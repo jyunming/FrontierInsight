@@ -141,8 +141,22 @@ def paper_status(outcome: str, grade: dict[str, Any] | None, contradiction: str)
     if outcome != "paper":
         return None
     g = grade or {}
-    if is_fail(g.get("g1")) or contradiction:
+    if is_fail(g.get("g1")):
         return "fake"
+    # A contradiction from an unfixed problem makes the paper fake only if the grader says it changes a reported number.
+    # If the grader says unfixed_changes_numbers is False, the paper is judged by its grades like any other paper.
+    if contradiction:
+        # The "not executed" case is always fake, regardless of the unfixed_changes_numbers judgment.
+        if contradiction.startswith("EVIDENCE.json says the experiment was not executed"):
+            return "fake"
+        # For unfixed checks/code/run/analysis problems, check the grader's judgment.
+        # If unfixed_changes_numbers is False, do NOT return "fake"; fall through to the grade-based decision.
+        # If it's True or None (missing), return "fake".
+        if g.get("unfixed_changes_numbers") is False:
+            pass  # Fall through to the grade-based decision below
+        else:
+            # unfixed_changes_numbers is True or None (missing)
+            return "fake"
     if all(is_pass(g.get(k)) for k in _PASS):
         # a paper may do part of the topic, but only if it says plainly which parts it does not do; a report that does not
         # say how many parts were left out (no `PARTS NOT DONE` line) has not decided it yet

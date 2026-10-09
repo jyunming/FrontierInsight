@@ -50,6 +50,7 @@ Write your report to `{report}` with:
 4. FI faults (a check that passed something wrong, or flagged something right) listed separately from the model's own mistakes.
 5. If, and only if, the quest was an honest stop, a line `STOP: correct` or `STOP: wrong` saying whether the cause FI gave for stopping was true of the run, with the evidence.
 6. One line `PARTS NOT DONE: <number of goals the paper does not do> | STATED: yes|no|n/a` (`n/a` when it does every goal; `yes` only when every goal left out is declared plainly in the paper), then the list of those goals, each marked stated or silent.
+7. One line `UNFIXED CHANGES NUMBERS: yes|no|n/a` saying whether any unfixed problem in FI's records (QUALITY.md "Where it failed", .fi/code_review.json open issues) changes a number or figure the paper reports; `n/a` if the record has no unfixed problem, `no` if they change none, `yes` if any unfixed problem changes a reported number or figure.
 Be concise and factual; do not inflate. Finish by replying with just the table row and the 3 most important faults.
 """
 
@@ -127,6 +128,9 @@ def import_grade(round_dir: Path, topic: str, report_file: Path, *, stop_correct
     if entry.get("g1") and not pm:
         print(f"WARNING: {report_file} has no `PARTS NOT DONE: n | STATED: yes|no|n/a` line, so the paper for '{topic}' stays "
               "undecided (never trustworthy) until the grader adds it.", file=sys.stderr)
+    um = re.search(r"^\s*UNFIXED CHANGES NUMBERS:\s*(yes|no|n/a)", text, re.I | re.M)
+    if um:
+        entry["unfixed_changes_numbers"] = {"yes": True, "no": False}.get(um.group(1).lower())
     if cause_class:
         entry["class"] = cause_class
         entry["stage"] = stage or ""

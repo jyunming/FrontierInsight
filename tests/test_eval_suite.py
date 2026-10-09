@@ -675,3 +675,38 @@ def test_grade_import_warns_plainly_when_the_parts_line_is_missing(tmp_path: Pat
     assert collect.paper_status("paper", entry, "") == "ungraded"
     grade.import_grade(tmp_path / "r", "b", _w_and(tmp_path / "b.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10)))
     assert capsys.readouterr().err == ""
+
+
+def test_unfixed_problem_is_fake_only_when_it_changes_a_reported_number() -> None:
+    # When unfixed_changes_numbers is False, the paper is not fake despite the unfixed problem
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0,
+                                          "parts_stated": None, "unfixed_changes_numbers": False},
+                                "a code problem was not fixed: x") == "trustworthy"
+    # When unfixed_changes_numbers is True, it is fake
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0,
+                                          "parts_stated": None, "unfixed_changes_numbers": True},
+                                "a code problem was not fixed: x") == "fake"
+    # When unfixed_changes_numbers is missing (None), it is fake (old behavior)
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0,
+                                          "parts_stated": None},
+                                "a code problem was not fixed: x") == "fake"
+
+
+def test_not_executed_is_always_fake_regardless_of_unfixed_changes_numbers() -> None:
+    # Even with unfixed_changes_numbers False, a not-executed contradiction is always fake
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0,
+                                          "parts_stated": None, "unfixed_changes_numbers": False},
+                                "EVIDENCE.json says the experiment was not executed") == "fake"
+
+
+def test_import_grade_parses_unfixed_changes_numbers_line(tmp_path: Path) -> None:
+    row = "| r | d | b | m | 100 | 100 | n/a | 100 | 50 | 100 | 90 | pass | pass | pass | 4 | 1 | n |" + chr(10)
+    entry_no = grade.import_grade(tmp_path / "r", "a", _w_and(tmp_path / "a.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10) +
+                                                               "UNFIXED CHANGES NUMBERS: no" + chr(10)))
+    assert entry_no["unfixed_changes_numbers"] is False
+    entry_yes = grade.import_grade(tmp_path / "r", "b", _w_and(tmp_path / "b.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10) +
+                                                                "UNFIXED CHANGES NUMBERS: yes" + chr(10)))
+    assert entry_yes["unfixed_changes_numbers"] is True
+    entry_na = grade.import_grade(tmp_path / "r", "c", _w_and(tmp_path / "c.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10) +
+                                                               "UNFIXED CHANGES NUMBERS: n/a" + chr(10)))
+    assert entry_na.get("unfixed_changes_numbers") is None
