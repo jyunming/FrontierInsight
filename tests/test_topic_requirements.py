@@ -458,3 +458,30 @@ async def test_a_formula_mapped_to_an_unrelated_equation_that_the_reader_rejects
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [] and "design" in patch
     assert "states the formula `dT/dt = -k*(T - Tr)`" in tr.write_note(eng.quest_root)
+
+
+# --- constraints: the cap and the writer's note -----------------------------------------------------------------------
+
+
+def test_parse_keeps_thirty_constraints_when_given_thirty_five() -> None:
+    obj = {"factors": [{"name": "alpha"}], "constraints": [f"limit {n}." for n in range(35)]}
+    parsed = tr.parse(obj)
+    assert parsed is not None and len(parsed["constraints"]) == 30
+    assert parsed["constraints"][-1] == "limit 29."
+
+
+def test_write_note_names_each_constraint_when_no_covered_record_exists(tmp_path: Path) -> None:
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    (fi / tr.FILE).write_text(json.dumps({"constraints": ["Alpha bound one.", "Beta bound two.", "Gamma bound three."]}),
+                              encoding="utf-8")
+    note = tr.write_note(tmp_path)
+    assert "Alpha bound one; Beta bound two; Gamma bound three." in note
+    assert "say plainly in the limitations" in note
+
+
+def test_write_note_is_empty_when_requirements_have_no_constraints(tmp_path: Path) -> None:
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    (fi / tr.FILE).write_text(json.dumps({"factors": [{"name": "alpha"}]}), encoding="utf-8")
+    assert tr.write_note(tmp_path) == ""

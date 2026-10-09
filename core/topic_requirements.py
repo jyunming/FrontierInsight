@@ -123,7 +123,7 @@ def parse(obj: Any) -> dict[str, Any] | None:
     if not (factors or quantities or formulas or comparisons):
         return None
     return {"factors": factors[:20], "quantities": quantities[:30], "formulas": formulas[:12],
-            "comparisons": comparisons[:12], "constraints": constraints[:12], "stated_results": results[:20]}
+            "comparisons": comparisons[:12], "constraints": constraints[:30], "stated_results": results[:20]}
 
 
 def is_empty(req: Any) -> bool:
@@ -584,7 +584,11 @@ def write_note(quest_root: Any) -> str:
     try:
         record = json.loads((Path(quest_root) / ".fi" / COVERED_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
+        record = {}
+    try:
+        requirements = json.loads((Path(quest_root) / ".fi" / FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        requirements = {}
     left = record.get("left") if isinstance(record, dict) else None
     left = left if isinstance(left, list) else []
     unjudged = [str(n) for n in (record.get("unjudged") if isinstance(record, dict) else None) or [] if str(n).strip()]
@@ -599,6 +603,14 @@ def write_note(quest_root: Any) -> str:
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
+    raw = requirements.get("constraints") if isinstance(requirements, dict) else None
+    constraints = [str(c).strip().rstrip(".").strip() for c in (raw if isinstance(raw, list) else [])]
+    constraints = [c for c in constraints if c]
+    if constraints:
+        parts.append(f"The topic set these requirements on the study and the paper: {'; '.join(constraints)}. For each one the "
+                     "study did not meet (check it against the run record: run time, the code files, the seed, the uncertainty "
+                     "of every number), say plainly in the limitations that it was not met and why; never leave one out "
+                     "silently, and never claim one was met unless the record shows it.")
     return " ".join(parts)
 
 
