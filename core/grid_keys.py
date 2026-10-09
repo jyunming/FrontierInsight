@@ -269,6 +269,120 @@ def _is_length(node: ast.AST) -> bool:
     return isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "shape"
 
 
+def _mentions_trial_source(node: ast.AST) -> bool:
+    """Whether a node's text mentions FI_TRIALS, trials.json, ledger, or calls load_trials/read_trials."""
+    # Check via unparsed text for all keywords (handles string constants like environ["FI_TRIALS"])
+    text = ast.unparse(node)
+    if any(kw in text for kw in ["FI_TRIALS", "trials.json", "ledger"]):
+        return True
+
+    # Check for function calls with load_trials or read_trials in the name
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            func_name = ""
+            if isinstance(n.func, ast.Name):
+                func_name = n.func.id
+            elif isinstance(n.func, ast.Attribute):
+                func_name = n.func.attr
+            if any(kw in func_name.lower() for kw in ["load_trials", "read_trials"]):
+                return True
+
+    return False
+
+
+def _is_trial_records_length(node: ast.AST, tree: ast.Module) -> bool:
+    """Whether a length expression measures the trial records (not a resample or seed count).
+
+    Returns True for len(X), X.shape[0], X.size, X.shape when X satisfies:
+    (a) X is a name containing one of: trials, trial, records, record, rows, results, runs (whole word, case-insensitive)
+    (b) X is a name assigned from an expression mentioning FI_TRIALS, trials.json, ledger, load_trials, or read_trials,
+        OR assigned inside a function whose name or parameters contain trial-related keywords
+    (c) The expression itself mentions FI_TRIALS
+    """
+    if not _is_length(node):
+        return False
+
+    # Extract the variable being measured
+    var_node = None
+    var_name = None
+
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "len" and node.args:
+        var_node = node.args[0]
+    elif isinstance(node, ast.Attribute) and node.attr in ("size", "shape"):
+        var_node = node.value
+    elif isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "shape":
+        var_node = node.value.value
+
+    if var_node is None:
+        return False
+
+    # Extract variable name if it's a simple Name node
+    if isinstance(var_node, ast.Name):
+        var_name = var_node.id
+
+    # Check rule (a): name contains trial-related keywords
+    if var_name:
+        keywords = {"trials", "trial", "records", "record", "rows", "results", "runs"}
+        # Convert to lowercase and split on non-alphanumeric characters
+        tokens = set(re.split(r"[^a-z0-9]+", var_name.lower()))
+        if tokens & keywords:
+            return True
+
+    # Check rule (c): the expression itself mentions FI_TRIALS
+    if _mentions_trial_source(var_node):
+        return True
+
+    # Build set of functions related to trial records (for rule b extension)
+    trial_related_funcs = set()
+    keywords = {"trials", "trial", "records", "record", "rows", "results", "runs"}
+    for node_in_tree in ast.walk(tree):
+        if isinstance(node_in_tree, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Check function name
+            func_tokens = set(re.split(r"[^a-z0-9]+", node_in_tree.name.lower()))
+            if func_tokens & keywords:
+                trial_related_funcs.add(node_in_tree.name)
+            # Check parameter names
+            for arg in node_in_tree.args.args + node_in_tree.args.posonlyargs + node_in_tree.args.kwonlyargs:
+                arg_tokens = set(re.split(r"[^a-z0-9]+", arg.arg.lower()))
+                if arg_tokens & keywords:
+                    trial_related_funcs.add(node_in_tree.name)
+
+    # Check rule (b): variable assigned from expression mentioning trial-source keywords,
+    # or assigned inside a trial-related function
+    if var_name:
+        for stmt in ast.walk(tree):
+            value = None
+            target_names = []
+
+            if isinstance(stmt, ast.Assign):
+                value = stmt.value
+                target_names = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                value = stmt.value
+                if isinstance(stmt.target, ast.Name):
+                    target_names = [stmt.target.id]
+            else:
+                continue
+
+            if var_name not in target_names or value is None:
+                continue
+
+            # Check if directly mentions trial source
+            if _mentions_trial_source(value):
+                return True
+
+            # Check if inside a trial-related function
+            for func_node in ast.walk(tree):
+                if isinstance(func_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if func_node.name in trial_related_funcs:
+                        # Check if stmt is inside this function
+                        for sub_stmt in ast.walk(func_node):
+                            if sub_stmt is stmt:
+                                return True
+
+    return False
+
+
 def _calls_runner(node: ast.AST) -> bool:
     for n in ast.walk(node):
         if isinstance(n, ast.Call):
@@ -280,7 +394,7 @@ def _calls_runner(node: ast.AST) -> bool:
 
 def _controls_trial_records(tree: ast.Module, name: str) -> bool:
     """Whether the constant ``name`` decides how many trial records are produced or expected: the bound of a loop whose body
-    calls the simulation, a length compared with it (an assertion or a check of the records received), or the count passed
+    calls the simulation, a length of the trial records compared with it (an assertion or a check of the records received), or the count passed
     to a runner by keyword. Used only as the size of a resample, a count of seeds or an inner iteration count, it is not."""
     for n in ast.walk(tree):
         if isinstance(n, (ast.For, ast.AsyncFor)) and _mentions(n.iter, name) and any(_calls_runner(b) for b in n.body):
@@ -291,7 +405,7 @@ def _controls_trial_records(tree: ast.Module, name: str) -> bool:
             return True  # the same loop written as a comprehension
         if isinstance(n, ast.Compare):
             parts = [n.left, *n.comparators]
-            if any(isinstance(p, ast.Name) and p.id == name for p in parts) and any(_is_length(p) for p in parts):
+            if any(isinstance(p, ast.Name) and p.id == name for p in parts) and any(_is_trial_records_length(p, tree) for p in parts):
                 return True
         if isinstance(n, ast.Call):
             for kw in n.keywords:

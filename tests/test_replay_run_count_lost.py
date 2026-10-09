@@ -265,3 +265,55 @@ def test_checks_tied_to_an_equation_the_redesign_changed_are_not_kept(tmp_path: 
     same = {**DESIGN, "protocol": {**redesign, "model": plan_protocol["model"]}}
     both = engine._inherit_plan_parts({"design": same, "iteration": 1}, same, iteration=1)["protocol"]
     assert [o["name"] for o in both["oracles"]] == ["tied_check", "free_check"]
+
+
+# --- tests for _is_trial_records_length rule ---
+
+def test_a_bootstrap_check_that_uses_the_count_for_resampling_is_not_the_trial_count() -> None:
+    """Bootstrap example: N_TRIALS = 200; samples = [boot() for _ in range(N_TRIALS)]; assert len(samples) == N_TRIALS
+    This should NOT give a finding because samples is a resample, not trial records."""
+    from core import grid_keys
+
+    sim = "def run_trial(cell, trial, seed):\n    return {'x': 1.0}\n"
+    protocol = {"runs_per_setting": 1000}
+    bootstrap = ("N_TRIALS = 200\ndef boot():\n    return 1.0\n"
+                 "samples = [boot() for _ in range(N_TRIALS)]\n"
+                 "assert len(samples) == N_TRIALS\n")
+    # Should give no finding (empty list)
+    assert grid_keys.problems({"experiment.py": bootstrap, "simulate.py": sim}, protocol) == []
+
+
+def test_a_count_compared_with_trial_records_gives_one_finding() -> None:
+    """N_TRIALS = 200 with assert len(records) == N_TRIALS
+    records contains "record" keyword, so it should give one finding."""
+    from core import grid_keys
+
+    sim = "def run_trial(cell, trial, seed):\n    return {'x': 1.0}\n"
+    protocol = {"runs_per_setting": 1000}
+    with_records = "N_TRIALS = 200\ndef check(records):\n    assert len(records) == N_TRIALS\n"
+    found = grid_keys.problems({"experiment.py": with_records, "simulate.py": sim}, protocol)
+    counted = [r for r in found if r.planned is not None]
+    assert len(counted) == 1
+
+
+def test_a_count_assigned_from_fi_trials_gives_one_finding() -> None:
+    """N_TRIALS = 200 with rows = json.load(open(os.environ["FI_TRIALS"])); assert len(rows) == N_TRIALS
+    rows contains "rows" keyword (rule a), so it should give one finding."""
+    from core import grid_keys
+
+    sim = "def run_trial(cell, trial, seed):\n    return {'x': 1.0}\n"
+    protocol = {"runs_per_setting": 1000}
+    with_fi_trials = ("import json, os\nN_TRIALS = 200\n"
+                      "rows = json.load(open(os.environ[\"FI_TRIALS\"]))\n"
+                      "assert len(rows) == N_TRIALS\n")
+    found = grid_keys.problems({"experiment.py": with_fi_trials, "simulate.py": sim}, protocol)
+    counted = [r for r in found if r.planned is not None]
+    assert len(counted) == 1
+
+    # Also test with a neutral variable name derived from FI_TRIALS (rule b)
+    with_neutral_name = ("import json, os\nN_TRIALS = 200\n"
+                        "data = json.load(open(os.environ[\"FI_TRIALS\"]))\n"
+                        "assert len(data) == N_TRIALS\n")
+    found2 = grid_keys.problems({"experiment.py": with_neutral_name, "simulate.py": sim}, protocol)
+    counted2 = [r for r in found2 if r.planned is not None]
+    assert len(counted2) == 1
