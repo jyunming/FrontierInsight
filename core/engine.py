@@ -5824,8 +5824,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             current["gaps"] = (await self._topic_gaps(req, now))[0]
             return [g["sentence"] for g in current["gaps"]]
 
-        def request(_now: Any, _text: str) -> str:
-            return _topic_req.request(self.config.topic, current["gaps"])
+        def request(now: Any, _text: str) -> str:
+            return _topic_req.request(self.config.topic, current["gaps"], search=_optim.has_block(now))
 
         return await self._ask_plan_to_complete(
             design, plan_sha, lacks=lacks, request=request,
@@ -5897,7 +5897,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._log.warning("[design] the redesign lacks what the topic asks for (%s); FI asked the design step's model to add it",
                           "; ".join(g["sentence"] for g in gaps)[:300])
         self._progress("Asking the model to add what the topic asks for to the design")
-        ask = (_topic_req.request(self.config.topic, gaps)
+        ask = (_topic_req.request(self.config.topic, gaps, search=_optim.has_block(design))
                + "\n\nThe design drafted so far:\n" + json.dumps(design, ensure_ascii=False, default=str)[:8000]
                + "\n\nAnswer with the whole design as one JSON object, with what was asked added.")
         try:
@@ -5915,24 +5915,50 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return design
         return {**merged, "protocol": fixed}
 
+    _TOPIC_UNMET_FILE = "topic_unmet.json"
+
     def _stop_for_the_topic(self, gaps: list[dict[str, Any]], asked: int) -> None:
         """Nothing is run: the topic asks for something its question cannot be answered without, and the plan could not
-        include it even when the plan's model was asked. Ends without a paper; the card says what to do in plain words."""
-        path = _plan.plan_path(self.quest_root)
-        steps = _topic_req.stop_steps(self.quest_id, gaps, asked)
+        include it even when the plan's model was asked (within its bound, each time quoting why the last answer was not
+        used). The honest stop (no paper), reached when the code would be written and again when it would run
+        (:meth:`_topic_unmet_stop`): nobody is asked to pick another model, because another model cannot fix a plan whose
+        rules leave no place for what the topic asks. This only writes down what stands."""
+        record = {"text": " ".join(g["sentence"] for g in gaps), "asked": asked, "at": _frozen.now(),
+                  "tried": _topic_req.stop_tried(gaps, asked, self._topic_last_problem())}
         self._log.warning("[design] the plan leaves out what the topic's question needs (%s); stopping, nothing was run",
                           "; ".join(g["sentence"] for g in gaps)[:400])
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / self._TOPIC_UNMET_FILE).write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[design] couldn't write down what the topic asks for that the plan lacks: %r", e)
+
+    def _topic_last_problem(self) -> str:
+        """Why the plan's model's last answer to the request for what the topic asks was not used (``""`` when it was)."""
+        try:
+            record = json.loads((self.fi_dir / _TOPIC_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        return str(record.get("problem") or "") if isinstance(record, dict) else ""
+
+    def _forget_topic_unmet(self) -> None:
+        try:
+            (self.fi_dir / self._TOPIC_UNMET_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _topic_unmet_stop(self) -> QuestState | None:
+        """The honest stop (no paper) for a plan that still leaves out what the topic's question needs
+        (:meth:`_stop_for_the_topic`), or ``None``."""
+        try:
+            record = json.loads((self.fi_dir / self._TOPIC_UNMET_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict) or not record.get("text"):
+            return None
         print(f"[FI] quest {self.quest_id}: the plan leaves out something the topic asks for; nothing was run "
-              "(see NEXT_STEP.md)")
-        self._pause_for_human(
-            kind="plan",
-            interaction="supply",
-            headline="the plan leaves out what the topic asks for",
-            steps=steps,
-            recommended="Try another model for the plan step.",
-            alternatives=[steps[-1][3:]],
-            payload={"quest_id": self.quest_id, "plan_file": str(path), "topic_stage": True},
-        )
+              "(see needs/STUCK.json)")
+        return self._stop_before_run(str(record["text"]), "topic_unmet", tried=[str(t) for t in record.get("tried") or []])
 
     async def _hold_the_design_to_the_topic(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
         """At the design step, on the design that will RUN (the frozen protocol once there is one, else the design with the
@@ -5945,6 +5971,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if (not self._runs_code(state) or not isinstance(design, dict) or req is None or req.get("error")
                 or _topic_req.is_empty(req)):
             return design, plan_sha
+        self._forget_topic_unmet()  # the design is held to the topic again: an earlier stop does not stand
         frozen = _frozen.load(self.quest_root) is not None
 
         def running(now: dict[str, Any]) -> Any:
@@ -9018,6 +9045,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         ``implement_outline`` slot is already populated — the body
         stage uses what's there.
         """
+        if (self.fi_dir / self._TOPIC_UNMET_FILE).is_file():
+            return {}  # the study will not be written: the next step stops it
         if state.get("implement_outline"):
             # Already populated (resume after a failed body call, or a
             # checkpoint that was advanced by a future-version engine).
@@ -9073,6 +9102,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     async def _node_implement(self, state: QuestState) -> QuestState:
         self._forget_cannot_repair()  # the code is written again: an earlier problem does not stop the new code
+        if (topic_stop := self._topic_unmet_stop()) is not None:
+            return topic_stop  # no code is written for a study that leaves out what the topic's question needs
         if (search_stop := self._search_cannot_start_stop(state, state.get("design"))) is not None:
             return search_stop  # no code is written for a search FI could not make (the run step stops the same way)
         await self._shadow("implement", state, taken="implemented the design")
@@ -14487,6 +14518,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # The frozen protocol is a search even when the design in the state no longer says so.
             design_now = {**(design_now if isinstance(design_now, dict) else {}),
                           "protocol": {**((design_now or {}).get("protocol") or {}), "optimisation": frozen_block}}
+        if (topic_stop := self._topic_unmet_stop()) is not None:
+            return topic_stop
         self._stop_if_the_search_cannot_start(state, design_now)
         if (search_stop := self._search_cannot_start_stop(state, design_now)) is not None:
             return search_stop
@@ -17251,6 +17284,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             problem = f"{_one_line(said, 500)}, so nothing was run for the study"
             tried = [str(t) for t in (state.get("exec_result") or {}).get("no_search_tried") or []] or [said]
             ended = "the plan's model could not write a search FI can run"
+        if reason == "topic_unmet":
+            # The topic asks for something the plan has no place for, and the plan's model was asked within its bound.
+            said = str((state.get("exec_result") or {}).get("topic_unmet") or "").strip().rstrip(".")
+            problem = (f"the plan still leaves out what the topic's question needs ({_one_line(said, 400)}), so nothing "
+                       "was run for the study")
+            tried = [str(t) for t in (state.get("exec_result") or {}).get("topic_unmet_tried") or []] or [said]
+            ended = "the plan could not be made to include what the topic asks for"
         if reason == "cannot_repair":
             said = str((state.get("exec_result") or {}).get("cannot_repair") or "").strip().rstrip(".")
             problem = f"{_one_line(said, 400)}, and FI's repairs did not remove it, so there is nothing it can vouch for"
@@ -17305,7 +17345,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                or reason == "flat" or headline_missing else
                "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
                "or try another model for the code (`provider.node_models.implement`)." if reason == "cannot_repair" else
-               "or ask for a change in words (`--revise-plan \"<what to change>\"`)." if reason == "no_search" else
+               "or ask for a change in words (`--revise-plan \"<what to change>\"`)." if reason in ("no_search", "topic_unmet") else
                "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
                "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
                "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`).")))
@@ -23541,7 +23581,7 @@ the record. The rules above still hold, with these differences:
   `start`, `design`, `objective`, `constraints`, `feasible`, `status`). Draw the best objective found so far against
   the evaluation number (one line per starting point, `start`), and a table of the baseline against the best design.
   When the plan has a coarse scan (`optimisation.grid`), `FI_TRIALS` names its per-setting results as described above:
-  draw them as a map. Its `RESULT_JSON` reports the best design, its objective, the baseline's and the improvement,
+  draw them as a map (a condition held fixed that the scan compares is one of its axes: report the study across it). Its `RESULT_JSON` reports the best design, its objective, the baseline's and the improvement,
   read from that file; a best of null means no design met every limit, and it says so. It never writes either file.
 - Before the analysis runs, FI checks the best design at finer numerical settings: `best["check"]` holds `"says"`
   (one plain sentence: report THIS, in its words, never the internal `"verdict"` code, which is only for branching),
@@ -23565,7 +23605,7 @@ _FILL_MARKER = "plan_sources_asked.json"
 # The kinds of stop before the study (``Engine._stop_before_run``): the key in ``exec_result`` that holds the plain text.
 # ``cannot_repair``: FI's repairs of the code ended and the problem stands (the run record differs from the protocol, the
 # numerics still warn, the code still lacks what the plan requires ...): the quest ends without a paper, nobody debugs.
-_STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair", "no_search")
+_STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair", "no_search", "topic_unmet")
 _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 #: The parts of a protocol that a redesign writes itself: it is never given the plan's in their place by
@@ -23787,7 +23827,7 @@ A search for the best design has NO top-level `grid`: its protocol has an `optim
   "numerical_settings": {"<a mesh size, a time step, a number of elements>": {"search": <the value the search uses>, "check": [<finer values the best designs and the baseline are recomputed at>], "finer": "<smaller | larger>"}},
   "evaluation_budget": {"starts": <whole number of starting points>, "per_start": <whole number of evaluations each>, "seconds_per_evaluation": <your estimate of one evaluation, or leave out>},
   "search_method": "<bounded_local | global_then_local | exhaustive | scipy:<function> | optuna:<sampler>>",
-  "grid": {"<design variable>": [<a coarse scan run before the search, plotted; leave out when not wanted>]},
+  "grid": {"<design variable, or a condition listed in fixed that the study should also be compared across>": [<a coarse scan run before the search, plotted; only a cell at the value held in fixed can start the search; leave out when not wanted>]},
   "improvement_tolerance": {"value": <number, in the objective's unit; a fraction when relative, 0.05 = 5%>, "mode": "<absolute | relative>"},
   "target": <the value of the objective the person hopes to reach, only when the topic names one>
 }

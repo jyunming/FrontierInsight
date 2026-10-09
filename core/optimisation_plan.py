@@ -286,15 +286,29 @@ def _whole_at_least_one(value: Any) -> bool:
     return _whole(value) and value >= 1
 
 
-def _grid(grid: Any, variables: dict[str, dict[str, Any]]) -> str | None:
+def _grid(grid: Any, variables: dict[str, dict[str, Any]], fixed: dict[str, Any] | None = None) -> str | None:
+    """The scan run before the search: each axis is a design variable (its values inside its range) or a condition the
+    plan holds fixed for the search (``fixed``; any values: the scan compares the study across them, and only the
+    cells at the held value can start the search)."""
     if not isinstance(grid, dict) or not grid:
-        return f"{_P}.grid` (the coarse scan run first) must map each design variable to the values it takes"
+        return (f"{_P}.grid` (the scan run first) must map each design variable, or each condition held fixed that is "
+                "compared across settings, to the values it takes")
+    fixed = fixed or {}
     for axis, values in grid.items():
-        if str(axis) not in variables:
-            return f"{_P}.grid` scans `{axis}`, which is not one of the design variables"
         values = values if isinstance(values, list) else [values]
-        if not values or not all(_inside(variables[str(axis)], v) for v in values):
-            return f"{_P}.grid` `{axis}`: every value must lie inside that variable's range"
+        if str(axis) in variables:
+            if not values or not all(_inside(variables[str(axis)], v) for v in values):
+                return f"{_P}.grid` `{axis}`: every value must lie inside that variable's range"
+        elif str(axis) in fixed:
+            if not values or not all(isinstance(v, (str, int, float)) and not isinstance(v, bool) and
+                                     (not isinstance(v, float) or math.isfinite(v)) for v in values):
+                return f"{_P}.grid` `{axis}`: give the settings to compare as a list of numbers or a list of names"
+            if len({isinstance(v, str) for v in values}) > 1:
+                return f"{_P}.grid` `{axis}`: the settings to compare are all numbers or all names, not a mix"
+        else:
+            return (f"{_P}.grid` scans `{axis}`, which is neither a design variable nor a condition held fixed: to "
+                    f"compare the study across `{axis}`, also list it under `protocol.optimisation.fixed` with the value "
+                    "the search holds it at")
     return None
 
 
@@ -439,7 +453,7 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
 
     grid = out.get("grid")
     if grid is not None:
-        why = _grid(grid, variables)
+        why = _grid(grid, variables, {str(k): v for k, v in fixed.items()} if isinstance(fixed, dict) else None)
         if why:
             return None, why
         out["grid"] = {str(axis): (v if isinstance(v, list) else [v]) for axis, v in grid.items()}
@@ -729,8 +743,9 @@ def ask_request(topic: str, problems: list[str], left_out: list[str] | None = No
     if not any(SCALAR_NOTE in p for p in problems):
         parts.append(SCALAR_NOTE)
     parts.append("Write the block under `protocol` (as `protocol.optimisation`), not at the top level of the design block. "
-                 "If the plan has a plain `protocol.grid`, remove it: a plan cannot hold both a sweep and a search (the "
-                 "search's own coarse scan is `protocol.optimisation.grid`). "
+                 "If the plan has a plain `protocol.grid`, remove it: a plan cannot hold both a sweep and a search (a "
+                 "setting to compare goes in `protocol.optimisation.grid`: a design variable, or a condition listed under "
+                 "`protocol.optimisation.fixed` with the value the search holds it at). "
                  "Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion.")
     return "\n\n".join(parts)
 

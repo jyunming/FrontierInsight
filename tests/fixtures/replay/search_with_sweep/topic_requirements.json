@@ -1,0 +1,274 @@
+{
+  "factors": [
+    {
+      "name": "illumination sources",
+      "levels": [
+        "conventional",
+        "annular",
+        "x-dipole",
+        "quasar",
+        "free-form pixelated source"
+      ],
+      "range": [],
+      "stated": "Sources (a) parametric families swept: conventional (sigma 0.3 to 0.9), annular (inner/outer sigma pairs), x-dipole (pole centre 0.5 to 0.95, pole radius 0.1 to 0.2) and quasar; (b) a free-form pixelated source optimized to maximize the common depth of focus of a representative set of pitches (dense",
+      "main": true
+    },
+    {
+      "name": "pitches",
+      "levels": [
+        "isolated"
+      ],
+      "range": [
+        80.0,
+        2000.0
+      ],
+      "stated": "pitches from 80 nm (k1 = 0.28) to isolated (2000 nm), with enough pitches to resolve forbidden-pitch dips",
+      "main": true
+    },
+    {
+      "name": "conventional sigma",
+      "levels": [],
+      "range": [
+        0.3,
+        0.9
+      ],
+      "stated": "conventional (sigma 0.3 to 0.9)",
+      "main": true
+    },
+    {
+      "name": "annular inner/outer sigma pairs",
+      "levels": [],
+      "range": [],
+      "stated": "annular (inner/outer sigma pairs)",
+      "main": true
+    },
+    {
+      "name": "x-dipole pole centre",
+      "levels": [],
+      "range": [
+        0.5,
+        0.95
+      ],
+      "stated": "x-dipole (pole centre 0.5 to 0.95, pole radius 0.1 to 0.2)",
+      "main": true
+    },
+    {
+      "name": "x-dipole pole radius",
+      "levels": [],
+      "range": [
+        0.1,
+        0.2
+      ],
+      "stated": "x-dipole (pole centre 0.5 to 0.95, pole radius 0.1 to 0.2)",
+      "main": true
+    },
+    {
+      "name": "conventional sources with sigma",
+      "levels": [],
+      "range": [
+        0.1,
+        0.95
+      ],
+      "stated": "for conventional sources with sigma from 0.1 to 0.95",
+      "main": true
+    },
+    {
+      "name": "neighbour",
+      "levels": [],
+      "range": [
+        80.0,
+        2000.0
+      ],
+      "stated": "a single isolated line with one neighbour moved from 80 nm to 2000 nm away for the ambit study",
+      "main": true
+    },
+    {
+      "name": "defocus z",
+      "levels": [],
+      "range": [],
+      "stated": "Defocus z in the resist-side medium of index n adds the pupil phase 2*pi/lambda * z * (n - sqrt(n**2 - (lambda*f)**2)) at spatial frequency f.",
+      "main": true
+    },
+    {
+      "name": "mask line width",
+      "levels": [],
+      "range": [],
+      "stated": "a one-dimensional OPC sets the mask line width at every pitch so it prints at 40 nm at best focus",
+      "main": true
+    }
+  ],
+  "quantities": [
+    {
+      "name": "depth of focus through pitch",
+      "stated": "depth of focus at 5% exposure latitude with a CD tolerance of +/-10% of 40 nm",
+      "main": true
+    },
+    {
+      "name": "NILS",
+      "stated": "NILS at best focus",
+      "main": true
+    },
+    {
+      "name": "MEEF",
+      "stated": "MEEF",
+      "main": true
+    },
+    {
+      "name": "mask bias OPC needs",
+      "stated": "the mask bias OPC needs",
+      "main": true
+    },
+    {
+      "name": "iso-dense bias before OPC",
+      "stated": "the iso-dense bias before OPC",
+      "main": true
+    },
+    {
+      "name": "attenuated-mask side-lobe printing",
+      "stated": "whether an attenuated-mask side lobe reaches the printing threshold",
+      "main": true
+    },
+    {
+      "name": "forbidden pitches",
+      "stated": "Name the forbidden pitches of each source.",
+      "main": true
+    },
+    {
+      "name": "common depth of focus",
+      "stated": "maximize the common depth of focus of a representative set of pitches (dense, semi-dense, the worst forbidden pitch, isolated)",
+      "main": true
+    },
+    {
+      "name": "CD change of the isolated line",
+      "stated": "the CD change of the isolated line as its neighbour moves away",
+      "main": true
+    },
+    {
+      "name": "optical ambit",
+      "stated": "the distance beyond which it stays below 0.1 nm",
+      "main": true
+    },
+    {
+      "name": "extent of CD oscillation",
+      "stated": "how far its oscillation is still visible",
+      "main": true
+    },
+    {
+      "name": "Abbe and Hopkins aerial images",
+      "stated": "Abbe and Hopkins both implemented, and their aerial images compared.",
+      "main": false
+    },
+    {
+      "name": "numerical error",
+      "stated": "Report every number with its numerical error (grid, source sampling, focus step)",
+      "main": false
+    },
+    {
+      "name": "runtime",
+      "stated": "report the runtime.",
+      "main": false
+    }
+  ],
+  "formulas": [
+    {
+      "name": "attenuated-mask transmission amplitude",
+      "text": "sqrt(0.06)",
+      "main": false
+    },
+    {
+      "name": "defocus pupil phase",
+      "text": "2*pi/lambda * z * (n - sqrt(n**2 - (lambda*f)**2))",
+      "main": true
+    },
+    {
+      "name": "mutual coherence and u",
+      "text": "2*J1(u)/u with u = 2*pi*sigma*NA*d/lambda",
+      "main": true
+    },
+    {
+      "name": "first zero of mutual coherence",
+      "text": "d = 0.61*lambda/(sigma*NA)",
+      "main": true
+    },
+    {
+      "name": "symmetric dense-pitch dipole poles",
+      "text": "sigma = lambda/(2*p*NA)",
+      "main": false
+    },
+    {
+      "name": "frequency limit reaching the wafer",
+      "text": "NA*(1+sigma_max)/lambda",
+      "main": false
+    }
+  ],
+  "comparisons": [
+    {
+      "what": "Compare depth of focus through pitch across illumination sources and identify each source's forbidden pitches.",
+      "between": [
+        "pitches",
+        "conventional",
+        "annular",
+        "x-dipole",
+        "quasar",
+        "free-form pixelated source"
+      ]
+    },
+    {
+      "what": "Compare NILS, MEEF, iso-dense bias, required mask bias, and side-lobe printing through pitch as the source changes.",
+      "between": [
+        "pitches",
+        "illumination sources"
+      ]
+    },
+    {
+      "what": "Compare the optimized free-form source with the best parametric source.",
+      "between": [
+        "free-form pixelated source",
+        "best parametric one"
+      ]
+    },
+    {
+      "what": "Compare aerial images computed by Abbe and Hopkins.",
+      "between": [
+        "Abbe",
+        "Hopkins"
+      ]
+    },
+    {
+      "what": "Compare the isolated line's CD change and optical ambit as its neighbour moves away under different illumination.",
+      "between": [
+        "conventional sources with sigma from 0.1 to 0.95",
+        "best annular",
+        "best dipole",
+        "best free-form sources",
+        "neighbour distance"
+      ]
+    },
+    {
+      "what": "Compare the CD oscillation with the stated mutual coherence function.",
+      "between": [
+        "CD oscillation",
+        "mutual coherence function"
+      ]
+    }
+  ],
+  "constraints": [
+    "Use exposure wavelength 193.368 nm through water of refractive index 1.436 and a projection lens of NA 1.35.",
+    "Use a thin 6% attenuated phase-shift mask with dark-region transmission amplitude sqrt(0.06), phase pi, and the Kirchhoff thin-mask approximation.",
+    "Use scalar imaging with no polarization, and state plainly that at NA 1.35 it overstates contrast and depth of focus.",
+    "Use vertical dark-mask lines and spaces with a target line width of 40 nm.",
+    "Use a constant-threshold aerial image with no resist blur.",
+    "Anchor dose so the densest pitch prints at 40 nm at best focus.",
+    "Set the mask line width by one-dimensional OPC at every pitch so it prints at 40 nm at best focus.",
+    "Use 5% exposure latitude and a CD tolerance of +/-10% of 40 nm when reporting depth of focus.",
+    "Keep mirror symmetry in the optimized free-form pixelated source.",
+    "Use Python with numpy, scipy, and matplotlib with the Agg backend.",
+    "Implement both Abbe and Hopkins and make their aerial images agree.",
+    "Make figures showing depth of focus through pitch with forbidden pitches marked, OPC features through pitch, the optimized source beside the best parametric source, and CD change against neighbour distance for several sigma with coherence-function zeros drawn."
+  ],
+  "stated_results": [],
+  "reviewer": "gpt-6-sol",
+  "planner": "gpt-5.6-terra",
+  "same_model": false,
+  "at": "2026-10-09T12:05:41+00:00"
+}

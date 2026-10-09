@@ -316,7 +316,9 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
 
         if out.get("grid") is not None:
             return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
-                          "best design puts a coarse scan run before it in `optimisation.grid`")
+                          "best design puts the settings it compares, and a coarse scan run before it, in "
+                          "`optimisation.grid` (a design variable, or a condition also listed under `optimisation.fixed` "
+                          "with the value the search holds it at)")
         block, why = optimisation_plan.normalize(out["optimisation"])
         if block is None:
             return None, why
