@@ -732,6 +732,8 @@ def _validate_fix(
     if action in ("drop_citation", "drop_sentence"):
         if action == "drop_sentence" and site.kind != "prose":
             return {"action": "drop_citation", "text": ""}
+        if action == "drop_sentence" and any(n in own_numbers for n in _numbers(site.text)):
+            return None  # a sentence that carries one of the study's own results is never dropped: settled by rule
         return {"action": action, "text": ""}
     bad = set(target["labels"])
     if action == "cite_other":

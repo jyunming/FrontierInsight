@@ -163,3 +163,17 @@ def test_pairs_a_reply_leaves_out_are_asked_again_without_holding_up_the_others(
         judge_prompt=lambda a, srcs: "\n".join(f"{p} | cites [{lb}] | x" for p, s, lb in a), repair_prompt=lambda ts: ""))
     assert result.counts["supported"] == n and result.counts["unchecked"] == 0
     assert len(asked_ids) <= 3
+
+
+def test_a_fixer_may_not_drop_a_sentence_that_carries_the_study_s_own_result() -> None:
+    paper = "# T\n\nWe achieved 95%, beating the baseline [1].\n"
+    sources = {"1": _src("1", " an unrelated text. ")}
+    site = cs.find_sites(paper)[0]
+    drop = {"action": "drop_sentence", "source": "", "quote": "", "text": ""}
+    assert cs._validate_fix(site, {"labels": ["1"], "kept": []}, drop, sources, cs.OwnNumbers(["95"]),
+                            lambda q, s: q in s) is None  # refused: the rule settles it and keeps the result
+    assert cs._validate_fix(site, {"labels": ["1"], "kept": []}, drop, sources, cs.OwnNumbers(),
+                            lambda q, s: q in s) == {"action": "drop_sentence", "text": ""}  # no own result: may go
+    result, _asked, _rec = _run(paper, sources, verdict=lambda s, lb: False,
+                                fixes=lambda sid, sentence: drop, own=["95"])
+    assert "95%" in result.paper
