@@ -15396,7 +15396,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 # What the models read of the run's output: without its RESULT_JSON line and without any line that names a
                 # quantity left out of the results (core/run_checks.py). The raw output is kept in .fi/last_run_stdout.txt.
                 "stdout_tail": self._stdout_for_models(result.stdout)[-2000:],
-                "stderr_tail": result.stderr[-2000:],
+                "stderr_tail": self._stderr_for_models(result.stderr)[-2000:],
                 # What could not be installed (core/experiment_deps.py), kept apart from the run's own stderr so the
                 # analysis does not read it as an error and no slice of the stderr cuts the traceback's last line.
                 # The repair step reads it first, on every run: one that exits 0 on a caught ImportError still goes

@@ -231,33 +231,47 @@ class RunChecksMixin:
         keys = self._left_out_quantities()
         return _typed.strip_keys(result_json, keys) if keys and result_json else result_json
 
+    def _lines_without_left_out(self, lines: list[str]) -> tuple[list[str], int, list[str]]:
+        """``lines`` without those that name a left-out quantity: the kept lines, how many were taken out, and the names."""
+        keys = sorted(self._left_out_quantities())
+        patterns = [re.compile(r"(?<![A-Za-z0-9_])" + re.escape(k) + r"(?![A-Za-z0-9_])") for k in keys]
+        kept = [line for line in lines if not any(p.search(line) for p in patterns)]
+        return kept, len(lines) - len(kept), keys
+
+    def _taken_out_note(self, dropped: int, keys: list[str], where: str) -> str:
+        """The plain note that says how many lines of ``where`` were taken out, and why."""
+        names = ", ".join(f"`{k}`" for k in keys)
+        return (f"[FI NOTE] {dropped} line(s) of the run's {where} that name {names} were taken out: "
+                f"{'that quantity was' if len(keys) == 1 else 'those quantities were'} left out of the results "
+                "(typed into the code, or failed a check of what ran) and must not be used, derived from or renamed.")
+
     def _stdout_for_models(self, stdout: str) -> str:
         """What a model may read of a run's output: the output without its ``RESULT_JSON`` line (the verified results reach a
         model once, as FI's accepted projection of them, with the left-out quantities taken out) and without any line that
-        names a left-out quantity, with a plain note saying what was taken out and why. The raw output stays in the records
-        (``.fi/last_run_stdout.txt``)."""
+        names a left-out quantity, with a plain note saying what was taken out and why. A bare left-out value is replaced
+        too. The raw output stays in the records (``.fi/last_run_stdout.txt``)."""
         text = stdout or ""
-        keys = sorted(self._left_out_quantities())
-        patterns = [re.compile(r"(?<![A-Za-z0-9_])" + re.escape(k) + r"(?![A-Za-z0-9_])") for k in keys]
-        kept: list[str] = []
-        had_result_line, dropped = False, 0
-        for line in text.splitlines():
-            if line.lstrip().startswith("RESULT_JSON:"):
-                had_result_line = True
-            elif any(p.search(line) for p in patterns):
-                dropped += 1
-            else:
-                kept.append(line)
+        lines = text.splitlines()
+        body = [line for line in lines if not line.lstrip().startswith("RESULT_JSON:")]
+        kept, dropped, keys = self._lines_without_left_out(body)
         notes: list[str] = []
-        if had_result_line:
+        if len(body) != len(lines):
             notes.append("[FI NOTE] The run's RESULT_JSON line is not repeated here: the results block is FI's accepted "
                          "projection of the results, and the only place to read them.")
         if dropped:
-            names = ", ".join(f"`{k}`" for k in keys)
-            notes.append(f"[FI NOTE] {dropped} line(s) of the run's output that name {names} were taken out: "
-                         f"{'that quantity was' if len(keys) == 1 else 'those quantities were'} left out of the results "
-                         "(typed into the code, or failed a check of what ran) and must not be used, derived from or renamed.")
-        return "\n".join([*kept, *notes]) if notes else text
+            notes.append(self._taken_out_note(dropped, keys, "output"))
+        out = "\n".join([*kept, *notes]) if notes else text
+        return self._withhold_left_out_values(out)
+
+    def _stderr_for_models(self, stderr: str) -> str:
+        """What a model may read of a run's error output: every line except those that name a left-out quantity (the
+        traceback and the rest stay readable), with a plain note saying how many were taken out. A bare left-out value is
+        replaced too."""
+        text = stderr or ""
+        kept, dropped, keys = self._lines_without_left_out(text.splitlines())
+        notes = [self._taken_out_note(dropped, keys, "error output")] if dropped else []
+        out = "\n".join([*kept, *notes]) if notes else text
+        return self._withhold_left_out_values(out)
 
     def _keep_raw_stdout(self, stdout: str) -> None:
         """The run's output exactly as it was, for the records (no model reads it)."""

@@ -169,6 +169,41 @@ def test_stdout_for_models_drops_the_result_line_and_any_line_naming_a_left_out_
     assert SENTINEL in (eng.fi_dir / "last_run_stdout.txt").read_text(encoding="utf-8")
 
 
+def test_stderr_for_models_drops_lines_naming_a_left_out_quantity_and_keeps_the_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_run_checks import _typed_engine
+
+    eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
+    asyncio.run(eng._results_from_computation({}))
+    key = sorted(eng._left_out_quantities())[0]
+    err = ("Traceback (most recent call last):\n"
+           '  File "experiment.py", line 9, in <module>\n'
+           f"{key} = {SENTINEL}\n"
+           "ZeroDivisionError: division by zero\n")
+    shown = eng._stderr_for_models(err)
+    assert f"{key} = " not in shown and SENTINEL not in shown
+    assert "Traceback (most recent call last):" in shown and "ZeroDivisionError: division by zero" in shown
+    assert "[FI NOTE]" in shown and "1 line(s) of the run's error output" in shown and f"`{key}`" in shown
+    # Error output with nothing to take out is passed on as it is.
+    plain = "Traceback (most recent call last):\nValueError: x\n"
+    assert eng._stderr_for_models(plain) == plain
+
+
+def test_stdout_for_models_replaces_a_bare_left_out_value_printed_without_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_run_checks import _typed_engine
+
+    eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
+    asyncio.run(eng._results_from_computation({}))
+    key = sorted(eng._left_out_quantities())[0]
+    eng._note_typed_values({"kept": 1.5, key: float(SENTINEL)})
+    shown = eng._stdout_for_models(f"Result: {SENTINEL}\nkept is 1.5\n")
+    assert SENTINEL not in shown and "Result:" in shown and "kept is 1.5" in shown
+    assert "(a value that is not given)" in shown
+
+
 def test_the_exclusion_persists_across_a_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.test_run_checks import _typed_engine
 
