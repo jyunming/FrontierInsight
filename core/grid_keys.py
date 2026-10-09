@@ -334,17 +334,17 @@ def _is_trial_records_length(node: ast.AST, tree: ast.Module) -> bool:
 
     # Build set of functions related to trial records (for rule b extension)
     trial_related_funcs = set()
-    keywords = {"trials", "trial", "records", "record", "rows", "results", "runs"}
+    func_keywords = {"trial", "trials"}
     for node_in_tree in ast.walk(tree):
         if isinstance(node_in_tree, (ast.FunctionDef, ast.AsyncFunctionDef)):
             # Check function name
             func_tokens = set(re.split(r"[^a-z0-9]+", node_in_tree.name.lower()))
-            if func_tokens & keywords:
+            if func_tokens & func_keywords:
                 trial_related_funcs.add(node_in_tree.name)
             # Check parameter names
             for arg in node_in_tree.args.args + node_in_tree.args.posonlyargs + node_in_tree.args.kwonlyargs:
                 arg_tokens = set(re.split(r"[^a-z0-9]+", arg.arg.lower()))
-                if arg_tokens & keywords:
+                if arg_tokens & func_keywords:
                     trial_related_funcs.add(node_in_tree.name)
 
     # Check rule (b): variable assigned from expression mentioning trial-source keywords,

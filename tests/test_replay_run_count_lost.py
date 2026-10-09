@@ -317,3 +317,17 @@ def test_a_count_assigned_from_fi_trials_gives_one_finding() -> None:
     found2 = grid_keys.problems({"experiment.py": with_neutral_name, "simulate.py": sim}, protocol)
     counted2 = [r for r in found2 if r.planned is not None]
     assert len(counted2) == 1
+
+
+def test_a_length_inside_a_function_named_for_folds_is_not_the_trial_count() -> None:
+    """A length of folds, assigned inside a function whose name says results, is not the trial records' length, so a
+    count compared with it is not the trial count. The name NUM_FOLDS is never a count name, so the count is N_TRIALS."""
+    from core import grid_keys
+
+    sim = "def run_trial(cell, trial, seed):\n    return {'x': 1.0}\n"
+    protocol = {"runs_per_setting": 1000}
+    literal = "NUM_FOLDS = 5\ndef process_results(folds):\n    assert len(folds) == NUM_FOLDS\n"
+    assert grid_keys.problems({"experiment.py": literal, "simulate.py": sim}, protocol) == []
+    assigned = ("N_TRIALS = 5\ndef process_results(data):\n    folds = split(data)\n"
+                "    assert len(folds) == N_TRIALS\n")
+    assert grid_keys.problems({"experiment.py": assigned, "simulate.py": sim}, protocol) == []
