@@ -48,7 +48,10 @@ LEDGER_MD = "paper/CITATIONS.md"
 MAX_JUDGE_CALLS = 2
 MAX_REPAIR_CALLS = 1
 MAX_VERIFY_CALLS = 1
-MAX_CALLS_IN_QUEST = 12
+MAX_CALLS_IN_QUEST = 24
+#: Pairs the reader judges in one call. A paper with more is read in several calls, so a normal paper is covered whole
+#: within the cap: the cap for a paper is one call per batch plus ``MAX_JUDGE_CALLS - 1`` for the pairs a reply left out.
+BATCH_PAIRS = 40
 
 #: A sentence that names this many words its source's title, authors and stored text do not, when that text is only a
 #: snippet, a contents list or a title, says more than the source shows (the same bar as the title-only rule).
@@ -64,6 +67,7 @@ _REFERENCES_RE = re.compile(r"^#{1,6}\s*references\s*$", re.IGNORECASE | re.MULT
 _NUMBER_RE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*%?")
 _SENTENCES_RE = re.compile(r"(?<=[.!?])\s+")
 _ACTIONS = ("cite_other", "reword", "drop_citation", "drop_sentence")
+_TAIL_RE = re.compile(r"[.!?]+[\s*_)\]\"']*$")
 
 
 # --- the pairs -----------------------------------------------------------------------------------------------------
@@ -375,6 +379,7 @@ class Row:
     action: str = ""
     new_sentence: str = ""
     new_label: str = ""
+    note: str = ""  # what was left in the paper, said plainly (a number no source shows, kept with its citation gone)
 
     def as_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.__dict__.items() if v != ""}
@@ -395,7 +400,7 @@ class Result:
 
 def count_rows(rows: list[Row]) -> dict[str, int]:
     c = {"citations": len(rows), "supported": 0, "found_unsupported": 0, "replaced": 0, "reworded": 0,
-         "citation_dropped": 0, "sentence_dropped": 0, "unchecked": 0}
+         "citation_dropped": 0, "sentence_dropped": 0, "clause_dropped": 0, "left_in_place": 0, "unchecked": 0}
     for r in rows:
         if r.status == "supported":
             c["supported"] += 1
@@ -404,6 +409,8 @@ def count_rows(rows: list[Row]) -> dict[str, int]:
         else:
             c["found_unsupported"] += 1
             c[r.status] = c.get(r.status, 0) + 1
+            if r.note:
+                c["left_in_place"] += 1
     return c
 
 
@@ -446,13 +453,45 @@ def _candidates(sentence: str, sources: dict[str, Source], exclude: set[str], *,
     return [(label, passage) for _s, label, passage in best[:top]]
 
 
-def fallback(site: Site, *, claim_unsupported: bool, has_numbers: bool) -> str:
-    """The rule that settles a sentence nobody could fix (needs no model): the sentence goes when it states a number or
-    its claim is one the study's own results do not back either (and it is a prose sentence); otherwise the citation
-    goes and the sentence rests on the paper's own result."""
-    if site.kind == "prose" and (has_numbers or claim_unsupported):
-        return "drop_sentence"
-    return "drop_citation"
+def drop_clause(sentence: str, foreign: list[str], own_numbers: Any) -> str | None:
+    """``sentence`` without the one comma- or semicolon-separated clause that holds every number no source shows, when that
+    clause is not the first, holds none of the study's own numbers, and something else is left; ``None`` otherwise (the
+    sentence is then not cut: a clause cut anywhere else could leave a sentence that does not read)."""
+    parts = re.split(r"(?<=[,;])\s+", sentence)
+    if len(parts) < 2:
+        return None
+    hit = [i for i, p in enumerate(parts) if any(n in _numbers(p) for n in foreign)]
+    if len(hit) != 1 or hit[0] == 0 or any(n in own_numbers for n in _numbers(parts[hit[0]])):
+        return None
+    tail = _TAIL_RE.search(sentence)
+    out = " ".join(parts[:hit[0]] + parts[hit[0] + 1:]).rstrip(" ,;")
+    if not out.strip() or any(n in _numbers(out) for n in foreign):
+        return None
+    return out if _TAIL_RE.search(out) else out + (tail.group(0) if tail else ".")
+
+
+def settle(site: Site, labels: set[str], own_numbers: Any, claim_unsupported: bool) -> tuple[str, str, str]:
+    """``(action, new text, note)``: the rule that settles a sentence nobody could fix (needs no model). The study's own
+    result is never cut out. A plain prose sentence with no result of the study goes when it states a number no source
+    shows or the claim check found nothing backing it either. A sentence that carries one of the study's own results keeps
+    it: the clause holding the numbers no source shows goes when that can be cut cleanly; otherwise only the citation goes
+    and the note says what was left in the paper."""
+    numbers = _numbers(site.text)
+    own = [n for n in numbers if n in own_numbers]
+    foreign = [n for n in numbers if n not in own_numbers]
+    plain = rewrite_brackets(site.text, remove=labels)
+    if not own and site.kind == "prose" and (foreign or claim_unsupported):
+        return "drop_sentence", "", ""
+    if own and foreign:
+        clause = drop_clause(site.text, foreign, own_numbers)
+        if clause:
+            return "drop_clause", rewrite_brackets(clause, remove=labels), ""
+    left = ""
+    if foreign:
+        left = f"left in the paper with its citation taken out: {', '.join(foreign[:4])}, which no source shows"
+    elif claim_unsupported:
+        left = "left in the paper with its citation taken out: the claim check found nothing backing it either"
+    return "drop_citation", plain, left
 
 
 def _apply(paper: str, edits: list[tuple[int, int, str]]) -> str:
@@ -513,20 +552,24 @@ async def check_paper(
     judged: dict[str, dict[str, Any]] = dict(record.setdefault("judged", {}))
     to_ask = [(pid, s, lb) for pid, s, lb in pairs if pid not in problems and pid not in judged]
     judge_failed = False
-    while to_ask and _bounded(record, "judge", MAX_JUDGE_CALLS):
+    cap = max(int(record.get("judge_cap") or 0), -(-len(to_ask) // BATCH_PAIRS) + MAX_JUDGE_CALLS - 1)
+    record["judge_cap"] = cap
+    while to_ask and _bounded(record, "judge", cap):
         _spend(record, "judge", save)
+        chunk, rest = to_ask[:BATCH_PAIRS], to_ask[BATCH_PAIRS:]
         try:
-            reply = await judge(judge_prompt(to_ask, sources))
+            reply = await judge(judge_prompt(chunk, sources))
         except Exception as e:  # noqa: BLE001 -- a check that could not be had leaves the paper as it is, and says so
             record["judge_error"] = f"{type(e).__name__}: {str(e)[:200]}"
             save(record)
             judge_failed = True
             break
-        got = parse_verdicts(reply, {pid for pid, _s, _l in to_ask})
+        got = parse_verdicts(reply, {pid for pid, _s, _l in chunk})
         judged.update(got)
         record["judged"] = judged
         save(record)
-        to_ask = [(pid, s, lb) for pid, s, lb in to_ask if pid not in judged]
+        # the pairs a reply left out go to the back, so one that answers nothing cannot keep the others waiting
+        to_ask = rest + [c for c in chunk if c[0] not in judged]
     for pid, site, label in pairs:
         if pid in problems or pid not in judged:
             continue
@@ -600,37 +643,46 @@ async def check_paper(
             if not ok:
                 plans.pop(sk, None)
 
-    # 3. the paper as it is delivered, and the ledger of what became of each citation.
+    # 3. the paper as it is delivered, and the ledger of what became of each citation. Each edit is checked on its own: one
+    # that would change a heading or a figure link is settled by the rule that needs no model instead; the others stand.
     rows: list[Row] = []
     edits: list[tuple[int, int, str]] = []
+    base_shape = _shape(paper[:references_start(paper)])
+
+    def keeps_shape(site: Site, text: str) -> bool:
+        done = _apply(paper, [(site.start, site.end, text)])
+        return _shape(done[:references_start(done)]) == base_shape
+
     for sk, labels in bad_sites.items():
         site = by_key[sk]
         plan = plans.get(sk)
+        fell_back = plan is None
+        note = ""
         if plan is None:
-            action = fallback(site, claim_unsupported=claim_unsupported(site.text),
-                              has_numbers=any(n not in own_numbers for n in _numbers(site.text)))
+            plan = {}
+        else:
+            new_text = "" if plan["action"] == "drop_sentence" else (
+                plan["text"] if plan["action"] in ("cite_other", "reword") else rewrite_brackets(site.text, remove=set(labels)))
+            if not keeps_shape(site, new_text):
+                plan, fell_back = {}, True
+        if fell_back:
+            action, new_text, note = settle(site, set(labels), own_numbers, claim_unsupported(site.text))
+            if not keeps_shape(site, new_text):
+                action, new_text = "drop_citation", rewrite_brackets(site.text, remove=set(labels))
+                note = note or "left in the paper with its citation taken out: removing more would change a heading or a figure"
             plan = {"action": action, "text": ""}
-        if plan["action"] == "drop_sentence":
+        elif plan["action"] == "drop_sentence":
             new_text = ""
         elif plan["action"] in ("cite_other", "reword"):
             new_text = plan["text"]
         else:
             new_text = rewrite_brackets(site.text, remove=set(labels))
         edits.append((site.start, site.end, new_text))
-        plan["final"] = new_text
-        plan["fell_back"] = sk not in plans
+        plan.update(final=new_text, fell_back=fell_back, note=note)
         plans[sk] = plan
     new_paper = _apply(paper, edits) if edits else paper
-    if edits and _shape(new_paper[:references_start(new_paper)]) != _shape(paper[:references_start(paper)]):
-        # An edit changed a figure link or a heading: only the citations come out, nothing else is touched.
-        edits = [(by_key[sk].start, by_key[sk].end, rewrite_brackets(by_key[sk].text, remove=set(labels)))
-                 for sk, labels in bad_sites.items()]
-        for sk in bad_sites:
-            plans[sk] = {"action": "drop_citation", "text": "", "final": rewrite_brackets(
-                by_key[sk].text, remove=set(bad_sites[sk])), "fell_back": True}
-        new_paper = _apply(paper, edits)
     status_of = {"cite_other": "replaced", "reword": "reworded", "drop_citation": "citation_dropped",
-                 "drop_sentence": "sentence_dropped"}
+                 "drop_sentence": "sentence_dropped", "drop_clause": "clause_dropped"}
     for pid, site, label in pairs:
         src = sources.get(label)
         title = src.title if src else ""
@@ -638,7 +690,7 @@ async def check_paper(
         if pid in problems:
             plan = plans.get(site.key, {"action": "drop_citation", "final": ""})
             rows.append(Row(site.text, label, title, kind, status_of[plan["action"]], problem=problems[pid],
-                            action=plan["action"], new_sentence=plan.get("final", ""),
+                            action=plan["action"], new_sentence=plan.get("final", ""), note=plan.get("note", ""),
                             new_label=str(plan.get("source") or "") if plan["action"] == "cite_other" else ""))
         elif pid in unchecked:
             rows.append(Row(site.text, label, title, kind, "unchecked",
@@ -693,10 +745,17 @@ def _validate_fix(
         probe = Site(0, 0, new, labels_in_text(new), site.kind)
         if pre_problem(probe, label, src, own_numbers):
             return None
+        if _numbers(new) != _numbers(site.text):
+            return None
         return {"action": action, "text": new, "source": label}
     # reword: a new sentence that cites only sources it may (the ones already supported, and the one it names)
     new = " ".join(fix["text"].split())
     if not new or "\n" in fix["text"].strip() or new == " ".join(site.text.split()):
+        return None
+    # The study's own results in the sentence are kept exactly, and none is added: a new wording may not change a result.
+    kept_own = {n for n in _numbers(site.text) if n in own_numbers}
+    new_numbers = _numbers(new)
+    if not kept_own <= set(new_numbers) or any(n in own_numbers and n not in kept_own for n in new_numbers):
         return None
     allowed = set(target["kept"]) | ({fix["source"]} if fix["source"] else set())
     cited = labels_in_text(new)
@@ -757,7 +816,8 @@ def render_md(data: dict[str, Any]) -> str:
             lines.append(f"{head}\n  - not checked: {r.get('problem', '')}")
         else:
             lines.append(f"{head}\n  - {r['status'].replace('_', ' ')}: {r.get('problem', '')}"
-                         + (f" -- now: {r['new_sentence']}" if r.get("new_sentence") else ""))
+                         + (f" -- now: {r['new_sentence']}" if r.get("new_sentence") else "")
+                         + (f"\n  - note: {r['note']}" if r.get("note") else ""))
     return "\n".join(lines) + "\n"
 
 

@@ -18104,19 +18104,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             previous = {}
         if not isinstance(previous, dict):
             previous = {}
-        if previous.get("done") and previous.get("final_sha") == sha:
-            # This paper is what an earlier pass of the check left (a resume, or the same paper shown again).
-            return {**out, "citation_check": previous.get("summary") or {}}  # type: ignore[return-value]
+        if previous.get("final_sha") == sha and previous.get("order") is not None:
+            # This paper is what an earlier pass of the check left (a resume after the record was written, or the same
+            # paper shown again). Nothing is asked again; what the state would have held is put back: the sources in the
+            # order the paper now numbers them, the receipts for the text as it is, the claim check on it.
+            return await self._settle_citation_check(  # type: ignore[return-value]
+                state, path, previous, lambda rec: self._citation_record_save(record_path, rec), out,
+                _reorder_literature(state.get("literature") or [], previous.get("order") or []))
         record = previous if previous.get("paper_sha") == sha else _cs.new_record(paper, previous)
 
         def save(rec: dict[str, Any]) -> None:
-            try:
-                self.fi_dir.mkdir(parents=True, exist_ok=True)
-                tmp = record_path.with_name(record_path.name + f".{os.getpid()}.tmp")
-                tmp.write_text(json.dumps(rec, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
-                os.replace(tmp, record_path)
-            except OSError as e:
-                self._log.warning("[citation_check] its record could not be written: %r", e)
+            self._citation_record_save(record_path, rec)
 
         literature = state.get("literature") or []
         audience = self.config.output.audience
@@ -18185,36 +18183,72 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         new_literature = literature
         if result.changed:
             final, new_literature = _finalize_after_citation_edits(result.paper, literature, audience)
-            path.write_text(final, encoding="utf-8")
         data = _cs.ledger(result, reader=reader, same_model=same)
+        c = result.counts
+        summary = {**c, "reader": reader, "reader_is_writer": same, "judge_failed": result.judge_failed}
+        # Everything a resume needs to put the state back is in the record BEFORE the paper is written.
+        record.update(
+            final_sha=_cs.paper_hash(final), changed=bool(result.changed), summary=summary, done=False,
+            order=[_literature_key(i, n) for n, i in enumerate(new_literature)],
+            receipt={"status": "pass" if result.clean else "unknown",
+                     "error": "" if result.clean else (record.get("judge_error") or f"{c['unchecked']} citation(s) were not judged"),
+                     "detail": f"{c['citations']} citation(s): {c['supported']} backed as written, {c['found_unsupported']} fixed"})
+        save(record)
+        if result.changed:
+            path.write_text(final, encoding="utf-8")
         try:
             (path.parent / "citations.json").write_text(_cs.dump(data), encoding="utf-8")
             (path.parent / "CITATIONS.md").write_text(_cs.render_md(data), encoding="utf-8")
         except OSError as e:
             self._log.warning("[citation_check] its ledger could not be written: %r", e)
-        c = result.counts
-        summary = {**c, "reader": reader, "reader_is_writer": same, "judge_failed": result.judge_failed}
-        record.update(done=True, final_sha=_cs.paper_hash(final), summary=summary)
-        save(record)
         self._log.info(
             "[citation_check] %d citation(s): %d backed by a passage as written, %d found unsupported and fixed (%d to another "
-            "source, %d reworded, %d citation dropped, %d sentence dropped)%s%s", c["citations"], c["supported"],
-            c["found_unsupported"], c["replaced"], c["reworded"], c["citation_dropped"], c["sentence_dropped"],
+            "source, %d reworded, %d citation dropped, %d clause dropped, %d sentence dropped)%s%s", c["citations"], c["supported"],
+            c["found_unsupported"], c["replaced"], c["reworded"], c["citation_dropped"], c["clause_dropped"], c["sentence_dropped"],
             f", {c['unchecked']} could not be checked" if c["unchecked"] else "",
             f"; read by {reader}" + (" (the model that wrote the paper)" if same else ""))
-        self._write_receipt(
-            "citation_check", "pass" if result.clean else "unknown", started_at=started,
-            inputs={"paper": path.read_bytes()}, output=data,
-            error="" if result.clean else (record.get("judge_error") or f"{c['unchecked']} citation(s) were not judged"),
-            detail=f"{c['citations']} citation(s): {c['supported']} backed as written, {c['found_unsupported']} fixed")
-        out.update({"citation_check": summary, "literature": new_literature})
-        if result.changed:
-            # The claim ledger and its receipt are for the paper as it is delivered.
+        return await self._settle_citation_check(state, path, record, save, out, new_literature, started=started)  # type: ignore[return-value]
+
+    def _citation_record_save(self, record_path: Path, rec: dict[str, Any]) -> None:
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            tmp = record_path.with_name(record_path.name + f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(rec, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+            os.replace(tmp, record_path)
+        except OSError as e:
+            self._log.warning("[citation_check] its record could not be written: %r", e)
+
+    async def _settle_citation_check(
+        self, state: QuestState, path: Path, record: dict[str, Any], save: Callable[[dict[str, Any]], None],
+        out: dict[str, Any], literature: list[Any], *, started: str = "",
+    ) -> dict[str, Any]:
+        """The part of the citation check that follows the paper being final, run on a first pass and again on a resume:
+        the receipt for the text as it is, the claim check on it when the check changed it and the claim check's receipt is
+        not for this text, and the record marked done. A step already done is not done again, so no model call is repeated."""
+        final_bytes = path.read_bytes()
+        digest = _receipts.sha256(final_bytes)
+        status, receipt, problem = _receipts.read(self.quest_root, "citation_check")
+        if problem or receipt is None or (receipt.get("input_hashes") or {}).get("paper") != digest:
             try:
-                out.update(await self._node_claim_check({**state, "literature": new_literature, **out}))  # type: ignore[arg-type]
-            except Exception as e:  # noqa: BLE001 -- the citations are already settled; this only refreshes the ledger
-                self._log.warning("[citation_check] the claim check could not be run again on the fixed paper: %r", e)
-        return out  # type: ignore[return-value]
+                data = json.loads((path.parent / "citations.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = dict(record.get("summary") or {})
+            kept = record.get("receipt") or {}
+            self._write_receipt("citation_check", kept.get("status") or "unknown", started_at=started or _receipts.now(),
+                                inputs={"paper": final_bytes}, output=data, error=kept.get("error") or "",
+                                detail=kept.get("detail") or "")
+        out.update({"citation_check": record.get("summary") or {}, "literature": literature})
+        if record.get("changed"):
+            c_status, c_receipt, c_problem = _receipts.read(self.quest_root, "claim_check")
+            if c_problem or c_receipt is None or (c_receipt.get("input_hashes") or {}).get("paper") != digest:
+                # The claim ledger and its receipt are for the paper as it is delivered.
+                try:
+                    out.update(await self._node_claim_check({**state, "literature": literature, **out}))  # type: ignore[arg-type]
+                except Exception as e:  # noqa: BLE001 -- the citations are already settled; this only refreshes the ledger
+                    self._log.warning("[citation_check] the claim check could not be run again on the fixed paper: %r", e)
+        record["done"] = True
+        save(record)
+        return out
 
     async def _node_select_skills(self, state: QuestState) -> QuestState:
         """Pick which skills this quest carries.
@@ -24435,6 +24469,27 @@ def _finalize_paper_sources(
         body = body.rstrip() + "\n\n" + "\n".join(["## References", "", *lines]) + "\n"
     body = _append_further_reading(body, build_further_reading(ordered, audience=audience))
     return body, ordered, dropped
+
+
+def _literature_key(item: Any, index: int) -> str:
+    """What names a source in the record of the citation check, so the order the paper numbers them in can be put back."""
+    meta = (item.get("metadata") if isinstance(item, dict) else getattr(item, "metadata", None)) or {}
+    key = str(meta.get("doi") or meta.get("arxiv_id") or meta.get("pmid") or meta.get("url") or meta.get("title") or "")
+    return key.lower().strip() or f"#{index}"
+
+
+def _reorder_literature(literature: list[Any], order: list[str]) -> list[Any]:
+    """``literature`` in the order ``order`` names (keys from :func:`_literature_key`); a source it does not name keeps its
+    place after them. The same list comes back when it is already in that order."""
+    pool: dict[str, list[Any]] = {}
+    for n, item in enumerate(literature):
+        pool.setdefault(_literature_key(item, n), []).append(item)
+    out: list[Any] = []
+    for key in order:
+        if pool.get(key):
+            out.append(pool[key].pop(0))
+    placed = {id(i) for i in out}
+    return out + [item for item in literature if id(item) not in placed]
 
 
 def _finalize_after_citation_edits(markdown: str, literature: list[Any], audience: str) -> tuple[str, list[Any]]:
