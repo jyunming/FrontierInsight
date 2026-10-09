@@ -1,6 +1,6 @@
 # RECONSTRUCTED from .fi/run.log (the text before 16:39 was not kept): "simulate.py line 290: reads the setting
 # `reference_dose` or `dose_to_size` (and gives 80.0 when it is not there)". The surrounding lines are the real ones
-# (simulate_after_guard.py), with only the read of the reference dose as the log describes it.
+# (simulate_after_guard.txt), with only the read of the reference dose as the log describes it.
 def run_trial(cell, trial_id=0):
     dose = float(cell["exposure_dose"])
     resist = cell["resist_type"]

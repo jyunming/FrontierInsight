@@ -31,7 +31,7 @@ READ_TEXT = next(line.strip() for line in BEFORE.splitlines() if f'"{CONST}"' in
 READ_EXPR = READ_TEXT.split("=", 1)[1].strip()
 TARGET = READ_TEXT.split("=", 1)[0].strip()
 # The guard's own rewrite, as the real code has it: the same name set to the swept setting.
-REWRITE_LINE = next(line.strip() for line in (FIXTURE / "simulate_after_guard.py").read_text(encoding="utf-8").splitlines()
+REWRITE_LINE = next(line.strip() for line in (FIXTURE / "simulate_after_guard.txt").read_text(encoding="utf-8").splitlines()
                     if line.strip().startswith(f"{TARGET}=float(cell["))
 AFTER = BEFORE.replace(READ_TEXT, REWRITE_LINE)
 
