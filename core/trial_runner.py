@@ -506,6 +506,9 @@ class TrialsRunner:
         self.failed_script: str | None = None
         #: Why the last run was sent back as a simulation that does not use its inputs (core/flat_output.py), or ``None``.
         self.flat: str | None = None
+        #: Every setting gave the same numbers but nothing in the code ignores the settings (core/flat_output.py): the plain
+        #: record of what was observed, or ``None``.
+        self.no_difference: str | None = None
         self.last: TrialRun | None = None
         # On a cluster: the experiment's script that submits the job array FI prepared and reports it pending or done.
         self.submit = Path(submit) if submit is not None else None
@@ -646,11 +649,23 @@ class TrialsRunner:
                 (r.get("reason") for c in run.cells for r in c.rows if r.get("reason")), "every trial failed")
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr()}\nFI ran no trial successfully: {reason}".strip())
-        # Every setting gave the very same numbers: the simulation does not use the settings it is given. Sent back to be
-        # repaired like one that does not run (core/flat_output.py), never analysed as a finding.
+        # Every setting gave the very same numbers. That alone is an observation (a conserved quantity, a plateau and a true
+        # absence of effect look the same); it is a fault only when the simulation's own code never lets the varied setting
+        # reach what it returns. The fault is sent back to be repaired like a simulation that does not run
+        # (core/flat_output.py); the observation is kept as a result and recorded as observed (`self.no_difference`).
+        from . import degenerate_results as _degenerate
         from . import flat_output as _flat
 
-        flat = _flat.flat_sweep(run.cells)
+        self.no_difference = None
+        seen = _flat.observed_flat_sweep(run.cells)
+        flat = _flat.flat_sweep(
+            run.cells, source=self.simulate.read_text(encoding="utf-8", errors="replace"),
+            expected=_degenerate.expected_constants(protocol)) if seen is not None else None
+        if seen is not None and flat is None:
+            self.no_difference = seen.note()
+            if self.log is not None:
+                self.log.info("[execute] every setting gave the same numbers, and the simulation's code does read the settings: "
+                              "kept as an observed absence of difference, not a fault. %s", self.no_difference)
         if flat is not None:
             self.flat = flat
             self.failed_script = self.simulate.name

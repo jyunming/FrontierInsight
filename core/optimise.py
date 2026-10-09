@@ -878,10 +878,19 @@ class OptimisationRunner:
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr}\nFI's search for the best design got no result from the "
                                           f"simulation: {reason}".strip())
-        # A search in which every design gave the very same numbers is not a result: the simulation does not use the
-        # design it is given. It is sent back to be repaired like one that does not run (core/flat_output.py).
+        # A search in which every design gave the very same numbers, and whose simulation's code never lets the design reach
+        # what it returns, is not a result: the simulation does not use the design it is given. It is sent back to be repaired
+        # like one that does not run (core/flat_output.py). The same numbers from a simulation that does read the design are
+        # an observed plateau, not a fault.
         norm_block = _plan.normalize(block_of(protocol))[0] or block_of(protocol) or {}
-        flat = _flat.flat_search(run.rows, str((norm_block.get("objective") or {}).get("quantity") or "the objective"))
+        from . import degenerate_results as _degenerate
+
+        try:
+            sim_text = self.simulate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            sim_text = None
+        flat = _flat.flat_search(run.rows, str((norm_block.get("objective") or {}).get("quantity") or "the objective"),
+                                 source=sim_text, expected=_degenerate.expected_constants(protocol))
         if flat is not None:
             return self._flat_result(flat, run, started)
         # FI checks the best design at finer settings (core/optimum_check.py), with a time limit of its own. A check that
@@ -892,7 +901,7 @@ class OptimisationRunner:
             checked = json.loads(check_text) if check_text else None
         except ValueError:
             checked = None
-        flat = _flat.flat_search_check(checked, norm_block)
+        flat = _flat.flat_search_check(checked, norm_block, source=sim_text)
         if flat is not None:
             return self._flat_result(flat, run, started)
         analysis_env = {**(env or {}), LEDGER_ENV: LEDGER_PATH.as_posix(), BEST_ENV: BEST_PATH.as_posix(),

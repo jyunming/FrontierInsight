@@ -154,16 +154,27 @@ def test_nothing_is_claimed_about_a_subset_the_pilot_could_not_all_try() -> None
 def test_the_other_findings_are_a_constant_mean_and_an_output_that_never_changes() -> None:
     cells = [{"a": a} for a in (1, 2, 3)]
     moving = [({**c}, {"x": float(c["a"]) + 0.1 * t, "m": 5.0}) for c in cells for t in range(2)]
-    pilot = est.pilot_problems(moving, {"x": "mean", "m": "mean"})
+    # Values that did not change are an observation. They are a finding only with evidence from the code that the value is
+    # built from no setting (core/flat_output.py).
+    fixed = 'def run_trial(cell, trial, seed):\n    return {"x": cell["a"] + trial * 0.1, "m": 5.0}\n'
+    responding = 'def run_trial(cell, trial, seed):\n    return {"x": cell["a"] + trial * 0.1, "m": 5.0 + 0.0 * cell["a"]}\n'
+    pilot = est.pilot_problems(moving, {"x": "mean", "m": "mean"}, source=fixed)
     assert [(p.metric, p.kind) for p in pilot.problems] == [("m", "constant")]
     assert "exactly 5" in pilot.problems[0].says and "never responds" in pilot.problems[0].says
+    assert est.pilot_problems(moving, {"x": "mean", "m": "mean"}).problems == [], "no code to read: no evidence"
+    assert est.pilot_problems(moving, {"x": "mean", "m": "mean"}, source=responding).problems == [], "the code reads the setting"
     # a proportion that is 0 everywhere in a small pilot is a rare event, not a fault; nor is a metric the plan expects constant
     rare = [({**c}, {"x": float(c["a"]) + 0.1 * t, "p": 0.0}) for c in cells for t in range(2)]
-    assert est.pilot_problems(rare, {"x": "mean", "p": "proportion"}).problems == []
-    assert est.pilot_problems(moving, {"x": "mean", "m": "mean"}, exempt={"m"}).problems == []
-    # every number the same at every setting: the existing flat check
+    assert est.pilot_problems(rare, {"x": "mean", "p": "proportion"}, source=fixed).problems == []
+    assert est.pilot_problems(moving, {"x": "mean", "m": "mean"}, exempt={"m"}, source=fixed).problems == []
+    # every number the same at every setting, from code that lets no setting reach them
     flat = [({**c}, {"x": 1.0, "m": 5.0}) for c in cells for _ in range(2)]
-    assert [p.kind for p in est.pilot_problems(flat, {"x": "mean"}).problems] == ["flat"]
+    ignoring = 'def run_trial(cell, trial, seed):\n    return {"x": 1.0, "m": 5.0}\n'
+    assert [p.kind for p in est.pilot_problems(flat, {"x": "mean"}, source=ignoring).problems] == ["flat"]
+    # the same numbers from code that reads the settings (a conserved quantity) are an observation: nothing is sent back
+    conserved = ('def run_trial(cell, trial, seed):\n    a = cell["a"]\n    b = 10.0 - a\n    return {"x": 1.0 + 0 * (a + b), "m": a + b}\n')
+    assert est.pilot_problems(flat, {"x": "mean"}, source=conserved).problems == []
+    assert est.pilot_problems(flat, {"x": "mean"}).problems == []
 
 
 @pytest.mark.asyncio

@@ -15330,6 +15330,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             for name in figures:
                 if name not in replotted and name in figure_records:
                     figure_records[name]["single_seed"] = 0
+        self._record_no_difference(getattr(runner, "no_difference", None) if result.returncode == 0 else None)
         patch: dict[str, Any] = {
             "exec_result": {
                 "returncode": result.returncode,
@@ -16580,6 +16581,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             )
         if once_note := self._ran_once_note():
             stdout_for_analyze = f"[FI NOTE] {once_note}\n\n{stdout_for_analyze}"
+        if no_difference := self._no_difference_note():
+            stdout_for_analyze = f"[FI NOTE] {no_difference}\n\n{stdout_for_analyze}"
         if state.get("result_json_replicate_seed_ignored") and state.get("result_json_no_random_source"):
             stdout_for_analyze = (
                 "[FI NOTE] This study is deterministic: the script draws no random numbers, so one run is the whole "

@@ -27,7 +27,11 @@ so a simulation that measures nothing is found in minutes, not after the study:
   the settings with few values (at most three) in every combination (:func:`confirm_cells`), so a metric that applies only to
   some of the settings is not mistaken for a broken one; if those cannot all be tried, nothing is claimed;
 * a ``mean`` metric that is exactly one value in every pilot trial although the settings change and other results move, and a
-  simulation whose every returned number is the same at every setting (:func:`core.flat_output.flat_sweep`);
+  simulation whose every returned number is the same at every setting (:func:`core.flat_output.flat_sweep`). Values that did
+  not change are only an observation (a conserved quantity or a true absence of effect look the same), so each of these, and
+  the stuck proportions below, is a finding only with evidence from the simulation's own code that the returned value is
+  built from no setting (:func:`core.flat_output.unused_outputs`, :func:`core.flat_output.unread_settings`); without the
+  code's text, or when the code cannot be followed with certainty, nothing is claimed;
 * proportions stuck at a bound: **at least two different** ``proportion`` metrics that are each exactly 0 (or each exactly 1)
   in every pilot trial that returned them, over at least :data:`MIN_STUCK_TRIALS` trials at :data:`MIN_STUCK_SETTINGS`
   settings. The protocol has no structured field that tells a rare-event probability (where 0 is the expected outcome of a
@@ -483,12 +487,15 @@ def _say_undefined(name: str, obs: list[tuple[dict[str, Any], dict[str, float]]]
 
 def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: dict[str, str], *,
                    exempt: set[str] | frozenset[str] = frozenset(), tried_all: str = "",
-                   unsure: set[str] | frozenset[str] = frozenset(), axes: set[str] | frozenset[str] = frozenset()) -> Pilot:
+                   unsure: set[str] | frozenset[str] = frozenset(), axes: set[str] | frozenset[str] = frozenset(),
+                   source: str | None = None) -> Pilot:
     """What the pilot trials show. ``kinds``: the protocol's metrics (``{id: kind}``); only those the trials returned are read.
     ``tried_all``: a clause saying that every combination of the small settings was tried (when it was); ``unsure``: metrics
     that looked undefined but whose subsets were not all tried (nothing is claimed about them). ``exempt``: names the plan
-    expects to stay put. Nothing here is a judgement about the science: a metric undefined everywhere, one that never moves
-    while others do, and an output that is the same everywhere."""
+    expects to stay put. ``source``: the text of the simulation, for the evidence a value that never changed needs (see the
+    module's notes); without it only an undefined metric is a finding. Nothing here is a judgement about the science: a metric
+    undefined everywhere, and, when the code shows it is built from no setting, one that never moves while others do and an
+    output that is the same everywhere."""
     from . import flat_output as _flat
 
     pilot = Pilot(trials=len(obs), settings=_setting_count(obs))
@@ -501,12 +508,13 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
             pilot.unsure.append(name)
             continue
         pilot.problems.append(PilotProblem(name, "undefined", _say_undefined(name, obs, tried_all)))
+    ignoring = set(_flat.unused_outputs(source, pilot.checked) or []) if source is not None else set()
     moved = {n for n in returned
              if len({v[n] for _c, v in obs if n in v and _finite(v[n])}) > 1}
     varied_cells = {_tr.cell_key(c) for c, _v in obs}
     if len(obs) >= MIN_CONSTANT_TRIALS and len(varied_cells) >= MIN_CONSTANT_SETTINGS and moved:
         for name in pilot.checked:
-            if kinds.get(name) != "mean" or name in exempt or name in axes or name in moved:
+            if kinds.get(name) != "mean" or name in exempt or name in axes or name in moved or name not in ignoring:
                 continue
             own = [v[name] for _c, v in obs if name in v]
             if len(own) >= MIN_CONSTANT_TRIALS and all(_finite(x) for x in own) and _flat._all_same([float(x) for x in own]):
@@ -518,7 +526,7 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
     stuck: list[tuple[str, float, list[tuple[dict[str, Any], dict[str, float]]]]] = []
     if len(varied_cells) >= 2:
         for name in pilot.checked:
-            if kinds.get(name) != "proportion" or name in exempt or name in axes:
+            if kinds.get(name) != "proportion" or name in exempt or name in axes or name not in ignoring:
                 continue
             own_obs = [(c, v) for c, v in obs if name in v]
             own = [v[name] for _c, v in own_obs]
@@ -542,7 +550,7 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
     for cell, values in obs:
         run = by_cell.setdefault(_tr.cell_key(cell), type("PilotCell", (), {"cell": dict(cell), "rows": []})())
         run.rows.append({"status": "ok", "values": values})
-    flat = _flat.flat_sweep(list(by_cell.values()))
+    flat = _flat.flat_sweep(list(by_cell.values()), source=source, expected=set(exempt))
     if flat:
         pilot.problems.append(PilotProblem("", "flat", f"in the {len(obs)} pilot trials, {flat}"))
     return pilot
@@ -600,6 +608,10 @@ async def pilot(
     of the settings has a value there. If they cannot all be tried, the metric is left alone (nothing is claimed)."""
     obs = observations(probes)
     axes = {name for name, _v in axes_of(grid)}
+    try:
+        source = (Path(quest_root) / str(module)).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        source = None
     suspects = undefined_metrics(obs, [n for n in kinds if any(n in v for _c, v in obs)])
     tried_all, unsure = "", set()
     if suspects:
@@ -622,7 +634,7 @@ async def pilot(
                          f"values ({_setting_count(obs)} settings in all)")
         else:
             unsure = set(suspects)
-    return pilot_problems(obs, kinds, exempt=exempt, tried_all=tried_all, unsure=unsure, axes=axes)
+    return pilot_problems(obs, kinds, exempt=exempt, tried_all=tried_all, unsure=unsure, axes=axes, source=source)
 
 
 # ---- the record: so a resume neither times nor asks again -------------------------------------------------------------

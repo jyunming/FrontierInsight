@@ -27,6 +27,10 @@ from tests.test_optimise_runner import LocalExecutor
 
 # --- the pure readers ------------------------------------------------------------------------------------------------
 
+#: A simulation that lets nothing it is given reach what it returns, and one that does (the same numbers may come from either).
+IGNORES = 'def run_cell(cell):\n    return {"peak": 0.0, "mass": 1.0}\n'
+READS = 'def run_cell(cell):\n    return {"peak": cell["fin"] * 0.0, "mass": cell["gap"] * 0.0}\n'
+
 
 def _row(n: int, fin: float, objective: Any, constraints: dict[str, Any] | None = None, status: str = "ok") -> dict[str, Any]:
     return {"event": "evaluation", "n": n, "status": status, "design": {"fin": fin, "gap": 2.0 * fin},
@@ -35,11 +39,17 @@ def _row(n: int, fin: float, objective: Any, constraints: dict[str, Any] | None 
 
 def test_a_search_with_one_value_at_every_design_is_flat() -> None:
     rows = [_row(i, 1.0 + i, 0.0) for i in range(6)]
-    why = flat.flat_search(rows, "peak_temperature")
+    why = flat.flat_search(rows, "peak_temperature", source=IGNORES)
     assert why is not None
     assert "does not change when `fin`, `gap` change" in why and "the simulation does not use them" in why
     assert "`peak_temperature` was the same at all 6 designs" in why
     assert "expected" not in why.lower()
+    # The same numbers from a simulation that reads the design are an observed plateau, not a fault; with no code to read
+    # there is no evidence either.
+    assert flat.flat_search(rows, "peak_temperature", source=READS) is None
+    assert flat.flat_search(rows, "peak_temperature") is None
+    # An objective the plan itself expects to stay put is never a fault.
+    assert flat.flat_search(rows, "peak_temperature", source=IGNORES, expected={"peak_temperature"}) is None
 
 
 def test_a_search_whose_objective_moves_is_not_flat() -> None:
@@ -49,33 +59,33 @@ def test_a_search_whose_objective_moves_is_not_flat() -> None:
 
 def test_a_flat_objective_is_broken_even_while_a_limit_quantity_still_moves() -> None:
     rows = [_row(i, 1.0 + i, 3.0, {"mass": 5.0 + i}) for i in range(6)]
-    why = flat.flat_search(rows, "peak")
+    why = flat.flat_search(rows, "peak", source=IGNORES)
     assert why is not None and "`peak` was the same at all 6 designs" in why and "mass" not in why
     # A moving objective is fine whatever the limits do.
     assert flat.flat_search([_row(i, 1.0 + i, 3.0 + i, {"mass": 5.0}) for i in range(6)]) is None
 
 
 def test_two_evaluations_or_one_design_prove_nothing() -> None:
-    assert flat.flat_search([_row(0, 1.0, 0.0), _row(1, 2.0, 0.0)]) is None
-    assert flat.flat_search([_row(i, 1.0, 0.0) for i in range(5)]) is None
-    assert flat.flat_search([_row(i, 1.0 + i, 0.0, status="failed") for i in range(5)]) is None
+    assert flat.flat_search([_row(0, 1.0, 0.0), _row(1, 2.0, 0.0)], source=IGNORES) is None
+    assert flat.flat_search([_row(i, 1.0, 0.0) for i in range(5)], source=IGNORES) is None
+    assert flat.flat_search([_row(i, 1.0 + i, 0.0, status="failed") for i in range(5)], source=IGNORES) is None
 
 
 def test_numbers_that_differ_only_by_noise_are_the_same() -> None:
     rows = [_row(i, 1.0 + i, 5.0 + i * 1e-13) for i in range(5)]
-    assert flat.flat_search(rows) is not None
+    assert flat.flat_search(rows, source=IGNORES) is not None
     rows = [_row(i, 1.0 + i, 5.0 + i * 1e-3) for i in range(5)]
-    assert flat.flat_search(rows) is None
+    assert flat.flat_search(rows, source=IGNORES) is None
 
 
 def test_designs_that_differ_only_by_noise_are_one_design() -> None:
     noisy = [{"event": "evaluation", "n": i, "status": "ok", "design": {"fin": 2.0 + i * 1e-13, "gap": 4.0},
               "objective": 7.0 + i * 1e-4, "constraints": {}} for i in range(4)]
-    assert flat.flat_search(noisy) is None, "one design, a tiny objective change: nothing to say"
+    assert flat.flat_search(noisy, source=IGNORES) is None, "one design, a tiny objective change: nothing to say"
     same_objective = [{**r, "objective": 7.0} for r in noisy]
-    assert flat.flat_search(same_objective) is None, "noise-level differences are not distinct designs"
+    assert flat.flat_search(same_objective, source=IGNORES) is None, "noise-level differences are not distinct designs"
     distinct = [_row(i, 1.0 + i, 7.0) for i in range(3)]
-    assert flat.flat_search(distinct) is not None
+    assert flat.flat_search(distinct, source=IGNORES) is not None
 
 
 def _check(no_effect: list[str], sensitivity: dict[str, float] | None = None, finished: bool = True) -> dict[str, Any]:
@@ -89,13 +99,16 @@ BLOCK = {"design_variables": [{"name": "fin", "low": 0, "high": 5, "kind": "cont
 
 
 def test_the_check_finding_that_every_nudge_changes_nothing_is_flat() -> None:
-    why = flat.flat_search_check(_check(["fin", "gap"]), BLOCK)
+    why = flat.flat_search_check(_check(["fin", "gap"]), BLOCK, source=IGNORES)
     assert why is not None and "does not change when `fin`, `gap` change" in why
+    # The same finding from a simulation that does read the design, or with no code to read: an observation, not a fault.
+    assert flat.flat_search_check(_check(["fin", "gap"]), BLOCK, source=READS) is None
+    assert flat.flat_search_check(_check(["fin", "gap"]), BLOCK) is None
     # One variable that does matter, or a check that did not finish: not this.
-    assert flat.flat_search_check(_check(["fin"], {"fin": 0.0, "gap": 1.5}), BLOCK) is None
-    assert flat.flat_search_check(_check(["fin"]), BLOCK) is None
-    assert flat.flat_search_check(_check(["fin", "gap"], finished=False), BLOCK) is None
-    assert flat.flat_search_check(_check([]), BLOCK) is None
+    assert flat.flat_search_check(_check(["fin"], {"fin": 0.0, "gap": 1.5}), BLOCK, source=IGNORES) is None
+    assert flat.flat_search_check(_check(["fin"]), BLOCK, source=IGNORES) is None
+    assert flat.flat_search_check(_check(["fin", "gap"], finished=False), BLOCK, source=IGNORES) is None
+    assert flat.flat_search_check(_check([]), BLOCK, source=IGNORES) is None
 
 
 def _cell(cell: dict[str, Any], *values: dict[str, Any]) -> Any:
@@ -104,24 +117,34 @@ def _cell(cell: dict[str, Any], *values: dict[str, Any]) -> Any:
 
 def test_a_sweep_with_the_same_numbers_in_every_setting_is_flat() -> None:
     cells = [_cell({"flow": f}, {"t_out": 20.0, "drop": 0.0}, {"t_out": 20.0, "drop": 0.0}) for f in (1.0, 2.0, 3.0)]
-    why = flat.flat_sweep(cells)
+    ignoring = 'def run_cell(cell):\n    return {"t_out": 20.0, "drop": 0.0}\n'
+    why = flat.flat_sweep(cells, source=ignoring)
     assert why is not None and "does not change when `flow` change" in why and "`drop`, `t_out`" in why
-    assert "the simulation does not use it" in flat.flat_sweep(cells).replace("them", "it") or "does not use" in why
+    assert "the simulation does not use it" in why
+    # The numbers alone are an observation: no fault without evidence from the code, and none while the code reads the setting.
+    assert flat.flat_sweep(cells) is None
+    reading = 'def run_cell(cell):\n    return {"t_out": 20.0 + 0.0 * cell["flow"], "drop": 0.0}\n'
+    assert flat.flat_sweep(cells, source=reading) is None
+    seen = flat.observed_flat_sweep(cells)
+    assert seen is not None and seen.names == ["drop", "t_out"] and seen.varied == ["flow"] and seen.count == 3
+    assert "cannot show that there is no effect" in seen.note() and "does not use" not in seen.note()
+    # A name the plan itself expects to stay put (an invariant) is never a fault.
+    assert flat.flat_sweep(cells, source=ignoring, expected={"t_out", "drop"}) is None
 
 
 def test_a_sweep_where_anything_varies_is_not_flat() -> None:
     cells = [_cell({"flow": f}, {"t_out": 20.0 - f, "drop": 0.0}) for f in (1.0, 2.0, 3.0)]
-    assert flat.flat_sweep(cells) is None
+    assert flat.observed_flat_sweep(cells) is None
     # A single setting, or a grid that varies nothing, has nothing to compare.
-    assert flat.flat_sweep([_cell({"flow": 1.0}, {"t_out": 20.0})]) is None
-    assert flat.flat_sweep([_cell({"flow": 1.0}, {"t_out": 20.0}), _cell({"flow": 1.0}, {"t_out": 20.0})]) is None
+    assert flat.observed_flat_sweep([_cell({"flow": 1.0}, {"t_out": 20.0})]) is None
+    assert flat.observed_flat_sweep([_cell({"flow": 1.0}, {"t_out": 20.0}), _cell({"flow": 1.0}, {"t_out": 20.0})]) is None
     # Words and flags are not measurements.
-    assert flat.flat_sweep([_cell({"flow": f}, {"note": "ok"}) for f in (1.0, 2.0)]) is None
+    assert flat.observed_flat_sweep([_cell({"flow": f}, {"note": "ok"}) for f in (1.0, 2.0)]) is None
 
 
 def test_trial_noise_that_differs_between_trials_is_not_flat() -> None:
     cells = [_cell({"flow": f}, {"t_out": 20.0 + 0.1}, {"t_out": 20.0 - 0.1}) for f in (1.0, 2.0, 3.0)]
-    assert flat.flat_sweep(cells) is None
+    assert flat.observed_flat_sweep(cells) is None
 
 
 # --- the runners -----------------------------------------------------------------------------------------------------
@@ -349,11 +372,11 @@ async def test_a_flat_simulation_the_repair_fixes_goes_on_to_a_paper(
 @pytest.mark.parametrize("scale", [1e-12, 1e-6, 1.0, 1e6, 1e12])
 def test_the_flat_decision_does_not_change_with_the_unit(scale: float) -> None:
     moving = [_cell({"s": i}, {"out": i * scale}) for i in (1, 2, 3)]
-    assert flat.flat_sweep(moving) is None, "numbers 1, 2, 3 in any unit are different numbers"
+    assert flat.observed_flat_sweep(moving) is None, "numbers 1, 2, 3 in any unit are different numbers"
     still = [_cell({"s": i}, {"out": 7.0 * scale}) for i in (1, 2, 3)]
-    assert flat.flat_sweep(still) is not None, "one number written three times is the same in any unit"
+    assert flat.observed_flat_sweep(still) is not None, "one number written three times is the same in any unit"
     noisy = [_cell({"s": i}, {"out": scale * (7.0 + i * 1e-13)}) for i in (1, 2, 3)]
-    assert flat.flat_sweep(noisy) is not None
+    assert flat.observed_flat_sweep(noisy) is not None
     assert flat._all_same([1.0 * scale, 2.0 * scale]) is False
     assert flat.same(1.0 * scale, 1.0 * scale * (1 + 1e-12)) and not flat.same(1.0 * scale, 2.0 * scale)
 

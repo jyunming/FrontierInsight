@@ -36,6 +36,7 @@ from . import typed_results as _typed
 #: How many times, in all, a simulation that returns typed-in numbers is sent back.
 TYPED_RESULT_REPAIRS = 2
 TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
+NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
 
 
@@ -225,6 +226,32 @@ class RunChecksMixin:
         keys = self._left_out_quantities()
         return _typed.strip_keys(result_json, keys) if keys and result_json else result_json
 
+    # ---- a result that did not change is recorded as observed ----------------------------------------------------------
+
+    def _record_no_difference(self, note: str | None) -> None:
+        """Every setting gave the same numbers and the code does read the settings (core/flat_output.py): the observation is
+        kept in ``needs/NO_DIFFERENCE_OBSERVED.json`` (this run's alone) for the analysis and the writer. A run without one
+        removes an earlier run's record."""
+        path = self.quest_root / "needs" / NO_DIFFERENCE_RECORD  # type: ignore[attr-defined]
+        if not note:
+            path.unlink(missing_ok=True)
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"note": note}, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute] could not write needs/%s (%r)", NO_DIFFERENCE_RECORD, exc)  # type: ignore[attr-defined]
+
+    def _no_difference_note(self) -> str:
+        """For the analysis and the writer: a study whose numbers did not change with its settings, said as an observation
+        (never as proof of no effect, and never as a broken simulation). Empty when there is none."""
+        record = _read_json(self.quest_root / "needs" / NO_DIFFERENCE_RECORD)  # type: ignore[attr-defined]
+        note = record.get("note") if isinstance(record, dict) else None
+        if not isinstance(note, str) or not note.strip():
+            return ""
+        return (f"Observed: {note} Report it as a result that did not change in the settings tried; do not call the "
+                "simulation broken, and do not claim that the setting can have no effect in general.")
+
     # ---- the note for the writer ---------------------------------------------------------------------------------------
 
     def _run_checks_note(self) -> str:
@@ -241,6 +268,8 @@ class RunChecksMixin:
             parts.append(checked)
         if static := self._static_checks_note():  # type: ignore[attr-defined]  # core/static_checks.py
             parts.append(static)
+        if observed := self._no_difference_note():
+            parts.append(observed)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
