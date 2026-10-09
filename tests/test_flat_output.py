@@ -341,3 +341,24 @@ async def test_a_flat_simulation_the_repair_fixes_goes_on_to_a_paper(
     best = json.loads((engine.quest_root / "results" / "best_design.json").read_text(encoding="utf-8"))
     assert best["best"]["objective"] < 40
     assert artifacts.paper_md is not None
+
+
+# --- a number's size is judged against itself, not against a unit -------------------------------------------------------
+
+
+@pytest.mark.parametrize("scale", [1e-12, 1e-6, 1.0, 1e6, 1e12])
+def test_the_flat_decision_does_not_change_with_the_unit(scale: float) -> None:
+    moving = [_cell({"s": i}, {"out": i * scale}) for i in (1, 2, 3)]
+    assert flat.flat_sweep(moving) is None, "numbers 1, 2, 3 in any unit are different numbers"
+    still = [_cell({"s": i}, {"out": 7.0 * scale}) for i in (1, 2, 3)]
+    assert flat.flat_sweep(still) is not None, "one number written three times is the same in any unit"
+    noisy = [_cell({"s": i}, {"out": scale * (7.0 + i * 1e-13)}) for i in (1, 2, 3)]
+    assert flat.flat_sweep(noisy) is not None
+    assert flat._all_same([1.0 * scale, 2.0 * scale]) is False
+    assert flat.same(1.0 * scale, 1.0 * scale * (1 + 1e-12)) and not flat.same(1.0 * scale, 2.0 * scale)
+
+
+def test_numbers_that_cannot_be_told_apart_by_their_own_size_are_not_called_flat() -> None:
+    assert flat._all_same([0.0, 0.0, 0.0])
+    assert not flat._all_same([0.0, 1e-30]), "a zero beside a number that is not zero: undecided, never flat"
+    assert not flat._all_same([-1e-15, 1e-15]), "noise around zero is not a constant"

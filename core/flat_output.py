@@ -17,8 +17,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
-#: Two numbers are "the same" when they differ by less than this fraction of their size (plus the same amount absolute):
-#: numerical noise, not a different answer.
+#: Two numbers are "the same" when they differ by less than this fraction of their own size: numerical noise, not a
+#: different answer. There is no absolute floor: a floor has a unit, and the same quantity written in another unit
+#: (a length in metres or in picometres) must be judged the same way. A set of numbers that cannot be told apart by their
+#: own size (some near zero beside others that are not, or noise around zero) is not called the same.
 SAME_TOLERANCE = 1e-9
 #: A search is read only once it has tried this many designs: two equal numbers prove nothing.
 MIN_DESIGNS = 3
@@ -29,20 +31,28 @@ def _is_number(value: Any) -> bool:
 
 
 def same(a: float, b: float) -> bool:
-    """``a`` and ``b`` agree within numerical noise."""
-    return abs(float(a) - float(b)) <= SAME_TOLERANCE * (1.0 + max(abs(float(a)), abs(float(b))))
+    """``a`` and ``b`` agree within numerical noise, measured against their own size (so the answer does not change when
+    both are written in another unit). Two exact zeros agree; a zero and a number that is not zero do not."""
+    a, b = float(a), float(b)
+    return abs(a - b) <= SAME_TOLERANCE * max(abs(a), abs(b))
 
 
 def _varies(values: list[Any]) -> bool:
     """Whether a design variable takes more than one value: numbers must differ by more than numerical noise (the same
-    relative and absolute tolerance as :func:`same`), anything else by its value."""
+    relative tolerance as :func:`same`), anything else by its value."""
     if all(_is_number(v) for v in values):
         return not _all_same([float(v) for v in values])
     return len({repr(v) for v in values}) > 1
 
 
 def _all_same(values: list[float]) -> bool:
-    return bool(values) and all(same(v, values[0]) for v in values[1:])
+    """Every number is within numerical noise of the others, against the size of the numbers themselves: the spread of the
+    set is compared with its largest magnitude, so multiplying all of them by one factor (a change of unit) never changes
+    the answer. A set that is not all the same size to that tolerance is not called the same, and nothing is decided
+    from it."""
+    if not values:
+        return False
+    return max(values) - min(values) <= SAME_TOLERANCE * max(abs(v) for v in values)
 
 
 def _names(items: list[str], *, limit: int = 6) -> str:
