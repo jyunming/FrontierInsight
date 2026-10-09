@@ -9730,7 +9730,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             hits = _record_claims.contradictions(
                 text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
                 oracle=self._oracle_record_read(), figures_on_disk=figures,
-                left_out=(_read_json_or_none_path(self.quest_root / "needs" / "RESULT_CHECK.json") or {}).get("removed_values"))
+                left_out=(_read_json_or_none_path(self.quest_root / "needs" / "RESULT_CHECK.json") or {}).get("removed_values"),
+                left_out_typed=(_read_json_or_none_path(self.quest_root / "needs" / "TYPED_RESULTS_CHECK.json") or {}).get(
+                    "removed_values"))
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
             self._log.warning("[record_check] could not compare the paper with FI's records (%r)", exc)
             return []
@@ -15068,7 +15070,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
         ) if (self.quest_root / "figures").is_dir() else []
-        result_json = self._without_typed_results(_extract_result_json(result.stdout))
+        raw_result_json = _extract_result_json(result.stdout)
+        self._note_typed_values(raw_result_json)
+        result_json = self._without_typed_results(raw_result_json)
         self._log.info(
             "[execute] rc=%d duration=%.1fs figures=%d result_json=%s",
             result.returncode, result.duration_s, len(figures), bool(result_json),
@@ -15183,7 +15187,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     timeout_s=self.config.execution.timeout_s,
                     env=rep_env,
                 )
-                rep_rj = _extract_result_json(rep_result.stdout)
+                rep_rj = self._without_typed_results(_extract_result_json(rep_result.stdout))
                 if rep_result.returncode == 0 and rep_rj is not None:
                     result_json_replicates.append({"_seed": seed, **rep_rj})
                     self._log.info(
@@ -15331,12 +15335,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if name not in replotted and name in figure_records:
                     figure_records[name]["single_seed"] = 0
         self._record_no_difference(getattr(runner, "no_difference", None) if result.returncode == 0 else None)
+        self._keep_raw_stdout(result.stdout)
         patch: dict[str, Any] = {
             "exec_result": {
                 "returncode": result.returncode,
                 "duration_s": result.duration_s,
                 "timed_out": result.timed_out,
-                "stdout_tail": result.stdout[-2000:],
+                # What the models read of the run's output: without its RESULT_JSON line and without any line that names a
+                # quantity left out of the results (core/run_checks.py). The raw output is kept in .fi/last_run_stdout.txt.
+                "stdout_tail": self._stdout_for_models(result.stdout)[-2000:],
                 "stderr_tail": result.stderr[-2000:],
                 # What could not be installed (core/experiment_deps.py), kept apart from the run's own stderr so the
                 # analysis does not read it as an error and no slice of the stderr cuts the traceback's last line.

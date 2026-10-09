@@ -56,7 +56,11 @@ class TypedResult:
     line: int
     value: str
 
-    def says(self) -> str:
+    def says(self, *, with_value: bool = True) -> str:
+        """The finding in words. The value is for a repair that is shown the code (which holds it anyway); a note for a
+        reader of the results leaves it out, so a quantity left out never has its value repeated."""
+        if not with_value:
+            return f"{self.script} line {self.line}: `{self.key}` is a number typed into the code"
         return f"{self.script} line {self.line}: `{self.key}` is returned as {self.value}, a number typed into the code"
 
 
@@ -322,7 +326,7 @@ def directive(findings: list[TypedResult]) -> str:
 def plain_note(keys: list[str], where: list[TypedResult]) -> str:
     """The sentence for the paper's limitations and for run.log when quantities were left out."""
     names = ", ".join(f"`{k}`" for k in keys)
-    calls = "; ".join(f.says() for f in where[:4])
+    calls = "; ".join(f.says(with_value=False) for f in where[:4])
     return (f"{names} {'was' if len(keys) == 1 else 'were'} left out of the results: the simulation returned "
             f"{'a number' if len(keys) == 1 else 'numbers'} typed into the code rather than computed ({calls}).")
 

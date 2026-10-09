@@ -21,6 +21,7 @@ def test_the_same_numbers_in_other_units_get_the_same_flat_decision() -> None:
 
 import asyncio
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -122,3 +123,159 @@ def test_the_pilot_does_not_send_back_the_conserved_total() -> None:
     obs = [(dict(c), {"total": 10.0}) for c in cells for _ in range(2)]
     assert est.pilot_problems(obs, {"total": "mean"}, source=CONSERVING).problems == []
     assert [p.kind for p in est.pilot_problems(obs, {"total": "mean"}, source=IGNORING).problems] == ["flat"]
+
+
+# ---- a value left out of the results does not reach a model through the run's output -----------------------------------
+
+SENTINEL = "4242.4242"
+
+
+def _with_sentinel_sim() -> str:
+    from tests import test_engine_callable_simulation as cs
+
+    return cs.SIMULATE.replace('return {"error": abs(y - math.exp(-1.0))}',
+                               'return {"error": abs(y - math.exp(-1.0)), "typed_value": 4242.4242}')
+
+
+def _with_sentinel_analysis() -> str:
+    from tests import test_engine_callable_simulation as cs
+
+    return cs.ANALYSIS.replace(
+        "print('RESULT_JSON: ' + json.dumps({'max_error': max(errors.values())}))",
+        "print('typed_value is', 4242.4242)\n"
+        "print('RESULT_JSON: ' + json.dumps({'max_error': max(errors.values()), 'typed_value': 4242.4242}))")
+
+
+def test_stdout_for_models_drops_the_result_line_and_any_line_naming_a_left_out_quantity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_run_checks import _typed_engine
+
+    eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
+    asyncio.run(eng._results_from_computation({}))
+    keys = eng._left_out_quantities()
+    assert keys, "the typed-in quantity is left out"
+    key = sorted(keys)[0]
+    raw = f"step 1 done\n{key} = {SENTINEL}\nRESULT_JSON: " + json.dumps({"kept": 1.5, key: float(SENTINEL)}) + "\ndone\n"
+    shown = eng._stdout_for_models(raw)
+    assert SENTINEL not in shown and "RESULT_JSON" not in shown.replace("[FI NOTE] The run's RESULT_JSON line", "")
+    assert "step 1 done" in shown and "done" in shown and f"`{key}`" in shown and "must not be used" in shown
+    # Output with nothing to take out is passed on as it is.
+    assert eng._stdout_for_models("plain\n") == "plain\n"
+    # Raw output stays in the records, off the models' path.
+    eng._keep_raw_stdout(raw)
+    assert SENTINEL in (eng.fi_dir / "last_run_stdout.txt").read_text(encoding="utf-8")
+
+
+def test_the_exclusion_persists_across_a_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.test_run_checks import _typed_engine
+
+    eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
+    asyncio.run(eng._results_from_computation({}))
+    left = eng._left_out_quantities()
+    assert left
+    # A new process: nothing in memory, the pass's record is what stands.
+    fresh, _ = _typed_engine(tmp_path / "again", monkeypatch, ["{}"])
+    (fresh.quest_root / "needs").mkdir(parents=True, exist_ok=True)
+    shutil.copy(eng.quest_root / "needs" / "TYPED_RESULTS_CHECK.json", fresh.quest_root / "needs" / "TYPED_RESULTS_CHECK.json")
+    fresh.__dict__.pop("_typed_result_keys", None)
+    assert getattr(fresh, "_typed_result_keys", None) is None
+    assert fresh._left_out_quantities() == left
+    assert fresh._without_typed_results({"kept": 1.0, sorted(left)[0]: 2.0}) == {"kept": 1.0}
+    assert SENTINEL not in fresh._stdout_for_models(f"{sorted(left)[0]} = {SENTINEL}\n")
+
+
+def test_the_values_left_out_are_kept_so_the_writers_text_is_checked_for_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import record_claims
+    from tests.test_run_checks import _typed_engine
+
+    eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
+    asyncio.run(eng._results_from_computation({}))
+    key = sorted(eng._left_out_quantities())[0]
+    eng._note_typed_values({"kept": 1.5, key: float(SENTINEL)})
+    record = json.loads((eng.quest_root / "needs" / "TYPED_RESULTS_CHECK.json").read_text(encoding="utf-8"))
+    assert record["removed_values"] == {key: [float(SENTINEL)]}
+    hits = record_claims.contradictions(f"The simulation gave {SENTINEL} at the end.", left_out_typed=record["removed_values"])
+    assert hits and key in hits[0] and "typed into its code" in hits[0]
+    assert record_claims.contradictions("The simulation gave 1.5 at the end.", left_out_typed=record["removed_values"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_left_out_value_is_in_no_model_prompt_and_not_in_the_paper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole graph with a fake model: the simulation types a number into its code and the analysis script prints it (in a
+    RESULT_JSON line and in a plain line). Every prompt that carries the run's output (not the code, which holds its own
+    constant) is free of it, and so is the paper; the raw output keeps it."""
+    from core.engine import Engine
+    from tests import test_engine_callable_simulation as cs
+
+    prompts: list[str] = []
+    inner = cs._fake([], _with_sentinel_sim())
+
+    async def spying(self, messages, **kw):  # noqa: ANN001
+        prompts.append("\n".join(str(m.get("content", "")) for m in messages))
+        reply = await inner(self, messages, **kw)
+        if "# file: experiment.py" in reply:
+            reply = reply.replace(cs.ANALYSIS, _with_sentinel_analysis())
+        return reply
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", spying)
+    engine = Engine(cs._cfg(tmp_path))
+    artifacts = await engine.run()
+    raw = (engine.quest_root / ".fi" / "last_run_stdout.txt").read_text(encoding="utf-8")
+    assert SENTINEL in raw, "the run printed it, and the record keeps what the run printed"
+    ran = [p for p in prompts if "def run_cell" not in p and "def run_trial" not in p]
+    assert ran and not any(SENTINEL in p for p in ran), [p[:200] for p in ran if SENTINEL in p][:1]
+    assert any("RESULT_JSON line is not repeated here" in p or "left out of the results" in p for p in ran)
+    assert artifacts.paper_md is None or SENTINEL not in Path(artifacts.paper_md).read_text(encoding="utf-8")
+
+
+def test_a_note_that_says_why_a_quantity_is_out_never_repeats_its_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.test_run_checks import _typed_engine
+
+    eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
+    asyncio.run(eng._results_from_computation({}))
+    eng._note_typed_values({"typed_value": float(SENTINEL)})
+    (eng.quest_root / "needs" / "RESULT_CHECK.json").write_text(json.dumps({
+        "removed_quantities": ["other_value"], "removed_values": {"other_value": [3.14159]},
+        "say": "`other_value` is 3.14159 at every one of the 8 settings although other results change with them."}),
+        encoding="utf-8")
+    note = eng._run_checks_note()
+    assert SENTINEL not in note and "3.14159" not in note
+    assert "8 settings" in note, "numbers that are not a left-out value stay"
+    assert "(a value that is not given)" in note
+
+
+def test_the_analysis_prompt_has_one_projection_of_the_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The audit's reproduction, with the output handed on the way the run hands it: the left-out quantity is in the raw
+    output's result line, and the analysis prompt carries neither that line nor the quantity."""
+    from unittest.mock import AsyncMock
+
+    from tests.test_run_checks import _typed_engine
+
+    eng, _ = _typed_engine(tmp_path, monkeypatch, ["{}"])
+    asyncio.run(eng._results_from_computation({}))
+    key = sorted(eng._left_out_quantities())[0]
+    raw = {"kept_value": 73.25, key: 1.0}
+    filtered = eng._without_typed_results(raw)
+    assert key not in filtered
+    captured: list[str] = []
+
+    async def fake_json(prompt, **kwargs):  # noqa: ANN001
+        captured.append(prompt)
+        return "", {"summary": "offline", "key_findings": []}
+
+    monkeypatch.setattr(eng, "_refresh_code_project", AsyncMock())
+    monkeypatch.setattr(eng, "_ask_about_edited_project_files", lambda: None)
+    monkeypatch.setattr(eng, "_chat_json", fake_json)
+    stdout = "RESULT_JSON: " + json.dumps(raw)
+    asyncio.run(eng._node_analyze({
+        "result_json": filtered,
+        "exec_result": {"returncode": 0, "duration_s": 0.1, "stdout_tail": eng._stdout_for_models(stdout)}}))
+    assert len(captured) == 1
+    assert f'"{key}": 1.0' not in captured[0] and "RESULT_JSON: {" not in captured[0]
+    assert "73.25" in captured[0], "the accepted results are there, once"
+    assert "RESULT_JSON line is not repeated here" in captured[0]

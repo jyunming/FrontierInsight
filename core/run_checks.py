@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -219,12 +220,71 @@ class RunChecksMixin:
 
     def _left_out_quantities(self) -> set[str]:
         """The quantities this pass's analysis and results must not use (still typed into the code after the repairs)."""
-        return set(getattr(self, "_typed_result_keys", None) or ()) | self._result_check_keys()  # type: ignore[attr-defined]
+        typed = getattr(self, "_typed_result_keys", None)
+        if typed is None:
+            # A fresh process (a resume at a later node): the pass that left them out wrote its record, which is what stands.
+            typed = {str(k) for k in _read_json(self.quest_root / "needs" / TYPED_RECORD).get("removed_quantities") or []}  # type: ignore[attr-defined]
+        return set(typed) | self._result_check_keys()  # type: ignore[attr-defined]
 
     def _without_typed_results(self, result_json: Any) -> Any:
         """``result_json`` without the left-out quantities."""
         keys = self._left_out_quantities()
         return _typed.strip_keys(result_json, keys) if keys and result_json else result_json
+
+    def _stdout_for_models(self, stdout: str) -> str:
+        """What a model may read of a run's output: the output without its ``RESULT_JSON`` line (the verified results reach a
+        model once, as FI's accepted projection of them, with the left-out quantities taken out) and without any line that
+        names a left-out quantity, with a plain note saying what was taken out and why. The raw output stays in the records
+        (``.fi/last_run_stdout.txt``)."""
+        text = stdout or ""
+        keys = sorted(self._left_out_quantities())
+        patterns = [re.compile(r"(?<![A-Za-z0-9_])" + re.escape(k) + r"(?![A-Za-z0-9_])") for k in keys]
+        kept: list[str] = []
+        had_result_line, dropped = False, 0
+        for line in text.splitlines():
+            if line.lstrip().startswith("RESULT_JSON:"):
+                had_result_line = True
+            elif any(p.search(line) for p in patterns):
+                dropped += 1
+            else:
+                kept.append(line)
+        notes: list[str] = []
+        if had_result_line:
+            notes.append("[FI NOTE] The run's RESULT_JSON line is not repeated here: the results block is FI's accepted "
+                         "projection of the results, and the only place to read them.")
+        if dropped:
+            names = ", ".join(f"`{k}`" for k in keys)
+            notes.append(f"[FI NOTE] {dropped} line(s) of the run's output that name {names} were taken out: "
+                         f"{'that quantity was' if len(keys) == 1 else 'those quantities were'} left out of the results "
+                         "(typed into the code, or failed a check of what ran) and must not be used, derived from or renamed.")
+        return "\n".join([*kept, *notes]) if notes else text
+
+    def _keep_raw_stdout(self, stdout: str) -> None:
+        """The run's output exactly as it was, for the records (no model reads it)."""
+        try:
+            path = self.fi_dir / "last_run_stdout.txt"  # type: ignore[attr-defined]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text((stdout or "")[-200000:], encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute] could not keep the run's raw output (%r)", exc)  # type: ignore[attr-defined]
+
+    def _note_typed_values(self, raw_result_json: Any) -> None:
+        """The values of the quantities left out for being typed into the code, kept in this pass's record so the writer's
+        text can be checked for quoting one (core/record_claims.py). Nothing is added when none was left out."""
+        from . import result_checks as _checks
+
+        keys = self._typed_result_keys if getattr(self, "_typed_result_keys", None) is not None else set()
+        if not keys or not raw_result_json:
+            return
+        path = self.quest_root / "needs" / TYPED_RECORD  # type: ignore[attr-defined]
+        record = _read_json(path)
+        if not record:
+            return
+        record["removed_values"] = _checks._values_left_out(raw_result_json, set(keys))
+        try:
+            path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute] could not write needs/%s (%r)", TYPED_RECORD, exc)  # type: ignore[attr-defined]
 
     # ---- a result that did not change is recorded as observed ----------------------------------------------------------
 
@@ -254,6 +314,29 @@ class RunChecksMixin:
 
     # ---- the note for the writer ---------------------------------------------------------------------------------------
 
+    def _withhold_left_out_values(self, text: str) -> str:
+        """``text`` (a note a model reads) with any number written precisely enough to be recognised that equals a value of a
+        quantity left out of the results replaced by plain words: a note that says why a quantity is out never repeats it."""
+        from .number_provenance import _carries_enough_precision
+
+        values: list[float] = []
+        for name in (TYPED_RECORD, "RESULT_CHECK.json"):
+            removed = _read_json(self.quest_root / "needs" / name).get("removed_values")  # type: ignore[attr-defined]
+            if isinstance(removed, dict):
+                values += [float(v) for vs in removed.values() if isinstance(vs, list) for v in vs
+                           if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if not values:
+            return text
+
+        def swap(m: re.Match[str]) -> str:
+            token = m.group(0)
+            if not _carries_enough_precision(token):
+                return token
+            number = float(token)
+            return "(a value that is not given)" if any(abs(number - v) <= 1e-9 * max(1.0, abs(v)) for v in values) else token
+
+        return re.sub(r"(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w])", swap, text)
+
     def _run_checks_note(self) -> str:
         """For the writer: quantities left out because they were typed into the code, and a run FI made smaller to fit the
         time allowed, so the limitations say so."""
@@ -262,10 +345,10 @@ class RunChecksMixin:
         note = record.get("note")
         if isinstance(note, str) and note.strip():
             names = ", ".join(f"`{k}`" for k in record.get("removed_quantities") or [])
-            parts.append(f"{note} Do not report, describe or quote any value for {names or 'them'}: say plainly, in the "
+            parts.append(f"{self._withhold_left_out_values(note)} Do not report, describe or quote any value for {names or 'them'}: say plainly, in the "
                          "limitations, that this quantity was not computed by the simulation and is left out.")
         if checked := self._result_checks_note():  # type: ignore[attr-defined]  # core/result_checks.py
-            parts.append(checked)
+            parts.append(self._withhold_left_out_values(checked))
         if static := self._static_checks_note():  # type: ignore[attr-defined]  # core/static_checks.py
             parts.append(static)
         if observed := self._no_difference_note():
