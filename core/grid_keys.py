@@ -386,6 +386,13 @@ def _structured_value(node: Any, key: str, value: float, allowed: set[str]) -> b
     return walk(node)
 
 
+def _word_end(text: str, word: str) -> int:
+    """Where the last whole-word occurrence of ``word`` in ``text`` ends (``-1`` when it is not there as a word: ``rate`` is
+    not in ``accelerate``)."""
+    ends = [m.end() for m in re.finditer(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])", text)]
+    return ends[-1] if ends else -1
+
+
 def _stated_as_value(low: str, words: list[str], value: float) -> bool:
     """Whether the prose states ``value`` AS the value of the thing the ``words`` name, in one short clause: ``<words> of 80``,
     ``<words> = 80``, ``<words> is 80``, or ``80 <unit> <words>``; no other number between them and no clause break
@@ -398,11 +405,11 @@ def _stated_as_value(low: str, words: list[str], value: float) -> bool:
         cuts = list(_BREAK.finditer(before))
         clause = before[cuts[-1].end():] if cuts else before
         binder = _BINDER.search(clause.rstrip() + " ")
-        if all(w in clause for w in words) and binder and not _NUMBER.search(clause):
+        if all(_word_end(clause, w) >= 0 for w in words) and binder and not _NUMBER.search(clause):
             # The binder must follow the name itself: at most a few words (``reference line dose of 80``) between the
             # last of its words and ``of`` / ``is`` / ``=``. "the rate is estimated from a sample of 80" binds 80 to the
             # sample, not to the rate.
-            last = max(clause.rfind(w) + len(w) for w in words)
+            last = max(_word_end(clause, w) for w in words)
             between = clause[last:binder.start()].split()
             if len(between) <= _BOUND_WORDS:
                 return True
@@ -410,7 +417,7 @@ def _stated_as_value(low: str, words: list[str], value: float) -> bool:
         cut = _BREAK.search(after)
         tail = after[:cut.start()] if cut else after
         unit = _UNIT.match(tail + " ")
-        if unit and all(w in tail[unit.end():] for w in words) and not _NUMBER.search(tail) and len(tail.split()) <= 6:
+        if unit and all(_word_end(tail[unit.end():], w) >= 0 for w in words) and not _NUMBER.search(tail) and len(tail.split()) <= 6:
             return True
     return False
 

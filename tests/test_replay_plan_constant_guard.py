@@ -207,3 +207,26 @@ def test_a_structured_field_of_the_plan_that_gives_the_name_a_value_is_the_plans
     assert [r.keys for r in gk.problems({"simulate.py": BEFORE}, other, {})] == [CONST_KEYS]
     elsewhere = {**PROTOCOL, "constants": {"unrelated_setting": 80}}
     assert [r.keys for r in gk.problems({"simulate.py": BEFORE}, elsewhere, {})] == [CONST_KEYS]
+
+
+@pytest.mark.parametrize("text", [
+    f"the {_WORDS}ing is 80",        # the word with something glued on is another word
+    f"re{_WORDS} is 80",              # ... or in front of it
+    f"80 units {_WORDS}s",
+])
+def test_the_words_of_a_name_match_as_whole_words_only(text: str) -> None:
+    assert _flagged_keys(BEFORE, {"_text": text}) == [CONST_KEYS]
+
+
+def test_a_word_inside_a_longer_word_does_not_make_a_fallback_the_plans_constant() -> None:
+    """``base`` is not in ``database``: the name's own word must stand alone in the plan's clause."""
+    code = "\n".join(("def run_trial(cell):", "    r = float(cell.get('base_rate', 5.0))", "    return {'x': float(cell['speed_rate']) * r}"))
+    protocol = {"grid": {"speed_rate": [1, 2]}}
+
+    def flagged(text: str) -> list[tuple[str, ...]]:
+        return [r.keys for r in gk.problems({"s.py": code}, protocol, {"_text": text})]
+
+    assert flagged("the database is 5") == [("base_rate",)]
+    assert flagged("the base of 5") == []
+    assert flagged("the database of 5") == [("base_rate",)]
+    assert flagged("the base is 5") == []
