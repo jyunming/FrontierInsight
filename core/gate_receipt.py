@@ -15,6 +15,7 @@ Files FI writes itself (the run script, the figure redraws, the study file, note
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -27,6 +28,10 @@ RECEIPT = Path(".fi") / "gate_receipt.json"
 GENERATED = frozenset({"web_plots.py", "replot_figures.py", "replot_figures.json", "replot_layout.py", "run.py", "submit.py",
                        "fi_search.py", "study.json"})
 SKIPPED_DIRS = ("__pycache__", ".git", ".pytest_cache")
+#: File types a script can name by a literal path. A literal counts only when it resolves to an existing file.
+REFERENCE_SUFFIXES = (".json", ".yaml", ".yml", ".toml", ".csv", ".txt", ".npy", ".npz", ".py", ".ini", ".cfg")
+#: Folders under quest_root that hold outputs and records, not inputs: a literal naming them is not part of the version.
+OUTPUT_DIRS = (".fi", "raw", "data/results", "figures", "paper")
 
 
 def _files(code: Path) -> list[Path]:
@@ -40,22 +45,70 @@ def _files(code: Path) -> list[Path]:
     return out
 
 
+def _referenced(code: Path, root: Path) -> dict[str, Path]:
+    """Files outside ``code/`` (inside ``root``) that a script names by a literal path, keyed by their path relative to
+    ``root``. The scripts are read with :mod:`ast`, never run. Outputs and records are left out."""
+    code_r, root_r = code.resolve(), root.resolve()
+    found: dict[str, Path] = {}
+    for script in _files(code):
+        if script.suffix != ".py":
+            continue
+        try:
+            tree = ast.parse(script.read_bytes().decode("utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                continue
+            literal = node.value.strip()
+            if not literal or len(literal) > 512 or "\0" in literal or not literal.lower().endswith(REFERENCE_SUFFIXES):
+                continue
+            for base in (code_r, root_r):
+                try:
+                    target = (base / literal).resolve()
+                    if target.is_relative_to(code_r) or not target.is_relative_to(root_r) or not target.is_file():
+                        continue  # a code file is hashed already; anything outside quest_root is not ours to check
+                    rel = target.relative_to(root_r).as_posix()
+                except (OSError, ValueError):
+                    continue
+                if any(rel == d or rel.startswith(d + "/") for d in OUTPUT_DIRS) \
+                        or any(part in SKIPPED_DIRS for part in rel.split("/")):
+                    continue
+                found.setdefault(rel, target)
+    return found
+
+
+def _absorb(full: Any, comp: Any, key: str, path: Path) -> bool:
+    """Add one file to both digests. False when it cannot be read."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return False
+    full.update(key.encode("utf-8") + b"\0" + raw + b"\0")
+    mark = plot_scope.computation_print(raw.decode("utf-8", errors="replace")) if path.suffix == ".py" else None
+    comp.update(key.encode("utf-8") + b"\0" + (mark.encode("utf-8") if mark is not None else raw) + b"\0")
+    return True
+
+
 def fingerprint(quest_root: Path) -> dict[str, Any]:
-    """``{"full": hash of every file, "computation": the same with each script's drawing taken out, "files": [names]}``."""
-    code = Path(quest_root) / "code"
+    """``{"full": hash of every file, "computation": the same with each script's drawing taken out, "files": [names]}``.
+
+    The files are those under ``code/``, then the files outside it that a script names by a literal path (sorted, keyed by
+    their path relative to ``quest_root``): a parameter file or a helper is part of the checked version."""
+    root = Path(quest_root)
+    code = root / "code"
     full, comp = hashlib.sha256(), hashlib.sha256()
     names: list[str] = []
     if code.is_dir():
         for path in _files(code):
             rel = path.relative_to(code).as_posix()
-            try:
-                raw = path.read_bytes()
-            except OSError:
-                return {"full": "", "computation": "", "files": names}
             names.append(rel)
-            full.update(rel.encode("utf-8") + b"\0" + raw + b"\0")
-            mark = plot_scope.computation_print(raw.decode("utf-8", errors="replace")) if path.suffix == ".py" else None
-            comp.update(rel.encode("utf-8") + b"\0" + (mark.encode("utf-8") if mark is not None else raw) + b"\0")
+            if not _absorb(full, comp, rel, path):
+                return {"full": "", "computation": "", "files": names}
+        for rel, path in sorted(_referenced(code, root).items()):
+            names.append(rel)
+            if not _absorb(full, comp, rel, path):
+                return {"full": "", "computation": "", "files": names}
     return {"full": full.hexdigest(), "computation": comp.hexdigest(), "files": names}
 
 

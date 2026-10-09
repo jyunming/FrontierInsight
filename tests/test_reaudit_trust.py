@@ -546,6 +546,49 @@ async def test_a_run_nobody_changed_after_its_checks_makes_them_once(tmp_path: P
     assert "making the checks again" not in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
 
 
+def _reads(root: Path, literal: str) -> None:
+    """simulate.py opens ``literal`` (a path outside code/) when it runs."""
+    (root / "code" / "simulate.py").write_text(
+        "from pkg.model import energy\n"
+        f"PARAMS = open({literal!r}).read()\n"
+        "def run_cell(cell):\n    return {'e': energy(cell['x'])}\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("literal", ["../inputs/params.json", "inputs/params.json"])
+def test_a_parameter_file_the_code_reads_is_part_of_the_checked_version(tmp_path: Path, literal: str) -> None:
+    root = _code(tmp_path)
+    _reads(root, literal)
+    (root / "inputs").mkdir()
+    (root / "inputs" / "params.json").write_text('{"k": 1}', encoding="utf-8")
+    gate_receipt.write(root)
+    assert gate_receipt.verdict(root) == gate_receipt.SAME
+    (root / "inputs" / "params.json").write_text('{"k": 2}', encoding="utf-8")
+    assert gate_receipt.verdict(root) == gate_receipt.CHANGED
+    assert "inputs/params.json" in gate_receipt.fingerprint(root)["files"]
+
+
+@pytest.mark.parametrize("literal", ["../raw/run.csv", "../.fi/notes.json", "../figures/fig.txt", "../paper/claims.json"])
+def test_outputs_and_records_a_literal_names_are_not_part_of_the_checked_version(tmp_path: Path, literal: str) -> None:
+    root = _code(tmp_path)
+    _reads(root, literal)
+    target = root / literal.replace("../", "", 1)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("1,2\n", encoding="utf-8")
+    gate_receipt.write(root)
+    target.write_text("9,9\n", encoding="utf-8")
+    assert gate_receipt.verdict(root) == gate_receipt.SAME
+    assert all(not name.startswith(("raw/", ".fi/", "figures/", "paper/")) for name in gate_receipt.fingerprint(root)["files"])
+
+
+def test_a_literal_naming_a_missing_file_is_ignored(tmp_path: Path) -> None:
+    root = _code(tmp_path)
+    _reads(root, "../inputs/missing.json")
+    gate_receipt.write(root)
+    now = gate_receipt.fingerprint(root)
+    assert now["full"] and "inputs/missing.json" not in now["files"]
+    assert gate_receipt.verdict(root) == gate_receipt.SAME
+
+
 def test_the_node_makes_the_receipt_check_before_the_pilot_and_the_run() -> None:
     import inspect
 
