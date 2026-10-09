@@ -5,7 +5,8 @@ that can be another model. Each reviewer has its own step, so a person can route
 
 * the plan's checks: ``oracle_review`` (core/oracle_review.py),
 * the design: ``design_review`` (the methodology audit, ``Engine._audit_design``),
-* the code: ``code_review`` (core/code_review.py), which follows ``oracle_review`` while it is not set.
+* the code: ``code_review`` (core/code_review.py), which follows ``oracle_review`` while it is not set,
+* the citations: ``citation_check`` (core/citation_support.py), which follows ``oracle_review`` while it is not set.
 
 A step that is not set keeps today's behaviour: the design is audited by the main model (recorded as a self-review, never
 as an independent one), the code is read by whatever reads the checks.
@@ -22,11 +23,12 @@ import re
 from typing import Any, Callable
 
 #: The step a person routes (``provider.node_providers.<step>`` / ``provider.node_models.<step>``) to have each stage read.
-READER_STEP = {"checks": "oracle_review", "design": "design_review", "code": "code_review"}
+READER_STEP = {"checks": "oracle_review", "design": "design_review", "code": "code_review", "paper": "citation_check"}
 #: The steps a call is made under when its own step is not set: the design audit keeps its old name (so does every
 #: record of it); the code reading goes to the step that reads the checks (``oracle_review.code`` is routed by the key
 #: ``oracle_review``, and its calls are recorded apart from the reading of the plan's checks).
-FALLBACK_NODE = {"design_review": "design_self_critique", "code_review": "oracle_review.code"}
+FALLBACK_NODE = {"design_review": "design_self_critique", "code_review": "oracle_review.code",
+                 "citation_check": "oracle_review.citations"}
 
 
 def node_for(step: str, configured: Callable[[str], Any]) -> str:

@@ -95,6 +95,7 @@ from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
 from . import trial_runner as _trial_runner
 from . import goal_coverage
+from . import citation_support as _cs
 from . import paper_patch
 from . import paper_trim
 from . import plan as _plan
@@ -201,6 +202,7 @@ STAGE_PROGRESS: dict[str, str] = {
     "cross_check": "Checking the results against the literature.",
     "write": "Writing the paper.",
     "claim_check": "Checking every claim against the evidence.",
+    "citation_check": "Checking every citation against its source.",
     "review": "Reviewing the paper.",
     "auto_collect_data": "Looking for data.",
     "data_load": "Loading the data.",
@@ -240,6 +242,8 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "evidence_gate",
     "review",
     "claim_check",
+    "citation_check",  # every citation read against the retrieved text of its source, last, on the final paper
+    "oracle_review.citations",  # ... while no step of its own is set for it
     "cross_check",
     "relevance_guard",
     "literature_screen",
@@ -451,6 +455,10 @@ class QuestState(TypedDict, total=False):
     # runs). The review then forces ``citations_unchecked``: a draft whose
     # citations nobody checked cannot be accepted.
     claim_check_failed: str
+    # The last citation check (core/citation_support.py): what it found and what it did, in counts.
+    citation_check: dict[str, Any]
+    # Where the review sent the paper that the citation check then read: "done" or "human_feedback".
+    citation_next: str
     # How many drafts the review has sent back to be shortened because the
     # rendered PDF ran over the page limit. At most ``_PAGE_LIMIT_REWRITES``;
     # these rewrites do not use ``engine.max_iterations``.
@@ -2421,6 +2429,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         g.add_edge("stuck_no_findings", END)
         g.add_node("write", self._audited("write", self._node_write))
         g.add_node("claim_check", self._audited("claim_check", self._node_claim_check))
+        g.add_node("citation_check", self._audited("citation_check", self._node_citation_check))
         g.add_node("replot_layout", self._audited("replot_layout", self._node_replot_layout))
         g.add_node("review", self._audited("review", self._node_review))
         g.add_node("human_feedback", self._audited("human_feedback", self._node_human_feedback))
@@ -2558,11 +2567,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 # the paper can fix that, so the experiment is written and run
                 # again (implement → execute → analyze → … → write).
                 "re_execute": "implement",
-                "done": END,
-                "human_feedback": "human_feedback",
+                # The paper that is about to be delivered (or shown to a person) has every citation read against the
+                # retrieved text of its source last, after the review, the rewrites and the page-limit fit.
+                "done": "citation_check",
+                "human_feedback": "citation_check",
                 # The paper still claims what FI's own records contradict after its rewrites: no paper (needs/STUCK.json).
                 "stuck": "stuck_no_findings",
             },
+        )
+        g.add_conditional_edges(
+            "citation_check",
+            self._audited_route("citation_check", self._route_after_citation_check),
+            {"done": END, "human_feedback": "human_feedback"},
         )
         # human_feedback resolves to one of three outcomes after the callback returns: accept / reject → END,
         # refine → write (the writer answers the notes; one that needs a new experiment goes on to design).
@@ -3343,6 +3359,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if verdict == "revise" and state.get("iteration", 0) < self.config.engine.max_iterations:
             return "revise"
         return "done"
+
+    def _route_after_citation_check(self, state: QuestState) -> str:
+        """Where the review was sending the paper (to a person's decision, or out), as the citation check found it."""
+        return "human_feedback" if state.get("citation_next") == "human_feedback" else "done"
 
     def _route_after_human_feedback(self, state: QuestState) -> str:
         """``refine`` goes to the writing step with the person's notes; ``accept`` / ``reject`` finalise.
@@ -11640,6 +11660,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     "sealing": sealing,
                     "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
+                    "citation_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
                     "design_audit": "not_applicable" if self.config.engine.analyze_local_first else "on",
                     **(_phased.evidence_settings(self.quest_root) if _phased.enabled(self.config) else {}),
@@ -18060,6 +18081,141 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._clear_check_stop("claim_check")
         return {"claim_grounding": grounding, "claim_check_failed": failed}
 
+    async def _node_citation_check(self, state: QuestState) -> QuestState:
+        """Read every citation of the paper that is about to be delivered against the retrieved text of its source, and
+        fix what that text does not support (core/citation_support.py). It runs last: after the review, the rewrites and
+        the page-limit fit, so nothing can add a citation after it. A person is never asked; the paper is never stopped
+        for this. A no-op when ``engine.claim_grounding`` is off."""
+        nxt = "human_feedback" if self._route_after_review(state) == "human_feedback" else "done"
+        out: dict[str, Any] = {"citation_next": nxt}
+        if not self.config.engine.claim_grounding:
+            return out  # type: ignore[return-value]
+        paper_md = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not paper_md or not Path(paper_md).is_file():
+            return out  # type: ignore[return-value]
+        path = Path(paper_md)
+        started = _receipts.now()
+        paper = path.read_text(encoding="utf-8")
+        sha = _cs.paper_hash(paper)
+        record_path = self.fi_dir / _cs.FILE
+        try:
+            previous = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else {}
+        except (OSError, ValueError):
+            previous = {}
+        if not isinstance(previous, dict):
+            previous = {}
+        if previous.get("done") and previous.get("final_sha") == sha:
+            # This paper is what an earlier pass of the check left (a resume, or the same paper shown again).
+            return {**out, "citation_check": previous.get("summary") or {}}  # type: ignore[return-value]
+        record = previous if previous.get("paper_sha") == sha else _cs.new_record(paper, previous)
+
+        def save(rec: dict[str, Any]) -> None:
+            try:
+                self.fi_dir.mkdir(parents=True, exist_ok=True)
+                tmp = record_path.with_name(record_path.name + f".{os.getpid()}.tmp")
+                tmp.write_text(json.dumps(rec, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+                os.replace(tmp, record_path)
+            except OSError as e:
+                self._log.warning("[citation_check] its record could not be written: %r", e)
+
+        literature = state.get("literature") or []
+        audience = self.config.output.audience
+        listed = set(further_reading_listed(paper) or [])
+        sources: dict[str, _cs.Source] = {}
+        for label, meta, item in _labelled_sources(literature, audience):
+            text, _readings = _split_figure_readings(_item_content(item))
+            who = meta.get("authors") or []
+            sources[label] = _cs.Source(
+                label=label, title=str(meta.get("title") or ""), text=text, full=_has_full_text(meta),
+                authors=[str(a) for a in (who if isinstance(who, list) else [who])],
+                retracted=_retractions.is_retracted(meta), usable=(not label.startswith("W")) or label in listed)
+        own = _cs.OwnNumbers(re.findall(r"\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", " ".join(
+            json.dumps(x, default=str) for x in (
+                state.get("result_json"), state.get("result_json_replicates"), state.get("analysis"),
+                state.get("design"), state.get("topic"), _frozen.protocol_of(self.quest_root)))))
+        unsupported_claims = [str(c.get("claim") or "") for c in ((state.get("claim_grounding") or {}).get("claims") or [])
+                              if isinstance(c, dict) and c.get("basis") == "unsupported"]
+        reader_node = self._review_node("citation_check")
+        same, reader, _writer_model, _named = self._reader_vs_planner(reader_node, after_call=False, writer="write")
+
+        def passage_block(label: str, sentences: list[str], srcs: dict[str, _cs.Source]) -> str:
+            src = srcs.get(label)
+            if src is None:
+                return f"[{label}] (not one of the paper's sources)"
+            head = f"[{label}] {src.title} ({src.kind()})"
+            if not src.text.strip():
+                return head + "\n(no text of this source was retrieved, so nothing can be quoted from it)"
+            return head + "\nText:\n" + _format_lit_excerpt(
+                src.text, src.title, query=" ".join(sentences), budget=_CITATION_SOURCE_CHARS).strip()
+
+        def judge_prompt(asked: list[tuple[str, Any, str]], srcs: dict[str, _cs.Source]) -> str:
+            by_label: dict[str, list[str]] = {}
+            for _pid, site, label in asked:
+                by_label.setdefault(label, []).append(site.text)
+            return self._prompts["citation_check"].substitute(
+                pairs="\n".join(f"{pid} | cites [{label}] | {' '.join(site.text.split())}" for pid, site, label in asked),
+                sources=_source_text.fence("\n\n".join(
+                    passage_block(lb, by_label[lb], srcs)
+                    for lb in sorted(by_label, key=lambda x: (x.startswith("W"), int(x.lstrip("W") or 0))))) or "(none)")
+
+        def repair_prompt(targets: list[dict[str, Any]]) -> str:
+            items: list[str] = []
+            for t in targets:
+                lines = [f"Item {t['id']} ({t['kind']}): {' '.join(t['sentence'].split())}"]
+                lines += [f"  not supported: [{lb}] -- {why}" for lb, why in t["why"].items()]
+                if t["kept"]:
+                    lines.append("  already supported, keep: " + ", ".join(f"[{x}]" for x in t["kept"]))
+                lines += [f"  nearest passage of the retrieved text of [{lb}]: {' '.join(p.split())}" for lb, p in t["cited"]]
+                for lb, p in t["others"]:
+                    lines.append(f"  other source [{lb}] {sources[lb].title} ({sources[lb].kind()}): {' '.join(p.split())}")
+                items.append("\n".join(lines))
+            return self._prompts["citation_repair"].substitute(items=_source_text.fence("\n\n".join(items)) or "(none)")
+
+        async def judge(prompt: str) -> str:
+            return await self._chat(prompt, node=reader_node)
+
+        async def repair(prompt: str) -> str:
+            return await self._chat(prompt, node="write.citations")
+
+        result = await _cs.check_paper(
+            paper, sources, own_numbers=own, quote_ok=_quote_in_source, judge=judge, repair=repair, record=record,
+            save=save, judge_prompt=judge_prompt, repair_prompt=repair_prompt,
+            claim_unsupported=lambda sentence: any(_same_statement(c, sentence) for c in unsupported_claims))
+        final = paper
+        new_literature = literature
+        if result.changed:
+            final, new_literature = _finalize_after_citation_edits(result.paper, literature, audience)
+            path.write_text(final, encoding="utf-8")
+        data = _cs.ledger(result, reader=reader, same_model=same)
+        try:
+            (path.parent / "citations.json").write_text(_cs.dump(data), encoding="utf-8")
+            (path.parent / "CITATIONS.md").write_text(_cs.render_md(data), encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[citation_check] its ledger could not be written: %r", e)
+        c = result.counts
+        summary = {**c, "reader": reader, "reader_is_writer": same, "judge_failed": result.judge_failed}
+        record.update(done=True, final_sha=_cs.paper_hash(final), summary=summary)
+        save(record)
+        self._log.info(
+            "[citation_check] %d citation(s): %d backed by a passage as written, %d found unsupported and fixed (%d to another "
+            "source, %d reworded, %d citation dropped, %d sentence dropped)%s%s", c["citations"], c["supported"],
+            c["found_unsupported"], c["replaced"], c["reworded"], c["citation_dropped"], c["sentence_dropped"],
+            f", {c['unchecked']} could not be checked" if c["unchecked"] else "",
+            f"; read by {reader}" + (" (the model that wrote the paper)" if same else ""))
+        self._write_receipt(
+            "citation_check", "pass" if result.clean else "unknown", started_at=started,
+            inputs={"paper": path.read_bytes()}, output=data,
+            error="" if result.clean else (record.get("judge_error") or f"{c['unchecked']} citation(s) were not judged"),
+            detail=f"{c['citations']} citation(s): {c['supported']} backed as written, {c['found_unsupported']} fixed")
+        out.update({"citation_check": summary, "literature": new_literature})
+        if result.changed:
+            # The claim ledger and its receipt are for the paper as it is delivered.
+            try:
+                out.update(await self._node_claim_check({**state, "literature": new_literature, **out}))  # type: ignore[arg-type]
+            except Exception as e:  # noqa: BLE001 -- the citations are already settled; this only refreshes the ledger
+                self._log.warning("[citation_check] the claim check could not be run again on the fixed paper: %r", e)
+        return out  # type: ignore[return-value]
+
     async def _node_select_skills(self, state: QuestState) -> QuestState:
         """Pick which skills this quest carries.
 
@@ -22293,6 +22449,8 @@ def _load_prompts() -> dict[str, string.Template]:
         "cross_check",
         "cross_check_verify",   # CoVe-style second-pass verification
         "claim_check",          # ground each paper claim to evidence
+        "citation_check",       # a different model reads every citation against its source's retrieved text
+        "citation_repair",      # what that reading found unsupported, fixed without a person
         "evidence_gate",        # weigh evidence sufficiency before write
         "literature_screen",    # grade retrieved sources 0-3 before they reach the corpus
         "figures_pick",         # which of the papers' figures carry values this question can use
@@ -23206,6 +23364,8 @@ def _apply_title_only_rule(
 # opening chunk and one 1,200-character passage fit, so a source cited by six
 # sentences showed one passage, and supported citations were rejected.
 _CLAIM_SOURCE_CHARS = 6000
+# The citation check shows the reader this much of each cited source: the passages most related to the sentences citing it.
+_CITATION_SOURCE_CHARS = 2500
 # A quote shorter than this could be found in almost any source.
 _QUOTE_MIN_CHARS = 25
 # A paper has a title and sections. Text this short with no heading at all is
@@ -24275,6 +24435,31 @@ def _finalize_paper_sources(
         body = body.rstrip() + "\n\n" + "\n".join(["## References", "", *lines]) + "\n"
     body = _append_further_reading(body, build_further_reading(ordered, audience=audience))
     return body, ordered, dropped
+
+
+def _finalize_after_citation_edits(markdown: str, literature: list[Any], audience: str) -> tuple[str, list[Any]]:
+    """The paper after the citation check took citations out or put one in: the sources it cites are numbered again in
+    the order the text first cites them, ``## References`` lists exactly those, and the literature is reordered to
+    match. Everything after the References (Further reading as the page-limit fit left it) is kept as it is."""
+    start = _cs.references_start(markdown)
+    body, rest = markdown[:start], markdown[start:]
+    n_papers = sum(1 for label, _m, _i in _labelled_sources(literature, audience) if not label.startswith("W"))
+    body, mapping, _dropped = _renumber_citations(body.rstrip(), n_papers)
+    ordered = _literature_in_citation_order(literature, mapping, audience)
+    refs = build_references(ordered, audience=audience)[:len(mapping)]
+    after = ""
+    if rest:
+        newline = rest.find("\n")
+        heading = _ANY_HEADING_RE.search(rest, newline) if newline >= 0 else None
+        after = rest[heading.start():] if heading else ""
+    text = body
+    if refs:
+        text = text + "\n\n" + "\n".join(["## References", "", *(f"{r['n']}. {_ref_citation_text(r)}" for r in refs)]) + "\n"
+    else:
+        text = text + "\n"
+    if after:
+        text = text.rstrip() + "\n\n" + after
+    return text, ordered
 
 
 def cited_references(

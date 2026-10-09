@@ -42,7 +42,8 @@ _NODE_STAGE = {
     "oracle_review.topic": "plan",
     "execute_reflect": "run", "improve": "run",
     "analyze": "analysis", "cross_check": "analysis",
-    "write": "paper", "figures": "paper", "claim_check": "paper",
+    "write": "paper", "figures": "paper", "claim_check": "paper", "citation_check": "paper",
+    "oracle_review.citations": "paper",
     "review": "review",
 }
 #: The steps that write a stage's work, and the steps that read it (the step a person routes with
@@ -54,7 +55,7 @@ _WRITERS = {"plan": ("plan", "plan_revise"), "checks": ("implement_oracle",), "d
             "review": ("review",)}
 _READERS = {"plan": ("oracle_review.topic",), "checks": ("oracle_review", "oracle_recompute"),
             "design": ("design_review", "design_self_critique"), "code": ("code_review", "oracle_review.code"),
-            "analysis": ("cross_check",), "paper": ("claim_check",)}
+            "analysis": ("cross_check",), "paper": ("claim_check", "citation_check", "oracle_review.citations")}
 #: A stage's step to name when a person asks for another model to write (or read) it.
 _KEY = {"plan": "plan", "checks": "oracle_review", "design": "design", "code": "implement", "run": "execute_reflect",
         "analysis": "analyze", "paper": "write", "review": "review"}
@@ -444,6 +445,29 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
+    return out
+
+
+def _citations(q: _Quest) -> dict[str, Any] | None:
+    """The citation check's ledger of the delivered paper (``paper/citations.json``): every citation with the passage that
+    backs it or what was done instead, and the counts. ``None`` when the check did not run."""
+    data = _json(q.root / "paper" / "citations.json")
+    return data if isinstance(data, dict) and isinstance(data.get("citations"), list) else None
+
+
+def _citation_problems(q: _Quest) -> list[dict[str, str]]:
+    """Each citation the retrieved text did not support: found by the citation reader, fixed by FI."""
+    data = _citations(q)
+    if not data:
+        return []
+    reader = str(data.get("reader") or "") or "the citation reader"
+    out: list[dict[str, str]] = []
+    for r in map(_dict, _list(data.get("citations"))):
+        if r.get("status") == "supported" or str(r.get("action") or "").startswith("added"):
+            continue
+        fixed = r.get("status") != "unchecked"
+        out.append(_problem("paper", f"[{r.get('label')}] {_one(r.get('sentence'), 90)}: {_one(r.get('problem'), 140)}",
+                            f"{reader} (citation check)", "fixed" if fixed else "not fixed", "paper/CITATIONS.md"))
     return out
 
 
@@ -877,7 +901,8 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
             running = False
     started = _run_started(q)
     problems: list[dict[str, str]] = [*_plan_problems(q), *_checks_problems(q), *_design_problems(q), *_code_problems(q),
-                                      *_run_problems(q), *_analysis_problems(q), *_paper_problems(q), *_review_problems(q),
+                                      *_run_problems(q), *_analysis_problems(q), *_paper_problems(q), *_citation_problems(q),
+                                      *_review_problems(q),
                                       *_call_problems(q)]
     seconds = _durations(q.audit)
     stages: dict[str, dict[str, Any]] = {}
@@ -912,6 +937,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
+        "citations": _citations(q),
         "left_out_of_paper": _left_out_of_paper(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
@@ -972,6 +998,17 @@ def _cell(text: str) -> str:
     return text.replace("|", "/").replace("\n", " ")
 
 
+def _citations_line(c: dict[str, Any]) -> str:
+    n = c.get("counts") or {}
+    who = (f" Read by {c.get('reader')}" + (", the model that wrote the paper." if c.get("reader_is_writer") else ".")
+           if c.get("reader") else "")
+    return (f"{n.get('citations', 0)} citation(s): {n.get('supported', 0)} backed by a passage of the retrieved text as "
+            f"written, {n.get('found_unsupported', 0)} found unsupported and fixed ({n.get('replaced', 0)} cited to another "
+            f"source, {n.get('reworded', 0)} reworded, {n.get('citation_dropped', 0)} citation dropped, "
+            f"{n.get('sentence_dropped', 0)} sentence dropped)"
+            + (f", {n.get('unchecked')} could not be checked" if n.get("unchecked") else "") + "." + who)
+
+
 def render(report: dict[str, Any]) -> str:
     """QUALITY.md: plain words for a scientist."""
     o = report["outcome"]
@@ -1028,6 +1065,16 @@ def render(report: dict[str, Any]) -> str:
     else:
         lines.append("Nothing was left unfixed that stopped the quest." if o["kind"] == "finished"
                      else "The records name no stage where the quest could not go on.")
+    cites = report.get("citations")
+    if cites:
+        lines += ["", "## Citations", "", _citations_line(cites), ""]
+        for r in cites["citations"]:
+            if str(r.get("action") or "").startswith("added"):
+                lines.append(f"- [{r['label']}] cited in the fixed sentence: \"{_one(r.get('passage'), 200)}\"")
+                continue
+            what = (f"backed by: \"{_one(r.get('passage'), 200)}\"" if r["status"] == "supported"
+                    else f"{str(r['status']).replace('_', ' ')} ({_one(r.get('problem'), 160)})")
+            lines.append(f"- [{r['label']}] {_one(r.get('sentence'), 90)} -- {what}")
     if report.get("left_out_of_paper"):
         lines += ["", "## Left out of the paper", "",
                   "These quantities are not in the paper's results, and the paper says so:", ""]

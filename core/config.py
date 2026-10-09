@@ -245,6 +245,7 @@ class ProviderConfig(BaseModel):
             "oracle_review": 600.0,
             "design_review": 600.0,
             "code_review": 600.0,
+            "citation_check": 600.0,
             "analyze": 300.0,
             # Reads the whole simulation before it answers with one change.
             "improve": 300.0,
@@ -298,6 +299,7 @@ class ProviderConfig(BaseModel):
             "oracle_review": 900.0,
             "design_review": 900.0,
             "code_review": 900.0,
+            "citation_check": 900.0,
             # web_plots writes a short matplotlib script — it should be
             # quick. A tight ceiling kills a stuck codex_cli call fast
             # instead of letting it dribble output past the default budget.

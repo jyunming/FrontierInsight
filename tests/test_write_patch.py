@@ -454,6 +454,10 @@ def test_the_edit_call_uses_the_writers_model_setting(tmp_path: Path) -> None:
 
 # --- through the graph ---------------------------------------------------------------
 
+async def _citation_pass(eng, state):  # noqa: ANN001
+    return {"citation_next": "human_feedback" if eng._route_after_review(state) == "human_feedback" else "done"}
+
+
 def test_through_the_graph_the_second_write_edits_the_first(tmp_path: Path) -> None:
     """The basis and the draft survive the checkpoint, so the write node the
     review sends the quest back to edits the draft the first one wrote."""
@@ -479,6 +483,8 @@ def test_through_the_graph_the_second_write_edits_the_first(tmp_path: Path) -> N
     for name in ("design", "implement_outline", "implement", "execute", "analyze"):
         setattr(eng, f"_node_{name}", never)
     eng._node_claim_check = claim_check  # type: ignore[method-assign]
+    # This test is about the writer; the citation check (tests/test_citation_check_node.py) is not run here.
+    eng._node_citation_check = lambda state: _citation_pass(eng, state)  # type: ignore[method-assign]
     eng._node_review = review  # type: ignore[method-assign]
     eng._route_after_evidence_gate = lambda state: "write"  # type: ignore[method-assign]
     graph = eng._build_graph().compile(checkpointer=MemorySaver())
