@@ -1,0 +1,2 @@
+356:2026-10-08 23:12:27,253 [INFO] [execute] the pilot read 28 trial(s) at 22 setting(s): 8 metric(s) of the protocol checked, nothing wrong
+357:2026-10-08 23:12:27,253 [INFO] [execute] FI estimates the experiment takes about 54 minutes; the limit is 8 h

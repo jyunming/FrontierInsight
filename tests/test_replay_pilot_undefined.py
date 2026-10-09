@@ -53,6 +53,14 @@ def _honest(record: dict[str, Any]) -> dict[str, Any]:
     for i, trial in enumerate(target["trials"]):
         for k, name in enumerate(facts.broken):
             trial[name] = 2.4 + 0.7 * k + 0.2 * i
+    # the proportions of an honest record are sampled: one is a rare event that stays 0 in a small pilot, the others vary
+    proportions = [m["id"] for m in record["metrics"] if m["kind"] == "proportion"]
+    rare = next((m for m in proportions if any(m in t for c in out["cells"] for t in c["trials"])), None)
+    for c in out["cells"]:
+        for i, trial in enumerate(c["trials"]):
+            for m in proportions:
+                if m in trial:
+                    trial[m] = 0.0 if m == rare else float(i % 2)
     return out
 
 
@@ -109,7 +117,9 @@ def test_the_pilot_reads_the_real_trials_and_names_the_metric_the_settings_and_t
     facts = _facts(record)
     pilot = est.pilot_problems(_observations(record), _kinds(record), tried_all="; FI also tried every value of every setting")
     found = {p.metric: p for p in pilot.problems}
-    assert set(found) == set(facts.broken), "only the metrics that never had a number; the probabilities have values"
+    assert set(facts.broken) <= set(found) and all(found[m].kind == "undefined" for m in facts.broken)
+    # this simulation also gave the same outcome in every trial for its proportions: found by the stuck-proportion rule
+    assert {p.kind for p in pilot.problems} == {"undefined", "stuck"}
     first = facts.broken[0]
     text = found[first].says
     assert text.startswith(f"the metric `{first}` was not a number in any of the 8 pilot trials, at any of the 4 settings tried")
@@ -176,9 +186,9 @@ async def test_the_pilot_tries_the_small_settings_in_every_combination_before_it
     assert len([c for c in todo if c[facts.big] != facts.base]) == 10
     result = await est.pilot(ex, "python", quest, quest / "simulate.py", grid, probes, _kinds(record), deterministic=False,
                              budget_s=600, allowance_s=60)
-    assert {p.metric for p in result.problems} == set(facts.broken) and result.settings == 20 and result.trials == 26
+    assert set(facts.broken) <= {p.metric for p in result.problems} and result.settings == 20 and result.trials == 26
     assert ("FI also tried every value of every setting and every combination of the settings that take few values "
-            "(20 settings in all)") in result.problems[0].says
+            "(20 settings in all)") in next(p for p in result.problems if p.kind == "undefined").says
     assert not (quest / "raw").exists(), "the pilot trials are not results"
 
 

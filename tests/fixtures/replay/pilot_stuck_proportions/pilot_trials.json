@@ -1,0 +1,650 @@
+{
+ "note": "the first two trials of the 22 settings the pilot of quest 1791490114-euv-stochastic-car-vs-mor-e8de57 tried (raw/trials.json); NaN kept",
+ "grid": {
+  "resist": [
+   "CAR",
+   "MOR"
+  ],
+  "pattern": [
+   "lines",
+   "contacts"
+  ],
+  "dose_mj_cm2": [
+   10,
+   15,
+   20,
+   25,
+   30,
+   40,
+   50,
+   60,
+   75,
+   90,
+   110,
+   130,
+   150,
+   180,
+   220
+  ],
+  "chemistry": [
+   "enabled",
+   "switched_off"
+  ]
+ },
+ "metrics": [
+  {
+   "id": "ler_3sigma_nm",
+   "kind": "mean"
+  },
+  {
+   "id": "lwr_3sigma_nm",
+   "kind": "mean"
+  },
+  {
+   "id": "bridge_probability",
+   "kind": "proportion"
+  },
+  {
+   "id": "break_probability",
+   "kind": "proportion"
+  },
+  {
+   "id": "missing_contact_probability",
+   "kind": "proportion"
+  },
+  {
+   "id": "merged_contact_probability",
+   "kind": "proportion"
+  },
+  {
+   "id": "valid_line_trace_fraction",
+   "kind": "proportion"
+  },
+  {
+   "id": "absorbed_photon_count_variance",
+   "kind": "mean"
+  },
+  {
+   "id": "zero_absorbed_event_probability",
+   "kind": "proportion"
+  },
+  {
+   "id": "relative_absorbed_photon_noise",
+   "kind": "mean"
+  },
+  {
+   "id": "estimate_uncertainty",
+   "kind": "mean"
+  },
+  {
+   "id": "cpu_runtime_seconds",
+   "kind": "mean"
+  },
+  {
+   "id": "dose_at_1e6_defect_probability",
+   "kind": "mean"
+  },
+  {
+   "id": "equal_dose_probability_contrast",
+   "kind": "mean"
+  },
+  {
+   "id": "equal_roughness_probability_contrast",
+   "kind": "mean"
+  }
+ ],
+ "cells": [
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 60,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 24.148368712786887,
+     "absorbed_photon_count": 11.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 24.253590861306396,
+     "absorbed_photon_count": 12.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "CAR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 60,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 23.534213434057992,
+     "absorbed_photon_count": 9.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 23.42576026046658,
+     "absorbed_photon_count": 11.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "lines",
+    "dose_mj_cm2": 60,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "ler_3sigma_nm": NaN,
+     "lwr_3sigma_nm": NaN,
+     "valid_line_trace_fraction": 0.0,
+     "bridge_probability": 1.0,
+     "break_probability": 0.0,
+     "line_cd_nm": NaN,
+     "absorbed_photon_count": 15.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "ler_3sigma_nm": NaN,
+     "lwr_3sigma_nm": NaN,
+     "valid_line_trace_fraction": 0.0,
+     "bridge_probability": 1.0,
+     "break_probability": 0.0,
+     "line_cd_nm": NaN,
+     "absorbed_photon_count": 15.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 10,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 10.704744696916627,
+     "absorbed_photon_count": 2.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 10.998079684646791,
+     "absorbed_photon_count": 5.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 220,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 28.18690255978371,
+     "absorbed_photon_count": 46.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 28.18690255978371,
+     "absorbed_photon_count": 46.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 60,
+    "chemistry": "enabled"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 25.206081266687335,
+     "absorbed_photon_count": 11.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 25.180812005932435,
+     "absorbed_photon_count": 22.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "CAR",
+    "pattern": "lines",
+    "dose_mj_cm2": 60,
+    "chemistry": "enabled"
+   },
+   "trials": [
+    {
+     "ler_3sigma_nm": 0.0,
+     "lwr_3sigma_nm": 3.3720865948527707e-15,
+     "valid_line_trace_fraction": 1.0,
+     "bridge_probability": 1.0,
+     "break_probability": 0.0,
+     "line_cd_nm": 17.0,
+     "absorbed_photon_count": 5.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "ler_3sigma_nm": 0.0,
+     "lwr_3sigma_nm": 3.3720865948527707e-15,
+     "valid_line_trace_fraction": 1.0,
+     "bridge_probability": 1.0,
+     "break_probability": 0.0,
+     "line_cd_nm": 17.0,
+     "absorbed_photon_count": 5.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "CAR",
+    "pattern": "lines",
+    "dose_mj_cm2": 60,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "ler_3sigma_nm": NaN,
+     "lwr_3sigma_nm": NaN,
+     "valid_line_trace_fraction": 0.0,
+     "bridge_probability": 1.0,
+     "break_probability": 0.0,
+     "line_cd_nm": NaN,
+     "absorbed_photon_count": 3.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "ler_3sigma_nm": NaN,
+     "lwr_3sigma_nm": NaN,
+     "valid_line_trace_fraction": 0.0,
+     "bridge_probability": 1.0,
+     "break_probability": 0.0,
+     "line_cd_nm": NaN,
+     "absorbed_photon_count": 6.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "CAR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 60,
+    "chemistry": "enabled"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 27.524126309792685,
+     "absorbed_photon_count": 7.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 27.45465007031079,
+     "absorbed_photon_count": 6.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "lines",
+    "dose_mj_cm2": 60,
+    "chemistry": "enabled"
+   },
+   "trials": [
+    {
+     "ler_3sigma_nm": NaN,
+     "lwr_3sigma_nm": NaN,
+     "valid_line_trace_fraction": 0.0,
+     "bridge_probability": 1.0,
+     "break_probability": 0.0,
+     "line_cd_nm": NaN,
+     "absorbed_photon_count": 8.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "ler_3sigma_nm": NaN,
+     "lwr_3sigma_nm": NaN,
+     "valid_line_trace_fraction": 0.0,
+     "bridge_probability": 1.0,
+     "break_probability": 0.0,
+     "line_cd_nm": NaN,
+     "absorbed_photon_count": 8.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 15,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 14.884343478431232,
+     "absorbed_photon_count": 5.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 14.96964127403822,
+     "absorbed_photon_count": 2.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 20,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 17.22396045987371,
+     "absorbed_photon_count": 5.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 17.22396045987371,
+     "absorbed_photon_count": 3.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 25,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 18.81384047546846,
+     "absorbed_photon_count": 6.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 19.115955360352558,
+     "absorbed_photon_count": 7.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 30,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 20.37341629633241,
+     "absorbed_photon_count": 8.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 20.466944330257718,
+     "absorbed_photon_count": 10.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 40,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 21.996159369293583,
+     "absorbed_photon_count": 11.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 22.16913314200113,
+     "absorbed_photon_count": 12.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 50,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 23.152404806704283,
+     "absorbed_photon_count": 8.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 23.398568422792877,
+     "absorbed_photon_count": 12.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 75,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 25.40733061895184,
+     "absorbed_photon_count": 13.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 0.0,
+     "contact_cd_nm": 25.45739437315213,
+     "absorbed_photon_count": 16.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 90,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 26.26967516446403,
+     "absorbed_photon_count": 15.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 26.196872229566885,
+     "absorbed_photon_count": 23.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 110,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 27.151532118863187,
+     "absorbed_photon_count": 24.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 27.151532118863187,
+     "absorbed_photon_count": 24.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 130,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 27.570346537664197,
+     "absorbed_photon_count": 27.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 27.66255531193445,
+     "absorbed_photon_count": 35.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 150,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 27.96013377055607,
+     "absorbed_photon_count": 36.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 27.891743614073043,
+     "absorbed_photon_count": 30.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  },
+  {
+   "cell": {
+    "resist": "MOR",
+    "pattern": "contacts",
+    "dose_mj_cm2": 180,
+    "chemistry": "switched_off"
+   },
+   "trials": [
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 28.096414677602564,
+     "absorbed_photon_count": 42.0,
+     "zero_absorbed_event_probability": 0.0
+    },
+    {
+     "missing_contact_probability": 0.0,
+     "merged_contact_probability": 1.0,
+     "contact_cd_nm": 28.02835705319874,
+     "absorbed_photon_count": 34.0,
+     "zero_absorbed_event_probability": 0.0
+    }
+   ]
+  }
+ ]
+}

@@ -27,7 +27,14 @@ so a simulation that measures nothing is found in minutes, not after the study:
   the settings with few values (at most three) in every combination (:func:`confirm_cells`), so a metric that applies only to
   some of the settings is not mistaken for a broken one; if those cannot all be tried, nothing is claimed;
 * a ``mean`` metric that is exactly one value in every pilot trial although the settings change and other results move, and a
-  simulation whose every returned number is the same at every setting (:func:`core.flat_output.flat_sweep`).
+  simulation whose every returned number is the same at every setting (:func:`core.flat_output.flat_sweep`);
+* proportions stuck at a bound: **at least two different** ``proportion`` metrics that are each exactly 0 (or each exactly 1)
+  in every pilot trial that returned them, over at least :data:`MIN_STUCK_TRIALS` trials at :data:`MIN_STUCK_SETTINGS`
+  settings. The protocol has no structured field that tells a rare-event probability (where 0 is the expected outcome of a
+  small pilot) from any other, so one metric at a bound is never a finding; two or more at once are the sign of a simulated
+  object that is itself degenerate. Names the plan expects to stay put (``expected_constants``) are exempt. Several proportions
+  at opposite bounds that flip only between settings are deliberately **not** a finding: a sharp but honest transition sampled
+  by a few settings looks the same, and a pilot of a few trials cannot tell the two apart.
 
 A metric that is undefined at some settings and has a value at others is the plan's own business and is never a finding. The
 findings go to the existing repair of the simulation (``RunChecksMixin._pilot_gate``); a metric the trials do not return at all
@@ -384,6 +391,9 @@ CONFIRM_MAX = 40
 #: A metric is called constant only when it was returned in at least this many pilot trials, at this many different settings.
 MIN_CONSTANT_TRIALS = 6
 MIN_CONSTANT_SETTINGS = 3
+#: A proportion is called stuck at a bound only when it was returned in at least this many pilot trials at this many settings.
+MIN_STUCK_TRIALS = 4
+MIN_STUCK_SETTINGS = 2
 PILOT_RECORD = Path(".fi") / "pilot_check.json"
 
 
@@ -505,6 +515,25 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
                     f"the metric `{name}` was exactly {float(own[0]):g} in all {len(own)} pilot trials, at "
                     f"{_setting_count([(c, v) for c, v in obs if name in v])} settings ({_settings_text(obs)}), although "
                     f"other results changed with the settings: a result that never responds to them is not computed from them"))
+    stuck: list[tuple[str, float, list[tuple[dict[str, Any], dict[str, float]]]]] = []
+    if len(varied_cells) >= 2:
+        for name in pilot.checked:
+            if kinds.get(name) != "proportion" or name in exempt or name in axes:
+                continue
+            own_obs = [(c, v) for c, v in obs if name in v]
+            own = [v[name] for _c, v in own_obs]
+            if (len(own) >= MIN_STUCK_TRIALS and _setting_count(own_obs) >= MIN_STUCK_SETTINGS
+                    and all(_finite(x) for x in own) and (all(float(x) == 0.0 for x in own) or all(float(x) == 1.0 for x in own))):
+                stuck.append((name, float(own[0]), own_obs))
+    if len(stuck) >= 2:
+        names = ", ".join(f"`{n}`" for n, _b, _o in stuck)
+        for name, bound, own_obs in stuck:
+            pilot.problems.append(PilotProblem(
+                name, "stuck",
+                f"the proportion `{name}` was exactly {bound:g} in all {len(own_obs)} pilot trials, at {_setting_count(own_obs)} "
+                f"settings ({_settings_text(own_obs)}), and so were {', '.join(f'`{n}`' for n, _b, _o in stuck if n != name)}: "
+                f"{len(stuck)} proportions ({names}) each gave the same outcome in every trial, which a simulated object that "
+                "is sampled does not do"))
     by_cell: dict[str, Any] = {}
     for cell, values in obs:
         run = by_cell.setdefault(_tr.cell_key(cell), type("PilotCell", (), {"cell": dict(cell), "rows": []})())
