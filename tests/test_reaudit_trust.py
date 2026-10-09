@@ -188,6 +188,10 @@ def test_stderr_for_models_drops_lines_naming_a_left_out_quantity_and_keeps_the_
     # Error output with nothing to take out is passed on as it is.
     plain = "Traceback (most recent call last):\nValueError: x\n"
     assert eng._stderr_for_models(plain) == plain
+    # FI's own message naming the quantity (what to repair) stays: it is FI's diagnosis, not a value the script printed.
+    fi_line = f"FI's run gave a result that is not usable: the result `{key}` does not change when the settings change"
+    shown = eng._stderr_for_models(f"{fi_line}\n{key} = {SENTINEL}\n")
+    assert fi_line in shown and SENTINEL not in shown and "1 line(s) of the run's error output" in shown
 
 
 def test_stdout_for_models_replaces_a_bare_left_out_value_printed_without_its_name(

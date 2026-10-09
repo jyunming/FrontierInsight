@@ -268,9 +268,22 @@ class RunChecksMixin:
         traceback and the rest stay readable), with a plain note saying how many were taken out. A bare left-out value is
         replaced too."""
         text = stderr or ""
-        kept, dropped, keys = self._lines_without_left_out(text.splitlines())
-        notes = [self._taken_out_note(dropped, keys, "error output")] if dropped else []
-        out = "\n".join([*kept, *notes]) if notes else text
+        lines = text.splitlines()
+        # FI's own messages in the error output (why a run was refused: "FI ran no trial successfully: ...", "FI's run gave
+        # a result that is not usable: ...") name a quantity to say what to repair; they are FI's diagnosis, not a value the
+        # script printed, so they stay. Only what the script itself printed is filtered (and any bare value, below).
+        kept: list[str] = []
+        dropped, keys = 0, []
+        for line in lines:
+            if line.lstrip().startswith(("FI ", "FI's ", "[FI")):
+                kept.append(line)
+                continue
+            ok, gone, keys = self._lines_without_left_out([line])
+            kept.extend(ok)
+            dropped += gone
+        if not dropped:
+            return self._withhold_left_out_values(text)
+        out = "\n".join([*kept, self._taken_out_note(dropped, keys, "error output")])
         return self._withhold_left_out_values(out)
 
     def _keep_raw_stdout(self, stdout: str) -> None:
