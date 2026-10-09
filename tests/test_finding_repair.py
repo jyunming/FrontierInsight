@@ -460,3 +460,23 @@ def test_a_reply_that_changes_a_module_constant_has_it_ignored_when_one_function
     assert "THRESHOLD = 0.5" in new and "0.8" not in new, "a statement that is not a function is never applied"
     assert "import os" in new and "cmath" not in new, "a new module is brought in; an import that rebinds a name is not"
     assert "(c + 1)" in new
+
+
+def test_a_finding_that_names_no_function_may_change_one_function_and_only_the_values_it_speaks_of(tmp_path: Path) -> None:
+    base = "SCALE = 2.0\nOFFSET = 1.0\n\n" + SOURCE
+    one = base.replace("return m * w / c", "return m * w / c + 0.5")
+    two = one.replace("return x\n", "return x * 3\n")  # also changes `helper`, which the finding does not name
+    other_value = one.replace("OFFSET = 1.0", "OFFSET = 9.0")  # a value the finding does not speak of
+    run = Run(tmp_path, [{"id": "F-1", "function": "", "quantity": "SCALE"}], {})
+    (run.code / "spring.py").write_text(base, encoding="utf-8")
+    spoken = one.replace("SCALE = 2.0", "SCALE = 3.0")  # the value the finding speaks of may change
+    run.replies = {"code:test": [_block(FAILING)],
+                   "code:repair": [_block("# file: spring.py\n" + two), _block("# file: spring.py\n" + other_value),
+                                   _block("# file: spring.py\n" + spoken)]}
+    assert run.go() == ["spring.py"]
+    repairs = run.record["issues"]["F-1"]["repairs"]
+    assert [r["outcome"] for r in repairs] == ["rejected", "rejected", "accepted"]
+    assert "may change one existing function" in repairs[0]["why"]
+    assert "does not speak of" in repairs[1]["why"]
+    text = (run.code / "spring.py").read_text(encoding="utf-8")
+    assert "SCALE = 3.0" in text and "OFFSET = 1.0" in text and "return x\n" in text

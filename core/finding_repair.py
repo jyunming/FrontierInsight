@@ -325,6 +325,32 @@ def frame_changes(old: str, new: str) -> list[str]:
     return [f"{where or 'the module'}: {text[:60]}" for where, text in changed + new_frame]
 
 
+def frame_altered(old: str, new: str) -> list[tuple[str, set[str]]]:
+    """The module- and class-level statements of ``old`` that ``new`` changed or removed (additions are not listed), each
+    as ``(description, the names it binds)``."""
+    try:
+        before, after = ast.parse(old), ast.parse(new)
+    except SyntaxError:
+        return [("the file does not parse", set())]
+    kept = [d for _w, d in _frame(after)]
+    names = {ast.dump(n): _bound_names(n) for tree in (before,) for n in ast.walk(tree)
+             if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Import, ast.ImportFrom))}
+    out: list[tuple[str, set[str]]] = []
+    for where, dump in _frame(before):
+        if dump in kept:
+            kept.remove(dump)
+        else:
+            out.append((f"{where or 'the module'}: {dump[:60]}", names.get(dump, set())))
+    return out
+
+
+def issue_names(issue: dict[str, Any]) -> set[str]:
+    """The identifiers a finding speaks of: its quantity and the code names in its wording."""
+    text = " ".join(str(issue.get(k) or "") for k in ("quantity", "function", "headline", "summary", "detail", "claim"))
+    text += " " + " ".join(str(w) for w in issue.get("wordings") or [])
+    return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text))
+
+
 def other_functions_changed(old: str, new: str, allowed: str) -> list[str]:
     """The functions, methods and nested functions other than ``allowed`` (a qualified name) whose own text is not byte for
     byte what it was, or that are gone."""
@@ -566,6 +592,18 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             elif outside:
                 new, why = None, ("it changed " + "; ".join(outside[:3])
                                   + f", which the finding is not about (only `{dotted}` may change)")
+        elif new:
+            # A finding that names no function (a quantity the results lack, a module-level value): the repair may
+            # add helpers and change ONE existing function, and may change an existing module- or class-level
+            # statement only when a name it binds is one the finding speaks of. Anything wider is not this finding's.
+            changed = other_functions_changed(old, new, "")
+            altered = [s for s in frame_altered(old, new) if not (s[1] & issue_names(issue))]
+            if len(changed) > 1:
+                new, why = None, ("it changed " + ", ".join(f"`{n}`" for n in changed[:4])
+                                  + "; a repair of a finding that names no function may change one existing function")
+            elif altered:
+                new, why = None, ("it changed " + "; ".join(t for t, _ in altered[:3])
+                                  + ", which the finding does not speak of")
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"
     if new == old:
