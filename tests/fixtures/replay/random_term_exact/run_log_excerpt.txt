@@ -1,0 +1,2 @@
+2026-10-09 16:43:27,151 [WARNING] [equations] E1 (z_statistic) still fail their worked example after 2 repair(s) each: ; the whole script is repaired next
+2026-10-09 18:45:57,347 [WARNING] [equations] E1 (z_statistic) still fail their worked example after 2 repair(s) each: ; the whole script is repaired next

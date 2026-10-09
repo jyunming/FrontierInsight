@@ -73,6 +73,8 @@ SEED_PARAM = "seed"
 TEST_NAME = "test_equations.py"
 TESTS_DIR = "tests"
 TEST_PATH = f"{TESTS_DIR}/{TEST_NAME}"
+#: Beside the test file: what the last ``--json`` run measured (value got, expected value, tolerance) per equation.
+NUMBERS_NAME = "equation_numbers.json"
 #: The line the test file prints (with ``--json``), one JSON list of ``{"id", "function", "status", "detail"}``.
 MARK = "EQUATION_TESTS:"
 
@@ -110,17 +112,26 @@ def _number(value: Any) -> float | None:
 
 
 #: A formula that names a distribution or says its value is drawn: the equation's output is then a random draw.
+_DISTRIBUTIONS = (r"poisson|binomial|bernoulli|gaussian|normal|uniform|exponential|gamma|beta|lognormal|geometric|"
+                  r"weibull|multinomial|student|chi|cauchy|laplace|logistic|categorical")
 _DRAW_WORDS = re.compile(
-    r"\b(?:poisson|binomial|bernoulli|gaussian|normal|uniform|exponential|gamma|beta|lognormal|geometric|weibull|"
-    r"multinomial)\s*\(|\b(?:drawn|sampled) from\b|\brandom (?:draw|sample|variate|variable)\b", re.IGNORECASE)
+    rf"\b(?:{_DISTRIBUTIONS})\s*\(|\b(?:drawn|sampled|generated|simulated) from\b|\brandomly (?:drawn|sampled|generated)\b"
+    r"|\b(?:random|stochastic) (?:draw|sample|variate|variable|noise|term|error|perturbation|fluctuation)s?\b"
+    # a term said to follow a distribution: `x ~ N(0, 1)`, `x ~ Normal`, `x ~ U(a, b)`, `x ~ Poisson(lam)`
+    rf"|[~∼]\s*(?:[A-Za-z][A-Za-z0-9_]{{0,15}}\s*\(|(?:{_DISTRIBUTIONS})\b)"
+    rf"|\bdistributed (?:as|according to|like)\b|\bfollows? (?:an? )?(?:{_DISTRIBUTIONS})\b", re.IGNORECASE)
 
 
 def is_random(equation: dict[str, Any]) -> bool:
-    """Whether the equation's output is a random draw: the plan marked its example ``"random": true``, or the equation's
-    formula names a distribution (``Poisson(...)``) or says its value is drawn. Conservative on purpose: a deterministic
-    function that is taken for a random one is still held to the strict rule (see the module text), so nothing is loosened."""
+    """Whether the equation's output is a random draw: the plan marked its example (or the equation) ``"random": true``,
+    or the equation's formula says a term follows a distribution (``Poisson(...)``, ``x ~ N(0, 1)``, ``x ~ U(a, b)``,
+    "distributed as") or that its value is drawn or random. Conservative on purpose: a deterministic function that is
+    taken for a random one is still held to the strict rule (see the module text), so nothing is loosened."""
     example = equation.get("example")
-    if isinstance(example, dict) and example.get("random") not in (None, False, "", 0, "false", "False"):
+    unset = (None, False, "", 0, "false", "False")
+    if isinstance(example, dict) and example.get("random") not in unset:
+        return True
+    if equation.get("random") not in unset:  # the plan wrote the flag beside the example instead of inside it
         return True
     return bool(_DRAW_WORDS.search(_text(equation.get("formula"))))
 
@@ -216,7 +227,8 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
         formula = example.get("expected_formula")
         if formula is None or not _text(formula):
             row.update(state="unusable", why=(
-                "its output is a random draw, and it gave inputs but no `expected_formula` (the distribution's mean)"
+                "its output is a random draw, so it cannot be held to one exact value, and the plan gave inputs but no "
+                "`expected_formula` (the distribution's mean)"
                 if row["random"] else "it gave inputs but no `expected_formula`"))
             continue
         value, why, unset, _used = _forms._formula_result({"expected_formula": formula, "case": good}, None)
@@ -235,7 +247,7 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
         row.update(state="ok", why="", inputs={k: float(v) for k, v in good.items()}, expected=float(value), rel=rel,
                    abs=abs_tol, method=method)
         if row["random"]:
-            row["variance"] = _stated_variance(example, good)
+            row["variance"] = _stated_variance(example if "variance_formula" in example else eq, good)
     return rows
 
 
@@ -349,6 +361,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 CASES = json.loads({cases!r})
 DRAWS, MIN_DRAWS, TIME_LIMIT_S, SIGMAS = {draws!r}, {min_draws!r}, {limit!r}, {sigmas!r}
 RNG_PARAMS = {rng_params!r}
+NUMBERS_NAME = {numbers!r}
 
 
 def _run_random(case, fn, params):
@@ -377,70 +390,76 @@ def _run_random(case, fn, params):
         try:
             result = fn(**kwargs)
         except Exception as e:  # noqa: BLE001
-            return "error", (type(e).__name__ + ": " + str(e))[:300], None
+            return "error", (type(e).__name__ + ": " + str(e))[:300], None, None
         try:
             draw = float(result)
         except (TypeError, ValueError):
-            return "mismatch", "it returned something that is not one number", None
+            return "mismatch", "it returned something that is not one number", None, None
         if not math.isfinite(draw):
-            return "mismatch", "a draw was not a finite number", None
+            return "mismatch", "a draw was not a finite number", None, None
         values.append(draw)
         if len(values) >= MIN_DRAWS and time.monotonic() - started > TIME_LIMIT_S:
             break
     n = len(values)
     if n < MIN_DRAWS:
-        return "error", "the function is too slow to be drawn from " + str(MIN_DRAWS) + " times in the time allowed", None
+        return "error", "the function is too slow to be drawn from " + str(MIN_DRAWS) + " times in the time allowed", None, None
     mean = sum(values) / n
     m2 = sum((v - mean) ** 2 for v in values) / n
     want = case["expected"]
     if max(values) == min(values):
-        if abs(mean - want) > max(case["rel"] * abs(want), case["abs"]):
-            return "mismatch", "", mean
-        return "ok", "", mean
+        tol = max(case["rel"] * abs(want), case["abs"])
+        if abs(mean - want) > tol:
+            return "mismatch", "", mean, tol
+        return "ok", "", mean, tol
     variance = case.get("variance")
     sigma = math.sqrt(variance) if variance else math.sqrt(m2 * n / (n - 1))
-    if abs(mean - want) > max(SIGMAS * sigma / math.sqrt(n), case["rel"] * abs(want), case["abs"]):
-        return "mismatch", "the mean of " + str(n) + " draws with fixed seeds is further than " + str(int(SIGMAS)) + " standard errors from the distribution's mean the plan states", mean
+    tol = max(SIGMAS * sigma / math.sqrt(n), case["rel"] * abs(want), case["abs"])
+    if abs(mean - want) > tol:
+        return "mismatch", "the mean of " + str(n) + " draws with fixed seeds is further than " + str(int(SIGMAS)) + " standard errors from the distribution's mean the plan states", mean, tol
     if variance:
         m4 = sum((v - mean) ** 4 for v in values) / n
         spread = math.sqrt(max(m4 - m2 * m2, 0.0) / n)
         if abs(m2 * n / (n - 1) - variance) > SIGMAS * spread:
-            return "mismatch", "the variance of " + str(n) + " draws with fixed seeds is further than " + str(int(SIGMAS)) + " standard errors from the variance the plan states", mean
-    return "ok", "", mean
+            return "mismatch", "the variance of " + str(n) + " draws with fixed seeds is further than " + str(int(SIGMAS)) + " standard errors from the variance the plan states", m2 * n / (n - 1), SIGMAS * spread, variance
+    return "ok", "", mean, tol
 
 
 def _run(case):
-    """(status, detail, value): status ok | mismatch | contract | error. The detail never holds the expected value."""
+    """(status, detail, value, tolerance, expected): status ok | mismatch | contract | error. The detail never holds the
+    expected value (it goes to the model that repairs the function); the last three are for the record and the log."""
+    want = case["expected"]
     try:
         fn = getattr(importlib.import_module(case["module"]), case["function"])
     except Exception as e:  # noqa: BLE001
-        return "error", (type(e).__name__ + ": " + str(e))[:300], None
+        return "error", (type(e).__name__ + ": " + str(e))[:300], None, None, want
     params = inspect.signature(fn).parameters
     if not any(p.kind is p.VAR_KEYWORD for p in params.values()):
         missing = [n for n in case["inputs"] if n not in params]
         if missing:
-            return "contract", "the function must take " + ", ".join(missing) + " as arguments, named so", None
+            return "contract", "the function must take " + ", ".join(missing) + " as arguments, named so", None, None, want
     if case.get("random"):
-        return _run_random(case, fn, params)
+        out = _run_random(case, fn, params)
+        return (*out, want) if len(out) == 4 else out
     try:
         value = fn(**case["inputs"])
     except Exception as e:  # noqa: BLE001
-        return "error", (type(e).__name__ + ": " + str(e))[:300], None
+        return "error", (type(e).__name__ + ": " + str(e))[:300], None, None, want
     try:
         value = float(value)
     except (TypeError, ValueError):
-        return "mismatch", "it returned something that is not one number", None
-    want = case["expected"]
-    if not math.isfinite(value) or abs(value - want) > max(case["rel"] * abs(want), case["abs"]):
-        return "mismatch", "", value
-    return "ok", "", value
+        return "mismatch", "it returned something that is not one number", None, None, want
+    tol = max(case["rel"] * abs(want), case["abs"])
+    if not math.isfinite(value) or abs(value - want) > tol:
+        return "mismatch", "", value, tol, want
+    return "ok", "", value, tol, want
 
 
 def _check(index):
     case = CASES[index]
-    status, detail, value = _run(case)
+    status, detail, value, tol, want = _run(case)
     assert status == "ok", (case["id"] + " (" + case["function"] + "): " + status + " " + detail
-                            + (" got " + repr(value) + ", the worked example gives " + repr(case["expected"])
+                            + (" got " + repr(value) + ", the worked example gives " + repr(want)
+                               + (", the tolerance is " + repr(tol) if tol is not None else "")
                                if value is not None else ""))
 '''
 
@@ -448,7 +467,8 @@ def _check(index):
 def test_source(case_list: list[dict[str, Any]]) -> str:
     """``tests/test_equations.py`` for ``case_list`` (:func:`cases`): a test per equation, and a runner."""
     text = _TEMPLATE.format(cases=json.dumps(case_list, default=str), draws=DRAWS, min_draws=MIN_DRAWS,
-                            limit=TIME_LIMIT_S, sigmas=SIGMAS, rng_params=RNG_PARAMS)
+                            limit=TIME_LIMIT_S, sigmas=SIGMAS, rng_params=RNG_PARAMS,
+                            numbers=NUMBERS_NAME)
     names = []
     for i, c in enumerate(case_list):
         name = "test_" + re.sub(r"[^a-z0-9]+", "_", str(c["id"]).lower()).strip("_")
@@ -460,13 +480,20 @@ def test_source(case_list: list[dict[str, Any]]) -> str:
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1:] if "--only" in sys.argv else []
-    results = []
+    results, numbers = [], {}
     for case in CASES:
         if only and case["id"] not in only:
             continue
-        status, detail, _value = _run(case)
+        status, detail, value, tol, want = _run(case)
         results.append({"id": case["id"], "function": case["function"], "status": status, "detail": detail})
+        numbers[case["id"]] = {"got": value, "expected": want, "tolerance": tol}
     if "--json" in sys.argv:
+        # The numbers (value got, expected value, tolerance) are for the run log, in a file of their own: this line is
+        # read by code that may report to the model that writes the function, and it never carries the expected value.
+        try:
+            Path(__file__).with_name(NUMBERS_NAME).write_text(json.dumps(numbers), encoding="utf-8")
+        except OSError:
+            pass
         print("''' + MARK + ''' " + json.dumps(results))
         sys.exit(0)
     for r in results:
@@ -503,6 +530,28 @@ def failure_message(result: dict[str, Any], formula: str) -> str:
     if status == CONTRACT:
         return head + f" FI could not call it: {result.get('detail')}. The parameters are named as the equation's inputs."
     return head + f" Calling it with the equation's inputs raised: {result.get('detail')}"
+
+
+def load_numbers(code_dir: Path) -> dict[str, dict[str, Any]]:
+    """What the last ``--json`` run of the test file measured, by equation id (``{}`` when there is none)."""
+    try:
+        value = json.loads((Path(code_dir) / TESTS_DIR / NUMBERS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): v for k, v in value.items() if isinstance(v, dict)} if isinstance(value, dict) else {}
+
+
+def failure_reason(result: dict[str, Any]) -> str:
+    """Why one equation test failed, for the run log and the record (never for a request to the model: it holds the
+    expected value): the expected value, the value got and the tolerance, or the error the call raised. ``result`` is a
+    parsed result merged with its entry of :func:`load_numbers`."""
+    status = result.get("status")
+    got, want, tol = result.get("got"), result.get("expected"), result.get("tolerance")
+    detail = _text(result.get("detail"))
+    if status == MISMATCH and got is not None and want is not None:
+        text = f"got {got:.10g}, expected {want:.10g}" + (f", tolerance {tol:.3g}" if isinstance(tol, (int, float)) else "")
+        return text + (f" ({detail})" if detail else "")
+    return f"{status}: {detail}" if detail else str(status or "failed")
 
 
 def write(code_dir: Path, case_list: list[dict[str, Any]]) -> Path | None:

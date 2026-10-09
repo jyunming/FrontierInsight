@@ -11329,7 +11329,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 failures = []
                 break
             by_id = {c["id"]: c for c in case_list}
-            failures = [{**r, "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
+            numbers = _equation_tests.load_numbers(self.quest_root / "code")
+            failures = [{**r, **numbers.get(str(r.get("id")), {}), "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
                          "module": by_id.get(str(r.get("id")), {}).get("module", "")}
                         for r in results if r.get("status") != _equation_tests.OK]
             record["tested"] = [str(r.get("id")) for r in results]
@@ -11350,7 +11351,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     continue
                 spent[eid] = spent.get(eid, 0) + 1
                 await self._repair_equation_function(f, sources, located)
-        record["failed"] = [{"id": f.get("id"), "function": f.get("function"), "status": f.get("status")} for f in failures]
+        record["failed"] = [{"id": f.get("id"), "function": f.get("function"), "status": f.get("status"),
+                             "reason": _equation_tests.failure_reason(f)} for f in failures]
         record["repairs"] = spent
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
@@ -11360,9 +11362,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not failures:
             return None
         message = " ".join(_equation_tests.failure_message(f, str(f.get("formula") or "")) for f in failures)
-        self._log.warning("[equations] %s still fail their worked example after %d repair(s) each: %s",
+        self._log.warning("[equations] %s still fail their worked example after %d repair(s) each: %s; the whole script "
+                          "is repaired next",
                           ", ".join(f"{f.get('id')} ({f.get('function')})" for f in failures), _function_steps.REPAIRS,
-                          "; the whole script is repaired next")
+                          "; ".join(f"{f.get('id')}: {_equation_tests.failure_reason(f)}" for f in failures))
         return {
             "exec_result": {
                 "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "",

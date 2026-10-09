@@ -509,7 +509,9 @@ same PR that adds, splits or renames one.
 - `core/equation_tests.py` — a small test per equation of the plan's model, from the plan's own worked example
   (`example_rows`: FI computes the output with `oracle_forms`' calculator; `request` asks the plan for a missing or
   unusable one; `locate` finds the function labelled `# E<n>`; `cases` / `test_source` / `write` produce
-  `code/tests/test_equations.py`; `failure_message` names the function and equation, never the expected value). Called
+  `code/tests/test_equations.py`; `failure_message` names the function and equation, never the expected value; `failure_reason` + `load_numbers` give the run log the
+  value got, the expected value and the tolerance from `tests/equation_numbers.json`; `is_random` reads a flag on the equation or
+  example, or a formula that says a term follows a distribution (`~N(0,1)`, `~U(a,b)`, "drawn from", "random")). Called
   by `Engine._equation_gate` (in `_node_execute` before the oracle gate; repairs a failing function alone, then returns
   a failed run for the existing `execute_reflect`), by `_hold_oracle_forms` (missing examples ride in the one request to
   the plan, `_revise_checks_only(equations="example")`) and by `code_layout.project_files`. Record: `.fi/equation_tests.json`.
