@@ -412,6 +412,14 @@ def test_grader_prompt_carries_the_topics_own_goals_and_no_topic_words(tmp_path:
     assert "G1" in text and "STOP:" in text and "{" not in text.replace("{}", "")
 
 
+def test_grade_template_says_to_collect_first_when_round_json_missing(tmp_path: Path) -> None:
+    """When round.json does not exist, write_templates raises SuiteError with a helpful message."""
+    rdir = tmp_path / "empty_round"
+    rdir.mkdir()
+    with pytest.raises(SuiteError, match="has not been collected yet"):
+        grade.write_templates(rdir, {})
+
+
 # --------------------------------------------------------------------------------------------- the CLI
 
 def test_cli_collect_and_report_on_an_adopted_round(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

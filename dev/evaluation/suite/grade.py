@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .collect import GRADES, load_grades
+from .suite import SuiteError
 
 RUBRIC = Path(__file__).resolve().parents[1] / "benchmark" / "rubric.md"
 SCORES = Path(__file__).resolve().parents[1] / "benchmark" / "scores.md"
@@ -61,7 +62,10 @@ def prompt_for(*, quest: str, round_name: str, topic: str, topic_text: str, repo
 def write_templates(round_dir: Path, topic_texts: dict[str, str]) -> list[Path]:
     """One ``GRADER_PROMPT.md`` per delivered paper of a collected round (``<round>/<topic>/GRADER_PROMPT.md``)."""
     rdir = Path(round_dir)
-    data = json.loads((rdir / "round.json").read_text(encoding="utf-8"))
+    round_json = rdir / "round.json"
+    if not round_json.exists():
+        raise SuiteError(f"round {rdir.name} has not been collected yet: run `python -m dev.evaluation.suite collect --suite <suite.yaml> --round {rdir.name}` first")
+    data = json.loads(round_json.read_text(encoding="utf-8"))
     written = []
     for t in data["topics"]:
         if t["outcome"] != "paper" or not t.get("folder"):
