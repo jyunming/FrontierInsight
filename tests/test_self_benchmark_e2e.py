@@ -70,6 +70,19 @@ def _claim_for(prompt: str) -> str:
                                    "evidence": "the source"}], "summary": "one claim"})
 
 
+def _verdicts_for(prompt: str) -> str:
+    """The fake citation reader: each cited line is supported by the planted source whose text the prompt shows."""
+    shown = [src for src in (plant.WAKEFIELD, plant.MADSEN) if src["content"][:60] in prompt]
+    rows = []
+    for line in prompt.split("# The citations", 1)[-1].split("# The sources", 1)[0].splitlines():
+        pid = line.split("|", 1)[0].strip()
+        if "| cites [" in line and pid:
+            ok = bool(shown)
+            rows.append({"id": pid, "supported": ok, "quote": shown[0]["content"][:60] if ok else "",
+                         "why": "" if ok else "the fake reader was shown no planted source"})
+    return json.dumps({"verdicts": rows})
+
+
 def _fake(calls: list[str]):
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         LAST_CALL.set({"provider": "openai", "model": kw.get("model") or "m-default", "reported": True})
@@ -86,6 +99,8 @@ def _fake(calls: list[str]):
             return CITING if ("Ileal-lymphoid" in prompt or "population-based study" in prompt) else PAPER
         if kind == "ClaimCheck" and ("Ileal-lymphoid" in prompt or "population-based study" in prompt):
             return _claim_for(prompt)
+        if prompt.lstrip().startswith("You are the **Citation Reader**"):
+            return _verdicts_for(prompt)
         if prompt.lstrip().startswith("**Persona:"):
             return _FAKE_RESPONSES["review"]
         if prompt.lstrip().startswith("# Second Opinion on the Checks"):  # the second reading of the checks
