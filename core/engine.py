@@ -17799,6 +17799,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             survey=bool(state.get("survey_mode_resolved"))))
         # A search for the best design: the engine's "Best design found" section, from FI's own records.
         markdown = self._mark_best_design(state, markdown)
+        # What the second model's reading of the code left unresolved, in the limitations: the engine's words from its
+        # record, so the paper states it whatever the writer did with the note (core/code_review.py, core/disclosure.py).
+        markdown = _disclosure.mark_findings(markdown, _code_review.findings_block(self.quest_root, self.quest_root / "code"))
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -19858,6 +19861,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 state.get("literature") or [], paper_md, self.config.output.audience,
             ),
             user_feedback_block=_user_feedback_review_block(state),
+            # What a second model's reading of the code left open: a claim resting on it is not established.
+            code_findings_block=_code_review.review_block(self.quest_root, self.quest_root / "code"),
             # The whole paper. A 16 KB cut hid the second half of a real
             # 34,910-character paper, so the review graded a draft it had not
             # read; the cap now only guards against a runaway file.

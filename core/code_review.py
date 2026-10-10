@@ -909,60 +909,193 @@ def resolve_logic(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     return confirmed
 
 
-def write_note(quest_root: Path, code_dir: Path) -> str:
-    """For the write prompt: what the code does not compute, to be said plainly in the limitations. ``""`` when nothing."""
+#: How many findings of one kind the writer's note and the paper's block name; the rest are counted and left to the record.
+NOTE_CAP = 8
+BLOCK_CAP = 20
+
+
+def _listed(items: list[str], cap: int) -> str:
+    """``a; b; c`` for the first ``cap`` items, then how many more there are and where they are listed (never a silent cut)."""
+    out = "; ".join(items[:cap])
+    more = len(items) - cap
+    return out + (f"; and {more} more (all are listed in {RECORD.as_posix()})" if more > 0 else "")
+
+
+def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
+    """What a second model's reading of the code left unresolved on the version that ran, by kind: ``unread`` (why the
+    code was not read by another model, else ``""``), ``reread`` (the final version was changed after the reading and
+    not read again), ``not_reviewed`` (requirements the reader did not check) and ``not_reviewed_headline``, ``missing`` /
+    ``different`` (requirements not computed / computed differently from the plan), ``conflicts`` (the plan's parts
+    disagree), ``unshown`` (flagged, and no test could show the fault), ``flagged`` (flagged logic problems, still open),
+    ``stopped`` (repairs ended because a round did not reduce what is open). A finding the run's own results contradict is
+    not in it. Everything is empty for a quest with no record."""
     record = load(quest_root)
-    notes: list[str] = []
-    if record and not record.get("read_version"):
+    out: dict[str, Any] = {"unread": "", "reread": False, "not_reviewed": [], "not_reviewed_headline": False,
+                           "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False}
+    if not record:
+        return out
+    now = version(code_dir)
+    if not record.get("read_version"):
         # The code that runs was never read by another model (the reading failed, the same model was the reader, or the
-        # readings allowed are spent): the writer says so.
-        why = record.get("error") or record.get("skipped") or "no reading was made"
-        notes.append("The code that produced these results was not compared with the plan by another model "
-                     f"({why}): say so plainly in the limitations.")
-    elif record.get("read_version") and record["read_version"] != version(code_dir):
-        notes.append("The code was read against the plan by a second model, but it was changed afterwards and the final "
-                     "version was not read again by another model: say so in the limitations.")
-    elif record.get("version") == version(code_dir) and record.get("not_reviewed"):
-        names = "; ".join(str(x) for x in record["not_reviewed"][:8])
-        notes.append("A second model was asked to compare the code with the plan, and did not check these requirements: "
-                     f"{names}. Say plainly (in the limitations) that they were not checked against the code by another model"
-                     + (", the study's main quantity among them." if record.get("not_reviewed_headline") else "."))
+        # readings allowed are spent).
+        out["unread"] = str(record.get("error") or record.get("skipped") or "no reading was made")
+    elif record["read_version"] != now:
+        out["reread"] = True
+    elif record.get("version") == now and record.get("not_reviewed"):
+        out["not_reviewed"] = [str(x) for x in record["not_reviewed"]]
+        out["not_reviewed_headline"] = bool(record.get("not_reviewed_headline"))
     still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")]
     issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
-    flagged = [v for v in still if v.get("kind") == "logic"]
+    logic = [v for v in still if v.get("kind") == "logic"]
     left = [v for v in still if v.get("kind") != "logic"]
-    conflicts = [v for v in flagged if v.get("plan_conflict")]
-    flagged = [v for v in flagged if not v.get("plan_conflict")]
-    if conflicts:
-        listed = "; ".join(f"{v['text']}" + (f" ({v['note']})" if v.get("note") else "") for v in conflicts[:6])
+    out["missing"] = [v for v in left if v.get("status") == MISSING]
+    out["different"] = [v for v in left if v.get("status") != MISSING]
+    out["conflicts"] = [v for v in logic if v.get("plan_conflict")]
+    rest = [v for v in logic if not v.get("plan_conflict")]
+    out["unshown"] = [v for v in rest if (issues.get(v.get("fid")) or {}).get("outcome") == "not demonstrated"]
+    out["flagged"] = [v for v in rest if v not in out["unshown"]]
+    out["stopped"] = record.get("converged") is False and bool(out["flagged"] or out["unshown"] or left)
+    return out
+
+
+def _where(v: dict[str, Any], *, line: bool) -> str:
+    if not v.get("file"):
+        return ""
+    return f" (in {v['file']}" + (f", line {v['line']}" if line and v.get("line") else "") + ")"
+
+
+def write_note(quest_root: Path, code_dir: Path) -> str:
+    """For the write prompt: what the code does not compute and what is still flagged, to be said plainly in the
+    limitations. ``""`` when nothing. Every kind of finding is named (none is dropped because another is present); a long
+    list is cut for the prompt's size and says how many more there are. The paper itself carries the same facts in a block
+    the engine writes (:func:`findings_block`), whatever the writer does with this note."""
+    f = open_findings(quest_root, code_dir)
+    notes: list[str] = []
+    missing, different = f["missing"], f["different"]
+    if missing or different:
+        names = _listed([f"{v['text']} ({'not computed' if v['status'] == MISSING else 'computed differently from the plan'})"
+                         for v in [*missing, *different]], NOTE_CAP)
+        notes.append("A second model compared the code with what the plan requires, and the code was sent back to be "
+                     f"repaired; these requirements are still not met: {names}. Say so plainly (in the limitations): a "
+                     "quantity listed as not computed was not computed, and do not write a value, a figure or a claim for it.")
+    if f["unread"]:
+        notes.append("The code that produced these results was not compared with the plan by another model "
+                     f"({f['unread']}): say so plainly in the limitations.")
+    elif f["reread"]:
+        notes.append("The code was read against the plan by a second model, but it was changed afterwards and the final "
+                     "version was not read again by another model: say so in the limitations.")
+    elif f["not_reviewed"]:
+        names = _listed(f["not_reviewed"], NOTE_CAP)
+        notes.append("A second model was asked to compare the code with the plan, and did not check these requirements: "
+                     f"{names}. Say plainly (in the limitations) that they were not checked against the code by another model"
+                     + (", the study's main quantity among them." if f["not_reviewed_headline"] else "."))
+    if f["conflicts"]:
+        listed = _listed([f"{v['text']}" + (f" ({v['note']})" if v.get("note") else "") for v in f["conflicts"]], NOTE_CAP)
         notes.append("A second model found that the PLAN contradicts itself: two of its parts define one thing differently "
                      f"({listed}). This is not a fault of the code. The plan's model was asked to make the plan consistent "
                      "and the code follows the plan as it stands now: say plainly in the limitations that the plan's own "
                      "definitions disagreed, and which one the study used.")
-    unshown = [v for v in flagged if (issues.get(v.get("fid")) or {}).get("outcome") == "not demonstrated"]
-    if unshown:
-        listed = "; ".join(f"{v['text']}" for v in unshown[:6])
+    if f["unshown"]:
+        listed = _listed([f"{v['text']}" for v in f["unshown"]], NOTE_CAP)
         notes.append("A second model flagged these, and FI could not show any of them by a test that fails on the code, so "
                      f"the code was left as it is: {listed}. Say plainly in the limitations that they are unconfirmed.")
-        flagged = [v for v in flagged if v not in unshown]
-    if flagged:
-        listed = "; ".join(f"{v['text']}" + (f" (in {v['file']}" + (f", line {v['line']}" if v.get("line") else "") + ")"
-                                             if v.get("file") else "") + f" [{v.get('severity', 'medium')}]"
-                           for v in flagged[:8])
+    if f["flagged"]:
+        listed = _listed([f"{v['text']}{_where(v, line=True)} [{v.get('severity', 'medium')}]" for v in f["flagged"]], NOTE_CAP)
         notes.append("A second model read how the code computes what the plan says, and the code was sent back to be "
                      f"repaired; it still flags: {listed}. The run's results cannot settle this, and the reader can be wrong: "
                      "say plainly in the limitations that a second model flagged these and they were not resolved, and do "
                      "not present the quantities they concern as established.")
-    if record.get("converged") is False and (flagged or unshown or [v for v in still if v.get("kind") != "logic"]):
+    if f["stopped"]:
         notes.append("The repairs of the second model's findings were stopped because a round did not reduce the open "
                      "findings that change a result; what is open is listed here as it stands.")
-    if not left:
-        return " ".join(notes)
-    names = "; ".join(f"{v['text']} ({'not computed' if v['status'] == MISSING else 'computed differently from the plan'})"
-                      for v in left[:8])
-    return ("A second model compared the code with what the plan requires, and the code was sent back to be repaired; "
-            f"these requirements are still not met: {names}. Say so plainly (in the limitations): a quantity listed as "
-            "not computed was not computed, and do not write a value, a figure or a claim for it.")
+    return " ".join(notes)
+
+
+# ---- the paper's block ---------------------------------------------------------------------------------------------
+
+
+def _plain_text(text: Any) -> str:
+    """One finding's words for the paper: one line, and nothing that could open or close an HTML comment (the engine's
+    own block is found by its markers)."""
+    out = re.sub(r"\s+", " ", str(text or "")).strip()
+    out = out.replace("<!--", "").replace("-->", "")
+    out = out[len("the result reports "):] if out.startswith("the result reports ") else out
+    return out.rstrip(" .;")
+
+
+def findings_block(quest_root: Path, code_dir: Path) -> str:
+    """The paragraph the ENGINE puts into the paper's limitations: what the second model's reading of the code left
+    unresolved on the version that ran, in plain words, from the same record the writer's note (:func:`write_note`) is built
+    from. ``""`` when nothing is open (no record, or every requirement met and no problem flagged). The writer never writes
+    it: whatever it put between the block's markers is removed and this goes in after it has finished
+    (``core/disclosure.py:mark_findings``), so the paper states the open findings even when the writer left them out of its
+    own limitations.
+
+    Its findings are the reader's own sentences, which carry numbers (a tolerance, a size). The number checks
+    (``core/numeric_oracle.py``, ``core/number_provenance.py``, ``core/stat_claims.py``) hold every number in the paper to the
+    run's results, so those numbers must not count as claims of the paper's. They are left out the way every other
+    engine-written block is, but by a checksum of this text in the block's opening marker (``disclosure.strip_for_checks``)
+    and not by a grammar: the block is left out only while it is exactly what this function returned, so it cannot carry a
+    claim of anyone's. No line number is printed (a place in the code is the record's, not the paper's)."""
+    f = open_findings(quest_root, code_dir)
+
+    def names(items: list[dict[str, Any]], *, severity: bool = False) -> list[str]:
+        return [_plain_text(v.get("text")) + _where(v, line=False) + (f" [{v.get('severity') or 'medium'}]" if severity else "")
+                for v in items]
+
+    points: list[str] = []
+    if f["missing"]:
+        points.append("**Not computed.** The plan asks for these quantities and the code does not compute them, so the paper "
+                      f"reports no value for them: {_listed(names(f['missing']), BLOCK_CAP)}.")
+    if f["different"]:
+        points.append("**Not as the plan defines them.** These are in the code, but done differently from the plan, so what "
+                      f"they show may not be what the plan meant: {_listed(names(f['different']), BLOCK_CAP)}.")
+    if f["flagged"]:
+        points.append("**Problems still flagged in how the results are computed** (how serious, as the second model rated "
+                      "it). The repairs did not settle them, the run's results cannot show whether they are real, and the "
+                      "quantities they concern should not be taken as established: "
+                      f"{_listed(names(f['flagged'], severity=True), BLOCK_CAP)}.")
+    if f["unshown"]:
+        points.append("**Flagged, not confirmed.** No test that fails on the code could be written for these, so the code "
+                      f"was left as it is and the points remain open: {_listed(names(f['unshown']), BLOCK_CAP)}.")
+    if f["conflicts"]:
+        points.append("**The plan disagrees with itself.** Two of its parts define one thing differently; the study followed "
+                      f"the plan as it stood at the end: {_listed(names(f['conflicts']), BLOCK_CAP)}.")
+    if f["unread"]:
+        points.append("**The code was not compared with the plan by another model** "
+                      f"({_plain_text(f['unread'])}).")
+    elif f["reread"]:
+        points.append("**The final code was not read again.** A second model read the code against the plan, but the code "
+                      "was changed afterwards and the version that produced these results was not read by another model.")
+    elif f["not_reviewed"]:
+        points.append("**Not checked against the code.** The second model did not check these requirements"
+                      + (" (the study's main quantity among them)" if f["not_reviewed_headline"] else "")
+                      + f": {_listed([_plain_text(x) for x in f['not_reviewed']], BLOCK_CAP)}.")
+    if f["stopped"]:
+        points.append("**Repairs stopped.** They ended because a round did not reduce the open findings that change a "
+                      "result, so what is listed above is open as it stands.")
+    if not points:
+        return ""
+    return ("**Open points in the code that produced these results.** A second model read the code against the plan. "
+            "These points were still open on the version that ran. The second model can be wrong, and none of them was "
+            f"settled by the run; the full record is in `{RECORD.as_posix()}`.\n\n"
+            + "\n\n".join(f"- {p}" for p in points))
+
+
+def review_block(quest_root: Path, code_dir: Path) -> str:
+    """For the paper's reviewer: the same open points as :func:`findings_block`, with how to weigh them (``""`` when none
+    are open). The reviewer reads the paper, in which the engine's block states them, and this tells it what they mean for
+    its judgement."""
+    text = findings_block(quest_root, code_dir)
+    if not text:
+        return ""
+    return ("\n\n## Open points in the code (a second model's reading, not resolved)\n"
+            f"{text}\n\n"
+            "A claim, a figure or a number in the paper that rests on a quantity named here must not be presented as "
+            "established: treat it as a problem to report (a weakness, and a required fix when the paper states it as fact). "
+            "A quantity listed as not computed must not have a value anywhere in the paper. The block above is the engine's "
+            "own text from its records, also printed in the paper's limitations; it is not the writer's and cannot be "
+            "edited, so do not ask for it to be changed.")
 
 
 def plain_lines(record: dict[str, Any]) -> str:

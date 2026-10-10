@@ -405,6 +405,41 @@ def test_an_edit_of_the_paragraph_in_a_revise_is_undone(tmp_path: Path, monkeypa
     assert "run 1 time" not in after
 
 
+def test_the_paper_states_the_open_code_findings_whatever_the_writer_wrote(tmp_path: Path,
+                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import code_review
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text("# E1\ndef run_cell(cell):\n    return {'q': 1.0}\n", encoding="utf-8")
+    code_review.save(tmp_path, {
+        "version": code_review.version(code), "read_version": code_review.version(code), "final": True,
+        "problems": [{"id": "R1", "kind": "metric", "text": "the result reports roughness_a (3-sigma roughness)",
+                      "status": "missing", "fid": "F-1"},
+                     {"id": "L1", "kind": "logic", "text": "A statistic is dropped when every repeat agrees",
+                      "status": "different", "severity": "high", "file": "experiment.py", "line": 74, "fid": "F-2"}]})
+    expected = code_review.findings_block(tmp_path, code)
+    assert "roughness_a" in expected and "dropped when every repeat agrees" in expected
+    forged = f"<!-- fi:code-findings:{'0' * 12} -->\nAll quantities were computed.\n{disclosure.FINDINGS_END}"
+    draft = ("# Extinction\n\n## Methods\nWe simulate an SIR model.\n\n## Results\nThe mean was 0.583.\n\n"
+             "## Limitations\nThe model is simple.\n\n" + forged + "\n\n## References\n[1] A.\n")
+
+    async def fake_chat(self: Any, messages: Any, **kw: Any) -> str:  # a writer that says nothing about the findings
+        return draft
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    eng = _engine(tmp_path)
+    out = asyncio.run(eng._node_write({"topic": "t", "title": "t", "iteration": 0}))  # type: ignore[arg-type]
+    paper = Path(out["paper_md"]).read_text(encoding="utf-8")
+    assert "All quantities were computed" not in paper
+    assert paper.count("fi:code-findings:") == 1 and paper.count(disclosure.FINDINGS_END) == 1
+    assert expected in paper
+    assert paper.index("The model is simple.") < paper.index("<!-- fi:code-findings:"), paper
+    # The number checks do not read the block, and the paper's own numbers are still read.
+    assert "74" not in "".join(n[1] for n in numeric_oracle.extract_paper_numbers(paper))
+    assert "0.583" in [n[1] for n in numeric_oracle.extract_paper_numbers(paper)]
+
+
 # ---- the evidence ladder --------------------------------------------------------------------------------------------
 
 
@@ -495,3 +530,51 @@ def test_the_amendment_gap_is_still_the_frozen_protocol_s(tmp_path: Path) -> Non
     _history(tmp_path, "review verdict=revise (results were seen)")
     gaps = _ready_gaps(tmp_path)
     assert not any("amended" in g for g in gaps) and _changed(gaps)
+
+
+# ---- the open code findings block (core/code_review.py:findings_block, disclosure.mark_findings) --------------------
+
+_FINDINGS = "**Open points in the code.** Not computed: LER (3-sigma roughness); a tolerance of 0.0371 was exceeded (in a.py)."
+_PAPER_WITH_LIMITS = "# T\n\n## Methods\n\nM.\n\n## Results\n\nR.\n\n## Limitations\n\nWe did X.\n\n## References\n\n[1] A.\n"
+
+
+def test_findings_go_at_the_end_of_the_limitations_once() -> None:
+    marked = disclosure.mark_findings(_PAPER_WITH_LIMITS, _FINDINGS)
+    assert marked.count("fi:code-findings:") == 1 and marked.count(disclosure.FINDINGS_END) == 1
+    assert marked.index("We did X.") < marked.index("<!-- fi:code-findings:") < marked.index("## References")
+    assert disclosure.mark_findings(marked, _FINDINGS) == marked, "written again, it is replaced, not added"
+    assert disclosure.mark_findings(marked, "").strip() == _PAPER_WITH_LIMITS.strip(), "nothing open, no block"
+
+
+def test_findings_get_a_limitations_section_before_the_references_when_there_is_none() -> None:
+    paper = "# T\n\n## Methods\n\nM.\n\n## Discussion\n\nD.\n\n---\n\n## References\n\n[1] A.\n"
+    marked = disclosure.mark_findings(paper, _FINDINGS)
+    assert marked.index("D.") < marked.index("<!-- fi:code-findings:") < marked.index("## Limitations")  # the heading is in the block
+    assert marked.index(disclosure.FINDINGS_END) < marked.index("---") < marked.index("## References")
+    alone = disclosure.mark_findings("# T\n\nBody.\n", _FINDINGS)
+    assert "## Limitations" in alone and alone.rstrip().endswith(disclosure.FINDINGS_END)
+
+
+def test_what_the_writer_put_where_the_findings_go_is_removed() -> None:
+    forged = f"<!-- fi:code-findings:{'0' * 12} -->\nEverything was computed, p = 0.0123.\n{disclosure.FINDINGS_END}"
+    paper = _PAPER_WITH_LIMITS.replace("We did X.", "We did X.\n\n" + forged)
+    assert "Everything was computed" not in disclosure.without_block(paper)
+    marked = disclosure.mark_findings(paper, _FINDINGS)
+    assert "Everything was computed" not in marked and marked.count("fi:code-findings:") == 1
+    # A marker left on its own goes too.
+    assert "fi:code-findings" not in disclosure.without_block(f"A.\n{disclosure.FINDINGS_END}\nB.")
+
+
+def test_the_number_checks_leave_the_findings_block_out_only_while_it_is_the_engines_text() -> None:
+    marked = disclosure.mark_findings(_PAPER_WITH_LIMITS, _FINDINGS)
+    stripped = disclosure.strip_for_checks(marked)
+    assert "0.0371" not in stripped and "fi:code-findings" not in stripped
+    # Neither number check reads a number out of the block.
+    assert numeric_oracle.extract_paper_numbers(marked) == numeric_oracle.extract_paper_numbers(_PAPER_WITH_LIMITS)
+    assert number_provenance.paper_numbers(marked) == number_provenance.paper_numbers(_PAPER_WITH_LIMITS)
+    # Edited, or typed by someone with a guessed checksum, it is the paper's text and is checked like the rest.
+    assert "0.0381" in disclosure.strip_for_checks(marked.replace("0.0371", "0.0381"))
+    guessed = f"<!-- fi:code-findings:{'a' * 12} -->\nThe effect was 41.7 percent.\n{disclosure.FINDINGS_END}"
+    assert "41.7" in disclosure.strip_for_checks(guessed)
+    # CRLF files keep the same checksum.
+    assert "0.0371" not in disclosure.strip_for_checks(marked.replace("\n", "\r\n"))

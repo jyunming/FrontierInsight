@@ -268,6 +268,11 @@ same PR that adds, splits or renames one.
   left) and `mark_paper` (at the end of the write node: the paragraph at the end of the methods, else before the
   results); `strip_for_checks` (first in `stat_claims.normalise` and `numeric_oracle.extract_paper_numbers`, so
   `number_provenance` too, and the claim check's copy of the paper: removes the block only when `is_engine_paragraph`);
+  `mark_findings` / `without_block_findings` / `findings_checksum` (the second engine-written block, the paper's open
+  code findings, `<!-- fi:code-findings:<checksum> -->`: at the end of the limitations section, else a new
+  `Limitations` section before the references; `Engine._node_write` applies it after `_mark_best_design`; `without_block`
+  removes it too; `strip_for_checks` leaves it out of the number checks only while its text matches the checksum in the
+  marker, so an edited or forged block is checked like the paper);
   `unconfirmed_gap` / `confirmed_after_last_change` (`evidence.assess`: a revision after results with no confirm run
   after it, read from `.fi/phased.json` `design_revisions_at_confirm`, beyond the `frozen_protocol.post_hoc`
   amendments, is a `publication_ready` gap unless a `_PHASED_GAPS` entry already names the stage; none for a survey).
@@ -555,7 +560,7 @@ same PR that adds, splits or renames one.
   `not_computed` / `headline_missing` / `headline_constant` / `write_note` (what the paper says),
   `constant_in` / `resolve_logic` (the run's results decide a "constant" finding; only a claim they confirm stops), `.fi/code_review.json`. Called by
   `Engine._code_review_gate` (reads, `_repair_review_findings`) in `_node_execute` before the equation gate (`final=False`) and just before the run (`final=True`); the
-  headline stop goes through `_no_results_verdict` and `_node_stuck_no_findings` (reason `headline_missing`).
+  headline stop goes through `_no_results_verdict` and `_node_stuck_no_findings` (reason `headline_missing`). `open_findings` (what is left open on the version that ran, by kind: the one source of `write_note`, `findings_block` and `review_block`; a finding the results contradict is not in it), `write_note` (the writer's note: every kind is named, none dropped because another is present; a list over `NOTE_CAP` says how many more and that `.fi/code_review.json` lists them), `findings_block` (the engine's plain-words block for the paper's limitations, `BLOCK_CAP` per kind, no line numbers, `disclosure.mark_findings`), `review_block` (the same points for the paper's reviewer: `$code_findings_block` of `agents/review.md`, a claim resting on a listed quantity is not established).
 - `core/code_findings.py` — the reader's findings as issues with a stable id: `index_problems` gives each problem a `fid` (a hash of
   the file, the function that holds the line it names, the kind of finding and the planned quantity or requirement; never the
   reader's wording; a finding with no quantity takes the name the code assigns at that line), so a reworded repeat keeps its id and

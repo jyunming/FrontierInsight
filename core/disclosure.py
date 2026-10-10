@@ -23,10 +23,21 @@ checked like the rest of the paper.
 had run, with no confirm run on data or seeds exploration never saw after the last revision (``core/phased.py``),
 keeps the result below ``publication_ready``. It reads whether the confirm run happened (``.fi/phased.json``), not
 whether ``engine.phased`` is set.
+
+The same module holds the second engine-written block, the paper's open code findings (:func:`mark_findings`, its text
+built by ``core/code_review.py``: what a second model's reading of the code left unresolved, put into the limitations
+after the writer has finished, so the paper states it whatever the writer did with the prompt's note). It is between
+``<!-- fi:code-findings:<checksum> -->`` markers. Its words are the findings' own texts, which carry numbers (a
+tolerance, a size, a count), so the grammar check above cannot recognise it. Instead the opening marker carries a
+checksum of the block's text, and :func:`strip_for_checks` leaves the block out of the number checks only while the text
+still matches it: a block that was edited, or one a writer typed with a guessed checksum, is checked like the rest of
+the paper. (The engine removes every block between these markers from a draft before it puts its own in, so a writer's
+block never survives to the checks in the first place.)
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -234,20 +245,48 @@ _HEADING = re.compile(r"^(#{1,6})[ \t]+\S")
 _FRONT_MATTER_KEY = re.compile(r"^[A-Za-z_][\w-]*[ \t]*:")
 
 
-def without_block(markdown: str) -> str:
-    """``markdown`` with every block between the markers, every marker left on its own, and every paragraph under the
-    engine's lead words taken out. Repeated until nothing is left to take out, so taking one piece out cannot join
-    what is around it into a new marker."""
-    def gap(m: re.Match[str]) -> str:
-        # What was before and after the block is left one blank line apart, as two paragraphs are.
-        return "" if m.start() == 0 else "\n" if m.end() == len(m.string) else "\n\n"
+#: The open code findings block (see the module docstring): the checksum of its text is in the opening marker.
+FINDINGS_END = "<!-- /fi:code-findings -->"
+_FINDINGS_OPEN = r"<!-- fi:code-findings(?::[0-9a-f]*)? -->"
+_FINDINGS_ANY = re.compile(r"\n*[ \t]*" + _FINDINGS_OPEN + r".*?" + re.escape(FINDINGS_END) + r"[ \t]*\n*", re.S)
+_FINDINGS_STRAY = re.compile(r"(?:" + _FINDINGS_OPEN + "|" + re.escape(FINDINGS_END) + r")")
+_FINDINGS_BLOCK = re.compile(
+    r"<!-- fi:code-findings:([0-9a-f]{12}) -->[ \t]*\r?\n(.*?)\r?\n[ \t]*" + re.escape(FINDINGS_END), re.S)
 
+
+def findings_checksum(text: str) -> str:
+    """The checksum in the opening marker of the open code findings block: 12 hex digits of the SHA-256 of its text
+    (line ends and outer blank lines not counted)."""
+    return hashlib.sha256(text.replace("\r\n", "\n").strip().encode("utf-8")).hexdigest()[:12]
+
+
+def _gap(m: re.Match[str]) -> str:
+    # What was before and after a block is left one blank line apart, as two paragraphs are.
+    return "" if m.start() == 0 else "\n" if m.end() == len(m.string) else "\n\n"
+
+
+def without_block_findings(markdown: str) -> str:
+    """``markdown`` with only the open code findings block (and any marker of it left on its own) taken out."""
     text = markdown
     while True:
         before = text
-        text = _ANY_BLOCK.sub(gap, text)
+        text = _FINDINGS_ANY.sub(_gap, text)
+        text = _FINDINGS_STRAY.sub("", text)
+        if text == before:
+            return text
+
+
+def without_block(markdown: str) -> str:
+    """``markdown`` with every block between the markers, every marker left on its own, and every paragraph under the
+    engine's lead words taken out. Repeated until nothing is left to take out, so taking one piece out cannot join
+    what is around it into a new marker. The open code findings block (:func:`mark_findings`) goes too."""
+    text = markdown
+    while True:
+        before = text
+        text = _ANY_BLOCK.sub(_gap, text)
         text = _STRAY_MARKER.sub("", text)
-        text = _LEAD_LINE.sub(gap, text)
+        text = _LEAD_LINE.sub(_gap, text)
+        text = without_block_findings(text)
         if text == before:
             return text
 
@@ -319,6 +358,56 @@ def mark_paper(markdown: str, text: str) -> str:
     return "\n".join([*head, *([""] if head else []), *block, *([""] if tail else []), *tail])
 
 
+_LIMITS = re.compile(
+    r"^#{1,6}[ \t]+" + _SECTION_NUMBER + r".*\b(?:limitations?|threats[ \t]+to[ \t]+validity)\b", re.I)
+_BEFORE_END = re.compile(
+    r"^#{1,6}[ \t]+" + _SECTION_NUMBER + r"(?:references|bibliography|further[ \t]+reading|acknowledg|appendix|appendices)",
+    re.I)
+
+
+def mark_findings(markdown: str, body: str, *, heading: str = "Limitations") -> str:
+    """``markdown`` with the open code findings ``body`` (``core/code_review.py:findings_block``) once, between its
+    checksummed markers, at the end of the paper's limitations section (the last heading that names limitations or
+    threats to validity). A paper with none gets a ``heading`` section of its own, before the references (else at the
+    end). Whatever an earlier pass or the writer put between those markers is taken out first; an empty ``body``
+    leaves no block."""
+    markdown = without_block_findings(markdown)
+    if not body.strip():
+        return markdown
+    lines = markdown.split("\n")
+    start = 0
+    if lines and lines[0].strip() == "---" and len(lines) > 1 and _FRONT_MATTER_KEY.match(lines[1]):
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")), None)
+        start = end + 1 if end is not None else 0
+    headings = _headings(lines, start)
+    title_line = next((i for i, lv, _t in headings if lv == 1), None)
+    levels = [lv for i, lv, _t in headings if i != title_line]
+    level = min(levels) if levels else 2
+    text = body.strip("\n")
+    own = [h for h in headings if h[0] != title_line and _LIMITS.match(h[2])]
+    if own:
+        at, lv, _t = own[-1]
+        place = _section_end(headings, at, lv, len(lines))
+    else:
+        text = "#" * level + f" {heading}\n\n" + text
+        refs = next((h for h in headings if h[0] != title_line and h[1] <= level and _BEFORE_END.match(h[2])), None)
+        place = refs[0] if refs else len(lines)
+    if place < len(lines):
+        # The engine's references follow a rule line: the block goes before it.
+        while place > 0 and not lines[place - 1].strip():
+            place -= 1
+        if place > 0 and lines[place - 1].strip() == "---":
+            place -= 1
+    head = lines[:place]
+    while head and not head[-1].strip():
+        head.pop()
+    tail = lines[place:]
+    while tail and not tail[0].strip():
+        tail.pop(0)
+    block = [f"<!-- fi:code-findings:{findings_checksum(text)} -->", text, FINDINGS_END]
+    return "\n".join([*head, *([""] if head else []), *block, *([""] if tail else []), *tail]) + ("" if tail else "\n")
+
+
 # ---- what the number checks leave out ------------------------------------------------------------------------------
 
 _NUM = r"[1-9]\d*"
@@ -357,7 +446,11 @@ def is_engine_paragraph(text: str) -> bool:
 def strip_for_checks(text: str) -> str:
     """``text`` with the engine's paragraph taken out, for the checks that hold the paper's numbers to the results and
     for the claim check. Only a block whose every word is the engine's grammar is taken out; anything else between
-    the markers stays and is checked."""
+    the markers stays and is checked. The open code findings block is left out while its text matches the checksum in
+    its opening marker (:func:`findings_checksum`)."""
+    if "fi:code-findings:" in text:
+        text = _FINDINGS_BLOCK.sub(
+            lambda m: " " if findings_checksum(m.group(2)) == m.group(1) else m.group(0), text)
     if BEGIN not in text:
         return text
     return _BLOCK.sub(lambda m: " " if is_engine_paragraph(m.group(1)) else m.group(0), text)

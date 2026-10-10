@@ -426,3 +426,121 @@ async def test_the_readings_in_a_quest_are_capped(tmp_path: Path) -> None:
         await engine._code_review_gate(STATE, final=True)
     assert len(engine._client.prompts) == cr.MAX_REVIEWS
     assert "readings of the code allowed in a quest" in cr.load(engine.quest_root)["skipped"]
+
+
+# ---- what is left open is stated, in full, in the writer's note and in the paper's own block ---------------------------
+
+
+def _record(tmp_path: Path, *, missing: int = 2, logic: bool = True, **extra: Any) -> tuple[Path, Path]:
+    """A quest folder with a code folder and a finished record for that code: ``missing`` quantities not computed, one
+    planned figure computed differently, and (with ``logic``) one still-flagged high-severity finding, one the tests
+    could not show, one plan conflict and one the results contradict."""
+    root = tmp_path / "q"
+    code = root / "code"
+    code.mkdir(parents=True)
+    (code / "simulate.py").write_text(SIM_FULL, encoding="utf-8")
+    problems: list[dict[str, Any]] = [
+        {"id": f"R{i}", "kind": "metric", "text": f"the result reports metric_{i} (a quantity)", "status": "missing",
+         "headline": False, "fid": f"F-m{i}"} for i in range(missing)]
+    problems.append({"id": "R90", "kind": "figure", "text": "the script draws the planned figure shape.png",
+                     "status": "different", "file": "experiment.py", "line": 5, "fid": "F-d"})
+    if logic:
+        problems += [
+            {"id": "L1", "kind": "logic", "text": "A statistic is set to None when every repeat agrees", "status": "different",
+             "file": "experiment.py", "line": 74, "severity": "high", "fid": "F-l1"},
+            {"id": "L2", "kind": "logic", "text": "The generator ignores the seed of the case", "status": "different",
+             "file": "simulate.py", "line": 46, "severity": "low", "fid": "F-l2"},
+            {"id": "L3", "kind": "logic", "text": "Two definitions of one thing disagree", "status": "different",
+             "plan_conflict": True, "note": "the plan defines it twice", "fid": "F-l3"},
+            {"id": "L4", "kind": "logic", "text": "The results are declared constant", "status": "different",
+             "contradicted": True, "fid": "F-l4"},
+        ]
+    rec = {"version": cr.version(code), "read_version": cr.version(code), "final": True, "problems": problems,
+           "issues": {"F-l2": {"outcome": "not demonstrated"}}, "converged": False, **extra}
+    cr.save(root, rec)
+    return root, code
+
+
+def test_the_note_names_every_kind_of_open_finding_not_only_the_missing_quantities(tmp_path: Path) -> None:
+    root, code = _record(tmp_path)
+    note = cr.write_note(root, code)
+    assert "metric_0" in note and "metric_1" in note and "not computed" in note
+    assert "planned figure shape.png" in note and "computed differently from the plan" in note
+    assert "A statistic is set to None" in note and "[high]" in note, "a flagged logic problem next to missing quantities"
+    assert "The generator ignores the seed" in note and "unconfirmed" in note, "a finding no test could show"
+    assert "Two definitions of one thing disagree" in note and "contradicts itself" in note
+    assert "declared constant" not in note, "a finding the results contradict is not said"
+    assert "stopped because a round did not reduce" in note
+    # The same facts without the requirement findings still all appear.
+    root2, code2 = _record(tmp_path / "b", missing=0)
+    assert "A statistic is set to None" in cr.write_note(root2, code2)
+
+
+def test_a_long_list_in_the_note_says_how_many_more_there_are_and_where(tmp_path: Path) -> None:
+    root, code = _record(tmp_path, missing=14)
+    note = cr.write_note(root, code)
+    shown = [i for i in range(14) if f"metric_{i} " in note]
+    assert len(shown) == cr.NOTE_CAP - 1 or len(shown) == cr.NOTE_CAP, "the note keeps a cap for the prompt's size"
+    assert f"and {14 + 1 - cr.NOTE_CAP} more (all are listed in .fi/code_review.json)" in note
+    block = cr.findings_block(root, code)
+    assert all(f"metric_{i} " in block for i in range(14)), "the paper's block has room for all of them"
+    assert "more (all are listed" not in block
+    big, bcode = _record(tmp_path / "big", missing=cr.BLOCK_CAP + 5)
+    assert "and 5 more (all are listed in .fi/code_review.json)" in cr.findings_block(big, bcode)
+
+
+def test_the_block_lists_each_kind_in_plain_words_and_has_no_line_numbers(tmp_path: Path) -> None:
+    root, code = _record(tmp_path)
+    block = cr.findings_block(root, code)
+    assert "**Not computed.**" in block and "metric_0 (a quantity)" in block and "the result reports" not in block
+    assert "**Problems still flagged" in block and "[high]" in block and "(in experiment.py)" in block
+    assert "line 74" not in block and "line 5" not in block
+    assert "**Flagged, not confirmed.**" in block and "**The plan disagrees with itself.**" in block
+    assert "declared constant" not in block
+    assert ".fi/code_review.json" in block
+    # Nothing open, no block.
+    assert cr.findings_block(tmp_path / "nowhere", tmp_path / "nowhere" / "code") == ""
+    clean, ccode = _record(tmp_path / "c", missing=0, logic=False)
+    rec = cr.load(clean)
+    rec["problems"] = []
+    rec["converged"] = True
+    cr.save(clean, rec)
+    assert cr.findings_block(clean, ccode) == "" and cr.write_note(clean, ccode) == ""
+
+
+def test_the_block_says_when_the_code_was_not_read_or_not_read_again(tmp_path: Path) -> None:
+    root, code = _record(tmp_path, missing=0, logic=False)
+    rec = cr.load(root)
+    rec["problems"] = []
+    cr.save(root, rec)
+    (code / "simulate.py").write_text(SIM_OTHER, encoding="utf-8")
+    assert "not read again" in cr.findings_block(root, code)
+    rec = cr.load(root)
+    rec.pop("read_version")
+    rec["skipped"] = "the reader is the model that wrote the code"
+    cr.save(root, rec)
+    assert "not compared with the plan by another model" in cr.findings_block(root, code)
+    assert "the reader is the model that wrote the code" in cr.findings_block(root, code)
+
+
+def test_a_finding_cannot_open_or_close_the_blocks_comment(tmp_path: Path) -> None:
+    root, code = _record(tmp_path, missing=0, logic=False)
+    rec = cr.load(root)
+    rec["problems"] = [{"id": "L1", "kind": "logic", "text": "x <!-- /fi:code-findings --> y\n\nz", "status": "different",
+                        "severity": "high", "fid": "F-x"}]
+    cr.save(root, rec)
+    block = cr.findings_block(root, code)
+    assert "<!--" not in block.replace("<!-- fi", "") and "-->" not in block and "\n\nz" not in block
+
+
+def test_the_reviewer_is_given_the_open_points(tmp_path: Path) -> None:
+    root, code = _record(tmp_path)
+    text = cr.review_block(root, code)
+    assert "Open points in the code" in text and "metric_0" in text and "must not be presented as established" in text
+    assert cr.review_block(tmp_path / "nowhere", tmp_path / "nowhere" / "code") == ""
+    from string import Template
+
+    template = Template((Path(__file__).resolve().parent.parent / "agents" / "review.md").read_text(encoding="utf-8"))
+    names = dict.fromkeys(["topic", "clarify_block", "design_block", "analysis_block", "claim_grounding_block",
+                           "figure_check_block", "foundational_check_block", "user_feedback_block", "paper_md"], "")
+    assert "metric_1" in template.substitute(**names, code_findings_block=text)
