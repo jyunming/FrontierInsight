@@ -574,13 +574,24 @@ def test_a_check_named_in_an_open_finding_is_flagged_and_the_others_are_not(tmp_
 
 def test_the_name_is_matched_whatever_its_case_punctuation_or_underscores(tmp_path: Path) -> None:
     root, code = _with_finding(tmp_path, "The grid-convergence CHECK returns a constant instead of running the grids.")
-    assert list(cr.flagged_checks(root, code, CHECKS)) == ["Grid_Convergence_Check"]
+    assert list(cr.flagged_checks(root, code, CHECKS[:3])) == ["Grid_Convergence_Check"]
 
 
 def test_a_finding_that_only_shares_common_words_with_a_check_does_not_match(tmp_path: Path) -> None:
-    root, code = _with_finding(tmp_path, "The convergence of the grid is never tested, and no check of the zero count is made; "
-                                         "absorption is a closed form.")
-    assert cr.flagged_checks(root, code, CHECKS) == {}, "'convergence' alone, or words far apart, are not a name"
+    root, code = _with_finding(tmp_path, "The grid is never refined, no check of the zero count is made; absorption is a closed form.")
+    assert cr.flagged_checks(root, code, CHECKS) == {}, "words of a multi-word name far apart, or only some of them, are not a name"
+    root2, code2 = _with_finding(tmp_path / "b", "The grid size never changes, so the convergence check is vacuous.")
+    assert cr.flagged_checks(root2, code2, ["Grid_Convergence_Check"]) == {}, "two of the three words, not in order"
+
+
+def test_a_one_word_check_name_matches_only_as_a_whole_word_whatever_its_case(tmp_path: Path) -> None:
+    root, code = _with_finding(tmp_path, "The Convergence test returns a constant instead of running the grids.")
+    assert list(cr.flagged_checks(root, code, ["convergence", "Absorption"])) == ["convergence"], "case does not matter"
+    # The rule is the exact word: a one-word check named "Convergence" IS named by "Grid convergence ..." (the word is there).
+    root2, code2 = _with_finding(tmp_path / "b", "Grid convergence is computed from a closed form.")
+    assert list(cr.flagged_checks(root2, code2, ["Convergence"])) == ["Convergence"]
+    root3, code3 = _with_finding(tmp_path / "c", "The Grid_Convergence_Check is a constant.")
+    assert cr.flagged_checks(root3, code3, ["Convergence"]) == {}, "a longer name does not hold the one-word name as a word"
 
 
 def test_a_fixed_or_contradicted_finding_does_not_flag_the_check(tmp_path: Path) -> None:
@@ -591,9 +602,7 @@ def test_a_fixed_or_contradicted_finding_does_not_flag_the_check(tmp_path: Path)
     rec["problems"] = []  # the final reading no longer flags it
     cr.save(root2, rec)
     assert cr.flagged_checks(root2, code2, CHECKS) == {}
-    root3, code3 = _with_finding(tmp_path / "c", FAKED)
-    (code3 / "simulate.py").write_text(SIM_FULL + "# changed after the reading\n", encoding="utf-8")
-    assert cr.flagged_checks(root3, code3, CHECKS) == {}, "a record for other code says nothing about this code"
+
 
 
 def test_a_flagged_check_is_not_counted_by_the_note_the_criteria_or_the_evidence_helpers() -> None:
@@ -615,5 +624,42 @@ def test_a_flagged_check_is_not_counted_by_the_note_the_criteria_or_the_evidence
              {"name": "absorption", "oracle": "Absorption_Check", "use": "error", "direction": "lower", "tolerance": 0.01,
               "target": 0.0}]
     rows = {r["name"]: r for r in crit.evaluate(items, judged=marked, series={})}
-    assert rows["grid"]["counts"] is False and rows["grid"]["met"] is None and "not shown" in rows["grid"]["why"]
+    assert rows["grid"]["counts"] is True and rows["grid"]["met"] is False and "not shown" in rows["grid"]["why"]
+    from core import improve as imp
+
+    assert not imp.all_met(list(rows.values())), "a flagged check is an unmet check, so the improve loop does not stop as done"
+    only = [rows["grid"]]
+    assert not imp.all_met(only) and imp.counted(only) == only
+    assert "not shown" in crit.summary_line(list(rows.values()))
     assert rows["absorption"]["counts"] is True and rows["absorption"]["met"] is True
+
+
+def test_a_flag_sticks_to_later_versions_until_a_newer_reading_clears_it(tmp_path: Path) -> None:
+    root, code = _with_finding(tmp_path, FAKED)
+    (code / "simulate.py").write_text(SIM_FULL + "# version B, an improve round, nobody read it\n", encoding="utf-8")
+    assert list(cr.flagged_checks(root, code, CHECKS)) == ["Grid_Convergence_Check"], "no new reading: still flagged"
+    rec = cr.load(root)  # a newer reading of version B that no longer flags it
+    rec.update(version=cr.version(code), read_version=cr.version(code), problems=[], final=True)
+    cr.save(root, rec)
+    assert cr.flagged_checks(root, code, CHECKS) == {}
+    # a reading that failed keeps the earlier reading's findings
+    root2, code2 = _with_finding(tmp_path / "b", FAKED)
+    rec2 = cr.load(root2)
+    rec2["read_problems"] = rec2.pop("problems")
+    cr.save(root2, rec2)
+    assert list(cr.flagged_checks(root2, code2, CHECKS)) == ["Grid_Convergence_Check"]
+
+
+def test_an_improve_round_cannot_keep_a_version_by_passing_a_flagged_check(tmp_path: Path) -> None:
+    from core import criteria as crit
+    from core import improve as imp
+    from core.engine import _oracle_with_reader_flags
+
+    root, code = _with_finding(tmp_path, FAKED)
+    (code / "simulate.py").write_text(SIM_FULL + "# version B\n", encoding="utf-8")
+    judged = [{"name": "Grid_Convergence_Check", "value": 0.0, "expected": 0.0, "limit": 0.01, "passed_by_engine": True,
+               "measured_by": "engine"}]
+    items = [{"name": "grid", "oracle": "Grid_Convergence_Check", "use": "error", "direction": "lower", "tolerance": 0.01,
+              "target": 0.0}]
+    rows = crit.evaluate(items, judged=_oracle_with_reader_flags(root, judged), series={})
+    assert rows[0]["counts"] is True and rows[0]["met"] is False and not imp.all_met(rows)

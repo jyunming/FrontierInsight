@@ -462,7 +462,7 @@ def repair_problem(old: str, new: str, rel: str, *, equations: list[str], packag
 
 #: What a record keeps from one code version to the next (the quest-wide counters and the history of the readings).
 CARRIED = ("reviews_total", "send_backs", "repair_calls", "finding_calls", "test_calls", "readings", "converged", "repaired",
-           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts")
+           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts", "read_problems")
 
 
 def carried(record: dict[str, Any]) -> dict[str, Any]:
@@ -966,11 +966,11 @@ def _words(text: Any) -> list[str]:
 def _names_check(finding: str, name: str) -> bool:
     """Whether ``finding`` names the check ``name``: the check's words appear in it one after the other (``Grid_Convergence_Check``
     is named by "the grid convergence check", not by "grid" and "check" far apart). A check with a one-word name is
-    named only when that word is written exactly as the name is (a common word such as ``Convergence`` is not a name)."""
+    named only when that word, as a whole word (case does not matter), is in the finding."""
     want = _words(name)
     if not want:
         return False
-    if len(want) == 1 and str(name).strip() not in re.findall(r"\w+", str(finding)):
+    if len(want) == 1 and str(name).strip().lower() not in (w.lower() for w in re.findall(r"\w+", str(finding))):
         return False
     have = _words(finding)
     return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
@@ -980,15 +980,28 @@ def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[s
     """The checks of correctness (``names``) that an OPEN finding of the second model's reading of the code concerns, as
     ``{name: the finding in its own words}`` (no line number). A check is evidence only if the code that computes its measure
     is not itself flagged: a check whose measure the code fakes (a closed form put where the simulation should run) passes
-    whatever the simulation does. A finding counts only while it is open on the version that ran (:func:`open_findings`:
-    not one the run's results contradict, not one the repairs settled, none when the record is for other code), and a
+    whatever the simulation does.
+
+    A flag sticks: the findings of the latest reading stay open for every later version of the code (a repair, a round of
+    the improve loop) until a newer reading, one of that later version, no longer flags the check; a version nobody has
+    read yet is not trusted more than the one that was. A finding the run's results contradict is not open, and a
     contradiction in the plan is not a fault of the code. A finding concerns a check only when it names it
     (:func:`_names_check`); a likeness of words is not a match. Reads the record only."""
     if not names:
         return {}
-    f = open_findings(quest_root, code_dir)
+    record = load(quest_root)
+    if not record:
+        return {}
+    if "problems" in record:
+        if record.get("version") == version(code_dir) and not record.get("final"):
+            return {}  # a reading in progress: the gate has not finished with this version
+        found = record["problems"]
+    else:
+        found = record.get("read_problems")  # the latest reading's findings survive a reading that failed
     out: dict[str, str] = {}
-    for v in [*f["flagged"], *f["unshown"], *f["different"], *f["missing"]]:
+    for v in found if isinstance(found, list) else []:
+        if not isinstance(v, dict) or v.get("contradicted") or v.get("plan_conflict"):
+            continue
         text = _plain_text(v.get("text"))
         for name in names:
             if name not in out and _names_check(f"{v.get('text') or ''}", str(name)):

@@ -11020,6 +11020,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         record["logic"] = logic
         record["checked"] = listed[:40]
         record["problems"] = [*_code_review.problems(verdicts), *logic]
+        record["read_problems"] = list(record["problems"])  # carried: a later reading that fails does not lose the flags
         _code_review.note_reading(record, version, record["problems"], code)
         self._log.info("[code_review] %s; %s", _code_review.plain_lines(record), _code_review.metrics_line(record))
         if not record["problems"]:
@@ -12925,7 +12926,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     env=env, thresholds=thresholds, case_env=dict(env),
                 )
                 problems += found
-                judged = _oracle.judged(oracles, {"checks": checks, "engine_measured": True})
+                judged = _oracle_with_reader_flags(
+                    root, _oracle.judged(oracles, {"checks": checks, "engine_measured": True}))
             except Exception as e:  # noqa: BLE001 -- a round that cannot run is a round that measured nothing
                 problems.append(f"the known-answer cases could not be run: {e!r}"[:300])
                 why_missing["oracle"] = "the known-answer cases could not be run"
@@ -19380,7 +19382,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 comparison_stats=comparison_stats,
                 config=config_dump,
                 design=state.get("design") or {},
-                oracle_checks=_oracle.last_judged(self._oracle_record_read()),
+                oracle_checks=self._judged_checks(),
                 n_seeds=len(replicates),
                 optimisation=(_best_report.records(self.quest_root)
                               if _optimise.block_of(self._protocol_block(state)) is not None else None),

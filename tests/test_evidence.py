@@ -810,5 +810,9 @@ def test_a_check_the_code_reader_flags_is_not_independent_evidence(tmp_path: Pat
     got = evidence.assess(root, _state(), settings=ON)
     assert got["status"] == "protocol_runtime_matched"
     assert any("the check 'closed form' is not shown: a second model found" in g and "line" not in g for g in got["gaps"]), got["gaps"]
-    (code / "simulate.py").write_text("def run_trial(seed):\n    return {'x': 1}\n", encoding="utf-8")  # other code: no claim about it
+    (code / "simulate.py").write_text("def run_trial(seed):\n    return {'x': 1}\n", encoding="utf-8")  # a later version, not read again
+    assert evidence.assess(root, _state(), settings=ON)["status"] == "protocol_runtime_matched", "the flag sticks"
+    rec = code_review.load(root)  # a newer reading of that version no longer flags it
+    rec.update(version=code_review.version(code), read_version=code_review.version(code), problems=[], final=True)
+    code_review.save(root, rec)
     assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"
