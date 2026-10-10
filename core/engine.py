@@ -2197,6 +2197,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                         f"the model could not be used ({gone}); nothing this step decided was kept. Resume the quest "
                         "when the model can be used again (after its usage limit resets).")
             except GraphBubbleUp as e:
+                if isinstance(e, GraphInterrupt) and (gone := self.__dict__.pop("_provider_unavailable", None)):
+                    # A pause that follows a call its model could not take (r4: "the settings to vary could not be
+                    # read" after the plan's model hit its usage limit) asks a person about a question never answered:
+                    # the step stops instead, and runs again on resume.
+                    error = ModelUnavailable(
+                        f"the model could not be used ({gone}); nothing this step decided was kept. Resume the quest "
+                        "when the model can be used again (after its usage limit resets).")
+                    self._audit("node_failed", node=name, error=f"{type(error).__name__}: {error}")
+                    raise error from None
                 if isinstance(e, GraphInterrupt):
                     self._audit("node_paused", node=name, pause=self._audit_pause)
                 raise
@@ -20904,11 +20913,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             node: str = "",
         ) -> str:
             assert self._client is not None
-            text, served = await self._recorded_call(
-                node, messages,
-                lambda: self._client.chat(messages, temperature=temperature, model=model, node=node),
-                requested_model=model,
-            )
+            before = self.__dict__.get("_provider_unavailable")
+            try:
+                text, served = await self._recorded_call(
+                    node, messages,
+                    lambda: self._client.chat(messages, temperature=temperature, model=model, node=node),
+                    requested_model=model,
+                )
+            except Exception:
+                # A member that cannot be used is left out by design (the merger sees the others; all failing raises),
+                # so its usage limit does not stop the step.
+                if before is None:
+                    self.__dict__.pop("_provider_unavailable", None)
+                else:
+                    self.__dict__["_provider_unavailable"] = before
+                raise
             # This call's own model and counts (LAST_CALL is the task's own record); the client's shared attributes
             # only when the transport set nothing.
             self._log_chat_cost(

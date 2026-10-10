@@ -74,3 +74,33 @@ async def test_a_step_whose_calls_answer_is_kept_and_an_earlier_limit_does_not_l
     eng.__dict__["_provider_unavailable"] = "plan_revise: an earlier step's limit"
     step = eng._audited("plan", lambda state: _swallowing_step(eng))
     assert (await step({}))["decided"] == "went on"
+
+
+@pytest.mark.asyncio
+async def test_a_pause_after_a_call_its_model_could_not_take_is_a_stop_not_a_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langgraph.errors import GraphInterrupt
+
+    eng = _engine(tmp_path, monkeypatch, _Limited())
+
+    async def asks_a_person(state: Any) -> dict[str, Any]:
+        await _swallowing_step(eng)
+        raise GraphInterrupt(())  # r4 euv: "Waiting for you: the settings to vary could not be read"
+
+    with pytest.raises(ModelUnavailable):
+        await eng._audited("plan", asks_a_person)({})
+
+
+@pytest.mark.asyncio
+async def test_a_real_pause_is_still_a_pause(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from langgraph.errors import GraphInterrupt
+
+    eng = _engine(tmp_path, monkeypatch, _Fine())
+
+    async def asks_a_person(state: Any) -> dict[str, Any]:
+        await _swallowing_step(eng)
+        raise GraphInterrupt(())
+
+    with pytest.raises(GraphInterrupt):
+        await eng._audited("plan", asks_a_person)({})
