@@ -544,3 +544,5 @@ def test_the_reviewer_is_given_the_open_points(tmp_path: Path) -> None:
     names = dict.fromkeys(["topic", "clarify_block", "design_block", "analysis_block", "claim_grounding_block",
                            "figure_check_block", "foundational_check_block", "user_feedback_block", "paper_md"], "")
     assert "metric_1" in template.substitute(**names, code_findings_block=text)
+    empty = template.substitute(**names, code_findings_block="")
+    assert "Open points in the code (a second model" not in empty and "$" not in empty.replace("$$", "")

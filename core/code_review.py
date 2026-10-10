@@ -1045,8 +1045,9 @@ def findings_block(quest_root: Path, code_dir: Path) -> str:
 
     points: list[str] = []
     if f["missing"]:
-        points.append("**Not computed.** The plan asks for these quantities and the code does not compute them, so the paper "
-                      f"reports no value for them: {_listed(names(f['missing']), BLOCK_CAP)}.")
+        points.append("**Not computed.** The plan asks for these quantities and the second model found that the code does "
+                      "not compute them, so no value for them is established by this study: "
+                      f"{_listed(names(f['missing']), BLOCK_CAP)}.")
     if f["different"]:
         points.append("**Not as the plan defines them.** These are in the code, but done differently from the plan, so what "
                       f"they show may not be what the plan meant: {_listed(names(f['different']), BLOCK_CAP)}.")

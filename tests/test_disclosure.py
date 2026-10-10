@@ -416,7 +416,7 @@ def test_the_paper_states_the_open_code_findings_whatever_the_writer_wrote(tmp_p
         "version": code_review.version(code), "read_version": code_review.version(code), "final": True,
         "problems": [{"id": "R1", "kind": "metric", "text": "the result reports roughness_a (3-sigma roughness)",
                       "status": "missing", "fid": "F-1"},
-                     {"id": "L1", "kind": "logic", "text": "A statistic is dropped when every repeat agrees",
+                     {"id": "L1", "kind": "logic", "text": "A statistic is dropped when every repeat agrees, below 0.125",
                       "status": "different", "severity": "high", "file": "experiment.py", "line": 74, "fid": "F-2"}]})
     expected = code_review.findings_block(tmp_path, code)
     assert "roughness_a" in expected and "dropped when every repeat agrees" in expected
@@ -436,7 +436,9 @@ def test_the_paper_states_the_open_code_findings_whatever_the_writer_wrote(tmp_p
     assert expected in paper
     assert paper.index("The model is simple.") < paper.index("<!-- fi:code-findings:"), paper
     # The number checks do not read the block, and the paper's own numbers are still read.
-    assert "74" not in "".join(n[1] for n in numeric_oracle.extract_paper_numbers(paper))
+    assert "0.125" in expected
+    assert "0.125" not in [n[1] for n in numeric_oracle.extract_paper_numbers(paper)]
+    assert "0.125" in [n[1] for n in numeric_oracle.extract_paper_numbers(paper.replace("<!-- fi:code-findings:", "<!-- x:"))],         "a block that is not the engine's is read like the rest of the paper"
     assert "0.583" in [n[1] for n in numeric_oracle.extract_paper_numbers(paper)]
 
 

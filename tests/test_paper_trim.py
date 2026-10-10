@@ -553,3 +553,18 @@ def test_the_review_reads_the_grounding_of_the_paper_it_reads(tmp_path: Path, mo
     ledger = json.loads((tmp_path / "paper" / "claims.json").read_text(encoding="utf-8"))
     assert ledger["total"] == 1 and ledger["unsupported"] == []
     assert [node for node, _p in calls].count("write.trim") == 1
+
+
+def test_the_engine_block_of_open_code_findings_is_never_offered() -> None:
+    from core import disclosure
+
+    body = ("**Open points in the code that produced these results.** A second model read the code against the plan. "
+            "Their wording is plain and some of them are about the way the figures were drawn from the data. "
+            "A third sentence says that the reader can be wrong about any of these points in the end.")
+    paper = disclosure.mark_findings(_paper(), body)
+    assert "<!-- fi:code-findings:" in paper
+    texts = _texts(paper)
+    joined = " ".join(texts)
+    assert "A third sentence says that the reader can be wrong" not in joined
+    assert not any(t.lstrip().startswith("<") for t in texts), "no piece of a marker is offered"
+    assert "A further limitation of the study" in joined, "the writer's own sentences are still offered"
