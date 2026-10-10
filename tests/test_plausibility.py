@@ -392,3 +392,28 @@ def test_a_failure_count_the_protocol_names_may_be_zero_everywhere() -> None:
     named = {**rate, "protocol": {"failure_policy": "Failures are counted in `rate`."}}
     assert _zero_expected_paths({**state, "design": prose}) == set()
     assert _zero_expected_paths({**state, "design": named}) == {"rate"}
+
+
+def test_the_path_index_picks_the_leaves_matches_picks_in_result_order() -> None:
+    from core.plausibility import _matches, _PathIndex
+
+    paths = ["cd_nm", "sweep[0].cd_nm", "sweep[1].cd_nm", "a.b.cd_nm", "cd_nm_x", "sweep[2]", "x.cd", "LER_values[3]",
+             "by.cd_nm.y", "<root>", "a.b"]
+    index = _PathIndex(paths)
+    for a in ["cd_nm", "cd_nm.*", "sweep[0].cd_nm", "a.b", "a.b.*", "cd", "y", "LER_values", "missing", "sweep[2]"]:
+        assert index.matching(a) == [i for i, p in enumerate(paths) if _matches(a, p)], a
+        assert index.any_match(a) == any(_matches(a, p) for p in paths), a
+
+
+def test_a_result_with_a_million_values_is_checked_in_seconds() -> None:
+    import time
+
+    from core.plausibility import Assertion, violations
+
+    result = {"mean_ler": 2.0, "ler_values": [1.0] * 500_000, "cells": [{"ler": 1.0, "p": 0.1} for _ in range(100_000)]}
+    assertions = [Assertion(path=f"q{i}", min=0.0, max=1.0, unit="", reason="") for i in range(30)]
+    assertions.append(Assertion(path="ler", min=0.0, max=0.5, unit="", reason=""))
+    started = time.monotonic()
+    found = violations(result, assertions)
+    assert time.monotonic() - started < 30
+    assert len([v for v in found if v.assertion.path == "ler"]) == 100_000
