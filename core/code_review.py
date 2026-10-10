@@ -958,6 +958,44 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     return out
 
 
+def _words(text: Any) -> list[str]:
+    """The lower-case alphanumeric words of ``text``; case, punctuation and underscores do not matter."""
+    return re.findall(r"[a-z0-9]+", str(text).lower())
+
+
+def _names_check(finding: str, name: str) -> bool:
+    """Whether ``finding`` names the check ``name``: the check's words appear in it one after the other (``Grid_Convergence_Check``
+    is named by "the grid convergence check", not by "grid" and "check" far apart). A check with a one-word name is
+    named only when that word is written exactly as the name is (a common word such as ``Convergence`` is not a name)."""
+    want = _words(name)
+    if not want:
+        return False
+    if len(want) == 1 and str(name).strip() not in re.findall(r"\w+", str(finding)):
+        return False
+    have = _words(finding)
+    return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
+
+
+def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[str, str]:
+    """The checks of correctness (``names``) that an OPEN finding of the second model's reading of the code concerns, as
+    ``{name: the finding in its own words}`` (no line number). A check is evidence only if the code that computes its measure
+    is not itself flagged: a check whose measure the code fakes (a closed form put where the simulation should run) passes
+    whatever the simulation does. A finding counts only while it is open on the version that ran (:func:`open_findings`:
+    not one the run's results contradict, not one the repairs settled, none when the record is for other code), and a
+    contradiction in the plan is not a fault of the code. A finding concerns a check only when it names it
+    (:func:`_names_check`); a likeness of words is not a match. Reads the record only."""
+    if not names:
+        return {}
+    f = open_findings(quest_root, code_dir)
+    out: dict[str, str] = {}
+    for v in [*f["flagged"], *f["unshown"], *f["different"], *f["missing"]]:
+        text = _plain_text(v.get("text"))
+        for name in names:
+            if name not in out and _names_check(f"{v.get('text') or ''}", str(name)):
+                out[name] = text
+    return out
+
+
 def _where(v: dict[str, Any], *, line: bool) -> str:
     if not v.get("file"):
         return ""

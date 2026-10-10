@@ -373,8 +373,20 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
     return out
 
 
+def _flagged_check_problems(q: _Quest) -> list[dict[str, str]]:
+    """The known-answer checks that passed but that a second model's reading of the code flags as computed by flagged code:
+    not shown, so they do not count as evidence (``core/code_review.py:flagged_checks``)."""
+    from . import code_review as _cr
+    from . import oracle_check as _oc
+
+    names = [str(j["name"]) for j in _oc.last_judged(q.oracle_check)]
+    return [_problem("run", f"the check {n!r} is {_oc.not_shown_words(text)}", "a second model reading the code", "not fixed",
+                     ".fi/code_review.json")
+            for n, text in _cr.flagged_checks(q.root, q.root / "code", names).items()]
+
+
 def _run_problems(q: _Quest) -> list[dict[str, str]]:
-    out = _oracle_problems(q)
+    out = [*_oracle_problems(q), *_flagged_check_problems(q)]
     crashes = q.decisions("execute_reflect")
     retries = [d for d in crashes if str(d.get("chosen")) == "retry"]
     ended_ok = bool(crashes) and str(crashes[-1].get("chosen")) == "proceed"

@@ -12654,7 +12654,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     self._log.warning("[criteria] not computed: %s", note)
             trial_mode = bool(getattr(self, "_trial_mode", False))
             why_missing: dict[str, str] = {}
-            judged = _oracle.last_judged(self._oracle_record_read())
+            judged = self._judged_checks()
             if not judged:
                 why_missing["oracle"] = ("the checks against known answers are off (engine.oracle_check: off)"
                                          if self.config.engine.oracle_check == "off" else
@@ -13287,6 +13287,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except (OSError, ValueError):
             return None
         return record if isinstance(record, dict) else None
+
+    def _judged_checks(self) -> list[dict[str, Any]]:
+        """The engine's verdicts on the plan's checks of the last gate, with the checks that a second model's reading of the
+        code flags marked (``core/code_review.py:flagged_checks``): the one list the note to the analysis and the criteria read."""
+        return _oracle_with_reader_flags(self.quest_root, _oracle.last_judged(self._oracle_record_read()))
 
     def _oracle_record(self, payload: dict[str, Any]) -> None:
         try:
@@ -16687,7 +16692,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 + stdout_for_analyze
             )
         # The engine's own oracle verdicts: the script's results may re-judge the same oracles with a stale tolerance.
-        stdout_for_analyze = _oracle.analysis_note(_oracle.last_judged(self._oracle_record_read())) + stdout_for_analyze
+        stdout_for_analyze = _oracle.analysis_note(self._judged_checks()) + stdout_for_analyze
         # Read the ACTUAL contents of any user-dropped data (the pause-drop
         # gate writes to inputs/data/). Previously only the file PATHS were
         # surfaced, so analyze never saw the numbers — a dropped latency.csv
@@ -24079,12 +24084,21 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
         record = None
     # The engine's own oracle verdicts: a real run's script re-read its oracle results from the wrong folder and
     # reported them failed, and the check called the paper's true "every oracle passed" unsupported.
-    oracle_note = _oracle.analysis_note(_oracle.last_judged(record)).strip()
+    oracle_note = _oracle.analysis_note(_oracle_with_reader_flags(quest_root, _oracle.last_judged(record))).strip()
     if oracle_note:
         parts.append(oracle_note.replace("[FI NOTE] ", "", 1).replace("the results below", "the results above"))
     if state.get("figures"):
         parts.append("What each figure draws:\n" + _figure_list_for_prompt(state))
     return "\n\n".join(parts) or "(nothing recorded)"
+
+
+def _oracle_with_reader_flags(quest_root: Path, judged: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``judged`` with each check marked that an open finding of the second model's reading of the code concerns."""
+    try:
+        flagged = _code_review.flagged_checks(quest_root, quest_root / "code", [str(j.get("name")) for j in judged])
+    except Exception:  # noqa: BLE001 - a record that cannot be read marks nothing; it never loosens a check
+        return judged
+    return _oracle.with_reader_flags(judged, flagged)
 
 
 def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str], *, readings: str = "") -> str:

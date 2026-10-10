@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from . import acceptance as _acceptance
+from . import code_review as _code_review
 from . import disclosure as _disclosure
 from . import frozen_protocol as _frozen
 from . import optimise as _optimise
@@ -528,6 +529,12 @@ def assess(
             "(run the experiment again so FI checks them)"
         )
     if protocol is not None:
+        # A check is evidence only if the code that computes its measure is not itself flagged: a second model's open
+        # finding that names the check (core/code_review.py:flagged_checks) leaves it not shown, whatever it recorded.
+        judged_names = [str(j["name"]) for j in _oracle_check.last_judged(oracle_record)]
+        for n, finding in _code_review.flagged_checks(
+                quest_root, quest_root / "code", [*(str(o["name"]) for o in _oracle_check.declared(protocol)), *judged_names]).items():
+            valid_gaps.append(f"the check '{n}' is {_oracle_check.not_shown_words(finding)}")
         # An expected value nobody can trace (no reference, or a source this quest did not retrieve) is the plan's word
         # only: a check that agrees with it shows the script agrees with the plan, not that either is right.
         valid_gaps.extend(

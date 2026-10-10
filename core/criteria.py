@@ -381,6 +381,11 @@ def evaluate(items: list[dict[str, Any]], *, judged: list[dict[str, Any]], serie
                 why = "" if value is not None else f"the check {c['oracle']!r} has no expected value"
                 if value is not None:
                     measured_by = "FI" if j.get("measured_by") == "engine" else "the script"
+                if value is not None and j.get("flagged_by_reader"):
+                    # A second model found that the code computing this check's measure is flagged: shown, never counted.
+                    measured_by = "a flagged check"
+                    why = ("not shown: a second model found that the code that computes this check is flagged ("
+                           + str(j["flagged_by_reader"]) + ")")
         else:
             cells = list((series.get(c["trials"]) or {}).values())
             value = se_rate(cells)
@@ -391,7 +396,8 @@ def evaluate(items: list[dict[str, Any]], *, judged: list[dict[str, Any]], serie
             else:
                 why = "" if value is not None else why_missing["trials"]
             measured_by = "FI" if value is not None else None
-        row = {"name": c["name"], "value": value, "met": meets(c, value), "counts": measured_by == "FI",
+        row = {"name": c["name"], "value": value,
+               "met": None if measured_by == "a flagged check" else meets(c, value), "counts": measured_by == "FI",
                "measured_by": measured_by, "direction": c["direction"], "target": c.get("target"),
                "tolerance": c["tolerance"]}
         if why:
@@ -473,7 +479,9 @@ def summary_line(results: list[dict[str, Any]]) -> str:
         else:
             state = {True: "met", False: "not met", None: "no bar set"}[r.get("met")]
             state = f"{_fmt(r['value'])}, {state}"
-            if not r.get("counts"):
+            if r.get("measured_by") == "a flagged check":
+                state = f"{_fmt(r['value'])}, {r.get('why') or 'not shown'}"
+            elif not r.get("counts"):
                 state += ", measured by the script itself so not counted"
         parts.append(f"{r['name']}: {state}")
     return lead + "; ".join(parts)

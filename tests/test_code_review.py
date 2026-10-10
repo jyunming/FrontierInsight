@@ -546,3 +546,74 @@ def test_the_reviewer_is_given_the_open_points(tmp_path: Path) -> None:
     assert "metric_1" in template.substitute(**names, code_findings_block=text)
     empty = template.substitute(**names, code_findings_block="")
     assert "Open points in the code (a second model" not in empty and "$" not in empty.replace("$$", "")
+
+
+# ---- a check whose measure the code fakes is not evidence ------------------------------------------------------------
+
+
+def _with_finding(tmp_path: Path, text: str, **extra: Any) -> tuple[Path, Path]:
+    root, code = _record(tmp_path, missing=0, logic=False)
+    rec = cr.load(root)
+    rec["problems"] = [{"id": "L9", "kind": "logic", "text": text, "status": "different", "file": "simulate.py", "line": 82,
+                        "severity": "medium", "fid": "F-g", **extra}]
+    cr.save(root, rec)
+    return root, code
+
+
+CHECKS = ["Grid_Convergence_Check", "Poisson_Zero_Check", "Absorption_Check", "Convergence"]
+FAKED = ("Grid_Convergence_Check assigns coarse and fine critical dimensions to identical values from an analytical formula "
+         "without executing simulations on coarse and fine grids.")
+
+
+def test_a_check_named_in_an_open_finding_is_flagged_and_the_others_are_not(tmp_path: Path) -> None:
+    root, code = _with_finding(tmp_path, FAKED)
+    flagged = cr.flagged_checks(root, code, CHECKS)
+    assert list(flagged) == ["Grid_Convergence_Check"]
+    assert "analytical formula" in flagged["Grid_Convergence_Check"] and "82" not in flagged["Grid_Convergence_Check"]
+
+
+def test_the_name_is_matched_whatever_its_case_punctuation_or_underscores(tmp_path: Path) -> None:
+    root, code = _with_finding(tmp_path, "The grid-convergence CHECK returns a constant instead of running the grids.")
+    assert list(cr.flagged_checks(root, code, CHECKS)) == ["Grid_Convergence_Check"]
+
+
+def test_a_finding_that_only_shares_common_words_with_a_check_does_not_match(tmp_path: Path) -> None:
+    root, code = _with_finding(tmp_path, "The convergence of the grid is never tested, and no check of the zero count is made; "
+                                         "absorption is a closed form.")
+    assert cr.flagged_checks(root, code, CHECKS) == {}, "'convergence' alone, or words far apart, are not a name"
+
+
+def test_a_fixed_or_contradicted_finding_does_not_flag_the_check(tmp_path: Path) -> None:
+    root, code = _with_finding(tmp_path, FAKED, contradicted=True)
+    assert cr.flagged_checks(root, code, CHECKS) == {}, "the run's results contradict the finding"
+    root2, code2 = _with_finding(tmp_path / "b", FAKED)
+    rec = cr.load(root2)
+    rec["problems"] = []  # the final reading no longer flags it
+    cr.save(root2, rec)
+    assert cr.flagged_checks(root2, code2, CHECKS) == {}
+    root3, code3 = _with_finding(tmp_path / "c", FAKED)
+    (code3 / "simulate.py").write_text(SIM_FULL + "# changed after the reading\n", encoding="utf-8")
+    assert cr.flagged_checks(root3, code3, CHECKS) == {}, "a record for other code says nothing about this code"
+
+
+def test_a_flagged_check_is_not_counted_by_the_note_the_criteria_or_the_evidence_helpers() -> None:
+    from core import criteria as crit
+    from core import oracle_check as oc
+
+    judged = [{"name": "Grid_Convergence_Check", "value": 0.0, "expected": 0.0, "limit": 0.01, "passed_by_engine": True,
+               "measured_by": "engine"},
+              {"name": "Absorption_Check", "value": 0.16, "expected": 0.16, "limit": 0.01, "passed_by_engine": True,
+               "measured_by": "engine"}]
+    marked = oc.with_reader_flags(judged, {"Grid_Convergence_Check": "the grid sizes are not simulated"})
+    assert "flagged_by_reader" not in judged[0], "the list given is not changed"
+    assert oc.engine_passed(marked) == ["Absorption_Check"] and oc.not_passed(marked) == ["Grid_Convergence_Check"]
+    note = oc.analysis_note(marked)
+    assert "Grid_Convergence_Check: measured 0, expected 0 within 0.01: not shown: a second model found" in note
+    assert "Absorption_Check: measured 0.16, expected 0.16 within 0.01: passed" in note
+    items = [{"name": "grid", "oracle": "Grid_Convergence_Check", "use": "error", "direction": "lower", "tolerance": 0.01,
+              "target": 0.0},
+             {"name": "absorption", "oracle": "Absorption_Check", "use": "error", "direction": "lower", "tolerance": 0.01,
+              "target": 0.0}]
+    rows = {r["name"]: r for r in crit.evaluate(items, judged=marked, series={})}
+    assert rows["grid"]["counts"] is False and rows["grid"]["met"] is None and "not shown" in rows["grid"]["why"]
+    assert rows["absorption"]["counts"] is True and rows["absorption"]["met"] is True

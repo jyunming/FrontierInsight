@@ -927,12 +927,13 @@ def engine_passed(judged_list: list[dict[str, Any]]) -> list[str]:
     return [
         str(j["name"]) for j in judged_list
         if j.get("measured_by") == "engine" and _num(j.get("value")) is not None and j.get("passed_by_engine") is True
+        and not j.get("flagged_by_reader")
     ]
 
 
 def not_passed(judged_list: list[dict[str, Any]]) -> list[str]:
     """The names of the judged oracles that got no verdict or failed (``passed_by_engine`` not ``True``)."""
-    return [str(j["name"]) for j in judged_list if j.get("passed_by_engine") is not True]
+    return [str(j["name"]) for j in judged_list if j.get("passed_by_engine") is not True or j.get("flagged_by_reader")]
 
 
 def last_judged(record: Any) -> list[dict[str, Any]]:
@@ -946,6 +947,23 @@ def last_judged(record: Any) -> list[dict[str, Any]]:
     return [j for j in last.get("judged") or [] if isinstance(j, dict) and j.get("name")]
 
 
+def with_reader_flags(judged_list: list[dict[str, Any]], flagged: dict[str, str]) -> list[dict[str, Any]]:
+    """``judged_list`` with each check that the second model's reading of the code flags (``flagged``:
+    :func:`core.code_review.flagged_checks`) marked ``flagged_by_reader`` (the finding's words). The marked check is not
+    counted as passed anywhere: not as independent evidence, not as a criterion met, and the writer is not told it passed.
+    The list given is not changed."""
+    if not flagged:
+        return judged_list
+    by_name = {str(k).strip().lower(): v for k, v in flagged.items()}
+    return [{**j, "flagged_by_reader": by_name[str(j.get("name")).strip().lower()]}
+            if str(j.get("name")).strip().lower() in by_name else j for j in judged_list]
+
+
+def not_shown_words(finding: str) -> str:
+    """The plain sentence for a check the code reader flags (one place, so the note, the report and the gap agree)."""
+    return f"not shown: a second model found that the code that computes this check is flagged ({finding})"
+
+
 def analysis_note(judged_list: list[dict[str, Any]]) -> str:
     """What the analysis is told about the oracles the engine judged before the main run ('' when there were none).
 
@@ -957,6 +975,9 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
         value, expected, limit = _num(j.get("value")), _num(j.get("expected")), _num(j.get("limit"))
         verdict = {True: "passed", False: "failed"}.get(j.get("passed_by_engine"), "not judged")
         verdict += "" if j.get("measured_by") == "engine" else " (the value is the script's own)"
+        if j.get("flagged_by_reader"):
+            verdict = (not_shown_words(str(j["flagged_by_reader"])) + "; do not say this check passed or that it "
+                       "confirms the code, say that it is not shown")
         disputed = _num(j.get("disputed_expected"))
         if disputed is not None and j.get("passed_by_engine") is False:
             who = {"recompute": "FI's own recomputation of it (another model, not shown the measured value) says",
