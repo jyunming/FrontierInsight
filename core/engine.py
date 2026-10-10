@@ -20541,10 +20541,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             counts[node] = max(int(counts.get(node, 0) or 0), int(n or 0))
 
     async def _recorded_call(self, node: str, messages: Any, call: Any, *,
-                             requested_model: str | None = None) -> tuple[Any, dict[str, Any]]:
+                             requested_model: str | None = None, tolerated: bool = False) -> tuple[Any, dict[str, Any]]:
         """Make one model call (``call()``) and write every attempt of it in the quest's record of its calls: each
         attempt that failed before it answered or gave up (a retry, a provider the fallback chain passed over), then
-        the answer or the final failure. Returns the answer and who answered it (this task's LAST_CALL)."""
+        the answer or the final failure. Returns the answer and who answered it (this task's LAST_CALL). ``tolerated``:
+        a call whose failure the caller leaves out by design (an ensemble member), so a usage limit does not stop the step."""
         attempts: list[dict[str, Any]] = []
         token = _CALL_ATTEMPTS.set(attempts)
         _LAST_CALL.set(None)
@@ -20571,7 +20572,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     self._cost_of_failed_attempt(node, getattr(exc, "model", None) or failed.get("model"), usage,
                                                  messages)
                 self._save_thinking(node, holder, requested_model, failed, outcome=_outcome_of(exc), call_id=final_id)
-                if _is_fatal_provider_error(exc):
+                if _is_fatal_provider_error(exc) and not tolerated:
                     # A usage limit or a dead login is no answer: the step that asked is not kept, whatever it catches
                     # (see _audited), so it runs again when the quest resumes instead of deciding on a call never made.
                     self.__dict__["_provider_unavailable"] = f"{node or 'a step'}: {' '.join(str(exc).split())[:400]}"
@@ -20892,10 +20893,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         merger sees survivors only. All-fail bubbles ``EnsembleError``
         up to the caller, which decides whether to fall back to a
         single-call path or hard-fail."""
-        from core.ensemble import (
-            cost_jsonl_entries, fanout_chat, merge_synthesize,
-            merge_tournament, merge_vote,
-        )
         assert self._client is not None
 
         # The chat_fn ensemble.py calls. Match the keyword shape of
@@ -20913,20 +20910,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             node: str = "",
         ) -> str:
             assert self._client is not None
-            before = self.__dict__.get("_provider_unavailable")
             try:
+                # A member that cannot be used is left out by design (the merger sees the others), so its usage limit
+                # alone does not stop the step; when no member answers, it does (below).
                 text, served = await self._recorded_call(
                     node, messages,
                     lambda: self._client.chat(messages, temperature=temperature, model=model, node=node),
-                    requested_model=model,
+                    requested_model=model, tolerated=True,
                 )
-            except Exception:
-                # A member that cannot be used is left out by design (the merger sees the others; all failing raises),
-                # so its usage limit does not stop the step.
-                if before is None:
-                    self.__dict__.pop("_provider_unavailable", None)
-                else:
-                    self.__dict__["_provider_unavailable"] = before
+            except Exception as exc:
+                if _is_fatal_provider_error(exc):
+                    unusable.append(f"{node}: {' '.join(str(exc).split())[:400]}")
                 raise
             # This call's own model and counts (LAST_CALL is the task's own record); the client's shared attributes
             # only when the transport set nothing.
@@ -20938,6 +20932,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return text
 
         messages = [{"role": "user", "content": prompt}]
+        unusable: list[str] = []
+        try:
+            return await self._merged_ensemble(prompt, messages, node, ensemble_cfg, _chat_fn)
+        except Exception:
+            if unusable:
+                self.__dict__["_provider_unavailable"] = unusable[0]  # no member answered and one met a usage limit
+            raise
+
+    async def _merged_ensemble(self, prompt: str, messages: list[dict[str, str]], node: str,
+                               ensemble_cfg: Any, _chat_fn: Any) -> Any:
+        """:meth:`_ensemble_chat`'s fan-out, merge and breadcrumb rows."""
+        from core.ensemble import cost_jsonl_entries, fanout_chat, merge_synthesize, merge_tournament, merge_vote
+
         raw = await fanout_chat(
             messages, ensemble_cfg.models,
             chat_fn=_chat_fn, node=node,

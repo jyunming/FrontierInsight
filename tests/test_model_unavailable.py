@@ -104,3 +104,47 @@ async def test_a_real_pause_is_still_a_pause(tmp_path: Path, monkeypatch: pytest
 
     with pytest.raises(GraphInterrupt):
         await eng._audited("plan", asks_a_person)({})
+
+
+def _ensemble_engine(tmp_path: Path, limited: set[str]) -> tuple[Engine, Any]:
+    import json as _json
+
+    from core.config import NodeEnsembleConfig
+    from tests.test_ensemble_engine import _engine_with_ensemble
+
+    cfg = NodeEnsembleConfig(models=["m1", "m2", "m3"], merge="vote")
+    eng, client = _engine_with_ensemble(tmp_path, {"cross_check": cfg})
+
+    async def chat(messages: Any, *, temperature: float = 0.2, model: Any = None, node: str = "") -> str:
+        if model in limited:
+            raise _CliTransientError(CODEX_LIMIT)
+        return _json.dumps({"verdict": "supporting"})
+
+    client.chat = chat
+    return eng, cfg
+
+
+@pytest.mark.asyncio
+async def test_an_ensemble_member_out_of_quota_is_left_out_and_the_step_is_kept(tmp_path: Path) -> None:
+    eng, cfg = _ensemble_engine(tmp_path, {"m2"})
+
+    async def step(state: Any) -> dict[str, Any]:
+        result = await eng._ensemble_chat("classify", node="cross_check", ensemble_cfg=cfg)
+        return {"verdict": result.merged["verdict"]}
+
+    assert (await eng._audited("cross_check", step)({}))["verdict"] == "supporting"
+
+
+@pytest.mark.asyncio
+async def test_an_ensemble_no_member_of_which_could_answer_stops_the_step(tmp_path: Path) -> None:
+    eng, cfg = _ensemble_engine(tmp_path, {"m1", "m2", "m3"})
+
+    async def step(state: Any) -> dict[str, Any]:
+        try:
+            await eng._ensemble_chat("classify", node="cross_check", ensemble_cfg=cfg)
+        except Exception:  # noqa: BLE001 -- a caller that goes on without the ensemble
+            return {"verdict": "unknown"}
+        return {"verdict": "answered"}
+
+    with pytest.raises(ModelUnavailable):
+        await eng._audited("cross_check", step)({})
