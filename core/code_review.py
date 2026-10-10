@@ -970,7 +970,7 @@ def _names_check(finding: str, name: str) -> bool:
     want = _words(name)
     if not want:
         return False
-    if len(want) == 1 and str(name).strip().lower() not in (w.lower() for w in re.findall(r"\w+", str(finding))):
+    if len(want) == 1 and want[0] not in (w.lower() for w in re.findall(r"\w+", str(finding))):
         return False
     have = _words(finding)
     return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
@@ -998,10 +998,15 @@ def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[s
         found = record["problems"]
     else:
         found = record.get("read_problems")  # the latest reading's findings survive a reading that failed
+    from . import code_findings as _issues
+
+    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
     out: dict[str, str] = {}
     for v in found if isinstance(found, list) else []:
         if not isinstance(v, dict) or v.get("contradicted") or v.get("plan_conflict"):
             continue
+        if (issues.get(v.get("fid")) or {}).get("outcome") in (_issues.FIXED, _issues.GONE):
+            continue  # a repair a test showed, or a later reading that no longer names it, settled it
         text = _plain_text(v.get("text"))
         for name in names:
             if name not in out and _names_check(f"{v.get('text') or ''}", str(name)):

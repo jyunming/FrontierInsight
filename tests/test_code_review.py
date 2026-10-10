@@ -663,3 +663,29 @@ def test_an_improve_round_cannot_keep_a_version_by_passing_a_flagged_check(tmp_p
               "target": 0.0}]
     rows = crit.evaluate(items, judged=_oracle_with_reader_flags(root, judged), series={})
     assert rows[0]["counts"] is True and rows[0]["met"] is False and not imp.all_met(rows)
+
+
+def test_a_finding_a_repair_settled_no_longer_flags_its_check(tmp_path: Path) -> None:
+    from core import code_findings
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    finding = {"kind": "logic", "text": "The Grid_Convergence_Check sets coarse and fine to one value", "fid": "F-1"}
+    record = {"version": cr.version(code), "read_version": cr.version(code), "final": True, "problems": [finding],
+              "issues": {"F-1": {"outcome": code_findings.OPEN}}}
+    cr.save(tmp_path, record)
+    assert "Grid_Convergence_Check" in cr.flagged_checks(tmp_path, code, ["Grid_Convergence_Check"])
+    for settled in (code_findings.FIXED, code_findings.GONE):
+        record["issues"]["F-1"]["outcome"] = settled
+        cr.save(tmp_path, record)
+        assert cr.flagged_checks(tmp_path, code, ["Grid_Convergence_Check"]) == {}, settled
+    for unsettled in (code_findings.NOT_DEMONSTRATED, code_findings.GAVE_UP, code_findings.REOPENED):
+        record["issues"]["F-1"]["outcome"] = unsettled
+        cr.save(tmp_path, record)
+        assert "Grid_Convergence_Check" in cr.flagged_checks(tmp_path, code, ["Grid_Convergence_Check"]), unsettled
+
+
+def test_a_one_word_check_name_with_punctuation_is_still_matched_as_its_word() -> None:
+    assert cr._names_check("The convergence test returns a constant.", "Convergence!")
+    assert cr._names_check("The convergence test returns a constant.", " CONVERGENCE ")
