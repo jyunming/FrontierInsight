@@ -485,3 +485,13 @@ def test_write_note_is_empty_when_requirements_have_no_constraints(tmp_path: Pat
     fi.mkdir()
     (fi / tr.FILE).write_text(json.dumps({"factors": [{"name": "alpha"}]}), encoding="utf-8")
     assert tr.write_note(tmp_path) == ""
+
+
+def test_the_cover_reader_counts_a_metric_of_an_estimate_for_a_recovery_topic() -> None:
+    """r5 kinetics: "how accurately can k and Ea be recovered" with k/Ea error, bias, spread and coverage metrics was read
+    as "no metric reports k itself" and the quest stopped. A metric of the estimate reports the quantity it estimates."""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parent.parent / "agents" / "topic_cover.md").read_text(encoding="utf-8")
+    assert "how well that quantity is estimated, fitted or recovered" in text
+    assert "a metric of its estimate" in text
