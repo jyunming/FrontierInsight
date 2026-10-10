@@ -384,7 +384,71 @@ def _mapping_counts(mapping: dict[str, Any], metric_id: str) -> tuple[int, int]:
     return defined, undefined
 
 
-def _listed_by_group(result_json: Any, metric_id: str) -> tuple[dict[Any, tuple[int, int]],
+def _key_pairs(key: Any, grid: dict[str, list[Any]]) -> list[tuple[str, Any]] | None:
+    """The ``(axis, the protocol's value)`` pairs a ``name=value[,...]`` key names over the grid's own axes and values;
+    ``None`` when the key is not read that way."""
+    parsed = _parse_cell(key)
+    if not parsed or not set(parsed) <= set(grid):
+        return None
+    out: list[tuple[str, Any]] = []
+    for axis, raw in parsed.items():
+        matched = _match_grid_value(raw, grid[axis])
+        if matched is _NO_MATCH:
+            return None
+        out.append((axis, matched))
+    return out
+
+
+def _axis_named(segment: str, grid: dict[str, list[Any]]) -> str | None:
+    """The grid axis a key names as a grouping of that setting: its exact name, or the name with a common grouping affix
+    (``by_<name>``, ``per_<name>``, ``<name>s``), compared without case. ``None`` when no axis, or more than one, fits."""
+    low = segment.strip().lower()
+    exact = [a for a in grid if a.lower() == low]
+    if len(exact) == 1:
+        return exact[0]
+    fits = [a for a in grid
+            if low in (f"by_{a.lower()}", f"per_{a.lower()}", f"{a.lower()}s", f"by_{a.lower()}s", f"per_{a.lower()}s")]
+    return fits[0] if len(fits) == 1 else None
+
+
+def _path_cells(path: tuple[Any, ...], grid: dict[str, list[Any]]) -> frozenset[tuple[str, Any]] | None:
+    """The setting fragment a list belongs to, read from the WHOLE key path from the root: a segment ``axis=value`` names
+    that fragment, and a segment that names a grid axis (:func:`_axis_named`) followed by a segment that is one of that
+    axis's grid values names it too (``by_a`` / ``5`` / ``by_b`` / ``0.1`` is a=5, b=0.1). The fragments along the path
+    combine. ``None`` when the path names no setting, or names one axis with two different values."""
+    found: dict[str, Any] = {}
+
+    def put(axis: str, value: Any) -> bool:
+        if axis in found and found[axis] != value:
+            return False
+        found[axis] = value
+        return True
+
+    i = 0
+    while i < len(path):
+        seg = path[i]
+        if not isinstance(seg, str):
+            i += 1
+            continue
+        pairs = _key_pairs(seg, grid)
+        if pairs:
+            if not all(put(a, v) for a, v in pairs):
+                return None
+            i += 1
+            continue
+        axis = _axis_named(seg, grid)
+        if axis and i + 1 < len(path) and isinstance(path[i + 1], str):
+            value = _match_grid_value(path[i + 1], grid[axis])
+            if value is not _NO_MATCH:
+                if not put(axis, value):
+                    return None
+                i += 2
+                continue
+        i += 1
+    return frozenset(found.items()) if found else None
+
+
+def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]] | None = None) -> tuple[dict[Any, tuple[int, int]],
                                                                 dict[Any, dict[Any, tuple[int, int]]]]:
     """``(real values, undefined)`` the analysis lists for ``metric_id``, per key the lists sit under (``None`` for the top
     level), and the same counts per mapping that holds those keys side by side.
@@ -393,38 +457,54 @@ def _listed_by_group(result_json: Any, metric_id: str) -> tuple[dict[Any, tuple[
     the largest is kept. A ``<id>_values`` (or ``<id>_undefined``) that is itself a mapping (one list or count per key)
     is read as one entry per key, the keys side by side in that mapping. The second result, per holding mapping, is
     what each key beside the others holds there: keys side by side in one mapping are parts of one report (a setting's
-    own name the grid cannot read, an index), so :func:`_listed_counts` may add them up for the lower bound."""
+    own name the grid cannot read, an index), so :func:`_listed_counts` may add them up for the lower bound.
+
+    With the protocol's ``grid``, the setting a list belongs to is read from the whole key path from the root
+    (:func:`_path_cells`), not only the last key: a list under ``by_a`` / ``5`` / ``by_b`` / ``0.1`` is the setting
+    a=5, b=0.1, so the same ``0.1`` under another ``a`` is another setting, not a copy. Such a list is listed under
+    ``("cells", <the pairs>)``; a list whose path names no setting is listed under its last key, as before."""
     values_key, undefined_key = f"{metric_id}_values", f"{metric_id}_undefined"
     found: dict[tuple[Any, Any], dict[Any, list[int]]] = {}
 
     def number(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool)
 
+    def read(under: Any, path: tuple[Any, ...]) -> Any:
+        if not grid:
+            return under
+        pairs = _path_cells(path, grid)
+        if not pairs:
+            return under
+        alone = _key_pairs(under, grid) if isinstance(under, str) else None
+        if alone and frozenset(alone) == pairs:
+            return under  # the last key alone already says it
+        return ("cells", pairs)
+
     def add(under: Any, parent: Any, container: Any, counts: tuple[int, int]) -> None:
         total = found.setdefault((under, parent), {}).setdefault(container, [0, 0])
         total[0] += counts[0]
         total[1] += counts[1]
 
-    def walk(node: Any, under: Any, container: Any, parent: Any) -> None:
+    def walk(node: Any, under: Any, container: Any, parent: Any, path: tuple[Any, ...] = ()) -> None:
         if isinstance(node, dict):
             listed, undefined = node.get(values_key), node.get(undefined_key)
             if isinstance(listed, list) or number(undefined):
-                add(under, parent, container if container is not None else id(node), _mapping_counts(node, metric_id))
+                add(read(under, path), parent, container if container is not None else id(node), _mapping_counts(node, metric_id))
             inner = ("inner", id(node))
             if isinstance(listed, dict):
                 for key, value in listed.items():
                     if isinstance(value, list):
-                        add(key, id(node), inner, _mapping_counts({values_key: value}, metric_id))
+                        add(read(key, path + (key,)), id(node), inner, _mapping_counts({values_key: value}, metric_id))
             if isinstance(undefined, dict):
                 for key, value in undefined.items():
-                    add(key, id(node), inner, _mapping_counts({undefined_key: value}, metric_id))
+                    add(read(key, path + (key,)), id(node), inner, _mapping_counts({undefined_key: value}, metric_id))
             for k, v in node.items():
                 if k in (values_key, undefined_key) and isinstance(v, dict):
                     continue  # read above, one entry per key
-                walk(v, k, None, id(node))
+                walk(v, k, None, id(node), path + (k,))
         elif isinstance(node, list):
             for v in node:
-                walk(v, under, id(node), parent)
+                walk(v, under, id(node), parent, path)
 
     walk(result_json, None, None, None)
     by_under: dict[Any, tuple[int, int]] = {}
@@ -464,12 +544,23 @@ def _listed_counts(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
     parts of one report, like the rows of one table: for the lower bound (the last two numbers returned) they add up, so
     an honest report keyed that way is not taken for its largest part. They are never held to the upper bound as a sum,
     since a pooled copy may sit beside them; each one alone still is."""
-    groups, families = _listed_by_group(result_json, metric_id)
+    groups, families = _listed_by_group(result_json, metric_id, grid)
+
+    def cells_of(under: Any) -> set[frozenset[tuple[str, Any]]] | None:
+        if isinstance(under, tuple) and len(under) == 2 and under[0] == "cells":
+            return {cell for cell in _all_cells(grid) if under[1] <= cell}
+        return _fragment_cells(under, grid) if grid and isinstance(under, str) else None
+
+    def label(under: Any) -> str:
+        if isinstance(under, tuple) and len(under) == 2 and under[0] == "cells":
+            return ",".join(f"{a}={v}" for a, v in sorted(under[1], key=lambda p: list(grid).index(p[0])))
+        return str(under)
+
     strata: list[tuple[Any, set[frozenset[tuple[str, Any]]], tuple[int, int]]] = []
     pooled = [0, 0]
     excesses: list[str] = []
     for under, counts in groups.items():
-        cells = _fragment_cells(under, grid) if grid and isinstance(under, str) else None
+        cells = cells_of(under)
         if cells:
             strata.append((under, cells, counts))
         else:
@@ -484,13 +575,13 @@ def _listed_counts(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
         if recorded_by_cell:
             have_value, have_none = _recorded_in_cells(recorded_by_cell, metric_id, cells, grid)
             if counts[0] > have_value or counts[1] > have_none or counts[0] + counts[1] > have_value + have_none:
-                excesses.append(f"{counts[0]} value(s) and {counts[1]} undefined for `{under}` where FI's record has "
+                excesses.append(f"{counts[0]} value(s) and {counts[1]} undefined for `{label(under)}` where FI's record has "
                                 f"{have_value} with a value and {have_none} with none")
     defined, undefined = max(per_setting[0], pooled[0]), max(per_setting[1], pooled[1])
     side_by_side = (0, 0)
     for members in families.values():
         parts = [c for under, c in members.items()
-                 if not (grid and isinstance(under, str) and _fragment_cells(under, grid))]
+                 if not cells_of(under)]
         total = (sum(c[0] for c in parts), sum(c[1] for c in parts))
         if total[0] + total[1] > side_by_side[0] + side_by_side[1]:
             side_by_side = total
