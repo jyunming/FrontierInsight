@@ -173,6 +173,7 @@ from .provider import (
     step_provider_config,
     step_provider_lines,
     _ModelAnswerProblem,
+    _is_fatal_provider_error,
     ModelAnswerTruncated,
     resolve_endpoint_async,
     set_model_call_archive as _set_model_call_archive,
@@ -2180,6 +2181,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self.__dict__["_chat_at_node_start"] = dict(self._last_chat)
             self._progress_stage(name)
             began = time.monotonic()
+            self.__dict__.pop("_provider_unavailable", None)
             try:
                 try:
                     out = await fn(state)
@@ -2188,6 +2190,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     # the step a larger output limit or another model; the step runs again on resume.
                     self._pause_for_model_output(name, e)
                     raise  # unreachable: the pause interrupts
+                if gone := self.__dict__.pop("_provider_unavailable", None):
+                    # A call in this step met a usage limit or a dead login and the step went on without its answer
+                    # (a "could not ask" path): what it decided is not kept, and the step runs again on resume.
+                    raise ModelUnavailable(
+                        f"the model could not be used ({gone}); nothing this step decided was kept. Resume the quest "
+                        "when the model can be used again (after its usage limit resets).")
             except GraphBubbleUp as e:
                 if isinstance(e, GraphInterrupt):
                     self._audit("node_paused", node=name, pause=self._audit_pause)
@@ -5612,6 +5620,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 last_problem = re.sub(r";? ?plan\.md is unchanged\.?$", "", " ".join(str(e).split()))[:1500]
                 self._log.warning("[plan] the plan step's answer to complete %s could not be used: %s", short, e)
             except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing
+                if _is_fatal_provider_error(e):
+                    # Never asked (a usage limit, a dead login): the ask is given back, and the step stops to be run
+                    # again on resume (_audited), so the plan is not judged on a question its model never answered.
+                    self._record_search_asked(count, calls, sha_before, "model could not be used", file, extra_now)
+                    raise
                 outcome = "no answer"
                 self._log.warning("[plan] the plan step could not be asked to complete %s: %s", short, e)
             count += 1
@@ -20549,6 +20562,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     self._cost_of_failed_attempt(node, getattr(exc, "model", None) or failed.get("model"), usage,
                                                  messages)
                 self._save_thinking(node, holder, requested_model, failed, outcome=_outcome_of(exc), call_id=final_id)
+                if _is_fatal_provider_error(exc):
+                    # A usage limit or a dead login is no answer: the step that asked is not kept, whatever it catches
+                    # (see _audited), so it runs again when the quest resumes instead of deciding on a call never made.
+                    self.__dict__["_provider_unavailable"] = f"{node or 'a step'}: {' '.join(str(exc).split())[:400]}"
                 raise
             served = dict(_LAST_CALL.get() or {})
             self._record_attempts(node, messages, attempts, requested_model)
@@ -23685,6 +23702,11 @@ _SEARCH_CALLS = 6  # at most this many chat calls in all, per plan and model
 
 class _PlanEditedMeanwhile(Exception):
     """plan.md was changed (by a person) while the plan's model was answering: the model's answer is not written."""
+
+
+class ModelUnavailable(RuntimeError):
+    """A step's model call met a limit that does not clear within the run (a usage limit, a dead login) and the step
+    went on without the answer: the step is not kept, so the quest stops and the step runs again on resume."""
 
 #: What a plan with no way to judge whether the code got better means, in one line (never a stop of its own).
 _NO_CRITERIA_LINE = ("The plan has no measure of whether the code got better (FI looked in the literature once and found "

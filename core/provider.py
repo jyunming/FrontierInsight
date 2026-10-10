@@ -2108,6 +2108,7 @@ _CLI_FATAL_MARKERS: tuple[str, ...] = (
     "session limit",
     "weekly limit",
     "usage limit reached",
+    "hit your usage limit",      # codex CLI: "You've hit your usage limit. ... try again at 4:51 AM."
     "out of credits",
     "token may be invalid",
     "copilot requests",          # gh token lacking the Copilot scope
