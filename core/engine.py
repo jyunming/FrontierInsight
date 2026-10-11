@@ -24059,22 +24059,64 @@ def _item_content(item: Any) -> str:
 # many oracle trials) is checked against the code that ran it, all of it: a real run's model lived in a package the check
 # never saw, and its Methods described an imaging model and a chemistry the code did not compute. The budget is the one
 # the code reader has (``core/code_review.py:_MAX_CODE_CHARS``).
-_CLAIM_CODE_CHARS = _code_review._MAX_CODE_CHARS
+# It is larger than the reader's: the paper alone may take 120,000 characters of this prompt, and a model package of a
+# real run was 48,000 with its scripts.
+_CLAIM_CODE_CHARS = 100_000
 _CLAIM_PROTOCOL_CHARS = 3000
-_CLAIM_PLOT_WORDS = ("plot", "figure", "fig_", "viz", "draw", "render", "report")
+#: A file whose name has one of these as a whole part (split on ``_``, ``-`` and ``.``) only draws; it comes last.
+_CLAIM_PLOT_WORDS = frozenset({"plot", "plots", "figure", "figures", "fig", "figs", "viz", "chart", "charts"})
 
 
-def _claim_code_order(rel: str) -> tuple[int, str]:
-    """Where a file comes first in what the claim check is shown: the scripts that run the study, then the model and
-    simulation modules, then the entry points, the files that only draw or report last."""
+def _claim_code_order(rel: str) -> tuple[int, int, str]:
+    """Where a file comes first in what the claim check is shown: simulate.py, experiment.py, then the model and
+    simulation modules, then the entry points, and the files that only draw last."""
     name = rel.rsplit("/", 1)[-1].lower()
-    if rel in (_split_run.SIMULATE_NAME, "experiment.py"):
-        return (0, rel)
-    if any(w in name for w in _CLAIM_PLOT_WORDS):
-        return (3, rel)
+    if rel == _split_run.SIMULATE_NAME:
+        return (0, 0, rel)
+    if rel == "experiment.py":
+        return (0, 1, rel)
+    if set(re.split(r"[_.\-]+", name)) & _CLAIM_PLOT_WORDS:
+        return (3, 0, rel)
     if name in ("run.py", "__init__.py", "__main__.py", "main.py"):
-        return (2, rel)
-    return (1, rel)
+        return (2, 0, rel)
+    return (1, 0, rel)
+
+
+def _claim_fi_record_block(quest_root: Path) -> str:
+    """FI's own record of what ran, from its trial ledger: the settings run and the trials per setting. FI's engine runs
+    the trials (``core/trial_runner.py``), so the code does not show them. ``""`` when FI wrote no ledger (a script that
+    drove its own runs)."""
+    try:
+        rows = _trial_runner.read_ledger(quest_root)
+    except Exception:  # noqa: BLE001 - no readable record adds nothing; it never loosens a check
+        return ""
+    if not rows:
+        return ""
+    per_cell: dict[str, Counter] = {}
+    for row in rows:
+        per_cell.setdefault(str(row.get("cell")), Counter())[str(row.get("status"))] += 1
+    total: Counter = Counter()
+    for c in per_cell.values():
+        total.update(c)
+    axes: dict[str, list[str]] = {}
+    for key in per_cell:
+        for part in key.split(","):
+            name, eq, value = part.partition("=")
+            if eq and name.strip():
+                seen = axes.setdefault(name.strip(), [])
+                if value.strip() not in seen:
+                    seen.append(value.strip())
+    sizes = sorted({sum(c.values()) for c in per_cell.values()})
+    per = (f"{sizes[0]:,}" if len(sizes) == 1 else f"{sizes[0]:,} to {sizes[-1]:,}")
+    lines = [
+        "WHAT FI RAN (FI's own record of the trials it ran; the engine runs them, so the code does not show them):",
+        f"- {len(per_cell):,} setting(s), {sum(total.values()):,} trial(s) in all"
+        f" ({total.get('ok', 0):,} finished, {total.get('failed', 0):,} failed); {per} trial(s) per setting.",
+    ]
+    for name, values in axes.items():
+        shown = ", ".join(values[:30]) + (f", ... ({len(values)} values)" if len(values) > 30 else "")
+        lines.append(f"- {name}: {shown}")
+    return "\n".join(lines)
 
 
 def _claim_code_block(code_dir: Path) -> str:
@@ -24087,7 +24129,11 @@ def _claim_code_block(code_dir: Path) -> str:
     parts: list[str] = []
     cut: list[str] = []
     used = 0
+    full = True
     for rel in sorted(files, key=_claim_code_order):
+        if not full:
+            cut.append(f"code/{rel} (not shown)")
+            continue
         numbered = "\n".join(f"{i:4d}  {line}" for i, line in enumerate(files[rel].splitlines(), start=1))
         block = f"### code/{rel}\n```python\n{numbered}\n```"
         room = _CLAIM_CODE_CHARS - used
@@ -24098,13 +24144,15 @@ def _claim_code_block(code_dir: Path) -> str:
             keep = numbered[: room - 200]
             parts.append(f"### code/{rel}\n```python\n{keep}\n# ... ({len(numbered) - len(keep):,} more characters of this file not shown)\n```")
             cut.append(f"code/{rel} (cut)")
-            used = _CLAIM_CODE_CHARS
+            full = False
         else:
             cut.append(f"code/{rel} (not shown)")
+            full = False
     text = "The code that ran (every script and module of code/ except its tests):\n\n" + "\n\n".join(parts)
     if cut:
-        text += ("\n\nNOT SHOWN, so nothing in it can be taken as done: " + "; ".join(cut)
-                 + ". A claim about how the study was run that only this part could show is unsupported.")
+        text += ("\n\nNOT SHOWN (the code is longer than what fits): " + "; ".join(cut)
+                 + ". What this part does is not known from here; a claim that only it could show is grounded as it"
+                 " would be without the code, unless a finding below says the code does not do it.")
     return text
 
 
@@ -24119,19 +24167,13 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
         if len(text) > _CLAIM_PROTOCOL_CHARS:
             text = text[:_CLAIM_PROTOCOL_CHARS] + f"\n... ({len(text) - _CLAIM_PROTOCOL_CHARS:,} more characters)"
         parts.append("THE PLAN (the frozen protocol: what was planned, NOT evidence of what ran):\n" + text)
+    record = _claim_fi_record_block(quest_root)
+    if record:
+        parts.append(record)
     code = _claim_code_block(quest_root / "code")
     if code:
         parts.append(code)
-    try:
-        findings = _code_review.review_block(quest_root, quest_root / "code").strip()
-    except Exception:  # noqa: BLE001 - a record that cannot be read adds nothing; it never loosens a check
-        findings = ""
-    if findings:
-        parts.append(
-            "WHAT A SECOND MODEL FOUND WHEN IT READ THE CODE AGAINST THE PLAN (its reading can be wrong). A claim that"
-            " a point below says the code does not do, or does differently, is `unsupported` unless the code above"
-            " plainly does it.\n" + findings
-        )
+    parts.extend(_claim_findings_parts(quest_root))
     try:
         record = json.loads((quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -24144,6 +24186,26 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
     if state.get("figures"):
         parts.append("What each figure draws:\n" + _figure_list_for_prompt(state))
     return "\n\n".join(parts) or "(nothing recorded)"
+
+
+def _claim_findings_parts(quest_root: Path) -> list[str]:
+    """What the second model's reading of the code left open, for the claim check: the engine's own list (the same one
+    the paper's limitations carry) under a header that says how to weigh it; when no second model read the code and
+    nothing else is open, one neutral line."""
+    code_dir = quest_root / "code"
+    try:
+        f = _code_review.open_findings(quest_root, code_dir)
+        text = _code_review.findings_block(quest_root, code_dir).strip()
+    except Exception:  # noqa: BLE001 - a record that cannot be read adds nothing; it never loosens a check
+        return []
+    if not text:
+        return []
+    if f["unread"] and not any(f[k] for k in ("missing", "different", "flagged", "unshown", "conflicts", "not_reviewed")):
+        return ["No second model compared the code with the plan, so no findings about the code are listed."]
+    return [
+        "A SECOND MODEL'S READING OF THE CODE AGAINST THE PLAN (it can be wrong). A claim that a point below says the "
+        "code does not do, or does differently, is `unsupported` unless the code above plainly does it.\n" + text
+    ]
 
 
 def _oracle_with_reader_flags(quest_root: Path, judged: list[dict[str, Any]]) -> list[dict[str, Any]]:

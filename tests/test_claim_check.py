@@ -1196,6 +1196,7 @@ def _code_tree(root: Path) -> None:
     (code / "tests").mkdir()
     (code / "__pycache__").mkdir()
     (code / "simulate.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (code / "experiment.py").write_text("def main():\n    return 2\n", encoding="utf-8")
     (code / "pkg" / "__init__.py").write_text("", encoding="utf-8")
     (code / "pkg" / "model.py").write_text("def cd():\n    return log(dose)  # a heuristic\n", encoding="utf-8")
     (code / "pkg" / "plots.py").write_text("def draw():\n    pass\n", encoding="utf-8")
@@ -1203,22 +1204,30 @@ def _code_tree(root: Path) -> None:
     (code / "__pycache__" / "junk.py").write_text("JUNK = 1\n", encoding="utf-8")
 
 
-def test_method_block_shows_package_code_and_labels_the_plan(tmp_path: Path) -> None:
-    from core import frozen_protocol as _fp
+def test_method_block_shows_package_code_in_order(tmp_path: Path) -> None:
     from core.engine import _claim_method_block
 
     _code_tree(tmp_path)
     block = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
     assert "code/pkg/model.py" in block and "return log(dose)" in block
     assert "SECRET_TEST" not in block and "JUNK" not in block
-    assert block.index("code/simulate.py") < block.index("code/pkg/model.py") < block.index("code/pkg/plots.py")
-    assert "NOT SHOWN" not in block
-    # no protocol recorded: no plan label, and nothing else invented
-    assert "THE PLAN" not in block
-    _ = _fp
+    # simulate.py, then experiment.py, then the model, the plotting file last
+    order = [block.index(f"### code/{n}") for n in ("simulate.py", "experiment.py", "pkg/model.py", "pkg/plots.py")]
+    assert order == sorted(order)
+    assert "NOT SHOWN" not in block and "THE PLAN" not in block
 
 
-def test_method_block_says_what_the_budget_cut(tmp_path: Path, monkeypatch) -> None:
+def test_plotting_files_are_matched_by_whole_name_parts() -> None:
+    from core.engine import _claim_code_order
+
+    assert _claim_code_order("pkg/plots.py")[0] == 3 and _claim_code_order("figure_utils.py")[0] == 3
+    assert _claim_code_order("make-charts.py")[0] == 3 and _claim_code_order("viz.py")[0] == 3
+    # a core module whose name only contains such letters is a model module
+    for core in ("draw_samples.py", "renderer.py", "reporting.py", "pkg/configure.py"):
+        assert _claim_code_order(core)[0] == 1, core
+
+
+def test_method_block_says_what_the_budget_cut_and_stops_there(tmp_path: Path, monkeypatch) -> None:
     from core import engine as _eng
 
     _code_tree(tmp_path)
@@ -1227,7 +1236,10 @@ def test_method_block_says_what_the_budget_cut(tmp_path: Path, monkeypatch) -> N
     block = _eng._claim_method_block(tmp_path, {})  # type: ignore[arg-type]
     assert "NOT SHOWN" in block and "code/pkg/big.py (cut)" in block
     assert "more characters of this file not shown" in block
+    # once a file is cut nothing after it is included, even a small file that would fit
+    assert "code/pkg/model.py (not shown)" in block and "return log(dose)" not in block
     assert "code/pkg/plots.py (not shown)" in block
+    assert "### code/pkg/model.py" not in block and "### code/pkg/plots.py" not in block
 
 
 def test_method_block_labels_protocol_as_the_plan(tmp_path: Path, monkeypatch) -> None:
@@ -1235,18 +1247,70 @@ def test_method_block_labels_protocol_as_the_plan(tmp_path: Path, monkeypatch) -
 
     monkeypatch.setattr(_eng._frozen, "protocol_of", lambda root: {"model": "Abbe imaging"})
     block = _eng._claim_method_block(tmp_path, {})  # type: ignore[arg-type]
-    assert "THE PLAN" in block and "NOT evidence of what ran" in block and "Abbe imaging" in block
+    assert "THE PLAN (the frozen protocol: what was planned, NOT evidence of what ran)" in block
+    assert "Abbe imaging" in block
 
 
-def test_method_block_carries_open_findings_only_when_there_are_some(tmp_path: Path) -> None:
+def test_method_block_carries_fi_record_of_the_trials(tmp_path: Path) -> None:
+    from core.engine import _claim_method_block
+
+    assert "WHAT FI RAN" not in _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    rows = [{"event": "trial", "cell": f"dose={d},resist={r}", "trial": t, "status": "ok"}
+            for d in (20, 40) for r in ("CAR", "MOR") for t in range(5)]
+    rows.append({"event": "trial", "cell": "dose=20,resist=CAR", "trial": 5, "status": "failed"})
+    (raw / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    block = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "WHAT FI RAN (FI's own record" in block
+    assert "4 setting(s), 21 trial(s) in all (20 finished, 1 failed); 5 to 6 trial(s) per setting" in block
+    assert "- dose: 20, 40" in block and "- resist: CAR, MOR" in block
+
+
+def test_method_block_carries_the_engines_check_verdicts(tmp_path: Path) -> None:
+    from core.engine import _claim_method_block
+
+    (tmp_path / "needs").mkdir()
+    (tmp_path / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok", "attempts": [{"judged": [
+        {"name": "energy_conserved", "value": 1.0001, "expected": 1.0, "limit": 0.01, "passed_by_engine": True,
+         "measured_by": "engine"}]}]}), encoding="utf-8")
+    block = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "energy_conserved: measured 1.0001, expected 1 within 0.01: passed" in block
+
+
+def test_a_check_the_reader_flagged_is_marked_not_shown(tmp_path: Path, monkeypatch) -> None:
+    from core import engine as _eng
+
+    (tmp_path / "needs").mkdir()
+    (tmp_path / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok", "attempts": [{"judged": [
+        {"name": "energy_conserved", "value": 1.0, "expected": 1.0, "limit": 0.01, "passed_by_engine": True,
+         "measured_by": "engine"}]}]}), encoding="utf-8")
+    monkeypatch.setattr(_eng._code_review, "flagged_checks", lambda *a, **k: {"energy_conserved": "the check is a constant"})
+    block = _eng._claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "do not say this check passed" in block and "passed_by_engine" not in block
+    assert "energy_conserved: measured 1, expected 1 within 0.01: passed" not in block
+
+
+def test_method_block_open_findings_header_only_when_there_are_some(tmp_path: Path) -> None:
     from core import code_review as _cr
     from core.engine import _claim_method_block
 
     _code_tree(tmp_path)
-    assert "SECOND MODEL" not in _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    plain = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "SECOND MODEL" not in plain and "No second model" not in plain
+    # a reading that was never made: one neutral line, no reviewer instructions, no header
     _cr.save(tmp_path, {"skipped": "the same model wrote the code", "read_version": ""})
-    block = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
-    assert "WHAT A SECOND MODEL FOUND" in block and "can be wrong" in block
+    skipped = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "No second model compared the code with the plan" in skipped
+    assert "A SECOND MODEL'S READING" not in skipped and "Open points" not in skipped
+    assert "do not ask for it to be changed" not in skipped
+    # a real reading with something open: our header, the engine's list, no duplicated heading
+    _cr.save(tmp_path, {"read_version": _cr.version(tmp_path / "code"), "version": _cr.version(tmp_path / "code"),
+                        "not_reviewed": ["R1 the model computes the aerial image"]})
+    read = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "A SECOND MODEL'S READING OF THE CODE AGAINST THE PLAN (it can be wrong)" in read
+    assert "R1 the model computes the aerial image" in read
+    assert "## Open points" not in read and "do not ask for it to be changed" not in read
 
 
 def test_claim_check_template_fills_every_placeholder() -> None:
@@ -1254,5 +1318,8 @@ def test_claim_check_template_fills_every_placeholder() -> None:
 
     text = (Path(__file__).resolve().parent.parent / "agents" / "claim_check.md").read_text(encoding="utf-8")
     out = Template(text).substitute(topic="T", evidence_block="E", method_block="M", references="R", paper="P")
-    assert "$" not in out.replace("$topic", "")
-    assert "the plan alone" in out.lower() or "never grounds a claim" in out
+    assert "WHAT FI RAN (FI's own record)" in out
+    assert "where the code is shown, it does not ground a claim about how the study was run" in out
+    assert "do not call a claim about that part `unsupported` just because it is not shown" in out
+    assert "a constant in the code is never a result" in out
+    assert "cannot ground a claim that it passed" in out
