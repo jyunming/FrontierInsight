@@ -1185,3 +1185,74 @@ def test_a_reading_picked_for_relevance_keeps_its_label_and_a_readings_only_sour
     # Room the source's own text leaves goes to its readings.
     short = "Short abstract.\n\n" + _FIGURE_READINGS_MARK + "\n\n" + ("r" * 900)
     assert _format_lit_excerpt(short, "t", budget=1000).count("r") >= 800
+
+
+# --- the method block the claim check is shown ----------------------------
+
+
+def _code_tree(root: Path) -> None:
+    code = root / "code"
+    (code / "pkg").mkdir(parents=True)
+    (code / "tests").mkdir()
+    (code / "__pycache__").mkdir()
+    (code / "simulate.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (code / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (code / "pkg" / "model.py").write_text("def cd():\n    return log(dose)  # a heuristic\n", encoding="utf-8")
+    (code / "pkg" / "plots.py").write_text("def draw():\n    pass\n", encoding="utf-8")
+    (code / "tests" / "test_model.py").write_text("def test_x():\n    assert SECRET_TEST\n", encoding="utf-8")
+    (code / "__pycache__" / "junk.py").write_text("JUNK = 1\n", encoding="utf-8")
+
+
+def test_method_block_shows_package_code_and_labels_the_plan(tmp_path: Path) -> None:
+    from core import frozen_protocol as _fp
+    from core.engine import _claim_method_block
+
+    _code_tree(tmp_path)
+    block = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "code/pkg/model.py" in block and "return log(dose)" in block
+    assert "SECRET_TEST" not in block and "JUNK" not in block
+    assert block.index("code/simulate.py") < block.index("code/pkg/model.py") < block.index("code/pkg/plots.py")
+    assert "NOT SHOWN" not in block
+    # no protocol recorded: no plan label, and nothing else invented
+    assert "THE PLAN" not in block
+    _ = _fp
+
+
+def test_method_block_says_what_the_budget_cut(tmp_path: Path, monkeypatch) -> None:
+    from core import engine as _eng
+
+    _code_tree(tmp_path)
+    (tmp_path / "code" / "pkg" / "big.py").write_text("x = 1\n" * 4000, encoding="utf-8")
+    monkeypatch.setattr(_eng, "_CLAIM_CODE_CHARS", 6000)
+    block = _eng._claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "NOT SHOWN" in block and "code/pkg/big.py (cut)" in block
+    assert "more characters of this file not shown" in block
+    assert "code/pkg/plots.py (not shown)" in block
+
+
+def test_method_block_labels_protocol_as_the_plan(tmp_path: Path, monkeypatch) -> None:
+    from core import engine as _eng
+
+    monkeypatch.setattr(_eng._frozen, "protocol_of", lambda root: {"model": "Abbe imaging"})
+    block = _eng._claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "THE PLAN" in block and "NOT evidence of what ran" in block and "Abbe imaging" in block
+
+
+def test_method_block_carries_open_findings_only_when_there_are_some(tmp_path: Path) -> None:
+    from core import code_review as _cr
+    from core.engine import _claim_method_block
+
+    _code_tree(tmp_path)
+    assert "SECOND MODEL" not in _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    _cr.save(tmp_path, {"skipped": "the same model wrote the code", "read_version": ""})
+    block = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "WHAT A SECOND MODEL FOUND" in block and "can be wrong" in block
+
+
+def test_claim_check_template_fills_every_placeholder() -> None:
+    from string import Template
+
+    text = (Path(__file__).resolve().parent.parent / "agents" / "claim_check.md").read_text(encoding="utf-8")
+    out = Template(text).substitute(topic="T", evidence_block="E", method_block="M", references="R", paper="P")
+    assert "$" not in out.replace("$topic", "")
+    assert "the plan alone" in out.lower() or "never grounds a claim" in out

@@ -24055,31 +24055,83 @@ def _item_content(item: Any) -> str:
     return str(content or "")
 
 
-# The scripts as the claim check sees them. A sentence about how the study was run (the generator, the solver, how
-# many oracle trials) is checked against the code that ran it: without it a real run had four true method sentences
-# called unsupported, and the revise that followed rewrote them.
-_CLAIM_SCRIPT_CHARS = 8000
+# The code as the claim check sees it. A sentence about how the study was run (the model, the solver, a calibration, how
+# many oracle trials) is checked against the code that ran it, all of it: a real run's model lived in a package the check
+# never saw, and its Methods described an imaging model and a chemistry the code did not compute. The budget is the one
+# the code reader has (``core/code_review.py:_MAX_CODE_CHARS``).
+_CLAIM_CODE_CHARS = _code_review._MAX_CODE_CHARS
 _CLAIM_PROTOCOL_CHARS = 3000
+_CLAIM_PLOT_WORDS = ("plot", "figure", "fig_", "viz", "draw", "render", "report")
+
+
+def _claim_code_order(rel: str) -> tuple[int, str]:
+    """Where a file comes first in what the claim check is shown: the scripts that run the study, then the model and
+    simulation modules, then the entry points, the files that only draw or report last."""
+    name = rel.rsplit("/", 1)[-1].lower()
+    if rel in (_split_run.SIMULATE_NAME, "experiment.py"):
+        return (0, rel)
+    if any(w in name for w in _CLAIM_PLOT_WORDS):
+        return (3, rel)
+    if name in ("run.py", "__init__.py", "__main__.py", "main.py"):
+        return (2, rel)
+    return (1, rel)
+
+
+def _claim_code_block(code_dir: Path) -> str:
+    """The code that ran, for the claim check: every ``.py`` of ``code/`` except tests and caches, with line numbers, the
+    model and simulation files first and the plotting files last, as much as ``_CLAIM_CODE_CHARS`` holds. What does not
+    fit is cut or left out and said so by name."""
+    files = _grid_keys.code_files(code_dir)
+    if not files:
+        return ""
+    parts: list[str] = []
+    cut: list[str] = []
+    used = 0
+    for rel in sorted(files, key=_claim_code_order):
+        numbered = "\n".join(f"{i:4d}  {line}" for i, line in enumerate(files[rel].splitlines(), start=1))
+        block = f"### code/{rel}\n```python\n{numbered}\n```"
+        room = _CLAIM_CODE_CHARS - used
+        if len(block) <= room:
+            parts.append(block)
+            used += len(block)
+        elif room >= 2000:
+            keep = numbered[: room - 200]
+            parts.append(f"### code/{rel}\n```python\n{keep}\n# ... ({len(numbered) - len(keep):,} more characters of this file not shown)\n```")
+            cut.append(f"code/{rel} (cut)")
+            used = _CLAIM_CODE_CHARS
+        else:
+            cut.append(f"code/{rel} (not shown)")
+    text = "The code that ran (every script and module of code/ except its tests):\n\n" + "\n\n".join(parts)
+    if cut:
+        text += ("\n\nNOT SHOWN, so nothing in it can be taken as done: " + "; ".join(cut)
+                 + ". A claim about how the study was run that only this part could show is unsupported.")
+    return text
 
 
 def _claim_method_block(quest_root: Path, state: QuestState) -> str:
-    """How the study was run, for the claim check: the frozen protocol, the scripts that ran (each cut at
-    ``_CLAIM_SCRIPT_CHARS``, and saying so), and what each figure draws."""
+    """How the study was run, for the claim check: the frozen protocol (labelled as the plan), the code that ran
+    (:func:`_claim_code_block`), the open findings of the second model's reading of that code, the engine's check
+    verdicts, and what each figure draws."""
     parts: list[str] = []
     protocol = _frozen.protocol_of(quest_root)
     if protocol:
         text = json.dumps(protocol, indent=1, default=str)
         if len(text) > _CLAIM_PROTOCOL_CHARS:
             text = text[:_CLAIM_PROTOCOL_CHARS] + f"\n... ({len(text) - _CLAIM_PROTOCOL_CHARS:,} more characters)"
-        parts.append("The frozen protocol:\n" + text)
-    for name in (_split_run.SIMULATE_NAME, "experiment.py"):
-        try:
-            source = (quest_root / "code" / name).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if len(source) > _CLAIM_SCRIPT_CHARS:
-            source = source[:_CLAIM_SCRIPT_CHARS] + f"\n# ... ({len(source) - _CLAIM_SCRIPT_CHARS:,} more characters not shown)"
-        parts.append(f"code/{name}:\n```python\n{source}\n```")
+        parts.append("THE PLAN (the frozen protocol: what was planned, NOT evidence of what ran):\n" + text)
+    code = _claim_code_block(quest_root / "code")
+    if code:
+        parts.append(code)
+    try:
+        findings = _code_review.review_block(quest_root, quest_root / "code").strip()
+    except Exception:  # noqa: BLE001 - a record that cannot be read adds nothing; it never loosens a check
+        findings = ""
+    if findings:
+        parts.append(
+            "WHAT A SECOND MODEL FOUND WHEN IT READ THE CODE AGAINST THE PLAN (its reading can be wrong). A claim that"
+            " a point below says the code does not do, or does differently, is `unsupported` unless the code above"
+            " plainly does it.\n" + findings
+        )
     try:
         record = json.loads((quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
