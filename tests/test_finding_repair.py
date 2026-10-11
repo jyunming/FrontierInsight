@@ -512,18 +512,52 @@ def test_a_result_dict_entry_of_the_findings_quantity_may_change_and_no_other_va
 
 def test_a_finding_that_names_no_function_may_change_the_entry_of_its_quantity_in_a_module_level_dict(tmp_path: Path) -> None:
     base = RESULT + SOURCE
-    one = base.replace("return m * w / c", "return m * w / c + 0.5")
-    entry = one.replace('"missing_probability": 0.0', '"missing_probability": 0.25')
+    failing = "import spring\n\ndef test_q():\n    assert spring.result['missing_probability'] == 0.25, 'the entry is wrong'\n"
+    entry = base.replace('"missing_probability": 0.0', '"missing_probability": 0.25')
     other = entry.replace('"merged_probability": 0.0', '"merged_probability": 0.4')
-    constant = entry.replace("THRESHOLD = 0.5", "THRESHOLD = 0.9")
+    untouched = base.replace("return m * w / c", "return m * w / c + 0.5")  # the entry is not repaired: the test fails
     run = Run(tmp_path, [{"id": "F-1", "function": "<module>", "quantity": "missingprobability"}], {})
     (run.code / "spring.py").write_text(base, encoding="utf-8")
-    run.replies = {"code:test": [_block(FAILING)],
-                   "code:repair": [_block("# file: spring.py\n" + other), _block("# file: spring.py\n" + constant),
-                                   _block("# file: spring.py\n" + entry)]}
+    run.replies = {"code:test": [_block(failing)],
+                   "code:repair": [_block("# file: spring.py\n" + other),
+                                   _block("# file: spring.py\n" + untouched), _block("# file: spring.py\n" + entry)]}
     assert run.go() == ["spring.py"]
     repairs = run.record["issues"]["F-1"]["repairs"]
     assert [r["outcome"] for r in repairs] == ["rejected", "rejected", "accepted"]
-    assert all("does not speak of" in r["why"] for r in repairs[:2])
+    assert "does not speak of" in repairs[0]["why"]
+    assert "test still fails" in repairs[1]["why"]
     text = (run.code / "spring.py").read_text(encoding="utf-8")
     assert '"missing_probability": 0.25' in text and '"merged_probability": 0.0' in text and "THRESHOLD = 0.5" in text
+
+
+def test_only_the_findings_own_quantity_entries_may_change_at_module_level() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+
+    def changes(old: str, new: str) -> list[str]:
+        return fr.unspoken_frame_changes(old, new, issue)
+
+    # A call that merely holds a dict, a statement that reads the entry, a deleted statement: not the quantity's entry.
+    assert changes(f'CONFIG = build({{{q}: 0, "k": "a"}})\n', 'CONFIG = build({"k": "b"})\n')
+    assert changes(f"TOTAL = f(d[{q}], x)\n", "TOTAL = x * 100\n")
+    assert changes(f"result = {{}}\nresult[{q}] = 0.0\n", "result = {}\n")
+    # The one subscript of the quantity may be set or added to; another subscript may not.
+    assert changes(f"result = {{}}\nresult[{q}] = 0.0\n", f"result = {{}}\nresult[{q}] = 0.3\n") == []
+    assert changes(f"result = {{}}\nresult[{q}] += 1\n", f"result = {{}}\nresult[{q}] += 2\n") == []
+    assert changes(f"result = {{}}\nresult[{q}] = 0.0\n", f"result = {{}}\nother[{q}] = 0.0\n")
+    # A ** entry added to the dict may overwrite others; one that was there already is unchanged.
+    base = f'result = {{{q}: 0.0, "merged": 0.0}}\n'
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, **{{"merged": 99}}}}\n')
+    spread = f"result = {{{q}: 0.0, **extra}}\n"
+    assert changes(spread, f"result = {{{q}: 0.1, **extra}}\n") == []
+    # An assignment inside a function is not the module-level one it shares a text with.
+    local = f"def f():\n    result = {{{q}: 0.1}}\n"
+    assert changes(f"result = {{{q}: 0.0}}\n{local}", local), "the module-level one is gone; its function-local twin is not it"
+    # Chained or tuple targets are not a plain result dict.
+    assert changes(f"result = cache = {{{q}: 0.0}}\n", f"result = {{{q}: 0.1}}\n")
+    assert changes(f"result, other = {{{q}: 0.0}}, 1\n", f"result, other = {{{q}: 0.1}}, 1\n")
+    assert changes(f"result = cache = {{{q}: 0.0}}\n", f"result = cache = {{{q}: 0.1}}\n") == []
+    # An added key must be a static string that the dict does not have; a computed or repeated one can overwrite an entry.
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "extra": 1}}\n') == []
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, name: 1}}\n')
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "merged": 5}}\n')

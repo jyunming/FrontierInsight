@@ -350,24 +350,33 @@ def _quantity_keys(issue: dict[str, Any]) -> set[str]:
     return {k for k in (_issues.norm(q) for q in raw) if k}
 
 
-def _statement_dumps(source: str) -> dict[str, ast.stmt]:
-    """Every assignment of ``source`` by its ``ast.dump``."""
+def _frame_assigns(source: str) -> list[tuple[str, str, ast.stmt]]:
+    """The assignments at module or class level of ``source`` (where the statements of :func:`_frame` are), as
+    ``(where, ast.dump, node)``; those inside a function or a nested block are not."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return {}
-    return {ast.dump(n): n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AnnAssign))}
+        return []
+    out: list[tuple[str, str, ast.stmt]] = []
+
+    def walk(body: list[ast.stmt], where: str) -> None:
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                walk(node.body, f"{where}{node.name}.")
+            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                out.append((where, ast.dump(node), node))
+
+    walk(tree.body, "")
+    return out
 
 
-def _target_dump(node: ast.stmt) -> str:
-    """What an assignment assigns to, as ``ast.dump`` (its first target)."""
-    targets = getattr(node, "targets", None)
-    return ast.dump(targets[0] if targets else getattr(node, "target", node))
+def _targets(node: ast.stmt) -> list[ast.expr]:
+    return list(node.targets) if isinstance(node, ast.Assign) else [node.target]  # type: ignore[attr-defined]
 
 
 def _dict_value(node: ast.stmt | None) -> ast.Dict | None:
     value = getattr(node, "value", None)
-    return value if isinstance(value, ast.Dict) else None
+    return value if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(value, ast.Dict) else None
 
 
 def _quantity_name(key: ast.expr | None, quantities: set[str]) -> bool:
@@ -375,47 +384,64 @@ def _quantity_name(key: ast.expr | None, quantities: set[str]) -> bool:
 
 
 def changes_only_quantity_entries(old: ast.stmt, new: ast.stmt | None, quantities: set[str]) -> bool:
-    """Whether a changed statement is one the finding's quantity is an entry of: a dict literal assigned to the same
-    target in which every existing entry that changed or went is keyed by a quantity of the finding (entries may be
-    added; the others are untouched), or, for any other statement, one that sets or builds an entry (a dict key, a
-    subscript) named by a quantity of the finding."""
-    if not quantities:
+    """Whether a changed statement changes only the entries of the finding's own quantity: a dict literal assigned to the
+    same targets in which every existing entry that changed or went is keyed by a quantity of the finding (entries may be
+    added, under a static string key the dict does not have; a ``**`` entry may not be added, taken out or changed), or
+    an assignment (``=``, ``+=``, annotated) to the one subscript ``name["quantity"]``, the same on both sides. Anything
+    else, and a statement that is gone, is not."""
+    if not quantities or new is None or type(old) is not type(new):
+        return False
+    old_targets, new_targets = _targets(old), _targets(new)
+    if [ast.dump(t) for t in old_targets] != [ast.dump(t) for t in new_targets]:
+        return False
+    if any(isinstance(t, (ast.Tuple, ast.List, ast.Starred)) for t in old_targets):
         return False
     before, after = _dict_value(old), _dict_value(new)
-    if before is not None:
-        if after is None or new is None or _target_dump(old) != _target_dump(new):
+    if before is not None or after is not None:
+        if before is None or after is None:
             return False
-        now = {ast.dump(k) if k is not None else "**" + ast.dump(v): ast.dump(v) for k, v in zip(after.keys, after.values)}
-        for k, v in zip(before.keys, before.values):
-            key = ast.dump(k) if k is not None else "**" + ast.dump(v)
-            if now.get(key) != ast.dump(v) and not _quantity_name(k, quantities):
+        old_keys = [ast.dump(k) if k is not None else None for k in before.keys]
+        new_keys = [ast.dump(k) if k is not None else None for k in after.keys]
+        spread = lambda d: sorted(ast.dump(v) for k, v in zip(d.keys, d.values) if k is None)  # noqa: E731
+        named = [k for k in new_keys if k is not None]
+        if spread(before) != spread(after) or len(named) != len(set(named)):
+            return False
+        now = {k: ast.dump(v) for k, v in zip(new_keys, after.values) if k is not None}
+        for k, v, key in zip(before.keys, before.values, old_keys):
+            if key is not None and now.get(key) != ast.dump(v) and not _quantity_name(k, quantities):
+                return False
+        for k, key in zip(after.keys, new_keys):
+            if key is not None and key not in old_keys and not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
                 return False
         return any(_quantity_name(k, quantities) for k in before.keys + after.keys)
-    for n in ast.walk(old):
-        if isinstance(n, ast.Dict) and any(_quantity_name(k, quantities) for k in n.keys):
-            return True
-        if isinstance(n, ast.Subscript) and _quantity_name(n.slice, quantities):
-            return True
-    return False
+    return len(old_targets) == 1 and isinstance(old_targets[0], ast.Subscript) and _quantity_name(old_targets[0].slice, quantities)
 
 
 def unspoken_frame_changes(old: str, new: str, issue: dict[str, Any]) -> list[str]:
     """What a repair changed at module or class level that the finding does not speak of: a statement that binds no name
-    the finding names and is not an entry-for-the-finding's-quantity change (:func:`changes_only_quantity_entries`)."""
+    the finding names and is not a change of the entries of the finding's own quantity
+    (:func:`changes_only_quantity_entries`)."""
     spoken, quantities = issue_names(issue), _quantity_keys(issue)
     altered = [s for s in frame_altered(old, new) if not (s[1] & spoken)]
     if not altered or not quantities:
         return [t for t, _n, _d in altered]
-    olds, news = _statement_dumps(old), _statement_dumps(new)
-    unmatched = [n for d, n in news.items() if d not in olds]
+    olds, news = _frame_assigns(old), _frame_assigns(new)
+    for _w, dump, _n in olds:  # what is the same in both is not a twin
+        match = next((n for n in news if n[1] == dump), None)
+        if match:
+            news.remove(match)
     out = []
     for text, _names, dump in altered:
-        node = olds.get(dump)
-        if node is None:
+        found = next((o for o in olds if o[1] == dump), None)
+        if found is None:
             out.append(text)
             continue
-        twin = next((u for u in unmatched if _target_dump(u) == _target_dump(node)), None)
-        if not changes_only_quantity_entries(node, twin, quantities):
+        olds.remove(found)
+        twin = next((n for n in news if n[0] == found[0] and [ast.dump(t) for t in _targets(n[2])]
+                     == [ast.dump(t) for t in _targets(found[2])]), None)
+        if twin:
+            news.remove(twin)
+        if not changes_only_quantity_entries(found[2], twin[2] if twin else None, quantities):
             out.append(text)
     return out
 
