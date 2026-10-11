@@ -120,8 +120,14 @@ def test_paired_permutation_agrees_with_the_pure_python_path(pure_python) -> Non
     assert abs(_mean(n["ci_lower"] for n in new) - _mean(o["ci_lower"] for o in old)) < 0.03
     assert abs(_mean(n["ci_upper"] for n in new) - _mean(o["ci_upper"] for o in old)) < 0.03
     assert all(n["diff"] == o["diff"] and n["n_pairs"] == 60 for n, o in zip(new, old))
-    for edge in ([], [1.0], [0.0] * 20, [float("nan")] * 3 + [1.0, -1.0], [1.0] * 14, [1.0] * 30 + [0.0] * 5):
-        assert stats.paired_permutation_test(edge) == pure_python(stats.paired_permutation_test, edge) or edge == [1.0] * 30 + [0.0] * 5
+    for edge in ([], [1.0], [0.0] * 20, [float("nan")] * 3 + [1.0, -1.0], [1.0] * 14):
+        assert stats.paired_permutation_test(edge) == pure_python(stats.paired_permutation_test, edge)
+    # past the exact enumeration the flips are drawn: the two paths agree in distribution, not draw for draw
+    many = [1.0] * 30 + [0.0] * 5
+    new = [stats.paired_permutation_test(many, seed=s) for s in SEEDS]
+    old = [pure_python(stats.paired_permutation_test, many, seed=s) for s in SEEDS]
+    assert all(n["diff"] == o["diff"] and n["n_pairs"] == o["n_pairs"] for n, o in zip(new, old))
+    assert abs(_mean(n["p"] for n in new) - _mean(o["p"] for o in old)) < 0.01
     # the all-same-sign case: every flip but the identity (and its mirror) is smaller, in both paths
     assert stats.paired_permutation_test([1.0] * 30)["p"] < 0.01
 
