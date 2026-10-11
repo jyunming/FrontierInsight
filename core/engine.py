@@ -174,6 +174,8 @@ from .provider import (
     step_provider_lines,
     _ModelAnswerProblem,
     _is_fatal_provider_error,
+    is_auth_error as _provider_is_auth_error,
+    sign_in_advice as _provider_sign_in_advice,
     ModelAnswerTruncated,
     resolve_endpoint_async,
     set_model_call_archive as _set_model_call_archive,
@@ -2167,6 +2169,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if phrase:
             self._progress(f"[{node}] {phrase}")
 
+    def _sign_in_message(self, exc: BaseException, requested_model: str | None = None) -> str:
+        """The plain sign-in message for a call that a provider refused (which provider and model, what to run)."""
+        served = _crash_kind.served_by(exc)
+        prov = getattr(getattr(self, "config", None), "provider", None)
+        name = served[0] if served else str(getattr(prov, "name", "") or "")
+        model = served[1] if served else str(requested_model or getattr(prov, "model", "") or "")
+        return _provider_sign_in_advice(name, model)
+
+    def _unavailable_message(self, gone: str) -> str:
+        """What a stop because the model could not be used says: a dead sign-in says which one and how to sign in
+        again; a usage limit says to wait for its reset. Both say how to continue."""
+        signin = self.__dict__.pop("_provider_signin", "")
+        if signin:
+            return (f"{signin} Nothing this step decided was kept. After signing in, continue the quest with "
+                    f"`--resume {self.quest_id}` and it runs this step again. ({gone})")
+        return (f"the model could not be used ({gone}); nothing this step decided was kept. Resume the quest "
+                "when the model can be used again (after its usage limit resets).")
+
     def _audited(self, name: str, fn: Any) -> Any:
         """``fn`` (a graph node) with its start, end, failure or pause in the audit trace. An interrupted node is run again
         from its start when the quest resumes, so a second ``node_started`` after ``node_paused`` is what happened."""
@@ -2182,6 +2202,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._progress_stage(name)
             began = time.monotonic()
             self.__dict__.pop("_provider_unavailable", None)
+            self.__dict__.pop("_provider_signin", None)
             try:
                 try:
                     out = await fn(state)
@@ -2193,17 +2214,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if gone := self.__dict__.pop("_provider_unavailable", None):
                     # A call in this step met a usage limit or a dead login and the step went on without its answer
                     # (a "could not ask" path): what it decided is not kept, and the step runs again on resume.
-                    raise ModelUnavailable(
-                        f"the model could not be used ({gone}); nothing this step decided was kept. Resume the quest "
-                        "when the model can be used again (after its usage limit resets).")
+                    raise ModelUnavailable(self._unavailable_message(gone))
             except GraphBubbleUp as e:
                 if isinstance(e, GraphInterrupt) and (gone := self.__dict__.pop("_provider_unavailable", None)):
                     # A pause that follows a call its model could not take (r4: "the settings to vary could not be
                     # read" after the plan's model hit its usage limit) asks a person about a question never answered:
                     # the step stops instead, and runs again on resume.
-                    error = ModelUnavailable(
-                        f"the model could not be used ({gone}); nothing this step decided was kept. Resume the quest "
-                        "when the model can be used again (after its usage limit resets).")
+                    error = ModelUnavailable(self._unavailable_message(gone))
                     self._audit("node_failed", node=name, error=f"{type(error).__name__}: {error}")
                     raise error from None
                 if isinstance(e, GraphInterrupt):
@@ -2738,7 +2755,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # physically wrong (unit error, factor of two, sign flip). The
             # design declared what its outputs may legally be; enforce it
             # here, before a paper gets written from them.
-            if _assertion_violations(state):
+            if _assertion_violations(state, self._walk_memo()):
                 return "retry"
             # Warnings from the run's own numerics, until the repairs are spent.
             if self._numeric_findings(state):
@@ -10351,7 +10368,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         out = _result_comparison_stats(replicates, metric_ids=metric_ids, **kw)
         if protocol is not None and len(replicates) >= 1 and _metric_spec.declared(protocol):
             try:
-                spec = _metric_spec.statistics(replicates, protocol)
+                spec = _metric_spec.statistics(replicates, protocol, progress=self._log.info)
             except Exception as e:  # noqa: BLE001 -- a report about the numbers must never stall the quest
                 self._log.warning("[stats] the metric specs' statistics could not be computed: %r", e)
                 spec = {}
@@ -11683,7 +11700,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             protocol_now = self._protocol_block(state)
             try:
                 computed = (
-                    _metric_spec.statistics(replicates_for_specs, protocol_now)
+                    _metric_spec.statistics(replicates_for_specs, protocol_now, progress=self._log.info)
                     if replicates_for_specs and _metric_spec.declared(protocol_now) else None
                 )
                 statistics_gaps = _metric_spec.coverage_gaps(protocol_now, replicates_for_specs, computed) if replicates_for_specs else []
@@ -11855,6 +11872,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except (OSError, ValueError):
             pass
         return [{"kind": w.kind, "text": w.text} for w in found]
+
+    def _walk_memo(self) -> Any:
+        """This Engine's memo of the last result's leaf walk, so the plausibility checks that read one result in turn walk
+        it once (``plausibility.WalkMemo``)."""
+        from core import plausibility
+
+        return self.__dict__.setdefault("_plaus_walk_memo", plausibility.WalkMemo())
 
     def _numeric_findings(self, state: QuestState) -> list[Any]:
         """The numeric warnings of the last run that call for a repair (``block``), none once the person accepted the run."""
@@ -15219,7 +15243,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             _assertion_violations({
                 **state, "result_json": result_json,
                 "manifest_failed_trials": getattr(self, "_manifest_failed_trials", None),
-            })
+            }, self._walk_memo())
             if result.returncode == 0 and result_json is not None
             else []
         )
@@ -15458,7 +15482,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             patch["selected_skills"] = [n for n in state.get("selected_skills") or [] if n not in gone]
             patch["skill_selection"] = selection
         patch["numeric_warnings_accepted"] = False
-        for w in _assertion_warnings({**state, **patch}):
+        for w in _assertion_warnings({**state, **patch}, self._walk_memo()):
             self._log.warning("[plausibility] warning, not a stop: %s", w.describe())
             self._audit("check_result", check="plausibility_unproven_cap", status="warn",
                         summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
@@ -15502,7 +15526,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self.__dict__.setdefault("_run_record_ids", []).append(run_record_id)
         patch["manifest_failed_trials"] = getattr(self, "_manifest_failed_trials", None)
         if result_json:
-            patch["bounded_seen"] = _bounded_seen_after(state, result_json)
+            patch["bounded_seen"] = _bounded_seen_after(state, result_json, self._walk_memo())
         self._check_replicate_manifests(state, split, replicates_n)
         if oracle_code is None and getattr(self, "_review_experiment_changed", False) and code_path.is_file():
             oracle_code = code_path.read_text(encoding="utf-8")  # a repair of the second model's findings
@@ -15903,7 +15927,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             and self.config.engine.degenerate_run_guard
             and _is_degenerate_result(state.get("result_json") or {})
         )
-        implausible = _assertion_violations(state)
+        implausible = _assertion_violations(state, self._walk_memo())
         # A legend drawn over its data, or a figure title over a panel title, is
         # sent back for a redraw once, and only when nothing else is wrong with
         # the run: a repair of a crash, an all-zero result or a broken bound
@@ -20588,6 +20612,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     # A usage limit or a dead login is no answer: the step that asked is not kept, whatever it catches
                     # (see _audited), so it runs again when the quest resumes instead of deciding on a call never made.
                     self.__dict__["_provider_unavailable"] = f"{node or 'a step'}: {' '.join(str(exc).split())[:400]}"
+                    self.__dict__["_provider_signin"] = self._sign_in_message(exc, requested_model) if _provider_is_auth_error(exc) else ""
                 raise
             served = dict(_LAST_CALL.get() or {})
             self._record_attempts(node, messages, attempts, requested_model)
@@ -20933,6 +20958,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             except Exception as exc:
                 if _is_fatal_provider_error(exc):
                     unusable.append(f"{node}: {' '.join(str(exc).split())[:400]}")
+                    if _provider_is_auth_error(exc) and not unusable_signin:
+                        unusable_signin.append(self._sign_in_message(exc, model))
                 raise
             # This call's own model and counts (LAST_CALL is the task's own record); the client's shared attributes
             # only when the transport set nothing.
@@ -20945,11 +20972,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
         messages = [{"role": "user", "content": prompt}]
         unusable: list[str] = []
+        unusable_signin: list[str] = []
         try:
             return await self._merged_ensemble(prompt, messages, node, ensemble_cfg, _chat_fn)
         except Exception:
             if unusable:
                 self.__dict__["_provider_unavailable"] = unusable[0]  # no member answered and one met a usage limit
+                self.__dict__["_provider_signin"] = unusable_signin[0] if unusable_signin else ""
             raise
 
     async def _merged_ensemble(self, prompt: str, messages: list[dict[str, str]], node: str,
@@ -28405,7 +28434,7 @@ def _resolve_selected_skills(
     return list(usable), reasons
 
 
-def _assertion_violations(state: "QuestState") -> list:
+def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
     """Range/unit assertions the run broke, as declared by its own design.
 
     Returns [] when the design declared nothing — silence means "nothing was
@@ -28423,9 +28452,11 @@ def _assertion_violations(state: "QuestState") -> list:
         # The script rides along so a value capped exactly at a non-zero
         # bound is caught too; ``seen`` so a bounded quantity an earlier run
         # reported cannot quietly disappear. See core/plausibility.py for both.
+        rj = state.get("result_json") or {}
         found = plausibility.check_design(
-            state.get("result_json") or {}, _asserting_design(state), code=state.get("code") or "",
+            rj, _asserting_design(state), code=state.get("code") or "",
             seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
+            walk=memo.get(rj) if memo is not None else None,
         )
         # A cap whose place in the result cannot be shown is a warning (_assertion_warnings), not a violation.
         return [v for v in found if getattr(v, "kind", "") != "clamped_unproven"]
@@ -28433,16 +28464,18 @@ def _assertion_violations(state: "QuestState") -> list:
         return []
 
 
-def _assertion_warnings(state: "QuestState") -> list:
+def _assertion_warnings(state: "QuestState", memo: Any = None) -> list:
     """The findings of the same check that are warnings, not violations: a value exactly on a constant the script
     caps a quantity of that name at, where that cap's place in the result cannot be shown
     (``plausibility.direct_caps(..., proven=False)``). Logged and recorded in the trace; they never send a run back."""
     try:
         from core import plausibility
 
+        rj = state.get("result_json") or {}
         found = plausibility.check_design(
-            state.get("result_json") or {}, _asserting_design(state), code=state.get("code") or "",
+            rj, _asserting_design(state), code=state.get("code") or "",
             seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
+            walk=memo.get(rj) if memo is not None else None,
         )
         return [v for v in found if getattr(v, "kind", "") == "clamped_unproven"]
     except Exception:  # noqa: BLE001
@@ -28489,13 +28522,14 @@ def _asserting_design(state: "QuestState") -> dict[str, Any]:
     return design
 
 
-def _bounded_seen_after(state: "QuestState", result_json: dict[str, Any]) -> list[str]:
+def _bounded_seen_after(state: "QuestState", result_json: dict[str, Any], memo: Any = None) -> list[str]:
     """``bounded_seen`` once this result is counted: what was seen before, plus what it reports."""
     seen = list(state.get("bounded_seen") or [])
     try:
         from core import plausibility
 
-        for path in plausibility.bounded_paths(result_json, _asserting_design(state)):
+        for path in plausibility.bounded_paths(
+                result_json, _asserting_design(state), walk=memo.get(result_json) if memo is not None else None):
             if path not in seen:
                 seen.append(path)
     except Exception:  # noqa: BLE001 - bookkeeping must not block a quest
