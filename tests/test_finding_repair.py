@@ -488,3 +488,42 @@ def test_only_code_names_of_a_finding_count_never_the_plain_words_of_its_prose()
     names = fr.issue_names(issue)
     assert {"SCALE", "OFFSET", "max_dose", "E5"} <= names
     assert not names & {"data", "is", "the", "value", "missing", "simulation"}
+
+
+RESULT = 'THRESHOLD = 0.5\nresult = {"missing_probability": 0.0, "merged_probability": 0.0, "n": 3}\n'
+
+
+def test_a_result_dict_entry_of_the_findings_quantity_may_change_and_no_other_value_of_it() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability", "quantities": ["missingprobability"]}
+    entry = RESULT.replace('"missing_probability": 0.0', '"missing_probability": 0.25')
+    assert fr.unspoken_frame_changes(RESULT, entry, issue) == []
+    added = RESULT.replace('"n": 3}', '"n": 3, "missing_count": 4}')
+    assert fr.unspoken_frame_changes(RESULT, entry.replace('"n": 3}', '"n": 3, "missing_count": 4}'), issue) == []
+    assert fr.unspoken_frame_changes(RESULT, added, issue) == [], "new entries may be added"
+    other = entry.replace('"merged_probability": 0.0', '"merged_probability": 0.4')  # another entry's value changes too
+    assert fr.unspoken_frame_changes(RESULT, other, issue)
+    assert fr.unspoken_frame_changes(RESULT, entry.replace("THRESHOLD = 0.5", "THRESHOLD = 0.9"), issue)
+    # A statement that is not a dict literal but sets an entry of the quantity.
+    sub_old, sub_new = 'result = {}\nresult["missing_probability"] = 0.0\n', 'result = {}\nresult["missing_probability"] = 0.3\n'
+    assert fr.unspoken_frame_changes(sub_old, sub_new, issue) == []
+    assert fr.unspoken_frame_changes(sub_old.replace("missing", "merged"), sub_new.replace("missing", "merged"), issue)
+    assert fr.unspoken_frame_changes(RESULT, entry, {"function": "<module>"}), "no quantity, no entry allowed"
+
+
+def test_a_finding_that_names_no_function_may_change_the_entry_of_its_quantity_in_a_module_level_dict(tmp_path: Path) -> None:
+    base = RESULT + SOURCE
+    one = base.replace("return m * w / c", "return m * w / c + 0.5")
+    entry = one.replace('"missing_probability": 0.0', '"missing_probability": 0.25')
+    other = entry.replace('"merged_probability": 0.0', '"merged_probability": 0.4')
+    constant = entry.replace("THRESHOLD = 0.5", "THRESHOLD = 0.9")
+    run = Run(tmp_path, [{"id": "F-1", "function": "<module>", "quantity": "missingprobability"}], {})
+    (run.code / "spring.py").write_text(base, encoding="utf-8")
+    run.replies = {"code:test": [_block(FAILING)],
+                   "code:repair": [_block("# file: spring.py\n" + other), _block("# file: spring.py\n" + constant),
+                                   _block("# file: spring.py\n" + entry)]}
+    assert run.go() == ["spring.py"]
+    repairs = run.record["issues"]["F-1"]["repairs"]
+    assert [r["outcome"] for r in repairs] == ["rejected", "rejected", "accepted"]
+    assert all("does not speak of" in r["why"] for r in repairs[:2])
+    text = (run.code / "spring.py").read_text(encoding="utf-8")
+    assert '"missing_probability": 0.25' in text and '"merged_probability": 0.0' in text and "THRESHOLD = 0.5" in text

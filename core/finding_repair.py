@@ -325,22 +325,98 @@ def frame_changes(old: str, new: str) -> list[str]:
     return [f"{where or 'the module'}: {text[:60]}" for where, text in changed + new_frame]
 
 
-def frame_altered(old: str, new: str) -> list[tuple[str, set[str]]]:
+def frame_altered(old: str, new: str) -> list[tuple[str, set[str], str]]:
     """The module- and class-level statements of ``old`` that ``new`` changed or removed (additions are not listed), each
-    as ``(description, the names it binds)``."""
+    as ``(description, the names it binds, its ast.dump)``."""
     try:
         before, after = ast.parse(old), ast.parse(new)
     except SyntaxError:
-        return [("the file does not parse", set())]
+        return [("the file does not parse", set(), "")]
     kept = [d for _w, d in _frame(after)]
     names = {ast.dump(n): _bound_names(n) for tree in (before,) for n in ast.walk(tree)
              if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Import, ast.ImportFrom))}
-    out: list[tuple[str, set[str]]] = []
+    out: list[tuple[str, set[str], str]] = []
     for where, dump in _frame(before):
         if dump in kept:
             kept.remove(dump)
         else:
-            out.append((f"{where or 'the module'}: {dump[:60]}", names.get(dump, set())))
+            out.append((f"{where or 'the module'}: {dump[:60]}", names.get(dump, set()), dump))
+    return out
+
+
+def _quantity_keys(issue: dict[str, Any]) -> set[str]:
+    """The finding's quantities, normalised as the findings themselves are (:func:`core.code_findings.norm`)."""
+    raw = [issue.get("quantity"), *(issue.get("quantities") or [])]
+    return {k for k in (_issues.norm(q) for q in raw) if k}
+
+
+def _statement_dumps(source: str) -> dict[str, ast.stmt]:
+    """Every assignment of ``source`` by its ``ast.dump``."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    return {ast.dump(n): n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AnnAssign))}
+
+
+def _target_dump(node: ast.stmt) -> str:
+    """What an assignment assigns to, as ``ast.dump`` (its first target)."""
+    targets = getattr(node, "targets", None)
+    return ast.dump(targets[0] if targets else getattr(node, "target", node))
+
+
+def _dict_value(node: ast.stmt | None) -> ast.Dict | None:
+    value = getattr(node, "value", None)
+    return value if isinstance(value, ast.Dict) else None
+
+
+def _quantity_name(key: ast.expr | None, quantities: set[str]) -> bool:
+    return isinstance(key, ast.Constant) and isinstance(key.value, str) and _issues.norm(key.value) in quantities
+
+
+def changes_only_quantity_entries(old: ast.stmt, new: ast.stmt | None, quantities: set[str]) -> bool:
+    """Whether a changed statement is one the finding's quantity is an entry of: a dict literal assigned to the same
+    target in which every existing entry that changed or went is keyed by a quantity of the finding (entries may be
+    added; the others are untouched), or, for any other statement, one that sets or builds an entry (a dict key, a
+    subscript) named by a quantity of the finding."""
+    if not quantities:
+        return False
+    before, after = _dict_value(old), _dict_value(new)
+    if before is not None:
+        if after is None or new is None or _target_dump(old) != _target_dump(new):
+            return False
+        now = {ast.dump(k) if k is not None else "**" + ast.dump(v): ast.dump(v) for k, v in zip(after.keys, after.values)}
+        for k, v in zip(before.keys, before.values):
+            key = ast.dump(k) if k is not None else "**" + ast.dump(v)
+            if now.get(key) != ast.dump(v) and not _quantity_name(k, quantities):
+                return False
+        return any(_quantity_name(k, quantities) for k in before.keys + after.keys)
+    for n in ast.walk(old):
+        if isinstance(n, ast.Dict) and any(_quantity_name(k, quantities) for k in n.keys):
+            return True
+        if isinstance(n, ast.Subscript) and _quantity_name(n.slice, quantities):
+            return True
+    return False
+
+
+def unspoken_frame_changes(old: str, new: str, issue: dict[str, Any]) -> list[str]:
+    """What a repair changed at module or class level that the finding does not speak of: a statement that binds no name
+    the finding names and is not an entry-for-the-finding's-quantity change (:func:`changes_only_quantity_entries`)."""
+    spoken, quantities = issue_names(issue), _quantity_keys(issue)
+    altered = [s for s in frame_altered(old, new) if not (s[1] & spoken)]
+    if not altered or not quantities:
+        return [t for t, _n, _d in altered]
+    olds, news = _statement_dumps(old), _statement_dumps(new)
+    unmatched = [n for d, n in news.items() if d not in olds]
+    out = []
+    for text, _names, dump in altered:
+        node = olds.get(dump)
+        if node is None:
+            out.append(text)
+            continue
+        twin = next((u for u in unmatched if _target_dump(u) == _target_dump(node)), None)
+        if not changes_only_quantity_entries(node, twin, quantities):
+            out.append(text)
     return out
 
 
@@ -604,14 +680,15 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         elif new:
             # A finding that names no function (a quantity the results lack, a module-level value): the repair may
             # add helpers and change ONE existing function, and may change an existing module- or class-level
-            # statement only when a name it binds is one the finding speaks of. Anything wider is not this finding's.
+            # statement only when a name it binds is one the finding speaks of, or when it is an entry of the finding's
+            # own quantity (a result dict built in one module-level statement). Anything wider is not this finding's.
             changed = other_functions_changed(old, new, "")
-            altered = [s for s in frame_altered(old, new) if not (s[1] & issue_names(issue))]
+            altered = unspoken_frame_changes(old, new, issue)
             if len(changed) > 1:
                 new, why = None, ("it changed " + ", ".join(f"`{n}`" for n in changed[:4])
                                   + "; a repair of a finding that names no function may change one existing function")
             elif altered:
-                new, why = None, ("it changed " + "; ".join(t for t, _ in altered[:3])
+                new, why = None, ("it changed " + "; ".join(altered[:3])
                                   + ", which the finding does not speak of")
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"
