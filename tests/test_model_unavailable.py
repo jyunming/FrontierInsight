@@ -148,3 +148,93 @@ async def test_an_ensemble_no_member_of_which_could_answer_stops_the_step(tmp_pa
 
     with pytest.raises(ModelUnavailable):
         await eng._audited("cross_check", step)({})
+
+
+# --- a sign-in that expired or was refused is the same kind of stop as a usage limit ---------------------------------
+
+CODEX_EXPIRED = (
+    "C:\\Users\\x\\AppData\\Roaming\\npm\\codex.CMD exited rc=1: Reconnecting... 2/5 (workspace routing discovery "
+    "unauthorized (401)) | Failed to refresh token: Your access token could not be refreshed because your refresh token "
+    "has expired. Please log out and sign in again.")
+
+
+def _http_error(status: int) -> Any:
+    import httpx
+
+    request = httpx.Request("POST", "https://api.example.test/v1/chat/completions")
+    return httpx.HTTPStatusError("x", request=request, response=httpx.Response(status, request=request, json={}))
+
+
+def test_an_expired_codex_sign_in_is_not_tried_again_and_is_known_as_a_sign_in_problem() -> None:
+    from core.provider import is_auth_error
+
+    err = _CliTransientError(CODEX_EXPIRED)
+    assert _is_fatal_provider_error(err) and is_auth_error(err)
+    assert not _retry_cli_error(err), "not retried: it cannot clear by itself"
+
+
+def test_an_http_401_is_a_sign_in_problem_not_retried() -> None:
+    from core.provider import _retry_http_error, is_auth_error
+
+    err = _http_error(401)
+    assert _is_fatal_provider_error(err) and is_auth_error(err) and not _retry_http_error(err)
+
+
+@pytest.mark.parametrize("text", [
+    "codex.CMD exited rc=1: stream disconnected before completion",
+    "codex.CMD exited rc=1: Reconnecting... 2/5 (network error)",
+    "codex.CMD exited rc=1: the answer mentions status 4010 and an unauthorized person",
+])
+def test_a_passing_cli_error_is_not_a_sign_in_problem(text: str) -> None:
+    from core.provider import is_auth_error
+
+    err = _CliTransientError(text)
+    assert not is_auth_error(err) and not _is_fatal_provider_error(err) and _retry_cli_error(err)
+
+
+def test_a_500_is_not_a_sign_in_problem() -> None:
+    from core.provider import is_auth_error
+
+    err = _http_error(500)
+    assert not is_auth_error(err) and not _is_fatal_provider_error(err)
+
+
+def test_the_advice_names_the_provider_the_model_and_the_command_and_never_a_token() -> None:
+    from core.provider import sign_in_advice
+
+    said = sign_in_advice("codex_cli", "gpt-5.5")
+    assert "codex_cli (gpt-5.5)" in said and "`codex logout`, then `codex login`" in said
+    assert "token" not in said.lower()
+    assert "agy" in sign_in_advice("antigravity_cli")
+
+
+class _Expired:
+    async def chat(self, messages: Any, **kw: Any) -> str:
+        raise _CliTransientError(CODEX_EXPIRED)
+
+
+@pytest.mark.asyncio
+async def test_a_step_whose_login_expired_stops_with_how_to_sign_in_and_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine(tmp_path, monkeypatch, _Expired())
+    step = eng._audited("plan", lambda state: _swallowing_step(eng))
+    with pytest.raises(ModelUnavailable) as caught:
+        await step({})
+    said = str(caught.value)
+    assert "has expired or was refused" in said and "--resume" in said and "usage limit" not in said
+    assert "openai" in said  # the quest's provider here (an HTTP one): the advice says to check the key or sign-in
+
+
+def test_the_failure_card_for_an_expired_codex_login_names_the_command() -> None:
+    from core import crash_kind as ck
+
+    f = ck.classify(_CliTransientError(CODEX_EXPIRED), provider="codex_cli", model="gpt-5.5")
+    assert f.kind == "setup" and "codex_cli (gpt-5.5)" in f.say and "`codex logout`, then `codex login`" in f.do
+
+
+def test_a_cli_that_prints_http_401_is_a_sign_in_problem_but_status_4010_is_not() -> None:
+    from core.provider import is_auth_error
+
+    assert is_auth_error(_CliTransientError("gemini exited rc=1: request failed with HTTP 401"))
+    assert not is_auth_error(_CliTransientError("gemini exited rc=1: status 4010"))
