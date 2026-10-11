@@ -4917,6 +4917,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             )
         amended = critique.get("amended_design") if isinstance(critique, dict) else None
         objections = critique.get("objections_addressed") if isinstance(critique, dict) else None
+        not_applied: list[dict[str, str]] = []  # repairs FI did not apply: they would not pass its own checks
         if not failure and not isinstance(objections, list):
             # An audit judges by naming its objections (none is an empty list). An unreadable reply, or one that names
             # none, is not an audit that found nothing.
@@ -4940,7 +4941,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             draft_keys = set(design.keys())
             amended_keys = set(amended.keys())
             if draft_keys.issubset(amended_keys):
-                design = amended
+                design, not_applied = self._hold_audit_repairs_to_the_schema(design, amended)
             else:
                 failure = f"the amended design dropped the keys {sorted(draft_keys - amended_keys)}; the draft was kept"
                 self._log.warning(
@@ -4957,20 +4958,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                        else "self_review" if same else "unclear",
                        "reviewer": reviewer, "writer": writer_model, "same_model": same, "reported": named,
                        "step": review_node}
-        self._record_design_critique(iteration, before, design, objections, failure, node=review_node, review=review_info)
+        self._record_design_critique(iteration, before, design, objections, failure, node=review_node, review=review_info,
+                                     not_applied=not_applied)
         if not failure:
             self._log.info(
                 "[design_self_critique] the design was read by %s: %s", reviewer,
                 "a different model than the one that wrote it" if same is False else
                 "the model that wrote it (a self-review, not an independent one)" if same else
                 f"FI cannot tell whether it is another model than the one that wrote it ({writer_model})")
-        objected = [o.get("objection") if isinstance(o, dict) else o for o in objections or []] if not adopt else []
+        objected = [o.get("objection") if isinstance(o, dict) else o for o in objections or []] if not adopt or not_applied else []
         if not adopt and not failure and proposed_change and not objected:
             objected = ["it proposed a different design without naming why"]
         self._write_receipt(
             "design_audit", "unknown" if failure else "fail" if objected else "pass", started_at=audit_started,
             inputs={"design": before}, output=_receipts.design_core(design), error=failure,
-            detail=("it objected to the design that ran: " + "; ".join(str(o)[:160] for o in objected[:3])) if objected else "",
+            detail=(("it objected to the design that ran: " if not adopt else "its repair could not be applied, so the "
+                     "objection stands: ") + "; ".join(str(o)[:160] for o in objected[:3])) if objected else "",
         )
         if failure and not_reviewed:
             # The reviewer answered but did not review: a gap the evidence level records, not a stop for a person.
@@ -4985,6 +4988,39 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if rationale is not None:
             design = {**design, "rationale": rationale}
         return design, objections
+
+    def _hold_audit_repairs_to_the_schema(
+        self, before: dict[str, Any], amended: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+        """``(design, not_applied)``: ``amended`` with every repair that FI's own reading of the plan would refuse put back
+        as it was in ``before``, and one ``{"key", "reason"}`` per repair left out. A repair is refused when the design
+        read as the plan step reads it (:func:`core.plan.repair_protocol`, :func:`core.plan.normalize_design`) loses a part
+        with it that it kept without it: the reviewer's repair of a value must not cost the block it is in. The reviewer's
+        objection stays reported; only the change is not made."""
+        not_applied: list[dict[str, str]] = []
+        out = dict(amended)
+        old_p, new_p = before.get("protocol"), amended.get("protocol")
+        if isinstance(old_p, dict) and isinstance(new_p, dict):
+            kept_p = dict(new_p)
+            base_fixed, base_notes = _plan.repair_protocol(old_p)
+            for key in sorted(k for k in new_p if k in old_p and new_p[k] != old_p[k]):
+                trial_fixed, trial_notes = _plan.repair_protocol({**old_p, key: new_p[key]})
+                lost = key in (base_fixed or {}) and key not in (trial_fixed or {})
+                if not lost and len(trial_notes) <= len(base_notes):
+                    continue
+                reason = next((n for n in trial_notes if n not in base_notes), "") or f"`protocol.{key}` could not be read"
+                kept_p[key] = old_p[key]
+                not_applied.append({"key": f"protocol.{key}", "reason": " ".join(reason.split())[:300]})
+            out["protocol"] = kept_p
+        if _plan.normalize_design(before)[0] is not None:
+            usable, why = _plan.normalize_design(out)
+            if usable is None:  # the design was readable before the repair and is not with it: nothing of it is applied
+                changed = sorted(k for k in out if out[k] != before.get(k))
+                out = dict(before)
+                not_applied.append({"key": ", ".join(changed) or "design", "reason": " ".join(str(why).split())[:300]})
+        for item in not_applied:
+            self._log.warning("[design_self_critique] the audit's change to `%s` was not applied: %s", item["key"], item["reason"])
+        return out, not_applied
 
     def _critique_summary(self) -> list[str]:
         """What the last methodology audit did, for the plan's *Checks already made*: which parts of the design it changed,
@@ -5001,6 +5037,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                      f"that wrote it ({review.get('writer')}).",
                "self_review": "The design was read again by the model that wrote it: a self-review, not an independent "
                               "one."}.get(str(review.get("kind")), "")
+        held_back = [f"The audit proposed changing `{n.get('key')}`, but FI did not apply it: {n.get('reason')}"
+                     for n in last.get("not_applied") or [] if isinstance(n, dict)]
+        if held_back:
+            who = " ".join([*held_back, who]).strip()
         if last.get("changed_keys"):
             return [
                 "The methodology audit amended the design: " + ", ".join(last["changed_keys"])
@@ -5011,6 +5051,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     def _record_design_critique(
         self, iteration: int, before: dict[str, Any], after: dict[str, Any], objections: Any, failure: str,
         *, node: str = "design_self_critique", review: dict[str, Any] | None = None,
+        not_applied: list[dict[str, str]] | None = None,
     ) -> None:
         """Keep what the methodology audit said and did in ``needs/DESIGN_CRITIQUE.json``, one entry per pass: the
         objections in full, the design before and after and the keys that changed, and whether the audit ran at all. Until
@@ -5026,6 +5067,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "failure": failure,
                 "objections": objections if isinstance(objections, list) else [],
                 **({"review": review} if review else {}),
+                **({"not_applied": not_applied} if not_applied else {}),
                 "changed_keys": changed,
                 "before": before,
                 "after": after_plain,
@@ -5920,41 +5962,53 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     async def _ask_design_for_the_topic(self, state: QuestState, design: dict[str, Any], req: dict[str, Any],
                                         gaps: list[dict[str, Any]], *, iteration: int) -> dict[str, Any]:
         """A design drafted at the design step (a redesign, not from plan.md) that lacks what the topic asks for: the design
-        step's model is asked once per design round (one chat call, counted in ``.fi/topic_design_asked.json`` BEFORE the
-        call) to add it; only what was asked is kept (:func:`core.topic_requirements.merge`)."""
+        step's model is asked to add it, at most ``_SEARCH_ASKS`` times per design round (one chat call each, counted in
+        ``.fi/topic_design_asked.json`` BEFORE the call, so a resume never asks again). An answer that cannot be read goes
+        back to the model with the reader's exact reason. Only what was asked is kept (:func:`core.topic_requirements.merge`)."""
         path = self.fi_dir / _TOPIC_DESIGN_ASKED
         try:
             done = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             done = {}
-        if isinstance(done, dict) and int(done.get("iteration", -1)) == iteration:
-            return design
-        try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"iteration": iteration, "at": _frozen.now()}) + "\n", encoding="utf-8")
-        except OSError as e:
-            self._log.warning("[design] FI could not write down that it was asking for what the topic asks, so it did not ask: %r", e)
-            return design
-        self._log.warning("[design] the redesign lacks what the topic asks for (%s); FI asked the design step's model to add it",
-                          "; ".join(g["sentence"] for g in gaps)[:300])
-        self._progress("Asking the model to add what the topic asks for to the design")
-        ask = (_topic_req.request(self.config.topic, gaps, search=_optim.has_block(design))
-               + "\n\nThe design drafted so far:\n" + json.dumps(design, ensure_ascii=False, default=str)[:8000]
-               + "\n\nAnswer with the whole design as one JSON object, with what was asked added.")
-        try:
-            reply = await self._chat(ask, node="design")
-            obj = _parse_json_lenient(reply)
-        except _ModelAnswerProblem:
-            raise
-        except Exception as e:  # noqa: BLE001 -- what is still missing is decided after this
-            self._log.warning("[design] the design step could not be asked to add what the topic asks for: %s", e)
-            return design
-        merged = _topic_req.merge(design, obj, gaps) if isinstance(obj, dict) else None
-        fixed, why = _plan.normalize_protocol(merged.get("protocol")) if merged is not None else (None, "nothing came back")
-        if merged is None or fixed is None:
+        done = done if isinstance(done, dict) else {}
+        asks = 0
+        problem = ""
+        if int(done.get("iteration", -1)) == iteration:
+            asks = int(done.get("asks", 1) or 0)  # a record from before the count was kept is one ask
+            problem = str(done.get("problem") or "")
+        while asks < _SEARCH_ASKS:
+            try:
+                self.fi_dir.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"iteration": iteration, "asks": asks + 1, "problem": problem,
+                                            "at": _frozen.now()}) + "\n", encoding="utf-8")
+            except OSError as e:
+                self._log.warning("[design] FI could not write down that it was asking for what the topic asks, so it did not ask: %r", e)
+                return design
+            asks += 1
+            self._log.warning("[design] the redesign lacks what the topic asks for (%s); FI asked the design step's model to add it (%d of %d)",
+                              "; ".join(g["sentence"] for g in gaps)[:300], asks, _SEARCH_ASKS)
+            self._progress("Asking the model to add what the topic asks for to the design")
+            ask = (_topic_req.request(self.config.topic, gaps, search=_optim.has_block(design))
+                   + "\n\nThe design drafted so far:\n" + json.dumps(design, ensure_ascii=False, default=str)[:8000]
+                   + "\n\nAnswer with the whole design as one JSON object, with what was asked added.")
+            if problem:
+                ask += ("\n\nYour last answer was not used. The reason, exactly:\n" + problem
+                        + "\nFix that, and keep everything the design already has.")
+            try:
+                reply = await self._chat(ask, node="design")
+                obj = _parse_json_lenient(reply)
+            except _ModelAnswerProblem:
+                raise
+            except Exception as e:  # noqa: BLE001 -- what is still missing is decided after this
+                self._log.warning("[design] the design step could not be asked to add what the topic asks for: %s", e)
+                return design
+            merged = _topic_req.merge(design, obj, gaps) if isinstance(obj, dict) else None
+            fixed, why = _plan.normalize_protocol(merged.get("protocol")) if merged is not None else (None, "nothing came back")
+            if merged is not None and fixed is not None:
+                return {**merged, "protocol": fixed}
             self._log.warning("[design] the design step's answer to add what the topic asks for could not be used: %s", why)
-            return design
-        return {**merged, "protocol": fixed}
+            problem = " ".join(str(why or "the answer had none of what was asked in a form that can be read").split())[:1500]
+        return design
 
     _TOPIC_UNMET_FILE = "topic_unmet.json"
 

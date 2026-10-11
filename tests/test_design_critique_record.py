@@ -138,3 +138,43 @@ async def test_each_audit_leaves_a_receipt_and_a_research_quest_stops_once_when_
     assert receipt["status"] == "unknown" and "provider down" in receipt["error"]
     await eng._audit_design({"topic": "OPC", "iteration": 0}, dict(DRAFT))  # the retry fails too: no second stop
     assert len(stops) == 1
+
+
+SEARCH = {
+    "objective": {"quantity": "y", "direction": "minimise", "unit": "J"},
+    "design_variables": [{"name": "w", "low": 0.0, "high": 1.0, "kind": "continuous"}],
+    "baseline": {"values": {"w": 0.0}, "source": "the topic"},
+    "evaluation_budget": {"starts": 2, "per_start": 20},
+}
+SEARCH_DRAFT = {**DRAFT, "study_type": "find_best_design", "protocol": {"optimisation": SEARCH}}
+
+
+def _with_baseline(value: object) -> dict:
+    return {**SEARCH_DRAFT, "protocol": {"optimisation": {**SEARCH, "baseline": {"values": {"w": value}, "source": "the topic"}}}}
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_breaks_the_search_block_is_not_applied_and_is_recorded(tmp_path: Path) -> None:
+    assert plan.normalize_design(SEARCH_DRAFT)[0] is not None
+    broken = _with_baseline([[0.1, 0.1], [0.0, 0.0]])  # a baseline outside what the variable takes
+    assert plan.normalize_design(broken)[0] is None  # the plan step would drop the whole block over it
+    objection = {"check": "baseline", "objection": "the baseline is a single number", "fix": "made it a grid"}
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [objection], "amended_design": broken})])
+    design, objections = await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
+    assert design["protocol"]["optimisation"]["baseline"]["values"] == {"w": 0.0}  # the block and its baseline stay
+    assert objections == [objection]  # the objection is still reported
+    (entry,) = _record(eng)
+    assert entry["changed_keys"] == []
+    assert [n["key"] for n in entry["not_applied"]] == ["protocol.optimisation"]
+    assert entry["not_applied"][0]["reason"]
+    assert "did not apply it" in " ".join(eng._critique_summary())
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_passes_the_same_checks_is_still_applied(tmp_path: Path) -> None:
+    fixed = _with_baseline(0.5)
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [OBJECTION], "amended_design": fixed})])
+    design, _ = await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
+    assert design["protocol"]["optimisation"]["baseline"]["values"] == {"w": 0.5}
+    (entry,) = _record(eng)
+    assert entry["changed_keys"] == ["protocol"] and "not_applied" not in entry
