@@ -67,12 +67,30 @@ def _find(analysis: dict[str, Any]) -> list[tuple[str, bool]]:
 def test_the_whole_path_names_the_setting() -> None:
     assert rm._path_cells(("by_n_pts", "5", "by_nsr", "0.01"), GRID) == frozenset({("n_pts", 5), ("nsr", 0.01)})
     assert rm._path_cells(("n_pts=5", "nsr=0.01"), GRID) == frozenset({("n_pts", 5), ("nsr", 0.01)})
-    assert rm._path_cells(("nsrs", "0.1"), GRID) == frozenset({("nsr", 0.1)})
+    assert rm._path_cells(("by_nsrs", "0.1"), GRID) == frozenset({("nsr", 0.1)})
     assert rm._path_cells(("per_nsr", "0.1", "n_pts", "10"), GRID) == frozenset({("nsr", 0.1), ("n_pts", 10)})
     # no setting named, an unknown value, a bare value, or one axis with two values: nothing is read
     assert rm._path_cells(("results", "0.01"), GRID) is None
     assert rm._path_cells(("by_nsr", "0.3"), GRID) is None
     assert rm._path_cells(("by_nsr", "0.1", "by_nsr", "0.2"), GRID) is None
+    # an off-grid value anywhere makes the whole path unreadable, whatever valid segments come before or after it
+    assert rm._path_cells(("by_n_pts", "5", "by_nsr", "0.3"), GRID) is None
+    assert rm._path_cells(("by_nsr", "0.3", "by_n_pts", "5"), GRID) is None
+    assert rm._path_cells(("by_n_pts", "5", "nsr=0.3"), GRID) is None
+    assert rm._path_cells(("by_n_pts", "5", "by_nsr"), GRID) is None
+    # a bare plural is a container, not an axis: `trials` / "1" is not axis `trial`
+    assert rm._path_cells(("trials", "1"), {"trial": [1, 2]}) is None
+    assert rm._axis_named("trials", {"trial": [1, 2]}) is None
+
+
+def test_an_off_grid_value_is_not_credited_to_the_setting_before_it() -> None:
+    analysis = _nested()
+    analysis["by_n_pts"]["5"]["by_nsr"] = {"0.3": {"n_runs": RUNS, "err_values": [0.5] * RUNS}}
+    groups, _ = rm._listed_by_group(analysis, "err", GRID)
+    assert all(not (isinstance(u, tuple) and u[1] == frozenset({("n_pts", 5)})) for u in groups)
+    assert "0.3" in groups  # kept under its last key, as before
+    _, _, excesses, acc, _ = rm._listed_counts(analysis, "err", GRID, (20 * RUNS, 0), _recorded_by_cell())
+    assert acc == 15 * RUNS and excesses == []  # 15 read cells; the off-grid list is a pooled copy, never added
 
 
 def test_nested_lists_account_for_every_setting() -> None:
@@ -122,5 +140,12 @@ def test_a_copy_of_the_same_setting_under_a_second_path_counts_once() -> None:
     short = _nested(short=(5, 0.01))
     _, _, _, acc_defined, _ = rm._listed_counts({**short, **swapped}, "err", GRID, (20 * RUNS, 0), _recorded_by_cell())
     assert acc_defined == 20 * RUNS  # the copy under the second path holds the full list, the larger one stands
+    # both paths built from the SHORT report: the copy cannot make up the difference
+    swapped_short: dict[str, Any] = {"by_nsr": {}}
+    for b in B:
+        swapped_short["by_nsr"][str(b)] = {"by_n_pts": {
+            str(a): short["by_n_pts"][str(a)]["by_nsr"][str(b)] for a in A}}
+    _, _, _, acc_both, _ = rm._listed_counts({**short, **swapped_short}, "err", GRID, (20 * RUNS, 0), _recorded_by_cell())
+    assert acc_both == 20 * RUNS - 100
     _, _, _, acc_short, _ = rm._listed_counts(short, "err", GRID, (20 * RUNS, 0), _recorded_by_cell())
     assert acc_short == 20 * RUNS - 100

@@ -401,13 +401,13 @@ def _key_pairs(key: Any, grid: dict[str, list[Any]]) -> list[tuple[str, Any]] | 
 
 def _axis_named(segment: str, grid: dict[str, list[Any]]) -> str | None:
     """The grid axis a key names as a grouping of that setting: its exact name, or the name with a common grouping affix
-    (``by_<name>``, ``per_<name>``, ``<name>s``), compared without case. ``None`` when no axis, or more than one, fits."""
+    (``by_<name>``, ``per_<name>``, and their plurals; a bare ``<name>s`` is not one, since ``steps`` or ``trials`` are containers), compared without case. ``None`` when no axis, or more than one, fits."""
     low = segment.strip().lower()
     exact = [a for a in grid if a.lower() == low]
     if len(exact) == 1:
         return exact[0]
     fits = [a for a in grid
-            if low in (f"by_{a.lower()}", f"per_{a.lower()}", f"{a.lower()}s", f"by_{a.lower()}s", f"per_{a.lower()}s")]
+            if low in (f"by_{a.lower()}", f"per_{a.lower()}", f"by_{a.lower()}s", f"per_{a.lower()}s")]
     return fits[0] if len(fits) == 1 else None
 
 
@@ -415,7 +415,7 @@ def _path_cells(path: tuple[Any, ...], grid: dict[str, list[Any]]) -> frozenset[
     """The setting fragment a list belongs to, read from the WHOLE key path from the root: a segment ``axis=value`` names
     that fragment, and a segment that names a grid axis (:func:`_axis_named`) followed by a segment that is one of that
     axis's grid values names it too (``by_a`` / ``5`` / ``by_b`` / ``0.1`` is a=5, b=0.1). The fragments along the path
-    combine. ``None`` when the path names no setting, or names one axis with two different values."""
+    combine. ``None`` when the path names no setting, names one axis with two different values, or names an axis or value the grid does not have."""
     found: dict[str, Any] = {}
 
     def put(axis: str, value: Any) -> bool:
@@ -436,14 +436,18 @@ def _path_cells(path: tuple[Any, ...], grid: dict[str, list[Any]]) -> frozenset[
                 return None
             i += 1
             continue
+        parsed = _parse_cell(seg)
+        if parsed and set(parsed) <= set(grid):
+            return None  # names the grid's axes with a value the grid does not have: the path cannot be read
         axis = _axis_named(seg, grid)
-        if axis and i + 1 < len(path) and isinstance(path[i + 1], str):
-            value = _match_grid_value(path[i + 1], grid[axis])
-            if value is not _NO_MATCH:
-                if not put(axis, value):
-                    return None
-                i += 2
-                continue
+        if axis:
+            value = _match_grid_value(path[i + 1], grid[axis]) if i + 1 < len(path) and isinstance(path[i + 1], str) else _NO_MATCH
+            if value is _NO_MATCH:
+                return None  # a grouping by an axis whose next key is not one of its values: not a path to read
+            if not put(axis, value):
+                return None
+            i += 2
+            continue
         i += 1
     return frozenset(found.items()) if found else None
 
