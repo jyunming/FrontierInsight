@@ -54,6 +54,9 @@ docker>=7.1
 # viztracer enables `--profile` per-quest tracing.
 psutil>=5.9
 
+# The bootstrap / permutation loops of the evidence statistics (core/stats.py) run as array operations.
+numpy>=1.24
+
 # Cross-process lock around a skill's provenance.json. Two quests
 # recording a use of the same skill serialise on it, so neither
 # loses the other's record.

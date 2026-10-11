@@ -138,7 +138,7 @@ def bootstrap_mean_interval(
         vals = rng.sample(vals, cap)
     n = len(vals)
     rounds = resamples if n <= 2000 else max(200, resamples * 2000 // n)
-    means = sorted(sum(vals[rng.randrange(n)] for _ in range(n)) / n for _ in range(rounds))
+    means = sorted(_resampled_means(vals, rounds, rng))
     lo = means[int(0.025 * (rounds - 1))]
     hi = means[int(math.ceil(0.975 * (rounds - 1)))]
     return lo, hi
@@ -215,6 +215,147 @@ def _clean(values: list[Any]) -> list[float]:
     return [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
 
 
+# --- Resampling kernels ---------------------------------------------------------------------------------------------
+# The bootstrap and permutation loops below are array operations in numpy, drawn in chunks so a chunk holds at most
+# ``_CHUNK_ELEMENTS`` numbers, not a Python loop over every draw (pure Python took tens of minutes for 48 settings x ~10
+# metrics of thousands of values each). The statistic, the number of rounds, the p-value formula and the percentile
+# interval are unchanged. Seeding: the caller's ``random.Random(seed)`` still does the thinning; the numpy generator is
+# then seeded with 64 bits drawn from that same ``Random``, so the same ``seed`` and values always give the same
+# interval and p-value. The draws differ from the old pure-Python stream (same distribution, not the same numbers). Without
+# numpy the original pure-Python loops run.
+
+_CHUNK_ELEMENTS = 4_000_000
+
+
+def _numpy() -> Any:
+    try:
+        import numpy
+
+        return numpy
+    except ImportError:  # pragma: no cover -- numpy is a declared dependency; this is the old pure-Python path
+        return None
+
+
+def _np_generator(np: Any, rng: Any) -> Any:
+    return np.random.default_rng(rng.getrandbits(64))
+
+
+def _chunks(rounds: int, width: int) -> list[int]:
+    """Round counts per chunk so that ``rows * width`` stays within ``_CHUNK_ELEMENTS``."""
+    per = max(1, _CHUNK_ELEMENTS // max(1, width))
+    out = []
+    left = rounds
+    while left > 0:
+        out.append(min(per, left))
+        left -= out[-1]
+    return out
+
+
+def _resampled_means(vals: list[float], rounds: int, rng: Any) -> list[float]:
+    """The mean of ``len(vals)`` values drawn with replacement, ``rounds`` times."""
+    n = len(vals)
+    np = _numpy()
+    if np is None:
+        return [sum(vals[rng.randrange(n)] for _ in range(n)) / n for _ in range(rounds)]
+    gen, arr, out = _np_generator(np, rng), np.asarray(vals, dtype=float), []
+    for r in _chunks(rounds, n):
+        out.append(arr[gen.integers(0, n, size=(r, n))].mean(axis=1))
+    return np.concatenate(out).tolist()
+
+
+def _resampled_mean_differences(x: list[float], y: list[float], rounds: int, rng: Any) -> list[float]:
+    nx, ny = len(x), len(y)
+    np = _numpy()
+    if np is None:
+        return [
+            sum(x[rng.randrange(nx)] for _ in range(nx)) / nx - sum(y[rng.randrange(ny)] for _ in range(ny)) / ny
+            for _ in range(rounds)
+        ]
+    gen, ax, ay, out = _np_generator(np, rng), np.asarray(x, dtype=float), np.asarray(y, dtype=float), []
+    for r in _chunks(rounds, nx + ny):
+        out.append(ax[gen.integers(0, nx, size=(r, nx))].mean(axis=1) - ay[gen.integers(0, ny, size=(r, ny))].mean(axis=1))
+    return np.concatenate(out).tolist()
+
+
+def _permutation_hits(pool: list[float], nx: int, observed: float, rounds: int, rng: Any) -> int:
+    """How many of ``rounds`` random splits of ``pool`` into ``nx`` and the rest differ in mean by at least ``|observed|``."""
+    total, ny = len(pool), len(pool) - nx
+    np = _numpy()
+    if np is None:
+        pool = list(pool)
+        hits = 0
+        for _ in range(rounds):
+            rng.shuffle(pool)
+            if abs(sum(pool[:nx]) / nx - sum(pool[nx:]) / ny) >= abs(observed) - 1e-12:
+                hits += 1
+        return hits
+    gen, arr, hits = _np_generator(np, rng), np.asarray(pool, dtype=float), 0
+    for r in _chunks(rounds, total):
+        shuffled = gen.permuted(np.broadcast_to(arr, (r, total)).copy(), axis=1)
+        diff = shuffled[:, :nx].mean(axis=1) - shuffled[:, nx:].mean(axis=1)
+        hits += int((np.abs(diff) >= abs(observed) - 1e-12).sum())
+    return hits
+
+
+def _sign_flip_hits(values: list[float], observed_abs: float, rounds: int, rng: Any) -> int:
+    """How many of ``rounds`` random sign flips of ``values`` have a sum of at least ``observed_abs`` in size."""
+    m = len(values)
+    np = _numpy()
+    if np is None:
+        return sum(
+            1 for _ in range(rounds)
+            if abs(sum(x if rng.random() < 0.5 else -x for x in values)) >= observed_abs - 1e-12
+        )
+    gen, arr, hits = _np_generator(np, rng), np.asarray(values, dtype=float), 0
+    for r in _chunks(rounds, m):
+        flipped = np.where(gen.random((r, m)) < 0.5, arr, -arr).sum(axis=1)
+        hits += int((np.abs(flipped) >= observed_abs - 1e-12).sum())
+    return hits
+
+
+def _resampled_cluster_means(groups: list[tuple[float, int]], rounds: int, rng: Any) -> list[float]:
+    """The pooled mean of ``len(groups)`` whole clusters drawn with replacement (0.0 when the draw holds no observation)."""
+    g = len(groups)
+    np = _numpy()
+    if np is None:
+        out = []
+        for _ in range(rounds):
+            picks = [groups[rng.randrange(g)] for _ in range(g)]
+            c = sum(n for _s, n in picks)
+            out.append(sum(s for s, _n in picks) / c if c else 0.0)
+        return out
+    gen = _np_generator(np, rng)
+    sums, counts, out = np.asarray([s for s, _n in groups], dtype=float), np.asarray([n for _s, n in groups], dtype=float), []
+    for r in _chunks(rounds, g):
+        idx = gen.integers(0, g, size=(r, g))
+        c, s = counts[idx].sum(axis=1), sums[idx].sum(axis=1)
+        out.append(np.divide(s, c, out=np.zeros(r), where=c > 0))
+    return np.concatenate(out).tolist()
+
+
+def _resampled_cluster_differences(ga: list[tuple[float, int]], gb: list[tuple[float, int]], rounds: int, rng: Any) -> list[float]:
+    np = _numpy()
+    if np is None:
+        diffs = []
+        for _ in range(rounds):
+            pa = [ga[rng.randrange(len(ga))] for _ in range(len(ga))]
+            pb = [gb[rng.randrange(len(gb))] for _ in range(len(gb))]
+            ca, cb = sum(n for _s, n in pa), sum(n for _s, n in pb)
+            diffs.append((sum(s for s, _n in pa) / ca if ca else 0.0) - (sum(s for s, _n in pb) / cb if cb else 0.0))
+        return diffs
+    gen = _np_generator(np, rng)
+    sa, ca = np.asarray([s for s, _n in ga], dtype=float), np.asarray([n for _s, n in ga], dtype=float)
+    sb, cb = np.asarray([s for s, _n in gb], dtype=float), np.asarray([n for _s, n in gb], dtype=float)
+    out = []
+    for r in _chunks(rounds, len(ga) + len(gb)):
+        ia, ib = gen.integers(0, len(ga), size=(r, len(ga))), gen.integers(0, len(gb), size=(r, len(gb)))
+        na, nb = ca[ia].sum(axis=1), cb[ib].sum(axis=1)
+        ma = np.divide(sa[ia].sum(axis=1), na, out=np.zeros(r), where=na > 0)
+        mb = np.divide(sb[ib].sum(axis=1), nb, out=np.zeros(r), where=nb > 0)
+        out.append(ma - mb)
+    return np.concatenate(out).tolist()
+
+
 def _percentile_interval(samples: list[float]) -> tuple[float, float]:
     samples = sorted(samples)
     rounds = len(samples)
@@ -280,13 +421,10 @@ def paired_permutation_test(diffs: list[float], *, resamples: int = 4000, seed: 
         p_value = extreme / total
     else:
         rounds = _rounds(len(nonzero), resamples)
-        hits = sum(
-            1 for _ in range(rounds)
-            if abs(sum(x if rng.random() < 0.5 else -x for x in nonzero)) >= abs(sum(nonzero)) - 1e-12
-        )
+        hits = _sign_flip_hits(nonzero, abs(sum(nonzero)), rounds, rng)
         p_value = (hits + 1) / (rounds + 1)
     rounds = _rounds(n)
-    means = [sum(d[rng.randrange(n)] for _ in range(n)) / n for _ in range(rounds)]
+    means = _resampled_means(d, rounds, rng)
     lo, hi = _percentile_interval(means)
     return {"diff": observed, "ci_lower": lo, "ci_upper": hi, "p": p_value, "n_pairs": n, "method": "paired_permutation_bootstrap"}
 
@@ -302,16 +440,8 @@ def two_sample_mean_test(a: list[float], b: list[float], *, resamples: int = 200
         return None
     observed = sum(x) / len(x) - sum(y) / len(y)
     rounds = _rounds(len(x) + len(y), resamples)
-    boots = [
-        sum(x[rng.randrange(len(x))] for _ in range(len(x))) / len(x) - sum(y[rng.randrange(len(y))] for _ in range(len(y))) / len(y)
-        for _ in range(rounds)
-    ]
-    pool = x + y
-    hits = 0
-    for _ in range(rounds):
-        rng.shuffle(pool)
-        if abs(sum(pool[: len(x)]) / len(x) - sum(pool[len(x):]) / len(y)) >= abs(observed) - 1e-12:
-            hits += 1
+    boots = _resampled_mean_differences(x, y, rounds, rng)
+    hits = _permutation_hits(x + y, len(x), observed, rounds, rng)
     lo, hi = _percentile_interval(boots)
     return {"diff": observed, "ci_lower": lo, "ci_upper": hi, "p": (hits + 1) / (rounds + 1), "method": "bootstrap_permutation"}
 
@@ -340,11 +470,7 @@ def cluster_bootstrap_interval(values: list[float], clusters: list[Any], *, resa
     rng = random.Random(seed)
     g = len(groups)
     rounds = _rounds(g)
-    means = []
-    for _ in range(rounds):
-        picks = [groups[rng.randrange(g)] for _ in range(g)]
-        c = sum(n for _s, n in picks)
-        means.append(sum(s for s, _n in picks) / c if c else 0.0)
+    means = _resampled_cluster_means(groups, rounds, rng)
     lo, hi = _percentile_interval(means)
     return {"mean": total / count, "ci_lower": lo, "ci_upper": hi, "n_clusters": g, "n_observations": count, "method": "cluster_bootstrap"}
 
@@ -362,12 +488,7 @@ def cluster_bootstrap_difference(
     observed = sum(s for s, _n in ga) / sum(n for _s, n in ga) - sum(s for s, _n in gb) / sum(n for _s, n in gb)
     rng = random.Random(seed)
     rounds = _rounds(len(ga) + len(gb))
-    diffs = []
-    for _ in range(rounds):
-        pa = [ga[rng.randrange(len(ga))] for _ in range(len(ga))]
-        pb = [gb[rng.randrange(len(gb))] for _ in range(len(gb))]
-        ca, cb = sum(n for _s, n in pa), sum(n for _s, n in pb)
-        diffs.append((sum(s for s, _n in pa) / ca if ca else 0.0) - (sum(s for s, _n in pb) / cb if cb else 0.0))
+    diffs = _resampled_cluster_differences(ga, gb, rounds, rng)
     below = sum(1 for d in diffs if d <= 0.0)
     above = sum(1 for d in diffs if d >= 0.0)
     p_value = min(1.0, 2.0 * (min(below, above) + 1) / (rounds + 1))
