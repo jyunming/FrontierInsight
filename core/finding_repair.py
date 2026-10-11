@@ -385,8 +385,8 @@ def _quantity_name(key: ast.expr | None, quantities: set[str]) -> bool:
 
 def changes_only_quantity_entries(old: ast.stmt, new: ast.stmt | None, quantities: set[str]) -> bool:
     """Whether a changed statement changes only the entries of the finding's own quantity: a dict literal assigned to the
-    same targets in which every existing entry that changed or went is keyed by a quantity of the finding (entries may be
-    added, under a static string key the dict does not have; a ``**`` entry may not be added, taken out or changed), or
+    same targets in which every existing entry that changed or went is keyed by a quantity of the finding (entries of the
+    quantity may be added; a ``**`` entry may not be added, taken out or changed), or
     an assignment (``=``, ``+=``, annotated) to the one subscript ``name["quantity"]``, the same on both sides. Anything
     else, and a statement that is gone, is not."""
     if not quantities or new is None or type(old) is not type(new):
@@ -406,28 +406,47 @@ def changes_only_quantity_entries(old: ast.stmt, new: ast.stmt | None, quantitie
         if len(named) != len(set(named)):
             return False
         # The entries the dict had keep their order (a ``**`` among them, whose place decides what it overwrites), apart
-        # from an entry of the quantity that went, and new entries come after them; a ``**`` is never added or changed.
-        ids = lambda d, keys: [("key", k) if k is not None else ("**", ast.dump(v)) for k, v in zip(keys, d.values)]  # noqa: E731
-        old_ids, new_ids = ids(before, old_keys), ids(after, new_keys)
-        kept = [i for i, k in zip(old_ids, before.keys) if i in new_ids or not _quantity_name(k, quantities)]
-        if new_ids[:len(kept)] != kept or any(i[0] == "**" for i in new_ids[len(kept):]):
+        # from entries of the quantity, which may go, come or stand where one went; a ``**`` is never added or changed,
+        # and no other key is added.
+        if any(isinstance(n, ast.NamedExpr) for n in ast.walk(after)):
+            return False
+        old_ids = [("key", k) if k is not None else ("**", ast.dump(v)) for k, v in zip(old_keys, before.values)]
+        new_ids = [(("key", key) if key is not None else ("**", ast.dump(v)), k)
+                   for key, k, v in zip(new_keys, after.keys, after.values)]
+        kept = [i for i, k in zip(old_ids, before.keys) if i in [n for n, _k in new_ids] or not _quantity_name(k, quantities)]
+        rest = [n for n, k in new_ids if n in old_ids or not _quantity_name(k, quantities)]
+        if rest != kept:  # a key that is new and not the quantity's, a new or moved ``**``, an entry out of order
             return False
         now = {k: ast.dump(v) for k, v in zip(new_keys, after.values) if k is not None}
         for k, v, key in zip(before.keys, before.values, old_keys):
             if key is not None and now.get(key) != ast.dump(v) and not _quantity_name(k, quantities):
                 return False
-        for k, key in zip(after.keys, new_keys):
-            if key is not None and key not in old_keys and not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
-                return False
         return any(_quantity_name(k, quantities) for k in before.keys + after.keys)
     return len(old_targets) == 1 and isinstance(old_targets[0], ast.Subscript) and _quantity_name(old_targets[0].slice, quantities)
 
 
+def _containers(source: str, quantities: set[str]) -> set[str]:
+    """The names under which ``source`` already keeps an entry of the finding's quantity at module or class level: a
+    name assigned a dict literal with a key of the quantity, or one whose ``name["quantity"]`` is assigned."""
+    found: set[str] = set()
+    for _w, _d, node in _frame_assigns(source):
+        targets = _targets(node)
+        if len(targets) != 1:
+            continue
+        value = _dict_value(node)
+        if isinstance(targets[0], ast.Name) and value is not None and any(_quantity_name(k, quantities) for k in value.keys):
+            found.add(targets[0].id)
+        elif isinstance(targets[0], ast.Subscript) and isinstance(targets[0].value, ast.Name)                 and _quantity_name(targets[0].slice, quantities):
+            found.add(targets[0].value.id)
+    return found
+
+
 def _adds_quantity_entry(node: ast.stmt, quantities: set[str], bound: set[str]) -> bool:
     """Whether an added statement is a set of the finding's quantity entry (``name["quantity"] = ...``, ``+=``,
-    annotated) of a name the file already had. The value written is not looked at: the finding's own test and the
-    regression checks run it."""
-    if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+    annotated) of a name that already holds an entry of that quantity (``bound``: :func:`_containers`). The value
+    written is not looked at, apart from a walrus (it binds a name unseen): the finding's own test and the regression
+    checks run it."""
+    if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) or any(isinstance(n, ast.NamedExpr) for n in ast.walk(node)):
         return False
     targets = _targets(node)
     return (len(targets) == 1 and isinstance(targets[0], ast.Subscript) and isinstance(targets[0].value, ast.Name)
@@ -446,9 +465,13 @@ def _added(old: str, new: str) -> list[tuple[str, str, ast.stmt]]:
     kept = _frame_nodes(before)
     out = []
     for where, dump, node in _frame_nodes(after):
-        if isinstance(node, (ast.Import, ast.ImportFrom)) and where == "" and not (_bound_names(node) & taken):
+        if (isinstance(node, (ast.Import, ast.ImportFrom)) and where == "" and not (_bound_names(node) & taken)
+                and not any(a.name == "*" for a in node.names)):
             continue
         if where.split(".")[0] in new_classes or (isinstance(node, ast.ClassDef) and where == "" and node.name in new_classes):
+            if _plain_class_statement(node):
+                continue
+            out.append((where, dump, node))
             continue
         match = next((k for k in kept if k[:2] == (where, dump)), None)
         if match:
@@ -456,6 +479,17 @@ def _added(old: str, new: str) -> list[tuple[str, str, ast.stmt]]:
         else:
             out.append((where, dump, node))
     return out
+
+
+def _plain_class_statement(node: ast.stmt) -> bool:
+    """A statement a new class may have: a nested class, a docstring, ``pass``, or an assignment to plain names (class
+    attributes) with no walrus in it. (Its methods are functions, which :func:`_frame_nodes` leaves out.)"""
+    if isinstance(node, (ast.ClassDef, ast.Pass)):
+        return True
+    if isinstance(node, ast.Expr):
+        return isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    return (isinstance(node, (ast.Assign, ast.AnnAssign)) and all(isinstance(t, ast.Name) for t in _targets(node))
+            and not any(isinstance(n, ast.NamedExpr) for n in ast.walk(node)))
 
 
 def _frame_nodes(tree: ast.Module) -> list[tuple[str, str, ast.stmt]]:
@@ -492,7 +526,10 @@ def unspoken_frame_changes(old: str, new: str, issue: dict[str, Any]) -> list[st
         found = next((o for o in olds if o[1] == dump), None)
         if found is not None:
             olds.remove(found)
-        if names & spoken:  # it binds a name the finding speaks of: its replacement is taken out of the additions
+        value = _dict_value(found[2]) if found is not None else None
+        if names & spoken and not (value is not None and any(_quantity_name(k, quantities) for k in value.keys)):
+            # it binds a name the finding speaks of (a dict that holds the finding's quantity is held to the entries
+            # of that quantity whatever it is called): its replacement is taken out of the additions
             twin = next((n for n in news if _bound_names(n[2]) & names), None)
             if twin:
                 news.remove(twin)
@@ -505,9 +542,7 @@ def unspoken_frame_changes(old: str, new: str, issue: dict[str, Any]) -> list[st
             news.remove(twin)
         if found is None or not changes_only_quantity_entries(found[2], twin[2] if twin else None, quantities):
             out.append(text)
-    bound: set[str] = set()
-    for node in ast.parse(old).body:
-        bound |= _bound_names(node)
+    bound = _containers(old, quantities)
     for where, dump, node in news:  # what is added and is no replacement of a statement that went
         if not _adds_quantity_entry(node, quantities, bound):
             out.append(f"{where or 'the module'}: added {dump[:60]}")

@@ -498,8 +498,8 @@ def test_a_result_dict_entry_of_the_findings_quantity_may_change_and_no_other_va
     entry = RESULT.replace('"missing_probability": 0.0', '"missing_probability": 0.25')
     assert fr.unspoken_frame_changes(RESULT, entry, issue) == []
     added = RESULT.replace('"n": 3}', '"n": 3, "missing_count": 4}')
-    assert fr.unspoken_frame_changes(RESULT, entry.replace('"n": 3}', '"n": 3, "missing_count": 4}'), issue) == []
-    assert fr.unspoken_frame_changes(RESULT, added, issue) == [], "new entries may be added"
+    assert fr.unspoken_frame_changes(RESULT, entry.replace('"n": 3}', '"n": 3, "missing_count": 4}'), issue)
+    assert fr.unspoken_frame_changes(RESULT, added, issue), "an entry of another name is not the finding's"
     other = entry.replace('"merged_probability": 0.0', '"merged_probability": 0.4')  # another entry's value changes too
     assert fr.unspoken_frame_changes(RESULT, other, issue)
     assert fr.unspoken_frame_changes(RESULT, entry.replace("THRESHOLD = 0.5", "THRESHOLD = 0.9"), issue)
@@ -561,7 +561,7 @@ def test_only_the_findings_own_quantity_entries_may_change_at_module_level() -> 
     assert changes(f"result, other = {{{q}: 0.0}}, 1\n", f"result, other = {{{q}: 0.1}}, 1\n")
     assert changes(f"result = cache = {{{q}: 0.0}}\n", f"result = cache = {{{q}: 0.1}}\n") == []
     # An added key must be a static string that the dict does not have; a computed or repeated one can overwrite an entry.
-    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "extra": 1}}\n') == []
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "extra": 1}}\n'), "a key of another name is not the finding's"
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, name: 1}}\n')
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "new": 1, "new": 2}}\n')
 
@@ -578,7 +578,7 @@ def test_the_entries_a_module_level_dict_had_keep_their_order_and_a_spread_is_ne
     assert changes(f"result = {{{q}: 0.1, **a, **b}}\n")
     assert changes(f'result = {{**a, **b, "extra": 1, {q}: 0.1}}\n')
     assert changes(f"result = {{**a, **b, {q}: 0.1, **c}}\n")
-    assert changes(f'result = {{**a, **b, {q}: 0.1, "extra": 1}}\n') == []
+    assert changes(f'result = {{**a, **b, {q}: 0.1, "extra": 1}}\n')
     assert changes(f'result = {{**a, **b, {q}: 0.1, "new": 1, "new": 2}}\n'), "a new key given twice"
 
 
@@ -605,3 +605,39 @@ def test_what_a_repair_adds_at_module_level_is_the_findings_quantity_entry_or_a_
     assert changes(old.replace("THRESHOLD = 0.5", "THRESHOLD = 0.5\nTHRESHOLD = 0.9"))
     # Setting the quantity's entry again while another name's entry is added is refused as well.
     assert changes(old.replace(f"result[{q}] = 0.0\n", f"result[{q}] = 0.3\nother[{q}] = 0.0\n"))
+
+
+def test_a_dict_that_holds_the_quantity_is_held_to_its_entries_even_when_the_finding_names_the_container() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability", "summary": "the `result` dictionary reports it as zero"}
+    q = '"missing_probability"'
+    old = f'result = {{{q}: 0.0, "merged": 0.0}}\n'
+    assert fr.unspoken_frame_changes(old, f'result = {{{q}: 0.3, "merged": 0.0}}\n', issue) == []
+    assert fr.unspoken_frame_changes(old, f'result = {{{q}: 0.3, "merged": 5.0}}\n', issue)
+    assert fr.unspoken_frame_changes(old, 'result = {"other": 1}\n', issue)
+    # A statement that is not such a dict keeps the allowance of a name the finding speaks of.
+    assert fr.unspoken_frame_changes("result = build(1)\n", "result = build(2)\n", issue) == []
+    # A walrus in the dict binds a name that is not seen.
+    assert fr.unspoken_frame_changes(old, f'result = {{{q}: (z := 1), "merged": 0.0}}\n', issue)
+
+
+def test_a_quantity_entry_may_stand_where_the_old_one_stood_and_a_new_class_is_checked() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+    old = f'result = {{"a": 1, {q}: 0.0, "b": 2}}\n'
+    assert fr.unspoken_frame_changes(old, 'result = {"a": 1, "Missing_Probability": 0.3, "b": 2}\n', issue) == []
+    assert fr.unspoken_frame_changes(old, 'result = {"b": 2, "Missing_Probability": 0.3, "a": 1}\n', issue)
+    base = f"result = {{{q}: 0.0}}\n"
+    assert fr.unspoken_frame_changes(base, base + "from os import *\n", issue), "a star import binds names unseen"
+    assert fr.unspoken_frame_changes(base, base + "class K:\n    LIMIT = 3\n    def f(self):\n        return 1\n", issue) == []
+    for body in ('    result["k"] = 1\n', "    print(1)\n", "    global result\n", "    del x\n", "    A = (z := 1)\n", "    a[0] = 1\n"):
+        assert fr.unspoken_frame_changes(base, base + "class K:\n" + body, issue), body
+    assert fr.unspoken_frame_changes(base, base + f"result[{q}] = (z := 1)\n", issue)
+
+
+def test_an_added_entry_goes_only_to_a_name_that_already_holds_the_findings_quantity() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+    old = f"result = {{{q}: 0.0}}\ncache = {{}}\n"
+    assert fr.unspoken_frame_changes(old, old + f"result[{q}] = 0.3\n", issue) == []
+    assert fr.unspoken_frame_changes(old, old + f"cache[{q}] = 0.0\n", issue), "cache holds no entry of the quantity"
+    assert fr.unspoken_frame_changes(old + f"cache[{q}] = 1\n", old + f"cache[{q}] = 1\ncache[{q}] += 1\n", issue) == []
