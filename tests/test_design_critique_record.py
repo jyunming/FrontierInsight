@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core import plan
+from core import plan, receipts
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
@@ -168,6 +168,8 @@ async def test_a_repair_that_breaks_the_search_block_is_not_applied_and_is_recor
     assert [n["key"] for n in entry["not_applied"]] == ["protocol.optimisation"]
     assert entry["not_applied"][0]["reason"]
     assert "did not apply it" in " ".join(eng._critique_summary())
+    status, record, _problem = receipts.read(eng.quest_root, "design_audit")
+    assert status == "fail" and "protocol.optimisation" in json.dumps(record)
 
 
 @pytest.mark.asyncio
@@ -178,3 +180,49 @@ async def test_a_repair_that_passes_the_same_checks_is_still_applied(tmp_path: P
     assert design["protocol"]["optimisation"]["baseline"]["values"] == {"w": 0.5}
     (entry,) = _record(eng)
     assert entry["changed_keys"] == ["protocol"] and "not_applied" not in entry
+
+
+def _thresholded(thresholds: dict) -> dict:
+    return {**DRAFT, "protocol": {"runs_per_setting": 300, "thresholds": thresholds}}
+
+
+@pytest.mark.asyncio
+async def test_a_part_the_audit_left_out_is_put_back_and_recorded(tmp_path: Path) -> None:
+    left_out = {**DRAFT, "protocol": {}}
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [OBJECTION], "amended_design": left_out})])
+    design, _ = await eng._audit_design({"topic": "OPC", "iteration": 0}, dict(DRAFT))
+    assert design["protocol"] == {"runs_per_setting": 300}
+    (entry,) = _record(eng)
+    assert [n["key"] for n in entry["not_applied"]] == ["protocol.runs_per_setting"]
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_cannot_be_applied_fails_the_receipt_even_when_no_objection_was_named(tmp_path: Path) -> None:
+    broken = _with_baseline([[0.1, 0.1], [0.0, 0.0]])
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [], "amended_design": broken})])
+    await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
+    status, record, _problem = receipts.read(eng.quest_root, "design_audit")
+    assert status == "fail" and "could not be applied" in json.dumps(record)
+
+
+@pytest.mark.asyncio
+async def test_a_change_to_the_top_level_is_caught_even_when_the_draft_needed_its_protocol_repaired(tmp_path: Path) -> None:
+    before = _thresholded({"a": 1, "rule": "prose that is not a number"})
+    assert plan.normalize_design(before)[0] is None  # the plan step repairs this protocol before it reads the design
+    amended = {**before, "hypothesis": ""}
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [OBJECTION], "amended_design": amended})])
+    design, _ = await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(before)))
+    assert design["hypothesis"] == DRAFT["hypothesis"]
+    (entry,) = _record(eng)
+    assert any("hypothesis" in n["key"] for n in entry["not_applied"])
+
+
+@pytest.mark.asyncio
+async def test_swapping_one_unreadable_part_for_another_is_not_a_repair(tmp_path: Path) -> None:
+    before = _thresholded({"a": 1, "rule": "prose one"})
+    amended = _thresholded({"a": 1, "rule": "prose two"})
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [OBJECTION], "amended_design": amended})])
+    design, _ = await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(before)))
+    assert design["protocol"]["thresholds"]["rule"] == "prose one"
+    (entry,) = _record(eng)
+    assert [n["key"] for n in entry["not_applied"]] == ["protocol.thresholds"]

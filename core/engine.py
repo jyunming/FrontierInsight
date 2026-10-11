@@ -4969,11 +4969,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         objected = [o.get("objection") if isinstance(o, dict) else o for o in objections or []] if not adopt or not_applied else []
         if not adopt and not failure and proposed_change and not objected:
             objected = ["it proposed a different design without naming why"]
+        if not_applied and not objected:  # a repair FI could not apply is an objection that stands, named or not
+            objected = [f"the audit's change to `{n['key']}` could not be applied: {n['reason']}" for n in not_applied]
         self._write_receipt(
             "design_audit", "unknown" if failure else "fail" if objected else "pass", started_at=audit_started,
             inputs={"design": before}, output=_receipts.design_core(design), error=failure,
             detail=(("it objected to the design that ran: " if not adopt else "its repair could not be applied, so the "
-                     "objection stands: ") + "; ".join(str(o)[:160] for o in objected[:3])) if objected else "",
+                     "objection stands: ") + "; ".join(str(o)[:160] for o in objected[:3])
+                    + ("".join(f" [FI did not apply `{n['key']}`: {n['reason'][:160]}]" for n in not_applied[:3])
+                       if not_applied else "")) if objected else "",
         )
         if failure and not_reviewed:
             # The reviewer answered but did not review: a gap the evidence level records, not a stop for a person.
@@ -5003,19 +5007,37 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if isinstance(old_p, dict) and isinstance(new_p, dict):
             kept_p = dict(new_p)
             base_fixed, base_notes = _plan.repair_protocol(old_p)
-            for key in sorted(k for k in new_p if k in old_p and new_p[k] != old_p[k]):
-                trial_fixed, trial_notes = _plan.repair_protocol({**old_p, key: new_p[key]})
-                lost = key in (base_fixed or {}) and key not in (trial_fixed or {})
-                if not lost and len(trial_notes) <= len(base_notes):
+            # Every key the audit changed, added or left out, each tried alone on the protocol as it was.
+            for key in sorted(k for k in {*old_p, *new_p} if (k in old_p) != (k in new_p) or new_p.get(k) != old_p.get(k)):
+                rest = {k: v for k, v in old_p.items() if k != key}
+                trial_fixed, trial_notes = _plan.repair_protocol({**rest, **({key: new_p[key]} if key in new_p else {})})
+                gone = sorted(set(base_fixed or {}) - set(trial_fixed or {}) - ({key} if key not in new_p else set()))
+                fresh = [n for n in trial_notes if n not in base_notes]
+                dropped = key in old_p and key not in new_p
+                if not gone and not fresh and not dropped:
                     continue
-                reason = next((n for n in trial_notes if n not in base_notes), "") or f"`protocol.{key}` could not be read"
-                kept_p[key] = old_p[key]
+                reason = (fresh[0] if fresh else f"`protocol.{', '.join(gone)}` could not be read with it" if gone
+                          else f"the audit left `protocol.{key}` out")
+                if key in old_p:
+                    kept_p[key] = old_p[key]
+                else:
+                    kept_p.pop(key, None)
                 not_applied.append({"key": f"protocol.{key}", "reason": " ".join(reason.split())[:300]})
             out["protocol"] = kept_p
-        if _plan.normalize_design(before)[0] is not None:
-            usable, why = _plan.normalize_design(out)
+
+        def readable(d: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+            """The design as the plan step reads it: with the protocol's unreadable keys left out, as it does."""
+            got, why = _plan.normalize_design(d)
+            if got is None and "`protocol" in (why or ""):
+                fixed_p, _notes = _plan.repair_protocol(d.get("protocol"))
+                got, why = _plan.normalize_design({**{k: v for k, v in d.items() if k != "protocol"},
+                                                   **({"protocol": fixed_p} if fixed_p else {})})
+            return got, why
+
+        if readable(before)[0] is not None:
+            usable, why = readable(out)
             if usable is None:  # the design was readable before the repair and is not with it: nothing of it is applied
-                changed = sorted(k for k in out if out[k] != before.get(k))
+                changed = sorted(k for k in {*out, *before} if out.get(k) != before.get(k))
                 out = dict(before)
                 not_applied.append({"key": ", ".join(changed) or "design", "reason": " ".join(str(why).split())[:300]})
         for item in not_applied:
@@ -5976,13 +5998,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if int(done.get("iteration", -1)) == iteration:
             asks = int(done.get("asks", 1) or 0)  # a record from before the count was kept is one ask
             problem = str(done.get("problem") or "")
-        while asks < _SEARCH_ASKS:
+
+        def save(count: int) -> bool:
             try:
                 self.fi_dir.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps({"iteration": iteration, "asks": asks + 1, "problem": problem,
+                path.write_text(json.dumps({"iteration": iteration, "asks": count, "problem": problem,
                                             "at": _frozen.now()}) + "\n", encoding="utf-8")
+                return True
             except OSError as e:
                 self._log.warning("[design] FI could not write down that it was asking for what the topic asks, so it did not ask: %r", e)
+                return False
+
+        while asks < _SEARCH_ASKS:
+            if not save(asks + 1):  # counted BEFORE the call
                 return design
             asks += 1
             self._log.warning("[design] the redesign lacks what the topic asks for (%s); FI asked the design step's model to add it (%d of %d)",
@@ -6000,14 +6028,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             except _ModelAnswerProblem:
                 raise
             except Exception as e:  # noqa: BLE001 -- what is still missing is decided after this
+                if _is_fatal_provider_error(e):
+                    save(asks - 1)  # never asked (a usage limit, a dead login): the ask is given back
+                    raise
                 self._log.warning("[design] the design step could not be asked to add what the topic asks for: %s", e)
-                return design
+                problem = " ".join(f"the call to the model failed ({str(e)[:300] or type(e).__name__})".split())
+                save(asks)
+                continue
             merged = _topic_req.merge(design, obj, gaps) if isinstance(obj, dict) else None
             fixed, why = _plan.normalize_protocol(merged.get("protocol")) if merged is not None else (None, "nothing came back")
             if merged is not None and fixed is not None:
                 return {**merged, "protocol": fixed}
             self._log.warning("[design] the design step's answer to add what the topic asks for could not be used: %s", why)
             problem = " ".join(str(why or "the answer had none of what was asked in a form that can be read").split())[:1500]
+            save(asks)  # the reason is kept with the count, so the stop can say why
         return design
 
     _TOPIC_UNMET_FILE = "topic_unmet.json"
@@ -6028,13 +6062,28 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except OSError as e:
             self._log.warning("[design] couldn't write down what the topic asks for that the plan lacks: %r", e)
 
+    def _topic_design_record(self) -> dict[str, Any]:
+        """``.fi/topic_design_asked.json`` (the asks made at the design step, and why the last answer was not used); a record
+        without a count is one ask."""
+        try:
+            record = json.loads((self.fi_dir / _TOPIC_DESIGN_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(record, dict):
+            return {}
+        try:
+            return {**record, "asks": int(record.get("asks", 1) or 0)}
+        except (TypeError, ValueError):
+            return {**record, "asks": 1}
+
     def _topic_last_problem(self) -> str:
         """Why the plan's model's last answer to the request for what the topic asks was not used (``""`` when it was)."""
         try:
             record = json.loads((self.fi_dir / _TOPIC_ASKED).read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return ""
-        return str(record.get("problem") or "") if isinstance(record, dict) else ""
+            record = {}
+        problem = str(record.get("problem") or "") if isinstance(record, dict) else ""
+        return problem or str(self._topic_design_record().get("problem") or "")
 
     def _forget_topic_unmet(self) -> None:
         try:
@@ -6088,7 +6137,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if main and not frozen:
             path = _plan.plan_path(self.quest_root)
             asked = self._search_record(plan_sha, _TOPIC_ASKED)[0] if plan_sha and path.is_file() else (
-                1 if (self.fi_dir / _TOPIC_DESIGN_ASKED).is_file() else 0)
+                self._topic_design_record().get("asks", 1) if (self.fi_dir / _TOPIC_DESIGN_ASKED).is_file() else 0)
             self._stop_for_the_topic(main, asked)
         return design, plan_sha
 

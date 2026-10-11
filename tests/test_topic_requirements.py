@@ -528,3 +528,47 @@ async def test_a_rejected_answer_for_the_topic_is_asked_again_with_the_reason_an
     assert record["asks"] == 2
     await eng._hold_the_design_to_the_topic(state, redesign, "")  # a resume never asks past the bound
     assert len(prompts) == 2
+
+
+async def _redesign_setup(tmp_path: Path) -> tuple[Any, Any, dict[str, Any], dict[str, Any]]:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
+                               model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    redesign = copy.deepcopy(plan.parse(_plan_text(eng)).design)
+    del redesign["protocol"]["grid"]["lid_material"]
+    return eng, model, redesign, {"topic": TOPIC, "iteration": 1, "design": redesign}
+
+
+@pytest.mark.asyncio
+async def test_the_stop_names_the_design_steps_real_ask_count_and_why_its_last_answer_was_not_used(tmp_path: Path) -> None:
+    eng, _model, redesign, state = await _redesign_setup(tmp_path)  # the model never adds the axis
+    await eng._hold_the_design_to_the_topic(state, redesign, "")
+    record = json.loads((eng.fi_dir / "topic_design_asked.json").read_text(encoding="utf-8"))
+    assert record["asks"] == 2 and record["problem"]  # written after the last failed attempt too
+    stop = json.loads((eng.fi_dir / "topic_unmet.json").read_text(encoding="utf-8"))
+    assert stop["asked"] == 2
+    assert record["problem"] in eng._topic_last_problem()
+    assert any(record["problem"][:40] in t for t in stop["tried"])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_call_for_the_topic_is_noted_and_the_next_try_is_still_made(tmp_path: Path) -> None:
+    eng, model, redesign, state = await _redesign_setup(tmp_path)
+    original = model.chat
+    prompts: list[str] = []
+    good = {**redesign, "protocol": {**redesign["protocol"], "grid": {**redesign["protocol"]["grid"], **LID_AXIS}}}
+
+    async def chat(messages: list[dict[str, str]], **kw: Any) -> str:
+        prompt = messages[-1]["content"]
+        if "The topic asks for things this plan does not yet include" in prompt:
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                raise RuntimeError("connection reset")
+            return json.dumps(good)
+        return await original(messages, **kw)
+
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=chat)})()
+    design, _sha = await eng._hold_the_design_to_the_topic(state, redesign, "")
+    assert design["protocol"]["grid"]["lid_material"] == ["paper", "foam", "steel"]
+    assert len(prompts) == 2 and "connection reset" in prompts[1]
