@@ -12,7 +12,7 @@ You are the **Claim Grounding** stage. The paper has been written. Your job is t
 
 Four things in that section count as what ran, besides the code:
 - **WHAT FI RAN (FI's own record)**: the settings FI ran and the trials per setting. FI's engine runs the trials, so those facts are not in the code. A claim about which settings were run, how many trials each had or how many runs there were in all is `experiment` when this record shows it. Without such a record (a run the script drove itself), the plan's settings and counts ground such a claim only when the code shown does the loop and the counts.
-- **The engine's verdicts on the checks of correctness** (the "[FI NOTE]" lines): a claim that a check ran, passed or failed, and the check's own numbers in those lines, are grounded by them as if they were in the evidence block. A check the note says is not shown cannot ground a claim that it passed.
+- **The engine's verdicts on the checks of correctness** (the paragraph under "How the study was run" that begins "Before the main run the engine checked"): a claim that a check ran, passed or failed, and the check's own numbers in that paragraph, are grounded by them as if they were in the evidence block. A check the note says is not shown cannot ground a claim that it passed.
 - **The figure list**, for what a figure draws.
 - **The code**, for everything else about the method.
 
