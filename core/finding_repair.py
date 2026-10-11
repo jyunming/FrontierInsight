@@ -402,9 +402,15 @@ def changes_only_quantity_entries(old: ast.stmt, new: ast.stmt | None, quantitie
             return False
         old_keys = [ast.dump(k) if k is not None else None for k in before.keys]
         new_keys = [ast.dump(k) if k is not None else None for k in after.keys]
-        spread = lambda d: sorted(ast.dump(v) for k, v in zip(d.keys, d.values) if k is None)  # noqa: E731
         named = [k for k in new_keys if k is not None]
-        if spread(before) != spread(after) or len(named) != len(set(named)):
+        if len(named) != len(set(named)):
+            return False
+        # The entries the dict had keep their order (a ``**`` among them, whose place decides what it overwrites), apart
+        # from an entry of the quantity that went, and new entries come after them; a ``**`` is never added or changed.
+        ids = lambda d, keys: [("key", k) if k is not None else ("**", ast.dump(v)) for k, v in zip(keys, d.values)]  # noqa: E731
+        old_ids, new_ids = ids(before, old_keys), ids(after, new_keys)
+        kept = [i for i, k in zip(old_ids, before.keys) if i in new_ids or not _quantity_name(k, quantities)]
+        if new_ids[:len(kept)] != kept or any(i[0] == "**" for i in new_ids[len(kept):]):
             return False
         now = {k: ast.dump(v) for k, v in zip(new_keys, after.values) if k is not None}
         for k, v, key in zip(before.keys, before.values, old_keys):
@@ -417,32 +423,94 @@ def changes_only_quantity_entries(old: ast.stmt, new: ast.stmt | None, quantitie
     return len(old_targets) == 1 and isinstance(old_targets[0], ast.Subscript) and _quantity_name(old_targets[0].slice, quantities)
 
 
+def _adds_quantity_entry(node: ast.stmt, quantities: set[str], bound: set[str]) -> bool:
+    """Whether an added statement is a set of the finding's quantity entry (``name["quantity"] = ...``, ``+=``,
+    annotated) of a name the file already had. The value written is not looked at: the finding's own test and the
+    regression checks run it."""
+    if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        return False
+    targets = _targets(node)
+    return (len(targets) == 1 and isinstance(targets[0], ast.Subscript) and isinstance(targets[0].value, ast.Name)
+            and targets[0].value.id in bound and _quantity_name(targets[0].slice, quantities))
+
+
+def _added(old: str, new: str) -> list[tuple[str, str, ast.stmt]]:
+    """The module- and class-level statements ``new`` has that ``old`` does not, as ``(where, ast.dump, node)``, apart
+    from what :func:`frame_changes` allows (a new function or class, a new import that binds only names not bound
+    before)."""
+    before, after = ast.parse(old), ast.parse(new)
+    taken: set[str] = set()
+    for node in before.body:
+        taken |= _bound_names(node)
+    new_classes = {n.name for n in after.body if isinstance(n, ast.ClassDef) and n.name not in taken}
+    kept = _frame_nodes(before)
+    out = []
+    for where, dump, node in _frame_nodes(after):
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and where == "" and not (_bound_names(node) & taken):
+            continue
+        if where.split(".")[0] in new_classes or (isinstance(node, ast.ClassDef) and where == "" and node.name in new_classes):
+            continue
+        match = next((k for k in kept if k[:2] == (where, dump)), None)
+        if match:
+            kept.remove(match)
+        else:
+            out.append((where, dump, node))
+    return out
+
+
+def _frame_nodes(tree: ast.Module) -> list[tuple[str, str, ast.stmt]]:
+    """:func:`_frame` with the statement node of each item."""
+    out: list[tuple[str, str, ast.stmt]] = []
+
+    def walk(body: list[ast.stmt], where: str) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(node, ast.ClassDef):
+                bare = copy.copy(node)
+                bare.body = []
+                out.append((where, ast.dump(bare), node))
+                walk(node.body, f"{where}{node.name}.")
+            else:
+                out.append((where, ast.dump(node), node))
+
+    walk(tree.body, "")
+    return out
+
+
 def unspoken_frame_changes(old: str, new: str, issue: dict[str, Any]) -> list[str]:
     """What a repair changed at module or class level that the finding does not speak of: a statement that binds no name
     the finding names and is not a change of the entries of the finding's own quantity
     (:func:`changes_only_quantity_entries`)."""
     spoken, quantities = issue_names(issue), _quantity_keys(issue)
-    altered = [s for s in frame_altered(old, new) if not (s[1] & spoken)]
-    if not altered or not quantities:
-        return [t for t, _n, _d in altered]
-    olds, news = _frame_assigns(old), _frame_assigns(new)
-    for _w, dump, _n in olds:  # what is the same in both is not a twin
-        match = next((n for n in news if n[1] == dump), None)
-        if match:
-            news.remove(match)
+    everything = frame_altered(old, new)
+    if everything and not everything[0][2]:  # the file does not parse
+        return [t for t, _n, _d in everything]
+    olds, news = _frame_assigns(old), _added(old, new)
     out = []
-    for text, _names, dump in altered:
+    for text, names, dump in everything:
         found = next((o for o in olds if o[1] == dump), None)
-        if found is None:
-            out.append(text)
+        if found is not None:
+            olds.remove(found)
+        if names & spoken:  # it binds a name the finding speaks of: its replacement is taken out of the additions
+            twin = next((n for n in news if _bound_names(n[2]) & names), None)
+            if twin:
+                news.remove(twin)
             continue
-        olds.remove(found)
-        twin = next((n for n in news if n[0] == found[0] and [ast.dump(t) for t in _targets(n[2])]
-                     == [ast.dump(t) for t in _targets(found[2])]), None)
+        twin = None
+        if found is not None:
+            twin = next((n for n in news if n[0] == found[0] and isinstance(n[2], (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                         and [ast.dump(t) for t in _targets(n[2])] == [ast.dump(t) for t in _targets(found[2])]), None)
         if twin:
             news.remove(twin)
-        if not changes_only_quantity_entries(found[2], twin[2] if twin else None, quantities):
+        if found is None or not changes_only_quantity_entries(found[2], twin[2] if twin else None, quantities):
             out.append(text)
+    bound: set[str] = set()
+    for node in ast.parse(old).body:
+        bound |= _bound_names(node)
+    for where, dump, node in news:  # what is added and is no replacement of a statement that went
+        if not _adds_quantity_entry(node, quantities, bound):
+            out.append(f"{where or 'the module'}: added {dump[:60]}")
     return out
 
 

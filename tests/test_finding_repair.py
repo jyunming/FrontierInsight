@@ -545,6 +545,9 @@ def test_only_the_findings_own_quantity_entries_may_change_at_module_level() -> 
     assert changes(f"result = {{}}\nresult[{q}] = 0.0\n", f"result = {{}}\nresult[{q}] = 0.3\n") == []
     assert changes(f"result = {{}}\nresult[{q}] += 1\n", f"result = {{}}\nresult[{q}] += 2\n") == []
     assert changes(f"result = {{}}\nresult[{q}] = 0.0\n", f"result = {{}}\nother[{q}] = 0.0\n")
+    kept = f"result = {{}}\nresult[{q}] = 0.0\n"  # the quantity's entry stays and another name's, or another key, is added
+    assert changes(kept, kept + f"other[{q}] = 0.0\n")
+    assert changes(kept, kept + 'result["other_quantity"] = 0.0\n')
     # A ** entry added to the dict may overwrite others; one that was there already is unchanged.
     base = f'result = {{{q}: 0.0, "merged": 0.0}}\n'
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, **{{"merged": 99}}}}\n')
@@ -560,4 +563,45 @@ def test_only_the_findings_own_quantity_entries_may_change_at_module_level() -> 
     # An added key must be a static string that the dict does not have; a computed or repeated one can overwrite an entry.
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "extra": 1}}\n') == []
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, name: 1}}\n')
-    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "merged": 5}}\n')
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "new": 1, "new": 2}}\n')
+
+
+def test_the_entries_a_module_level_dict_had_keep_their_order_and_a_spread_is_never_new() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+    two = f"result = {{**a, **b, {q}: 0.0}}\n"
+
+    def changes(new: str) -> list[str]:
+        return fr.unspoken_frame_changes(two, new, issue)
+
+    assert changes(f"result = {{**b, **a, {q}: 0.1}}\n")
+    assert changes(f"result = {{{q}: 0.1, **a, **b}}\n")
+    assert changes(f'result = {{**a, **b, "extra": 1, {q}: 0.1}}\n')
+    assert changes(f"result = {{**a, **b, {q}: 0.1, **c}}\n")
+    assert changes(f'result = {{**a, **b, {q}: 0.1, "extra": 1}}\n') == []
+    assert changes(f'result = {{**a, **b, {q}: 0.1, "new": 1, "new": 2}}\n'), "a new key given twice"
+
+
+def test_what_a_repair_adds_at_module_level_is_the_findings_quantity_entry_or_a_helper_and_nothing_else() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+    old = f"import math\nTHRESHOLD = 0.5\nresult = {{{q}: 0.0}}\nresult[{q}] = 0.0\n"
+
+    def changes(new: str) -> list[str]:
+        return fr.unspoken_frame_changes(old, new, issue)
+
+    assert changes(old) == []
+    for bad in ('result["unspoken_metric"] = 999.0\n', "THRESHOLD2 = 0.9\n", "print(1)\n", f"other[{q}] = 0.0\n",
+                f"result[{q}], result['k'] = 1, 2\n", "import math as THRESHOLD\n", "import numpy as math\n"):
+        got = changes(old + bad)
+        assert got and "added" in got[0], bad
+    # Allowed: a helper function or class, an import of a new module, the quantity's entry on a name the file has.
+    assert changes(old + "def _help(x):\n    return x\n") == []
+    assert changes(old + "class K:\n    LIMIT = 3\n") == []
+    assert changes("import os\n" + old) == []
+    assert changes(old + f"result[{q}] += 0.1\nresult[{q}]: float = 0.1\n") == []
+    # An added statement does not hide as the replacement of one that went.
+    assert changes(old.replace(f"result[{q}] = 0.0\n", 'result["k"] = 1\n'))
+    assert changes(old.replace("THRESHOLD = 0.5", "THRESHOLD = 0.5\nTHRESHOLD = 0.9"))
+    # Setting the quantity's entry again while another name's entry is added is refused as well.
+    assert changes(old.replace(f"result[{q}] = 0.0\n", f"result[{q}] = 0.3\nother[{q}] = 0.0\n"))
