@@ -277,3 +277,33 @@ def test_one_engine_measured_pass_among_several_oracles_is_still_needed_and_enou
     got = evidence.assess(_root(tmp_path / "b", mixed), _state(), settings=ON)
     assert got["levels"]["independently_validated"] is False
     assert any("limit" in g for g in got["all_gaps"]["independently_validated"])
+
+
+# A random study whose simulation defines both functions: run_trial is ONE cheap trial (the harness calls it thousands of
+# times), run_cell is the mean over many. The oracle measures a mean, so FI must call run_cell and leave run_trial alone.
+BOTH = '''
+def run_trial(cell, trial_id, seed):
+    raise AssertionError("an oracle on a mean must not be measured with one trial")
+
+def run_cell(cell):
+    return {"rate": 0.05}
+'''
+TRIAL_INVARIANT = '''
+def run_trial(cell, trial_id, seed):
+    return {"rate": 0.05}
+
+def run_cell(cell):
+    raise AssertionError("an invariant is one trial's, not the cell's")
+'''
+MEAN_CHECK = {"name": "global null rate", "kind": "special_case", "check": "rate under the global null", "expected": 0.05,
+              "tolerance": 0.01, "case": {"m": 20}, "measure": "rate"}
+
+
+def test_a_check_on_a_mean_is_measured_on_run_cell_when_the_simulation_has_both(tmp_path: Path) -> None:
+    checks, problems, found = _measure(tmp_path, BOTH, [MEAN_CHECK])
+    assert not problems and found == [] and checks[0]["value"] == 0.05, (checks, problems)
+
+
+def test_an_invariant_is_measured_on_one_trial_when_the_simulation_has_both(tmp_path: Path) -> None:
+    checks, problems, _ = _measure(tmp_path, TRIAL_INVARIANT, [{**MEAN_CHECK, "kind": "invariant"}])
+    assert not problems and checks[0]["value"] == 0.05, (checks, problems)

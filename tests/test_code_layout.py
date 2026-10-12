@@ -799,3 +799,29 @@ def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> 
     (quest / ".fi" / "code_project.json").write_text(json.dumps(record), encoding="utf-8")
     hashes = attempt_records.script_hashes(quest)
     assert cl.METHODS_NAME not in hashes and cl.TEST_PATH not in hashes and f"{PKG}/model.py" in hashes
+
+
+@pytest.mark.asyncio
+async def test_an_oracle_repair_that_makes_run_trial_return_run_cell_is_not_used(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    engine._trial_mode = True
+    before = (code / "simulate.py").read_text(encoding="utf-8")
+    bad = ("def run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
+           "def run_cell(cell):\n    return {'error': 0.0}\n")
+
+    async def aggregate(prompt, **kw):  # noqa: ANN001
+        return json.dumps({"code": bad, "patch_summary": "the check reads a mean"})
+
+    monkeypatch.setattr(engine, "_chat", aggregate)
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert new is None and not failed and outcome == "not_usable"
+    assert (code / "simulate.py").read_text(encoding="utf-8") == before
+
+
+def test_the_generated_tests_call_run_cell_for_a_mean_and_run_trial_for_an_invariant() -> None:
+    text = cl.oracle_tests({**PROTOCOL, "oracles": [ORACLE, {**ORACLE, "name": "inv", "kind": "invariant"}]})
+    import ast
+
+    checks = json.loads(ast.literal_eval(re.search(r"CHECKS = json\.loads\((.+)\)\n", text).group(1)))
+    assert [c["per_trial"] for c in checks] == [False, True]

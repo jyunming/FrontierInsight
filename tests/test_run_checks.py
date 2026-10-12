@@ -575,3 +575,24 @@ async def test_the_heartbeat_puts_that_line_into_the_log(tmp_path: Path) -> None
     # Without a line to add, the heartbeat is the one it always was.
     await eng._await_with_heartbeat(work(), label="running x.py", interval_s=0.05)
     assert re.search(r"running x\.py — still running, \d+s elapsed", _log(eng))
+
+
+AGGREGATING_SIM = '''\
+def run_trial(cell, trial, seed):
+    return run_cell(cell)
+
+def run_cell(cell):
+    return {"y": sum(float(cell["n"]) * i for i in range(1000)) / 1000}
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_run_trial_that_is_a_cell_aggregate_goes_back_to_the_code_not_to_the_plan(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[])
+    (eng.quest_root / "code" / "simulate.py").write_text(AGGREGATING_SIM, encoding="utf-8")
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and patch["exec_result"]["failed_script"] == "simulate.py"
+    assert "run_trial must run ONE trial" in patch["exec_result"]["stderr_tail"]
+    assert model.asked == [] and ex.calls == 0, "the plan is not asked to shrink the grid and nothing is timed"
+    assert "too_long" not in patch["exec_result"]
+    assert "run_trial must run ONE trial" in _log(eng)

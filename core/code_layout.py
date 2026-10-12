@@ -610,7 +610,10 @@ def _measure(check):
         assert value is not None, f"{{check['name']}}: simulate.oracle() does not return this check"
         return value
     case = dict(check["case"])
-    if hasattr(simulate, "run_trial"):
+    # With both functions, a check that holds in every single trial runs on run_trial and every other check (a quantity of the
+    # setting: a mean, a rate) on run_cell, as Frontier Insight does.
+    one_trial = hasattr(simulate, "run_trial") and (not hasattr(simulate, "run_cell") or check["per_trial"])
+    if one_trial:
         return simulate.run_trial(case, 0, _seed(case))[check["measure"]]
     return simulate.run_cell(case)[check["measure"]]
 
@@ -635,7 +638,8 @@ def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
         own = _oracle.case_of(oracle)
         name = str(oracle["name"]).strip()
         checks.append({"name": name, "case": own[0] if own else None, "measure": own[1] if own else None,
-                       "expected": expected, "limit": limit})
+                       "expected": expected, "limit": limit,
+                       "per_trial": _oracle.kind_of(oracle) == "invariant"})
         names.append(_test_name(name, taken))
     if not checks:
         return None

@@ -326,3 +326,43 @@ def test_no_grid_and_a_script_that_reads_its_setting_is_not_run_with_an_empty_se
     result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=60, env={}))
     assert result.returncode != 0 and "no `grid`" in result.stderr and runner.failed_script == "simulate.py"
     assert runner.last is None
+
+
+# ---- run_trial is ONE trial; run_cell is the setting's own number (the oracle and the harness mean different things) ----
+
+R6T_SHAPE = '''
+def run_trial(m, pi1=None, run_index=0):
+    if isinstance(m, dict):
+        return run_cell(m)
+    return {"fdp": 0.1}
+
+def run_cell(case):
+    return {"fdp": sum(run_trial(case["m"], 0.0, i)["fdp"] for i in range(100)) / 100}
+'''
+
+
+def test_a_run_trial_that_returns_a_cell_aggregate_is_named() -> None:
+    why = trial_runner.trial_aggregates(R6T_SHAPE)
+    assert "run_trial must run ONE trial" in why and "run_cell" in why
+    # Through a helper of the same file, one level down.
+    via = "def _mean(c):\n    return run_cell(c)\n\ndef run_trial(c, t, s):\n    return _mean(c)\n\ndef run_cell(c):\n    return {'y': 1.0}\n"
+    assert "through _mean()" in trial_runner.trial_aggregates(via)
+
+
+def test_a_cell_built_from_trials_and_a_lone_run_trial_are_not_named() -> None:
+    fine = ("def run_trial(c, t, s):\n    return {'y': float(s % 7)}\n\n"
+            "def run_cell(c):\n    return {'y': sum(run_trial(c, i, i)['y'] for i in range(50)) / 50}\n")
+    assert trial_runner.trial_aggregates(fine) == ""
+    assert trial_runner.trial_aggregates("def run_trial(c, t, s):\n    return {'y': 1.0}\n") == ""
+    assert trial_runner.trial_aggregates("def run_trial(:\n") == ""  # unreadable text is not this check's to judge
+
+
+def test_the_oracle_is_measured_on_the_function_that_means_what_it_measures() -> None:
+    both, trial_only, cell_only = {"run_trial", "run_cell"}, {"run_trial"}, {"run_cell"}
+    mean = {"name": "n", "kind": "special_case"}
+    inv = {"name": "n", "kind": "invariant"}
+    assert trial_runner.oracle_entry(both, mean) == "run_cell", "a mean or a rate is a number of the setting"
+    assert trial_runner.oracle_entry(both, inv) == "run_trial", "an invariant holds in every single trial"
+    assert trial_runner.oracle_entry(both, mean, per_trial=True) == "run_trial"
+    assert trial_runner.oracle_entry(trial_only, mean) == "run_trial"
+    assert trial_runner.oracle_entry(cell_only, inv) == "run_cell"

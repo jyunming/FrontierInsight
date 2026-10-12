@@ -408,6 +408,20 @@ class RunChecksMixin:
         the best design or a cluster job has its own limits, and a resume of a run that already fits is not timed again."""
         self._sized_protocol: dict[str, Any] | None = None
         self._pilot_spent = 0.0  # seconds the pilot's extra trials took in this sizing: they count against the same budget
+        # A run_trial that returns the mean of many trials (it calls run_cell) is a fault of the code, not of the plan's size:
+        # it goes back to the code step, never to the plan to shrink the grid (which dropped settings the topic required).
+        if isinstance(runner, _trial_runner.TrialsRunner):
+            try:
+                aggregate = _trial_runner.trial_aggregates(runner.simulate.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                aggregate = ""
+            if aggregate:
+                self._log.warning("[execute] %s; sending simulate.py back to be repaired before the experiment is timed",  # type: ignore[attr-defined]
+                                  aggregate)
+                return self._sizing_failed(aggregate, text=f"FI read simulate.py before timing the experiment: {aggregate}. "
+                                                           "Make run_trial compute one trial (one random draw of the setting) "
+                                                           "on its own; keep any mean over trials in run_cell, which may "
+                                                           "call run_trial, never the other way round.")
         if (not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs  # type: ignore[attr-defined]
                 or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0):  # type: ignore[attr-defined]
             return None
@@ -635,10 +649,10 @@ class RunChecksMixin:
             return f"{said}; FI asked the plan {asks} time{'s' if asks != 1 else ''} to make it smaller"
         return said if can_ask else f"{said}; FI had no way to ask the plan to make it smaller"
 
-    def _sizing_failed(self, why: str) -> dict[str, Any]:
+    def _sizing_failed(self, why: str, text: str | None = None) -> dict[str, Any]:
         """A failed run for the existing repair of the simulation: it failed while the experiment was timed, at the setting
         named in ``why``."""
-        text = f"FI ran a trial of the simulation to time the experiment before the study, and it failed {why}"
+        text = text or f"FI ran a trial of the simulation to time the experiment before the study, and it failed {why}"
         return {
             "exec_result": {
                 "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": text[-2000:],

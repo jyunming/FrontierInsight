@@ -31,6 +31,7 @@ experiment's ``code/submit.py`` submits the array the way the cluster's skill sa
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from collections import Counter
@@ -486,6 +487,49 @@ def entries(simulate: Path) -> set[str]:
         return set()
 
 
+TRIAL_AGGREGATE_WHY = ("run_trial must run ONE trial of the setting, and it currently returns the result of run_cell, "
+                       "which is the setting's number computed over many trials")
+
+
+def _called_names(node: ast.AST) -> set[str]:
+    """The names of the functions called anywhere inside ``node`` (``f(...)`` and ``obj.f(...)``)."""
+    names: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            f = sub.func
+            if isinstance(f, ast.Name):
+                names.add(f.id)
+            elif isinstance(f, ast.Attribute):
+                names.add(f.attr)
+    return names
+
+
+def trial_aggregates(source: str) -> str:
+    """A plain sentence when ``run_trial`` in ``source`` (read, never run) is not one trial because it calls ``run_cell``
+    (directly, or through a function of the same file that it calls: one level), and ``""`` otherwise.
+
+    ``run_cell`` is the setting's own number, the mean over many trials for a random study. FI's harness calls
+    ``run_trial`` once per trial and keeps each result, so a ``run_trial`` that returns ``run_cell``'s number makes every
+    trial as long as a whole cell (the study would not fit its time) and every kept "trial" a mean of many (wrong
+    statistics). The converse, a ``run_cell`` that calls ``run_trial``, is how a cell is built and is not flagged."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return ""
+    functions = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    trial, cell = functions.get("run_trial"), functions.get("run_cell")
+    if trial is None or cell is None:
+        return ""
+    called = _called_names(trial)
+    if "run_cell" in called:
+        return TRIAL_AGGREGATE_WHY
+    for name in sorted(called - {"run_trial", "run_cell"}):
+        helper = functions.get(name)
+        if helper is not None and "run_cell" in _called_names(helper):
+            return TRIAL_AGGREGATE_WHY + f" (through {name}())"
+    return ""
+
+
 class TrialsRunner:
     """Stands in for the executor when the simulation follows the trial contract, as ``split_run.SplitRunner`` does for
     the older two-script one: running ``experiment.py`` first runs every trial of the protocol (:func:`run_trials`,
@@ -845,14 +889,33 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
                           env=env, thresholds=thresholds, label="oracle()")
 
 
+def oracle_entry(have: set[str] | frozenset[str], oracle: dict[str, Any] | None = None, *, per_trial: bool = False) -> str:
+    """Which simulation function FI calls to measure an oracle: ``"run_trial"`` or ``"run_cell"``.
+
+    The two mean different things. ``run_trial`` is ONE trial of one setting (FI's trial harness calls it once per trial
+    and keeps each result); ``run_cell`` is the setting's own number, the one a deterministic study computes or the mean
+    over many trials of a random one. A simulation that defines only one of them is called through it. When it defines
+    both, a check that holds in every single trial (kind ``invariant``, or ``per_trial``) is measured on ``run_trial``,
+    and every other check is a quantity of the setting and is measured on ``run_cell``: measuring it on ``run_trial``
+    is what led a repair to make ``run_trial`` return the mean of thousands of trials."""
+    if "run_trial" not in have:
+        return "run_cell"
+    if "run_cell" not in have:
+        return "run_trial"
+    if per_trial or (oracle is not None and _oracle.kind_of(oracle) == "invariant"):
+        return "run_trial"
+    return "run_cell"
+
+
 async def run_case(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
                    timeout_s: int, env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
-                   trial: int = 0) -> tuple[dict[str, float] | None, str]:
+                   trial: int = 0, oracle: dict[str, Any] | None = None,
+                   per_trial: bool = False) -> tuple[dict[str, float] | None, str]:
     """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial ``trial``, 0 unless asked,
-    with the seed FI gives that trial of that cell, or ``run_cell``): ``(the metrics it returned, "")``, or ``(None,
-    why)``. This is how an oracle is measured without asking the script for the number."""
+    with the seed FI gives that trial of that cell, or ``run_cell``; :func:`oracle_entry` says which): ``(the metrics it
+    returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number."""
     have = entries(Path(module) if Path(module).is_absolute() else Path(quest_root) / module)
-    entry = "run_trial" if "run_trial" in have else "run_cell"
+    entry = oracle_entry(have, oracle, per_trial=per_trial)
     base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
     seed = trial_seed(base, cell_key(cell), int(trial)) if entry == "run_trial" else None
     return await _run_one(executor, python, quest_root, module, entry=entry, cell=dict(cell), seed=seed, timeout_s=timeout_s,
@@ -937,7 +1000,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
         case, measure = own
         name = str(oracle["name"]).strip()
         values, why = await run_case(executor, python, quest_root, module, cell=case, timeout_s=timeout_s, env=cenv,
-                                     thresholds=thresholds)
+                                     thresholds=thresholds, oracle=oracle)
         if values is None:
             problems.append(f"the oracle {name!r}: the simulation could not be run on its case "
                             f"({clip_keeping_place(why, 300)})")

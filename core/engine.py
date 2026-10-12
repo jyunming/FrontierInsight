@@ -13536,7 +13536,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             case, measure = own
             if random_trials is None:
                 try:
-                    random_trials = "run_trial" in _trial_runner.entries(seed_path)
+                    random_trials = _trial_runner.oracle_entry(_trial_runner.entries(seed_path), oracle) == "run_trial"
                 except (ValueError, OSError):
                     random_trials = False
 
@@ -13544,7 +13544,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 try:
                     values, _why = await _trial_runner.run_case(
                         self.executor, py, self.quest_root, rel, cell=cell, timeout_s=timeout, env=case_env,
-                        thresholds=thresholds, trial=trial_no)
+                        thresholds=thresholds, trial=trial_no, oracle=oracle)
                 except Exception as e:  # noqa: BLE001 -- a look that could not be had never stops a quest
                     self._log.warning("[oracle] an extra run of %r's case could not be made: %r", name, e)
                     return None
@@ -14495,6 +14495,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not usable:
             self._log.warning("[oracle] the repair of %s is not usable (it must parse and %s); keeping it as written", path.name,
                               "define oracle()" if getattr(self, "_trial_mode", False) else "honour FI_ORACLE")
+            return None, False, "not_usable"
+        if (path.name == _split_run.SIMULATE_NAME and getattr(self, "_trial_mode", False)
+                and _trial_runner.trial_aggregates(new_code) and not _trial_runner.trial_aggregates(code)):
+            # run_trial is ONE trial: a repair that makes it return run_cell's number (the mean of many trials) made every
+            # trial of the study as long as a whole cell. A cell-level check is measured on run_cell, which FI calls for it.
+            self._log.warning("[oracle] the repair of %s is not used: %s; keeping it as written", path.name,
+                              _trial_runner.TRIAL_AGGREGATE_WHY)
             return None, False, "not_usable"
         path.write_text(new_code, encoding="utf-8")
         if path.name == _split_run.SIMULATE_NAME:
@@ -23786,7 +23793,10 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
 - When the protocol lists oracles: an oracle that names a `case` (the settings of one run) and a `measure` is run by
   FI itself: it calls run_trial / run_cell on that case and computes `measure` (one returned name, or a formula of
   them) from the dict returned, so that function must return every name the `measure` uses, computed by the real
-  simulation (never the check's number already worked out in another form). Only an oracle without a `case` needs `def oracle() -> dict`,
+  simulation (never the check's number already worked out in another form). When simulate.py defines both functions,
+  FI calls run_trial for a check of kind `invariant` and run_cell for every other check (a mean or a rate is a number of
+  the setting); `run_trial` is always ONE trial and never calls or returns `run_cell`, whose mean over trials may call
+  `run_trial`. Only an oracle without a `case` needs `def oracle() -> dict`,
   which computes, with the SAME simulation code, the values those oracles name, returned as a dict keyed by the oracle
   names; this replaces the `FI_ORACLE` rule above. `FI_PILOT` does not apply.
 
@@ -24110,7 +24120,12 @@ _TRIAL_ORACLE_NOTE = """
 THE TRIAL CONTRACT: simulate.py defines run_trial (or run_cell). An oracle that names a `case` and a `measure` is NOT
 measured by anything you write for the check: FI calls run_trial (or run_cell) itself on that case and computes `measure`
 (one returned name, or a formula of them) from the dict it returns, so the simulation function must return every name
-the `measure` uses, computed by the real simulation. Only an oracle
+the `measure` uses, computed by the real simulation. Which function FI calls: `run_trial` is ONE trial and `run_cell` is
+the setting's own number (a mean or rate over many trials, or a deterministic value). When simulate.py defines both, FI
+calls `run_trial(cell, trial_id, seed)` for a check of kind `invariant` (it holds in every single trial) and `run_cell(cell)`
+for every other check, so a check on a mean or a rate needs `run_cell` to return that name. NEVER make `run_trial` return
+or call `run_cell`, or average many trials inside it: FI runs it once per trial, thousands of times, and keeps each
+result as one trial. Put the mean over trials in `run_cell` (it may call `run_trial`, never the other way round). Only an oracle
 without a `case` is measured by `def oracle() -> dict` in simulate.py, which must compute, with the same simulation code,
 each such check and return them as a dict keyed by the check's name, e.g. `{"closed_form_limit": 0.4987}`. There is no
 FI_ORACLE variable and no ORACLE_JSON line. Keep every comment that marks where an equation of the plan's model is
