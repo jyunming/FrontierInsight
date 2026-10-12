@@ -369,6 +369,14 @@ async def test_the_equation_tests_run_on_the_package_a_repair_left_and_name_what
     model = engine.quest_root / "code" / "spring" / "model.py"
     model.write_text(model.read_text(encoding="utf-8").replace("return m * w / c", "return w / c"), encoding="utf-8")
     assert await engine._equation_test_failures(PROTOCOL, None) == "E2"
+    # a model that raises on import is reported per equation; one that ends the test run itself (no results printed) is
+    # a failure too, never a pass (a syntax error is caught earlier, by the function's own tests)
+    good = model.read_text(encoding="utf-8")
+    model.write_text(good + "\nraise RuntimeError('crashes on import')\n", encoding="utf-8")
+    assert await engine._equation_test_failures(PROTOCOL, None)
+    model.write_text(good + "\nimport os\nos._exit(3)\n", encoding="utf-8")
+    crashed = await engine._equation_test_failures(PROTOCOL, None)
+    assert crashed and "no results" in crashed
 
 
 @pytest.mark.asyncio

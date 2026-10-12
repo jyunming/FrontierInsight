@@ -11772,8 +11772,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return name or None
 
     async def _equation_test_failures(self, protocol: dict[str, Any], exec_env: Any) -> str:
-        """The plan's equation tests run once on the package as it is (no repair, no request): ``""`` when none fails or they
-        cannot be run here, else the failing equations' ids."""
+        """The plan's equation tests run once on the package as it is (no repair, no request): ``""`` when none fails or the plan
+        has none to run, else the failing equations' ids (or why the started tests gave no results)."""
         if self.config.engine.oracle_check == "off" or not (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
             return ""
         if not _equation_tests.eligible(protocol):
@@ -11788,10 +11788,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         raw_dir = self._raw_root() / "equation_tests"
         raw_dir.mkdir(parents=True, exist_ok=True)
         env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
-        _rc, out, _err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
+        rc, out, _err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
         results = _equation_tests.parse_results(out)
         if results is None:
-            return ""
+            # the tests were written and started but gave no results: the package crashed or hung, which is a failure,
+            # never a pass (a repair that leaves a model the tests cannot even run is not kept)
+            return f"the equation tests gave no results on this code (exit code {rc})"
         return ", ".join(str(r.get("id")) for r in results if r.get("status") != _equation_tests.OK)
 
     async def _second_version_gate(self, state: QuestState, py: Any, exec_env: Any) -> bool:
