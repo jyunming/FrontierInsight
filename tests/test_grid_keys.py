@@ -109,7 +109,7 @@ def main():
         if cell["fit_failure_fraction"] <= 0.01
         and abs(cell["by_method"]["weighted"]["ea_bias_j_mol"]) <= 0.05
     ]
-    largest = max(cell["rate"] for cell in supported)
+    largest = max(cell["fit_failure_fraction"] for cell in supported)
     return supported, largest
 '''
 OVER_RECORD = '''\
@@ -258,3 +258,70 @@ def test_a_list_picked_from_settings_by_a_comprehension_is_still_checked() -> No
     src = ('def main(record):\n    cells = [entry["cell"] for entry in record["cells"]]\n'
            '    picked = [cell for cell in cells if cell["missing"]]\n    return picked\n')
     assert _names({"a.py": src}) == [("a.py", ("missing",))]
+
+
+KINETICS_MODULE = '''\
+import json, os
+record = json.load(open(os.environ["FI_TRIALS"]))
+cells = []
+for entry in record["cells"]:
+    setting = entry["cell"]
+    result = {"rate": float(setting["rate"]), "fit_failure_fraction": 0.0, "by_method": {"weighted": {}}}
+    cells.append(result)
+supported = [cell for cell in cells if cell["fit_failure_fraction"] <= 0.01 and cell["by_method"]["weighted"]]
+largest = max(cell["fit_failure_fraction"] for cell in supported)
+for cell in cells:
+    print(cell["by_method"])
+'''
+FLOW_TEMPLATE = '''\
+def get_cell(entry):
+    return entry["cell"]
+
+
+def main(record, labels):
+    cells = []
+{build}
+    return [1 for cell in cells if cell["missing"]]
+
+
+def second(record, labels):
+    cells = []
+{build}
+    for cell in cells:
+        print(cell["missing"])
+'''
+# Each builds a list of settings in a way the check cannot see through, then reads a name the grid lacks.
+FLOW_BUILDS = {
+    "spread into a literal": ('    for entry in record["cells"]:\n        setting = entry["cell"]\n'
+                              '        result = {**setting, "metric": 1}\n        cells.append(result)'),
+    "dict(**setting)": ('    for entry in record["cells"]:\n        setting = entry["cell"]\n'
+                        '        cells.append(dict(**setting))'),
+    "helper that returns the cell": '    for entry in record["cells"]:\n        cells.append(get_cell(entry))',
+    "zip target": '    for cell, _ in zip(record["cells"], labels):\n        cells.append(cell)',
+    "enumerate target": '    for i, cell in enumerate(record["cells"]):\n        cells.append(cell)',
+    "nested loop": '    for group in record["groups"]:\n        for c in group["cells"]:\n            cells.append(c)',
+}
+
+
+def test_every_way_a_list_of_settings_can_be_built_unseen_is_still_checked() -> None:
+    for label, build in FLOW_BUILDS.items():
+        src = FLOW_TEMPLATE.format(build=build)
+        found = _names({"a.py": src})
+        assert found == [("a.py", ("missing",)), ("a.py", ("missing",))], (label, found)
+
+
+def test_the_scripts_own_summaries_are_not_settings_at_module_level_either() -> None:
+    assert _names({"experiment.py": KINETICS_MODULE}) == []
+    # ... but a comprehension over something else, in the same module, still is
+    src = KINETICS_MODULE + 'other = [1 for cell in record["cells"] if cell["missing"]]\n'
+    assert _names({"experiment.py": src}) == [("experiment.py", ("missing",))]
+
+
+def test_a_summary_dict_that_is_changed_or_spread_is_not_trusted() -> None:
+    for body in ('result = {"a": 1}\n        result.update(entry["cell"])\n        cells.append(result)',
+                 'result = {"a": 1}\n        result |= entry["cell"]\n        cells.append(result)',
+                 'result = {"a": 1, **entry["cell"]}\n        cells.append(result)',
+                 'cells.append({"a": 1, **entry["cell"]})'):
+        src = ('def main(record):\n    cells = []\n    for entry in record["cells"]:\n        ' + body
+               + '\n    return [1 for cell in cells if cell["missing"]]\n')
+        assert _names({"a.py": src}) == [("a.py", ("missing",))], body
