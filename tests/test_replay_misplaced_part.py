@@ -142,7 +142,7 @@ async def test_fi_moves_the_part_and_asks_with_the_exact_reason_and_ends_in_an_h
 
     design, sha = await eng._ask_plan_for_the_search(STATE, design, sha)
     record = json.loads((eng.fi_dir / "search_block_asked.json").read_text(encoding="utf-8"))
-    assert record["count"] == 4 and record["calls"] <= 12, "bounded: two asks, two more for a form the reader named, at most twelve chat calls"
+    assert record["count"] == 2 and record["calls"] <= 12, "bounded: the model repeats the same answer, so the same refusal twice ends the asking"
     assert len(asked) <= 12
     first, second = asked[0], next(a for a in asked[1:] if "Your last answer was not used" in a)
     assert "ONE number per design variable" in first, "the ask says plainly that the search takes scalar variables"
@@ -158,7 +158,7 @@ async def test_fi_moves_the_part_and_asks_with_the_exact_reason_and_ends_in_an_h
     assert stop is not None and not paused
     result = stop["exec_result"]
     assert result["no_search"].startswith("the plan is a search for the best design, but FI could not make a search")
-    assert "asked the plan's model 4 time(s)" in " ".join(result["no_search_tried"])
+    assert "asked the plan's model 2 time(s)" in " ".join(result["no_search_tried"])
     # the same stop is what the run step gives on a resume, and the stuck node writes the plain record
     verdict = eng._no_results_verdict({**STATE, "exec_result": result, "result_json": {}})
     assert verdict is not None and verdict["stuck_reason"] == "no_search"
@@ -189,7 +189,7 @@ async def test_the_reason_of_a_rejected_answer_is_kept_on_disk_and_a_resume_asks
     design, sha = eng._design_from_plan()
     await eng._ask_plan_for_the_search(STATE, design, sha)
     record = json.loads((eng.fi_dir / "search_block_asked.json").read_text(encoding="utf-8"))
-    assert record["count"] == 4 and record["calls"] <= 12
+    assert record["count"] == 2 and record["calls"] <= 12  # the same answer twice: the same refusal ends the asking
     assert VAR in record["problem"] and "array of values" in record["problem"]
     made = len(asked)
     again, sha2 = eng._design_from_plan()

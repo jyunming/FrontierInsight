@@ -712,8 +712,8 @@ def test_a_grid_axis_may_be_names_but_not_a_mix_or_a_bool() -> None:
     for bad in (["euler", [1, 2]], [True, False], [], [""]):
         got, why = plan.normalize_protocol({"grid": {"method": bad}})
         assert got is None and "protocol.grid.method" in why
-    mixed, why = plan.normalize_protocol({"grid": {"method": ["euler", 2]}})  # names and a number: read as names
-    assert why is None and mixed["grid"] == {"method": ["euler", "2"]}
+    mixed, why = plan.normalize_protocol({"grid": {"method": ["euler", 2]}})  # names and a number: refused, with how to write it
+    assert mixed is None and "mixes names and numbers" in why
 
 
 def test_a_grid_that_cannot_be_read_is_reported_in_plain_words() -> None:

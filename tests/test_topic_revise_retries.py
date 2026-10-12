@@ -19,21 +19,25 @@ async def test_a_design_step_answer_refused_for_its_form_is_asked_again_up_to_fo
     eng, model, redesign, state = await _redesign_setup(tmp_path)
     original = model.chat
     prompts: list[str] = []
-    bad = {**redesign, "protocol": {**redesign["protocol"], "grid": {**redesign["protocol"]["grid"], "lid_material": []}}}
+    def bad_with(value: Any) -> dict[str, Any]:
+        return {**redesign, "protocol": {**redesign["protocol"], "grid": {**redesign["protocol"]["grid"], "lid_material": value}}}
+    # three DIFFERENT unreadable forms (the same refusal twice would end the asking early)
+    bads = [bad_with([]), bad_with(["paper", [1, 2]]), bad_with([[1.0], [1.0, 2.0]])]
     good = {**redesign, "protocol": {**redesign["protocol"], "grid": {**redesign["protocol"]["grid"], **LID_AXIS}}}
 
     async def chat(messages: list[dict[str, str]], **kw: Any) -> str:
         prompt = messages[-1]["content"]
         if "The topic asks for things this plan does not yet include" in prompt:
             prompts.append(prompt)
-            return json.dumps(bad if len(prompts) < 4 else good)  # the fourth try is the first that can be read
+            return json.dumps(bads[len(prompts) - 1] if len(prompts) < 4 else good)  # the fourth try is the first that can be read
         return await original(messages, **kw)
 
     eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=chat)})()
     design, _sha = await eng._hold_the_design_to_the_topic(state, redesign, "")
     assert design["protocol"]["grid"]["lid_material"] == ["paper", "foam", "steel"]
     assert len(prompts) == 4
-    assert all("non-empty list" in p for p in prompts[1:]), "each retry quotes the reader's exact reason"
+    reasons = ("non-empty list", "mixes lists with single values", "the same number of numbers")
+    assert all(r in p for r, p in zip(reasons, prompts[1:])), "each retry quotes the reader's exact reason"
     record = json.loads((eng.fi_dir / "topic_design_asked.json").read_text(encoding="utf-8"))
     assert record["asks"] == 4 and not record["problem"] and not record["schema"], "a used answer clears the refusal"
     await eng._hold_the_design_to_the_topic(state, redesign, "")  # a resume never asks past the bound
