@@ -701,7 +701,9 @@ def _variants(value: float, token: str) -> Iterator[tuple[float, int, str]]:
     one the paper wrote, so ``2330`` is compared at the tens (``-1``)."""
     dec = _written_precision(token)
     yield value, dec, ""
-    yield value / 100.0, dec + 2, " (as a fraction rather than a percentage)"
+    # A rounded integer is divided at the precision it had before trailing zeros counted (2 decimals), not at
+    # dec + 2: 233000 / 100 compared at the tens would match an unrelated 2326.66.
+    yield value / 100.0, max(dec, 0) + 2, " (as a fraction rather than a percentage)"
     if dec >= 0:  # never for a rounded integer: 2330 x 100 would match an unrelated 233,450
         yield value * 100.0, max(dec - 2, 0), " (as a percentage rather than a fraction)"
     if 0.0 < value < 1.0:

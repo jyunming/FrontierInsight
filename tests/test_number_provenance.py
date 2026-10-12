@@ -810,6 +810,12 @@ def test_a_rounded_integer_is_never_scaled_up_by_a_hundred() -> None:
     assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"x": 233450.0})) == ["2330"]
 
 
+def test_a_rounded_integer_is_not_scaled_down_at_a_coarser_precision() -> None:
+    """233000 / 100 = 2330 must not be compared at the tens, where it would match 2326.66."""
+    assert _tokens(check("The study took 233000 steps.", result_json=SD_RUN)) == ["233000"]
+    assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"x": 23.28})) == ["2330"]
+
+
 def test_a_rounded_integer_is_not_matched_by_truncation() -> None:
     """Nobody truncates 2326.66 to 2320: 2320 is flagged (it would widen the window to [2315, 2330))."""
     assert _tokens(check("The SD of Ea was 2320 J/mol.", result_json=SD_RUN)) == ["2320"]
