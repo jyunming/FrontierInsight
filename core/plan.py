@@ -217,26 +217,28 @@ def _grid_values(axis: Any, values: Any) -> tuple[list[Any] | None, str | None]:
     """``(the values of one grid axis, None)`` or ``(None, why)``.
 
     An axis takes numbers, names (text), or tuples (a list of equal-length lists of numbers, each inner list being ONE
-    setting, such as an inner and an outer radius). A list that mixes names and numbers is read as names: every number
-    becomes its text, so the axis compares settings by name and the plan is not refused over a spelling (a name stays
-    exactly as written; a number is written back as the text of the number). A list that mixes tuples with anything else
-    is refused, since there is no single meaning for it."""
+    setting, such as an inner and an outer radius). A list that mixes names and numbers is refused with how to write it
+    (it may be a numeric sweep with a stray piece of text, which must not silently become names), and so is a list that
+    mixes tuples with anything else, since there is no single meaning for either."""
     where = f"`protocol.grid.{axis}`"
     if not isinstance(values, list) or not values:
         return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
-    if all(isinstance(v, list) for v in values):
+    if all(isinstance(v, (list, tuple)) for v in values):
         width = len(values[0])
         if not width or any(len(v) != width or not all(_number(x) and math.isfinite(x) for x in v) for v in values):
             return None, (f"{where}: when each value is a list, every one must be a list of the same number of numbers "
                           "(for example [[0.5, 0.8], [0.6, 0.9]]); each list is one setting")
         return [list(v) for v in values], None
-    if any(isinstance(v, (list, dict)) for v in values):
+    if any(isinstance(v, (list, tuple, dict)) for v in values):
         return None, (f"{where} mixes lists with single values: write every value as a number, every value as text, "
                       "or every value as a list of numbers of the same length")
     if all(_number(v) for v in values):
         return list(values), None
+    if all(isinstance(v, str) and v.strip() for v in values):
+        return [v.strip() for v in values], None
     if all(_number(v) or (isinstance(v, str) and v.strip()) for v in values):
-        return [v.strip() if isinstance(v, str) else str(v) for v in values], None
+        return None, (f"{where} mixes names and numbers: if the values are names, write every one as text in quotes "
+                      "(for example [\"a\", \"3\"]); if they are numbers, write every one as a number, without units or text")
     return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
 
 

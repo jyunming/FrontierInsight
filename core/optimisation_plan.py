@@ -27,6 +27,7 @@ sweep; one the engine cannot search (no block, no budget, one script, a cluster)
 
 from __future__ import annotations
 
+import difflib
 import itertools
 import math
 import re
@@ -458,6 +459,15 @@ def _grid(grid: Any, variables: dict[str, dict[str, Any]], fixed: dict[str, Any]
     return None
 
 
+def _near_a_variable(axis: str, variables: Any) -> bool:
+    """True when ``axis`` looks like a misspelling of a design variable (a close spelling, or one name inside the other):
+    such an axis is not taken as an outer comparison; the plan is refused as before, so the typo is seen."""
+    names = [str(v) for v in (variables or [])]
+    a = axis.lower()
+    return bool(difflib.get_close_matches(axis, names, n=1, cutoff=0.6)
+                or any(n.lower() in a or a in n.lower() for n in names if len(n) >= 3 and len(a) >= 3))
+
+
 def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
     """``(block, None)`` when the optimisation block can be read and checked, else ``(None, why)``."""
     if not isinstance(block, dict):
@@ -610,7 +620,8 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
         for axis, values in grid.items():
             values = values if isinstance(values, list) else [values]
             if (str(axis) not in variables and str(axis) not in {str(k) for k in held}
-                    and values and all(isinstance(v, str) and v.strip() for v in values)):
+                    and values and all(isinstance(v, str) and v.strip() for v in values)
+                    and not _near_a_variable(str(axis), variables)):
                 held[str(axis)] = values[0].strip()
         if held and held != (fixed if isinstance(fixed, dict) else {}):
             out["fixed"] = fixed = held

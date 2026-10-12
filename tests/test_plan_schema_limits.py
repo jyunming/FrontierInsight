@@ -52,10 +52,13 @@ def test_the_run_manifest_reads_a_tuple_setting_through_the_cell_key_the_runner_
 # 2. a list that mixes names and numbers -----------------------------------------------------------------------------------
 
 
-def test_a_list_that_mixes_names_and_numbers_is_read_as_names() -> None:
-    fixed, why = plan.normalize_protocol({"grid": {"family": ["round", "square", 3, 4.5]}})
-    assert fixed is not None, why
-    assert fixed["grid"]["family"] == ["round", "square", "3", "4.5"]
+def test_a_list_that_mixes_names_and_numbers_is_refused_with_how_to_write_it() -> None:
+    # a numeric sweep with a stray piece of text must not silently become names (the numeric checks would be lost)
+    fixed, why = plan.normalize_protocol({"grid": {"temp": [290, 300, "310K"]}})
+    assert fixed is None and "mixes names and numbers" in why and "in quotes" in why
+    # a tuple setting's numbers count as numbers the plan fixes (the topic's numbers are found in it)
+    from core import protocol_check as pc
+    assert (0.8, "grid pair") in pc.protocol_numbers({"grid": {"pair": [[0.5, 0.8], [0.6, 0.9]]}})
     # all-number and all-name lists are as before
     fixed, _ = plan.normalize_protocol({"grid": {"a": [1, 2.5], "b": [" x ", "y"]}})
     assert fixed["grid"] == {"a": [1, 2.5], "b": ["x", "y"]}
@@ -89,6 +92,18 @@ def test_a_scan_over_names_needs_no_entry_under_fixed_and_the_search_does_not_ch
     again, why = op.normalize({**BLOCK, "fixed": {"shape": "square"}, "grid": {"shape": ["round", "square"]}})
     assert again is not None, why
     assert again["fixed"]["shape"] == "square"
+
+
+def test_a_name_valued_scan_that_looks_like_a_misspelt_design_variable_is_still_refused() -> None:
+    block = {**BLOCK, "design_variables": [*BLOCK["design_variables"],
+                                           {"name": "solver_type", "kind": "choice", "values": ["rk4", "euler"]}],
+             "baseline": {"values": {"x": 0.0, "y": 0.0, "solver_type": "rk4"}, "source": "the design in use"}}
+    for typo in ("solver", "solvr_type"):
+        _, why = op.normalize({**block, "grid": {typo: ["rk4", "euler"]}})
+        assert why and typo in why, f"{typo} must be refused so the typo is seen"
+    # a short design-variable name does not make every axis containing its letter look like a typo
+    fixed, why = op.normalize({**BLOCK, "grid": {"family": ["a", "b"]}})
+    assert fixed is not None and fixed["fixed"]["family"] == "a", why
 
 
 def test_a_scan_over_numbers_that_are_neither_a_variable_nor_fixed_is_still_refused() -> None:

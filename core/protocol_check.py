@@ -366,8 +366,9 @@ def protocol_numbers(protocol: dict[str, Any] | None) -> list[tuple[float, str]]
     if isinstance(grid, dict):
         for axis, values in grid.items():
             for v in values if isinstance(values, list) else []:
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    out.append((float(v), f"grid {axis}"))
+                for x in (v if isinstance(v, (list, tuple)) else [v]):   # a tuple setting fixes each of its numbers
+                    if isinstance(x, (int, float)) and not isinstance(x, bool):
+                        out.append((float(x), f"grid {axis}"))
     runs = protocol.get("runs_per_setting")
     if isinstance(runs, (int, float)) and not isinstance(runs, bool):
         out.append((float(runs), "runs per setting"))
