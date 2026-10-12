@@ -921,6 +921,24 @@ def _listed(items: list[str], cap: int) -> str:
     return out + (f"; and {more} more (all are listed in {RECORD.as_posix()})" if more > 0 else "")
 
 
+def _second_record() -> str:
+    from . import second_impl as _second
+
+    return _second.RECORD.as_posix()
+
+
+def second_version_sentences(quest_root: Path) -> list[str]:
+    """The finding of kind ``second_version``: a key function of the model whose second, independently written version
+    (:mod:`core.second_impl`) could not be settled against the first, or could not be compared. Plain sentences from
+    ``.fi/second_impl.json``; empty when the check was not made or every function agreed."""
+    try:
+        from . import second_impl as _second
+
+        return [_plain_text(s) for s in _second.limitations(_second.load(quest_root))]
+    except Exception:  # noqa: BLE001 -- a record that cannot be read adds nothing
+        return []
+
+
 def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     """What a second model's reading of the code left unresolved on the version that ran, by kind: ``unread`` (why the
     code was not read by another model, else ``""``), ``reread`` (the final version was changed after the reading and
@@ -931,7 +949,8 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     not in it. Everything is empty for a quest with no record."""
     record = load(quest_root)
     out: dict[str, Any] = {"unread": "", "reread": False, "not_reviewed": [], "not_reviewed_headline": False,
-                           "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False}
+                           "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False,
+                           "second_version": second_version_sentences(quest_root)}
     if not record:
         return out
     now = version(code_dir)
@@ -1064,6 +1083,11 @@ def write_note(quest_root: Path, code_dir: Path) -> str:
     if f["stopped"]:
         notes.append("The repairs of the second model's findings were stopped because a round did not reduce the open "
                      "findings that change a result; what is open is listed here as it stands.")
+    if f["second_version"]:
+        notes.append("FI had a second, independently written version of key functions of the model compared with the first "
+                     f"on many inputs, and for these it could not settle which is right: {_listed(f['second_version'], NOTE_CAP)}. "
+                     "Say plainly in the limitations that the number or figure that rests on such a function was not "
+                     "confirmed by an independent version, and do not present it as established.")
     return " ".join(notes)
 
 
@@ -1131,8 +1155,20 @@ def findings_block(quest_root: Path, code_dir: Path) -> str:
     if f["stopped"]:
         points.append("**Repairs stopped.** They ended because a round did not reduce the open findings that change a "
                       "result, so what is listed above is open as it stands.")
+    # No second model read the code at all (nothing else is open, or the only other point is that it was not read):
+    only_second = bool(f["second_version"]) and (not points or (bool(f["unread"]) and len(points) == 1))
+    if f["second_version"]:
+        points.append("**A second, independent version of a key function was not settled.** FI had these functions written "
+                      "a second time from the plan's description alone and compared the two on many inputs: "
+                      f"{_listed(f['second_version'], BLOCK_CAP)}.")
     if not points:
         return ""
+    if only_second:
+        # No second model read the code: the only point is FI's own comparison of two versions of a function.
+        return ("**Open points in the code that produced these results.** FI compared two independently written versions of "
+                "key functions of the model. The points below were still open on the version that ran, and none of them was "
+                f"settled by the run; the full record is in `{_second_record()}`.\n\n"
+                + "\n\n".join(f"- {p}" for p in points))
     return ("**Open points in the code that produced these results.** A second model read the code against the plan. "
             "These points were still open on the version that ran. The second model can be wrong, and none of them was "
             f"settled by the run; the full record is in `{RECORD.as_posix()}`.\n\n"

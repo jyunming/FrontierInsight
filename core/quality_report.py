@@ -60,7 +60,7 @@ _READERS = {"plan": ("oracle_review.topic",), "checks": ("oracle_review", "oracl
 _KEY = {"plan": "plan", "checks": "oracle_review", "design": "design", "code": "implement", "run": "execute_reflect",
         "analysis": "analyze", "paper": "write", "review": "review"}
 _RECORD_FILES = ("model_calls.jsonl", "audit.jsonl", "oracle_review.json", "code_review.json", "equation_tests.json",
-                 "function_steps.json")
+                 "function_steps.json", "second_impl.json")
 
 
 def _is_choice(text: str) -> bool:
@@ -168,6 +168,7 @@ class _Quest:
         self.code_review = _dict(_json(fi / "code_review.json"))
         self.equation_tests = _dict(_json(fi / "equation_tests.json"))
         self.function_steps = _dict(_json(fi / "function_steps.json"))
+        self.second_impl = _dict(_json(fi / "second_impl.json"))
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
@@ -323,6 +324,16 @@ def _code_problems(q: _Quest) -> list[dict[str, str]]:
         elif f.get("status") == "done" and attempts > 1:
             out.append(_problem("code", f"function {name} (equation {eqn}) needed {attempts} tries",
                                 "FI's equation test", "fixed", ".fi/function_steps.json"))
+    # A second, independently written version of a key function (core/second_impl.py): said in plain words, never a stop.
+    for name, f in _dict(q.second_impl.get("functions")).items():
+        f = _dict(f)
+        if f.get("status") in ("unresolved", "unconfirmed") and f.get("limitation"):
+            out.append(_problem("code", _one(f.get("limitation"), 220), "a second, independently written version",
+                                "not fixed" if f.get("status") == "unresolved" else "left out", ".fi/second_impl.json"))
+        elif _dict(f.get("adjudication")).get("outcome") == "repair accepted":
+            out.append(_problem("code", f"function {name} differed from a second, independently written version; the first "
+                                "was wrong and was repaired", "a second, independently written version", "fixed",
+                                ".fi/second_impl.json"))
     return out
 
 

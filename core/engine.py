@@ -127,6 +127,8 @@ from . import code_findings as _code_findings
 from . import grid_keys as _grid_keys
 from . import finding_repair as _finding_repair
 from . import function_steps as _function_steps
+from . import second_impl as _second_impl
+from . import step_passages as _step_passages
 from . import hidden_check as _hidden
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
@@ -261,6 +263,7 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "code_review",  # the code read against the plan, when it has a step of its own
     "oracle_review.recompute",  # a failing check's expected value worked out again (core/oracle_triage.py)
     "oracle_review.code",  # the code read against the plan, while no step of its own is set for it
+    "second_impl.adjudicate",  # which of two versions of a function that disagree is wrong (core/second_impl.py)
     "oracle_review.topic",  # what the topic asks for, read from its text and looked for in the plan (core/topic_requirements.py)
 })
 
@@ -11705,6 +11708,145 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             out[_split_run.SIMULATE_NAME] = simulate.read_text(encoding="utf-8")
         return out
 
+    def _new_function_filler(self, outline: dict[str, Any], package: str, protocol: Any, specs: list[Any],
+                             passages: dict[str, str], deps: list[str]) -> Any:
+        """The filler that writes, and later tests or repairs, the model's functions: the quest-wide count of its requests
+        (``function_steps.max_calls_for``) is the one in ``.fi/function_steps.json``."""
+        view = _oracle.model_view((protocol or {}).get("model") if isinstance(protocol, dict) else None) or {}
+        constants = "\n".join(f"- {c.get('name')} = {c.get('value')} ({c.get('source')})"
+                              for c in outline.get("constants") or [] if isinstance(c, dict) and c.get("name"))
+
+        async def chat(prompt: str) -> str:
+            return await self._chat(prompt, node="implement")
+
+        return _function_steps.FunctionFiller(
+            quest_root=self.quest_root, package=package, protocol=protocol if isinstance(protocol, dict) else None,
+            summary=str(view.get("summary") or ""),
+            prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"],
+                     "module": self._prompts["implement_module_repair"]},
+            chat=chat, run=self._run_in_env, log=self._log, repairs=_function_steps.REPAIRS,
+            max_calls=_function_steps.max_calls_for(len(specs)), constants=constants, install=self._install_packages,
+            declared=deps, topic_block=self._topic_block(), passages=passages)
+
+    async def _step_passages(self, protocol: dict[str, Any] | None, specs: list[Any]) -> dict[str, str]:
+        """``{step or equation id: passages}`` for the functions of ``specs`` (core/step_passages.py): the best hits of the
+        quest's knowledge for the card's name and what it does, kept to the source the card names, and the plan's quoted
+        definitions of the metrics it computes. No model call; cached in ``.fi/step_passages.json``. An id with nothing is
+        left out; a search that fails leaves the function to be written without passages, as before."""
+        out: dict[str, str] = {}
+        if not isinstance(protocol, dict):
+            return out
+        try:
+            knowledge = self.knowledge if getattr(self.knowledge, "enabled", False) else None
+            definitions = _ledger.parse_definitions(protocol)[0]
+            equations = {_equation_tests._text(e["id"]): e for e in _equation_tests.eligible(protocol)}
+            for spec in specs:
+                if spec.kind == _function_steps.STEP and spec.card:
+                    card = spec.card
+                else:
+                    e = equations.get(spec.equation) or {}
+                    card = {"id": spec.equation, "name": spec.purpose, "formula": _equation_tests._text(e.get("formula")),
+                            "source": _equation_tests._text(e.get("source"))}
+                if not _step_passages._source_terms(str(card.get("source") or "")):
+                    # "derivation", "textbook": no paper to look for, so none is searched; the plan's quoted definitions stay
+                    card = {**card, "source": ""}
+                text = await _step_passages.for_card(card, knowledge, self.fi_dir / "step_passages.json",
+                                                     definitions=definitions)
+                if text:
+                    out[spec.equation] = text
+        except Exception as e:  # noqa: BLE001 -- passages are a help to the writer, never a stop
+            self._log.info("[implement] the literature passages for the model's functions could not be found: %r", e)
+        return out
+
+    def _family_of_node(self, node: str) -> str | None:
+        """Which kind of model answers ``node`` (the vendor family, from the model's name, else the provider's), so that
+        agreement between two versions of a function can be told from agreement between two models of one kind."""
+        step = node_provider_for(getattr(self.config.provider, "node_providers", None), node)
+        name = str(step[1].name if step else self.config.provider.name or "")
+        model = str((step[1].model if step else None) or self._model_for_node(node) or self.config.provider.model or "")
+        for text in (model.lower(), name.lower()):
+            for family, keys in (("openai", ("gpt", "codex", "openai", "terra")), ("anthropic", ("claude", "anthropic", "haiku", "sonnet", "opus")),
+                                 ("google", ("gemini", "gemma", "antigravity", "agy")), ("moonshot", ("kimi", "moonshot"))):
+                if any(k in text for k in keys):
+                    return family
+        return name or None
+
+    async def _second_version_gate(self, state: QuestState, py: Any, exec_env: Any) -> bool:
+        """After the equation tests and before the oracle gate: for up to ``second_impl.MAX_KEY`` key functions of the
+        model, a second version is written by another request (steps ``second_impl`` and ``second_impl.adjudicate``, which
+        may be other models) from the function's description alone, and the two are run on the same inputs in the quest's
+        environment (core/second_impl.py). A difference is settled by a judge; the first function is repaired only if the
+        repair still passes its own checks. What cannot be settled is recorded (``.fi/second_impl.json``) and said in the
+        paper's limitations; nothing here stops a quest or asks anyone. Counts are saved before each request, so a resume
+        asks nothing twice. ``True`` when a repair changed the model's package."""
+        ex = self.config.execution
+        try:
+            if not ex.code_function_steps or not self._runs_code(state):
+                return False
+            package = self._package_in_use(state)
+            protocol = self._protocol_block(state)
+            if not package or not isinstance(protocol, dict):
+                return False
+            record = _function_steps.load(self.quest_root)
+            if record.get("package") != package:
+                return False  # the package was not written function by function: there are no cards to write a second version from
+            outline = state.get("implement_outline") or {}
+            specs, _notes = _function_steps.model_functions(outline, protocol)
+            done = {n for n, e in (record.get("functions") or {}).items()
+                    if isinstance(e, dict) and e.get("status") == _function_steps.DONE}
+            specs = [s for s in specs if s.name in done]
+            if not specs or not _second_impl.key_functions(specs, protocol)[0]:
+                return False  # no card or equation to check (or only random ones): nothing is asked, nothing is said
+            if ex.sandbox == "venv" and not self.executor.python_path(self.quest_root).is_file():
+                return False
+            deps = _coerce_dep_list(outline.get("deps")) + _coerce_dep_list((state.get("design") or {}).get("dependencies"))
+            passages = await self._step_passages(protocol, specs)
+            filler = self._new_function_filler(outline, package, protocol, specs, passages, deps)
+            filler.know(specs)
+            by_name = {s.name: s for s in specs}
+
+            async def chat(node: str, messages: list[dict[str, str]]) -> str:
+                return await self._chat("\n\n".join(str(m.get("content") or "") for m in messages), node=node)
+
+            async def repair_main(name: str, problem: str, _cases: list[dict[str, Any]]) -> bool:
+                return await filler.repair_function(by_name[name], problem)
+
+            async def still_passes(name: str) -> bool:
+                return await filler.still_passes(by_name[name])
+
+            before = self._package_snapshot()
+            result = await _second_impl.second_versions(
+                quest_root=self.quest_root, package=package, specs=specs, protocol=protocol,
+                prompts={"write": self._prompts["second_impl_write"], "adjudicate": self._prompts["second_impl_adjudicate"]},
+                chat=chat, run=self._run_in_env, repair_main=repair_main, still_passes=still_passes, passages=passages,
+                family_of=self._family_of_node, topic_block=self._topic_block(), log=self._log)
+            for name, e in (result.get("functions") or {}).items():
+                if not isinstance(e, dict):
+                    continue
+                status, adj = e.get("status"), e.get("adjudication") or {}
+                if adj.get("outcome") == "repair accepted":
+                    self._log.info("[implement] a second version of %s showed the first was wrong: the first was repaired and "
+                                   "still passes its own checks", name)
+                if status == _second_impl.AGREE:
+                    self._log.info("[implement] a second, independently written version of %s agrees on %d inputs%s", name,
+                                   int(e.get("inputs_tried") or 0),
+                                   " (both versions were written by the same kind of model, so this counts for less)"
+                                   if e.get("same_family") else "")
+                elif status == _second_impl.UNRESOLVED:
+                    self._log.warning("[implement] a second version of %s differs from the first and FI could not settle which "
+                                      "is right; the paper's limitations say so", name)
+                elif status == _second_impl.UNCONFIRMED:
+                    self._log.info("[implement] a second version of %s could not be compared with the first (%s); the paper's "
+                                   "limitations say so", name, e.get("why") or "no reason recorded")
+                elif status == _second_impl.SKIPPED:
+                    self._log.info("[implement] %s was not compared with a second version: %s", name, e.get("why") or "skipped")
+            return self._package_snapshot() != before
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- a second version is a check on top; its failure never stops a quest
+            self._log.warning("[implement] the check with a second version of the model's functions could not be made: %r", e)
+            return False
+
     async def _fill_model_functions(self, state: QuestState, outline: dict[str, Any]) -> bool:
         """After the outline, before the code is written whole: fill the model's package one function at a time, each
         import-checked and tested against the plan's worked example for its equation, a failing function repaired alone
@@ -11742,21 +11884,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 failed = await self._install_packages(install_list)
                 for dep, why in failed:
                     self._log.info("[implement] %r could not be installed for the function checks: %s", dep, why)
-            view = _oracle.model_view((protocol or {}).get("model") if isinstance(protocol, dict) else None) or {}
-            constants = "\n".join(f"- {c.get('name')} = {c.get('value')} ({c.get('source')})"
-                                  for c in outline.get("constants") or [] if isinstance(c, dict) and c.get("name"))
-
-            async def chat(prompt: str) -> str:
-                return await self._chat(prompt, node="implement")
-
-            filler = _function_steps.FunctionFiller(
-                quest_root=self.quest_root, package=package, protocol=protocol if isinstance(protocol, dict) else None,
-                summary=str(view.get("summary") or ""),
-                prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"],
-                         "module": self._prompts["implement_module_repair"]},
-                chat=chat, run=self._run_in_env, log=self._log, repairs=_function_steps.REPAIRS,
-                max_calls=_function_steps.MAX_CALLS, constants=constants, install=self._install_packages,
-                declared=deps, topic_block=self._topic_block())
+            # Each function is written from its step card or equation and the passages of the source the plan cites for it
+            # (found here, without a model call, and kept in .fi/step_passages.json: a resume does not search again).
+            passages = await self._step_passages(protocol if isinstance(protocol, dict) else None, specs)
+            filler = self._new_function_filler(outline, package, protocol, specs, passages, deps)
             outcome = await filler.run_all(specs)
             if outcome.status == "done":
                 self._log.info("[implement] the model's package is written: %d function(s), each checked "
@@ -14999,6 +15130,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         failed_equations = await self._equation_gate(state, py, exec_env)
         if failed_equations is not None:
             return failed_equations, None, False
+        # A second, independently written version of the model's key functions, compared with the first on many inputs
+        # (core/second_impl.py). It never stops the quest; a repair of a function it makes is read again just below, and the
+        # receipt and the final reading of the code see the package it left.
+        second_rewrote = await self._second_version_gate(state, py, exec_env)
+        if second_rewrote and (stop := self._code_problems_stop(state)) is not None:
+            return stop, None, False
         # A repair of one equation's function is a new text of the simulation: read again for typed-in results (the same
         # text is never read twice), before the oracle gate tests it.
         await self._results_from_computation(state)
@@ -15011,7 +15148,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # person's edit during a stop, so it is not counted here).
         gate_rewrote = (seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate) or (
             self._package_snapshot() != package_before_gate)
-        gate_repaired = oracle_code is not None or gate_rewrote
+        gate_repaired = oracle_code is not None or gate_rewrote or second_rewrote
         if gate_rewrote:
             # An oracle repair rewrote the simulation or the model's package: its labels and layout are read again.
             # ... and the oracle gate's own repair is read for typed-in results too; if that rewrote the simulation again,
@@ -22492,12 +22629,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if _function_steps.is_ready(self.quest_root, package):
                 # FI wrote and checked the package function by function: only the two scripts are asked for.
                 block += _code_layout.prefilled_block(
-                    package, (self.quest_root / "code" / package / _code_layout.MODEL_NAME).read_text(encoding="utf-8"))
+                    package, (self.quest_root / "code" / package / _code_layout.MODEL_NAME).read_text(encoding="utf-8"),
+                    steps=self._written_steps(state))
                 block += self._function_steps_partial_note()
             else:
                 block += _code_layout.prompt_block(package, _oracle.generating_equations(self._protocol_block(state)))
                 block += self._function_steps_note(package)
         return block
+
+    def _written_steps(self, state: QuestState) -> list[tuple[str, str, str]]:
+        """``(function, step id, step name)`` for each function of the package that FI wrote for a step of the plan's method
+        (``.fi/function_steps.json`` and the plan's step cards): what the simulation is told to call and not write again."""
+        try:
+            record = _function_steps.load(self.quest_root)
+            names = {c["id"]: c.get("name") or "" for c in _plan_steps.parse(self._protocol_block(state))[0]}
+            return [(str(fn), str(e.get("equation")), names.get(str(e.get("equation")), ""))
+                    for fn, e in (record.get("functions") or {}).items()
+                    if isinstance(e, dict) and e.get("kind") == _function_steps.STEP]
+        except Exception:  # noqa: BLE001 -- a help to the prompt, never a stop
+            return []
 
     def _wait_for_job(self, job: dict[str, Any], code_path: Path) -> None:
         """The experiment reported its job as pending. Record what is being
@@ -24702,8 +24852,14 @@ def _claim_findings_parts(quest_root: Path) -> list[str]:
         return []
     if not text:
         return []
-    if f["unread"] and not any(f[k] for k in ("missing", "different", "flagged", "unshown", "conflicts", "not_reviewed")):
+    if f["unread"] and not any(f[k] for k in ("missing", "different", "flagged", "unshown", "conflicts", "not_reviewed", "second_version")):
         return ["No second model compared the code with the plan, so no findings about the code are listed."]
+    if f["second_version"] and not any(f[k] for k in ("reread", "missing", "different", "flagged", "unshown",
+                                                       "conflicts", "not_reviewed", "stopped")):
+        return [
+            "TWO INDEPENDENTLY WRITTEN VERSIONS OF KEY FUNCTIONS DISAGREED, or could not be compared (FI's own check; no second "
+            "model read the code). A claim that rests on a function named below is not confirmed by an independent version "
+            "and is `unsupported` unless the results show it by themselves.\n" + text]
     return [
         "A SECOND MODEL'S READING OF THE CODE AGAINST THE PLAN (it can be wrong). A claim that a point below says the "
         "code does not do, or does differently, is `unsupported` unless the code above plainly does it.\n" + text

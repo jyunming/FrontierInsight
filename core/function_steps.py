@@ -1216,6 +1216,36 @@ class FunctionFiller:
         self._remove()
         return Outcome("fell_back", int(record.get("calls") or 0), record["reason"], target.name)
 
+    # -- after the step: the second-version check asks for one function to be tested again, or repaired once --
+
+    def know(self, specs: list[Spec]) -> None:
+        """Tell a filler that did not write the functions (a later pass of the quest) which functions the package has."""
+        self._by_id = {s.equation: s for s in specs}
+
+    async def still_passes(self, spec: Spec) -> bool:
+        """The function's own checks (import, worked example, the static look) again on what is in the module now. A
+        check that could not be made does not count as a pass."""
+        record: dict[str, Any] = {}
+        problem, _who, _trace = await self._check(spec, record)
+        return not problem and spec.name not in (record.get("unchecked") or {})
+
+    async def repair_function(self, spec: Spec, problem: str) -> bool:
+        """ONE repair of one function, alone (its card or equation and the problem, never the expected value), written into
+        the module when the reply is a usable function with the parameters it had. ``True`` when the module changed."""
+        source = self.model_path.read_text(encoding="utf-8")
+        new, why = await repair_one(
+            source=source, name=spec.name, signature=spec.signature, equation=spec.equation,
+            equation_block=self._equation_block(spec.equation), problem=problem, prompt=self.prompts["repair"],
+            chat=self.chat, package=self.package, topic_block=self.topic_block,
+            literature_block=self._literature_block(spec), example_block=self._example_block(spec))
+        if new is None:
+            self.log.info("[implement] the repair of function %s was not used: %s", spec.name, why)
+            return False
+        if new == source:
+            return False
+        self.model_path.write_text(new, encoding="utf-8")
+        return True
+
     def _remove(self) -> None:
         import shutil
 

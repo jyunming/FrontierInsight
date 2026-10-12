@@ -247,9 +247,22 @@ Do not write tests, a README or a command-line entry: FI writes the unit tests f
 """
 
 
-def prefilled_block(package: str, model_source: str) -> str:
+def steps_block(steps: list[tuple[str, str, str]] | None) -> str:
+    """Which functions of the package are steps of the plan's method (``(function, step id, name)``): simulate.py calls
+    them and does not write the method again, not even in a shorter form of its own."""
+    rows = [(f, i, n) for f, i, n in steps or [] if f]
+    if not rows:
+        return ""
+    lines = "\n".join(f"  - `{f}` ({i}{': ' + n if n else ''})" for f, i, n in rows)
+    return ("\nThe package already holds the steps of the plan's method as functions, written from the plan's step cards and "
+            "the literature the plan cites. CALL them from simulate.py; do not rewrite them, and do not put a shorter or "
+            "simpler version of a step into simulate.py:\n" + lines + "\n")
+
+
+def prefilled_block(package: str, model_source: str, steps: list[tuple[str, str, str]] | None = None) -> str:
     """The layout the code-writing prompts ask for when FI has already written and checked the package, function by
-    function (:mod:`core.function_steps`): only the two scripts are asked for."""
+    function (:mod:`core.function_steps`): only the two scripts are asked for. ``steps``: the package's functions that are
+    steps of the method, which the scripts call and do not write again."""
     return f"""
 THE CODE AS A SMALL RESEARCH TOOL. The model's package `{package}/` is ALREADY WRITTEN AND TESTED: FI wrote it one function
 at a time, one function per equation, and checked each function against the plan's equation. Do NOT write any file of the
@@ -264,7 +277,7 @@ itself. The package's `{package}/{MODEL_NAME}` as it is:
 ```python
 {model_source.rstrip()}
 ```
-"""
+{steps_block(steps)}"""
 
 
 def reminder(package: str) -> str:

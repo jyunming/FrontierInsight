@@ -487,3 +487,27 @@ def test_random_functions_are_skipped_and_said(tmp_path):
     rec = asyncio.run(build(root, Fake(), [spec], proto).run_all())
     e = rec["functions"]["draw"]
     assert e["status"] == "skipped" and "random" in e["why"] and rec["calls"] == 0
+
+
+# --- equation functions (the description of an equation used to raise TypeError, so none was ever checked) -------------------
+
+
+def equation_protocol() -> dict:
+    return {"model": {"summary": "x", "equations": [
+        {"id": "E1", "formula": "Ea = -R * slope", "role": "analyses", "source": "Arrhenius 1889", "units": {"slope": "K"}}]}}
+
+
+def test_spec_block_describes_an_equation_function():
+    spec = fs.Spec(name="activation_energy", signature=SIG, purpose="activation energy", equation="E1")
+    text = si._spec_block(spec, equation_protocol())
+    assert "E1: Ea = -R * slope" in text and "source: Arrhenius 1889" in text and "purpose: activation energy" in text
+
+
+def test_an_equation_function_is_checked_not_left_unconfirmed(tmp_path):
+    proto = equation_protocol()
+    proto["model"]["equations"][0]["example"] = {"inputs": {"slope": -5000.0}, "expected_formula": "-slope * 8.314"}
+    root = make_quest(tmp_path)
+    spec = fs.Spec(name="activation_energy", signature=SIG, purpose="activation energy", equation="E1")
+    fake = Fake(write=[fenced(GOOD_REF)])
+    rec = asyncio.run(build(root, fake, [spec], proto).run_all())
+    assert rec["functions"]["activation_energy"]["status"] == "agree" and fake.count("second_impl") == 1

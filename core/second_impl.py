@@ -597,7 +597,7 @@ def _spec_block(spec: _fs.Spec, protocol: dict[str, Any] | None) -> str:
     for key in ("units", "unit", "variables", "symbols", "source", "derivation"):
         v = e.get(key)
         if v:
-            lines.append(f"{key}: " + (json.dumps(v, default=str)[:400] if isinstance(v, (dict, list)) else _eqt._text(v, 400)))
+            lines.append(f"{key}: " + (json.dumps(v, default=str)[:400] if isinstance(v, (dict, list)) else _eqt._text(v)[:400]))
     lines.append(f"purpose: {spec.purpose}")
     return "\n".join(lines)
 
