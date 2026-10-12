@@ -604,7 +604,8 @@ class Traceable:
         scale = 10.0 ** dec
         try:
             hit = list(self._lists(dec).get(round(value, dec), ()))
-            hit += self._trunc_lists(dec).get(math.floor(value * scale) / scale, ())
+            if dec >= 0:  # nobody truncates a number rounded to the tens (see find_truncated)
+                hit += self._trunc_lists(dec).get(math.floor(value * scale) / scale, ())
         except (ValueError, OverflowError):
             return []
         return hit
