@@ -15258,7 +15258,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                if split and result.returncode == 0 and self.config.engine.run_manifest_check != "off"
                                else None)
             manifest_status, manifest_found = self._run_manifest_problems(state, split, result, run_cell_random)
-        manifest_attempts_next = 0
+        # A run that crashed or has not recorded yet says nothing about the record: the repairs already spent stay spent
+        # (an analysis repair that crashes must not earn a fresh budget when the crash is fixed).
+        manifest_attempts_next = manifest_attempts if (result.returncode != 0 or manifest_status in ("not_run", "pending")) else 0
         manifest_analysis_only = False
         if manifest_found:
             mode = self.config.engine.run_manifest_check

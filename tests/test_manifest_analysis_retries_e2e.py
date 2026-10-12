@@ -70,3 +70,17 @@ async def test_the_analysis_repairs_have_a_budget_of_their_own_apart_from_crash_
     engine = Engine(_cfg(tmp_path, engine={"exec_reflect_max_iterations": 1}))
     artifacts = await engine.run()
     assert artifacts.paper_md is not None and calls.count("ExecuteReflect") == 3
+
+
+@pytest.mark.asyncio
+async def test_a_crash_between_analysis_repairs_does_not_earn_them_a_fresh_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An analysis repair that crashes is fixed by a crash repair; the analysis repairs already spent stay spent, so the
+    analysis still gets three repairs in all (four requests with the crash fix), not three more after the crash."""
+    calls: list[str] = []
+    prompts: list[str] = []
+    crashing = 'raise RuntimeError("the analysis broke")\n'
+    _model(monkeypatch, [crashing, ANALYSIS], calls, prompts)
+    engine = Engine(_cfg(tmp_path, engine={"exec_reflect_max_iterations": 3}))
+    await engine.run()
+    assert calls.count("ExecuteReflect") == 4, calls.count("ExecuteReflect")
+    assert not (engine.quest_root / "paper" / "paper.md").exists()

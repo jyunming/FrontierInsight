@@ -46,11 +46,14 @@ def test_a_flat_objective_ignoring_a_large_array_is_flagged_on_the_elements_that
     assert why is not None and "src[0,0]" in why and "27 more" in why
 
 
-def test_a_simulation_that_reads_the_array_is_not_flagged_and_an_unnudged_variable_says_nothing() -> None:
+def test_a_simulation_that_reads_the_array_is_not_flagged_and_an_unnudged_variable_is_left_out_of_the_claim() -> None:
     block = _big()
     probed = _probed(block)
     assert flat.flat_search_check(_hood(probed, probed), block, source=READS) is None  # reads `src` as a whole
-    assert flat.flat_search_check(_hood(["w"], ["w"]), block, source=IGNORES) is None  # no element of `src` was nudged
+    # No element of `src` was nudged: nothing is claimed about `src`, but `w` was nudged, changed nothing and is never
+    # read, so the finding still stands for `w` (an unnudged variable must not silence the whole check).
+    why = flat.flat_search_check(_hood(["w"], ["w"]), block, source=IGNORES)
+    assert why is not None and "w" in why and "src" not in why
     assert flat.flat_search_check(_hood(probed[:-1], probed), block, source=IGNORES) is None  # one nudge had an effect
 
 

@@ -131,7 +131,7 @@ def flat_search_check(check: dict[str, Any] | None, block: dict[str, Any] | None
         return None
     sensitivity = hood.get("sensitivity") or {}
     # Judged on the numbers the check really nudged: an array larger than the check's sample has elements it never moved,
-    # and those are not evidence either way. Every variable needs at least one nudged number, or nothing is claimed.
+    # and those are not evidence either way; a variable with no nudged number is left out of the claim.
     probed = hood.get("probed")
     movable, variables = [], []
     for v in block.get("design_variables") or []:
@@ -142,7 +142,7 @@ def flat_search_check(check: dict[str, Any] | None, block: dict[str, Any] | None
         if probed is not None:
             names = [n for n in names if n in {str(p) for p in probed}]
             if not names:
-                return None  # a variable none of whose numbers was nudged: the check says nothing about it
+                continue  # a variable none of whose numbers was nudged: nothing is claimed about it, the others are judged
         movable.extend(names)
         variables.append(str(v.get("name")))  # the code reads a variable by its name, an array as a whole
     if not movable or set(movable) - set(no_effect) or set(sensitivity) - set(no_effect):
