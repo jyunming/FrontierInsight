@@ -14,6 +14,10 @@ What is read as "a setting":
 * anything read as ``<expression>["cell"]`` or ``<expression>.get("cell")``: how the analysis reads a cell out of FI's
   per-cell record.
 
+A loop or comprehension variable called ``cell`` is not one of these when what it walks is a list the script builds itself from
+its own summaries (``cells.append(result)``, :func:`_built_from_non_settings`); a list FI supplies, a parameter or anything
+less plain is still read as settings.
+
 What counts as a read: ``setting["k"]`` and ``setting.get("k"[, default])`` with a literal ``k``. Names written in a
 chain of fallbacks (``cell.get("a", cell.get("b", 1.0))`` or ``cell.get("a") or cell.get("b")``) are one read that is
 satisfied by any one of them, so a code that accepts several spellings is flagged only when none of them is a name
@@ -140,6 +144,79 @@ def _own_nodes(scope: ast.AST) -> list[ast.AST]:
     return found
 
 
+def _fills_with_setting(value: ast.AST, names: set[str]) -> bool:
+    """Whether a value put into a list is itself a setting (a name or copy of one, or a dict that spreads one)."""
+    if isinstance(value, ast.Dict) and any(k is None and _fills_with_setting(v, names) for k, v in zip(value.keys, value.values)):
+        return True
+    return _setting_like(value, names)
+
+
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+
+
+def _built_from_non_settings(iterable: ast.AST, nodes: list[ast.AST], names: set[str], depth: int = 0) -> bool:
+    """Whether ``iterable`` is a local list (or dict) that the code itself builds from things that are not settings. Two
+    plain forms are recognised, both for a name that is assigned exactly once and touched in no other way:
+
+    * an empty ``[]`` / ``{}`` / ``list()`` / ``dict()`` filled by ``.append(x)`` or ``name[k] = x`` at least once, where no
+      ``x`` is a setting (``cells.append(summary)``);
+    * a list comprehension over such a list (``supported = [c for c in cells if ...]``).
+
+    Such a list holds the script's own summaries, so a loop variable called ``cell`` over it is not a cell of the grid.
+    Anything not that plain (a parameter, a list read from a file or FI's record, an ``extend``, ``+=``, a second
+    assignment, a list that gets a setting) is not recognised, and the loop variable is read as a setting, so the check
+    keeps flagging."""
+    while True:  # ``sorted(x)``, ``list(x)``, ``x.values()`` walk the same items
+        if (isinstance(iterable, ast.Call) and len(iterable.args) == 1 and not iterable.keywords
+                and isinstance(iterable.func, ast.Name) and iterable.func.id in ("sorted", "list", "tuple", "reversed")):
+            iterable = iterable.args[0]
+        elif (isinstance(iterable, ast.Call) and not iterable.args and not iterable.keywords
+              and isinstance(iterable.func, ast.Attribute) and iterable.func.attr == "values"):
+            iterable = iterable.func.value
+        else:
+            break
+    if not isinstance(iterable, ast.Name) or depth > 4:
+        return False
+    name = iterable.id
+    assigned: list[ast.AST] = []
+    fills: list[ast.AST] = []
+    for node in nodes:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            if len(node.targets) != 1:
+                return False
+            assigned.append(node.value)
+        elif (isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.comprehension, ast.NamedExpr))
+              and isinstance(node.target, ast.Name) and node.target.id == name):
+            return False
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+            return False
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and _is_name(node.func.value, name):
+            if node.func.attr in ("values", "keys", "items", "get", "copy"):
+                continue  # only looks
+            if node.func.attr != "append" or len(node.args) != 1 or node.keywords:
+                return False
+            fills.append(node.args[0])
+        elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Subscript) and _is_name(t.value, name) for t in node.targets):
+            fills.append(node.value)  # ``name[k] = x``
+    if len(assigned) != 1:
+        return False
+    value = assigned[0]
+    if isinstance(value, ast.ListComp):
+        if fills:
+            return False
+        targets = {t.id for g in value.generators for t in ast.walk(g.target) if isinstance(t, ast.Name)}
+        return (all(_built_from_non_settings(g.iter, nodes, names, depth + 1) for g in value.generators)
+                and not _fills_with_setting(value.elt, names - targets))
+    empty = ((isinstance(value, ast.List) and not value.elts) or (isinstance(value, ast.Dict) and not value.keys)
+             or (isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in ("list", "dict")
+                 and not value.args and not value.keywords))
+    return empty and bool(fills) and not any(_fills_with_setting(f, names) for f in fills)
+
+
+def _is_name(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Name) and node.id == name
+
+
 def reads(source: str, script: str) -> list[Read]:
     """Every read of a setting by a literal name in ``source`` (see the module docstring). Never raises: a script that
     does not parse has none to report (it fails on its own)."""
@@ -151,17 +228,33 @@ def reads(source: str, script: str) -> list[Read]:
     for scope, names in _scopes(tree):
         names = set(names)
         nodes = sorted(_own_nodes(scope), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)))
-        # A name assigned from a setting holds one too (``c = entry["cell"]``), in the order the code assigns them.
-        for node in nodes:
-            if isinstance(node, ast.Assign) and _setting_like(node.value, names):
-                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-            elif isinstance(node, (ast.For, ast.comprehension)) and isinstance(node.target, ast.Name):
-                if node.target.id in SETTING_NAMES:
-                    names.add(node.target.id)
+        # A name assigned from a setting holds one too (``c = entry["cell"]``), in the order the code assigns them. A loop
+        # variable called ``cell`` holds one unless it walks a list the code builds from summaries
+        # (:func:`_built_from_non_settings`). Repeated until nothing is added: whether a list holds settings depends on
+        # the names found.
+        grew = True
+        while grew:
+            before = len(names)
+            for node in nodes:
+                if isinstance(node, ast.Assign) and _setting_like(node.value, names):
+                    names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+                elif isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id in SETTING_NAMES:
+                    if not _built_from_non_settings(node.iter, nodes, names):
+                        names.add(node.target.id)
+            grew = len(names) > before
         for node in nodes:
             hit = _read_of(node, names)
             if hit is not None and hit[0] not in RECORD_FIELDS:
                 found[id(node)] = (node, hit[0], hit[1])
+            # A comprehension's variable is its own: ``cell`` in ``[cell for cell in cells ...]`` holds a setting only
+            # inside it, and only when what it walks is not the script's own summaries.
+            if isinstance(node, _COMPREHENSIONS):
+                local = {g.target.id for g in node.generators if isinstance(g.target, ast.Name)
+                         and g.target.id in SETTING_NAMES and not _built_from_non_settings(g.iter, nodes, names)}
+                for inner in (ast.walk(node) if local - names else ()):
+                    hit = _read_of(inner, names | local)
+                    if hit is not None and hit[0] not in RECORD_FIELDS:
+                        found[id(inner)] = (inner, hit[0], hit[1])
     # A chain of fallbacks is one read: the default of one is another read, and ``a or b`` joins both.
     parent: dict[int, int] = {i: i for i in found}
 
