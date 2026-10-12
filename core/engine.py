@@ -5799,16 +5799,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             await self._cover_the_topic_in_the_plan(state)
             self._write_the_ledger(state)
 
-    def _write_the_ledger(self, state: QuestState) -> None:
-        """At the end of the plan step, write ``.fi/ledger.json`` (:func:`core.plan_ledger.write_ledger`): the plan's
-        simplifications, each with the ids of the relations that test it (none yet) and its status. Read from plan.md as it
-        stands, so a plan a person edited is the one recorded. An item already recorded keeps its relation ids; a record
-        for the same plan is left as it is. A failure is a warning and never stops the quest."""
+    def _write_the_ledger(self, state: QuestState, design: Any = None) -> None:
+        """Write ``.fi/ledger.json`` (:func:`core.plan_ledger.write_ledger`): the plan's simplifications, each with the ids of the
+        relations that test it (none yet) and its status, and the metrics whose definition is the plan's own
+        (``unsourced_definitions``). At the end of the plan step it is read from plan.md as it stands, so a plan a person edited
+        is the one recorded; for a redesign (``design`` given) it is that design. An item already recorded keeps its relation
+        ids; a record for the same plan is left as it is. A failure is a warning and never stops the quest."""
         if not self._runs_code(state) or _frozen.load(self.quest_root) is not None:
             return
         try:
-            design, sha = self._design_from_plan()
-            if design is None or not sha:
+            if design is None:
+                design, sha = self._design_from_plan()
+            else:
+                sha = _plan.sha256(json.dumps(design, sort_keys=True, default=str))
+            if not isinstance(design, dict) or not sha:
                 return
             path = self.fi_dir / _ledger.FILE
             kept = _ledger.read_ledger(path)
@@ -5817,9 +5821,28 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             simplifications, _problems = _ledger.parse_simplifications(design.get("protocol"))
             relations = {str(i.get("id")): [str(r) for r in i.get("relation_ids") or []]
                          for i in (kept or {}).get("items") or [] if isinstance(i, dict)}
-            _ledger.write_ledger(path, _ledger.ledger_record(sha, simplifications, relations))
+            record = _ledger.ledger_record(sha, simplifications, relations)
+            record["unsourced_definitions"] = self._own_definitions(design.get("protocol"))
+            _ledger.write_ledger(path, record)
         except Exception as e:  # noqa: BLE001 -- a record that cannot be written never stops a quest
             self._log.warning("[plan] couldn't write the plan's ledger of simplifications: %r", e)
+
+    def _check_the_ledger_of_a_redesign(self, state: QuestState, design: Any) -> None:
+        """A design drafted at the design step (a redesign) gets the same look at its ledger parts as the plan: what is wrong
+        with its simplifications, definitions and step cards (and what the topic asks for that it neither covers nor names) is
+        said in run.log and kept for the writer, and its ledger is written. Nothing is asked of the model here (the redesign's
+        parts are completed by :meth:`_complete_drafted_parts`) and nothing stops."""
+        if not self._runs_code(state) or _frozen.load(self.quest_root) is not None or not isinstance(design, dict):
+            return
+        try:
+            left = self._ledger_unread(design, self._literature_passages(state))
+            gaps = [f"`protocol.{part}` is incomplete: {why}" for part, why in left.items() if part in _LEDGER_PARTS]
+            for gap in gaps:
+                self._log.warning("[design] the redesign: %s", gap)
+            self._note_the_ledger_for_the_writer(design, gaps)
+            self._write_the_ledger(state, design)
+        except Exception as e:  # noqa: BLE001 -- never a stop
+            self._log.warning("[design] the redesign's ledger could not be checked: %r", e)
 
     # -- what the topic asks for (core/topic_requirements.py) ------------------------------------------------------
 
@@ -6252,10 +6275,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     found[part] = line.strip().lstrip("-").strip()
         return found
 
-    def _keep_only_the_parts(self, before_text: str, after_text: str, parts: list[str]) -> str | None:
+    def _keep_only_the_parts(self, before_text: str, after_text: str, parts: list[str], passages: str = "") -> str | None:
         """``before_text`` with only the asked ``parts`` of the protocol taken from ``after_text`` (each only when it can be
         read as the plan reads it); everything else, a check, a threshold, a tolerance, is the plan's own as it was.
-        ``None`` when none of the asked parts came back usable."""
+        ``None`` when none of the asked parts came back usable.
+
+        The plan's ledger parts (``simplifications``, ``definitions``, the step cards ``steps``) are held to their own readers
+        (:mod:`core.plan_ledger`, :mod:`core.plan_steps`, and a quoted definition against ``passages``) and not only to
+        :func:`core.plan.normalize_protocol`, which does not check them: one that does not pass is not taken, and its exact
+        reasons go back to the model with the next request."""
         old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
         if not isinstance(old, dict) or not isinstance(new, dict):
             return None
@@ -6266,15 +6294,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         reasons: list[str] = []
         for part in parts:
             if part == "steps":
-                # The step cards sit inside the model block: only `model.steps` is taken, the rest of the model is the plan's.
+                # The step cards sit inside the model block: only the steps are taken (from `protocol.model.steps`, or
+                # `protocol.steps` written beside it), the rest of the model is the plan's.
                 new_model = new_protocol.get("model")
-                old_model = merged.get("model")
-                if not (isinstance(new_model, dict) and new_model.get("steps") is not None and isinstance(old_model, dict)):
+                steps = new_model.get("steps") if isinstance(new_model, dict) else None
+                if steps is None:
+                    steps = new_protocol.get("steps")
+                if steps is None:
+                    reasons.append("the step cards are missing: write them as `protocol.model.steps`")
                     continue
-                fixed, why = _plan.normalize_protocol({**merged, "model": {**old_model, "steps": new_model["steps"]}})
+                old_model = merged.get("model") if isinstance(merged.get("model"), dict) else {}
+                candidate = {**merged, "model": {**old_model, "steps": steps}}
+                fixed, why = _plan.normalize_protocol(candidate)
                 if fixed is None:
                     self._log.warning("[plan] the plan's model wrote the step cards again but they still cannot be read: %s", why)
                     reasons.append(f"`protocol.model.steps` as you wrote it cannot be read: {why}")
+                    continue
+                problems = _plan_steps.parse(fixed)[1]
+                if problems:
+                    self._log.warning("[plan] the step cards still have problems: %s", "; ".join(problems))
+                    reasons.append("`protocol.model.steps` as you wrote it is not complete: " + "; ".join(problems))
                     continue
                 merged["model"] = fixed["model"]
                 taken.append(part)
@@ -6288,6 +6327,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 reasons.append(f"`protocol.{part}` as you wrote it cannot be read: {why}"
                                + (f" The entry as you wrote it: {entry}" if entry else ""))
                 continue
+            if part in _LEDGER_PARTS:
+                problems = self._ledger_problems(fixed, passages).get(part)
+                if problems:
+                    self._log.warning("[plan] `protocol.%s` still has problems: %s", part, problems)
+                    reasons.append(f"`protocol.{part}` as you wrote it is not complete: {problems}")
+                    continue
             merged[part] = fixed[part]
             taken.append(part)
         if not taken:
@@ -6308,20 +6353,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._log.warning("[plan] the sources' text could not be gathered to check the quoted definitions: %r", e)
             return ""
 
-    def _ledger_unread(self, design: Any, passages: str = "") -> dict[str, str]:
-        """``{part: what is wrong with it}`` for the parts the plan's ledger asks for: ``simplifications`` and ``definitions``
-        (:mod:`core.plan_ledger`) and ``model.steps``, named ``steps`` (:mod:`core.plan_steps`), when they are written but
-        cannot be used, or when a metric has no definition. A definition's quote that is not in ``passages`` (the sources FI
-        found) is one more problem; with no passages nothing is judged. An old plan with none of these keys and no metric has
-        no problem. Structure only: nothing here stops a quest."""
-        protocol = design.get("protocol") if isinstance(design, dict) and isinstance(design.get("protocol"), dict) else None
-        if protocol is None:
+    def _ledger_problems(self, protocol: Any, passages: str = "") -> dict[str, str]:
+        """``{part: what is wrong with it}`` for the structure of the plan's ledger parts: ``simplifications`` and
+        ``definitions`` (:mod:`core.plan_ledger`) and ``model.steps``, named ``steps`` (:mod:`core.plan_steps`), when they are
+        written but cannot be used, or when a metric has no definition. A definition's quote that is not in ``passages`` (the
+        sources FI found) is one more problem; with no passages nothing is judged. A definition marked as the plan's own (its
+        ``differs`` names a simplification) needs no source. Nothing here stops a quest."""
+        if not isinstance(protocol, dict):
             return {}
         found: dict[str, str] = {}
         try:
             _sims, p_sims = _ledger.parse_simplifications(protocol)
             defs, p_defs = _ledger.parse_definitions(protocol)
-            # A definition marked as the plan's own (its `differs` names a simplification) needs no source.
             own = [d["metric"] for d in defs if d.get("differs")]
             p_defs = [p for p in p_defs if not any(p.startswith(f"definition not taken from a source: {m} ") for m in own)]
             if passages.strip():
@@ -6337,17 +6380,64 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 found[part] = "; ".join(problems)[:1200]
         return found
 
-    def _parts_asked_any(self) -> list[str]:
-        """The protocol parts FI has asked the plan's model about for this quest on the model asked now, whatever the plan's
-        hash was then (FI's own notes in plan.md change the hash between two steps). Used for the plan's ledger parts, which
-        are asked once."""
+    def _ledger_uncovered(self, design: Any) -> list[str]:
+        """Plain sentences for what the topic asks for that the plan neither covers nor names in ``protocol.simplifications``
+        (:func:`core.plan_ledger.uncovered`, from the kept reading of the topic). Empty when the topic was not read."""
         try:
-            record = json.loads((self.fi_dir / _PART_ASKED).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            req = self._topic_requirements_read()
+            if not isinstance(req, dict) or req.get("error") or not isinstance(design, dict):
+                return []
+            protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+            return [f"the topic asks for {g['name']}, which the plan neither includes nor names in `simplifications`"
+                    for g in _ledger.uncovered(req, protocol, design=design)]
+        except Exception as e:  # noqa: BLE001 -- never a stop
+            self._log.warning("[plan] what the topic asks for could not be held against the simplifications: %r", e)
             return []
-        if isinstance(record, dict) and record.get("model") == self._plan_model_name():
-            return [str(p) for p in record.get("parts") or []]
-        return []
+
+    def _ledger_unread(self, design: Any, passages: str = "") -> dict[str, str]:
+        """The parts the plan's ledger asks for that are wrong or incomplete (:meth:`_ledger_problems`), with the topic items the
+        plan neither covers nor names in ``simplifications`` (:meth:`_ledger_uncovered`) added to the ``simplifications`` part. An
+        old plan with none of these keys, no metric and nothing uncovered has no problem. Never a stop by itself: the topic's
+        own stop rules are unchanged."""
+        protocol = design.get("protocol") if isinstance(design, dict) and isinstance(design.get("protocol"), dict) else None
+        if protocol is None:
+            return {}
+        found = self._ledger_problems(protocol, passages)
+        uncovered = self._ledger_uncovered(design)
+        if uncovered:
+            found["simplifications"] = "; ".join(filter(None, [found.get("simplifications"), *uncovered]))[:1600]
+        return found
+
+    @staticmethod
+    def _own_definitions(protocol: Any) -> list[str]:
+        """The metrics whose definition is the plan's own: marked so (``differs``), or with no source or no quote."""
+        try:
+            defs, _problems = _ledger.parse_definitions(protocol)
+        except Exception:  # noqa: BLE001
+            return []
+        return sorted({d["metric"] for d in defs if d.get("metric") and (d.get("differs") or not (d.get("source") and d.get("quote")))})
+
+    def _ledger_seen(self, iteration: int) -> dict[str, str]:
+        """``{part: hash of the problem text it was last asked about}`` for this design round and the model asked now
+        (``.fi/ledger_asked.json``): the plan's ledger parts are asked once per round, whatever FI's own notes did to plan.md's
+        hash; a plan written anew (a revised plan, another round, another model) is asked afresh."""
+        try:
+            record = json.loads((self.fi_dir / _LEDGER_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if (isinstance(record, dict) and record.get("model") == self._plan_model_name()
+                and int(record.get("iteration") or 0) == iteration and isinstance(record.get("seen"), dict)):
+            return {str(k): str(v) for k, v in record["seen"].items()}
+        return {}
+
+    def _ledger_seen_write(self, iteration: int, seen: dict[str, str]) -> None:
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / _LEDGER_ASKED).write_text(json.dumps(
+                {"iteration": iteration, "model": self._plan_model_name(), "seen": seen, "at": _frozen.now()}) + "\n",
+                encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't record which ledger parts FI asked about: %r", e)
 
     async def _ask_plan_for_the_parts(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
         """A protocol part that could not be read (the settings to sweep, the metrics, ...) is asked of the plan's model, in
@@ -6355,23 +6445,34 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         (:meth:`_ask_plan_to_complete`, counted in ``.fi/protocol_part_asked.json``), quoting what could not be read and
         the rule. Only the asked parts are kept from the rewrite. plan.md says what was done.
 
-        The plan's ledger parts (``simplifications``, ``definitions``, the step cards: :meth:`_ledger_unread`) ride in the same
-        request, each asked at most once per quest. A gap that survives never stops the quest: plan.md says it under *What the
-        topic asks for*, and the paper's limitations say it (:func:`core.topic_requirements.write_note`)."""
+        The plan's ledger parts (``simplifications``, ``definitions``, the step cards, and the topic items the plan neither
+        covers nor names: :meth:`_ledger_unread`) ride in the same request, each asked once per design round
+        (``.fi/ledger_asked.json``; a request made of nothing else is one request, plus the retries a refusal for its form
+        earns). A gap that survives never stops the quest: plan.md says it under *What the topic asks for*, and the paper's
+        limitations say it (:func:`core.topic_requirements.write_note`)."""
         if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
                 or not plan_sha):
             return design, plan_sha
         passages = self._literature_passages(state)
+        iteration = int(state.get("iteration", 0) or 0)
 
         def unread(now: Any) -> dict[str, str]:
             return {**self._unread_parts(now), **self._ledger_unread(now, passages)}
 
+        def digest(text: str) -> str:
+            return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
         before = self._parts_asked(plan_sha)
-        ever = self._parts_asked_any()
-        # A part asked about at the plan step is not asked about again at the design step of the same run.
-        asked = [p for p in unread(design) if p not in before and not (p in _LEDGER_PARTS and p in ever)]
+        seen = self._ledger_seen(iteration)
+        current = unread(design)
+        # A part asked about at the plan step is not asked about again at the design step of the same run; a ledger part is
+        # asked once for the problem it has (a plan written anew has other problems and is asked afresh).
+        asked = [p for p in current if p not in before and not (p in _LEDGER_PARTS and seen.get(p) == digest(current[p]))]
         if asked:
-            record_parts = {"parts": sorted({*before, *ever, *asked})}
+            ledger_asked = [p for p in asked if p in _LEDGER_PARTS]
+            if ledger_asked:  # recorded BEFORE the request: a killed run does not ask again
+                self._ledger_seen_write(iteration, {**seen, **{p: digest(current[p]) for p in ledger_asked}})
+            record_parts = {"parts": sorted({*before, *asked}), "iteration": iteration}
 
             def lacks(now: Any) -> list[str]:
                 return [f"`protocol.{part}` ({'could not be read' if part in _plan.ASKED_PARTS else 'is incomplete'})"
@@ -6382,7 +6483,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                           {k: v for k, v in unread(now).items() if k in asked})
 
             def keep(before: str, revised: str) -> str:
-                kept = self._keep_only_the_parts(before, revised, asked)
+                kept = self._keep_only_the_parts(before, revised, asked, passages)
                 if kept is None:
                     raise ValueError("the revised plan has none of the asked parts in a form that can be read; plan.md is unchanged")
                 return kept
@@ -6390,9 +6491,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design, plan_sha = await self._ask_plan_to_complete(
                 design, plan_sha, lacks=lacks, request=request, keep=keep, file=_PART_ASKED,
                 what="settings the experiment needs", short="the protocol",
-                note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts)
+                note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts,
+                ask_limit=1 if all(p in _LEDGER_PARTS for p in asked) else None)
+            if ledger_asked:  # what the answer left is the problem it was asked about: not asked about again
+                after = unread(design)
+                self._ledger_seen_write(iteration, {**seen, **{p: digest(after[p]) for p in ledger_asked if p in after},
+                                                    **{p: "" for p in ledger_asked if p not in after}})
         else:
-            record_parts = {"parts": sorted({*before, *ever})}
+            record_parts = {"parts": sorted(before), "iteration": iteration}
         path = _plan.plan_path(self.quest_root)
         if path.is_file():
             left = unread(design)
@@ -6408,11 +6514,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                     if part in left else "now in the plan") + ".")
             # What is still wrong with the ledger parts is said under *What the topic asks for*, and kept for the writer.
             gaps = [f"`protocol.{part}` is incomplete: {why}" for part, why in left.items() if part in _LEDGER_PARTS]
+            self._note_the_ledger_for_the_writer(design, gaps)
             text = path.read_text(encoding="utf-8")
             new_lines = [line for line in lines if line not in text]
             new_gaps = [g for g in gaps if g not in text]
-            if gaps != (self._topic_covered_read().get("ledger_left") or []):
-                self._topic_covered_write(ledger_left=gaps)
             if new_lines or new_gaps:
                 count, calls = self._search_record(_plan.sha256(text), _PART_ASKED)
                 updated = text
@@ -6429,6 +6534,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 plan_sha = _plan.sha256(updated)
                 _plan.record_version(self.quest_root, updated, by="engine", note="what FI did about protocol parts that could not be read")
         return design, plan_sha
+
+    def _note_the_ledger_for_the_writer(self, design: Any, gaps: list[str]) -> None:
+        """Keep, for the writer (:func:`core.topic_requirements.write_note`), what is still wrong with the plan's ledger parts
+        (``ledger_left``) and which metrics are the study's own definitions, not a source's (``unsourced_definitions``)."""
+        protocol = design.get("protocol") if isinstance(design, dict) else None
+        own = self._own_definitions(protocol) if isinstance(protocol, dict) else []
+        record = self._topic_covered_read()
+        if gaps != (record.get("ledger_left") or []) or own != (record.get("unsourced_definitions") or []):
+            self._topic_covered_write(ledger_left=gaps, unsourced_definitions=own)
 
     def _inherit_plan_parts(self, state: QuestState, design: Any, *, iteration: int) -> Any:
         """A redesign (a design drafted at this step, not read from ``plan.md``) keeps every part of the plan's protocol that it
@@ -7667,6 +7781,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design = await self._complete_a_drafted_search(state, design, iteration=iteration)
             design = await self._complete_drafted_parts(state, design, iteration=iteration)
             design = self._inherit_plan_parts(state, design, iteration=iteration)
+            self._check_the_ledger_of_a_redesign(state, design)
         self._stop_if_no_settings_to_vary(state, design)
         self._stop_if_the_search_cannot_start(state, design)
         audited = await self._audit_the_design_that_runs(state, design)
@@ -24085,6 +24200,7 @@ _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a des
 #: :meth:`Engine._inherit_plan_parts` (a search for the best design is a different kind of study, not a missing part).
 _REDESIGN_OWNED_PARTS = frozenset({"grid", "metrics", "model", "topic_map", "optimisation"})
 _DRAFTED_PARTS_ASKED = "drafted_parts_asked.json"  # the same bound, for protocol parts a redesign drafted that could not be read
+_LEDGER_ASKED = "ledger_asked.json"  # which ledger parts were asked about, in which design round
 _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger parts: each asked once per quest
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"

@@ -306,3 +306,168 @@ def test_the_two_reader_prompts_ask_about_what_is_approximated_without_an_entry(
     review = (Path(engine_mod.__file__).parent.parent / "agents" / "oracle_review.md").read_text(encoding="utf-8")
     assert "protocol.simplifications" in critique and "protocol.definitions" in critique
     assert "`simplifications`" in review and "definition matches the source it quotes" in review
+
+
+# -- review fixes ---------------------------------------------------------------------------------------------------------
+
+
+def _texts(eng: Any, **protocol: Any) -> tuple[str, str]:
+    """plan.md as it stands, and the same plan with ``protocol`` keys set (what a model's rewrite would send back)."""
+    before = _plan_text(eng)
+    after = plan.edit_design_block(before, lambda d: {**d, "protocol": {**d["protocol"], **protocol}})
+    assert after is not None
+    return before, after
+
+
+@pytest.mark.asyncio
+async def test_an_answer_whose_ledger_parts_are_malformed_is_not_taken_and_the_exact_reason_goes_back(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], _draft(metrics=[METRIC], simplifications=[SIMPLIFICATION], definitions=[DEFINITION]))
+    await eng._node_plan(_state(literature=LITERATURE))
+    # a simplification with no `because`
+    before, after = _texts(eng, simplifications=[{"id": "X9", "replaces": "r", "effect": "e", "probe": "p"}])
+    with pytest.raises(ValueError, match="simplification X9 has no `because`"):
+        eng._keep_only_the_parts(before, after, ["simplifications"])
+    # a definition with no quote
+    before, after = _texts(eng, definitions=[{"metric": "base_temperature", "defined_as": "x", "source": "[1]"}])
+    with pytest.raises(ValueError, match="not taken from a source"):
+        eng._keep_only_the_parts(before, after, ["definitions"])
+    # a quote that is not in the sources
+    before, after = _texts(eng, definitions=[{**DEFINITION, "quote": "words that are nowhere"}])
+    with pytest.raises(ValueError, match="is not in the sources FI found"):
+        eng._keep_only_the_parts(before, after, ["definitions"], "other text entirely")
+    assert eng._keep_only_the_parts(before, after, ["definitions"], "") is not None, "no sources: not judged"
+    # a step card with no name
+    before, after = _texts(eng, model={"summary": "s", "equations": [], "steps": [{"id": "S1"}]})
+    with pytest.raises(ValueError, match="step S1 has no `name`"):
+        eng._keep_only_the_parts(before, after, ["steps"])
+
+
+@pytest.mark.asyncio
+async def test_steps_are_taken_from_the_protocol_top_level_too_and_a_missing_old_model_is_empty(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], _draft())
+    await eng._node_plan(_state())
+    card = {"id": "S1", "name": "mesh", "does": "builds the mesh", "inputs": {"n": "count"}, "output": "cells"}
+    before, after = _texts(eng, steps=[card])
+    kept = eng._keep_only_the_parts(before, after, ["steps"])
+    design = plan.parse(kept).design
+    assert design["protocol"]["model"]["steps"][0]["name"] == "mesh"
+    before, after = _texts(eng, note="nothing")
+    with pytest.raises(ValueError, match="step cards are missing"):
+        eng._keep_only_the_parts(before, after, ["steps"])
+
+
+@pytest.mark.asyncio
+async def test_ledger_parts_are_asked_afresh_for_a_new_plan_or_round_and_not_for_fi_own_notes(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Model(eng, [], _draft(metrics=[METRIC]))
+    await eng._node_plan(_state())
+    assert len(model.asked) == 1, "one request: the ledger parts are asked once"
+    assert _record(eng)["count"] == 1
+    design, sha = eng._design_from_plan()
+    await eng._ask_plan_for_the_parts(_state(), design, sha)
+    assert len(model.asked) == 1, "FI's notes changed plan.md; the same problem is not asked again"
+    other = {**METRIC, "id": "wall_flux"}
+    design["protocol"]["metrics"] = [METRIC, other]
+    await eng._ask_plan_for_the_parts(_state(), design, sha)
+    assert len(model.asked) == 2, "a plan with another problem (a revised plan, --from plan) is asked afresh"
+    await eng._ask_plan_for_the_parts(_state(iteration=1), design, sha)
+    assert len(model.asked) == 3, "another design round is asked afresh"
+
+
+def test_the_plan_step_rerun_clears_the_ledger_and_the_parts_records() -> None:
+    from core import rerun_from
+    for name in (".fi/protocol_part_asked.json", ".fi/ledger.json", ".fi/ledger_asked.json"):
+        assert name in rerun_from._OWN["plan"] and name in rerun_from._OWN["literature"]
+
+
+@pytest.mark.asyncio
+async def test_metrics_the_plan_defines_itself_are_recorded_and_the_writer_is_told(tmp_path: Path) -> None:
+    own = {"metric": "base_temperature", "defined_as": "the plate temperature", "source": "", "quote": "", "differs": "X1"}
+    eng = _engine(tmp_path, [])
+    Model(eng, [], _draft(metrics=[METRIC], simplifications=[SIMPLIFICATION], definitions=[own]))
+    await eng._node_plan(_state(literature=LITERATURE))
+    assert eng._topic_covered_read()["unsourced_definitions"] == ["base_temperature"]
+    assert plan_ledger.read_ledger(eng.fi_dir / "ledger.json")["unsourced_definitions"] == ["base_temperature"]
+    note = tr.write_note(eng.quest_root)
+    assert "the study's own definitions" in note and "base_temperature" in note and "in the limitations" in note
+    sourced = _engine(tmp_path / "s", [])
+    Model(sourced, [], _draft(metrics=[METRIC], simplifications=[SIMPLIFICATION], definitions=[DEFINITION]))
+    await sourced._node_plan(_state(literature=LITERATURE))
+    assert "own definitions" not in tr.write_note(sourced.quest_root)
+
+
+@pytest.mark.asyncio
+async def test_a_topic_item_the_plan_drops_without_a_simplification_is_a_problem_of_the_simplifications(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    reading = {**READING, "factors": [{"name": "fin material", "levels": ["copper", "steel"], "range": [], "stated": "x",
+                                       "main": False}]}
+    Model(eng, [], _draft(metrics=[METRIC], definitions=[DEFINITION]), reading=reading)
+    await eng._read_topic_before_the_prompt(_state())
+    design = _draft(metrics=[METRIC], definitions=[DEFINITION], simplifications=[SIMPLIFICATION])
+    problem = eng._ledger_unread(design, "")["simplifications"]
+    assert "the topic asks for fin material" in problem and "`simplifications`" in problem
+    named = {"id": "X2", "replaces": "fin material", "because": "one material only", "effect": "none known",
+             "probe": "run steel once"}
+    design = _draft(metrics=[METRIC], definitions=[DEFINITION], simplifications=[named])
+    assert "simplifications" not in eng._ledger_unread(design, "")
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_gets_its_ledger_checked_and_written(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Model(eng, [], _draft(metrics=[METRIC], simplifications=[SIMPLIFICATION], definitions=[DEFINITION]))
+    await eng._node_plan(_state(literature=LITERATURE))
+    asked = len(model.asked)
+    redraft = _draft(metrics=[METRIC], simplifications=[{**SIMPLIFICATION, "id": "X7"}],
+                     model={"summary": "s", "equations": [], "steps": [{"id": "S1"}]})  # a step card with no name
+    model.draft, model.drafted = redraft, False
+    patch = await eng._node_design(_state(iteration=1, design={"hypothesis": "old"}, literature=LITERATURE))
+    assert "design" in patch and len(model.asked) == asked, "nothing is asked at a redesign; nothing stops"
+    record = plan_ledger.read_ledger(eng.fi_dir / "ledger.json")
+    assert [i["id"] for i in record["items"]] == ["X7"]
+    assert "`protocol.steps` is incomplete" in " ".join(eng._topic_covered_read()["ledger_left"])
+
+
+def test_the_writer_is_told_when_the_method_steps_are_incomplete(tmp_path: Path) -> None:
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "topic_covered.json").write_text(json.dumps(
+        {"ledger_left": ["`protocol.steps` is incomplete: step S1 has no `name`"]}), encoding="utf-8")
+    assert "steps of the method are not all described in full" in tr.write_note(tmp_path)
+
+
+# -- the real wiring, with the topic read before the plan (scripted replies, as the older tests have them) -----------
+
+
+@pytest.mark.asyncio
+async def test_scripted_replies_with_the_topic_read_first_and_a_resume_that_reads_it_no_more(tmp_path: Path) -> None:
+    from tests.test_plan import _engine as scripted_engine
+    from tests.test_plan import _plan_reply
+    audit = json.dumps({"objections_addressed": []})
+    eng = scripted_engine(tmp_path, [json.dumps(READING), _plan_reply(), audit])
+    eng.config.topic = TOPIC
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    prompts = [c.args[0][-1]["content"] for c in eng._client.chat.await_args_list]
+    assert prompts[0].lstrip().startswith("# What a Research Topic Asks For")
+    assert "What the topic asks for (" in prompts[1] and "- vary or compare fin spacing" in prompts[1]
+    assert (eng.fi_dir / "topic_requirements.json").is_file()
+    calls = eng._client.chat.await_count
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})  # a resume: plan.md is read, nothing is asked again
+    assert eng._client.chat.await_count == calls
+
+
+@pytest.mark.asyncio
+async def test_design_critique_style_replies_with_the_topic_read_first(tmp_path: Path) -> None:
+    from tests.test_design_self_critique import _AMENDED_DESIGN, _DRAFT_DESIGN, _mk_cfg
+    eng = engine_mod.Engine(_mk_cfg(tmp_path))
+    replies = [json.dumps(READING), json.dumps(_DRAFT_DESIGN),
+               json.dumps({"objections_addressed": [{"check": "other", "objection": "o", "fix": "f"}],
+                           "amended_design": _AMENDED_DESIGN})]
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=replies)})()
+    patch = await eng._node_design({"topic": "OPC", "iteration": 0})
+    assert patch["design"] == _AMENDED_DESIGN
+    assert eng._client.chat.await_args_list[0].args[0][-1]["content"].lstrip().startswith("# What a Research Topic Asks For")
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[json.dumps(_DRAFT_DESIGN), json.dumps({})])})()
+    await eng._node_design({"topic": "OPC", "iteration": 1})  # the reading is kept: the next design round asks no reading
+    assert not any("A Research Topic Asks For" in c.args[0][-1]["content"] for c in eng._client.chat.await_args_list)

@@ -139,7 +139,9 @@ _FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RU
                 "code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, "data/auto_collected", *_PAPER]
 # The once-per-plan look at the plan's checks (core/oracle_forms.py): a new plan is looked at again.
 _PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_corrections.json",
-              ".fi/topic_requirements.json", ".fi/topic_covered.json", ".fi/topic_asked.json", ".fi/topic_design_asked.json"]
+              ".fi/topic_requirements.json", ".fi/topic_covered.json", ".fi/topic_asked.json", ".fi/topic_design_asked.json",
+              # The plan's parts asked of its model and the ledger of its simplifications belong to the plan written.
+              ".fi/protocol_part_asked.json", ".fi/ledger_asked.json", ".fi/ledger.json"]
 
 _OWN: dict[str, list[str]] = {
     # The review writes no file of its own; what is made from the reviewed paper is made again after it.
