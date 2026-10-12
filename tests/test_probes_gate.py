@@ -115,11 +115,11 @@ async def test_a_good_simulation_is_read_once_checked_and_recorded_with_the_name
     assert "`err` (the plan's `err_pct`)" in prompt and "`rate`" in prompt and "`dt`" in prompt
     assert "A smaller step dt gives a smaller error" in prompt
     res = _mine(eng)
-    assert res["R1"]["verdict"] == "held" and res["saturation"]["verdict"] == "held"
+    assert res["R1"]["verdict"] == "held" and res["saturation"]["verdict"] != "broken"
     # the relation named the plan's metric id; FI ran the returned name (the alias reached probes_run)
     assert not any("does not return" in v["says"] for v in res.values())
     assert json.loads((eng.quest_root / PR.SUMMARY).read_text(encoding="utf-8"))["held"]
-    assert "FI's own behaviour checks (recorded, not yet acting): 1 held, 0 could not be checked, 0 did not hold" in _log(eng)
+    assert "FI's own behaviour checks (recorded, not yet acting): 1 held, 1 could not be checked, 0 did not hold" in _log(eng)
     assert eng._run_checks_note() == ""
     assert not (eng.quest_root / ".fi" / "probes_run").exists()
     # within about a tenth of the run's time limit
@@ -157,11 +157,11 @@ async def test_the_repair_and_stop_switches_do_what_the_design_said_when_they_ar
     eng, _client_, _ex = _engine(tmp_path, monkeypatch, _reply(SENS), fn=ignores_dt)
     sent: list[str] = []
     monkeypatch.setattr(eng, "_code_review_failed_run", lambda text, script=None: sent.append(text) or {"sent_back": True}, raising=False)
-    monkeypatch.setattr(run_checks, "REPAIR_ENABLED", True)
+    eng.probe_repair_enabled = True    # an instance switch: the module constants are never touched (--fleet)
     assert await _gate(eng) == {"sent_back": True}
     assert "did not hold" in sent[0] and "exactly the same" in sent[0] and _record(eng)["repairs"] == 1
     # repairs used up and stop on: the honest stop
-    monkeypatch.setattr(run_checks, "STOP_ENABLED", True)
+    eng.probe_stop_enabled = True
     stopped = await _gate(eng, state={"iteration": 0, "exec_reflect_iter": 99})
     assert stopped is not None and "cannot_repair" in stopped["exec_result"]
 
@@ -229,7 +229,8 @@ async def test_a_coverage_that_is_all_ones_at_a_few_draws_is_not_called_broken_o
     assert await _gate(eng) is None
     res = _mine(eng)
     assert not any(k.startswith("saturation:") and v["verdict"] == "broken" for k, v in res.items())
-    assert res["saturation"]["verdict"] == "held"
+    # not broken, and said plainly as not judged
+    assert res["saturation:k_covered_1"]["verdict"] == "unconfirmed" and "not judged" in res["saturation:k_covered_1"]["says"]
 
 
 CMP = {"id": "R2", "kind": "compare", "metric": "err_pct", "a": {"mode": "a"}, "b": {"mode": "b"}, "larger": "a", "strength": "core",
@@ -255,3 +256,34 @@ async def test_a_comparison_of_two_methods_is_run_through_the_gate_and_judged_by
     r = _mine(eng2)["R2"]
     assert r["verdict"] == "broken" and "smaller" in r["says"]
     assert "FI's own check that `err_pct` is larger in one case than in the other" in eng2._run_checks_note()
+
+
+@pytest.mark.asyncio
+async def test_the_confirmation_says_what_the_second_run_really_was(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, _c, _e = _engine(tmp_path, monkeypatch, _reply(CMP), fn=lambda cell, seed: {"err": 1.0 + (1.0 if cell["mode"] == "a" else 2.0),
+                                                                                    "rate": 5.0, "k_covered_1": 1.0})
+    await _gate(eng)
+    says = _mine(eng)["R2"]["says"]
+    assert "A second run with new seeds agrees" in says and "different change" not in says   # a compare has no size of change
+
+
+def test_quality_summary_uses_the_entry_of_the_current_code(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
+    sha = PR.code_sha(root)
+    rec = {"results": {sha: {"R1": {"verdict": "held", "says": "ok", "strength": "core"}},
+                       "newer-but-other": {"R1": {"verdict": "broken", "says": "bad", "strength": "core"}}}}
+    (root / ".fi").mkdir()
+    (root / ".fi" / "probes.json").write_text(json.dumps(rec), encoding="utf-8")
+    summary = qr._probes_summary(qr._Quest(root))
+    assert summary["held"] == 1 and summary["broken"] == 0 and summary["for_current_code"] is True
+    rec["results"] = {"old": {"R1": {"verdict": "broken", "says": "bad", "strength": "core"}}}
+    (root / ".fi" / "probes.json").write_text(json.dumps(rec), encoding="utf-8")
+    summary = qr._probes_summary(qr._Quest(root))
+    assert summary["broken"] == 1 and summary["for_current_code"] is False
+    assert "earlier version of the code" in qr.render({**qr.build(root)})
+
+
+def test_the_switches_are_read_from_the_engine_not_changed_in_the_module() -> None:
+    assert run_checks.STOP_ENABLED is False and run_checks.REPAIR_ENABLED is False

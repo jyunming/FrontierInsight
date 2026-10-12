@@ -559,16 +559,21 @@ def judge(relation: Relation, observations: list[Any]) -> Verdict:
 
 def _pick_ab(rel: Relation, observations: list[Any]) -> tuple[list[float], list[float]] | None:
     """The clean values of the two named cells of an equal_when / compare relation; None when either returned no number."""
-    pick: dict[str, list[float]] = {}
+    named = set(rel.a) | set(rel.b)
+    found: dict[str, list[tuple[dict[str, Any], list[float]]]] = {"a": [], "b": []}
     for side, want in (("a", rel.a), ("b", rel.b)):
         for o in observations:
             cell, raw = _obs(o)
-            if _matches(cell, want):
-                vals = _clean(raw)
-                if vals is not None:
-                    pick[side] = vals
-                    break
-    return (pick["a"], pick["b"]) if len(pick) == 2 else None
+            vals = _clean(raw)
+            if _matches(cell, want) and vals is not None:
+                found[side].append((cell, vals))
+    # the two cells of one relation are the same cell except where the relation names a difference: a cell that merely
+    # contains the named settings but sits elsewhere in the grid is another relation's
+    for ca, va in found["a"]:
+        for cb, vb in found["b"]:
+            if all(_cell_key({"v": ca.get(k)}) == _cell_key({"v": cb.get(k)}) for k in (set(ca) | set(cb)) - named):
+                return va, vb
+    return None
 
 
 def _compare(rel: Relation, observations: list[Any]) -> Verdict:
@@ -769,7 +774,7 @@ def _diagnostic(name: str, bound: float) -> bool:
     return low.startswith(("is_", "has_")) or any(low.endswith(w) or w + "_" in low for w in _ONE_BY_DESIGN)
 
 
-def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[Verdict]:
+def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = (), headline: Iterable[str] = ()) -> list[Verdict]:
     """The generic test, needing no plan and no model. ``cells``: one per setting run, each ``{"metrics": {name: [values]}}``
     (the same shape the degenerate-results check reads). A metric is ``broken`` when any value is NaN or missing, when every
     cell sits at exactly 0 (or at exactly 1; a 0/1 indicator needs :data:`INDICATOR_MIN_VALUES` draws (at the top bound, in every setting: 8 of 8 is a good coverage, not a fault); a check value or flag sitting at its bound by design is only ``unconfirmed``), or when everything
@@ -777,6 +782,7 @@ def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[
     when it alone is constant over such a sweep while something else moves (it may be a fixed control). Names in ``exempt`` (see :func:`exempt_names`) may be
     constant or pinned by design, but never NaN."""
     skip = set(exempt)
+    protect = set(headline)   # reported / headline quantities: never excused as a check value or a flag
     names = sorted(set.intersection(*[set((c.get("metrics") or {}).keys()) for c in cells])) if cells else []
     out: list[Verdict] = []
     means: dict[str, list[float]] = {}
@@ -808,19 +814,21 @@ def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[
         if name in skip or len(ms) < 2:
             continue
         vid = f"saturation:{name}"
-        for bound in (0.0, 1.0):
-            if name in indicator and n_values[name] < INDICATOR_MIN_VALUES:
-                break
-            if name in indicator and bound == 1.0 and thinnest[name] < INDICATOR_MIN_VALUES:
-                break   # a coverage or success rate at 8 draws a setting is often 8 of 8 at every setting: not a fault
-            if all(abs(m - bound) <= 1e-12 for m in ms):
-                said = f"`{name}` is exactly {bound:g} at all {len(ms)} settings run, a bound it cannot leave."
-                if _diagnostic(name, bound):
-                    out.append(Verdict(vid, "unconfirmed", {"bound": bound, "cells": len(ms)},
-                                       said[:-1] + " (it looks like a check value or a flag, which may sit at its bound by design)."))
-                else:
-                    out.append(Verdict(vid, "broken", {"bound": bound, "cells": len(ms)}, said))
-                break
+        pinned = next((b for b in (0.0, 1.0) if all(abs(m - b) <= 1e-12 for m in ms)), None)
+        if pinned is not None:
+            said = f"`{name}` is exactly {pinned:g} at all {len(ms)} settings run, a bound it cannot leave."
+            thin = name in indicator and (n_values[name] < INDICATOR_MIN_VALUES
+                                          or (pinned == 1.0 and thinnest[name] < INDICATOR_MIN_VALUES))
+            if thin:
+                # a coverage or success rate comes out all ones at a handful of draws a setting: not judged, and said so
+                out.append(Verdict(vid, "unconfirmed", {"bound": pinned, "cells": len(ms), "draws_per_setting": thinnest[name]},
+                                   said[:-1] + f", but with {thinnest[name]} draw(s) a setting that is not enough to call a "
+                                   f"bound (a 0/1 proportion needs {INDICATOR_MIN_VALUES}); the bound was not judged."))
+            elif name not in protect and _diagnostic(name, pinned):
+                out.append(Verdict(vid, "unconfirmed", {"bound": pinned, "cells": len(ms)},
+                                   said[:-1] + " (it looks like a check value or a flag, which may sit at its bound by design)."))
+            else:
+                out.append(Verdict(vid, "broken", {"bound": pinned, "cells": len(ms)}, said))
         else:
             flat = (max(ms) - min(ms)) <= SAME * _scale(*ms)
             if flat and len(ms) >= SATURATION_MIN_CELLS and (moving or len(means) == len([n for n in means if n not in skip])):

@@ -324,7 +324,8 @@ def test_saturation_nan_bound_constant():
 def test_saturation_few_draws_of_an_indicator_at_its_bound_prove_nothing():
     # a 95% coverage can come out all ones in a handful of draws; INDICATOR_MIN_VALUES draws are needed
     few = [cell(cov=[1.0] * 4, y=[float(i)] * 4) for i in range(4)]
-    assert P.saturation(few) == []
+    got = P.saturation(few)     # not judged, and said so: never silently skipped, never broken
+    assert [(v.relation_id, v.verdict) for v in got] == [("saturation:cov", "unconfirmed")] and "not judged" in got[0].says
     many = [cell(cov=[1.0] * P.INDICATOR_MIN_VALUES, y=[float(i)]) for i in range(4)]
     assert [v.relation_id for v in P.saturation(many)] == ["saturation:cov"]
 
@@ -333,7 +334,8 @@ def test_saturation_a_coverage_of_all_ones_at_a_few_draws_a_setting_is_not_broke
     # the r6t kinetics case: a 0/1 coverage was 8 of 8 at each of 9 settings (72 draws pooled), on good code. The pooled count
     # passed the old rule; the top bound now needs the draws in EVERY setting.
     cells = [cell(k_covered_1=[1.0] * 8, rate=[float(i)] * 8) for i in range(9)]
-    assert P.saturation(cells) == []
+    got = P.saturation(cells)
+    assert [(v.relation_id, v.verdict) for v in got] == [("saturation:k_covered_1", "unconfirmed")]
     # the same data pinned at 0 is still read from the pooled draws (a quantity that never happens)
     zero = [cell(k_none=[0.0] * 8, rate=[float(i)] * 8) for i in range(9)]
     assert [v.relation_id for v in P.saturation(zero)] == ["saturation:k_none"]
@@ -491,3 +493,27 @@ def test_describe_speaks_plainly_and_a_relation_reads_back_from_its_record():
     assert P.from_dict(r.to_dict()).__dict__ == r.__dict__
     assert P.from_dict({"kind": "x"}) is None
     assert P.describe(None, "saturation:dof") == "that `dof` varies over the settings run"
+
+
+def test_a_headline_metric_named_error_stuck_at_zero_is_broken_only_extras_are_excused():
+    cells = [cell(relative_error=[0.0], y=[float(i)]) for i in range(4)]
+    assert P.saturation(cells)[0].verdict == "unconfirmed"                       # an extra nobody reports
+    assert P.saturation(cells, headline={"relative_error"})[0].verdict == "broken"   # the protocol's own metric
+
+
+def test_an_indicator_stuck_at_one_with_few_draws_still_gets_the_constant_check_when_everything_is_constant():
+    cells = [cell(cov=[1.0] * 8, y=[2.0] * 8) for _ in range(4)]
+    got = {v.relation_id: v.verdict for v in P.saturation(cells)}
+    assert got["saturation:y"] == "broken" and got["saturation:cov"] == "unconfirmed"
+
+
+def test_a_relation_matches_its_own_cells_not_another_cell_that_contains_the_named_settings():
+    r = rel("equal_when", setting=None, a={"x": 1.0}, b={"x": 4.0})
+    base = {"n": 100}
+    good_a, good_b = [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]
+    elsewhere = [9.0, 9.5, 9.1, 9.7]        # x = 1.0 too, but at n = 10: another relation's cell, listed first
+    obs_ = [P.Observation({"x": 1.0, "n": 10}, elsewhere), P.Observation({"x": 1.0, **base}, good_a),
+            P.Observation({"x": 4.0, **base}, good_b)]
+    assert P.judge(r, obs_).verdict == "held"
+    # with only mismatched cells there is nothing to compare
+    assert P.judge(r, [P.Observation({"x": 1.0, "n": 10}, elsewhere), P.Observation({"x": 4.0, **base}, good_b)]).verdict == "unconfirmed"

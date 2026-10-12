@@ -448,7 +448,11 @@ def _probes_summary(q: _Quest) -> dict[str, Any] | None:
     results = _dict(q.probes.get("results"))
     if not results:
         return None
-    mine = _dict(list(results.values())[-1])   # the newest version of the code
+    from . import probes_run as _pr
+
+    sha = _pr.code_sha(q.root)
+    exact = sha in results
+    mine = _dict(results[sha] if exact else list(results.values())[-1])   # the code as it is now, else the newest recorded
     rows = {k: v for k, v in mine.items() if k != "saturation" and isinstance(v, dict)}
     if not rows:
         return None
@@ -456,7 +460,8 @@ def _probes_summary(q: _Quest) -> dict[str, Any] | None:
     return {"held": count["held"], "unconfirmed": count["unconfirmed"], "broken": count["broken"],
             "broken_items": [{"id": k, "says": _one(str(v.get("says") or ""), 300), "strength": str(v.get("strength") or "core")}
                              for k, v in rows.items() if v.get("verdict") == "broken"],
-            "not_understood": len(_list(q.probes.get("dropped")))}
+            "not_understood": len(_list(q.probes.get("dropped"))),
+            "for_current_code": exact}
 
 
 def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
@@ -1104,7 +1109,8 @@ def render(report: dict[str, Any]) -> str:
         lines += ["", "## FI's own behaviour checks (recorded, not yet acting)", "",
                   f"FI ran the simulation on settings of its own and tested what the plan says must happen when a setting changes: "
                   f"{checks['held']} held, {checks['unconfirmed']} could not be checked, {checks['broken']} did not hold. "
-                  "Nothing was sent back or stopped because of them."]
+                  "Nothing was sent back or stopped because of them."
+                  + ("" if checks.get("for_current_code", True) else " (These were run on an earlier version of the code.)")]
         lines += [f"- ({b['strength']}) {b['says']}" for b in checks["broken_items"]]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")

@@ -681,18 +681,20 @@ class RunChecksMixin:
             for rid, v in broken.items():
                 self._log.warning("[execute] FI's own check %s did not hold: %s",  # type: ignore[attr-defined]
                                   _probes.describe(next((r for r in relations if r.id == rid), None), rid), v.get("says"))
-        if not broken or not (REPAIR_ENABLED or STOP_ENABLED):
+        repair_on = bool(getattr(self, "probe_repair_enabled", REPAIR_ENABLED))   # an instance can differ: no process-global switch
+        stop_on = bool(getattr(self, "probe_stop_enabled", STOP_ENABLED))
+        if not broken or not (repair_on or stop_on):
             return None
         says = [str(v.get("says")) for v in broken.values()]
         iters = int(state.get("exec_reflect_iter") or 0)
-        if REPAIR_ENABLED and iters < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+        if repair_on and iters < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
             self._probe_save(repairs=int(out.get("repairs") or 0) + 1)   # counted BEFORE the run goes back
             return self._code_review_failed_run(  # type: ignore[attr-defined]
                 "FI ran the simulation on a few settings of its own and compared what came back with what the plan says "
                 "must happen. It did not hold: " + " ".join(says)
                 + " Repair simulate.py so that it does what the plan says; keep every setting and every metric as they are.",
                 script=_split_run.SIMULATE_NAME)
-        if STOP_ENABLED:
+        if stop_on:
             return self._stop_before_run(  # type: ignore[attr-defined]
                 "FI's own check of the simulation did not hold: " + "; ".join(_one(x, 300) for x in says[:3]), "cannot_repair",
                 tried=["ran the simulation on a few settings of its own and compared the results with what the plan says",

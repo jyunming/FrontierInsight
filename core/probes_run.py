@@ -331,7 +331,9 @@ def saturation_of(cells: list[dict[str, Any]], quest_root: Path, protocol: dict[
     if reported is not None:
         names = [n for n in names if any(n == k or _rs.names_setting(n, k) or _rs.names_setting(k, n) for k in reported)]
         cells = [{**c, "metrics": {k: v for k, v in (c.get("metrics") or {}).items() if k in names}} for c in cells]
-    return _probes.saturation(cells, exempt_for_saturation(quest_root, protocol, grid, names) | set(hold or ()))
+    # every name judged here is a reported quantity, so none may be excused as a diagnostic
+    return _probes.saturation(cells, exempt_for_saturation(quest_root, protocol, grid, names) | set(hold or ()),
+                              headline=set(names) if reported is not None else ())
 
 
 def stored_cells(quest_root: Path) -> list[dict[str, Any]]:
@@ -458,11 +460,13 @@ async def _confirm(runner: _Runner, rel: _probes.Relation, first: _probes.Verdic
         return _probes.Verdict(rel.id, "unconfirmed", {"first_run": first.numbers},
                                f"Could not check this again: {TOO_COSTLY}. The first run said: {first.says}")
     second_results = [await runner.get(c, fresh, n) for c in cells]
+    changes = rel.kind in ("sensitivity", "invariance", "monotone", "convergence")
+    how = ("gives the same result" if deterministic else "with new seeds and a different change" if changes else "with new seeds")
     second = _verdict_for(rel, second_results, plan, metric_alias)
     if second.verdict == "broken":
-        return _probes.Verdict(rel.id, "broken", {**first.numbers, "second_run": second.numbers}, f"{first.says} A second run with new seeds and a different change agrees: {second.says}")
+        return _probes.Verdict(rel.id, "broken", {**first.numbers, "second_run": second.numbers}, f"{first.says} A second run {how} agrees: {second.says}")
     return _probes.Verdict(rel.id, "unconfirmed", {"first_run": first.numbers, "second_run": second.numbers},
-                           f"Looked wrong once but not on a second run with new seeds ({second.says}). First run: {first.says}")
+                           f"Looked wrong once but not on a second run {how} ({second.says}). First run: {first.says}")
 
 
 async def _saturation(runner: _Runner, root: Path, protocol: dict[str, Any] | None, grid: dict[str, list[Any]],
