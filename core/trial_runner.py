@@ -98,6 +98,20 @@ def main():
         fn = getattr(mod, spec["entry"], None)
         if not callable(fn):
             raise AttributeError(f"{spec['module']} has no function {spec['entry']}()")
+        # A run_cell measured for a check must really run the study's trials: run_trial is wrapped to count its calls.
+        trial_calls, trial_sums = [0], {}
+        if spec.get("spy_trial") and spec["entry"] == "run_cell" and callable(getattr(mod, "run_trial", None)):
+            _real_trial = mod.run_trial
+            def _counted(*a, **k):
+                trial_calls[0] += 1
+                got = _real_trial(*a, **k)
+                if isinstance(got, dict):
+                    for key, v in got.items():
+                        if _number(v):
+                            total, n = trial_sums.get(str(key), (0.0, 0))
+                            trial_sums[str(key)] = (total + float(v), n + 1)
+                return got
+            mod.run_trial = _counted
     except BaseException as e:
         out.write(json.dumps({"nonce": nonce, "load_error": f"{type(e).__name__}: {e}"[:500]}) + "\n")
         out.close()
@@ -126,6 +140,11 @@ def main():
                 row.update(status="failed", reason=f"{type(e).__name__}: {e}"[:300],
                            traceback=traceback.format_exc()[-1500:])
         row["duration_s"] = round(time.monotonic() - t0, 4)
+        if spec.get("spy_trial"):
+            row["trial_calls"] = trial_calls[0]
+            row["trial_means"] = {k: t / n for k, (t, n) in trial_sums.items() if n}
+            trial_calls[0] = 0
+            trial_sums.clear()
         row["warnings"] = [f"{w.category.__name__}: {w.message}"[:300] for w in caught][:20]
         for w in caught:  # printed as Python prints them, so the numeric-warning check reads them from stderr
             sys.stderr.write(f"{w.filename}:{w.lineno}: {w.category.__name__}: {w.message}\n")
@@ -534,10 +553,19 @@ class _Module:
         argument (``map(run_trial, ...)``); otherwise any mention (a table of functions, a returned function)."""
         found: set[str] = set()
 
+        # A name the code binds itself (a parameter, an assignment, a loop variable) is that variable, not the module's
+        # function of the same name.
+        local: set[str] = set()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = node.args
+            local |= {x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs, *filter(None, (a.vararg, a.kwarg)))}
+        local |= {x.id for x in ast.walk(node) if isinstance(x, ast.Name) and not isinstance(x.ctx, ast.Load)}
+
         def resolve(x: ast.AST) -> str | None:
             if isinstance(x, ast.Name):
-                return self.alias.get(x.id, x.id)
-            if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id in self.modules:
+                return None if x.id in local else self.alias.get(x.id, x.id)
+            if (isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id in self.modules
+                    and x.value.id not in local):
                 return x.attr
             return None
 
@@ -879,8 +907,11 @@ def _load_run(quest_root: Path, key: str) -> TrialRun | None:
 
 async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, entry: str, cell: dict[str, Any],
                    seed: int | None, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-                   label: str, trial: int = 0) -> tuple[dict[str, float] | None, str]:
-    """Call one entry function once in its own process: ``(values, "")``, or ``(None, why)`` when it could not."""
+                   label: str, trial: int = 0, spy_trial: bool = False,
+                   spy_out: dict[str, Any] | None = None) -> tuple[dict[str, float] | None, str]:
+    """Call one entry function once in its own process: ``(values, "")``, or ``(None, why)`` when it could not.
+    ``spy_trial``: count the calls ``run_cell`` makes to ``run_trial`` and the mean of what they returned, per
+    name, in ``spy_out`` (``calls``, ``means``)."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -891,7 +922,8 @@ async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: 
     nonce = hashlib.sha256(f"oracle|{time.time_ns()}".encode()).hexdigest()[:24]
     spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": entry, "cell": cell,
                                 "trials": [{"trial": int(trial), "seed": seed}], "nonce": nonce,
-                                "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
+                                "thresholds": dict(thresholds or {}), "spy_trial": bool(spy_trial)}, default=str),
+                    encoding="utf-8")
     result = await executor.execute(
         [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=timeout_s, env=env,
@@ -906,6 +938,8 @@ async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: 
         if row.get("load_error"):
             return None, str(row["load_error"])
         if row.get("status") == "ok":
+            if spy_out is not None:
+                spy_out.update(calls=int(row.get("trial_calls") or 0), means=dict(row.get("trial_means") or {}))
             return dict(row.get("values") or {}), ""
         if row.get("status") == "failed":
             where = last_frame(str(row.get("traceback") or ""), quest_root)
@@ -997,6 +1031,22 @@ def oracle_entry_for(simulate: Path | str, oracle: dict[str, Any] | None = None,
     return oracle_entry(have, oracle, per_trial=per_trial, cell_runs_trials=reaches)
 
 
+def _built_from_trials(values: dict[str, float], spy: dict[str, Any], oracle: dict[str, Any] | None) -> bool:
+    """Whether what ``run_cell`` returned really comes from the trials it ran: it called ``run_trial`` at least once, and
+    for every name both return, ``run_cell``'s number agrees (within the check's own limit) with the mean of what the
+    trials returned. A ``run_cell`` that runs a trial and drops it for a formula of its own does not agree."""
+    if int(spy.get("calls") or 0) <= 0:
+        return False
+    limit = _oracle.limit_of(oracle)[1] if oracle is not None else None
+    means = spy.get("means") or {}
+    for key, v in values.items():
+        if key in means and isinstance(v, (int, float)):
+            allowed = limit if limit is not None else 1e-6 * max(1.0, abs(v))
+            if abs(float(v) - float(means[key])) > allowed:
+                return False
+    return True
+
+
 async def run_case(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
                    timeout_s: int, env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
                    trial: int = 0, oracle: dict[str, Any] | None = None,
@@ -1004,9 +1054,20 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
     """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial ``trial``, 0 unless asked,
     with the seed FI gives that trial of that cell, or ``run_cell``; :func:`oracle_entry` says which): ``(the metrics it
     returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number."""
-    entry = oracle_entry_for(Path(module) if Path(module).is_absolute() else Path(quest_root) / module, oracle,
-                             per_trial=per_trial)
+    path = Path(module) if Path(module).is_absolute() else Path(quest_root) / module
+    entry = oracle_entry_for(path, oracle, per_trial=per_trial)
     base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
+    if entry == "run_cell" and "run_trial" in entries(path):
+        # The study runs only run_trial: a run_cell measurement counts only if run_cell really called it (a mention the
+        # code never reaches, or a call whose result is dropped for a formula of its own, proves nothing). The AST read
+        # is the first filter; this is the decision.
+        spy: dict[str, Any] = {}
+        values, why = await _run_one(executor, python, quest_root, module, entry="run_cell", cell=dict(cell), seed=None,
+                                     timeout_s=timeout_s, env=env, thresholds=thresholds, label="run_cell()",
+                                     trial=int(trial), spy_trial=True, spy_out=spy)
+        if values is None or _built_from_trials(values, spy, oracle):
+            return values, why
+        entry = "run_trial"  # run_cell never ran a trial: the check is measured on the code the study runs
     seed = trial_seed(base, cell_key(cell), int(trial)) if entry == "run_trial" else None
     return await _run_one(executor, python, quest_root, module, entry=entry, cell=dict(cell), seed=seed, timeout_s=timeout_s,
                           env=env, thresholds=thresholds, label=f"{entry}()", trial=int(trial))

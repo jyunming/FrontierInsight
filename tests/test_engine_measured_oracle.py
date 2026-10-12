@@ -316,3 +316,16 @@ def test_an_explicit_per_trial_check_and_an_invariant_are_measured_on_one_trial(
         assert not problems and checks[0]["value"] in (0.0, 0.1), (extra, checks, problems)
 
 
+_BUGGY_TRIAL = "def run_trial(cell, trial_id, seed):\n    return {'rate': 0.9}\n\n"
+
+
+@pytest.mark.parametrize("body", [
+    "    run_trial(cell, 0, 0)\n    return {'rate': 0.05}\n",                      # a call whose result is dropped
+    "    if False:\n        run_trial(cell, 0, 0)\n    return {'rate': 0.05}\n",   # a call never reached
+    "    print(run_trial)\n    return {'rate': 0.05}\n",                           # a mention, no call
+], ids=["result_dropped", "never_reached", "mention_only"])
+def test_a_run_cell_that_only_mentions_run_trial_does_not_hide_a_bug_in_it(tmp_path: Path, body: str) -> None:
+    checks, problems, found = _measure(tmp_path, _BUGGY_TRIAL + "def run_cell(cell):\n" + body, [MEAN_CHECK])
+    assert checks[0]["value"] == 0.9 and found, "measured on run_trial, the code the study runs, and fails on it"
+
+

@@ -602,26 +602,6 @@ def _seed(case):
     return int(hashlib.sha256(f"{{base}}|{{key}}|0".encode("utf-8")).hexdigest()[:8], 16)
 
 
-def _cell_runs_trials():
-    import ast
-    tree = ast.parse(Path(simulate.__file__).read_text(encoding="utf-8"))
-    defs = {{n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}}
-    seen, todo = set(), ["run_cell"]
-    while todo:
-        name = todo.pop()
-        if name in seen or name not in defs:
-            continue
-        seen.add(name)
-        for sub in ast.walk(defs[name]):
-            if isinstance(sub, ast.Call):
-                for x in (sub.func, *sub.args):
-                    if isinstance(x, ast.Name):
-                        if x.id == "run_trial":
-                            return True
-                        todo.append(x.id)
-    return False
-
-
 def _measure(check):
     if check["case"] is None:
         found = simulate.oracle()
@@ -633,9 +613,30 @@ def _measure(check):
     # With both functions the study runs only run_trial: a check that holds in every single trial runs on it, and so does any
     # other check unless run_cell really calls run_trial (its mean then comes from the study's own trials), as Frontier
     # Insight does.
-    one_trial = hasattr(simulate, "run_trial") and (
-        not hasattr(simulate, "run_cell") or check["per_trial"] or not _cell_runs_trials())
-    if one_trial:
+    if hasattr(simulate, "run_trial") and hasattr(simulate, "run_cell") and not check["per_trial"]:
+        # Counted at run time, as Frontier Insight does: run_cell counts only if it really called run_trial.
+        real, calls, sums = simulate.run_trial, [0], {{}}
+
+        def counted(*args, **kwargs):
+            calls[0] += 1
+            got = real(*args, **kwargs)
+            for key, v in (got.items() if isinstance(got, dict) else ()):
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    total, n = sums.get(key, (0.0, 0))
+                    sums[key] = (total + v, n + 1)
+            return got
+
+        simulate.run_trial = counted
+        try:
+            got = simulate.run_cell(case)
+        finally:
+            simulate.run_trial = real
+        # ... and what it returns agrees, within the check's limit, with the mean of what those trials returned.
+        if calls[0] and all(abs(v - sums[k][0] / sums[k][1]) <= check["limit"]
+                            for k, v in got.items() if k in sums and isinstance(v, (int, float))):
+            return got[check["measure"]]
+        return real(case, 0, _seed(case))[check["measure"]]
+    if hasattr(simulate, "run_trial") and (not hasattr(simulate, "run_cell") or check["per_trial"]):
         return simulate.run_trial(case, 0, _seed(case))[check["measure"]]
     return simulate.run_cell(case)[check["measure"]]
 

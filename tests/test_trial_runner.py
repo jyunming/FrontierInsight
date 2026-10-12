@@ -399,3 +399,14 @@ def test_the_oracle_is_measured_on_the_function_that_means_what_it_measures() ->
     assert trial_runner.oracle_entry(both, {**mean, "per_trial": "false"}, cell_runs_trials=True) == "run_cell"
     assert trial_runner.oracle_entry(trial_only, mean) == "run_trial"
     assert trial_runner.oracle_entry(cell_only, inv) == "run_cell"
+
+
+def test_a_local_name_that_is_also_run_cell_is_not_the_modules_run_cell() -> None:
+    local = "def run_trial(c, t, s):\n    run_cell = c.get('steps')\n    return {'y': float(run_cell)}\n"
+    param = "def run_trial(run_cell, t, s):\n    return {'y': float(run_cell)}\n"
+    loop = "def run_trial(c, t, s):\n    for run_cell in c['xs']:\n        pass\n    return {'y': 1.0}\n"
+    lam = "run_trial = lambda c, t, run_cell: {'y': run_cell}\n"
+    for src in (local, param, loop, lam, local + "\ndef run_cell(c):\n    return {'y': 1.0}\n"):
+        assert trial_runner.trial_aggregates(src) == "", src
+    # ... while the module's own function is still found when nothing shadows it.
+    assert trial_runner.trial_aggregates("def run_trial(c, t, s):\n    return run_cell(c)\n")

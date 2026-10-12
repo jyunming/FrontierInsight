@@ -826,7 +826,7 @@ def test_the_generated_tests_call_run_cell_for_a_mean_and_run_trial_for_an_invar
 
     checks = json.loads(ast.literal_eval(re.search(r"CHECKS = json\.loads\((.+)\)\n", text).group(1)))
     assert [c["per_trial"] for c in checks] == [False, True, True]
-    assert "_cell_runs_trials()" in text, "run_cell is used only when it is built from run_trial"
+    assert "calls[0]" in text, "run_cell counts only if it really called run_trial (counted at run time)"
     compile(text, "test_oracles.py", "exec")
 
 
@@ -845,3 +845,25 @@ async def test_a_repair_is_not_used_when_the_new_code_has_the_aggregate_even_if_
     monkeypatch.setattr(engine, "_chat", aggregate)
     new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
     assert new is None and outcome == "not_usable"
+
+
+def test_the_generated_tests_hold_a_run_cell_that_only_mentions_run_trial_to_run_trial(tmp_path: Path) -> None:
+    check = {"name": "rate", "kind": "special_case", "check": "rate", "expected": 0.05, "tolerance": 0.01,
+             "case": {"m": 20}, "measure": "rate"}
+
+    def run(sim: str) -> int:
+        root = tmp_path / str(abs(hash(sim)))
+        (root / "tests").mkdir(parents=True)
+        (root / "simulate.py").write_text(sim, encoding="utf-8")
+        (root / "tests" / "test_oracles.py").write_text(cl.oracle_tests({"oracles": [check]}), encoding="utf-8")
+        return subprocess.run([sys.executable, "tests/test_oracles.py"], cwd=root, capture_output=True).returncode
+
+    builds = ("def run_trial(c, t, s):\n    return {'rate': 0.05}\n\n"
+              "def run_cell(c):\n    return {'rate': run_trial(c, 0, 0)['rate']}\n")
+    mentions = ("def run_trial(c, t, s):\n    return {'rate': 0.9}\n\n"
+                "def run_cell(c):\n    run_trial(c, 0, 0)\n    return {'rate': 0.05}\n")
+    never = ("def run_trial(c, t, s):\n    return {'rate': 0.9}\n\n"
+             "def run_cell(c):\n    if False:\n        run_trial(c, 0, 0)\n    return {'rate': 0.05}\n")
+    assert run(builds) == 0
+    assert run(mentions) == 1, "run_trial was called but its result is dropped for a formula of run_cell's own"
+    assert run(never) == 1
