@@ -350,6 +350,9 @@ class QuestState(TypedDict, total=False):
     design_history: list[dict[str, Any]]
     # How many times the simulation was sent back because its run manifest differed from the frozen protocol.
     run_manifest_failures: int
+    #: The run record's last difference was in the analysis alone (so its repairs have a budget of their own, and spend no
+    #: crash repair); kept in the state so a resume knows.
+    run_manifest_analysis_only: bool
     figure_data_repairs: int
     record_rewrites: int
     # Two-stage implement scaffold from ``_node_implement_outline``.
@@ -15256,6 +15259,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                else None)
             manifest_status, manifest_found = self._run_manifest_problems(state, split, result, run_cell_random)
         manifest_attempts_next = 0
+        manifest_analysis_only = False
         if manifest_found:
             mode = self.config.engine.run_manifest_check
             budget = int(self.config.engine.run_manifest_repair_attempts)
@@ -15282,7 +15286,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 # another grid, a claimed count its own values do not back) sends simulate.py back, as it always did.
                 analysis_only = set(manifest_found) <= set(self._manifest_analysis_problems)
                 budget = _manifest_repair_budget(budget, analysis_only)
-                self._manifest_last_analysis_only = analysis_only  # for a repair that gives up (the budget it spends)
+                manifest_analysis_only = analysis_only
                 to_fix = _split_run.ANALYSIS_NAME if analysis_only else _split_run.SIMULATE_NAME
                 self._log.warning(
                     "[run_manifest] the run differs from the frozen protocol (%d): %s; sending %s back (%d of %d)",
@@ -15645,6 +15649,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._audit("check_result", check="plausibility_unproven_cap", status="warn",
                         summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
         patch["run_manifest_failures"] = manifest_attempts_next
+        patch["run_manifest_analysis_only"] = manifest_analysis_only
         run_context = await self._attempt_context({**state, **patch}, kind="after_run")
 
         def _run_record() -> dict[str, Any] | None:
@@ -16046,9 +16051,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         )
         patch: QuestState = {
             "run_manifest_failures": _manifest_repair_budget(
-                int(self.config.engine.run_manifest_repair_attempts), bool(getattr(self, "_manifest_last_analysis_only", False))),
+                int(self.config.engine.run_manifest_repair_attempts), bool(state.get("run_manifest_analysis_only"))),
             "exec_patch_pending": True,
-            "exec_reflect_iter": int(state.get("exec_reflect_iter") or 0) + 1,
+            # a repair of the analysis spends no crash repair (it has the budget of its own above)
+            "exec_reflect_iter": int(state.get("exec_reflect_iter") or 0) + (0 if state.get("run_manifest_analysis_only") else 1),
         }
         if history is not None:
             patch["exec_reflect_history"] = history  # the repair's own reason for giving up, kept
@@ -16113,7 +16119,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return {}
 
         iters = state.get("exec_reflect_iter", 0)
-        if iters >= self.config.engine.exec_reflect_max_iterations:
+        # The repair of an analysis the run record sent back has a budget of its own (``run_manifest_failures``, at most
+        # three): it neither waits for a crash repair to be left nor spends one.
+        manifest_turn = (rc != 0 and bool(state.get("run_manifest_failures")) and bool(state.get("run_manifest_analysis_only"))
+                         and self.config.engine.run_manifest_check == "block")
+        bump = 0 if manifest_turn else 1
+        if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn:
             # A run the run-manifest check sent back, with no repair left (earlier crashes spent them, or none are
             # allowed): the difference stands, and the quest stops and names it, never going on with no results.
             stop = self._manifest_repair_gave_up(state)
@@ -16328,7 +16339,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             })
             return self._manifest_repair_gave_up(state, history) or {
                 "exec_give_up_reason": give_up,
-                "exec_reflect_iter": iters + 1,
+                "exec_reflect_iter": iters + bump,
                 "exec_reflect_history": history,
             }
 
@@ -16344,7 +16355,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return spent
             return self._manifest_repair_gave_up(state) or {
                 "exec_give_up_reason": "(LLM produced no patched code)",
-                "exec_reflect_iter": iters + 1,
+                "exec_reflect_iter": iters + bump,
             }
         if overlaps:
             try:
@@ -16393,7 +16404,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
         patch: QuestState = {
             **spent,
-            "exec_reflect_iter": iters + 1,
+            "exec_reflect_iter": iters + bump,
             "exec_reflect_history": history,
             "exec_patch_pending": True,
         }
@@ -26027,7 +26038,7 @@ def _replicate_metric_kinds(state: "QuestState") -> dict[str, str]:
 # engine.max_iterations, and each script's own repairs by engine.exec_reflect_max_iterations.
 _FRESH_SCRIPT: dict[str, Any] = {
     "exec_reflect_iter": 0, "exec_reflect_history": [], "exec_give_up_reason": "", "exec_patch_pending": False,
-    "run_manifest_failures": 0, "figure_data_repairs": 0, "figure_overlap_repaired": False, "bounded_seen": [],
+    "run_manifest_failures": 0, "run_manifest_analysis_only": False, "figure_data_repairs": 0, "figure_overlap_repaired": False, "bounded_seen": [],
 }
 
 

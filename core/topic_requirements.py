@@ -448,7 +448,7 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False) -> 
         "`protocol.topic_map` that `optimisation` covers it. "
         if search else
         "A setting to vary or compare is a key of `protocol.grid` with every value the topic states (or, for a search for "
-        "the best design, a design variable of `protocol.optimisation` with its range). ")
+        "the best design, a design variable of `protocol.optimisation` with its range, and its value in `protocol.optimisation.baseline.values`). ")
     return (
         "The topic asks for things this plan does not yet include:\n" + "\n".join(lines)
         + f"\n\nThe topic: “{' '.join(str(topic or '').split())[:1500]}”\n\n"
@@ -532,8 +532,19 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
         have_vars = {str(v.get("name")) for v in block_old.get("design_variables") or [] if isinstance(v, dict)}
         extra = [v for v in block_new.get("design_variables") or [] if isinstance(v, dict) and str(v.get("name")) not in have_vars]
         if extra:
-            protocol["optimisation"] = {**protocol.get("optimisation", block_old),
-                                        "design_variables": [*(block_old.get("design_variables") or []), *extra]}
+            merged_block = {**protocol.get("optimisation", block_old),
+                            "design_variables": [*(block_old.get("design_variables") or []), *extra]}
+            # A variable the baseline has no value for is a block the plan reader refuses: the answer's baseline value of
+            # each added variable comes with it (the design to beat keeps every value it already had).
+            old_base = block_old.get("baseline") if isinstance(block_old.get("baseline"), dict) else {}
+            new_base = block_new.get("baseline") if isinstance(block_new.get("baseline"), dict) else {}
+            old_values = old_base.get("values") if isinstance(old_base.get("values"), dict) else {}
+            new_values = new_base.get("values") if isinstance(new_base.get("values"), dict) else {}
+            names = {" ".join(str(x.get("name")).split()) for x in extra}
+            added = {k: v for k, v in new_values.items() if " ".join(str(k).split()) in names and k not in old_values}
+            if added and old_base:
+                merged_block["baseline"] = {**old_base, "values": {**old_values, **added}}
+            protocol["optimisation"] = merged_block
             taken = True
     new_map = [m for m in (n.get("topic_map") if isinstance(n.get("topic_map"), list) else []) if isinstance(m, dict)]
     if new_map:

@@ -130,13 +130,24 @@ def flat_search_check(check: dict[str, Any] | None, block: dict[str, Any] | None
     if not no_effect:
         return None
     sensitivity = hood.get("sensitivity") or {}
-    movable = [name for v in block.get("design_variables") or []
-               if isinstance(v, dict) and str(v.get("kind") or "continuous") != "choice"
-               for name in ([_plan.element_name(str(v.get("name")), i) for i in _plan.indices(_plan.shape_of(v))]
-                            if _plan.is_array(v) else [str(v.get("name"))])]
+    # Judged on the numbers the check really nudged: an array larger than the check's sample has elements it never moved,
+    # and those are not evidence either way. Every variable needs at least one nudged number, or nothing is claimed.
+    probed = hood.get("probed")
+    movable, variables = [], []
+    for v in block.get("design_variables") or []:
+        if not isinstance(v, dict) or str(v.get("kind") or "continuous") == "choice":
+            continue
+        names = ([_plan.element_name(str(v.get("name")), i) for i in _plan.indices(_plan.shape_of(v))]
+                 if _plan.is_array(v) else [str(v.get("name"))])
+        if probed is not None:
+            names = [n for n in names if n in {str(p) for p in probed}]
+            if not names:
+                return None  # a variable none of whose numbers was nudged: the check says nothing about it
+        movable.extend(names)
+        variables.append(str(v.get("name")))  # the code reads a variable by its name, an array as a whole
     if not movable or set(movable) - set(no_effect) or set(sensitivity) - set(no_effect):
         return None
-    if not _ignores(source, movable):
+    if not _ignores(source, variables):
         return None
     return (f"the result does not change when {_names(movable)} change, so the simulation does not use "
             f"{'it' if len(movable) == 1 else 'them'}: nudging {'it' if len(movable) == 1 else 'each of them'} "

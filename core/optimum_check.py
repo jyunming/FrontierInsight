@@ -679,7 +679,7 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             says += " (the check's time ran out before every nudge was evaluated)"
         checks["neighbourhood"] = {"status": status, "says": says, "at_bound": at_bound, "no_effect": no_effect,
                                    "better_neighbour": sorted(better, key=lambda x: -x["gain"])[:3],
-                                   "sensitivity": sensitivity, "nudge": NUDGE}
+                                   "sensitivity": sensitivity, "nudge": NUDGE, "probed": list(probes)}
 
     # --- 6. the search's budget
     ev = search_record.get("evaluations") or {}

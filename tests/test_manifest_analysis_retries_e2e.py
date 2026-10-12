@@ -59,3 +59,14 @@ async def test_an_analysis_that_stays_wrong_after_three_tries_ends_in_the_honest
     assert calls.count("ExecuteReflect") == 3, "three tries, then the check stands"
     assert "back to be repaired 3 time(s)" in _stuck(engine)
     assert not (engine.quest_root / "paper" / "paper.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_analysis_repairs_have_a_budget_of_their_own_apart_from_crash_repairs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With one crash repair allowed, three repairs of the analysis still run, and spend none of it."""
+    calls: list[str] = []
+    prompts: list[str] = []
+    _model(monkeypatch, [ANALYSIS, ANALYSIS, ANALYSIS_WITH_VALUES], calls, prompts)
+    engine = Engine(_cfg(tmp_path, engine={"exec_reflect_max_iterations": 1}))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None and calls.count("ExecuteReflect") == 3

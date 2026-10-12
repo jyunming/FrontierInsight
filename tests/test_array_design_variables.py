@@ -206,7 +206,9 @@ def test_integer_arrays_count_and_enumerate_all_their_designs() -> None:
     assert space.count() == 2 ** 4 * 3
     combos = space.combos()
     assert combos is not None and len(combos) == 48 and {json.dumps(c["src"]) for c in combos}.__len__() == 16
-    assert op.effective_method(fixed) == ("exhaustive", "rule") or op.evaluations(fixed)[0] < 48
+    assert op.evaluations(fixed)[0] == 80 and op.effective_method(fixed) == ("exhaustive", "rule")  # 48 designs fit 80
+    tight = {**fixed, "evaluation_budget": {"starts": 1, "per_start": 47}}
+    assert op.effective_method(tight) == ("bounded_local", "rule") and search.effective_method(tight) == ("bounded_local", "rule")
     assert search.effective_method({**fixed, "evaluation_budget": {"starts": 8, "per_start": 8}}) == ("exhaustive", "rule")
 
 
