@@ -23,6 +23,7 @@ for checks that cried wolf.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,7 @@ from core.engine import (
     _hits_need_only_a_rewrite,
     _review_sends_the_experiment_back,
 )
-from core.number_provenance import check
+from core.number_provenance import _quantile, check
 
 # A small stand-in for a real run: seed 0's RESULT_JSON.
 RESULTS = {
@@ -822,25 +823,32 @@ def test_a_rounded_integer_is_not_matched_by_truncation() -> None:
 
 # --- raw trial values and luck: a match must mean something ---------------------
 
-def _raw_run(n: int = 200) -> dict:
-    """A run whose results hold ``n`` raw per-trial values plus one named summary."""
-    return {"summary_rate": 0.7391, "trial_values": [0.1 + i * 0.00371 for i in range(n)]}
+def _draws(n: int, mod: int = 1009, mul: int = 7919, lo: float = 0.1, span: float = 0.9) -> list[float]:
+    """``n`` distinct-looking, unordered values in [lo, lo + span): a stand-in for raw per-trial draws."""
+    return [lo + span * ((i * mul) % mod) / mod for i in range(n)]
+
+
+def _mean_sd(vals: list[float]) -> tuple[float, float]:
+    mean = math.fsum(vals) / len(vals)
+    return mean, math.sqrt(math.fsum((v - mean) ** 2 for v in vals) / (len(vals) - 1))
+
+
+def _raw_run(n: int = 400) -> dict:
+    return {"summary_rate": 0.7391, "trial_values": _draws(n)}
 
 
 def test_one_raw_trial_value_does_not_account_for_a_number() -> None:
-    """The paper prints 0.3115, which equals only trial 57 of 200 (0.1 + 57 * 0.00371 = 0.31147). A paper reports what
-    was computed from trials, never one trial picked at random, so this is luck and not a source."""
+    """A paper reports what was computed from trials, never one trial picked at random: equal to one of 400 draws is luck."""
     raw = _raw_run()
-    assert round(raw["trial_values"][57], 4) == 0.3115
-    report = check("The measured score was 0.3115.", result_json=raw)
-    assert _tokens(report) == ["0.3115"]
+    pick = round(raw["trial_values"][57], 4)
+    assert sum(1 for v in raw["trial_values"] if round(v, 4) == pick) == 1
+    assert _tokens(check(f"The measured score was {pick}.", result_json=raw)) == [str(pick)]
 
 
 def test_a_statistic_of_the_raw_trials_is_accounted_for() -> None:
     raw = _raw_run()
     vals = raw["trial_values"]
-    mean = sum(vals) / len(vals)
-    sd = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
+    mean, sd = _mean_sd(vals)
     ordered = sorted(vals)
     median = ordered[len(ordered) // 2 - 1] / 2 + ordered[len(ordered) // 2] / 2
     text = (f"The mean score was {mean:.4f} (SD {sd:.4f}), ranging from {ordered[0]:.4f} to {ordered[-1]:.4f}, "
@@ -848,34 +856,157 @@ def test_a_statistic_of_the_raw_trials_is_accounted_for() -> None:
     assert _tokens(check(text, result_json=raw)) == []
 
 
+def test_a_percentile_or_an_interval_the_run_did_not_store_is_not_made_up() -> None:
+    """Only mean, median, SD, min and max are derived. A 95th percentile or a 1.96-SEM interval is a result when the
+    run stored it, and is not a target the check invents (each invented target is another way to match by luck)."""
+    vals = _raw_run()["trial_values"]
+    ordered = sorted(vals)
+    q95 = _quantile(ordered, 95.0)
+    mean, sd = _mean_sd(vals)
+    upper = mean + 1.96 * sd / math.sqrt(len(vals))
+    run = _raw_run()
+    for number in (round(q95, 4), round(upper, 4)):
+        assert _tokens(check(f"The score reached {number}.", result_json=run)) == [str(number)]
+    stored = {**run, "p95": round(q95, 4)}
+    assert _tokens(check(f"The score reached {round(q95, 4)}.", result_json=stored)) == []
+
+
+def test_a_derived_statistic_is_never_the_operand_of_a_derivation() -> None:
+    """A table row whose last cell is the difference of two results is accepted when both are stored results; two
+    statistics FI derived from raw trials are not stored results, so their difference is not explained away."""
+    vals = _raw_run()["trial_values"]
+    mean, _sd = _mean_sd(vals)
+    low = min(vals)
+    diff = mean - low
+    row = f"| {mean:.4f} | {low:.4f} | {diff:.4f} |"
+    assert _tokens(check(row, result_json=_raw_run())) == [f"{diff:.4f}"]
+    stored = {"summary_rate": 0.7391, "a_result": round(mean, 4), "b_result": round(low, 4)}
+    assert _tokens(check(row, result_json=stored)) == []
+
+
 def test_every_element_of_a_short_list_is_still_a_result() -> None:
     """A sweep or a per-seed list is printed one entry at a time; only a long column is raw data."""
-    short = {"summary_rate": 0.7391, "by_setting": [0.1 + i * 0.00371 for i in range(10)]}
-    assert _tokens(check("The score at the fifth setting was 0.1148.", result_json=short)) == []
+    short = {"summary_rate": 0.7391, "by_setting": _draws(150)}
+    pick = round(short["by_setting"][17], 4)
+    assert _tokens(check(f"The score at the eighteenth setting was {pick}.", result_json=short)) == []
 
 
-def test_a_long_list_of_records_is_one_raw_column() -> None:
-    records = {"summary_rate": 0.7391, "trials": [{"error": 0.2 + i * 0.00417} for i in range(120)]}
-    pick = round(0.2 + 41 * 0.00417, 4)  # trial 41's own error
-    assert _tokens(check(f"The error was {pick}.", result_json=records)) == [str(pick)]
-    mean = sum(r["error"] for r in records["trials"]) / 120
-    assert _tokens(check(f"The mean error was {mean:.4f}.", result_json=records)) == []
+def test_a_long_sorted_column_or_one_with_few_values_keeps_its_elements() -> None:
+    """A grid, a time axis or a cumulative curve is in order and draws never are; a coded level takes few values."""
+    axis = {"summary_rate": 0.7391, "grid": [0.1 + i * 0.00371 for i in range(300)]}
+    assert _tokens(check("The point at index 57 was 0.3115.", result_json=axis)) == []
+    coded = {"summary_rate": 0.7391, "level": [0.1234] * 100 + [0.5678] * 100 + [0.9012] * 100}
+    assert _tokens(check("The coded level 0.5678 was used.", result_json=coded)) == []
+    # ...and a kept long column also has its statistics
+    mean, _sd = _mean_sd(axis["grid"])
+    assert _tokens(check(f"The mean position was {mean:.4f}.", result_json=axis)) == []
+
+
+def test_records_are_pooled_within_a_group_never_across_groups() -> None:
+    """A treatment mean is the mean of the treatment records. Pooling every record into one column made it no one's
+    statistic, and an honest subgroup mean was flagged."""
+    rows = []
+    for i in range(300):
+        rows.append({"arm": "control", "y": 0.2 + 0.3 * ((i * 7919) % 1009) / 1009})
+        rows.append({"arm": "treatment", "y": 0.6 + 0.3 * ((i * 4513) % 1013) / 1013})
+    run = {"summary_rate": 0.7391, "rows": rows}
+    treat = [r["y"] for r in rows if r["arm"] == "treatment"]
+    control = [r["y"] for r in rows if r["arm"] == "control"]
+    t_mean, c_mean = _mean_sd(treat)[0], _mean_sd(control)[0]
+    text = f"The treatment arm averaged {t_mean:.4f} and the control arm {c_mean:.4f}."
+    assert _tokens(check(text, result_json=run)) == []
+    pick = round(treat[10], 4)
+    assert _tokens(check(f"The treatment arm reached {pick}.", result_json=run)) == [str(pick)]
+
+
+def test_a_small_group_of_a_long_list_of_records_keeps_its_elements() -> None:
+    rows = [{"arm": "a", "y": 0.2 + 0.3 * ((i * 7919) % 1009) / 1009} for i in range(300)]
+    rows += [{"arm": "b", "y": 0.7 + 0.01 * i} for i in range(5)]
+    run = {"summary_rate": 0.7391, "rows": rows}
+    assert _tokens(check("Arm b reached 0.7300 at its fourth record.", result_json=run)) == []
+
+
+def _crowd(prefix: str) -> dict:
+    """400 distinct values between 0.1 and 0.9: they take about 44% of the 900 numbers ``0.xyz`` can be, so a 3-digit
+    number equals one of them on luck alone (chance > 0.2) and only the words around it can decide."""
+    return {f"{prefix}_{i}": round(0.1 + i * 0.00203, 3) for i in range(400)}
 
 
 def test_a_match_that_names_nothing_in_a_crowded_run_is_luck() -> None:
-    """400 distinct values between 0.1 and 0.9 take about 44% of the 900 numbers ``0.xyz`` can be, so a 3-digit number
-    equals one of them by luck. It counts when the sentence names the quantity (``gain``), not when it does not."""
-    crowd = {f"gain_{i}": round(0.1 + i * 0.00203, 3) for i in range(400)}
+    crowd = _crowd("gain")
     value = crowd["gain_137"]
     assert _tokens(check(f"The gain was {value}.", result_json=crowd)) == []
     assert _tokens(check(f"The widget was {value}.", result_json=crowd)) == [str(value)]
 
 
-def test_a_million_raw_values_are_checked_in_seconds() -> None:
+def test_the_words_every_result_has_do_not_name_a_quantity() -> None:
+    """``rate``, ``score``, ``error``, ``mean``(``s``), ``time`` appear in nearly every sentence and result name; a stop
+    list applied to the 4-letter stem stops each with its inflections."""
+    crowd = _crowd("error_rate")
+    value = crowd["error_rate_137"]
+    assert _tokens(check(f"The mean error rate scores were {value}.", result_json=crowd)) == [str(value)]
+    crowd = _crowd("calibration_rate")
+    value = crowd["calibration_rate_137"]
+    assert _tokens(check(f"The calibration was {value}.", result_json=crowd)) == []
+
+
+def test_only_the_sentence_of_the_number_names_it() -> None:
+    crowd = _crowd("gain")
+    value = crowd["gain_137"]
+    assert _tokens(check(f"The gain was high. The widget was {value}.", result_json=crowd)) == [str(value)]
+    assert _tokens(check(f"The widget gain was {value}. The other was fine.", result_json=crowd)) == []
+
+
+def test_a_configured_or_declared_number_is_never_luck() -> None:
+    crowd = _crowd("gain")
+    value = crowd["gain_137"]
+    assert _tokens(check(f"The widget was {value}.", result_json=crowd, config={"setting": value})) == []
+    assert _tokens(check(f"The widget was {value}.", result_json=crowd, design={"parameters": {"x": value}})) == []
+
+
+def test_luck_is_counted_per_sign_and_includes_truncation_keys() -> None:
+    from core.number_provenance import Traceable
+
+    negatives = Traceable({f"v{i}": -round(0.1 + i * 0.00203, 3) for i in range(400)})
+    assert negatives.chance(-0.5, 3) > 0.2          # the crowd is negative
+    assert negatives.chance(0.5, 3) == 0.0          # a positive number meets none of it
+    plain = Traceable({f"v{i}": 0.1 + i * 0.0023 for i in range(200)})
+    # 200 values round to 200 keys and truncate to 200 more: both are accepted matches, so both are counted
+    assert plain.chance(0.5, 3) > len(set(round(v, 3) for v in plain.values.values())) / 900.0
+    assert plain.chance(0.0004, 3) == 1.0           # a number that rounds to zero says nothing about its source
+
+
+def test_a_long_list_with_a_non_number_in_it_does_not_break_the_walk() -> None:
+    mixed = {"summary_rate": 0.7391, "trial_values": _draws(300) + [None, "n/a"], "also": [True] * 300}
+    assert _tokens(check("The summary rate was 0.7391.", result_json=mixed)) == []
+
+
+def test_a_million_raw_values_are_checked_in_seconds_and_correctly() -> None:
     import time
 
-    big = {"summary_rate": 0.7391, "trial_values": [((i * 7919) % 100003) / 100003 for i in range(1_000_000)]}
+    n = 1_000_000
+    vals = [((i * 7919) % 100003) / 100003 for i in range(n)]
+    big = {"summary_rate": 0.7391, "trial_values": vals}
+    mean, sd = _mean_sd(vals)
+    text = f"The score was 0.7391, the mean {mean:.4f} and the SD {sd:.4f}."
     started = time.time()
-    report = check("The score was 0.7391 and the mean was 0.5000.", result_json=big)
-    assert time.time() - started < 60
+    report = check(text, result_json=big)
+    took = time.time() - started
+    assert report.ok and report.paper_numbers == 3 and report.untraceable == 0
+    assert took < 60
     assert report.traceable_values < 1000
+    wrong = check("The score was 0.7391 and the mean 0.4123.", result_json=big)
+    assert _tokens(wrong) == ["0.4123"]
+
+
+def test_two_hundred_thousand_records_are_pooled_without_per_record_paths() -> None:
+    import time
+
+    rows = [{"arm": "a" if i % 2 else "b", "y": ((i * 7919) % 100003) / 100003, "z": (i * 31 % 977) / 977}
+            for i in range(200_000)]
+    run = {"summary_rate": 0.7391, "rows": rows}
+    b_mean = _mean_sd([r["y"] for r in rows if r["arm"] == "b"])[0]
+    started = time.time()
+    report = check(f"The b arm averaged {b_mean:.4f}, the rate 0.7391.", result_json=run)
+    assert time.time() - started < 60
+    assert report.ok and report.traceable_values < 1000
