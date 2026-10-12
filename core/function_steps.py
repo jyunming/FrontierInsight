@@ -1233,6 +1233,11 @@ class FunctionFiller:
         """ONE repair of one function, alone (its card or equation and the problem, never the expected value), written into
         the module when the reply is a usable function with the parameters it had. ``True`` when the module changed."""
         source = self.model_path.read_text(encoding="utf-8")
+        record = load(self.root)
+        if not self._spend(record):  # counted in the quest's total before the request, like every other one of the step
+            self.log.info("[implement] function %s is not repaired: the most requests the step may make in this quest are spent",
+                          spec.name)
+            return False
         new, why = await repair_one(
             source=source, name=spec.name, signature=spec.signature, equation=spec.equation,
             equation_block=self._equation_block(spec.equation), problem=problem, prompt=self.prompts["repair"],

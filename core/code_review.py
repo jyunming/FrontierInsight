@@ -950,7 +950,8 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     record = load(quest_root)
     out: dict[str, Any] = {"unread": "", "reread": False, "not_reviewed": [], "not_reviewed_headline": False,
                            "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False,
-                           "second_version": second_version_sentences(quest_root)}
+                           "second_version": second_version_sentences(quest_root),
+                           "reviewed": bool(record.get("read_version"))}
     if not record:
         return out
     now = version(code_dir)

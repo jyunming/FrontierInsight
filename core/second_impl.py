@@ -498,8 +498,17 @@ except BaseException:
 try:
     sp = importlib.util.spec_from_file_location("second_impl_reference", @REF@)
     ref_mod = importlib.util.module_from_spec(sp)
+    own = @OWN@
     for n in @USES@:
-        if hasattr(main_mod, n):
+        if n in own:
+            dsp = importlib.util.spec_from_file_location("second_impl_reference_" + n, own[n])
+            dmod = importlib.util.module_from_spec(dsp)
+            for m in @USES@:
+                if m != n and hasattr(main_mod, m):
+                    setattr(dmod, m, getattr(main_mod, m))
+            dsp.loader.exec_module(dmod)
+            setattr(ref_mod, n, getattr(dmod, n))
+        elif hasattr(main_mod, n):
             setattr(ref_mod, n, getattr(main_mod, n))
     sp.loader.exec_module(ref_mod)
     ref_fn = getattr(ref_mod, @NAME@)
@@ -522,11 +531,12 @@ done({"rows": rows})
 '''
 
 
-def compare_script(*, code_dir: str, module: str, name: str, reference: str, inputs: str, uses: list[str]) -> str:
+def compare_script(*, code_dir: str, module: str, name: str, reference: str, inputs: str, uses: list[str],
+                   own: dict[str, str] | None = None) -> str:
     """The ``-c`` script that imports both versions and calls each on every input; it prints one ``SECOND_IMPL: {json}`` line."""
     text = _SCRIPT
     for token, value in (("@CODE@", code_dir), ("@MODULE@", module), ("@NAME@", name), ("@REF@", reference),
-                         ("@INPUTS@", inputs), ("@USES@", list(uses))):
+                         ("@INPUTS@", inputs), ("@USES@", list(uses)), ("@OWN@", dict(own or {}))):
         text = text.replace(token, repr(value))
     return text
 
@@ -739,10 +749,14 @@ class SecondImpl:
     def __init__(self, *, quest_root: Path | str, package: str, specs: list[_fs.Spec], protocol: dict[str, Any] | None,
                  prompts: dict[str, string.Template], chat: ChatFn, run: RunFn, repair_main: RepairFn, still_passes: PassesFn,
                  passages: dict[str, str] | None = None, family_of: FamilyFn | None = None, topic_block: str = "",
-                 cap: int = MAX_KEY, log: Any = None) -> None:
+                 cap: int = MAX_KEY, log: Any = None,
+                 verify_package: Callable[[], Awaitable[str]] | None = None) -> None:
         self.root, self.package, self.specs, self.protocol = Path(quest_root), package, list(specs), protocol
         self.prompts, self.chat, self.run = prompts, chat, run
         self.repair_main, self.still_passes = repair_main, still_passes
+        #: ``verify_package()``: the model's other tests, run once on the package a repair left; ``""`` when none fails, else
+        #: what fails (the repair is then undone).
+        self.verify_package = verify_package
         self.passages = {str(k): str(v) for k, v in (passages or {}).items() if str(v).strip()}
         self.family_of, self.topic_block = family_of, topic_block
         self.cap, self.max_calls = int(cap), max_calls_for(cap)
@@ -796,7 +810,31 @@ class SecondImpl:
         else:
             entry.pop("limitation", None)
             entry["why"] = why
+        shared = entry.get("deps_from_first_version")
+        if shared and status in (UNRESOLVED, UNCONFIRMED) and entry.get("limitation"):
+            entry["limitation"] += (" The second version called " + ", ".join(shared) + " from the first version, so a fault "
+                                    "in that function would not show.")
         self.log.info("[second_impl] %s: %s%s", label(spec), status, f" ({why})" if why else "")
+        self._save()
+
+    def _orig_path(self, name: str) -> Path:
+        return self.root / DIR / f"{name}.orig.py"
+
+    def _restore_unverified_repair(self, spec: _fs.Spec, entry: dict[str, Any]) -> None:
+        """A repair of the first version was begun and the run ended before it was judged: the module as it was before the
+        repair is put back (the repair was never shown to pass its tests)."""
+        if not entry.get("repair_pending"):
+            return
+        orig = self._orig_path(spec.name)
+        try:
+            if orig.is_file():
+                self.model_path.write_text(orig.read_text(encoding="utf-8"), encoding="utf-8")
+                self.log.info("[second_impl] an unfinished repair of %s was undone", spec.name)
+                self.record["code_sha"] = _sha(self.model_path)
+                orig.unlink()
+        except OSError:
+            pass
+        entry.pop("repair_pending", None)
         self._save()
 
     # -- the reference version --
@@ -835,21 +873,38 @@ class SecondImpl:
 
     # -- comparing --
 
-    async def _compare(self, spec: _fs.Spec, entry: dict[str, Any]) -> dict[str, Any]:
-        """One subprocess runs both versions on every input. ``status`` unconfirmed with ``why`` when it cannot be judged."""
+    def _inputs_problem(self, spec: _fs.Spec) -> str:
+        """Why the function cannot be called with inputs FI knows (``""`` when it can): checked before a second version is
+        asked for, so no request is spent on a function that can only end unconfirmed."""
         base = example_inputs(spec, self.protocol)
         if not base:
-            return {"status": UNCONFIRMED, "why": "the plan gives no example inputs to call it with", "disagreements": [], "retry": False}
-        required = _required(spec.signature)
-        if not all(p in base for p in required):
-            return {"status": UNCONFIRMED, "why": "the example inputs do not cover the function's parameters", "disagreements": [], "retry": False}
+            return "the plan gives no example inputs to call it with"
+        if not all(p in base for p in _required(spec.signature)):
+            return "the example inputs do not cover the function's parameters"
+        return ""
+
+    async def _compare(self, spec: _fs.Spec, entry: dict[str, Any]) -> dict[str, Any]:
+        """One subprocess runs both versions on every input. ``status`` unconfirmed with ``why`` when it cannot be judged."""
+        why = self._inputs_problem(spec)
+        if why:
+            return {"status": UNCONFIRMED, "why": why, "disagreements": [], "retry": False}
+        base = example_inputs(spec, self.protocol)
         inputs = build_inputs(base, ranges_of(spec, self.protocol))
         (self.root / DIR).mkdir(parents=True, exist_ok=True)
         inputs_path = DIR / f"{spec.name}.inputs.json"
         (self.root / inputs_path).write_text(json.dumps(inputs), encoding="utf-8")
         uses = [d for d in spec.depends_on if d != spec.name]
+        # A dependency that has a second version of its own is called through it; the others are the first version's, which
+        # makes the evidence weaker (a fault in such a dependency is shared) and is said in the record.
+        own = {d: (DIR / f"{d}.py").as_posix() for d in uses if (self.root / DIR / f"{d}.py").is_file()}
+        shared = [d for d in uses if d not in own]
+        if shared:
+            entry["deps_from_first_version"] = shared
+        else:
+            entry.pop("deps_from_first_version", None)
         script = compare_script(code_dir="code", module=f"{self.package}.model", name=spec.name,
-                                reference=(DIR / f"{spec.name}.py").as_posix(), inputs=inputs_path.as_posix(), uses=uses)
+                                reference=(DIR / f"{spec.name}.py").as_posix(), inputs=inputs_path.as_posix(), uses=uses,
+                                own=own)
         out = None
         err = ""
         for _try in range(2):  # a harness that printed nothing is run once more: it says nothing about the function
@@ -880,11 +935,16 @@ class SecondImpl:
 
     async def _one(self, spec: _fs.Spec, entry: dict[str, Any]) -> None:
         entry["same_family"] = self._same_family()
+        self._restore_unverified_repair(spec, entry)
         if entry.get("pending"):  # a request was sent and its answer was not saved: it is not sent again
             kind = entry["pending"].get("kind")
             self._finish(spec, entry, UNCONFIRMED, f"a request ({kind}) was sent but its answer was not saved; it is not asked again")
             return
         if not self._ref_path(spec.name).is_file():
+            no_inputs = self._inputs_problem(spec)
+            if no_inputs:
+                self._finish(spec, entry, UNCONFIRMED, no_inputs)
+                return
             why = await self._write_reference(spec, entry)
             if why:
                 self._finish(spec, entry, UNCONFIRMED, f"the second version could not be written: {why}")
@@ -939,7 +999,12 @@ class SecondImpl:
         verdict, reason = adj.get("verdict"), str(adj.get("reason") or "")
         if verdict == MAIN_WRONG:
             before = self.model_path.read_text(encoding="utf-8") if self.model_path.is_file() else None
+            if before is not None:  # saved before anything is written, so a run that ends in the middle can be undone
+                self._orig_path(spec.name).parent.mkdir(parents=True, exist_ok=True)
+                self._orig_path(spec.name).write_text(before, encoding="utf-8")
+            entry["repair_pending"] = True
             if not self._spend(entry, "repair_main"):
+                entry.pop("repair_pending", None)
                 return UNRESOLVED, "no requests left to repair the first version"
             ok = False
             try:
@@ -948,17 +1013,28 @@ class SecondImpl:
             except Exception as e:  # noqa: BLE001
                 self.log.info("[second_impl] repair of %s failed: %r", spec.name, e)
             self._done_call(entry)
-            accepted = False
+            accepted, why_not = False, "the repair did not pass the function's own tests"
             if ok:
                 try:
                     accepted = bool(await self.still_passes(spec.name))
                 except Exception:  # noqa: BLE001
                     accepted = False
+            if accepted and self.verify_package is not None:
+                try:
+                    broke = await self.verify_package()
+                except Exception:  # noqa: BLE001 -- a check that cannot be made does not accept the repair
+                    broke = "the model's other tests could not be run"
+                if broke:
+                    accepted, why_not = False, f"the repair broke another check of the model ({broke})"
             if not accepted:
                 if before is not None and self.model_path.is_file() and self.model_path.read_text(encoding="utf-8") != before:
                     self.model_path.write_text(before, encoding="utf-8")  # the repair is not kept
+                entry.pop("repair_pending", None)
+                self._orig_path(spec.name).unlink(missing_ok=True)
                 adj["outcome"] = "repair not accepted"
-                return UNRESOLVED, "the judge found the first version wrong, but the repair did not pass the function's own tests"
+                return UNRESOLVED, f"the judge found the first version wrong, but {why_not}"
+            entry.pop("repair_pending", None)
+            self._orig_path(spec.name).unlink(missing_ok=True)
             adj["outcome"] = "repair accepted"
             self.record["code_sha"] = _sha(self.model_path)
             return None
@@ -999,6 +1075,8 @@ class SecondImpl:
                 if not again or not self._ref_path(spec.name).is_file():
                     continue  # finished: a resume reuses it and asks nothing
                 entry["status"] = WORKING
+                entry["rounds"] = 0
+                entry["rewrites"] = 0
                 entry.pop("adjudication", None)  # the first version changed: an earlier verdict is about other code
             try:
                 await self._one(spec, entry)

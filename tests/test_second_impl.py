@@ -511,3 +511,128 @@ def test_an_equation_function_is_checked_not_left_unconfirmed(tmp_path):
     fake = Fake(write=[fenced(GOOD_REF)])
     rec = asyncio.run(build(root, fake, [spec], proto).run_all())
     assert rec["functions"]["activation_energy"]["status"] == "agree" and fake.count("second_impl") == 1
+
+
+# --- second pass of the external review -------------------------------------------------------------------------------------
+
+
+def test_no_second_version_is_asked_for_a_function_with_no_usable_example_inputs(tmp_path):
+    fake = Fake()  # any request would raise
+    root, s, rec = run_it(tmp_path, fake, proto=protocol(example=False))
+    e = rec["functions"]["activation_energy"]
+    assert e["status"] == "unconfirmed" and "example inputs" in e["limitation"]
+    assert rec["calls"] == 0 and fake.count() == 0
+
+
+def _repair_setup(tmp_path):
+    proto = protocol()
+    root = make_quest(tmp_path, MUTANT_MAIN)
+    model = root / "code" / "pkg" / "model.py"
+    return proto, root, model
+
+
+def test_a_repair_that_breaks_another_check_of_the_package_is_undone(tmp_path):
+    proto, root, model = _repair_setup(tmp_path)
+
+    async def repair(name, problem, cases):
+        model.write_text(GOOD_MAIN, encoding="utf-8")
+        return True
+
+    async def broke():
+        return "E1"
+
+    fake = Fake(write=[fenced(GOOD_REF)], adjudicate=[verdict("main_wrong")])
+    s = build(root, fake, [spec_for(proto)], proto, repair_main=repair, verify_package=broke)
+    rec = asyncio.run(s.run_all())
+    e = rec["functions"]["activation_energy"]
+    assert e["status"] == "unresolved" and "broke another check" in e["why"]
+    assert model.read_text(encoding="utf-8") == MUTANT_MAIN, "the repair is not kept"
+    assert not (root / si.DIR / "activation_energy.orig.py").exists()
+
+
+def test_the_package_before_a_repair_is_saved_before_the_repair_writes(tmp_path):
+    proto, root, model = _repair_setup(tmp_path)
+    seen = {}
+
+    async def repair(name, problem, cases):
+        saved = root / si.DIR / "activation_energy.orig.py"
+        seen["orig"] = saved.read_text(encoding="utf-8") if saved.is_file() else None
+        model.write_text(GOOD_MAIN, encoding="utf-8")
+        return True
+
+    fake = Fake(write=[fenced(GOOD_REF)], adjudicate=[verdict("main_wrong")])
+    rec = asyncio.run(build(root, fake, [spec_for(proto)], proto, repair_main=repair).run_all())
+    assert seen["orig"] == MUTANT_MAIN
+    assert rec["functions"]["activation_energy"]["status"] == "agree"
+    assert not (root / si.DIR / "activation_energy.orig.py").exists(), "kept repair: the saved copy is dropped"
+
+
+def test_a_run_that_ended_in_the_middle_of_a_repair_gets_the_unverified_code_taken_out(tmp_path):
+    proto, root, model = _repair_setup(tmp_path)
+    ref = root / si.DIR / "activation_energy.py"
+    ref.parent.mkdir(parents=True, exist_ok=True)
+    ref.write_text(GOOD_REF, encoding="utf-8")
+    (root / si.DIR / "activation_energy.orig.py").write_text(MUTANT_MAIN, encoding="utf-8")
+    model.write_text(GOOD_MAIN.replace("8.314", "99.0"), encoding="utf-8")  # written by the repair that was never judged
+    si.save(root, {"calls": 3, "functions": {"activation_energy": {
+        "status": "working", "rounds": 1, "inputs_tried": 5, "disagreements": [], "same_family": None,
+        "repair_pending": True, "pending": {"kind": "repair_main", "round": 1}}}})
+    rec = asyncio.run(build(root, Fake(), [spec_for(proto)], proto).run_all())
+    assert model.read_text(encoding="utf-8") == MUTANT_MAIN, "the pre-repair file is back"
+    assert "repair_pending" not in rec["functions"]["activation_energy"]
+
+
+DEP_MAIN = "def a(x=2.0):\n    return x + 1.0\n\n\ndef b(x=2.0):\n    return a(x) * 3.0\n"  # a is wrong: it should double
+DEP_REF_A = "def a(x=2.0):\n    return 2.0 * x\n"
+DEP_REF_B = "def b(x=2.0):\n    return a(x) * 3.0\n"
+
+
+def _dep_specs():
+    return [fs.Spec(name="a", signature="def a(x=2.0):", purpose="double", equation="E1"),
+            fs.Spec(name="b", signature="def b(x=2.0):", purpose="triple the double", equation="E2", depends_on=["a"])]
+
+
+def _dep_protocol():
+    return {"model": {"summary": "x", "equations": [{"id": "E1", "formula": "a = 2 * x", "role": "analyses"},
+                                                    {"id": "E2", "formula": "b = 3 * a", "role": "analyses"}]}}
+
+
+def test_a_dependency_with_a_second_version_of_its_own_is_called_through_it(tmp_path):
+    root = make_quest(tmp_path, DEP_MAIN)
+    proto = _dep_protocol()
+    ref_dir = root / si.DIR
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "a.py").write_text(DEP_REF_A, encoding="utf-8")
+    fake = Fake(write=[fenced(DEP_REF_B)], adjudicate=[verdict("card_ambiguous")])
+    si.save(root, {"calls": 0, "functions": {"a": {"status": "agree", "rounds": 0, "inputs_tried": 5, "disagreements": [],
+                                                   "same_family": None}}})
+    rec = asyncio.run(build(root, fake, _dep_specs()[1:], proto).run_all() if False else
+                      build(root, fake, _dep_specs(), proto, cap=2).run_all())
+    e = rec["functions"]["b"]
+    assert e["status"] == "unresolved", "a fault in the dependency is not shared when it has a version of its own"
+    assert "deps_from_first_version" not in e
+
+
+def test_a_dependency_without_one_is_called_from_the_first_version_and_the_record_says_so(tmp_path):
+    root = make_quest(tmp_path, DEP_MAIN)
+    proto = _dep_protocol()
+    fake = Fake(write=[fenced(DEP_REF_B)])
+    specs = _dep_specs()[1:]
+    rec = asyncio.run(build(root, fake, specs, proto).run_all())
+    e = rec["functions"]["b"]
+    assert e["status"] == "agree" and e["deps_from_first_version"] == ["a"]
+
+
+def test_a_stale_entry_checked_again_starts_its_rounds_over(tmp_path):
+    proto = protocol()
+    root = make_quest(tmp_path, MUTANT_MAIN)
+    ref = root / si.DIR / "activation_energy.py"
+    ref.parent.mkdir(parents=True, exist_ok=True)
+    ref.write_text(GOOD_REF, encoding="utf-8")
+    si.save(root, {"calls": 2, "code_sha": "old", "functions": {"activation_energy": {
+        "status": "unresolved", "rounds": 2, "inputs_tried": 5, "disagreements": [], "same_family": None}}})
+    fake = Fake(adjudicate=[verdict("card_ambiguous")])
+    rec = asyncio.run(build(root, fake, [spec_for(proto)], proto).run_all())
+    e = rec["functions"]["activation_energy"]
+    assert fake.count("second_impl.adjudicate") == 1, "the rounds allowed start again for the changed code"
+    assert e["rounds"] == 1 and e["status"] == "unresolved"

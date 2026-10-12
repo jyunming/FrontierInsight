@@ -354,3 +354,106 @@ def test_each_node_resolves_its_own_provider_and_the_dot_name_falls_back(tmp_pat
     only = engine_with({"second_impl": both["second_impl"]})
     assert node_provider_for(only.config.provider.node_providers, "second_impl.adjudicate")[0] == "second_impl"
     assert only._family_of_node("second_impl.adjudicate") == "google"
+
+
+# --- second pass of the external review -------------------------------------------------------------------------------------
+
+SIMULATE = "from spring import model\n\n\ndef run_cell(cell):\n    return {'q': model.quality(2.0, 3.0, cell['c'])}\n"
+
+
+@pytest.mark.asyncio
+async def test_the_equation_tests_run_on_the_package_a_repair_left_and_name_what_fails(tmp_path: Path) -> None:
+    engine, _client = await _written(tmp_path)
+    (engine.quest_root / "code" / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    assert await engine._equation_test_failures(PROTOCOL, None) == ""
+    model = engine.quest_root / "code" / "spring" / "model.py"
+    model.write_text(model.read_text(encoding="utf-8").replace("return m * w / c", "return w / c"), encoding="utf-8")
+    assert await engine._equation_test_failures(PROTOCOL, None) == "E2"
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_breaks_an_equation_test_is_undone_and_the_function_stays_unresolved(tmp_path: Path) -> None:
+    engine, client = await _written(tmp_path)
+    code = engine.quest_root / "code"
+    (code / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    model = code / "spring" / "model.py"
+    wrong = model.read_text(encoding="utf-8").replace("return int(n)", "return int(n) + 1")
+    model.write_text(wrong, encoding="utf-8")
+    client.second = {"count_cycles": [REFERENCE["count_cycles"]]}
+    client.main = {"count_cycles": ["# S3\ndef count_cycles(n=7.5):\n    return int(n)\n"]}
+    client.judge = [json.dumps({"verdict": "main_wrong", "reason": "adds one"})]
+
+    async def broken(protocol, exec_env):  # noqa: ANN001
+        return "E2"
+
+    engine._equation_test_failures = broken  # type: ignore[method-assign]
+    pre = {n: {"status": "agree", "rounds": 0, "inputs_tried": 5, "disagreements": []} for n in ("frequency", "quality", "mean_quality")}
+    second_impl.save(engine.quest_root, {"functions": pre, "calls": 0, "code_sha": second_impl._sha(model)})
+    for name in pre:
+        ref = engine.quest_root / second_impl.DIR / f"{name}.py"
+        ref.parent.mkdir(parents=True, exist_ok=True)
+        ref.write_text(REFERENCE[name], encoding="utf-8")
+    assert await engine._second_version_gate(STATE, None, None) is False
+    entry = second_impl.load(engine.quest_root)["functions"]["count_cycles"]
+    assert entry["status"] == "unresolved" and "broke another check" in entry["why"]
+    assert model.read_text(encoding="utf-8") == wrong
+
+
+@pytest.mark.asyncio
+async def test_after_a_second_version_rewrite_the_equation_gate_runs_again(tmp_path: Path) -> None:
+    engine, _client = _setup(tmp_path)
+    order: list[str] = []
+
+    def stub(name: str, value: Any = None):
+        async def f(*a: Any, **k: Any) -> Any:
+            order.append(name)
+            return value
+        return f
+
+    for name in ("_results_from_computation", "_static_gate", "_code_review_gate", "_equation_gate"):
+        setattr(engine, name, stub(name))
+    engine._second_version_gate = stub("_second_version_gate", True)  # type: ignore[method-assign]
+    engine._oracle_gate = stub("_oracle_gate", None)  # type: ignore[method-assign]
+    engine._cannot_repair_stop = lambda: None  # type: ignore[method-assign]
+    engine._code_problems_stop = lambda state: None  # type: ignore[method-assign]
+    stop, _code, repaired = await engine._gate_pass({}, None, None, engine.quest_root / "code" / "simulate.py")
+    assert stop is None and repaired is True
+    assert order.count("_equation_gate") == 2
+    assert order.index("_second_version_gate") < len(order) - 1 - order[::-1].index("_equation_gate") < order.index("_oracle_gate")
+
+
+@pytest.mark.asyncio
+async def test_a_repair_is_counted_in_the_functions_total_and_refused_when_it_is_spent(tmp_path: Path) -> None:
+    engine, client = await _written(tmp_path)
+    specs = fs.model_functions(OUTLINE, PROTOCOL)[0]
+    filler = engine._new_function_filler(OUTLINE, "spring", PROTOCOL, specs, {}, [])
+    filler.know(specs)
+    spec = next(s for s in specs if s.name == "count_cycles")
+    before = fs.load(engine.quest_root)["calls_total"]
+    client.main = {"count_cycles": ["# S3\ndef count_cycles(n=7.5):\n    return int(n) + 0\n"]}
+    assert await filler.repair_function(spec, "it is wrong") is True
+    assert fs.load(engine.quest_root)["calls_total"] == before + 1
+    record = fs.load(engine.quest_root)
+    record["calls_total"] = filler.max_calls
+    fs.save(engine.quest_root, record)
+    asked = client.count("implement")
+    assert await filler.repair_function(spec, "it is wrong") is False and client.count("implement") == asked
+
+
+@pytest.mark.asyncio
+async def test_the_summary_does_not_say_no_second_model_read_the_code_when_one_did(tmp_path: Path) -> None:
+    from core.engine import _claim_findings_parts
+
+    engine, client = await _written(tmp_path)
+    code = engine.quest_root / "code"
+    (code / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    v = code_review.version(code)
+    code_review.save(engine.quest_root, {"read_version": v, "version": v, "final": True, "problems": [], "reviewer": "other"})
+    wrong = "def mean_quality(q1, q2):\n    return q1 - q2\n"
+    client.second = {"frequency": [REFERENCE["frequency"]], "quality": [REFERENCE["quality"]],
+                     "count_cycles": [REFERENCE["count_cycles"]], "mean_quality": [wrong]}
+    client.judge = [json.dumps({"verdict": "card_ambiguous", "reason": "both readings"})]
+    await engine._second_version_gate(STATE, None, None)
+    assert code_review.open_findings(engine.quest_root, code)["unread"] == ""
+    claim = " ".join(_claim_findings_parts(engine.quest_root))
+    assert "no second model read the code" not in claim and claim.startswith("A SECOND MODEL'S READING")

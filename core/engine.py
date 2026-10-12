@@ -11771,6 +11771,29 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     return family
         return name or None
 
+    async def _equation_test_failures(self, protocol: dict[str, Any], exec_env: Any) -> str:
+        """The plan's equation tests run once on the package as it is (no repair, no request): ``""`` when none fails or they
+        cannot be run here, else the failing equations' ids."""
+        if self.config.engine.oracle_check == "off" or not (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
+            return ""
+        if not _equation_tests.eligible(protocol):
+            return ""
+        rows = _equation_tests.example_rows(protocol)
+        located = _equation_tests.locate(protocol, self._equation_sources())
+        case_list = _equation_tests.cases(rows, located)
+        if not case_list:
+            return ""
+        _equation_tests.write(self.quest_root / "code", case_list)
+        env = {**(exec_env or os.environ)}
+        raw_dir = self._raw_root() / "equation_tests"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
+        _rc, out, _err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
+        results = _equation_tests.parse_results(out)
+        if results is None:
+            return ""
+        return ", ".join(str(r.get("id")) for r in results if r.get("status") != _equation_tests.OK)
+
     async def _second_version_gate(self, state: QuestState, py: Any, exec_env: Any) -> bool:
         """After the equation tests and before the oracle gate: for up to ``second_impl.MAX_KEY`` key functions of the
         model, a second version is written by another request (steps ``second_impl`` and ``second_impl.adjudicate``, which
@@ -11814,8 +11837,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             async def still_passes(name: str) -> bool:
                 return await filler.still_passes(by_name[name])
 
+            async def verify_package() -> str:
+                return await self._equation_test_failures(protocol, exec_env)
+
             before = self._package_snapshot()
             result = await _second_impl.second_versions(
+                verify_package=verify_package,
                 quest_root=self.quest_root, package=package, specs=specs, protocol=protocol,
                 prompts={"write": self._prompts["second_impl_write"], "adjudicate": self._prompts["second_impl_adjudicate"]},
                 chat=chat, run=self._run_in_env, repair_main=repair_main, still_passes=still_passes, passages=passages,
@@ -15134,8 +15161,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # (core/second_impl.py). It never stops the quest; a repair of a function it makes is read again just below, and the
         # receipt and the final reading of the code see the package it left.
         second_rewrote = await self._second_version_gate(state, py, exec_env)
-        if second_rewrote and (stop := self._code_problems_stop(state)) is not None:
-            return stop, None, False
+        if second_rewrote:
+            # A function was repaired: every equation test is run again on the package it left (a repair that fails one is
+            # already undone inside the check; this also covers a repair kept before a restart).
+            failed_equations = await self._equation_gate(state, py, exec_env)
+            if failed_equations is not None:
+                return failed_equations, None, False
+            if (stop := self._code_problems_stop(state)) is not None:
+                return stop, None, False
         # A repair of one equation's function is a new text of the simulation: read again for typed-in results (the same
         # text is never read twice), before the oracle gate tests it.
         await self._results_from_computation(state)
@@ -24854,7 +24887,7 @@ def _claim_findings_parts(quest_root: Path) -> list[str]:
         return []
     if f["unread"] and not any(f[k] for k in ("missing", "different", "flagged", "unshown", "conflicts", "not_reviewed", "second_version")):
         return ["No second model compared the code with the plan, so no findings about the code are listed."]
-    if f["second_version"] and not any(f[k] for k in ("reread", "missing", "different", "flagged", "unshown",
+    if f["second_version"] and not f["reviewed"] and not any(f[k] for k in ("reread", "missing", "different", "flagged", "unshown",
                                                        "conflicts", "not_reviewed", "stopped")):
         return [
             "TWO INDEPENDENTLY WRITTEN VERSIONS OF KEY FUNCTIONS DISAGREED, or could not be compared (FI's own check; no second "
