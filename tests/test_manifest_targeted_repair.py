@@ -82,5 +82,9 @@ def test_an_analysis_difference_is_sent_back_up_to_three_times_and_nothing_else_
 def test_a_repair_that_gave_up_spends_the_analysis_budget_so_the_stop_follows(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     eng.config.engine.run_manifest_check = "block"
+    eng._manifest_last_analysis_only = True  # type: ignore[attr-defined]
     patch = eng._manifest_repair_gave_up({"run_manifest_failures": 1, "exec_reflect_iter": 0})
     assert patch is not None and patch["run_manifest_failures"] >= 3
+    eng._manifest_last_analysis_only = False  # type: ignore[attr-defined]
+    patch = eng._manifest_repair_gave_up({"run_manifest_failures": 1, "exec_reflect_iter": 0})
+    assert patch is not None and patch["run_manifest_failures"] == eng.config.engine.run_manifest_repair_attempts

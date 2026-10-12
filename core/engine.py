@@ -15282,6 +15282,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 # another grid, a claimed count its own values do not back) sends simulate.py back, as it always did.
                 analysis_only = set(manifest_found) <= set(self._manifest_analysis_problems)
                 budget = _manifest_repair_budget(budget, analysis_only)
+                self._manifest_last_analysis_only = analysis_only  # for a repair that gives up (the budget it spends)
                 to_fix = _split_run.ANALYSIS_NAME if analysis_only else _split_run.SIMULATE_NAME
                 self._log.warning(
                     "[run_manifest] the run differs from the frozen protocol (%d): %s; sending %s back (%d of %d)",
@@ -16044,7 +16045,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "checked once more and stops with it"
         )
         patch: QuestState = {
-            "run_manifest_failures": _manifest_repair_budget(int(self.config.engine.run_manifest_repair_attempts), True),
+            "run_manifest_failures": _manifest_repair_budget(
+                int(self.config.engine.run_manifest_repair_attempts), bool(getattr(self, "_manifest_last_analysis_only", False))),
             "exec_patch_pending": True,
             "exec_reflect_iter": int(state.get("exec_reflect_iter") or 0) + 1,
         }
