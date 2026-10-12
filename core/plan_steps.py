@@ -75,7 +75,8 @@ def parse(protocol: Any) -> tuple[list[dict[str, Any]], list[str]]:
         card: dict[str, Any] = {
             "id": sid, "name": _text(entry.get("name"), 100), "does": _text(entry.get("does")), "inputs": inputs,
             "output": _text(entry.get("output"), 200), "source": _text(entry.get("source"), 300),
-            "uses": [], "relations": [], "example": None, "example_state": "none", "expected": None}
+            "uses": [], "relations": [], "example": None, "example_state": "none", "expected": None,
+            "random": entry.get("random")}
         for field in ("name", "does", "output"):
             if not card[field]:
                 problems.append(f"step {label} has no `{field}`")
