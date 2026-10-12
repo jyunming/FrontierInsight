@@ -444,7 +444,8 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False) -> 
         "A setting to vary or compare is a key of `protocol.optimisation.grid` with every value the topic states (this "
         "plan is a search for the best design, so do NOT write a `protocol.grid`): either one of the design variables, or "
         "a condition held fixed during the search, which you also list under `protocol.optimisation.fixed` with the value "
-        "the search holds it at. What the search itself finds (the best design) needs no setting: say in "
+        "the search holds it at (a condition whose values are names, such as a family or a mode, needs no `fixed` entry: "
+        "FI holds it at the first name listed). What the search itself finds (the best design) needs no setting: say in "
         "`protocol.topic_map` that `optimisation` covers it. "
         if search else
         "A setting to vary or compare is a key of `protocol.grid` with every value the topic states (or, for a search for "

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -212,6 +213,33 @@ def _number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _grid_values(axis: Any, values: Any) -> tuple[list[Any] | None, str | None]:
+    """``(the values of one grid axis, None)`` or ``(None, why)``.
+
+    An axis takes numbers, names (text), or tuples (a list of equal-length lists of numbers, each inner list being ONE
+    setting, such as an inner and an outer radius). A list that mixes names and numbers is read as names: every number
+    becomes its text, so the axis compares settings by name and the plan is not refused over a spelling (a name stays
+    exactly as written; a number is written back as the text of the number). A list that mixes tuples with anything else
+    is refused, since there is no single meaning for it."""
+    where = f"`protocol.grid.{axis}`"
+    if not isinstance(values, list) or not values:
+        return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
+    if all(isinstance(v, list) for v in values):
+        width = len(values[0])
+        if not width or any(len(v) != width or not all(_number(x) and math.isfinite(x) for x in v) for v in values):
+            return None, (f"{where}: when each value is a list, every one must be a list of the same number of numbers "
+                          "(for example [[0.5, 0.8], [0.6, 0.9]]); each list is one setting")
+        return [list(v) for v in values], None
+    if any(isinstance(v, (list, dict)) for v in values):
+        return None, (f"{where} mixes lists with single values: write every value as a number, every value as text, "
+                      "or every value as a list of numbers of the same length")
+    if all(_number(v) for v in values):
+        return list(values), None
+    if all(_number(v) or (isinstance(v, str) and v.strip()) for v in values):
+        return [v.strip() if isinstance(v, str) else str(v) for v in values], None
+    return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
+
+
 def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None]:
     """``(protocol, None)`` when the experiment protocol block can be checked against a script, else ``(None, why)``.
 
@@ -230,10 +258,10 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         for axis, values in grid.items():
             if _number(values) or (isinstance(values, str) and values.strip()):
                 values = [values]
-            if (not isinstance(values, list) or not values
-                    or not (all(_number(v) for v in values) or all(isinstance(v, str) and v.strip() for v in values))):
-                return None, f"`protocol.grid.{axis}` must be a non-empty list of numbers, or a non-empty list of names (text), not a mix"
-            fixed[str(axis)] = [v.strip() if isinstance(v, str) else v for v in values]
+            fixed_values, why = _grid_values(axis, values)
+            if why:
+                return None, why
+            fixed[str(axis)] = fixed_values
         out["grid"] = fixed
     runs = out.get("runs_per_setting")
     if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):

@@ -454,7 +454,7 @@ def _grid(grid: Any, variables: dict[str, dict[str, Any]], fixed: dict[str, Any]
         else:
             return (f"{_P}.grid` scans `{axis}`, which is neither a design variable nor a condition held fixed: to "
                     f"compare the study across `{axis}`, also list it under `protocol.optimisation.fixed` with the value "
-                    "the search holds it at")
+                    "the search holds it at (a setting whose values are names needs no such entry)")
     return None
 
 
@@ -602,6 +602,18 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
         return None, f"{_P}.constraint_margin` must be a number of at least 0"
 
     grid = out.get("grid")
+    if isinstance(grid, dict):
+        # A study compared across named alternatives (a family, a mode) is an outer comparison, not a search variable. The
+        # plan need not also list it as held fixed: FI does, at the first alternative named (the alternatives are still all
+        # measured by the scan; the held one is where the search goes on from).
+        held = dict(fixed) if isinstance(fixed, dict) else {}
+        for axis, values in grid.items():
+            values = values if isinstance(values, list) else [values]
+            if (str(axis) not in variables and str(axis) not in {str(k) for k in held}
+                    and values and all(isinstance(v, str) and v.strip() for v in values)):
+                held[str(axis)] = values[0].strip()
+        if held and held != (fixed if isinstance(fixed, dict) else {}):
+            out["fixed"] = fixed = held
     if grid is not None:
         why = _grid(grid, variables, {str(k): v for k, v in fixed.items()} if isinstance(fixed, dict) else None)
         if why:
@@ -904,7 +916,7 @@ def ask_request(topic: str, problems: list[str], left_out: list[str] | None = No
     parts.append("Write the block under `protocol` (as `protocol.optimisation`), not at the top level of the design block. "
                  "If the plan has a plain `protocol.grid`, remove it: a plan cannot hold both a sweep and a search (a "
                  "setting to compare goes in `protocol.optimisation.grid`: a design variable, or a condition listed under "
-                 "`protocol.optimisation.fixed` with the value the search holds it at). "
+                 "`protocol.optimisation.fixed` with the value the search holds it at; a condition whose values are names needs no entry there). "
                  "Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion.")
     return "\n\n".join(parts)
 

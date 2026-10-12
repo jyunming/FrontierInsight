@@ -206,7 +206,7 @@ def test_the_plan_says_which_numbers_the_topic_sets_and_the_protocol_leaves_out(
     ("not a mapping", "mapping"),
     ({"grid": ["R0"]}, "grid"),
     ({"grid": {"R0": []}}, "non-empty"),
-    ({"grid": {"R0": ["a", 1]}}, "not a mix"),
+    ({"grid": {"R0": ["a", [1]]}}, "mixes lists"),
     ({"runs_per_setting": 2.5}, "whole number"),
     ({"runs_per_setting": 0}, "whole number"),
     ({"thresholds": {"t": "high"}}, "thresholds"),

@@ -709,13 +709,15 @@ def test_a_grid_axis_may_be_names_but_not_a_mix_or_a_bool() -> None:
     assert why is None and ok["grid"] == {"method": ["euler", "rk4"], "dt": [0.1, 0.01]}
     single, why = plan.normalize_protocol({"grid": {"method": "euler"}})
     assert why is None and single["grid"] == {"method": ["euler"]}
-    for bad in (["euler", 2], [True, False], [], [""]):
+    for bad in (["euler", [1, 2]], [True, False], [], [""]):
         got, why = plan.normalize_protocol({"grid": {"method": bad}})
         assert got is None and "protocol.grid.method" in why
+    mixed, why = plan.normalize_protocol({"grid": {"method": ["euler", 2]}})  # names and a number: read as names
+    assert why is None and mixed["grid"] == {"method": ["euler", "2"]}
 
 
 def test_a_grid_that_cannot_be_read_is_reported_in_plain_words() -> None:
-    out, notes = plan.repair_protocol({"grid": {"method": ["euler", 2]}, "runs_per_setting": 3})
+    out, notes = plan.repair_protocol({"grid": {"method": ["euler", [1, 2]]}, "runs_per_setting": 3})
     assert "grid" not in out and len(notes) == 1
     assert "no settings to vary yet" in notes[0] and "FI asks the plan's model to write them" in notes[0]
     assert "[euler, rk4]" not in notes[0] and "in the protocol of this plan" not in notes[0], "a person is not asked to write it"

@@ -149,7 +149,9 @@ def manifest_from_ledger(
                 realized[axis].add(value)
     manifest = {
         "schema": SCHEMA,
-        "realized_grid": {axis: sorted(values, key=lambda v: (isinstance(v, str), v)) for axis, values in realized.items()},
+        "realized_grid": {axis: [list(v) if isinstance(v, tuple) else v
+                                 for v in sorted(values, key=lambda v: (isinstance(v, (str, tuple)), v))]
+                          for axis, values in realized.items()},
         "attempted_per_cell": attempted,
         "successful_per_cell": successful,
         "failed_trials": failed,
@@ -195,7 +197,15 @@ def _whole(value: Any) -> tuple[float | None, str | None]:
     return float(value), None
 
 
+def _freeze(value: Any) -> Any:
+    """A grid value as something that can sit in a set: a tuple setting (a list of numbers) becomes a tuple."""
+    return tuple(_freeze(v) for v in value) if isinstance(value, (list, tuple)) else value
+
+
 def _same(a: Any, b: Any) -> bool:
+    if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+        return (isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)) and len(a) == len(b)
+                and all(_same(x, y) for x, y in zip(a, b)))
     x, y = _num(a), _num(b)
     if x is not None and y is not None:
         return math.isclose(x, y, rel_tol=1e-9, abs_tol=1e-12)
@@ -271,6 +281,11 @@ def _match_grid_value(raw: str, allowed: list[Any]) -> Any:
     for v in allowed:
         if isinstance(v, str) and raw == v:
             return v
+    if raw.startswith("[") and raw.endswith("]"):  # a tuple setting is written "[0.5;0.8]" (no comma: a key is split on them)
+        parts = [_coerce_number(x.strip()) for x in raw[1:-1].replace(",", ";").split(";")]
+        for v in allowed:
+            if isinstance(v, (list, tuple)) and len(v) == len(parts) and all(_same(x, y) for x, y in zip(v, parts)):
+                return _freeze(v)
     number = _num(_coerce_number(raw))
     if number is not None:
         for v in allowed:
@@ -326,7 +341,7 @@ def _all_cells(grid: dict[str, list[Any]]) -> set[frozenset[tuple[str, Any]]]:
     """Every setting the protocol's grid names — its full Cartesian product, canonically keyed the same way
     :func:`_canonicalize_cell` keys a manifest's cells, so the two sets can be compared for exact equality."""
     axes = list(grid.items())
-    return {frozenset(zip((a for a, _ in axes), combo)) for combo in product(*(v for _, v in axes))}
+    return {frozenset(zip((a for a, _ in axes), (_freeze(c) for c in combo))) for combo in product(*(v for _, v in axes))}
 
 
 def _total_values_reported(result_json: Any, metric_id: str) -> int:

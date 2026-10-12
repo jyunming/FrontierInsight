@@ -49,6 +49,9 @@ from typing import Any
 from . import stats as _stats
 
 KINDS = ("proportion", "mean")
+# Plain words for "one measured number per run": the estimator is the mean over runs, so these read as `mean`.
+KIND_ALIASES = {"value": "mean", "measure": "mean", "measurement": "mean", "number": "mean", "scalar": "mean",
+                "average": "mean", "continuous": "mean", "numeric": "mean"}
 DEFAULT_FAMILY = "all"
 
 
@@ -69,8 +72,10 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
             return None, f"`protocol.metrics` names `{ident}` twice"
         seen.add(ident)
         kind = str(item.get("kind") or "").strip().lower()
+        kind = KIND_ALIASES.get(kind, kind)
         if kind not in KINDS:
-            return None, f"`protocol.metrics` entry `{ident}`: `kind` must be `proportion` or `mean`"
+            return None, (f"`protocol.metrics` entry `{ident}`: `kind` must be `proportion` (a share of runs that succeed) "
+                          f"or `mean` (a number measured once per run and averaged over runs; `value` is accepted for it)")
         # `estimand` and `unit` are what make a spec say what the number actually is (a probability of what,
         # over what population) rather than just which estimator function to call -- required, the same as
         # every other gate here (a config missing what protocol_check/oracle_check need is refused, not

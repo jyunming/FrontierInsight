@@ -2532,7 +2532,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         g.add_conditional_edges(
             "execute_reflect",
             self._audited_route("execute_reflect", self._route_after_execute_reflect),
-            {"retry": "execute", "proceed": "improve"},
+            {"retry": "execute", "proceed": "improve", "stuck": "evidence_gate"},
         )
         # improve → execute once, when it kept a changed version: that version runs the ordinary way (every check, the
         # full set of trials), and its run is the one analysed. It then comes back here and goes on.
@@ -2731,6 +2731,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         code (→ retry execute) or accepted the failure / success
         (→ proceed to analyze)."""
         result = state.get("exec_result") or {}
+        if result.get("topic_unmet"):
+            # Decided before anything ran: the plan never covered what the topic asks. There is nothing to improve, analyse
+            # or cross-check, and a redesign now would be recorded as a change made after results were seen. The gate states
+            # the stop (no paper) from the record, and the quest ends there.
+            return "stuck"
         rc = result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
         # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
@@ -5742,6 +5747,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return design, plan_sha
             used_before = getattr(self, "_plan_chat_calls", 0)
             outcome = "kept"
+            earlier_problem = last_problem
             last_problem = ""
             schema = False
             try:
@@ -5761,6 +5767,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 schema = True
                 last_problem = re.sub(r";? ?plan\.md is unchanged\.?$", "", " ".join(str(e).split()))[:1500]
                 self._log.warning("[plan] the plan step's answer to complete %s could not be used: %s", short, e)
+                if earlier_problem and last_problem == earlier_problem:
+                    outcome = "same refusal again"
+                    schema = False  # kept so: a resume does not ask once more for the same refusal
             except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing
                 if _is_fatal_provider_error(e):
                     # Never asked (a usage limit, a dead login): the ask is given back, and the step stops to be run
@@ -5773,6 +5782,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             calls += max(1, getattr(self, "_plan_chat_calls", 0) - used_before)  # the calls really made
             self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file,
                                       {**(extra or {}), **({"problem": last_problem, "schema": schema} if last_problem else {})})
+            if outcome == "same refusal again":
+                # The same reason twice: the model repeats an answer the plan's rules cannot take, so another call would
+                # cost a few minutes and return the same refusal. The stop that follows says what is missing.
+                self._log.warning("[plan] the plan's model gave the same answer that could not be used for %s twice, so FI "
+                                  "stopped asking (%d request(s) made)", short, count)
+                return design, plan_sha
             if outcome in ("no complete answer", "no answer", "plan changed meanwhile"):
                 again, sha = self._design_from_plan()
                 return (again, sha) if again is not None and outcome == "plan changed meanwhile" else (design, plan_sha)
@@ -6144,9 +6159,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 save(asks)
                 return {**merged, "protocol": fixed}
             self._log.warning("[design] the design step's answer to add what the topic asks for could not be used: %s", why)
+            earlier = problem
             problem = " ".join(str(why or "the answer had none of what was asked in a form that can be read").split())[:1500]
             schema = True  # the reader named what it could not read: that goes back for another try
+            repeated = bool(earlier) and problem == earlier
+            if repeated:
+                schema = False  # kept so: a later pass of this round (or a resume) does not ask once more
             save(asks)  # the reason is kept with the count, so the stop can say why
+            if repeated:
+                self._log.warning("[design] the design step's model gave the same answer that could not be used twice, so FI "
+                                  "stopped asking (%d request(s) made)", asks)
+                break
         return design
 
     _TOPIC_UNMET_FILE = "topic_unmet.json"
@@ -18096,8 +18119,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         the rule. The writer got no note, and the papers went out on no experiment. Now the quest goes back to design
         once while an iteration is left; after that the verdict is ``insufficient`` and the evidence note says why."""
         exec_result = state.get("exec_result")
+        if isinstance(exec_result, dict) and exec_result.get("topic_unmet"):
+            # Stopped before anything ran (the execute step's record of it): the gate states that, whatever the code or the
+            # results hold, so the reason the quest reports is the one that stopped it.
+            why = str(exec_result["topic_unmet"])
+            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
+            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True, "stuck_reason": "topic_unmet"}
         if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
-                _missing_headline := _code_review.resolve_headline(
+                _missing_headline :=_code_review.resolve_headline(
                     self.quest_root, self.quest_root / "code", state.get("result_json"))):
             # A second model found the study's main quantity missing from the code, the repairs did not add it, and the
             # run's own results do not hold it either (a reviewer's word alone never stops a quest).
@@ -24629,7 +24658,7 @@ A search for the best design has NO top-level `grid`: its protocol has an `optim
   "numerical_settings": {"<a mesh size, a time step, a number of elements>": {"search": <the value the search uses>, "check": [<finer values the best designs and the baseline are recomputed at>], "finer": "<smaller | larger>"}},
   "evaluation_budget": {"starts": <whole number of starting points>, "per_start": <whole number of evaluations each>, "seconds_per_evaluation": <your estimate of one evaluation, or leave out>},
   "search_method": "<bounded_local | global_then_local | exhaustive | scipy:<function> | optuna:<sampler>>",
-  "grid": {"<design variable, or a condition listed in fixed that the study should also be compared across>": [<a coarse scan run before the search, plotted; only a cell at the value held in fixed can start the search; leave out when not wanted>]},
+  "grid": {"<design variable, a condition listed in fixed that the study should also be compared across, or a setting whose values are names>": [<a coarse scan run before the search, plotted; only a cell at the value held in fixed can start the search; leave out when not wanted>]},
   "improvement_tolerance": {"value": <number, in the objective's unit; a fraction when relative, 0.05 = 5%>, "mode": "<absolute | relative>"},
   "target": <the value of the objective the person hopes to reach, only when the topic names one>
 }

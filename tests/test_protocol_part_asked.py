@@ -70,14 +70,14 @@ def _stop(eng: Any) -> list[dict[str, Any]]:
 @pytest.mark.asyncio
 async def test_an_unreadable_sweep_is_asked_of_the_plans_model_and_the_sweep_runs(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
-    mixed = {"fin_spacing": [2.0, "wide"]}  # numbers and names in one list: cannot be read
+    mixed = {"fin_spacing": [2.0, [1, 2]]}  # a list among single values: cannot be read
     model = Model(eng, [_set(grid=GOOD_GRID, tolerance_changed=True)], _draft(grid=mixed))
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [] and patch["design"]["protocol"]["grid"] == GOOD_GRID
     assert _record(eng)["count"] == 1
-    assert "must be a non-empty list of numbers" in model.asked[0] and "protocol.grid" in model.asked[0]
+    assert "mixes lists with single values" in model.asked[0] and "protocol.grid" in model.asked[0]
     text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     assert "Write each parameter" not in text and "put it right here" not in text and "NO settings" not in text
     assert "FI asked the plan's model to write `protocol.grid` again, and it is now in the plan" in text
@@ -90,19 +90,19 @@ async def test_an_unreadable_sweep_is_asked_of_the_plans_model_and_the_sweep_run
 async def test_a_sweep_still_unreadable_after_the_bounded_requests_stops_plainly_and_a_resume_asks_no_more(
         tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
-    model = Model(eng, [_set(grid={"fin_spacing": [2.0, "wide"]})] * 8, _draft(grid={"fin_spacing": [2.0, "wide"]}))
+    model = Model(eng, [_set(grid={"fin_spacing": [2.0, [1, 2]]})] * 8, _draft(grid={"fin_spacing": [2.0, [1, 2]]}))
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
     with pytest.raises(Paused):
         await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert _record(eng)["count"] == 4 and len(model.asked) <= 12  # four: the reader named the form it refused
+    assert _record(eng)["count"] == 2 and len(model.asked) <= 12  # two: the same refusal twice ends the asking
     shown = " ".join(seen[0]["steps"])
-    assert "Nothing was run" in shown and "asked the plan's model 4 time(s)" in shown
+    assert "Nothing was run" in shown and "asked the plan's model 2 time(s)" in shown
     assert "You do not need to write them yourself" in shown and "plan.md" not in shown
     assert not (eng.quest_root / "paper.md").exists()
     with pytest.raises(Paused):  # a resume stops again without asking a third time
         await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert _record(eng)["count"] == 4 and len(model.asked) <= 12
+    assert _record(eng)["count"] == 2 and len(model.asked) <= 12
     assert "the quest stops" in plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
 
 
@@ -137,7 +137,7 @@ async def test_unreadable_metrics_are_asked_once_and_when_still_unreadable_the_s
     seen = _stop(eng)
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [] and patch["design"]["protocol"]["metrics"][0]["id"] == "base_temperature"
-    assert "`kind` must be `proportion` or `mean`" in model.asked[0]
+    assert "`kind` must be `proportion`" in model.asked[0]
     assert "put it right here" not in plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
 
     other = _engine(tmp_path / "again", [])
@@ -152,7 +152,7 @@ async def test_unreadable_metrics_are_asked_once_and_when_still_unreadable_the_s
 @pytest.mark.asyncio
 async def test_a_part_asked_about_at_the_plan_step_is_not_asked_again_at_the_design_step(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
-    model = Model(eng, [], _draft(grid={"fin_spacing": [2.0, "wide"]}))  # every request fails
+    model = Model(eng, [], _draft(grid={"fin_spacing": [2.0, [1, 2]]}))  # every request fails
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     after_plan = len(model.asked)
     assert after_plan >= 1 and _record(eng)["parts"] == ["grid"]
