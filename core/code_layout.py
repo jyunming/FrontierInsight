@@ -602,6 +602,26 @@ def _seed(case):
     return int(hashlib.sha256(f"{{base}}|{{key}}|0".encode("utf-8")).hexdigest()[:8], 16)
 
 
+def _cell_runs_trials():
+    import ast
+    tree = ast.parse(Path(simulate.__file__).read_text(encoding="utf-8"))
+    defs = {{n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}}
+    seen, todo = set(), ["run_cell"]
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in defs:
+            continue
+        seen.add(name)
+        for sub in ast.walk(defs[name]):
+            if isinstance(sub, ast.Call):
+                for x in (sub.func, *sub.args):
+                    if isinstance(x, ast.Name):
+                        if x.id == "run_trial":
+                            return True
+                        todo.append(x.id)
+    return False
+
+
 def _measure(check):
     if check["case"] is None:
         found = simulate.oracle()
@@ -610,9 +630,11 @@ def _measure(check):
         assert value is not None, f"{{check['name']}}: simulate.oracle() does not return this check"
         return value
     case = dict(check["case"])
-    # With both functions, a check that holds in every single trial runs on run_trial and every other check (a quantity of the
-    # setting: a mean, a rate) on run_cell, as Frontier Insight does.
-    one_trial = hasattr(simulate, "run_trial") and (not hasattr(simulate, "run_cell") or check["per_trial"])
+    # With both functions the study runs only run_trial: a check that holds in every single trial runs on it, and so does any
+    # other check unless run_cell really calls run_trial (its mean then comes from the study's own trials), as Frontier
+    # Insight does.
+    one_trial = hasattr(simulate, "run_trial") and (
+        not hasattr(simulate, "run_cell") or check["per_trial"] or not _cell_runs_trials())
     if one_trial:
         return simulate.run_trial(case, 0, _seed(case))[check["measure"]]
     return simulate.run_cell(case)[check["measure"]]
@@ -629,6 +651,8 @@ def _check(index):
 def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
     """``tests/test_oracles.py``: one test per check of the plan that has a number to agree with; ``None`` when there is
     none."""
+    from .trial_runner import is_per_trial
+
     checks, names = [], []
     taken: set[str] = set()
     for oracle in _oracle.declared(protocol):
@@ -639,7 +663,7 @@ def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
         name = str(oracle["name"]).strip()
         checks.append({"name": name, "case": own[0] if own else None, "measure": own[1] if own else None,
                        "expected": expected, "limit": limit,
-                       "per_trial": _oracle.kind_of(oracle) == "invariant"})
+                       "per_trial": is_per_trial(oracle)})
         names.append(_test_name(name, taken))
     if not checks:
         return None

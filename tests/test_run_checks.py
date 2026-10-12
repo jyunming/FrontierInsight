@@ -596,3 +596,14 @@ async def test_a_run_trial_that_is_a_cell_aggregate_goes_back_to_the_code_not_to
     assert model.asked == [] and ex.calls == 0, "the plan is not asked to shrink the grid and nothing is timed"
     assert "too_long" not in patch["exec_result"]
     assert "run_trial must run ONE trial" in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_an_honest_run_trial_that_calls_a_method_named_run_cell_is_not_sent_back(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[])
+    honest = SLOW_SIM.replace("    return {", "    sim_cell = type('S', (), {'run_cell': staticmethod(lambda s: s)})\n"
+                                              "    sim_cell.run_cell(seed)\n    return {")
+    (eng.quest_root / "code" / "simulate.py").write_text(honest + "\ndef run_cell(cell):\n    return {'y': 1.0}\n",
+                                                         encoding="utf-8")
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert ex.calls > 0, "the experiment was timed as usual"

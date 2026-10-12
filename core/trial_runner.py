@@ -490,44 +490,109 @@ def entries(simulate: Path) -> set[str]:
 TRIAL_AGGREGATE_WHY = ("run_trial must run ONE trial of the setting, and it currently returns the result of run_cell, "
                        "which is the setting's number computed over many trials")
 
+_OWN_MODULE = "simulate"
 
-def _called_names(node: ast.AST) -> set[str]:
-    """The names of the functions called anywhere inside ``node`` (``f(...)`` and ``obj.f(...)``)."""
-    names: set[str] = set()
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Call):
-            f = sub.func
-            if isinstance(f, ast.Name):
-                names.add(f.id)
-            elif isinstance(f, ast.Attribute):
-                names.add(f.attr)
-    return names
+
+class _Module:
+    """What one reading of simulate.py (never run) says about which function reaches which. A module-level ``def``, a
+    module-level name bound to an expression (``_run = run_cell``, ``run_trial = lambda c, t, s: run_cell(c)``,
+    ``TABLE = {"a": run_cell}``) and an import (``from x import run_cell as y``) are all followed by name. An attribute
+    call counts only when its object is this very module (``import simulate``, ``import x as simulate``); ``obj.run_cell()``
+    on any other object is that object's own method and is not this file's ``run_cell``."""
+
+    def __init__(self, source: str) -> None:
+        self.ok = True
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            self.ok = False
+            return
+        self.nodes: dict[str, list[ast.AST]] = {}
+        self.alias: dict[str, str] = {}      # an imported name -> the name it stands for in this module
+        self.modules: set[str] = {_OWN_MODULE}
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.nodes.setdefault(n.name, []).append(n)
+            elif isinstance(n, (ast.Assign, ast.AnnAssign)) and getattr(n, "value", None) is not None:
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        self.nodes.setdefault(t.id, []).append(n.value)
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.name.split(".")[-1] == _OWN_MODULE:
+                        self.modules.add(a.asname or a.name.split(".")[0])
+            elif isinstance(n, ast.ImportFrom):
+                for a in n.names:
+                    if a.name in ("run_cell", "run_trial"):
+                        self.alias[a.asname or a.name] = a.name
+                    elif a.name == _OWN_MODULE:
+                        self.modules.add(a.asname or a.name)
+
+    def _names(self, node: ast.AST, *, calls_only: bool) -> set[str]:
+        """The module-level names ``node`` refers to. ``calls_only``: only a call, or a function handed to a call as an
+        argument (``map(run_trial, ...)``); otherwise any mention (a table of functions, a returned function)."""
+        found: set[str] = set()
+
+        def resolve(x: ast.AST) -> str | None:
+            if isinstance(x, ast.Name):
+                return self.alias.get(x.id, x.id)
+            if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id in self.modules:
+                return x.attr
+            return None
+
+        for sub in ast.walk(node):
+            if calls_only:
+                if isinstance(sub, ast.Call):
+                    for x in (sub.func, *sub.args, *(k.value for k in sub.keywords)):
+                        name = resolve(x)
+                        if name:
+                            found.add(name)
+            elif isinstance(sub, (ast.Name, ast.Attribute)):
+                name = resolve(sub)
+                if name:
+                    found.add(name)
+        return found
+
+    def reaches(self, start: str, goal: str, *, calls_only: bool) -> bool:
+        """Whether ``goal`` is reached from what ``start`` is, through any number of module-level functions and names."""
+        seen: set[str] = set()
+        todo = [start]
+        while todo:
+            current = todo.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            for node in self.nodes.get(current, []):
+                names = self._names(node, calls_only=calls_only)
+                if goal in names and current != goal:
+                    return True
+                todo.extend(n for n in names if n in self.nodes and n not in seen)
+        return False
 
 
 def trial_aggregates(source: str) -> str:
-    """A plain sentence when ``run_trial`` in ``source`` (read, never run) is not one trial because it calls ``run_cell``
-    (directly, or through a function of the same file that it calls: one level), and ``""`` otherwise.
+    """A plain sentence when ``run_trial`` in ``source`` (read, never run) is not one trial because it reaches ``run_cell``
+    (it calls or names it, directly or through any number of the file's own functions and names, an alias such as
+    ``_run = run_cell`` or ``run_trial = run_cell``, a table of functions, or an imported ``run_cell``), and ``""``
+    otherwise.
 
     ``run_cell`` is the setting's own number, the mean over many trials for a random study. FI's harness calls
     ``run_trial`` once per trial and keeps each result, so a ``run_trial`` that returns ``run_cell``'s number makes every
     trial as long as a whole cell (the study would not fit its time) and every kept "trial" a mean of many (wrong
-    statistics). The converse, a ``run_cell`` that calls ``run_trial``, is how a cell is built and is not flagged."""
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
+    statistics). The converse, a ``run_cell`` that calls ``run_trial``, is how a cell is built and is not flagged. Not
+    followed: a function looked up by a computed string (``globals()[name]``), ``getattr``, and code in other files."""
+    mod = _Module(source)
+    if not mod.ok or "run_trial" not in mod.nodes:
         return ""
-    functions = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    trial, cell = functions.get("run_trial"), functions.get("run_cell")
-    if trial is None or cell is None:
-        return ""
-    called = _called_names(trial)
-    if "run_cell" in called:
-        return TRIAL_AGGREGATE_WHY
-    for name in sorted(called - {"run_trial", "run_cell"}):
-        helper = functions.get(name)
-        if helper is not None and "run_cell" in _called_names(helper):
-            return TRIAL_AGGREGATE_WHY + f" (through {name}())"
-    return ""
+    return TRIAL_AGGREGATE_WHY if mod.reaches("run_trial", "run_cell", calls_only=False) else ""
+
+
+def cell_runs_trials(source: str) -> bool:
+    """Whether ``run_cell`` in ``source`` really calls ``run_trial`` (directly or through the file's own functions, also
+    handed to ``map`` and the like): the mean it returns then comes from the trials the study itself runs."""
+    mod = _Module(source)
+    return mod.ok and mod.reaches("run_cell", "run_trial", calls_only=True)
 
 
 class TrialsRunner:
@@ -889,22 +954,47 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
                           env=env, thresholds=thresholds, label="oracle()")
 
 
-def oracle_entry(have: set[str] | frozenset[str], oracle: dict[str, Any] | None = None, *, per_trial: bool = False) -> str:
+def is_per_trial(oracle: dict[str, Any] | None) -> bool:
+    """A check that holds in every single trial: kind ``invariant``, or declared ``per_trial: true``."""
+    if oracle is None:
+        return False
+    flag = oracle.get("per_trial")
+    if flag is True or (isinstance(flag, str) and flag.strip().lower() in ("true", "yes", "1")):
+        return True
+    return _oracle.kind_of(oracle) == "invariant"
+
+
+def oracle_entry(have: set[str] | frozenset[str], oracle: dict[str, Any] | None = None, *, per_trial: bool = False,
+                 cell_runs_trials: bool = False) -> str:
     """Which simulation function FI calls to measure an oracle: ``"run_trial"`` or ``"run_cell"``.
 
     The two mean different things. ``run_trial`` is ONE trial of one setting (FI's trial harness calls it once per trial
     and keeps each result); ``run_cell`` is the setting's own number, the one a deterministic study computes or the mean
     over many trials of a random one. A simulation that defines only one of them is called through it. When it defines
-    both, a check that holds in every single trial (kind ``invariant``, or ``per_trial``) is measured on ``run_trial``,
-    and every other check is a quantity of the setting and is measured on ``run_cell``: measuring it on ``run_trial``
-    is what led a repair to make ``run_trial`` return the mean of thousands of trials."""
+    both, the study runs ONLY ``run_trial``, so a check must test that code: a check that holds in every single trial
+    (:func:`is_per_trial`) is measured on ``run_trial``; any other check is measured on ``run_cell`` only when
+    ``cell_runs_trials`` (``run_cell`` really calls ``run_trial``, so its mean comes from the study's own trials), and
+    otherwise on ``run_trial`` as before. A ``run_cell`` with a formula of its own would let a bug in ``run_trial`` pass."""
     if "run_trial" not in have:
         return "run_cell"
     if "run_cell" not in have:
         return "run_trial"
-    if per_trial or (oracle is not None and _oracle.kind_of(oracle) == "invariant"):
+    if per_trial or is_per_trial(oracle) or not cell_runs_trials:
         return "run_trial"
     return "run_cell"
+
+
+def oracle_entry_for(simulate: Path | str, oracle: dict[str, Any] | None = None, *, per_trial: bool = False) -> str:
+    """:func:`oracle_entry` for the simulation file at ``simulate`` (read, not run)."""
+    path = Path(simulate)
+    have = entries(path)
+    reaches = False
+    if {"run_trial", "run_cell"} <= have:
+        try:
+            reaches = cell_runs_trials(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            reaches = False
+    return oracle_entry(have, oracle, per_trial=per_trial, cell_runs_trials=reaches)
 
 
 async def run_case(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
@@ -914,8 +1004,8 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
     """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial ``trial``, 0 unless asked,
     with the seed FI gives that trial of that cell, or ``run_cell``; :func:`oracle_entry` says which): ``(the metrics it
     returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number."""
-    have = entries(Path(module) if Path(module).is_absolute() else Path(quest_root) / module)
-    entry = oracle_entry(have, oracle, per_trial=per_trial)
+    entry = oracle_entry_for(Path(module) if Path(module).is_absolute() else Path(quest_root) / module, oracle,
+                             per_trial=per_trial)
     base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
     seed = trial_seed(base, cell_key(cell), int(trial)) if entry == "run_trial" else None
     return await _run_one(executor, python, quest_root, module, entry=entry, cell=dict(cell), seed=seed, timeout_s=timeout_s,

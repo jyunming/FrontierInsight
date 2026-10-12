@@ -279,31 +279,40 @@ def test_one_engine_measured_pass_among_several_oracles_is_still_needed_and_enou
     assert any("limit" in g for g in got["all_gaps"]["independently_validated"])
 
 
-# A random study whose simulation defines both functions: run_trial is ONE cheap trial (the harness calls it thousands of
-# times), run_cell is the mean over many. The oracle measures a mean, so FI must call run_cell and leave run_trial alone.
-BOTH = '''
+# A random study whose simulation defines both functions. The study runs ONLY run_trial, so a check must test that code:
+# a check on a mean is read from run_cell only when run_cell is built from calls to run_trial.
+BUILT_FROM_TRIALS = '''
 def run_trial(cell, trial_id, seed):
-    raise AssertionError("an oracle on a mean must not be measured with one trial")
+    return {"rate": 0.0 if seed % 2 == 0 else 0.1}
 
 def run_cell(cell):
-    return {"rate": 0.05}
+    return {"rate": sum(run_trial(cell, i, i)["rate"] for i in range(10)) / 10}
 '''
-TRIAL_INVARIANT = '''
+# run_cell has a formula of its own: a bug in run_trial (0.9) must not hide behind it.
+OWN_FORMULA = '''
 def run_trial(cell, trial_id, seed):
-    return {"rate": 0.05}
+    return {"rate": 0.9}
 
 def run_cell(cell):
-    raise AssertionError("an invariant is one trial's, not the cell's")
+    return {"rate": 0.05}
 '''
 MEAN_CHECK = {"name": "global null rate", "kind": "special_case", "check": "rate under the global null", "expected": 0.05,
               "tolerance": 0.01, "case": {"m": 20}, "measure": "rate"}
 
 
-def test_a_check_on_a_mean_is_measured_on_run_cell_when_the_simulation_has_both(tmp_path: Path) -> None:
-    checks, problems, found = _measure(tmp_path, BOTH, [MEAN_CHECK])
-    assert not problems and found == [] and checks[0]["value"] == 0.05, (checks, problems)
+def test_a_check_on_a_mean_is_measured_on_run_cell_when_it_is_built_from_run_trial(tmp_path: Path) -> None:
+    checks, problems, found = _measure(tmp_path, BUILT_FROM_TRIALS, [MEAN_CHECK])
+    assert not problems and found == [] and abs(checks[0]["value"] - 0.05) < 1e-12, (checks, problems)
 
 
-def test_an_invariant_is_measured_on_one_trial_when_the_simulation_has_both(tmp_path: Path) -> None:
-    checks, problems, _ = _measure(tmp_path, TRIAL_INVARIANT, [{**MEAN_CHECK, "kind": "invariant"}])
-    assert not problems and checks[0]["value"] == 0.05, (checks, problems)
+def test_a_run_cell_with_a_formula_of_its_own_does_not_hide_a_bug_in_run_trial(tmp_path: Path) -> None:
+    checks, problems, found = _measure(tmp_path, OWN_FORMULA, [MEAN_CHECK])
+    assert checks[0]["value"] == 0.9 and found, "the check reads the code the study runs, and fails on it"
+
+
+def test_an_explicit_per_trial_check_and_an_invariant_are_measured_on_one_trial(tmp_path: Path) -> None:
+    for i, extra in enumerate(({"per_trial": True}, {"kind": "invariant"})):
+        checks, problems, _ = _measure(tmp_path / str(i), BUILT_FROM_TRIALS, [{**MEAN_CHECK, **extra}])
+        assert not problems and checks[0]["value"] in (0.0, 0.1), (extra, checks, problems)
+
+

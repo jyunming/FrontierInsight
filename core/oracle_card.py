@@ -189,7 +189,7 @@ def locate(script: Path, quest_root: Path, oracle: dict[str, Any], *, trial: boo
         measure = own[1]
         wanted = set([measure] if _forms.is_name(measure) else _forms.names(measure))
         have = {e for e in ("run_trial", "run_cell") if e in functions}
-        entry = _entry_for(have, oracle) if have else None
+        entry = _entry_for(script, oracle) if have else None
         if entry is not None and wanted:
             inside = _key_lines(functions[entry], wanted)
             if inside:
@@ -263,7 +263,6 @@ def build(
     disputed_set = {str(n).strip().lower() for n in disputed or []}
     last_checks = attempts[-1].get("checks") if attempts else None
     reported_by_name = {str(c.get("name") or "").strip().lower(): c for c in last_checks or [] if isinstance(c, dict)}
-    have_entries = _entries(script) if trial else set()
     run_text = "; ".join(found) + "\n" + (stderr_tail or "")
     # What FI's own look at the failing checks found (core/oracle_triage.py), in the order it looked.
     triage = [t for a in attempts for t in a.get("triage") or [] if isinstance(t, dict)]
@@ -330,7 +329,7 @@ def build(
             "measured_text": shown_value,
             "measured_by": ("fi" if engine else "script") if value is not None else "",
             "measured_by_text": (
-                (f"FI, which called {_entry_for(have_entries, oracle)}() on the check's case itself" if engine else
+                (f"FI, which called {_entry_for(script, oracle) if trial else 'run_cell'}() on the check's case itself" if engine else
                  "the script's own oracle() (FI did not run the simulation for it)" if trial else
                  "the script itself, run with FI_ORACLE=1") if value is not None else ""),
             "tolerance": _num(oracle.get("tolerance")),
@@ -580,10 +579,13 @@ def _whose(proposal: dict[str, Any] | None) -> str:
     return "recomputation's" if source == "recompute" else "arithmetic's" if source == "arithmetic" else "repair's"
 
 
-def _entry_for(have: set[str], oracle: dict[str, Any] | None) -> str:
-    from .trial_runner import oracle_entry
+def _entry_for(script: Path, oracle: dict[str, Any] | None) -> str:
+    from .trial_runner import oracle_entry_for
 
-    return oracle_entry(have, oracle)
+    try:
+        return oracle_entry_for(Path(script), oracle)
+    except ValueError:  # a script that is not UTF-8 text: the card names run_cell
+        return "run_cell"
 
 
 def _entries(script: Path) -> set[str]:

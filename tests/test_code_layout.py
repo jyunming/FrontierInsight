@@ -820,8 +820,28 @@ async def test_an_oracle_repair_that_makes_run_trial_return_run_cell_is_not_used
 
 
 def test_the_generated_tests_call_run_cell_for_a_mean_and_run_trial_for_an_invariant() -> None:
-    text = cl.oracle_tests({**PROTOCOL, "oracles": [ORACLE, {**ORACLE, "name": "inv", "kind": "invariant"}]})
+    text = cl.oracle_tests({**PROTOCOL, "oracles": [ORACLE, {**ORACLE, "name": "inv", "kind": "invariant"},
+                                                    {**ORACLE, "name": "flag", "per_trial": True}]})
     import ast
 
     checks = json.loads(ast.literal_eval(re.search(r"CHECKS = json\.loads\((.+)\)\n", text).group(1)))
-    assert [c["per_trial"] for c in checks] == [False, True]
+    assert [c["per_trial"] for c in checks] == [False, True, True]
+    assert "_cell_runs_trials()" in text, "run_cell is used only when it is built from run_trial"
+    compile(text, "test_oracles.py", "exec")
+
+
+@pytest.mark.asyncio
+async def test_a_repair_is_not_used_when_the_new_code_has_the_aggregate_even_if_the_old_had_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    engine._trial_mode = True
+    bad = ("def run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
+           "def run_cell(cell):\n    return {'error': 0.0}\n")
+    (code / "simulate.py").write_text(bad, encoding="utf-8")
+
+    async def aggregate(prompt, **kw):  # noqa: ANN001
+        return json.dumps({"code": bad + "# touched\n", "patch_summary": "something else"})
+
+    monkeypatch.setattr(engine, "_chat", aggregate)
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert new is None and outcome == "not_usable"

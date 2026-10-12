@@ -903,3 +903,37 @@ def test_a_case_of_ordinary_settings_is_not_read_as_shown_working(case, shown):
     from core.oracle_triage import shows_working
 
     assert shows_working({"name": "x", "kind": "special_case", "case": case}) is shown
+
+
+@pytest.mark.asyncio
+async def test_which_function_a_check_runs_is_decided_per_check_not_once_for_all(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import trial_runner
+
+    eng = Engine(Config(topic="rates", title="per check", provider=ProviderConfig(name="openai"),
+                        engine=EngineConfig(max_iterations=1, review_loop=False),
+                        execution=ExecutionConfig(sandbox="venv"), knowledge=KnowledgeConfig(enabled=False),
+                        output=OutputConfig(output_dir=tmp_path / "out")))
+    eng._oracle_proposals, eng._oracle_disputed, eng._oracle_set_aside, eng._oracle_noisy = {}, set(), {}, set()
+    eng._trial_mode = True
+    seed = eng.quest_root / "code" / "simulate.py"
+    seed.parent.mkdir(parents=True, exist_ok=True)
+    seed.write_text("def run_trial(c, t, s):\n    return {'x': 1.0}\n\n"
+                    "def run_cell(c):\n    return {'x': sum(run_trial(c, i, i)['x'] for i in range(3)) / 3}\n", encoding="utf-8")
+    mean = {"name": "a_mean", "kind": "special_case", "check": "a", "expected": 5.0, "tolerance": 0.1,
+            "tolerance_mode": "absolute", "case": {"n": 1}, "measure": "x"}
+    inv = {**mean, "name": "b_inv", "kind": "invariant"}
+    seen: list[tuple[str, int]] = []
+
+    async def fake_case(*a, cell, trial=0, oracle=None, **kw):  # noqa: ANN002, ANN003
+        seen.append((oracle["name"], trial))
+        return {"x": 1.0}, ""
+
+    monkeypatch.setattr(trial_runner, "run_case", fake_case)
+    same = oracle_triage.recompute_entry(mean, "agrees", 5.0, 1.0, "x", model="m", same_model=True)
+    eng._recompute_expected = AsyncMock(return_value=(same, True))  # type: ignore[method-assign]
+    record: dict[str, Any] = {"judged": [_judged("a_mean", 1.0), _judged("b_inv", 1.0)]}
+    await eng._look_at_failing_checks({}, None, seed, [mean, inv], [mean, inv], record, set(), protocol={},
+                                      timeout=10, case_env={})
+    assert [t for n, t in seen if n == "b_inv"] and all(t >= 1 for n, t in seen if n == "b_inv"), seen
+    assert not [1 for n, t in seen if n == "a_mean" and t >= 1], "a mean built from trials is not re-run with more seeds"

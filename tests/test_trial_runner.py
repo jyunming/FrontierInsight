@@ -346,7 +346,7 @@ def test_a_run_trial_that_returns_a_cell_aggregate_is_named() -> None:
     assert "run_trial must run ONE trial" in why and "run_cell" in why
     # Through a helper of the same file, one level down.
     via = "def _mean(c):\n    return run_cell(c)\n\ndef run_trial(c, t, s):\n    return _mean(c)\n\ndef run_cell(c):\n    return {'y': 1.0}\n"
-    assert "through _mean()" in trial_runner.trial_aggregates(via)
+    assert "run_trial must run ONE trial" in trial_runner.trial_aggregates(via)
 
 
 def test_a_cell_built_from_trials_and_a_lone_run_trial_are_not_named() -> None:
@@ -357,12 +357,45 @@ def test_a_cell_built_from_trials_and_a_lone_run_trial_are_not_named() -> None:
     assert trial_runner.trial_aggregates("def run_trial(:\n") == ""  # unreadable text is not this check's to judge
 
 
+def test_the_ways_around_the_one_trial_rule_are_named_too() -> None:
+    deep = ("def a(c):\n    return run_cell(c)\n\ndef b(c):\n    return a(c)\n\ndef c_(c):\n    return b(c)\n\n"
+            "def run_trial(c, t, s):\n    return c_(c)\n\ndef run_cell(c):\n    return {'y': 1.0}\n")
+    imported = "from other import run_cell as _rc\n\ndef run_trial(c, t, s):\n    return _rc(c)\n"
+    plain_import = "from other import run_cell\n\ndef run_trial(c, t, s):\n    return run_cell(c)\n"
+    alias = "def run_cell(c):\n    return {'y': 1.0}\n\n_run = run_cell\n\ndef run_trial(c, t, s):\n    return _run(c)\n"
+    renamed = "def run_cell(c):\n    return {'y': 1.0}\n\nrun_trial = run_cell\n"
+    table = ("def run_cell(c):\n    return {'y': 1.0}\n\nTABLE = {'a': run_cell}\n\n"
+             "def run_trial(c, t, s):\n    return TABLE['a'](c)\n")
+    lam = "def run_cell(c):\n    return {'y': 1.0}\n\nrun_trial = lambda c, t, s: run_cell(c)\n"
+    module = "import simulate\n\ndef run_cell(c):\n    return {'y': 1.0}\n\ndef run_trial(c, t, s):\n    return simulate.run_cell(c)\n"
+    for name, src in dict(deep=deep, imported=imported, plain_import=plain_import, alias=alias, renamed=renamed,
+                          table=table, lam=lam, module=module).items():
+        assert "run_trial must run ONE trial" in trial_runner.trial_aggregates(src), name
+
+
+def test_a_method_called_run_cell_on_another_object_is_not_this_files_run_cell() -> None:
+    honest = ("def run_trial(c, t, s):\n    sim_cell = make(c)\n    return {'y': sim_cell.run_cell(s)}\n\n"
+              "def run_cell(c):\n    return {'y': 1.0}\n")
+    assert trial_runner.trial_aggregates(honest) == ""
+
+
+def test_a_cell_is_built_from_trials_only_when_it_really_calls_run_trial() -> None:
+    assert trial_runner.cell_runs_trials("def run_trial(c,t,s):\n    return {}\n\ndef run_cell(c):\n    return _m(c)\n\n"
+                                         "def _m(c):\n    return [run_trial(c, i, i) for i in range(3)]\n")
+    assert trial_runner.cell_runs_trials("def run_trial(c,t,s):\n    return {}\n\ndef run_cell(c):\n"
+                                         "    return list(map(run_trial, [c], [0], [0]))\n")
+    assert not trial_runner.cell_runs_trials("def run_trial(c,t,s):\n    return {}\n\ndef run_cell(c):\n    return {'y': 1.0}\n")
+
+
 def test_the_oracle_is_measured_on_the_function_that_means_what_it_measures() -> None:
     both, trial_only, cell_only = {"run_trial", "run_cell"}, {"run_trial"}, {"run_cell"}
     mean = {"name": "n", "kind": "special_case"}
     inv = {"name": "n", "kind": "invariant"}
-    assert trial_runner.oracle_entry(both, mean) == "run_cell", "a mean or a rate is a number of the setting"
-    assert trial_runner.oracle_entry(both, inv) == "run_trial", "an invariant holds in every single trial"
-    assert trial_runner.oracle_entry(both, mean, per_trial=True) == "run_trial"
+    assert trial_runner.oracle_entry(both, mean, cell_runs_trials=True) == "run_cell", "a mean built from the study's trials"
+    assert trial_runner.oracle_entry(both, mean) == "run_trial", "the study runs only run_trial: test that code"
+    assert trial_runner.oracle_entry(both, inv, cell_runs_trials=True) == "run_trial", "an invariant holds in every trial"
+    assert trial_runner.oracle_entry(both, mean, per_trial=True, cell_runs_trials=True) == "run_trial"
+    assert trial_runner.oracle_entry(both, {**mean, "per_trial": True}, cell_runs_trials=True) == "run_trial"
+    assert trial_runner.oracle_entry(both, {**mean, "per_trial": "false"}, cell_runs_trials=True) == "run_cell"
     assert trial_runner.oracle_entry(trial_only, mean) == "run_trial"
     assert trial_runner.oracle_entry(cell_only, inv) == "run_cell"
