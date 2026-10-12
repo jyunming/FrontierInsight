@@ -687,3 +687,49 @@ def code_block(topic: Any, req: Any = None, *, limit: int = 6000, scrub: Any = N
     if len(body) > room:
         body = body[:max(0, room - 40)].rstrip() + "\n(the rest of the topic is not shown)"
     return body + tail
+
+
+#: The most characters the checklist shown to the plan may take.
+CHECKLIST_LIMIT = 1900
+
+
+def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT) -> str:
+    """The topic's requirements as plain lines the plan is shown before it is written (``""`` for an empty or failed
+    reading): factors with their stated levels or range, quantities to report, stated formulas and constraints. Never
+    ``stated_results`` (a plan is not shown the answer). Pure; at most ``limit`` characters, what does not fit is counted
+    in a last line."""
+    if not isinstance(req, dict) or is_empty(req):
+        return ""
+    lines: list[str] = []
+    for item in req.get("factors") or []:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        levels = item.get("levels") or []
+        rng = item.get("range") or []
+        if levels:
+            shown = ", ".join(f"{v:g}" if isinstance(v, float) else str(v) for v in levels[:10])
+            detail = f": {shown}" + (f" (and {len(levels) - 10} more)" if len(levels) > 10 else "")
+        else:
+            detail = f": {rng[0]:g} to {rng[1]:g}" if len(rng) == 2 else ""
+        lines.append(f"- vary or compare {item['name']}{detail}")
+    for item in req.get("quantities") or []:
+        if isinstance(item, dict) and item.get("name"):
+            lines.append(f"- report {item['name']}")
+    for item in req.get("formulas") or []:
+        if isinstance(item, dict) and item.get("text"):
+            name = str(item.get("name") or "").strip()
+            lines.append(f"- formula{' ' + name if name else ''}: {str(item['text'])[:160]}")
+    for text in req.get("constraints") or []:
+        if str(text).strip():
+            lines.append(f"- constraint: {str(text)[:160]}")
+    head = ("What the topic asks for (each item must appear as a setting, a metric or an equation of the plan, "
+            "or be named in `simplifications`):")
+    out = [head]
+    used = len(head)
+    for i, line in enumerate(lines):
+        if used + len(line) + 1 > limit - 40:
+            out.append(f"(and {len(lines) - i} more)")
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out)

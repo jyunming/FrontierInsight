@@ -1,0 +1,78 @@
+{
+  "factors": [
+    {
+      "name": "noise level",
+      "levels": [],
+      "range": [],
+      "stated": "Vary the noise level",
+      "main": true
+    },
+    {
+      "name": "number of time points",
+      "levels": [],
+      "range": [],
+      "stated": "Vary the noise level and the number of time points",
+      "main": false
+    }
+  ],
+  "quantities": [
+    {
+      "name": "k",
+      "stated": "Fit k at each temperature by nonlinear least squares",
+      "main": true
+    },
+    {
+      "name": "Ea",
+      "stated": "to recover Ea and ln A",
+      "main": true
+    },
+    {
+      "name": "ln A",
+      "stated": "to recover Ea and ln A",
+      "main": false
+    },
+    {
+      "name": "bias",
+      "stated": "report bias",
+      "main": true
+    },
+    {
+      "name": "spread of the estimates",
+      "stated": "the spread of the estimates",
+      "main": true
+    },
+    {
+      "name": "how often the true value falls inside the reported 95 percent interval",
+      "stated": "how often the true value falls inside the reported 95 percent interval",
+      "main": false
+    }
+  ],
+  "formulas": [
+    {
+      "name": "c(t)",
+      "text": "c(t) = c0 * exp(-k * t)",
+      "main": true
+    },
+    {
+      "name": "k",
+      "text": "k = A * exp(-Ea / (R * T))",
+      "main": true
+    }
+  ],
+  "comparisons": [],
+  "constraints": [
+    "CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.",
+    "Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.",
+    "One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).",
+    "Two or three figures that answer the question directly, each with the reference or theory value drawn.",
+    "A short paper of at most 4 pages.",
+    "Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it.",
+    "Simulate noisy concentration-time data at five temperatures spanning a 10-fold range of k (with known A and Ea), with sampling times from 0 to 3/k at each temperature and additive Gaussian noise of a stated size.",
+    "Fit k at each temperature by nonlinear least squares, then fit ln k against 1/T (centre 1/T, weight each point by the variance of its ln k) to recover Ea and ln A."
+  ],
+  "stated_results": [],
+  "reviewer": "gemini-3.8-flash-high",
+  "planner": "gpt-5.6-terra",
+  "same_model": false,
+  "at": "2026-10-12T04:29:39+00:00"
+}

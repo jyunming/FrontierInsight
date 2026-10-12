@@ -1,0 +1,112 @@
+{
+  "factors": [
+    {
+      "name": "resist",
+      "levels": [
+        "CAR",
+        "MOR"
+      ],
+      "range": [],
+      "stated": "a chemically amplified resist (CAR) and a metal-oxide resist (MOR)",
+      "main": true
+    },
+    {
+      "name": "dose",
+      "levels": [],
+      "range": [
+        20.0,
+        150.0
+      ],
+      "stated": "dose from well below to well above its dose-to-size (for example 20 to 150 mJ/cm2)",
+      "main": true
+    },
+    {
+      "name": "Patterns",
+      "levels": [
+        "lines and spaces at 10 nm half pitch (20 nm pitch)",
+        "contact holes of 16 nm at 32 nm pitch"
+      ],
+      "range": [],
+      "stated": "lines and spaces at 10 nm half pitch (20 nm pitch), and contact holes of 16 nm at 32 nm pitch",
+      "main": true
+    }
+  ],
+  "quantities": [
+    {
+      "name": "LER and LWR",
+      "stated": "LER and LWR (3 sigma, over a stated line length, with the high-frequency cut-off stated)",
+      "main": true
+    },
+    {
+      "name": "the probability of a bridge or a break per micrometre of line",
+      "stated": "the probability of a bridge or a break per micrometre of line",
+      "main": true
+    },
+    {
+      "name": "the probability that a contact is missing or merged",
+      "stated": "the probability that a contact is missing or merged",
+      "main": true
+    },
+    {
+      "name": "dose-to-size",
+      "stated": "dose-to-size",
+      "main": false
+    },
+    {
+      "name": "the dose where those failure rates fall below 1e-6",
+      "stated": "the dose where those failure rates fall below 1e-6 (estimate the tails with a stated method and its uncertainty \u2014 extrapolation of a fitted tail or a rare-event method, not raw counts alone)",
+      "main": false
+    },
+    {
+      "name": "runtime",
+      "stated": "report the runtime",
+      "main": false
+    }
+  ],
+  "formulas": [
+    {
+      "name": "photons per nm2 at the resist top",
+      "text": "0.680*D",
+      "main": false
+    },
+    {
+      "name": "relative noise of N expected photons",
+      "text": "1/sqrt(N)",
+      "main": false
+    },
+    {
+      "name": "fraction absorbed",
+      "text": "1 - exp(-alpha*t)",
+      "main": false
+    },
+    {
+      "name": "probability that a region expecting N absorbed events receives none",
+      "text": "exp(-N)",
+      "main": false
+    }
+  ],
+  "comparisons": [
+    {
+      "what": "Compare CAR and MOR at equal dose and at equal roughness, and say where each is better and why (absorption, amplification, blur).",
+      "between": [
+        "CAR",
+        "MOR"
+      ]
+    }
+  ],
+  "constraints": [
+    "CPU only.",
+    "A long run is allowed; report the runtime.",
+    "Report every number with its uncertainty (Monte Carlo error, fit error) and say when a result is only a check of the code.",
+    "Say plainly which resist parameters are assumed rather than measured, and how the conclusions depend on them.",
+    "State every other parameter you assume with a source or a reason.",
+    "Imaging: NA 0.55, a thin binary mask, scalar imaging with a dipole source for the lines and a quasar or annular source for the contacts (state the choice); the aerial image only sets the mean exposure, the stochastics come from the resist.",
+    "Python with numpy and scipy, matplotlib with the Agg backend; Monte Carlo with fixed, stated seeds and enough trials for the reported uncertainty.",
+    "Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it."
+  ],
+  "stated_results": [],
+  "reviewer": "gemini-3.8-flash-high",
+  "planner": "gpt-5.6-terra",
+  "same_model": false,
+  "at": "2026-10-11T12:30:07+00:00"
+}

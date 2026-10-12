@@ -1,0 +1,78 @@
+{
+  "factors": [
+    {
+      "name": "m",
+      "levels": [
+        20.0,
+        200.0,
+        2000.0
+      ],
+      "range": [],
+      "stated": "m in {20, 200, 2000}",
+      "main": true
+    },
+    {
+      "name": "pi1",
+      "levels": [
+        0.0,
+        0.05,
+        0.2
+      ],
+      "range": [],
+      "stated": "pi1 in {0.0, 0.05, 0.2}",
+      "main": false
+    }
+  ],
+  "quantities": [
+    {
+      "name": "realised false discovery rate",
+      "stated": "report the realised false discovery rate",
+      "main": true
+    },
+    {
+      "name": "power",
+      "stated": "the power",
+      "main": true
+    },
+    {
+      "name": "chance of any false discovery",
+      "stated": "report only the chance of any false discovery",
+      "main": false
+    }
+  ],
+  "formulas": [
+    {
+      "name": "reference for Benjamini-Hochberg",
+      "text": "pi0 * 0.05",
+      "main": false
+    }
+  ],
+  "comparisons": [
+    {
+      "what": "Compare uncorrected, Bonferroni and Benjamini-Hochberg at a nominal 5 percent.",
+      "between": [
+        "uncorrected",
+        "Bonferroni",
+        "Benjamini-Hochberg"
+      ]
+    }
+  ],
+  "constraints": [
+    "Simulate using one-sided z-tests in which each real effect shifts the test statistic by 2.5.",
+    "Compare uncorrected, Bonferroni and Benjamini-Hochberg at a nominal 5 percent.",
+    "When pi1 = 0 there are no real effects, so power is undefined; report only the chance of any false discovery.",
+    "One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).",
+    "Two or three figures that answer the question directly, each with the reference or theory value drawn.",
+    "A short paper of at most 4 pages.",
+    "Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it.",
+    "CPU only.",
+    "Under 60 seconds of runtime.",
+    "Fixed random seeds where the run is random, stated in the paper.",
+    "Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code."
+  ],
+  "stated_results": [],
+  "reviewer": "gemini-3.8-flash-high",
+  "planner": "gpt-5.6-terra",
+  "same_model": false,
+  "at": "2026-10-12T08:49:06+00:00"
+}
