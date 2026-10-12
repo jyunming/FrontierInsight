@@ -41,6 +41,8 @@ Three more, only for a search for the best design (`study_type: find_best_design
 
 15. **Finer check settings** — is every `check` value of `optimisation.numerical_settings` really finer than its `search` value (smaller for a mesh size or a time step, larger for a count of elements; each level at least 1.1 times finer)? A check at the same or a coarser setting cannot tell a real improvement from a numerical error. Fix the values, or leave `check` out and FI uses half, then a quarter, of the search value. And is the one objective the right one: a second goal belongs in `constraints`, not in the objective.
 
+One more, for every design: **16. Approximated without saying so** (use `other`) - is anything the topic names approximated, replaced or left out without an entry in `protocol.simplifications`, and does each metric's `protocol.definitions` entry match the source it quotes? Add the entry, or correct the definition.
+
 After identifying issues, produce an amended design. The amended design must match the original JSON shape exactly — same keys, same structure — but with the fields updated to reflect the fixes. If no MUST-FIX objections apply, return the original design unchanged, an empty `objections_addressed` array, and in `checked_no_problem` each checklist item you checked and found no problem with.
 
 # Output format

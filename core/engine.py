@@ -117,6 +117,8 @@ from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 from . import oracle_review as _review
 from . import topic_requirements as _topic_req
+from . import plan_ledger as _ledger
+from . import plan_steps as _plan_steps
 from . import equation_tests as _equation_tests
 from . import code_review as _code_review
 from . import review_pairs as _pairs
@@ -4819,7 +4821,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "and this study is described as amended after its results were known.\n"
                 f"{json.dumps(frozen_protocol, indent=2)}\n"
             ).strip()
-        return self._prompts["design"].substitute(
+        prompt = self._prompts["design"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
             # The full excerpts, as analyze and write get. At 800 characters a
@@ -4844,6 +4846,32 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 else ""
             ),
         )
+        checklist = self._topic_checklist(state)
+        return f"{prompt}\n\n{checklist}\n" if checklist else prompt
+
+    def _topic_checklist(self, state: QuestState) -> str:
+        """What the topic asks for, as plain lines the plan or design is shown before it is written
+        (:func:`core.topic_requirements.checklist_block`), read from the kept reading (``.fi/topic_requirements.json``).
+        Empty when the quest runs no code, the protocol is frozen, or the topic was not read (a failed or empty reading):
+        the prompt is then as it was."""
+        if not self._runs_code(state) or _frozen.load(self.quest_root) is not None:
+            return ""
+        req = self._topic_requirements_read()
+        if not isinstance(req, dict) or req.get("error"):
+            return ""
+        try:
+            return _topic_req.checklist_block(req)
+        except Exception as e:  # noqa: BLE001 -- a block that cannot be built leaves the prompt as it was
+            self._log.warning("[plan] the list of what the topic asks for could not be built: %r", e)
+            return ""
+
+    async def _read_topic_before_the_prompt(self, state: QuestState) -> None:
+        """Read what the topic asks for (:meth:`_read_topic_requirements`: one call, kept, never asked again on a resume)
+        BEFORE the plan or the design is asked for, so the request can show it. It depends only on the topic. A reading
+        that fails is kept as an error and the request goes out without the list, as before."""
+        if not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None:
+            return
+        await self._read_topic_requirements()
 
     async def _audit_design(
         self, state: QuestState, design: dict[str, Any], *, adopt: bool = True, writer: str = "design",
@@ -5250,6 +5278,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # topic with no word of looking for the best is planned as a measurement, as before, without their cost.
         seek = (_optim.may_seek_best(state.get("topic") or self.config.topic)
                 or self._study_type_asked(state) == "find_best_design")
+        await self._read_topic_before_the_prompt(state)
         prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + (_STUDY_TYPE_DIRECTIVE if seek else "")
                   + self._study_type_note(state))
         obj = await self._design_reply(prompt, node="plan")
@@ -5768,6 +5797,29 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design, sha = await self._ask_plan_for_the_search(state, design, sha)
             design, sha = await self._ask_plan_for_the_parts(state, design, sha)
             await self._cover_the_topic_in_the_plan(state)
+            self._write_the_ledger(state)
+
+    def _write_the_ledger(self, state: QuestState) -> None:
+        """At the end of the plan step, write ``.fi/ledger.json`` (:func:`core.plan_ledger.write_ledger`): the plan's
+        simplifications, each with the ids of the relations that test it (none yet) and its status. Read from plan.md as it
+        stands, so a plan a person edited is the one recorded. An item already recorded keeps its relation ids; a record
+        for the same plan is left as it is. A failure is a warning and never stops the quest."""
+        if not self._runs_code(state) or _frozen.load(self.quest_root) is not None:
+            return
+        try:
+            design, sha = self._design_from_plan()
+            if design is None or not sha:
+                return
+            path = self.fi_dir / _ledger.FILE
+            kept = _ledger.read_ledger(path)
+            if kept is not None and kept.get("plan_sha") == sha:
+                return
+            simplifications, _problems = _ledger.parse_simplifications(design.get("protocol"))
+            relations = {str(i.get("id")): [str(r) for r in i.get("relation_ids") or []]
+                         for i in (kept or {}).get("items") or [] if isinstance(i, dict)}
+            _ledger.write_ledger(path, _ledger.ledger_record(sha, simplifications, relations))
+        except Exception as e:  # noqa: BLE001 -- a record that cannot be written never stops a quest
+            self._log.warning("[plan] couldn't write the plan's ledger of simplifications: %r", e)
 
     # -- what the topic asks for (core/topic_requirements.py) ------------------------------------------------------
 
@@ -6213,6 +6265,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         taken: list[str] = []
         reasons: list[str] = []
         for part in parts:
+            if part == "steps":
+                # The step cards sit inside the model block: only `model.steps` is taken, the rest of the model is the plan's.
+                new_model = new_protocol.get("model")
+                old_model = merged.get("model")
+                if not (isinstance(new_model, dict) and new_model.get("steps") is not None and isinstance(old_model, dict)):
+                    continue
+                fixed, why = _plan.normalize_protocol({**merged, "model": {**old_model, "steps": new_model["steps"]}})
+                if fixed is None:
+                    self._log.warning("[plan] the plan's model wrote the step cards again but they still cannot be read: %s", why)
+                    reasons.append(f"`protocol.model.steps` as you wrote it cannot be read: {why}")
+                    continue
+                merged["model"] = fixed["model"]
+                taken.append(part)
+                continue
             if new_protocol.get(part) is None:
                 continue
             fixed, why = _plan.normalize_protocol({**merged, part: new_protocol[part]})
@@ -6233,48 +6299,129 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return None
         return _plan.refresh_model_section(edited)
 
+    def _literature_passages(self, state: QuestState) -> str:
+        """The text of every source this quest retrieved (the passages the plan was shown), as one string, for checking that a
+        quoted definition is really in the sources. Empty when nothing was retrieved or the text cannot be had."""
+        try:
+            return "\n".join(_item_content(item) for _label, _meta, item in _labelled_sources(state.get("literature") or []))
+        except Exception as e:  # noqa: BLE001 -- a quote that cannot be looked for is not judged; never a stop
+            self._log.warning("[plan] the sources' text could not be gathered to check the quoted definitions: %r", e)
+            return ""
+
+    def _ledger_unread(self, design: Any, passages: str = "") -> dict[str, str]:
+        """``{part: what is wrong with it}`` for the parts the plan's ledger asks for: ``simplifications`` and ``definitions``
+        (:mod:`core.plan_ledger`) and ``model.steps``, named ``steps`` (:mod:`core.plan_steps`), when they are written but
+        cannot be used, or when a metric has no definition. A definition's quote that is not in ``passages`` (the sources FI
+        found) is one more problem; with no passages nothing is judged. An old plan with none of these keys and no metric has
+        no problem. Structure only: nothing here stops a quest."""
+        protocol = design.get("protocol") if isinstance(design, dict) and isinstance(design.get("protocol"), dict) else None
+        if protocol is None:
+            return {}
+        found: dict[str, str] = {}
+        try:
+            _sims, p_sims = _ledger.parse_simplifications(protocol)
+            defs, p_defs = _ledger.parse_definitions(protocol)
+            # A definition marked as the plan's own (its `differs` names a simplification) needs no source.
+            own = [d["metric"] for d in defs if d.get("differs")]
+            p_defs = [p for p in p_defs if not any(p.startswith(f"definition not taken from a source: {m} ") for m in own)]
+            if passages.strip():
+                p_defs += [f"the quote for {m} is not in the sources FI found; quote the source word for word, or leave "
+                           "`quote` empty and mark the definition as your own in `simplifications` (put that entry's id in "
+                           "`differs`)" for m in _ledger.unfound_quotes(defs, passages)]
+            _cards, p_steps = _plan_steps.parse(protocol)
+        except Exception as e:  # noqa: BLE001 -- a reader that fails leaves the plan as it was
+            self._log.warning("[plan] the plan's list of simplifications and definitions could not be read: %r", e)
+            return {}
+        for part, problems in (("simplifications", p_sims), ("definitions", p_defs), ("steps", p_steps)):
+            if problems:
+                found[part] = "; ".join(problems)[:1200]
+        return found
+
+    def _parts_asked_any(self) -> list[str]:
+        """The protocol parts FI has asked the plan's model about for this quest on the model asked now, whatever the plan's
+        hash was then (FI's own notes in plan.md change the hash between two steps). Used for the plan's ledger parts, which
+        are asked once."""
+        try:
+            record = json.loads((self.fi_dir / _PART_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if isinstance(record, dict) and record.get("model") == self._plan_model_name():
+            return [str(p) for p in record.get("parts") or []]
+        return []
+
     async def _ask_plan_for_the_parts(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
         """A protocol part that could not be read (the settings to sweep, the metrics, ...) is asked of the plan's model, in
         place of asking a person to write it: the same bounded request as the search block
         (:meth:`_ask_plan_to_complete`, counted in ``.fi/protocol_part_asked.json``), quoting what could not be read and
-        the rule. Only the asked parts are kept from the rewrite. plan.md says what was done."""
+        the rule. Only the asked parts are kept from the rewrite. plan.md says what was done.
+
+        The plan's ledger parts (``simplifications``, ``definitions``, the step cards: :meth:`_ledger_unread`) ride in the same
+        request, each asked at most once per quest. A gap that survives never stops the quest: plan.md says it under *What the
+        topic asks for*, and the paper's limitations say it (:func:`core.topic_requirements.write_note`)."""
         if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
                 or not plan_sha):
             return design, plan_sha
+        passages = self._literature_passages(state)
+
+        def unread(now: Any) -> dict[str, str]:
+            return {**self._unread_parts(now), **self._ledger_unread(now, passages)}
+
         before = self._parts_asked(plan_sha)
+        ever = self._parts_asked_any()
         # A part asked about at the plan step is not asked about again at the design step of the same run.
-        asked = [p for p in self._unread_parts(design) if p not in before]
-        if not asked:
-            return design, plan_sha
-        record_parts = {"parts": [*before, *asked]}
+        asked = [p for p in unread(design) if p not in before and not (p in _LEDGER_PARTS and p in ever)]
+        if asked:
+            record_parts = {"parts": sorted({*before, *ever, *asked})}
 
-        def lacks(now: Any) -> list[str]:
-            return [f"`protocol.{part}` (could not be read)" for part in self._unread_parts(now) if part in asked]
+            def lacks(now: Any) -> list[str]:
+                return [f"`protocol.{part}` ({'could not be read' if part in _plan.ASKED_PARTS else 'is incomplete'})"
+                        for part in unread(now) if part in asked]
 
-        def request(now: Any, _text: str) -> str:
-            return _plan.part_request(state.get("topic") or self.config.topic,
-                                      {k: v for k, v in self._unread_parts(now).items() if k in asked})
+            def request(now: Any, _text: str) -> str:
+                return _plan.part_request(state.get("topic") or self.config.topic,
+                                          {k: v for k, v in unread(now).items() if k in asked})
 
-        def keep(before: str, revised: str) -> str:
-            kept = self._keep_only_the_parts(before, revised, asked)
-            if kept is None:
-                raise ValueError("the revised plan has none of the asked parts in a form that can be read; plan.md is unchanged")
-            return kept
+            def keep(before: str, revised: str) -> str:
+                kept = self._keep_only_the_parts(before, revised, asked)
+                if kept is None:
+                    raise ValueError("the revised plan has none of the asked parts in a form that can be read; plan.md is unchanged")
+                return kept
 
-        design, plan_sha = await self._ask_plan_to_complete(
-            design, plan_sha, lacks=lacks, request=request, keep=keep, file=_PART_ASKED,
-            what="settings the experiment needs", short="the protocol",
-            note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts)
+            design, plan_sha = await self._ask_plan_to_complete(
+                design, plan_sha, lacks=lacks, request=request, keep=keep, file=_PART_ASKED,
+                what="settings the experiment needs", short="the protocol",
+                note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts)
+        else:
+            record_parts = {"parts": sorted({*before, *ever})}
         path = _plan.plan_path(self.quest_root)
         if path.is_file():
-            left = self._unread_parts(design)
-            lines = [f"FI asked the plan's model to write `protocol.{part}` again, and it is "
-                     + (f"still not readable ({'; the quest stops' if part == 'grid' else 'the experiment goes on without it'})"
-                        if part in left else "now in the plan") + "." for part in asked]
+            left = unread(design)
+            lines = []
+            for part in asked:
+                if part in _LEDGER_PARTS:
+                    lines.append(f"FI asked the plan's model to write `protocol.{part}` again, and "
+                                 + ("it still has gaps (the experiment goes on; the paper says so)" if part in left
+                                    else "it is complete now") + ".")
+                else:
+                    lines.append(f"FI asked the plan's model to write `protocol.{part}` again, and it is "
+                                 + (f"still not readable ({'; the quest stops' if part == 'grid' else 'the experiment goes on without it'})"
+                                    if part in left else "now in the plan") + ".")
+            # What is still wrong with the ledger parts is said under *What the topic asks for*, and kept for the writer.
+            gaps = [f"`protocol.{part}` is incomplete: {why}" for part, why in left.items() if part in _LEDGER_PARTS]
             text = path.read_text(encoding="utf-8")
-            if not any(line in text for line in lines):
+            new_lines = [line for line in lines if line not in text]
+            new_gaps = [g for g in gaps if g not in text]
+            if gaps != (self._topic_covered_read().get("ledger_left") or []):
+                self._topic_covered_write(ledger_left=gaps)
+            if new_lines or new_gaps:
                 count, calls = self._search_record(_plan.sha256(text), _PART_ASKED)
-                updated = _plan.add_to_section(text, _PART_HEADING, ["", *[f"- {line}" for line in lines]])
+                updated = text
+                if new_lines:
+                    updated = _plan.add_to_section(updated, _PART_HEADING, ["", *[f"- {line}" for line in new_lines]])
+                if new_gaps:
+                    updated = _plan.add_to_section(updated, _topic_req.HEADING, [
+                        "", "- The plan did not give all of what it was asked for about its simplifications, definitions and "
+                        "steps (the paper will say so in its limitations):", *[f"  - {g}" for g in new_gaps]])
                 path.write_text(updated, encoding="utf-8")
                 if count:  # the record names the plan it was made on: the plan as FI wrote its note on it
                     self._record_search_asked(count, calls, _plan.sha256(updated), "told in the plan", _PART_ASKED,
@@ -7496,6 +7643,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design, plan_sha = self._design_from_plan()
             objections = state.get("design_objections")
         if design is None:
+            await self._read_topic_before_the_prompt(state)
             prompt = self._design_prompt(state)
             design = await self._design_reply(prompt, node="design")
             design, objections = await self._audit_design(state, design)
@@ -22860,6 +23008,9 @@ def _load_prompts() -> dict[str, string.Template]:
                             # from user-supplied data
         "web_plots",        # no-simulation mode — chart the collected
                             # web/data content (text-only outputs otherwise)
+        "probe_relations",      # behaviour probes: the properties the plan says its output must have (core/probes.py)
+        "second_impl_write",    # a second, independent version of a key function, from its card alone
+        "second_impl_adjudicate",  # which of two versions that disagree is wrong
     )
     out: dict[str, string.Template] = {}
     for n in names:
@@ -23934,6 +24085,7 @@ _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a des
 #: :meth:`Engine._inherit_plan_parts` (a search for the best design is a different kind of study, not a missing part).
 _REDESIGN_OWNED_PARTS = frozenset({"grid", "metrics", "model", "topic_map", "optimisation"})
 _DRAFTED_PARTS_ASKED = "drafted_parts_asked.json"  # the same bound, for protocol parts a redesign drafted that could not be read
+_LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger parts: each asked once per quest
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"
 _TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks
@@ -24127,11 +24279,17 @@ Each oracle's `kind` is one of six: `special_case` (a special or limiting case w
 
 `criteria` are how a later version of the code will be judged better or worse: two to five checks of correctness that FI computes itself after every run, never the study's own finding. A criterion on a number in `metrics` or `precision` is refused, because judging the code by its result would reward bending the code towards the result. Each takes its number from exactly one of: an oracle above, by its name (`"use": "error"` for how far it lands from its expected value, such as the gap between an observed and a claimed convergence order; `"use": "value"` for the measured value, such as the worst drift of a conserved quantity), best one with a `case` so that FI runs it itself (a number the script's own `oracle()` reports is shown but never counts); or `"trials": "<a number every trial returns>"` in place of `oracle`, whose value is how fast the standard error of its mean shrinks as trials are added (use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more). Give each its own `tolerance`, from the method's known error or the noise of the measurement. Leave `criteria` out only when nothing FI can compute says whether the code is right.
 
+@@LEDGER@@
+
+@@STEPS@@
+
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 
 `oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. Give every oracle a `case` and a `measure`: FI calls the simulation's own function (run_cell for a deterministic simulation, run_trial for a random one) on that case itself before the main run and judges the number it returns, so the check does not rest on anything the script reports about itself. A deterministic simulation's oracles always get a case. For a random simulation a case is ONE trial with one seed, so give a case to a check one trial shows exactly (an invariant every trial keeps, a setting whose outcome is certain, such as no outbreak at R0 = 0); a check that needs many trials (a probability, a mean) has no case and is answered by the script's own oracle(). A check without a `case` is the script's own word and does not count as independent validation. (A quest set to keep one script, `execution.split_analysis: false`, has no such function: its script answers every check itself when FI_ORACLE=1, and none of them counts.) A run whose checks do not pass never reaches the main sweep.
 
 Mistakes that stop a run, each seen in real quests:
+- A thing the topic names that you leave out or approximate, with no entry in `simplifications`, or a metric with no entry in `definitions`, is sent back to you to write.
+- A `quote` in `definitions` that is not in the sources listed above is sent back to you: quote the source word for word, or leave `quote` empty and name your own definition in `simplifications` (put its id in `differs`).
 - `grid` holds only the settings the simulation runs separately; each grid cell is simulated and its trials are counted. A value used only to classify or summarise the same runs afterwards (a cut-off, a threshold) is not a grid axis: put it in `thresholds`.
 - A grid axis lists every value it takes: `[0, 99]` means two settings, not 0 to 99. Repeated random instances of one setting are trials, counted in `runs_per_setting`, not a grid axis.
 - An oracle's `tolerance` is what the method can reach on that case, worked out from the method's known error at the step, size or sample count the check uses, not an ideal: a method of order p has an error of order h^p, and a conserved quantity is conserved only to that error, so a tolerance below it fails a correct script.
@@ -24145,6 +24303,8 @@ Every number the topic sets (a set in braces, a count of runs, a threshold) must
 """
 
 _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@FORMULA@@", _forms.EXPECTED_FORMULA_LANGUAGE)
+_PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@LEDGER@@", _ledger.DIRECTIVE_TEXT)
+_PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@STEPS@@", _plan_steps.DIRECTIVE_TEXT)
 _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@EXAMPLE@@", _equation_tests.EXAMPLE_RULE)
 
 # The kind of study, and the block of a search for the best design (core/optimisation_plan.py). Added after the plan

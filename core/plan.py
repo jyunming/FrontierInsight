@@ -516,15 +516,31 @@ PART_RULES = {
     "runs_per_setting": "`protocol.runs_per_setting`: a whole number of at least 1.",
     "precision": "`protocol.precision`: a mapping with `target_half_width`, a number between 0 and 1, and optionally "
                  "`metric` and `reason` (text).",
+    # The plan's ledger parts (core/plan_ledger.py, core/plan_steps.py): asked once, never a stop.
+    "simplifications": "`protocol.simplifications`: a list; each entry has an `id` (X1, X2, ...), `replaces` (what the topic "
+                       "asks for that the plan leaves out or approximates), `because` (why), `effect` (what this could change "
+                       "in the result) and `probe` (one sentence: how a run could show whether it matters).",
+    "definitions": "`protocol.definitions`: a list with an entry for every metric: `metric` (its id), `defined_as` (one "
+                   "line), `source` (the [n] of a source listed in the plan), `quote` (the passage of that source that states "
+                   "the definition, word for word) and `differs` (empty, or the id of a `simplifications` entry when you "
+                   "define it differently; then leave `quote` empty if you have no source for your own definition).",
+    "steps": "`protocol.model.steps`: a list of step cards; each has an `id` (S1, S2, ...), `name`, `does`, `inputs` (a "
+             "mapping of each input's name to its unit), `output`, and optionally `uses` (equation ids of the model), "
+             "`source`, `example` and `relations`. Write the model's other keys again unchanged.",
 }
 
 
 def part_request(topic: str, unread: dict[str, str]) -> str:
     """The request FI makes of the plan's model, in place of asking a person, for each protocol part that could not be read:
     the sentence that says what could not be read (quoted) and the rule the part must meet. Nothing else may change."""
-    lines = [f"- {PART_RULES[part]}\n  What could not be read: {why}" for part, why in unread.items() if part in PART_RULES]
+    lines = [f"- {PART_RULES[part]}\n  {'What could not be read' if part in ASKED_PARTS else 'What is missing or wrong'}: {why}"
+             for part, why in unread.items() if part in PART_RULES]
+    lead = ("Parts of this plan's protocol could not be read, so the experiment would not run what the study needs."
+            if any(part in ASKED_PARTS for part in unread) else
+            "Parts of this plan's protocol are missing or incomplete, so the plan does not say what it leaves out or how its "
+            "metrics are defined.")
     return (
-        "Parts of this plan's protocol could not be read, so the experiment would not run what the study needs. Write "
+        f"{lead} Write "
         f"each of them again in the design block, from the plan and the topic: “{' '.join(str(topic or '').split())[:600]}”.\n"
         + "\n".join(lines)
         + "\nChange nothing else in the plan: not a check, a threshold, a tolerance or a criterion, and not a part of the "

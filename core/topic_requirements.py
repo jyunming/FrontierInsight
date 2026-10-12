@@ -624,6 +624,13 @@ def write_note(quest_root: Any) -> str:
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
+    ledger_left = [str(g).strip() for g in (record.get("ledger_left") if isinstance(record, dict) else None) or []
+                   if str(g).strip()]
+    if ledger_left:
+        parts.append("The plan did not give all of what it was asked for about what it simplifies and how its metrics are "
+                     f"defined ({'; '.join(g.rstrip('.') for g in ledger_left)}). Say plainly in the limitations that the "
+                     "simplifications or definitions of this study are not fully stated, and do not present a metric's "
+                     "definition as taken from a source.")
     raw = requirements.get("constraints") if isinstance(requirements, dict) else None
     constraints = [str(c).strip().rstrip(".").strip() for c in (raw if isinstance(raw, list) else [])]
     constraints = [c for c in constraints if c]

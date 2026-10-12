@@ -245,7 +245,8 @@ async def test_a_reading_that_could_not_be_had_is_said_and_never_stops_the_quest
     eng = _engine(tmp_path, [])
     Reader(eng, _draft(), extraction=None)
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
-    assert "What the topic asks for" not in _plan_text(eng), "a plan a person reads is not changed by a reading that failed"
+    # (The section also holds what the plan left out of its simplifications and definitions: only the topic's own lines are tested.)
+    assert "Read from the topic by" not in _plan_text(eng), "a plan a person reads is not changed by a reading that failed"
     assert not any("what the topic asks for" in str(h.get("note") or "") for h in plan.history(eng.quest_root))
     seen = _stop(eng)
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})

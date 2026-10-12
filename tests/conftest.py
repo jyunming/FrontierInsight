@@ -115,18 +115,30 @@ _SCRIPTED_AT_THE_PLAN_STEP = (
 )
 
 
+#: Tests whose fake model takes the first call that is not a request for a part as the plan's draft: the reading of the topic
+#: made before the plan would be taken for it.
+_FIRST_REPLY_IS_THE_PLAN = (
+    "test_drafted_search_block", "test_plan_optimisation", "test_plan_model_sources", "test_design_self_critique",
+    "test_design_critique_record", "test_latex_in_model_replies_nodes", "test_run_checks",
+)
+
+
 @pytest.fixture(autouse=True)
 def _topic_reading_off_where_the_replies_are_scripted(request, monkeypatch):
     """At the plan step the engine reads what the topic asks for (one call) and looks for it in the plan (a few more).
     That stays on in every test except the ones listed in ``_SCRIPTED_AT_THE_PLAN_STEP``."""
-    if request.module.__name__.split(".")[-1] not in _SCRIPTED_AT_THE_PLAN_STEP:
+    name = request.module.__name__.split(".")[-1]
+    if name not in _SCRIPTED_AT_THE_PLAN_STEP and name not in _FIRST_REPLY_IS_THE_PLAN:
         return
     from core.engine import Engine
 
     async def off(self, state):  # noqa: ANN001
         return None
 
-    monkeypatch.setattr(Engine, "_cover_the_topic_in_the_plan", off)
+    if name in _SCRIPTED_AT_THE_PLAN_STEP:
+        monkeypatch.setattr(Engine, "_cover_the_topic_in_the_plan", off)
+    # The reading is also made before the plan is asked for (so the request can show the list): one more scripted reply.
+    monkeypatch.setattr(Engine, "_read_topic_before_the_prompt", off)
 
 
 @pytest.fixture(autouse=True)
