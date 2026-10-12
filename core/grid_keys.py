@@ -184,8 +184,22 @@ def _fresh_dict(value: ast.AST, nodes: list[ast.AST]) -> bool:
     got = _assignments_of(value.id, nodes)
     if got is None or len(got) != 1 or not (isinstance(got[0], ast.Dict) and all(k is not None for k in got[0].keys)):
         return False
-    return not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and _is_name(n.func.value, value.id)
-                   and n.func.attr not in _LOOKS for n in nodes)
+    name = value.id
+    for n in nodes:
+        if isinstance(n, ast.Call):
+            if isinstance(n.func, ast.Attribute) and _is_name(n.func.value, name) and n.func.attr not in _LOOKS:
+                return False
+            handed = [*n.args, *(k.value for k in n.keywords)]
+            appended = isinstance(n.func, ast.Attribute) and n.func.attr == "append"
+            if any(isinstance(a, ast.Starred) and _is_name(a.value, name) for a in n.args):
+                return False
+            if not appended and any(_is_name(a, name) for a in handed):
+                return False  # handed to a call that may change it
+        elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
+            targets = n.targets if isinstance(n, (ast.Assign, ast.Delete)) else [n.target]
+            if any(isinstance(sub, ast.Subscript) and _is_name(sub.value, name) for t in targets for sub in ast.walk(t)):
+                return False  # ``name[k] = v``, ``name[k] += v``, ``del name[k]``: its contents change
+    return True
 
 
 def _fresh_summaries(iterable: ast.AST, nodes: list[ast.AST], depth: int = 0) -> bool:
@@ -259,21 +273,21 @@ def reads(source: str, script: str) -> list[Read]:
             for n in inner:
                 shadow[id(n)] = (shadow.get(id(n), names) - drop) | add
 
-        exempt_fors: list[ast.For] = []
         for node in nodes:
             if isinstance(node, ast.Assign) and _setting_like(node.value, names):
                 names.update(t.id for t in node.targets if isinstance(t, ast.Name))
             elif isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id in SETTING_NAMES:
-                if _fresh_summaries(node.iter, nodes):
-                    exempt_fors.append(node)
-                else:
+                if not _fresh_summaries(node.iter, nodes):
                     names.add(node.target.id)
-        for node in exempt_fors:
-            for stmt in (*node.body, *node.orelse):
-                shade(list(ast.walk(stmt)), {node.target.id}, set())
-        # ``ast.walk`` gives an outer comprehension before the ones inside it, so the inner target is applied last.
+        # Each loop or comprehension that binds the name sets it for its own nodes: dropped over the script's own
+        # summaries, a setting holder over anything else. Outer ones come first (``nodes`` is in source order), so the
+        # innermost binding wins.
         for node in nodes:
-            if isinstance(node, _COMPREHENSIONS):
+            if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id in SETTING_NAMES:
+                fresh = _fresh_summaries(node.iter, nodes)
+                inner = [n for stmt in (*node.body, *node.orelse) for n in ast.walk(stmt)]
+                shade(inner, {node.target.id} if fresh else set(), set() if fresh else {node.target.id})
+            elif isinstance(node, _COMPREHENSIONS):
                 drop = {g.target.id for g in node.generators if isinstance(g.target, ast.Name)
                         and g.target.id in SETTING_NAMES and _fresh_summaries(g.iter, nodes)}
                 add = {g.target.id for g in node.generators if isinstance(g.target, ast.Name)

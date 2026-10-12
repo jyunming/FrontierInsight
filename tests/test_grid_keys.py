@@ -325,3 +325,25 @@ def test_a_summary_dict_that_is_changed_or_spread_is_not_trusted() -> None:
         src = ('def main(record):\n    cells = []\n    for entry in record["cells"]:\n        ' + body
                + '\n    return [1 for cell in cells if cell["missing"]]\n')
         assert _names({"a.py": src}) == [("a.py", ("missing",))], body
+
+
+def test_a_loop_over_settings_inside_a_loop_over_summaries_is_still_checked() -> None:
+    head = ('def main(record):\n    cells = []\n    for entry in record["cells"]:\n        cells.append({"a": 1})\n')
+    as_loop = head + ('    for cell in cells:\n        print(cell["by_method"])\n'
+                      '        for cell in record["cells"]:\n            print(cell["missing"])\n')
+    as_comprehension = head + ('    for cell in cells:\n        print(cell["by_method"])\n'
+                               '        print([1 for cell in record["cells"] if cell["missing"]])\n')
+    as_inner_comprehension = head + ('    print([[cell["missing"] for cell in record["cells"]] for cell in cells])\n')
+    for src in (as_loop, as_comprehension, as_inner_comprehension):
+        assert _names({"a.py": src}) == [("a.py", ("missing",))], src
+
+
+def test_a_summary_dict_filled_by_item_assignment_is_not_trusted() -> None:
+    for body in ('result = {}\n        for k, v in entry["cell"].items():\n            result[k] = v\n        cells.append(result)',
+                 'result = {"a": 1}\n        result["b"] = entry["cell"]["rate"]\n        cells.append(result)',
+                 'result = {"a": 1}\n        result["a"] += 1\n        cells.append(result)',
+                 'result = {"a": 1}\n        fill(result, entry["cell"])\n        cells.append(result)'):
+        base = 'def main(record):\n    cells = []\n    for entry in record["cells"]:\n        ' + body + '\n'
+        for tail in ('    return [1 for cell in cells if cell["missing"]]\n',
+                     '    for cell in cells:\n        print(cell["missing"])\n'):
+            assert _names({"a.py": base + tail}) == [("a.py", ("missing",))], (body, tail)
