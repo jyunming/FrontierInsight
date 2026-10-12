@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import experiment_deps as _experiment_deps
+from .proc_tree import ProcessTree as _ProcessTree
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
 
@@ -847,10 +848,16 @@ def head(quest_root: Path) -> tuple[str | None, bool | None]:
         return None, None
 
 
+def _minutes(seconds: float) -> str:
+    return f"{seconds / 60:g} min" if seconds >= 60 else f"{seconds:g} s"
+
+
 def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
     """Run ``code/`` the way a person would: a fresh environment, only ``requirements.txt`` installed, then
-    ``python run.py``. Never raises; returns ``{"ok": bool, "reason": plain words}`` (also saved to
-    ``needs/CODE_PROJECT_CHECK.json``)."""
+    ``python run.py``. Never raises; returns ``{"ok": bool, "status": "ran" | "failed" | "not_finished", "reason":
+    plain words, "says": ...}`` (also saved to ``needs/CODE_PROJECT_CHECK.json``). ``not_finished`` is a run that
+    installed and was still going when ``run_timeout_s`` ran out: FI stopped it (the whole process tree), and that
+    is not a failure, so ``ok`` is False but only ``failed`` deserves a warning."""
     import shutil
     import subprocess
     import time
@@ -878,12 +885,26 @@ def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s
                     result["reason"] = f"installing requirements.txt failed: {(done.stderr or '').strip()[-300:]}"
             if not result["reason"]:
                 step = "running run.py"
-                done = subprocess.run([str(py), str(code_dir / RUN)], capture_output=True, text=True,
-                                      encoding="utf-8", errors="replace", timeout=run_timeout_s, cwd=code_dir)
-                if done.returncode == 0:
-                    result["ok"] = True
-                else:
-                    result["reason"] = f"run.py stopped with an error: {(done.stderr or '').strip()[-300:]}"
+                # A tree, not just the child: run.py starts a worker process per cell, and a timeout must stop them all.
+                with _ProcessTree(
+                    [str(py), str(code_dir / RUN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    encoding="utf-8", errors="replace", cwd=code_dir,
+                ) as tree:
+                    try:
+                        _out, err = tree.proc.communicate(timeout=run_timeout_s)
+                    except subprocess.TimeoutExpired:
+                        tree.kill()
+                        tree.proc.communicate()
+                        result["status"] = "not_finished"
+                        result["reason"] = (
+                            f"it installed and was still running after {_minutes(run_timeout_s)}, so FI stopped it "
+                            "there (the full run takes longer; this is not a failure)"
+                        )
+                    else:
+                        if tree.proc.returncode == 0:
+                            result["ok"] = True
+                        else:
+                            result["reason"] = f"run.py stopped with an error: {(err or '').strip()[-300:]}"
     except subprocess.TimeoutExpired:
         result["reason"] = f"{step} took too long and was stopped"
     except (OSError, subprocess.SubprocessError) as exc:
@@ -891,9 +912,13 @@ def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s
     finally:
         shutil.rmtree(env_dir, ignore_errors=True)
     result["seconds"] = round(time.monotonic() - started)
+    result["status"] = result.get("status") or ("ran" if result["ok"] else "failed")
     result["says"] = (
         "code/ was run again in a clean environment from requirements.txt and it ran."
         if result["ok"] else
+        f"code/ was started again in a clean environment from requirements.txt; {result['reason']}. "
+        "The results above are not affected."
+        if result["status"] == "not_finished" else
         "code/ was run again in a clean environment from requirements.txt and it did NOT run "
         f"({result['reason']}). The results above are not affected; fix requirements.txt or run.py before sharing code/."
     )

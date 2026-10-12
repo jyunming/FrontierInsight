@@ -30,6 +30,9 @@ def test_negative_numeric_config_fields_fail_fast() -> None:
     with pytest.raises(ValidationError):
         ExecutionConfig(timeout_s=0)
     with pytest.raises(ValidationError):
+        ExecutionConfig(clean_check_timeout_s=0)
+    assert ExecutionConfig().clean_check_timeout_s == 900
+    with pytest.raises(ValidationError):
         KnowledgeConfig(full_text_fetch_timeout_s=-1)
     with pytest.raises(ValidationError):
         KnowledgeConfig(relevance_min_score=1.5)   # le=1.0 → >1 rejected

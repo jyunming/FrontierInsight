@@ -17815,14 +17815,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             marker = self.fi_dir / "code_project_checked.json"
             if marker.is_file() and marker.read_text(encoding="utf-8") == digest:
                 return
-            self._progress("Trying code/ in a clean environment")
-            result = await asyncio.to_thread(
-                _code_project.verify, self.quest_root,
-                run_timeout_s=float(self.config.execution.timeout_s),
+            limit = float(min(self.config.execution.clean_check_timeout_s, self.config.execution.timeout_s))
+            self._progress(
+                f"Trying code/ in a clean environment (at most {limit / 60:g} min; it does not change the results)"
             )
+            result = await asyncio.to_thread(_code_project.verify, self.quest_root, run_timeout_s=limit)
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(digest, encoding="utf-8")
-            (self._log.info if result.get("ok") else self._log.warning)("[code] %s", result.get("says"))
+            (self._log.info if result.get("ok") or result.get("status") == "not_finished" else self._log.warning)(
+                "[code] %s", result.get("says"))
         except Exception as exc:  # noqa: BLE001 -- a check of a convenience, never a reason to stop
             self._log.warning("[code] could not try code/ in a clean environment: %s", exc)
 

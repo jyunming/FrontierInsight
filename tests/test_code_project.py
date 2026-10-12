@@ -287,6 +287,7 @@ def test_verify_says_it_ran_in_a_clean_environment(tmp_path):
     code_project.refresh(root, deps=[], protocol=None)
     result = code_project.verify(root)
     assert result["ok"] is True, result
+    assert result["status"] == "ran"
     assert json.loads((root / "needs" / "CODE_PROJECT_CHECK.json").read_text())["ok"] is True
     assert not (root / ".fi" / "project_check").exists()
 
@@ -297,6 +298,19 @@ def test_verify_warns_in_plain_words_when_it_does_not_run(tmp_path):
     code_project.refresh(root, deps=[], protocol=None)
     result = code_project.verify(root)
     assert result["ok"] is False and "did NOT run" in result["says"] and "boom in the script" in result["says"]
+    assert result["status"] == "failed"
+
+
+def test_verify_reports_a_run_cut_off_by_the_time_limit_as_not_finished(tmp_path):
+    root = _quest(tmp_path, two=False)
+    (root / "code" / "experiment.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    code_project.refresh(root, deps=[], protocol=None)
+    result = code_project.verify(root, run_timeout_s=3)
+    assert result["ok"] is False and result["status"] == "not_finished", result
+    assert "did NOT run" not in result["says"]
+    assert "still running after 3 s" in result["says"] and "not a failure" in result["says"]
+    assert json.loads((root / "needs" / "CODE_PROJECT_CHECK.json").read_text())["status"] == "not_finished"
+    assert not (root / ".fi" / "project_check").exists()
 
 
 def test_the_web_zip_leaves_out_run_output(tmp_path):

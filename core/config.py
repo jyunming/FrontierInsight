@@ -1158,6 +1158,10 @@ class EngineConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     sandbox: SandboxKind = "venv"
     timeout_s: int = Field(default=60 * 30, gt=0)
+    # The try of code/ in a clean environment (before the paper is written) is a convenience: it runs the whole
+    # experiment again, so it gets its own, shorter limit (never longer than ``timeout_s``). A run still going when
+    # it ends is stopped and reported as not finished, not as a failure.
+    clean_check_timeout_s: int = Field(default=900, gt=0)
     # Which interpreter builds each quest's venv. Previously declared but
     # never read — venv.EnvBuilder().create() always used sys.executable
     # (whichever interpreter happened to be running FI that invocation),

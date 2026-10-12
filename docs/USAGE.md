@@ -453,6 +453,7 @@ engine:
 execution:
   sandbox: venv                     # venv (default) | docker
   timeout_s: 600
+  clean_check_timeout_s: 900        # the try of code/ in a clean environment before the paper is written may take at most this long (never more than timeout_s); a run still going is stopped and reported as not finished, not as a failure
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest
   split_analysis: auto              # auto (default: two scripts for every quest that runs a simulation, deterministic or random) | true | false. Keep the simulation (code/simulate.py: run_cell for a deterministic study, run_trial for a random one, run by FI, record in raw/) apart from its analysis (code/experiment.py), so FI can run each oracle's case itself; false keeps one script and the result then cannot reach independently_validated; with background_jobs the trials run as a job array (code/submit.py submits FI's tasks)
