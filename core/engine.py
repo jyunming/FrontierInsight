@@ -10003,6 +10003,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         :meth:`_run_cell_randomness` found (``None`` when it was not asked, which holds the run to the protocol's count)."""
         self._manifest_failed_trials: int | None = None  # None: no manifest was read, so nothing corroborates a 0
         self._manifest_analysis_problems: list[str] = []
+        self._manifest_differences: list[dict[str, Any]] = []  # what FI counted: where the analysis lists more than ran
         self._manifest_note = ""  # a plain sentence for the record, when the run was compared in a way worth saying
         if self.config.engine.run_manifest_check == "off":
             return "off", []
@@ -10072,6 +10073,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                                      recorded_by_cell=per_cell)
                 + not_run + no_ids
             )
+            self._manifest_differences = _run_manifest.differences(counted, manifest, result_json, recorded=recorded,
+                                                                    recorded_by_cell=per_cell)
             return ("differs" if found else "ok"), found
         if self.config.rigor_profile == "research":
             # The older contract: the simulation ran its own loop and wrote its own record. Research needs FI's record,
@@ -10114,8 +10117,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         trials = bool(getattr(self, "_trial_mode", False))
         said = ("the analysis does not report the values the protocol's metrics need" if analysis_only else
                 "the simulation does not do what the protocol fixed")
+        differences = list(getattr(self, "_manifest_differences", None) or []) if analysis_only else []
+        plain = _run_manifest.plain_difference(differences)  # the first sentence a scientist reads; the numbers follow it
         return self._stop_before_run(
-            f"{said}: " + "; ".join(found),
+            (f"{plain} Details: " if plain else f"{said}: ") + "; ".join(found),
             "cannot_repair",
             tried=[
                 ("compared FI's record of the trials it ran (`raw/ledger.jsonl`) with the frozen protocol" if trials
@@ -15269,12 +15274,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             elif mode == "warn":
                 manifest_status = "warned"
                 self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join(manifest_found))
-            elif manifest_attempts < budget:
+            elif manifest_attempts < _manifest_repair_budget(
+                    budget, set(manifest_found) <= set(self._manifest_analysis_problems)):
                 manifest_status = "repairing"
                 manifest_attempts_next = manifest_attempts + 1
                 # Only what the analysis failed to print is the analysis's to fix; anything else (the simulation swept
                 # another grid, a claimed count its own values do not back) sends simulate.py back, as it always did.
                 analysis_only = set(manifest_found) <= set(self._manifest_analysis_problems)
+                budget = _manifest_repair_budget(budget, analysis_only)
                 to_fix = _split_run.ANALYSIS_NAME if analysis_only else _split_run.SIMULATE_NAME
                 self._log.warning(
                     "[run_manifest] the run differs from the frozen protocol (%d): %s; sending %s back (%d of %d)",
@@ -15283,7 +15290,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 # The rejected run's numbers must not reach the analysis if the repair gives up: no RESULT_JSON line, no figures.
                 kept = "\n".join(line for line in (result.stdout or "").splitlines() if not line.startswith("RESULT_JSON:"))
                 why = (
-                    _run_manifest.analysis_directive(manifest_found) if analysis_only
+                    _run_manifest.analysis_directive(manifest_found, self._manifest_differences) if analysis_only
                     else _run_manifest.directive(manifest_found, self._protocol_block(state) or {},
                                                  # research asks the older contract for run_trial as well
                                                  trial_mode=bool(getattr(self, "_trial_mode", False))
@@ -15308,7 +15315,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 await self._hidden_check(state, py, primary_env)  # the checks at a setting the code never saw
         if manifest_status == "stopped":
             try:
-                manifest_stop.write_text(json.dumps({"problems": manifest_found}) + "\n", encoding="utf-8")
+                plain_stop = (_run_manifest.plain_difference(self._manifest_differences)
+                              if set(manifest_found) <= set(self._manifest_analysis_problems) else "")
+                manifest_stop.write_text(json.dumps({
+                    "problems": manifest_found, **({"headline": plain_stop, "differences": self._manifest_differences}
+                                                   if plain_stop else {})}) + "\n", encoding="utf-8")
             except OSError:
                 pass
             # The rejected run's figures go, as when it is sent back: a stopped quest shows none of its output.
@@ -16033,7 +16044,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "checked once more and stops with it"
         )
         patch: QuestState = {
-            "run_manifest_failures": int(self.config.engine.run_manifest_repair_attempts),
+            "run_manifest_failures": _manifest_repair_budget(int(self.config.engine.run_manifest_repair_attempts), True),
             "exec_patch_pending": True,
             "exec_reflect_iter": int(state.get("exec_reflect_iter") or 0) + 1,
         }
@@ -23913,12 +23924,22 @@ _PART_HEADING = "Checks already made"
 _TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks
 _TOPIC_DESIGN_ASKED = "topic_design_asked.json"  # one request per redesign, for a design drafted at the design step
 _SEARCH_ASKS = 2
+#: How many times the analysis alone is sent back for a difference FI counted in its values (the simulation stands, so
+#: no experiment is run again); each try uses one of the execute-reflect repairs, which stay bounded as before.
+_ANALYSIS_REPAIR_TRIES = 3
 #: A model's answer the reader refused for its form (a schema error, quoted back to it exactly) earns this many more asks
 #: than ``_SEARCH_ASKS``, and the chat calls they need: a reason that names the field can usually be fixed in one more try.
 #: An answer that never came (a failed call, no complete answer) earns nothing extra.
 _SCHEMA_RETRY_ASKS = 2
 _SEARCH_CALLS_PER_ASK = 3  # one request can make up to three chat calls (two whole-file tries and one for the block alone)
 _SEARCH_CALLS = 6  # at most this many chat calls in all, per plan and model
+
+
+def _manifest_repair_budget(configured: int, analysis_only: bool) -> int:
+    """How many times a run-manifest difference is sent back: ``engine.run_manifest_repair_attempts``, but up to
+    ``_ANALYSIS_REPAIR_TRIES`` when only the analysis is at fault (a repair of its code reruns no experiment). Zero stays
+    zero: a person who asked for no repairs gets none."""
+    return max(configured, _ANALYSIS_REPAIR_TRIES) if analysis_only and configured > 0 else configured
 
 
 class _PlanEditedMeanwhile(Exception):
