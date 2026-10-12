@@ -51,6 +51,9 @@ ORDER_SHARE = 0.5
 ORDER_SLACK = 0.05
 MIN_LEVELS = 3
 SATURATION_MIN_CELLS = 3
+#: A 0/1 indicator (a coverage, a success: several 0/1 draws in every cell) that sits at its bound in every cell is called stuck only with at least this many
+#: draws: a proportion near 0.95 comes out all-ones in a handful of draws by chance (0.95**36 is 16%, 0.95**72 is 2.5%).
+INDICATOR_MIN_VALUES = 60
 
 _UP = {"up", "increase", "increasing", "rise", "rises", "rising"}
 _DOWN = {"down", "decrease", "decreasing", "fall", "falls", "falling"}
@@ -685,13 +688,16 @@ def exempt_names(protocol: dict[str, Any] | None) -> set[str]:
 def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[Verdict]:
     """The generic test, needing no plan and no model. ``cells``: one per setting run, each ``{"metrics": {name: [values]}}``
     (the same shape the degenerate-results check reads). A metric is ``broken`` when any value is NaN or missing, when every
-    cell sits at exactly 0 (or at exactly 1), or when it is one constant over a sweep of at least
-    :data:`SATURATION_MIN_CELLS` cells while something else moves. Names in ``exempt`` (see :func:`exempt_names`) may be
+    cell sits at exactly 0 (or at exactly 1; a 0/1 indicator needs :data:`INDICATOR_MIN_VALUES` draws), or when everything
+    the run returns is one constant over a sweep of at least :data:`SATURATION_MIN_CELLS` cells; it is ``unconfirmed``
+    when it alone is constant over such a sweep while something else moves (it may be a fixed control). Names in ``exempt`` (see :func:`exempt_names`) may be
     constant or pinned by design, but never NaN."""
     skip = set(exempt)
     names = sorted(set.intersection(*[set((c.get("metrics") or {}).keys()) for c in cells])) if cells else []
     out: list[Verdict] = []
     means: dict[str, list[float]] = {}
+    n_values: dict[str, int] = {}
+    indicator: set[str] = set()
     for name in names:
         bad = 0
         total = 0
@@ -708,12 +714,17 @@ def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[
                                f"`{name}` is not a number in {bad} of {total} values over the {len(cells)} settings run."))
         elif ms:
             means[name] = ms
+            n_values[name] = total
+            if all(len(c["metrics"][name]) >= 2 and all(_num(x) in (0.0, 1.0) for x in c["metrics"][name]) for c in cells):
+                indicator.add(name)
     moving = {n for n, ms in means.items() if len({round(m, 12) for m in ms}) > 1 or (max(ms) - min(ms)) > SAME * _scale(*ms)}
     for name, ms in means.items():
         if name in skip or len(ms) < 2:
             continue
         vid = f"saturation:{name}"
         for bound in (0.0, 1.0):
+            if name in indicator and n_values[name] < INDICATOR_MIN_VALUES:
+                break
             if all(abs(m - bound) <= 1e-12 for m in ms):
                 out.append(Verdict(vid, "broken", {"bound": bound, "cells": len(ms)},
                                    f"`{name}` is exactly {bound:g} at all {len(ms)} settings run, a bound it cannot leave."))
@@ -721,9 +732,11 @@ def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[
         else:
             flat = (max(ms) - min(ms)) <= SAME * _scale(*ms)
             if flat and len(ms) >= SATURATION_MIN_CELLS and (moving or len(means) == len([n for n in means if n not in skip])):
-                out.append(Verdict(vid, "broken", {"value": ms[0], "cells": len(ms)},
+                # Constant while other results move is "unconfirmed": a control the study holds fixed on purpose (the temperatures
+                # of the kinetics study, a true rate) looks the same, and FI cannot tell from the numbers. Everything constant is broken.
+                out.append(Verdict(vid, "unconfirmed" if moving else "broken", {"value": ms[0], "cells": len(ms)},
                                    f"`{name}` is {_g(ms[0])} at every one of the {len(ms)} settings run"
-                                   + (", although other results change with them." if moving else ", and so is everything else the run returns.")))
+                                   + (", although other results change with them (fine if it is a fixed control of the study)." if moving else ", and so is everything else the run returns.")))
     return out
 
 

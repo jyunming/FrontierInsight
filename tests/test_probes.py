@@ -309,12 +309,24 @@ def test_saturation_nan_bound_constant():
     assert [v.relation_id for v in nan] == ["saturation:m"] and "not a number" in nan[0].says
     none = P.saturation([cell(m=[None, 1.0])])
     assert none and none[0].verdict == "broken"
-    pinned = P.saturation([cell(p=[0.0, 0.0], q=[1.0, 2.0]), cell(p=[0.0, 0.0], q=[2.0, 3.0])])
-    assert any(v.relation_id == "saturation:p" and "exactly 0" in v.says for v in pinned)
-    one = P.saturation([cell(p=[1.0], q=[1.0]), cell(p=[1.0], q=[2.0])])
+    pinned = P.saturation([cell(p=[0.0] * 40, q=[1.0, 2.0]), cell(p=[0.0] * 40, q=[2.0, 3.0])])
+    assert any(v.relation_id == "saturation:p" and v.verdict == "broken" and "exactly 0" in v.says for v in pinned)
+    one = P.saturation([cell(p=[1.0] * 40, q=[1.0] * 40), cell(p=[1.0] * 40, q=[2.0] * 40)])
     assert any(v.relation_id == "saturation:p" and "exactly 1" in v.says for v in one)
+    # one number per cell is a result, not a 0/1 draw: a value pinned at 0 is read from any number of cells
+    assert P.saturation([cell(p=[0.0], q=[1.0]), cell(p=[0.0], q=[2.0]), cell(p=[0.0], q=[3.0])])[0].relation_id == "saturation:p"
+    # constant while others move: unconfirmed (a fixed control looks the same)
     const = P.saturation([cell(dof=[0.7, 0.7], y=[i, i]) for i in range(1, 5)])
     assert [v.relation_id for v in const] == ["saturation:dof"] and "although other results change" in const[0].says
+    assert const[0].verdict == "unconfirmed"
+
+
+def test_saturation_few_draws_of_an_indicator_at_its_bound_prove_nothing():
+    # a 95% coverage can come out all ones in a handful of draws; INDICATOR_MIN_VALUES draws are needed
+    few = [cell(cov=[1.0] * 4, y=[float(i)] * 4) for i in range(4)]
+    assert P.saturation(few) == []
+    many = [cell(cov=[1.0] * (P.INDICATOR_MIN_VALUES // 3 + 1), y=[float(i)]) for i in range(4)]
+    assert [v.relation_id for v in P.saturation(many)] == ["saturation:cov"]
 
 
 def test_saturation_clean_data_and_short_sweeps_pass():
@@ -336,7 +348,7 @@ def test_saturation_exemptions_mirror_expected_constants():
 
 def test_saturation_all_constant_run():
     got = P.saturation([cell(a=[2.0], b=[3.0]) for _ in range(4)])
-    assert {v.relation_id for v in got} == {"saturation:a", "saturation:b"}
+    assert {v.relation_id for v in got} == {"saturation:a", "saturation:b"} and all(v.verdict == "broken" for v in got)
 
 
 # ---------------------------------------------------------------------------------------------------------------- mutators

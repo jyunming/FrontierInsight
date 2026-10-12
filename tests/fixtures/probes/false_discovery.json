@@ -1,0 +1,32 @@
+{
+ "quest": "C:/fi_runs/suite/rounds/r5/false_discovery/out/1791615895-fdr-bonferroni-vs-bh-fe7b0f",
+ "about": "r5 false_discovery: graded 87.6 by hand (numbers all reproduce independently), the known-good false-discovery quest. Relations are hand-checked against its plan.md; `metrics_extra` are names run_trial returns that the protocol does not list as metrics. The grid's `correction_method` is never read by simulate.py (every trial returns all three methods), so no relation is written on it.",
+ "metrics_extra": ["bonferroni_power", "uncorrected_power", "R_uncorr", "R_bh", "R_bonf", "uncorrected_realized_fdr"],
+ "metric_alias": {},
+ "relations": [
+  {"id": "R1", "kind": "monotone", "setting": "m", "metric": "bonferroni_power", "direction": "down", "strength": "core",
+   "from_plan": "Bonferroni is often too conservative, leading to high Type II error (low power)"},
+  {"id": "R2", "kind": "equal_when", "metric": "uncorrected_power", "a": {"pi1": 0.05}, "b": {"pi1": 0.2}, "strength": "supporting",
+   "from_plan": "Power = E[S / (m * pi1)] for pi1 > 0 (a fraction of the real effects found, so it does not depend on how many there are)"},
+  {"id": "R3", "kind": "monotone", "setting": "m", "metric": "R_uncorr", "direction": "up", "strength": "core",
+   "from_plan": "simulating z-tests with varying multiplicities"},
+  {"id": "R4", "kind": "scaling", "setting": "m", "metric": "R_uncorr", "factor": 10, "exponent": 1, "strength": "supporting",
+   "from_plan": "simulating z-tests with varying multiplicities (uncorrected rejections are a fixed share of the m tests)"},
+  {"id": "R5", "kind": "sensitivity", "setting": "pi1", "metric": "R_bh", "strength": "core",
+   "from_plan": "z-tests with varying multiplicities and signal densities"},
+  {"id": "R6", "kind": "monotone", "setting": "pi1", "metric": "R_bh", "direction": "up", "strength": "core",
+   "from_plan": "z-tests with varying multiplicities and signal densities"},
+  {"id": "R7", "kind": "monotone", "setting": "pi1", "metric": "R_bonf", "direction": "up", "strength": "supporting",
+   "from_plan": "signal densities"},
+  {"id": "R8", "kind": "monotone", "setting": "pi1", "metric": "uncorrected_realized_fdr", "direction": "down", "strength": "supporting",
+   "from_plan": "the risk of any false discovery against the probability of detecting real effects"}
+ ],
+ "extra_mutants": [
+  {"name": "bonferroni_not_divided_by_m", "file": "fdr_bonferroni_vs_bh/model.py", "find": "return alpha / m", "replace": "return alpha"},
+  {"name": "bh_threshold_flat", "file": "fdr_bonferroni_vs_bh/model.py", "find": "(np.arange(1, m + 1) / m) * alpha", "replace": "alpha / m"},
+  {"name": "p_value_wrong_scale", "file": "fdr_bonferroni_vs_bh/model.py", "find": "0.5 * erfc(z / sqrt(2.0))", "replace": "0.5 * erfc(z)"},
+  {"name": "power_not_per_alternative", "file": "fdr_bonferroni_vs_bh/model.py", "find": "return S / (m * pi1)", "replace": "return S / m"},
+  {"name": "effect_size_ignored", "file": "simulate.py", "find": "effect_size * truth", "replace": "0.0 * truth"},
+  {"name": "truth_all_null", "file": "simulate.py", "find": "truth[rng.permutation(m)[:n_alternative]] = True", "replace": "pass"}
+ ]
+}
