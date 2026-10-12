@@ -798,20 +798,16 @@ def test_a_number_with_one_significant_digit_is_still_not_checked() -> None:
     assert _tokens(check("About 2000 samples were drawn.", result_json={"x": 1.5})) == []
 
 
-def test_a_unit_prefix_change_by_a_thousand_is_accepted() -> None:
-    """2326.66 J/mol written 2.33 kJ/mol."""
-    assert _tokens(check("The SD of Ea was 2.33 kJ/mol.", result_json=SD_RUN)) == []
-    assert _tokens(check("The SD of Ea was 2.327 kJ/mol.", result_json=SD_RUN)) == []
+def test_a_unit_prefix_change_by_a_thousand_is_not_accepted() -> None:
+    """2326.66 J/mol written 2.33 kJ/mol is deliberately flagged: accepting x/÷1000 raised coincidental matches."""
+    assert _tokens(check("The SD of Ea was 2.33 kJ/mol.", result_json=SD_RUN)) == ["2.33"]
+    assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"ea_sd_kj_mol": 2.32666})) == ["2330"]
 
 
-def test_a_unit_prefix_change_is_compared_at_the_precision_written() -> None:
-    assert _tokens(check("The SD of Ea was 2.33 kJ/mol.", result_json={"ea_sd_j_mol": 2316.0})) == ["2.33"]
-
-
-def test_a_value_in_the_larger_unit_is_found_in_the_smaller() -> None:
-    """The run holds 2.32666 (kJ); the paper writes 2330 (J)."""
-    assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"ea_sd_kj_mol": 2.32666})) == []
-    assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"ea_sd_kj_mol": 2.316})) == ["2330"]
+def test_a_percentage_of_a_rounded_integer_is_compared_at_the_precision_written() -> None:
+    """The x100 shift keeps working at a negative precision: 233000 (rounded to the thousands) from 2326.66 x 100."""
+    assert _tokens(check("The value was 233000.", result_json={"x": 2326.66})) == []
+    assert _tokens(check("The value was 233000.", result_json={"x": 2316.0})) == ["233000"]
 
 
 def test_truncation_at_the_tens_is_exact() -> None:
