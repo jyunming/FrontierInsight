@@ -94,7 +94,11 @@ the defence:
     gives it, so it is compared at the tens (``-1`` decimals), not at the
     units, where ``2327`` is not ``2330``. A token with ``k`` trailing zeros
     and no decimal point is compared at ``-k`` decimals; ``2316.0`` still
-    does not account for ``2330`` (it rounds to ``2320``). A number with fewer
+    does not account for ``2330`` (it rounds to ``2320``). Any integer with at
+    least three significant digits and trailing zeros (``1550``, ``20300``) is
+    compared this way, at +-5 or +-50; measured, it added no coincidental match.
+    Rounding only: a rounded integer is never matched by truncation, and is not
+    scaled by 100 upwards. A number with fewer
     than three significant digits (``2000``) is not checked at all, as before.
 
 ``unit prefixes``
@@ -458,16 +462,6 @@ _PATH_NUMBER = re.compile(r"(?<![\w])\d+(?:\.\d+)*(?![\w])")
 _TEXT_NUMBER = re.compile(r"(?<![\w.])(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)(?![\w])")
 
 
-def _floor_to(value: float, dec: int) -> float:
-    """``value`` truncated at ``dec`` decimals; a negative ``dec`` truncates at the tens, hundreds... (divided, not
-    multiplied by 0.1, which would not be exact)."""
-    if dec >= 0:
-        scale = 10.0 ** dec
-        return math.floor(value * scale) / scale
-    unit = 10.0 ** -dec
-    return math.floor(value / unit) * unit
-
-
 class Traceable:
     """The set of values this run can account for, indexed for rounded lookup.
 
@@ -509,9 +503,10 @@ class Traceable:
         table = self._trunc_by_dec.get(dec)
         if table is None:
             table = {}
+            scale = 10.0 ** dec
             for path, value in self.values.items():
                 try:
-                    table.setdefault(_floor_to(value, dec), path)
+                    table.setdefault(math.floor(value * scale) / scale, path)
                 except (ValueError, OverflowError):
                     continue
             self._trunc_by_dec[dec] = table
@@ -522,8 +517,13 @@ class Traceable:
         number. ``0.05/36 = 0.0013888…`` gets written ``0.001388``, and against
         rounding alone that reads as a number from nowhere — the one flag this
         check raised on a threshold the run really did compute."""
+        if dec < 0:
+            # Nobody truncates 2326.66 to 2320: a number rounded to the tens is rounded, and truncating would widen
+            # the window of 2320 to [2315, 2330).
+            return None
+        scale = 10.0 ** dec
         try:
-            key = _floor_to(value, dec)
+            key = math.floor(value * scale) / scale
         except (ValueError, OverflowError):
             return None
         return self._trunc_table(dec).get(key)
@@ -702,7 +702,8 @@ def _variants(value: float, token: str) -> Iterator[tuple[float, int, str]]:
     dec = _written_precision(token)
     yield value, dec, ""
     yield value / 100.0, dec + 2, " (as a fraction rather than a percentage)"
-    yield value * 100.0, max(dec - 2, 0) if dec >= 0 else dec - 2, " (as a percentage rather than a fraction)"
+    if dec >= 0:  # never for a rounded integer: 2330 x 100 would match an unrelated 233,450
+        yield value * 100.0, max(dec - 2, 0), " (as a percentage rather than a fraction)"
     if 0.0 < value < 1.0:
         yield 1.0 - value, dec, " (as its complement)"
     if 0.0 < value < 100.0:

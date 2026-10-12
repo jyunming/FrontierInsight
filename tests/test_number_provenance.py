@@ -794,8 +794,9 @@ def test_trailing_zeros_compare_at_the_hundreds_for_two_zeros() -> None:
 
 
 def test_a_number_with_one_significant_digit_is_still_not_checked() -> None:
-    """"2000" carries no information about where it came from, as before: no flag, whatever the run holds."""
-    assert _tokens(check("About 2000 samples were drawn.", result_json={"x": 1.5})) == []
+    """"3000" carries no information about where it came from, as before: not a year, not hedged, not checked."""
+    report = check("We drew 3000 samples.", result_json={"x": 1.5})
+    assert _tokens(report) == [] and report.paper_numbers == 0
 
 
 def test_a_unit_prefix_change_by_a_thousand_is_not_accepted() -> None:
@@ -804,12 +805,11 @@ def test_a_unit_prefix_change_by_a_thousand_is_not_accepted() -> None:
     assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"ea_sd_kj_mol": 2.32666})) == ["2330"]
 
 
-def test_a_percentage_of_a_rounded_integer_is_compared_at_the_precision_written() -> None:
-    """The x100 shift keeps working at a negative precision: 233000 (rounded to the thousands) from 2326.66 x 100."""
-    assert _tokens(check("The value was 233000.", result_json={"x": 2326.66})) == []
-    assert _tokens(check("The value was 233000.", result_json={"x": 2316.0})) == ["233000"]
+def test_a_rounded_integer_is_never_scaled_up_by_a_hundred() -> None:
+    """2330 x 100 must not match an unrelated 233,450 in the run."""
+    assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"x": 233450.0})) == ["2330"]
 
 
-def test_truncation_at_the_tens_is_exact() -> None:
-    """The truncation table at a negative precision is exact: 2326.66 truncates to 2320, so a paper's 2320 is accepted."""
-    assert _tokens(check("The SD of Ea was 2320 J/mol.", result_json=SD_RUN)) == []
+def test_a_rounded_integer_is_not_matched_by_truncation() -> None:
+    """Nobody truncates 2326.66 to 2320: 2320 is flagged (it would widen the window to [2315, 2330))."""
+    assert _tokens(check("The SD of Ea was 2320 J/mol.", result_json=SD_RUN)) == ["2320"]
