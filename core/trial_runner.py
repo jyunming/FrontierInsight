@@ -169,6 +169,8 @@ def cells(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
 def _fmt(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return repr(value)
+    if isinstance(value, list):  # an array setting (a design variable that is an array): no comma, a key is split on them
+        return "[" + ";".join(_fmt(x) for x in value) + "]"
     return str(value)
 
 

@@ -27,6 +27,7 @@ sweep; one the engine cannot search (no block, no budget, one script, a cluster)
 
 from __future__ import annotations
 
+import itertools
 import math
 import re
 from typing import Any
@@ -60,6 +61,15 @@ MIN_REFINEMENT = 1.1
 # How many of the best designs the check recomputes at the finer settings, besides the baseline.
 CHECK_CANDIDATES = 3
 _P = "`protocol.optimisation"
+
+#: An array design variable (a vector or an image of values the search changes): its largest size, and how many of its
+#: elements the check nudges. 1024 elements is a 32 x 32 image: the plan, the records and every evaluation carry the whole
+#: array, and the built-in searches need one evaluation per element just to start a local search, so a larger array is not
+#: searched; a design with more freedom is described with the few numbers that shape it. The nudge probes the elements of an
+#: array evenly spread (at most this many per array): two evaluations per element would otherwise be the whole check.
+MAX_ARRAY_ELEMENTS = 1024
+MAX_ARRAY_RANK = 3
+PROBE_ELEMENTS = 32
 
 
 def _number(value: Any) -> bool:
@@ -122,6 +132,55 @@ def study_type_of(design: Any) -> str:
 # --- the block -----------------------------------------------------------------------------------------------------
 
 
+def is_array(variable: Any) -> bool:
+    """Whether a design variable is an array (it declares a ``shape``)."""
+    return isinstance(variable, dict) and variable.get("shape") is not None
+
+
+def shape_of(variable: dict[str, Any]) -> list[int]:
+    """The declared shape of an array variable (validated by :func:`normalize`); ``[]`` for a scalar."""
+    shape = variable.get("shape") if isinstance(variable, dict) else None
+    return [int(n) for n in shape] if isinstance(shape, list) else []
+
+
+def indices(shape: list[int]) -> list[tuple[int, ...]]:
+    """Every index of an array of ``shape``, in row-major order."""
+    return list(itertools.product(*[range(n) for n in shape]))
+
+
+def element_count(variable: dict[str, Any]) -> int:
+    """How many numbers a design variable holds: one for a scalar, the product of its shape for an array."""
+    return math.prod(shape_of(variable)) if is_array(variable) else 1
+
+
+def element_name(name: str, index: tuple[int, ...]) -> str:
+    """How an element of an array variable is named in the records of a check: ``source[1,3]``."""
+    return f"{name}[{','.join(str(i) for i in index)}]"
+
+
+def bound_at(bound: Any, index: tuple[int, ...]) -> Any:
+    """The ``low`` or ``high`` that applies to the element at ``index``: the number itself, or the entry of the list."""
+    for i in index:
+        if not isinstance(bound, list):
+            break
+        bound = bound[i]
+    return bound
+
+
+def _nested_problem(value: Any, shape: list[int], leaf: Any, path: str = "") -> str | None:
+    """Why ``value`` is not a nested list of ``shape`` whose every entry satisfies ``leaf`` (a reason, or ``None``)."""
+    if not shape:
+        return None if leaf(value) else f"the entry{path} is not allowed ({value!r})"
+    if not isinstance(value, list) or len(value) != shape[0]:
+        size = len(value) if isinstance(value, list) else "a single value"
+        return f"{('the entry' + path) if path else 'it'} must be a list of {shape[0]} (it is {size})"
+    for i, item in enumerate(value):
+        why = _nested_problem(item, shape[1:], leaf, f"{path}[{i}]")
+        if why:
+            return why
+    return None
+
+
 def kind_of(variable: dict[str, Any]) -> str:
     """A design variable's kind; ``continuous`` when the plan left it out (``choice`` when it lists ``values``)."""
     kind = str(variable.get("kind") or "").strip().lower()
@@ -136,10 +195,13 @@ _ARRAY_WORDS = re.compile(
     r"|\bper[- ](?:pixel|element|cell|entry|sample)\b", re.IGNORECASE)
 
 #: What to tell the plan's model when the search is asked to change a set of values: the search takes one number each.
-SCALAR_NOTE = ("The search changes ONE number per design variable (`continuous` or `integer`), or picks one of a list of "
-               "`values` (`choice`). It cannot change an array, vector or image of values. When the design is such a "
-               "set, describe it with a few scalar design variables (the few numbers that shape it, each with its own "
-               "`low` and `high`) and let the simulation build the full set from them.")
+SCALAR_NOTE = ("A plain design variable is ONE number per design variable (`continuous` or `integer`), or one of a list of "
+               "`values` (`choice`). A set of values (a vector or an image, for example the pixels of a source) is an "
+               "array variable: give its `shape` (a list of whole numbers such as [5, 5], at most "
+               f"{MAX_ARRAY_ELEMENTS} elements), `kind` `continuous` or `integer`, `low` and `high` (one number for every "
+               "element, or a list of the same shape), and write the baseline value as a list of the same shape. A `kind` "
+               "that only describes an array is not read: declare the `shape`. A set of more than "
+               f"{MAX_ARRAY_ELEMENTS} values is described with the few numbers that shape it.")
 
 
 def read_kind(value: Any) -> tuple[str | None, str | None]:
@@ -172,6 +234,11 @@ def _variable(item: Any, index: int) -> tuple[dict[str, Any] | None, str | None]
         return None, f"{where} has no `name` (the name the simulation reads it under)"
     out["name"] = name
     where = f"{_P}.design_variables` `{name}`"
+    if out.get("shape") is not None:
+        return _array_variable(out, where)
+    if isinstance(out.get("low"), list) or isinstance(out.get("high"), list):
+        return None, (f"{where}: `low` and `high` are lists, but the variable declares no `shape`; an array variable gives "
+                      "its `shape` (a list of whole numbers such as [5, 5])")
     if out.get("kind") is not None:
         kind, kind_why = read_kind(out["kind"])
         if kind is None:
@@ -203,7 +270,74 @@ def _variable(item: Any, index: int) -> tuple[dict[str, Any] | None, str | None]
     return out, None
 
 
+def _array_variable(out: dict[str, Any], where: str) -> tuple[dict[str, Any] | None, str | None]:
+    """An array design variable: ``shape``, ``kind`` (``continuous`` or ``integer``) and per-element ``low`` / ``high``."""
+    shape = out["shape"]
+    if (not isinstance(shape, list) or not 1 <= len(shape) <= MAX_ARRAY_RANK
+            or not all(_whole(n) and n >= 1 for n in shape)):
+        return None, (f"{where}: `shape` must be a list of 1 to {MAX_ARRAY_RANK} whole numbers of at least 1, such as "
+                      f"[5, 5] (it is {shape!r})")
+    shape = [int(n) for n in shape]
+    total = math.prod(shape)
+    if total > MAX_ARRAY_ELEMENTS:
+        return None, (f"{where}: `shape` {shape} has {total} elements; at most {MAX_ARRAY_ELEMENTS} are searched. Describe "
+                      "a larger set with the few numbers that shape it")
+    out["shape"] = shape
+    if out.get("values") is not None:
+        return None, f"{where}: an array variable takes numbers in a range (`low`, `high`), not a list of `values`"
+    if out.get("kind") is not None:
+        kind, kind_why = read_kind(out["kind"])
+        if kind is None:
+            return None, f"{where}: {kind_why}"
+        out["kind"] = kind
+    kind = kind_of(out)
+    if kind not in ("continuous", "integer"):
+        return None, f"{where}: the elements of an array variable are `continuous` or `integer`, not `{kind}`"
+    for key in ("unit", "meaning"):
+        if out.get(key) is not None and not isinstance(out[key], (str, int, float)):
+            return None, f"{where}: `{key}` must be text"
+    for key in ("low", "high"):
+        bound = out.get(key)
+        if isinstance(bound, list):
+            why = _nested_problem(bound, shape, _number)
+        else:
+            why = None if _number(bound) else "it must be a number or a list of numbers"
+        if why:
+            return None, f"{where}: `{key}` must be a number, or a list of numbers of shape {shape} ({why})"
+    for index in indices(shape):
+        low, high = bound_at(out["low"], index), bound_at(out["high"], index)
+        at = f" at {list(index)}" if len(indices(shape)) > 1 else ""
+        if low >= high:
+            return None, f"{where}: `low` ({low}) must be below `high` ({high}){at}"
+        if kind == "integer" and not (_whole(low) and _whole(high)):
+            return None, f"{where}: an `integer` variable has whole-number `low` and `high`{at}"
+    return out, None
+
+
+def array_problem(variable: dict[str, Any], value: Any) -> str | None:
+    """Why ``value`` is not a value of the array variable (a list of its shape, every element inside its own range, whole
+    numbers for an ``integer`` one), or ``None``."""
+    shape = shape_of(variable)
+    kind = kind_of(variable)
+    why = _nested_problem(value, shape, _number)
+    if why:
+        return f"it must be a list of numbers of shape {shape} ({why})"
+    for index in indices(shape):
+        x = value
+        for i in index:
+            x = x[i]
+        low, high = bound_at(variable["low"], index), bound_at(variable["high"], index)
+        at = f" at {list(index)}" if len(shape) > 1 or shape[0] > 1 else ""
+        if not low <= x <= high:
+            return f"{x!r}{at} is outside its range {_fmt(low)} to {_fmt(high)}"
+        if kind == "integer" and not _whole(x):
+            return f"{x!r}{at} is not a whole number"
+    return None
+
+
 def _inside(variable: dict[str, Any], value: Any) -> bool:
+    if is_array(variable):
+        return array_problem(variable, value) is None
     kind = kind_of(variable)
     if kind == "choice":
         return any(value == v for v in variable["values"])
@@ -224,9 +358,18 @@ def _limit(value: Any) -> tuple[str, float] | None:
     return _OPS[match.group(1)], number
 
 
+def _leaves(value: Any) -> list[Any]:
+    return [x for item in value for x in _leaves(item)] if isinstance(value, list) else [value]
+
+
 def _fmt(value: Any) -> str:
     if _number(value):
         return str(int(value)) if float(value).is_integer() and abs(value) < 1e15 else repr(float(value))
+    if isinstance(value, list):
+        leaves = _leaves(value)
+        if len(leaves) > 16:  # a long array is shown by its first values and its size
+            return "[" + ", ".join(_fmt(x) for x in leaves[:8]) + f", ... ({len(leaves)} values)]"
+        return "[" + ", ".join(_fmt(x) for x in value) + "]"
     return str(value)
 
 
@@ -297,6 +440,9 @@ def _grid(grid: Any, variables: dict[str, dict[str, Any]], fixed: dict[str, Any]
     for axis, values in grid.items():
         values = values if isinstance(values, list) else [values]
         if str(axis) in variables:
+            if is_array(variables[str(axis)]):
+                return (f"{_P}.grid` `{axis}`: `{axis}` is an array variable; a scan axis takes single numbers, so scan "
+                        "another setting (the search changes the array from its baseline)")
             if not values or not all(_inside(variables[str(axis)], v) for v in values):
                 return f"{_P}.grid` `{axis}`: every value must lie inside that variable's range"
         elif str(axis) in fixed:
@@ -371,7 +517,11 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
     if extra:
         return None, f"{_P}.baseline.values` names `{extra[0]}`, which is not a design variable"
     for name, variable in variables.items():
-        if not _inside(variable, values[name]):
+        if is_array(variable):
+            why = array_problem(variable, values[name])
+            if why:
+                return None, f"{_P}.baseline.values` `{name}`: {why}"
+        elif not _inside(variable, values[name]):
             return None, (f"{_P}.baseline.values` `{name}` = {values[name]!r} is outside the range the search may use "
                           "(or not a value that variable takes)")
     if baseline.get("source") is not None and not isinstance(baseline["source"], (str, int, float)):
@@ -599,7 +749,13 @@ def effective_method(block: dict[str, Any]) -> tuple[str, str]:
     if variables and all(kind_of(v) in ("integer", "choice") for v in variables):
         combos = 1
         for v in variables:
-            combos *= len(v["values"]) if kind_of(v) == "choice" else int(v["high"] - v["low"] + 1)
+            if kind_of(v) == "choice":
+                combos *= len(v["values"])
+            elif is_array(v):
+                for index in indices(shape_of(v)):
+                    combos *= int(bound_at(v["high"], index) - bound_at(v["low"], index) + 1)
+            else:
+                combos *= int(v["high"] - v["low"] + 1)
         search, _scan = evaluations(block)
         if search is not None and combos <= search:
             return "exhaustive", "rule"
@@ -637,7 +793,8 @@ def budget(block: dict[str, Any]) -> dict[str, Any]:
     settings = block.get("numerical_settings") if isinstance(block.get("numerical_settings"), dict) else {}
     levels = max((len(check_levels(s if isinstance(s, dict) else {"search": s})[0]) for s in settings.values()),
                  default=0) or 1
-    continuous = sum(1 for v in block.get("design_variables") or [] if kind_of(v) in ("continuous", "integer"))
+    continuous = sum(min(PROBE_ELEMENTS, element_count(v)) for v in block.get("design_variables") or []
+                     if kind_of(v) in ("continuous", "integer"))
     runs = int(block.get("runs_per_evaluation") or 1)
     check_runs = int(block.get("check_runs") or block.get("runs_per_evaluation") or 1)
     check = ((candidates + 1) * levels + 2 * continuous) * check_runs
@@ -735,7 +892,9 @@ def ask_request(topic: str, problems: list[str], left_out: list[str] | None = No
         "`direction` (`minimise` or `maximise`), and optionally `unit` and `meaning`. A second goal becomes a limit "
         "under `constraints`.\n"
         "- `design_variables`: what the search may change: a list, each with `name`, `low` and `high` (the range it may "
-        "use), optionally `unit` and `kind` (exactly one word: `continuous`, `integer`, or `choice` with `values`).\n"
+        "use), optionally `unit` and `kind` (exactly one word: `continuous`, `integer`, or `choice` with `values`). A "
+        "set of values (a vector or an image) is ONE variable with a `shape` such as [5, 5] (`low` and `high` a number, "
+        "or a list of that shape; its baseline value a list of that shape).\n"
         "- `baseline`: the design to beat: `values` (one value for each design variable, inside its range) and `source` "
         "(where it comes from: the topic, or a source in the plan's list).\n"
         "- `evaluation_budget`: how many designs the search may try: `starts` (starting points) and `per_start` "
@@ -762,6 +921,13 @@ def _flat(text: Any) -> str:
 def _range(variable: dict[str, Any]) -> str:
     unit = _flat(variable.get("unit"))
     kind = kind_of(variable)
+    if is_array(variable):
+        shape = shape_of(variable)
+        low, high = variable["low"], variable["high"]
+        span = (f"{_fmt(low)} to {_fmt(high)}{' ' + unit if unit else ''}" if not isinstance(low, list)
+                and not isinstance(high, list) else f"its own range for each element{' (' + unit + ')' if unit else ''}")
+        return (f"an array of shape {shape} ({element_count(variable)} numbers); each element {span}"
+                + (" (whole numbers)" if kind == "integer" else ""))
     if kind == "choice":
         return "one of " + ", ".join(_flat(v) for v in variable["values"])
     span = f"{_fmt(variable['low'])} to {_fmt(variable['high'])}{' ' + unit if unit else ''}"
@@ -868,6 +1034,14 @@ def plan_lines(design: Any) -> list[str]:
         lines += ["**Numerical settings:** none named. If the simulation has a mesh size, a time step or a tolerance, "
                   "name it under `numerical_settings`: otherwise the best design is only recomputed at the same "
                   "settings, which cannot tell a real improvement from a numerical error.", ""]
+    dims = sum(element_count(v) for v in block["design_variables"] if kind_of(v) != "choice")
+    per_start = (block.get("evaluation_budget") or {}).get("per_start") if isinstance(block.get("evaluation_budget"), dict) else None
+    if (any(is_array(v) for v in block["design_variables"]) and _whole(per_start) and per_start < dims + 1
+            and method in ("bounded_local", "global_then_local")):
+        lines += [f"**A note on the size of the search:** the design has {dims} numbers to change, and a local search "
+                  f"needs {dims + 1} evaluations just to start (one for each number, plus one); {int(per_start)} per "
+                  "starting point is fewer, so each starting point may stop before it improves anything. A library method "
+                  "(`scipy:` or `optuna:`) or a larger `per_start` fits an array of this size better.", ""]
     count = budget(block)
     lines += ["**How many evaluations (worked out now, before anything runs):**", ""]
     if count["scan"]:

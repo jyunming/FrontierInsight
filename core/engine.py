@@ -24146,7 +24146,7 @@ A search for the best design has NO top-level `grid`: its protocol has an `optim
 
 "optimisation": {
   "objective": {"quantity": "<the name the simulation returns it under, e.g. max_base_temperature>", "direction": "<minimise | maximise>", "unit": "<K>", "meaning": "<what it is, in words>"},
-  "design_variables": [{"name": "<e.g. fin_spacing>", "low": <number>, "high": <number>, "unit": "<mm>", "kind": "<continuous | integer | choice>", "values": [<only for a choice: the values it may take>]}],
+  "design_variables": [{"name": "<e.g. fin_spacing>", "low": <number>, "high": <number>, "unit": "<mm>", "kind": "<continuous | integer | choice>", "values": [<only for a choice: the values it may take>]}, {"name": "<an array, e.g. source_pixels>", "shape": [<whole numbers, e.g. 5, 5>], "kind": "<continuous | integer>", "low": <a number, or a list of that shape>, "high": <a number, or a list of that shape>}],
   "fixed": {"<a condition the simulation needs that the search may not change, e.g. heat_load_W>": <value>},
   "constraints": [{"quantity": "<e.g. mass_g>", "limit": "<'<= 120' or '>= 3'>", "unit": "<g>"}],
   "baseline": {"values": {"<every design variable>": <its value>}, "source": "<where this design comes from: a design in a source listed above by its [n], a standard design, or the one in use now>"},
@@ -24161,6 +24161,7 @@ A search for the best design has NO top-level `grid`: its protocol has an `optim
 Rules for the block:
 - There is ONE objective. A second goal is written as a constraint: the lightest truss whose stress stays under 250 MPa minimises mass with the constraint stress <= 250.
 - Each design variable's range has a physical meaning and lies where the model holds (`model.holds_for`).
+- A design that is a set of numbers (the pixels of a source, a profile) is ONE design variable with a `shape` (a list of 1 to 3 whole numbers, at most 1024 elements in all), `kind` `continuous` or `integer`, and `low` / `high` as one number for every element or a list of that shape; its baseline value is a list of that shape. The search changes every element. Never write a list for `low`, `high` or a baseline value without the `shape`, and never put an array under `grid` (the grid scans single numbers).
 - The baseline is a real, feasible design (it meets every constraint): it gives a value for every design variable, inside its range, and says where it comes from. Make one oracle check the baseline design.
 - The search and the check use the same model; what differs is that the check recomputes the best designs and the baseline at finer numerical settings (and, with randomness, with new seeds), so an improvement that is only a numerical error does not count. `check` values must be really finer than `search`, each level at least 1.1 times finer than the one before (a mesh size of 0.5 is checked at 0.25 and 0.125). Leave `check` out and FI uses half, then a quarter, of the search value.
 - Leave out `improvement_tolerance` unless the topic or the field says how much better counts: a design then counts as better only when it beats the baseline by more than the numerical error of the two designs.

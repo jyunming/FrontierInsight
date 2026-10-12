@@ -326,23 +326,40 @@ def _probe(space: Any, chosen: dict[str, Any], level: int, evaluate: Callable, o
     ``out`` (filled as it goes, so a check cut short keeps what it did). A design within half a nudge of an edge of its
     range is at that edge, and is not nudged past it."""
     design = chosen["design"]
-    for variable, kind in zip(space.variables, space.kinds):
-        name = str(variable["name"])
+    flat = space.flat(design)
+    for k in _probed(space):
+        variable, kind = space.scalars[k], space.scalar_kinds[k]
+        name = str(variable["name"])  # an element of an array variable is named `source[1,3]`
         if kind == "choice":
             continue
-        low, high, x = float(variable["low"]), float(variable["high"]), float(design[name])
+        low, high, x = float(variable["low"]), float(variable["high"]), float(flat[k])
         step = 1.0 if kind == "integer" else NUDGE * (high - low)
         edge = "low" if x - low < step / 2 else "high" if high - x < step / 2 else None
-        out[name] = {"at_bound": edge, "step": step, "sides": {}, "value": design[name]}
+        out[name] = {"at_bound": edge, "step": step, "sides": {}, "value": flat[k]}
         for side, value in (("down", max(low, x - step)), ("up", min(high, x + step))):
             if (side == "down" and edge == "low") or (side == "up" and edge == "high"):
                 continue
-            nudged = dict(design)
-            nudged[name] = int(round(value)) if kind == "integer" else _search._snap(value)
+            moved = list(flat)
+            moved[k] = int(round(value)) if kind == "integer" else _search._snap(value)
+            nudged = space.fold(moved)
             if space.key(space.canonical(nudged)) == space.key(space.canonical(design)):
                 continue
             judged = yield from evaluate(nudged, level, "probe")
-            out[name]["sides"][side] = {"value": space.canonical(nudged)[name], "judged": judged}
+            out[name]["sides"][side] = {"value": space.flat(space.canonical(nudged))[k], "judged": judged}
+
+
+def _probed(space: Any) -> list[int]:
+    """The coordinates the check nudges: every number of a scalar variable, and at most ``PROBE_ELEMENTS`` elements of an
+    array variable, spread evenly over it (two evaluations per element would otherwise be the whole check)."""
+    groups: dict[str, list[int]] = {}
+    for k, v in enumerate(space.scalars):
+        groups.setdefault(str(v.get("of") or v["name"]), []).append(k)
+    out: list[int] = []
+    for members in groups.values():
+        if len(members) > _plan.PROBE_ELEMENTS:
+            members = [members[int(j * len(members) / _plan.PROBE_ELEMENTS)] for j in range(_plan.PROBE_ELEMENTS)]
+        out.extend(members)
+    return sorted(out)
 
 
 def _same(a: dict[str, Any], b: dict[str, Any], space: Any) -> bool:

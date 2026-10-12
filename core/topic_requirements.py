@@ -28,6 +28,16 @@ import math
 import re
 from typing import Any
 
+
+def _extreme(bound: Any, pick: Any) -> Any:
+    """A design variable's ``low`` or ``high`` as one number: an array variable gives one per element, and the smallest low
+    (the largest high) stands for the range it covers."""
+    if not isinstance(bound, list):
+        return bound
+    leaves = [x for item in bound for x in ([_extreme(item, pick)] if isinstance(item, list) else [item])]
+    leaves = [x for x in leaves if isinstance(x, (int, float)) and not isinstance(x, bool)]
+    return pick(leaves) if leaves else None
+
 #: The file in ``.fi/`` that holds the requirements, and the one that holds how far they are met.
 FILE = "topic_requirements.json"
 COVERED_FILE = "topic_covered.json"
@@ -164,7 +174,7 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
         if not isinstance(variable, dict) or not str(variable.get("name") or "").strip():
             continue
         values = variable.get("values") if isinstance(variable.get("values"), list) else [
-            v for v in (variable.get("low"), variable.get("high")) if v is not None]
+            v for v in (_extreme(variable.get("low"), min), _extreme(variable.get("high"), max)) if v is not None]
         axes[str(variable["name"]).strip()] = list(values)
     # The block's own scan compares the study across settings (of a design variable, or of a condition held fixed): those
     # are the settings the plan varies, whatever the plan's kind of study.

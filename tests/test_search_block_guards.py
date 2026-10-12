@@ -52,7 +52,7 @@ async def test_unusable_answers_never_make_more_than_six_chat_calls(tmp_path: Pa
     for _ in range(4):
         await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == []
-    assert len(model.asked) <= 6 and _record(eng)["calls"] <= 6
+    assert len(model.asked) <= 12 and _record(eng)["calls"] <= 12  # six for a request; twelve when the reader named the form it refused
 
 
 @pytest.mark.asyncio

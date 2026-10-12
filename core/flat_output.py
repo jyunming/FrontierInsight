@@ -19,6 +19,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from . import optimisation_plan as _plan
+
 #: Two numbers are "the same" when they differ by less than this fraction of their own size: numerical noise, not a
 #: different answer. There is no absolute floor: a floor has a unit, and the same quantity written in another unit
 #: (a length in metres or in picometres) must be judged the same way. A set of numbers that cannot be told apart by their
@@ -128,8 +130,10 @@ def flat_search_check(check: dict[str, Any] | None, block: dict[str, Any] | None
     if not no_effect:
         return None
     sensitivity = hood.get("sensitivity") or {}
-    movable = [str(v.get("name")) for v in block.get("design_variables") or []
-               if isinstance(v, dict) and str(v.get("kind") or "continuous") != "choice"]
+    movable = [name for v in block.get("design_variables") or []
+               if isinstance(v, dict) and str(v.get("kind") or "continuous") != "choice"
+               for name in ([_plan.element_name(str(v.get("name")), i) for i in _plan.indices(_plan.shape_of(v))]
+                            if _plan.is_array(v) else [str(v.get("name"))])]
     if not movable or set(movable) - set(no_effect) or set(sensitivity) - set(no_effect):
         return None
     if not _ignores(source, movable):

@@ -68,6 +68,8 @@ def cells(grid):
 
 
 def fmt(value):
+    if isinstance(value, list):  # an array setting: no comma, a key is split on them (kept equal to core/trial_runner.py)
+        return "[" + ";".join(fmt(x) for x in value) + "]"
     return repr(value) if isinstance(value, float) and value.is_integer() else str(value)
 
 

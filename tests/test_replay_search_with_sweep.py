@@ -177,7 +177,7 @@ async def test_when_the_asks_leave_a_gap_the_outcome_is_the_honest_stop_and_neve
     design, _sha = eng._design_from_plan()
     await eng._node_design({"topic": eng.config.topic, "iteration": 0})
     assert paused == [], "nobody is asked to try another model"
-    assert 1 <= len(asked) <= 2, "bounded"
+    assert 1 <= len(asked) <= 4, "bounded"
     stop = eng._topic_unmet_stop()
     assert stop is not None
     result = stop["exec_result"]

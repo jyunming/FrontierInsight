@@ -18,7 +18,9 @@ same PR that adds, splits or renames one.
   quest again (the `plan` pause, `_pause_for_plan(added=...)`) before the freeze under `pauses.plan: ask`.
 - `core/protocol_check.py` — static check: does the experiment's source hold to the frozen protocol? Also the plan's
   notes on the protocol (`*_notes`; `run_count_notes`: repeated runs of a design that names nothing random).
-- `core/run_manifest.py` — runtime check: does what the simulation says it ran (`run_manifest.json`) match the
+- `core/run_manifest.py` — runtime check (`differences` / `plain_difference` / `difference_request`: where the analysis lists
+  more values than FI's record holds, computed from the counts, the plain first sentence of the stop, and the request that
+  names metric, settings and counts for the repair of the analysis alone; `engine._manifest_repair_budget`: up to three tries): does what the simulation says it ran (`run_manifest.json`) match the
   protocol's exact Cartesian product? Also the two-script split-analysis lint, the strata of a `given` mean
   (`NESTING`, `DERIVED`, `_given_findings`, `strata_coverage`, read by `metric_spec.coverage_gaps`), and
   `once_per_setting`: for a `run_cell` with no randomness, `runs_per_setting` is left out of the comparison (one run
@@ -251,7 +253,9 @@ same PR that adds, splits or renames one.
   pauses a quest.
   `Engine._run_manifest_problems` returns `not_applicable` for a search; replicate seeds are not run for it; the
   code-writing prompt gets `_SEARCH_PROTOCOL` (via `_split_block`) and the repair prompts `_SEARCH_REFLECT_*`.
-- `core/optimise_search.py` — which design comes next, standard library only and importing nothing from FI (copied
+- `core/optimise_search.py` (array design variables: `scalar_variables`, `Space.flat` / `fold` / `element_design`; an array
+  is one coordinate per element, a design carries it as a nested list; `optimisation_plan.is_array` / `shape_of` /
+  `array_problem` / `MAX_ARRAY_ELEMENTS` / `PROBE_ELEMENTS` validate and bound it, `optimum_check._probed` picks the nudged elements) — which design comes next, standard library only and importing nothing from FI (copied
   into `.fi/optimisation/` and into `code/fi_search.py`): `search` (a generator of evaluate / drive requests; `bounded_local`,
   `global_then_local`, `exhaustive`, and a scipy / Optuna method replayed step by step by `drive`), `run_sync` (the
   same search driven in one process: `code/run.py`, the tests), `judge` (feasibility and failures), `best_design`

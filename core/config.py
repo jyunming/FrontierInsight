@@ -888,7 +888,8 @@ class EngineConfig(BaseModel):
     # it attempted and completed per setting, the failures, the thresholds) is compared with the frozen protocol
     # (``core/run_manifest.py``); it needs the two-script layout (``execution.split_analysis``), because that is where the
     # simulation is a script of its own. ``block`` (default) sends the simulation back for up to
-    # ``run_manifest_repair_attempts`` repairs (each is a full run again, so the default is one) and, if it still differs, stops
+    # ``run_manifest_repair_attempts`` repairs (each is a full run again, so the default is one; a difference only in the
+    # analysis is sent back up to three times, since its repair reruns no experiment) and, if it still differs, stops
     # the quest with what differs; ``warn`` only records it; ``off`` does not look. Every check is in
     # ``needs/RUN_MANIFEST_CHECK.json``.
     run_manifest_check: Literal["block", "warn", "off"] = "block"
