@@ -452,7 +452,7 @@ engine:
 
 execution:
   sandbox: venv                     # venv (default) | docker
-  timeout_s: 600
+  timeout_s: 3600
   clean_check_timeout_s: 900        # the try of code/ in a clean environment before the paper is written may take at most this long (never more than timeout_s); a run still going is stopped and reported as not finished, not as a failure
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest

@@ -848,11 +848,42 @@ def head(quest_root: Path) -> tuple[str | None, bool | None]:
         return None, None
 
 
+def _remove_env(env_dir: Path) -> None:
+    """Remove the clean environment; on Windows a process still holding a file can leave it half deleted, which is
+    said once in the log (the next check removes it again before it builds a new one)."""
+    import logging
+    import shutil
+
+    shutil.rmtree(env_dir, ignore_errors=True)
+    if env_dir.exists():
+        logging.getLogger("frontier_insight.code_project").warning(
+            "[code] could not remove %s completely (a file is still in use); it is removed again at the next check", env_dir)
+
+
+def _drain(proc: Any) -> str:
+    """What is left on a stopped run's pipes, never waiting for ever: a process that survived the stop and still
+    holds a pipe open would otherwise hold FI with it."""
+    import subprocess
+
+    try:
+        return proc.communicate(timeout=30)[1] or ""
+    except subprocess.TimeoutExpired:
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except OSError:
+                pass
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
 def _minutes(seconds: float) -> str:
     return f"{seconds / 60:g} min" if seconds >= 60 else f"{seconds:g} s"
 
 
-def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
+def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
     """Run ``code/`` the way a person would: a fresh environment, only ``requirements.txt`` installed, then
     ``python run.py``. Never raises; returns ``{"ok": bool, "status": "ran" | "failed" | "not_finished", "reason":
     plain words, "says": ...}`` (also saved to ``needs/CODE_PROJECT_CHECK.json``). ``not_finished`` is a run that
@@ -872,7 +903,7 @@ def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s
         if not (code_dir / RUN).is_file() or not (code_dir / REQUIREMENTS).is_file():
             result["reason"] = "code/ has no run.py or requirements.txt to try"
         else:
-            shutil.rmtree(env_dir, ignore_errors=True)
+            _remove_env(env_dir)
             subprocess.run([sys.executable, "-m", "venv", str(env_dir)], check=True, capture_output=True, timeout=300)
             py = env_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
             wanted = [ln for ln in (code_dir / REQUIREMENTS).read_text(encoding="utf-8").split("\n") if ln.strip()]
@@ -890,17 +921,20 @@ def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s
                     [str(py), str(code_dir / RUN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     encoding="utf-8", errors="replace", cwd=code_dir,
                 ) as tree:
+                    err = ""
                     try:
                         _out, err = tree.proc.communicate(timeout=run_timeout_s)
                     except subprocess.TimeoutExpired:
+                        # Still running, unless run.py already exited (non-zero) and a worker it left behind holds the pipes.
+                        if tree.proc.poll() is None:
+                            result["status"] = "not_finished"  # set first: nothing below may turn it into a failure
+                            result["reason"] = (
+                                f"it installed and was still running after {_minutes(run_timeout_s)}, so FI stopped "
+                                "it there (the full run takes longer; this is not a failure)"
+                            )
                         tree.kill()
-                        tree.proc.communicate()
-                        result["status"] = "not_finished"
-                        result["reason"] = (
-                            f"it installed and was still running after {_minutes(run_timeout_s)}, so FI stopped it "
-                            "there (the full run takes longer; this is not a failure)"
-                        )
-                    else:
+                        err = _drain(tree.proc)
+                    if result.get("status") != "not_finished":
                         if tree.proc.returncode == 0:
                             result["ok"] = True
                         else:
@@ -910,7 +944,7 @@ def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s
     except (OSError, subprocess.SubprocessError) as exc:
         result["reason"] = f"the check could not start: {exc}"
     finally:
-        shutil.rmtree(env_dir, ignore_errors=True)
+        _remove_env(env_dir)
     result["seconds"] = round(time.monotonic() - started)
     result["status"] = result.get("status") or ("ran" if result["ok"] else "failed")
     result["says"] = (

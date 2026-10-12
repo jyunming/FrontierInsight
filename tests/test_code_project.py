@@ -479,3 +479,53 @@ def test_a_commit_never_lands_in_a_repository_that_holds_the_quest_and_runs_no_h
     assert code_project.record_change(root, "third") is False
     log = subprocess.run(["git", "log", "--oneline"], cwd=parent, capture_output=True, text=True).stdout
     assert log.strip().endswith("base") and len(log.strip().splitlines()) == 1
+
+
+def test_verify_stops_a_worker_the_run_started(tmp_path):
+    import os
+    import time
+
+    import psutil
+
+    root = _quest(tmp_path, two=False)
+    pidfile = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(c.pid))\n"
+        "time.sleep(120)\n"
+    )
+    (root / "code" / "experiment.py").write_text(script, encoding="utf-8")
+    code_project.refresh(root, deps=[], protocol=None)
+    started = time.monotonic()
+    result = code_project.verify(root, run_timeout_s=3)
+    assert result["status"] == "not_finished", result
+    assert time.monotonic() - started < 60
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        if not psutil.pid_exists(pid):
+            break
+        time.sleep(0.1)
+    assert not psutil.pid_exists(pid)
+
+
+def test_verify_reports_an_early_crash_as_failed_even_if_a_worker_holds_the_pipes(tmp_path):
+    root = _quest(tmp_path, two=False)
+    script = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "raise SystemExit('crashed early')\n"
+    )
+    (root / "code" / "experiment.py").write_text(script, encoding="utf-8")
+    code_project.refresh(root, deps=[], protocol=None)
+    result = code_project.verify(root, run_timeout_s=3)
+    assert result["status"] == "failed" and "did NOT run" in result["says"], result
+
+
+def test_verify_defaults_to_the_same_limit_as_the_config():
+    import inspect
+
+    from core.config import ExecutionConfig
+
+    default = inspect.signature(code_project.verify).parameters["run_timeout_s"].default
+    assert default == ExecutionConfig().clean_check_timeout_s
