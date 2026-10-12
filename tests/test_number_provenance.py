@@ -770,3 +770,50 @@ def test_two_signs_in_front_of_a_comma_run_are_not_a_list_member() -> None:
             return value
 
     assert _a_list_the_run_holds("-100,250", Held()) and not _a_list_the_run_holds("+-100,250", Held())
+
+
+# --- a number rounded to significant figures, and a change of unit prefix -----
+
+SD_RUN = {"ea_sd_j_mol": 2326.660954282277}
+
+
+@pytest.mark.parametrize("written", ["2330", "2326.66", "2327"])
+def test_an_integer_rounded_to_significant_figures_is_the_value_it_was_rounded_from(written: str) -> None:
+    """2330 (+/- 82) J/mol is 2326.66 to three significant digits; compared at the units it read as 2327 != 2330."""
+    assert _tokens(check(f"The SD of Ea was {written} J/mol.", result_json=SD_RUN)) == []
+
+
+def test_an_integer_rounded_to_the_tens_still_has_to_round_from_the_run_value() -> None:
+    """2316.0 rounds to 2320 at the tens, not 2330: the check is as strict as the precision the paper wrote."""
+    assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"ea_sd_j_mol": 2316.0})) == ["2330"]
+
+
+def test_trailing_zeros_compare_at_the_hundreds_for_two_zeros() -> None:
+    assert _tokens(check("It took 20300 steps.", result_json={"steps": 20326.0})) == []
+    assert _tokens(check("It took 20300 steps.", result_json={"steps": 20246.0})) == ["20300"]
+
+
+def test_a_number_with_one_significant_digit_is_still_not_checked() -> None:
+    """"2000" carries no information about where it came from, as before: no flag, whatever the run holds."""
+    assert _tokens(check("About 2000 samples were drawn.", result_json={"x": 1.5})) == []
+
+
+def test_a_unit_prefix_change_by_a_thousand_is_accepted() -> None:
+    """2326.66 J/mol written 2.33 kJ/mol."""
+    assert _tokens(check("The SD of Ea was 2.33 kJ/mol.", result_json=SD_RUN)) == []
+    assert _tokens(check("The SD of Ea was 2.327 kJ/mol.", result_json=SD_RUN)) == []
+
+
+def test_a_unit_prefix_change_is_compared_at_the_precision_written() -> None:
+    assert _tokens(check("The SD of Ea was 2.33 kJ/mol.", result_json={"ea_sd_j_mol": 2316.0})) == ["2.33"]
+
+
+def test_a_value_in_the_larger_unit_is_found_in_the_smaller() -> None:
+    """The run holds 2.32666 (kJ); the paper writes 2330 (J)."""
+    assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"ea_sd_kj_mol": 2.32666})) == []
+    assert _tokens(check("The SD of Ea was 2330 J/mol.", result_json={"ea_sd_kj_mol": 2.316})) == ["2330"]
+
+
+def test_truncation_at_the_tens_is_exact() -> None:
+    """The truncation table at a negative precision is exact: 2326.66 truncates to 2320, so a paper's 2320 is accepted."""
+    assert _tokens(check("The SD of Ea was 2320 J/mol.", result_json=SD_RUN)) == []

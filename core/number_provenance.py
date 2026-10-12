@@ -67,8 +67,10 @@ set, because "300 realizations per setting" is a number the user chose rather
 than one the experiment computed.
 
 A value also counts as traced when it matches after a **scale change** (a
-results value of ``0.15`` printed as ``15%``) or as a **complement**
-(``1 − p``), each compared at the precision the shift implies.
+results value of ``0.15`` printed as ``15%``, or ``2326.7`` J printed as
+``2.33`` kJ) or as a **complement** (``1 − p``), each compared at the precision
+the shift implies. The scale changes are by 100 (a percentage) and by 1000 (a
+unit prefix: J to kJ, ms to s, nm to µm).
 
 The guards are the check
 ========================
@@ -87,6 +89,25 @@ the defence:
     a single hand-written rule about round numbers. A **known blind spot**
     follows from it and is accepted deliberately: a two-significant-digit
     textbook value quoted as the run's own result (``0.94``) is not checked.
+
+``trailing zeros``
+    An integer written ``2330`` from a run that holds ``2326.66`` is that value
+    to three significant digits, the same reading ``_significant_digits``
+    gives it, so it is compared at the tens (``-1`` decimals), not at the
+    units, where ``2327`` is not ``2330``. A token with ``k`` trailing zeros
+    and no decimal point is compared at ``-k`` decimals; ``2316.0`` still
+    does not account for ``2330`` (it rounds to ``2320``). A number with fewer
+    than three significant digits (``2000``) is not checked at all, as before.
+
+``scale by 1000``
+    One more candidate per number, compared at the precision shifted by three
+    places (``2.33`` against ``2326.66`` is compared at the tens), so ``2.33``
+    does not account for ``2316.0``; the three-significant-digit guard is
+    unchanged. It does admit more coincidences: checking the stored papers
+    against the *wrong* quest's results (every acceptance a coincidence), 71
+    of 133 numbers were accepted before and 76 after. That is a few points on
+    a base rate that is already high for a large result set, so it is
+    accepted rather than restricted to numbers beside a unit word.
 
 ``years`` / ``versions``
     An integer in 1900–2099 is a year, and a dotted ``1.11.4`` is a version;
@@ -300,6 +321,16 @@ def _decimals(token: str) -> int:
     return len(t.split(".", 1)[1]) if "." in t else 0
 
 
+def _written_precision(token: str) -> int:
+    """The decimal place the paper rounded to: the decimals of ``0.583`` (3), and
+    minus the trailing zeros of an integer written to fewer digits than it has
+    (``2330`` is rounded to the tens: -1). ``round(v, -1)`` is how it compares."""
+    t = token.lstrip("-+").replace(",", "")
+    if "." in t:
+        return _decimals(token)
+    return -(len(t) - len(t.rstrip("0")))
+
+
 def _carries_enough_precision(token: str) -> bool:
     """Is this number written precisely enough to say where it came from?
 
@@ -431,6 +462,16 @@ _PATH_NUMBER = re.compile(r"(?<![\w])\d+(?:\.\d+)*(?![\w])")
 _TEXT_NUMBER = re.compile(r"(?<![\w.])(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)(?![\w])")
 
 
+def _floor_to(value: float, dec: int) -> float:
+    """``value`` truncated at ``dec`` decimals; a negative ``dec`` truncates at the tens, hundreds... (divided, not
+    multiplied by 0.1, which would not be exact)."""
+    if dec >= 0:
+        scale = 10.0 ** dec
+        return math.floor(value * scale) / scale
+    unit = 10.0 ** -dec
+    return math.floor(value / unit) * unit
+
+
 class Traceable:
     """The set of values this run can account for, indexed for rounded lookup.
 
@@ -472,10 +513,9 @@ class Traceable:
         table = self._trunc_by_dec.get(dec)
         if table is None:
             table = {}
-            scale = 10.0 ** dec
             for path, value in self.values.items():
                 try:
-                    table.setdefault(math.floor(value * scale) / scale, path)
+                    table.setdefault(_floor_to(value, dec), path)
                 except (ValueError, OverflowError):
                     continue
             self._trunc_by_dec[dec] = table
@@ -486,9 +526,8 @@ class Traceable:
         number. ``0.05/36 = 0.0013888…`` gets written ``0.001388``, and against
         rounding alone that reads as a number from nowhere — the one flag this
         check raised on a threshold the run really did compute."""
-        scale = 10.0 ** dec
         try:
-            key = math.floor(value * scale) / scale
+            key = _floor_to(value, dec)
         except (ValueError, OverflowError):
             return None
         return self._trunc_table(dec).get(key)
@@ -662,11 +701,14 @@ def _variants(value: float, token: str) -> Iterator[tuple[float, int, str]]:
     """``(candidate, decimals, how)`` — the same number under the scale and
     complement shifts a paper legitimately applies. Dividing by 100 moves the
     decimal point two places, so the precision it must be compared at moves
-    with it."""
-    dec = _decimals(token)
+    with it; a unit prefix (x or / 1000) moves it three. The precision is the
+    one the paper wrote, so ``2330`` is compared at the tens (``-1``)."""
+    dec = _written_precision(token)
     yield value, dec, ""
     yield value / 100.0, dec + 2, " (as a fraction rather than a percentage)"
-    yield value * 100.0, max(dec - 2, 0), " (as a percentage rather than a fraction)"
+    yield value * 100.0, max(dec - 2, 0) if dec >= 0 else dec - 2, " (as a percentage rather than a fraction)"
+    yield value / 1000.0, dec + 3, " (in a unit 1000 times larger)"
+    yield value * 1000.0, dec - 3, " (in a unit 1000 times smaller)"
     if 0.0 < value < 1.0:
         yield 1.0 - value, dec, " (as its complement)"
     if 0.0 < value < 100.0:
