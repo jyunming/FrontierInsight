@@ -17,6 +17,7 @@ sensitivity             the metric differs between two values of the setting (pa
 invariance              the metric is the same at two values of the setting (within 4 SE)
 monotone                the metric rises (or falls) over at least 3 values; a wrong step is tolerated within 2 SE
 equal_when              two named cells give the same metric (a null case, a symmetry, a limit) within 4 SE
+compare                 the metric is larger in one named cell than in the other (direction only, no value)
 scaling                 multiplying the setting by c multiplies the metric by c**p (ratio within noise)
 convergence             refining the knob shrinks the error; the fitted order is at least half the stated one
 ======================  =========================================================================================
@@ -32,7 +33,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-KINDS = ("sensitivity", "invariance", "monotone", "equal_when", "scaling", "convergence")
+KINDS = ("sensitivity", "invariance", "monotone", "equal_when", "compare", "scaling", "convergence")
 AUTOMATIC = ("saturation",)
 STRENGTHS = ("core", "supporting")
 MAX_RELATIONS = 8
@@ -52,7 +53,7 @@ ORDER_SLACK = 0.05
 MIN_LEVELS = 3
 SATURATION_MIN_CELLS = 3
 #: A 0/1 indicator (a coverage, a success: several 0/1 draws in every cell) that sits at its bound in every cell is called stuck only with at least this many
-#: draws: a proportion near 0.95 comes out all-ones in a handful of draws by chance (0.95**36 is 16%, 0.95**72 is 2.5%).
+#: draws (pooled; at the top bound 1, in EACH cell: a coverage or success rate is allowed to be all ones): a proportion near 0.95 comes out all-ones in a handful of draws by chance (0.95**36 is 16%, 0.95**72 is 2.5%).
 INDICATOR_MIN_VALUES = 60
 
 _UP = {"up", "increase", "increasing", "rise", "rises", "rising"}
@@ -80,8 +81,9 @@ class Relation:
     order: float | None = None        # convergence: the stated order of the error in the knob
     refine: str | None = None         # convergence: "decrease" (a step size) | "increase" (a count)
     of: str = "mean"                  # convergence: "mean" (error against the finest level) | "spread" (seed-to-seed spread)
-    a: dict[str, Any] = field(default_factory=dict)  # equal_when: the first cell's settings
-    b: dict[str, Any] = field(default_factory=dict)  # equal_when: the second cell's settings
+    a: dict[str, Any] = field(default_factory=dict)  # equal_when / compare: the first cell's settings
+    b: dict[str, Any] = field(default_factory=dict)  # equal_when / compare: the second cell's settings
+    larger: str | None = None         # compare: "a" or "b", the cell the plan says gives the larger metric
 
     def to_dict(self) -> dict[str, Any]:
         out = {k: v for k, v in self.__dict__.items() if v not in (None, {}, "")}
@@ -252,11 +254,11 @@ def _build(raw: dict[str, Any], n: int, grid: dict[str, list[Any]], metrics: set
     ledger = raw.get("ledger_id")
     rel = Relation(id=rid, kind=kind, metric=metric, strength=strength, quote=quote[:400],
                    ledger_id=str(ledger) if ledger not in (None, "") else None)
-    if kind == "equal_when":
+    if kind in ("equal_when", "compare"):
         for side in ("a", "b"):
             cell = raw.get(side)
             if not isinstance(cell, dict) or not cell:
-                return None, "equal_when needs two cells"
+                return None, f"{kind} needs two cells"
             for name, v in cell.items():
                 if str(name) not in grid:
                     return None, "setting not in the protocol's grid"
@@ -264,7 +266,12 @@ def _build(raw: dict[str, Any], n: int, grid: dict[str, list[Any]], metrics: set
                     return None, "value outside the grid's range"
             setattr(rel, side, {str(k): v for k, v in cell.items()})
         if _cell_key(rel.a) == _cell_key(rel.b):
-            return None, "equal_when cells are the same"
+            return None, f"{kind} cells are the same"
+        if kind == "compare":
+            larger = str(raw.get("larger") or "").strip().lower()
+            if larger not in ("a", "b"):
+                return None, "compare needs `larger` = a or b"
+            rel.larger = larger
         return rel, ""
     setting = str(raw.get("setting") or "")
     if setting not in grid:
@@ -325,6 +332,35 @@ def parse(reply: Any, protocol: dict[str, Any] | None) -> tuple[list[Relation], 
         dropped += [{"id": r.id, "reason": f"over the limit of {MAX_RELATIONS}"} for i, r in enumerate(kept) if i not in keep_idx]
         kept = [r for i, r in enumerate(kept) if i in keep_idx]
     return kept, dropped
+
+
+def from_dict(d: Any) -> Relation | None:
+    """A relation kept in ``.fi/probes.json`` (see :meth:`Relation.to_dict`) read back; None when it cannot be."""
+    if not isinstance(d, dict):
+        return None
+    names = set(Relation.__dataclass_fields__)
+    try:
+        return Relation(**{k: v for k, v in d.items() if k in names})
+    except TypeError:
+        return None
+
+
+def describe(rel: Relation | None, rid: str = "") -> str:
+    """What a check was about, in the words of a scientist: ``that `T` changes `rate```. Used in the plain lines FI prints, and
+    in the sentence the paper's limitations carry when the check did not hold."""
+    if rel is None:
+        name = rid.split(":", 1)[1] if rid.startswith("saturation:") else rid
+        return f"that `{name}` varies over the settings run" if name else "of the simulation"
+    m, s = f"`{rel.metric}`", f"`{rel.setting}`"
+    return {
+        "sensitivity": f"that {s} changes {m}",
+        "invariance": f"that {s} does not change {m}",
+        "monotone": f"that {m} {'rises' if rel.direction == 'up' else 'falls'} with {s}",
+        "equal_when": f"that {m} is the same in the two cases the plan says match",
+        "compare": f"that {m} is larger in one case than in the other, as the plan says",
+        "scaling": f"that {m} scales with {s} as the plan says",
+        "convergence": f"that {m} converges as {s} is refined",
+    }.get(rel.kind, f"that {m} behaves as the plan says")
 
 
 def drop_counts(dropped: Iterable[dict[str, str]]) -> dict[str, int]:
@@ -422,7 +458,7 @@ def plan_runs(relations: list[Relation], grid: dict[str, list[Any]], seeds: int 
 
     for rel in relations:
         values = grid.get(rel.setting or "", [])
-        if rel.kind == "equal_when":
+        if rel.kind in ("equal_when", "compare"):
             want(rel, [rel.a, rel.b])
             continue
         if not values:
@@ -521,20 +557,55 @@ def judge(relation: Relation, observations: list[Any]) -> Verdict:
         return _unconfirmed(relation, "the numbers could not be compared")
 
 
+def _pick_ab(rel: Relation, observations: list[Any]) -> tuple[list[float], list[float]] | None:
+    """The clean values of the two named cells of an equal_when / compare relation; None when either returned no number."""
+    pick: dict[str, list[float]] = {}
+    for side, want in (("a", rel.a), ("b", rel.b)):
+        for o in observations:
+            cell, raw = _obs(o)
+            if _matches(cell, want):
+                vals = _clean(raw)
+                if vals is not None:
+                    pick[side] = vals
+                    break
+    return (pick["a"], pick["b"]) if len(pick) == 2 else None
+
+
+def _compare(rel: Relation, observations: list[Any]) -> Verdict:
+    """Direction only: the plan says one named cell gives the larger metric. Held when it does by more than 2 SE of the paired
+    difference; broken when the other cell is larger by more than 4 SE (or by more than rounding when nothing varies);
+    otherwise a tie or noise, which FI cannot call a fault."""
+    got = _pick_ab(rel, observations)
+    if got is None:
+        return _unconfirmed(rel, "one of the two cells returned no number")
+    va, vb = got
+    r = _diff(va, vb)
+    if r is None:
+        return _unconfirmed(rel, "the two cells ran a different number of seeds")
+    md, se, scale, d = r      # md = mean(b - a)
+    sign = 1.0 if rel.larger == "b" else -1.0    # sign * md > 0 means the plan's larger cell is larger
+    n = len(va)
+    nums = {"mean_a": _mean(va), "mean_b": _mean(vb), "mean_difference": md, "se": se, "n_pairs": n, "larger": rel.larger}
+    m = f"`{rel.metric}`"
+    big, small = (rel.b, rel.a) if rel.larger == "b" else (rel.a, rel.b)
+    where = f"{_fmt_cell(big)} against {_fmt_cell(small)}"
+    plan_mean, other_mean = (_mean(vb), _mean(va)) if rel.larger == "b" else (_mean(va), _mean(vb))
+    tol_hold = MONOTONE_SE * se if se > 0 else SAME * scale
+    tol_break = DIFFERENCE_SE * se if se > 0 else SAME * scale
+    if sign * md > tol_hold:
+        return Verdict(rel.id, "held", nums, f"{m} is larger for {where} ({_g(plan_mean)} against {_g(other_mean)}), as the plan says.")
+    if sign * md < -tol_break:
+        return Verdict(rel.id, "broken", nums, f"{m} is smaller for {where} ({_g(plan_mean)} against {_g(other_mean)}, difference {_g(abs(md))}, "
+                                               f"SE {_g(se)}, {n} paired runs), but the plan says it is larger.")
+    return _unconfirmed(rel, f"{m} for {where} is {_g(plan_mean)} against {_g(other_mean)}, a tie or within the noise (SE {_g(se)}) of {n} paired runs", **nums)
+
+
 def _pair_judge(rel: Relation, observations: list[Any]) -> Verdict:
     if rel.kind == "equal_when":
-        pick: dict[str, list[float]] = {}
-        for side, want in (("a", rel.a), ("b", rel.b)):
-            for o in observations:
-                cell, raw = _obs(o)
-                if _matches(cell, want):
-                    vals = _clean(raw)
-                    if vals is not None:
-                        pick[side] = vals
-                        break
-        if len(pick) < 2:
+        got = _pick_ab(rel, observations)
+        if got is None:
             return _unconfirmed(rel, "one of the two cells returned no number")
-        va, vb = pick["a"], pick["b"]
+        va, vb = got
         where = f"{_fmt_cell(rel.a)} and {_fmt_cell(rel.b)}"
     else:
         rows = _by_setting(rel, observations)
@@ -671,7 +742,7 @@ def _convergence(rel: Relation, observations: list[Any]) -> Verdict:
     return Verdict(rel.id, "broken", nums, f"The {what} of `{rel.metric}` shrinks too slowly as `{rel.setting}` is refined: fitted order {_g(order)} over {len(pos)} levels, but the plan says {_g(stated)} (at least {_g(ORDER_SHARE * stated)} is needed).")
 
 
-_JUDGES = {"sensitivity": _pair_judge, "invariance": _pair_judge, "equal_when": _pair_judge, "monotone": _monotone,
+_JUDGES = {"sensitivity": _pair_judge, "invariance": _pair_judge, "equal_when": _pair_judge, "compare": _compare, "monotone": _monotone,
            "scaling": _scaling, "convergence": _convergence}
 
 
@@ -685,10 +756,23 @@ def exempt_names(protocol: dict[str, Any] | None) -> set[str]:
     return _dr.expected_constants(protocol)
 
 
+#: Words that make a quantity a check value (which is meant to sit at 0) or a flag (which is meant to sit at 1), not a result.
+_ZERO_BY_DESIGN = ("error", "residual", "violation", "drift", "conservation", "mismatch", "defect")
+_ONE_BY_DESIGN = ("_defined", "_ok", "_valid", "_flag", "_converged", "_passed")
+
+
+def _diagnostic(name: str, bound: float) -> bool:
+    """Whether ``name`` at ``bound`` is a diagnostic sitting where it is meant to (an error term at 0, a flag at 1)."""
+    low = name.lower()
+    if bound == 0.0:
+        return any(w in low for w in _ZERO_BY_DESIGN)
+    return low.startswith(("is_", "has_")) or any(low.endswith(w) or w + "_" in low for w in _ONE_BY_DESIGN)
+
+
 def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[Verdict]:
     """The generic test, needing no plan and no model. ``cells``: one per setting run, each ``{"metrics": {name: [values]}}``
     (the same shape the degenerate-results check reads). A metric is ``broken`` when any value is NaN or missing, when every
-    cell sits at exactly 0 (or at exactly 1; a 0/1 indicator needs :data:`INDICATOR_MIN_VALUES` draws), or when everything
+    cell sits at exactly 0 (or at exactly 1; a 0/1 indicator needs :data:`INDICATOR_MIN_VALUES` draws (at the top bound, in every setting: 8 of 8 is a good coverage, not a fault); a check value or flag sitting at its bound by design is only ``unconfirmed``), or when everything
     the run returns is one constant over a sweep of at least :data:`SATURATION_MIN_CELLS` cells; it is ``unconfirmed``
     when it alone is constant over such a sweep while something else moves (it may be a fixed control). Names in ``exempt`` (see :func:`exempt_names`) may be
     constant or pinned by design, but never NaN."""
@@ -697,6 +781,7 @@ def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[
     out: list[Verdict] = []
     means: dict[str, list[float]] = {}
     n_values: dict[str, int] = {}
+    thinnest: dict[str, int] = {}
     indicator: set[str] = set()
     for name in names:
         bad = 0
@@ -715,6 +800,7 @@ def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[
         elif ms:
             means[name] = ms
             n_values[name] = total
+            thinnest[name] = min(len(c["metrics"][name]) for c in cells)
             if all(len(c["metrics"][name]) >= 2 and all(_num(x) in (0.0, 1.0) for x in c["metrics"][name]) for c in cells):
                 indicator.add(name)
     moving = {n for n, ms in means.items() if len({round(m, 12) for m in ms}) > 1 or (max(ms) - min(ms)) > SAME * _scale(*ms)}
@@ -725,9 +811,15 @@ def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = ()) -> list[
         for bound in (0.0, 1.0):
             if name in indicator and n_values[name] < INDICATOR_MIN_VALUES:
                 break
+            if name in indicator and bound == 1.0 and thinnest[name] < INDICATOR_MIN_VALUES:
+                break   # a coverage or success rate at 8 draws a setting is often 8 of 8 at every setting: not a fault
             if all(abs(m - bound) <= 1e-12 for m in ms):
-                out.append(Verdict(vid, "broken", {"bound": bound, "cells": len(ms)},
-                                   f"`{name}` is exactly {bound:g} at all {len(ms)} settings run, a bound it cannot leave."))
+                said = f"`{name}` is exactly {bound:g} at all {len(ms)} settings run, a bound it cannot leave."
+                if _diagnostic(name, bound):
+                    out.append(Verdict(vid, "unconfirmed", {"bound": bound, "cells": len(ms)},
+                                       said[:-1] + " (it looks like a check value or a flag, which may sit at its bound by design)."))
+                else:
+                    out.append(Verdict(vid, "broken", {"bound": bound, "cells": len(ms)}, said))
                 break
         else:
             flat = (max(ms) - min(ms)) <= SAME * _scale(*ms)

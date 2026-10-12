@@ -10,7 +10,7 @@ $plan_text
 
 $grid_settings
 
-# What the simulation reports (metrics)
+# What the simulation returns (metric names, with the plan's own name for it where they differ)
 
 $metrics_list
 
@@ -19,8 +19,8 @@ $metrics_list
 Only relations that the plan itself states, or that are general facts of the method the plan uses (for example: a smaller
 step size gives a smaller numerical error; averaging more samples shrinks the spread). Do not invent relations to fill the
 list. At most 8, the most important first. Every relation needs a short quote from the plan (or a few words naming the
-method) in `from_plan`. Use only setting names from the list above and only metric ids from the list above; a name that is
-not there is dropped.
+method) in `from_plan`. Use only setting names from the list above and only metric names from the list above (the names the simulation returns);
+a name that is not there is dropped.
 
 Kinds (use exactly these words):
 
@@ -29,6 +29,10 @@ Kinds (use exactly these words):
 - `monotone`: the metric rises or falls as `setting` grows; give `direction` as `up` or `down`.
 - `equal_when`: two cells give the same metric (a null case, a symmetry, a limit that reduces to another case); give `a`
   and `b`, each a mapping from setting name to a value inside that setting's range.
+- `compare`: the metric is larger in one named cell than in the other (a method that should beat another, a treatment
+  against its control); give `a` and `b` (each a mapping from setting name to a value inside that setting's range, for
+  example the two methods) and `larger` (`a` or `b`: the cell the plan says gives the larger metric). Direction only; never
+  say by how much.
 - `scaling`: multiplying `setting` by `factor` multiplies the metric by `factor` to the power `exponent`.
 - `convergence`: the error shrinks as the knob `setting` is refined; give `order` (the plan's stated order, a positive
   number), `refine` (`decrease` when a smaller value is finer, such as a step size; `increase` when a larger value is
@@ -45,6 +49,8 @@ JSON only, no other text:
 {"relations": [
   {"id": "R1", "kind": "sensitivity", "setting": "<setting name>", "metric": "<metric id>", "strength": "core",
    "from_plan": "<short quote>"},
+  {"id": "R3", "kind": "compare", "metric": "<metric name>", "a": {"<setting>": "<value>"}, "b": {"<setting>": "<value>"},
+   "larger": "a", "strength": "core", "from_plan": "<short quote>"},
   {"id": "R2", "kind": "convergence", "setting": "<knob name>", "metric": "<metric id>", "order": 2, "refine": "decrease",
    "strength": "supporting", "from_plan": "<short quote>"}
 ]}

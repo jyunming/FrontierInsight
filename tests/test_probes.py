@@ -311,7 +311,7 @@ def test_saturation_nan_bound_constant():
     assert none and none[0].verdict == "broken"
     pinned = P.saturation([cell(p=[0.0] * 40, q=[1.0, 2.0]), cell(p=[0.0] * 40, q=[2.0, 3.0])])
     assert any(v.relation_id == "saturation:p" and v.verdict == "broken" and "exactly 0" in v.says for v in pinned)
-    one = P.saturation([cell(p=[1.0] * 40, q=[1.0] * 40), cell(p=[1.0] * 40, q=[2.0] * 40)])
+    one = P.saturation([cell(p=[1.0] * 64, q=[1.0] * 64), cell(p=[1.0] * 64, q=[2.0] * 64)])
     assert any(v.relation_id == "saturation:p" and "exactly 1" in v.says for v in one)
     # one number per cell is a result, not a 0/1 draw: a value pinned at 0 is read from any number of cells
     assert P.saturation([cell(p=[0.0], q=[1.0]), cell(p=[0.0], q=[2.0]), cell(p=[0.0], q=[3.0])])[0].relation_id == "saturation:p"
@@ -325,8 +325,27 @@ def test_saturation_few_draws_of_an_indicator_at_its_bound_prove_nothing():
     # a 95% coverage can come out all ones in a handful of draws; INDICATOR_MIN_VALUES draws are needed
     few = [cell(cov=[1.0] * 4, y=[float(i)] * 4) for i in range(4)]
     assert P.saturation(few) == []
-    many = [cell(cov=[1.0] * (P.INDICATOR_MIN_VALUES // 3 + 1), y=[float(i)]) for i in range(4)]
+    many = [cell(cov=[1.0] * P.INDICATOR_MIN_VALUES, y=[float(i)]) for i in range(4)]
     assert [v.relation_id for v in P.saturation(many)] == ["saturation:cov"]
+
+
+def test_saturation_a_coverage_of_all_ones_at_a_few_draws_a_setting_is_not_broken_even_when_the_draws_add_up():
+    # the r6t kinetics case: a 0/1 coverage was 8 of 8 at each of 9 settings (72 draws pooled), on good code. The pooled count
+    # passed the old rule; the top bound now needs the draws in EVERY setting.
+    cells = [cell(k_covered_1=[1.0] * 8, rate=[float(i)] * 8) for i in range(9)]
+    assert P.saturation(cells) == []
+    # the same data pinned at 0 is still read from the pooled draws (a quantity that never happens)
+    zero = [cell(k_none=[0.0] * 8, rate=[float(i)] * 8) for i in range(9)]
+    assert [v.relation_id for v in P.saturation(zero)] == ["saturation:k_none"]
+
+
+def test_saturation_a_check_value_or_flag_at_its_bound_by_design_is_only_unconfirmed():
+    cells = [cell(parseval_relative_error=[0.0], side_lobe_defined=[1.0], dof=[0.0], y=[float(i)]) for i in range(4)]
+    got = {v.relation_id: v.verdict for v in P.saturation(cells)}
+    assert got == {"saturation:parseval_relative_error": "unconfirmed", "saturation:side_lobe_defined": "unconfirmed",
+                   "saturation:dof": "broken"}
+    # a NaN is never excused
+    assert P.saturation([cell(relative_error=[float("nan")])])[0].verdict == "broken"
 
 
 def test_saturation_clean_data_and_short_sweeps_pass():
@@ -429,3 +448,46 @@ def test_mutators_on_stored_simulate_py_import():
     assert any(n.startswith("hard_code:") for n, _ in ms)
     for name, text in ms:
         compile(text, name, "exec")
+
+
+# ------------------------------------------------------------------------------------------------------- compare (direction only)
+
+
+def test_compare_parse_needs_two_cells_and_a_larger_side_and_never_a_value():
+    rels, dropped = P.parse(reply(
+        good(id="c1", kind="compare", a={"mode": "a"}, b={"mode": "b"}, larger="b", expected=0.3),
+        good(id="c2", kind="compare", a={"mode": "a"}, b={"mode": "b"}),
+        good(id="c3", kind="compare", a={"mode": "a"}, b={"mode": "a"}, larger="a"),
+        good(id="c4", kind="compare", a={"mode": "a"}, b={"mode": "zzz"}, larger="a"),
+        good(id="c5", kind="compare", a={"mode": "a"}, larger="a")), PROTOCOL)
+    assert [r.id for r in rels] == ["c1"] and rels[0].larger == "b" and len(dropped) == 4
+    assert "expected" not in rels[0].to_dict() and rels[0].to_dict()["larger"] == "b"
+
+
+def test_compare_plans_its_two_cells_and_is_judged_by_direction_only():
+    r = rel("compare", setting=None, a={"mode": "a"}, b={"mode": "b"}, larger="b")
+    plan = P.plan_runs([r], GRID)
+    assert sorted(run.cell["mode"] for run in plan.runs) == ["a", "b"]
+    rng = random.Random(3)
+    lo, hi = paired(rng, 12, [1.0, 1.5], 0.3, 0.02)
+    held = P.judge(r, [P.Observation({"mode": "a"}, lo), P.Observation({"mode": "b"}, hi)])
+    assert held.verdict == "held" and "larger for" in held.says
+    # the plan's larger cell is the smaller one by a clear margin: broken
+    wrong = P.judge(r, [P.Observation({"mode": "a"}, hi), P.Observation({"mode": "b"}, lo)])
+    assert wrong.verdict == "broken" and "smaller" in wrong.says
+    # an exact tie, or noise, is not a fault FI can call
+    tie = P.judge(r, [P.Observation({"mode": "a"}, lo), P.Observation({"mode": "b"}, list(lo))])
+    assert tie.verdict == "unconfirmed"
+    # the same relation with `larger` = a reads the other way round
+    flipped = P.Relation(**{**r.__dict__, "larger": "a"})
+    assert P.judge(flipped, [P.Observation({"mode": "a"}, lo), P.Observation({"mode": "b"}, hi)]).verdict == "broken"
+    # a cell with no number back
+    assert P.judge(r, [P.Observation({"mode": "a"}, lo), P.Observation({"mode": "b"}, [None] * 12)]).verdict == "unconfirmed"
+
+
+def test_describe_speaks_plainly_and_a_relation_reads_back_from_its_record():
+    r = rel("sensitivity", setting="T")
+    assert P.describe(r) == "that `T` changes `err`"
+    assert P.from_dict(r.to_dict()).__dict__ == r.__dict__
+    assert P.from_dict({"kind": "x"}) is None
+    assert P.describe(None, "saturation:dof") == "that `dof` varies over the settings run"

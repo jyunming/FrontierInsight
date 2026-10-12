@@ -209,6 +209,27 @@ class _Runner:
         return res
 
 
+def metric_names(protocol_ids: list[str], returned: list[str]) -> tuple[dict[str, str], list[str]]:
+    """``(alias, shown)``: which name ``run_trial`` returns stands for each protocol metric id, read from the names the
+    pilot's own trials returned (an id that is itself returned maps to itself; otherwise the one returned name that names
+    the same words with a unit added or dropped; an id with no such name is left out), and the lines the reader is shown:
+    one per returned name, with the protocol id it stands for. ``shown`` is empty when nothing was returned."""
+    from . import reported_settings as _rs
+
+    have = sorted(set(returned))
+    alias: dict[str, str] = {}
+    for pid in protocol_ids:
+        if pid in have:
+            alias[pid] = pid
+            continue
+        close = [n for n in have if _rs.names_setting(n, pid) or _rs.names_setting(pid, n)]
+        if len(close) == 1:
+            alias[pid] = close[0]
+    stands = {v: k for k, v in alias.items() if k != v}
+    shown = [f"- `{n}`" + (f" (the plan's `{stands[n]}`)" if n in stands else "") for n in have]
+    return alias, shown
+
+
 def _alias(metric: str, metric_alias: dict[str, str] | None) -> str:
     return (metric_alias or {}).get(metric, metric)
 
@@ -465,7 +486,7 @@ async def _saturation(runner: _Runner, root: Path, protocol: dict[str, Any] | No
         for s, vals in grid.items():
             vs = _probes._sorted_values(vals)
             extra += [{**base, s: vs[0]}, {**base, s: vs[-1]}]
-        # enough draws that an indicator pinned at 0 or 1 is not just luck (see probes.INDICATOR_MIN_VALUES), within the seed limit
+        # enough draws that an indicator pinned at 0 is not just luck (see probes.INDICATOR_MIN_VALUES), within the seed limit
         k = min(_probes.MAX_SEEDS, max(_SWEEP_SEEDS, -(-_probes.INDICATOR_MIN_VALUES // len(extra))))
         for cell in extra:
             if runner.over(runner.would_cost([cell], base_seed, k)):
