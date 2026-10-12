@@ -320,7 +320,7 @@ async def test_a_main_factor_still_missing_after_the_bound_stops_before_anything
     seen = _stop(eng)
     await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [], "nobody is asked to pick another model: the plan's rules, not the model, left it out"
-    assert 1 <= len(model.asked) <= 2
+    assert 1 <= len(model.asked) <= 4
     result = _honest_stop(eng)
     shown = " ".join([result["topic_unmet"], *result["topic_unmet_tried"]])
     assert "lid material" in shown and "asked the plan's model" in shown
@@ -386,7 +386,7 @@ async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_i
         await eng._hold_the_design_to_the_topic(state, redesign, "")
     assert seen == []
     asked = [p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]
-    assert len(asked) == 2 and "Your last answer was not used" not in asked[0] and "Your last answer was not used" in asked[1]
+    assert len(asked) == 4 and "Your last answer was not used" not in asked[0] and "Your last answer was not used" in asked[1]
     assert "lid material" in _honest_stop(eng)["topic_unmet"]
 
 
@@ -545,10 +545,10 @@ async def test_the_stop_names_the_design_steps_real_ask_count_and_why_its_last_a
     eng, _model, redesign, state = await _redesign_setup(tmp_path)  # the model never adds the axis
     await eng._hold_the_design_to_the_topic(state, redesign, "")
     record = json.loads((eng.fi_dir / "topic_design_asked.json").read_text(encoding="utf-8"))
-    assert record["asks"] == 2 and record["problem"]  # written after the last failed attempt too
+    assert record["asks"] == 4 and record["problem"]  # written after the last failed attempt too
     stop = json.loads((eng.fi_dir / "topic_unmet.json").read_text(encoding="utf-8"))
-    assert stop["asked"] == 2
-    assert record["problem"] in eng._topic_last_problem()
+    assert stop["asked"] == 4
+    assert record["problem"] in eng._topic_last_problem(1)
     assert any(record["problem"][:40] in t for t in stop["tried"])
 
 

@@ -5029,7 +5029,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             """The design as the plan step reads it: with the protocol's unreadable keys left out, as it does."""
             got, why = _plan.normalize_design(d)
             if got is None and "`protocol" in (why or ""):
-                fixed_p, _notes = _plan.repair_protocol(d.get("protocol"))
+                fixed_p, notes_p = _plan.repair_protocol(d.get("protocol"))
+                if fixed_p is None:  # a protocol nothing of which can be read is not a design the plan step reads
+                    return None, why or (notes_p[0] if notes_p else "the protocol cannot be read")
                 got, why = _plan.normalize_design({**{k: v for k, v in d.items() if k != "protocol"},
                                                    **({"protocol": fixed_p} if fixed_p else {})})
             return got, why
@@ -5536,6 +5538,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return str(record.get("problem") or "")
         return ""
 
+    def _search_schema_refused(self, sha: str, file: str | None = None) -> bool:
+        """Whether the last answer of the plan's model was refused for its form (the record keeps ``schema``), for this plan
+        and model: such an answer is asked again within ``_SCHEMA_RETRY_ASKS`` more tries."""
+        try:
+            record = json.loads((self.fi_dir / (file or _SEARCH_ASKED)).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return bool(isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name()
+                    and record.get("schema") and record.get("problem"))
+
     def _search_asked(self, sha: str) -> int:
         """How many times FI has asked the plan's model to write the search (see :meth:`_search_record`)."""
         return self._search_record(sha)[0]
@@ -5668,8 +5680,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return design, plan_sha
         count, calls = self._search_record(plan_sha, file)
         last_problem = self._search_problem(plan_sha, file)  # why the last answer was not used (kept on disk)
+        schema = self._search_schema_refused(plan_sha, file)  # ... and whether it was refused for its form
         while (count < (_SEARCH_ASKS if ask_limit is None else min(_SEARCH_ASKS, ask_limit))
-               and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS):
+               + (_SCHEMA_RETRY_ASKS if schema else 0)
+               and calls + _SEARCH_CALLS_PER_ASK
+               <= _SEARCH_CALLS + (_SCHEMA_RETRY_ASKS * _SEARCH_CALLS_PER_ASK if schema else 0)):
             text = path.read_text(encoding="utf-8")
             sha_before = _plan.sha256(text)
             # `what` is a part of the plan ("settings the experiment needs") or, when it begins "what", the thing the plan lacks.
@@ -5683,7 +5698,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 # The reader's exact reason for refusing the last answer goes back to the model, not only what is missing.
                 ask += ("\n\nYour last answer was not used. The reason, exactly:\n" + last_problem
                         + "\nFix that, and keep everything the plan already has.")
-            extra_now = {**(extra or {}), **({"problem": last_problem} if last_problem else {})}
+            extra_now = {**(extra or {}), **({"problem": last_problem, "schema": schema} if last_problem else {})}
             # Recorded BEFORE the call, with the most chat calls one request can make reserved: a call that fails, or a quest
             # killed during it, still counts, so a broken model is never asked again and again across resumes.
             if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking", file, extra_now):
@@ -5693,6 +5708,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             used_before = getattr(self, "_plan_chat_calls", 0)
             outcome = "kept"
             last_problem = ""
+            schema = False
             try:
                 await self._rewrite_plan(
                     ask, path, by="engine", expect=text,
@@ -5707,6 +5723,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.warning("[plan] the plan step's answer to complete %s was not complete: %s", short, e)
             except ValueError as e:
                 outcome = "not usable"
+                schema = True
                 last_problem = re.sub(r";? ?plan\.md is unchanged\.?$", "", " ".join(str(e).split()))[:1500]
                 self._log.warning("[plan] the plan step's answer to complete %s could not be used: %s", short, e)
             except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing
@@ -5720,7 +5737,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             count += 1
             calls += max(1, getattr(self, "_plan_chat_calls", 0) - used_before)  # the calls really made
             self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file,
-                                      {**(extra or {}), **({"problem": last_problem} if last_problem else {})})
+                                      {**(extra or {}), **({"problem": last_problem, "schema": schema} if last_problem else {})})
             if outcome in ("no complete answer", "no answer", "plan changed meanwhile"):
                 again, sha = self._design_from_plan()
                 return (again, sha) if again is not None and outcome == "plan changed meanwhile" else (design, plan_sha)
@@ -5995,26 +6012,29 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         done = done if isinstance(done, dict) else {}
         asks = 0
         problem = ""
+        schema = False  # the last answer was refused for its form: it is asked again, within _SCHEMA_RETRY_ASKS more tries
         if int(done.get("iteration", -1)) == iteration:
             asks = int(done.get("asks", 1) or 0)  # a record from before the count was kept is one ask
             problem = str(done.get("problem") or "")
+            schema = bool(done.get("schema") and problem)
 
         def save(count: int) -> bool:
             try:
                 self.fi_dir.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps({"iteration": iteration, "asks": count, "problem": problem,
+                path.write_text(json.dumps({"iteration": iteration, "asks": count, "problem": problem, "schema": schema,
                                             "at": _frozen.now()}) + "\n", encoding="utf-8")
                 return True
             except OSError as e:
                 self._log.warning("[design] FI could not write down that it was asking for what the topic asks, so it did not ask: %r", e)
                 return False
 
-        while asks < _SEARCH_ASKS:
+        while asks < _SEARCH_ASKS + (_SCHEMA_RETRY_ASKS if schema else 0):
             if not save(asks + 1):  # counted BEFORE the call
                 return design
             asks += 1
             self._log.warning("[design] the redesign lacks what the topic asks for (%s); FI asked the design step's model to add it (%d of %d)",
-                              "; ".join(g["sentence"] for g in gaps)[:300], asks, _SEARCH_ASKS)
+                              "; ".join(g["sentence"] for g in gaps)[:300], asks,
+                              _SEARCH_ASKS + (_SCHEMA_RETRY_ASKS if schema else 0))
             self._progress("Asking the model to add what the topic asks for to the design")
             ask = (_topic_req.request(self.config.topic, gaps, search=_optim.has_block(design))
                    + "\n\nThe design drafted so far:\n" + json.dumps(design, ensure_ascii=False, default=str)[:8000]
@@ -6033,27 +6053,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     raise
                 self._log.warning("[design] the design step could not be asked to add what the topic asks for: %s", e)
                 problem = " ".join(f"the call to the model failed ({str(e)[:300] or type(e).__name__})".split())
+                schema = False  # no answer came: nothing for the form to be fixed in
                 save(asks)
                 continue
             merged = _topic_req.merge(design, obj, gaps) if isinstance(obj, dict) else None
             fixed, why = _plan.normalize_protocol(merged.get("protocol")) if merged is not None else (None, "nothing came back")
             if merged is not None and fixed is not None:
+                problem, schema = "", False  # used: an older refusal must not widen the bound of a later request
+                save(asks)
                 return {**merged, "protocol": fixed}
             self._log.warning("[design] the design step's answer to add what the topic asks for could not be used: %s", why)
             problem = " ".join(str(why or "the answer had none of what was asked in a form that can be read").split())[:1500]
+            schema = True  # the reader named what it could not read: that goes back for another try
             save(asks)  # the reason is kept with the count, so the stop can say why
         return design
 
     _TOPIC_UNMET_FILE = "topic_unmet.json"
 
-    def _stop_for_the_topic(self, gaps: list[dict[str, Any]], asked: int) -> None:
+    def _stop_for_the_topic(self, gaps: list[dict[str, Any]], asked: int, *, design_iteration: int | None = None) -> None:
         """Nothing is run: the topic asks for something its question cannot be answered without, and the plan could not
         include it even when the plan's model was asked (within its bound, each time quoting why the last answer was not
         used). The honest stop (no paper), reached when the code would be written and again when it would run
         (:meth:`_topic_unmet_stop`): nobody is asked to pick another model, because another model cannot fix a plan whose
         rules leave no place for what the topic asks. This only writes down what stands."""
         record = {"text": " ".join(g["sentence"] for g in gaps), "asked": asked, "at": _frozen.now(),
-                  "tried": _topic_req.stop_tried(gaps, asked, self._topic_last_problem())}
+                  "tried": _topic_req.stop_tried(gaps, asked, self._topic_last_problem(design_iteration))}
         self._log.warning("[design] the plan leaves out what the topic's question needs (%s); stopping, nothing was run",
                           "; ".join(g["sentence"] for g in gaps)[:400])
         try:
@@ -6062,28 +6086,39 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except OSError as e:
             self._log.warning("[design] couldn't write down what the topic asks for that the plan lacks: %r", e)
 
-    def _topic_design_record(self) -> dict[str, Any]:
+    def _topic_design_record(self, iteration: int | None = None) -> dict[str, Any]:
         """``.fi/topic_design_asked.json`` (the asks made at the design step, and why the last answer was not used); a record
-        without a count is one ask."""
+        without a count is one ask. With ``iteration``, only the record of that design round (another round's asks are not
+        this round's: ``{}``)."""
         try:
             record = json.loads((self.fi_dir / _TOPIC_DESIGN_ASKED).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         if not isinstance(record, dict):
             return {}
+        if iteration is not None:
+            try:
+                if int(record.get("iteration", -1)) != iteration:
+                    return {}
+            except (TypeError, ValueError):
+                return {}
         try:
             return {**record, "asks": int(record.get("asks", 1) or 0)}
         except (TypeError, ValueError):
             return {**record, "asks": 1}
 
-    def _topic_last_problem(self) -> str:
-        """Why the plan's model's last answer to the request for what the topic asks was not used (``""`` when it was)."""
+    def _topic_last_problem(self, design_iteration: int | None = None) -> str:
+        """Why the last answer to the request for what the topic asks was not used (``""`` when it was). With
+        ``design_iteration`` the stop is the design step's, in that round: its own record is read and only it (a plan
+        step's older reason is another request's); without it, the plan step's, which is the one the stop is about."""
+        if design_iteration is not None:
+            return str(self._topic_design_record(design_iteration).get("problem") or "")
         try:
             record = json.loads((self.fi_dir / _TOPIC_ASKED).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             record = {}
         problem = str(record.get("problem") or "") if isinstance(record, dict) else ""
-        return problem or str(self._topic_design_record().get("problem") or "")
+        return problem
 
     def _forget_topic_unmet(self) -> None:
         try:
@@ -6136,9 +6171,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         main = _topic_req.main_gaps(gaps)
         if main and not frozen:
             path = _plan.plan_path(self.quest_root)
-            asked = self._search_record(plan_sha, _TOPIC_ASKED)[0] if plan_sha and path.is_file() else (
-                self._topic_design_record().get("asks", 1) if (self.fi_dir / _TOPIC_DESIGN_ASKED).is_file() else 0)
-            self._stop_for_the_topic(main, asked)
+            iteration = int(state.get("iteration", 0) or 0)
+            by_plan = bool(plan_sha and path.is_file())
+            asked = self._search_record(plan_sha, _TOPIC_ASKED)[0] if by_plan else self._topic_design_record(iteration).get("asks", 0)
+            self._stop_for_the_topic(main, asked, design_iteration=None if by_plan else iteration)
         return design, plan_sha
 
     def _unread_parts(self, design: Any) -> dict[str, str]:
@@ -23877,6 +23913,10 @@ _PART_HEADING = "Checks already made"
 _TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks
 _TOPIC_DESIGN_ASKED = "topic_design_asked.json"  # one request per redesign, for a design drafted at the design step
 _SEARCH_ASKS = 2
+#: A model's answer the reader refused for its form (a schema error, quoted back to it exactly) earns this many more asks
+#: than ``_SEARCH_ASKS``, and the chat calls they need: a reason that names the field can usually be fixed in one more try.
+#: An answer that never came (a failed call, no complete answer) earns nothing extra.
+_SCHEMA_RETRY_ASKS = 2
 _SEARCH_CALLS_PER_ASK = 3  # one request can make up to three chat calls (two whole-file tries and one for the block alone)
 _SEARCH_CALLS = 6  # at most this many chat calls in all, per plan and model
 

@@ -140,7 +140,7 @@ async def test_a_reply_that_cannot_be_used_counts_as_a_request_and_leaves_the_pl
     def unusable(text: str) -> str:
         return _with_block(text, {"objective": {"quantity": "x"}})  # no direction, no variables
 
-    model = Model(eng, [unusable, unusable, unusable, unusable], _broken_draft())
+    model = Model(eng, [unusable] * 6, _broken_draft())
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     seen = []
@@ -148,11 +148,11 @@ async def test_a_reply_that_cannot_be_used_counts_as_a_request_and_leaves_the_pl
     state = {"topic": TOPIC, "iteration": 0}
     patch = await eng._node_design(state)
     assert seen == []
-    assert model.requests == 2 and _record(eng)["count"] == 2
+    assert model.requests == 4 and _record(eng)["count"] == 4  # a form the reader refused is asked again, two more times
     assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
     stop = eng._search_cannot_start_stop(state, patch["design"])["exec_result"]
     steps = stop["no_search"] + " " + " ".join(stop["no_search_tried"])
-    assert "what the search should make as low or as high as possible" in steps and "asked the plan's model 2 time(s)" in steps
+    assert "what the search should make as low or as high as possible" in steps and "asked the plan's model 4 time(s)" in steps
     # the second request quotes why the first answer was not used
     assert "Your last answer was not used" not in model.asked[0]
     assert any("Your last answer was not used" in a and "direction" in a for a in model.asked[1:])

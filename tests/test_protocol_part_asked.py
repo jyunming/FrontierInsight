@@ -90,19 +90,19 @@ async def test_an_unreadable_sweep_is_asked_of_the_plans_model_and_the_sweep_run
 async def test_a_sweep_still_unreadable_after_the_bounded_requests_stops_plainly_and_a_resume_asks_no_more(
         tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
-    model = Model(eng, [_set(grid={"fin_spacing": [2.0, "wide"]})] * 4, _draft(grid={"fin_spacing": [2.0, "wide"]}))
+    model = Model(eng, [_set(grid={"fin_spacing": [2.0, "wide"]})] * 8, _draft(grid={"fin_spacing": [2.0, "wide"]}))
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
     with pytest.raises(Paused):
         await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert _record(eng)["count"] == 2 and len(model.asked) <= 6
+    assert _record(eng)["count"] == 4 and len(model.asked) <= 12  # four: the reader named the form it refused
     shown = " ".join(seen[0]["steps"])
-    assert "Nothing was run" in shown and "asked the plan's model 2 time(s)" in shown
+    assert "Nothing was run" in shown and "asked the plan's model 4 time(s)" in shown
     assert "You do not need to write them yourself" in shown and "plan.md" not in shown
     assert not (eng.quest_root / "paper.md").exists()
     with pytest.raises(Paused):  # a resume stops again without asking a third time
         await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert _record(eng)["count"] == 2 and len(model.asked) <= 6
+    assert _record(eng)["count"] == 4 and len(model.asked) <= 12
     assert "the quest stops" in plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
 
 
