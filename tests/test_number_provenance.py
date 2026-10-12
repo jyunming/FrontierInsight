@@ -891,17 +891,6 @@ def test_every_element_of_a_short_list_is_still_a_result() -> None:
     assert _tokens(check(f"The score at the eighteenth setting was {pick}.", result_json=short)) == []
 
 
-def test_a_long_sorted_column_or_one_with_few_values_keeps_its_elements() -> None:
-    """A grid, a time axis or a cumulative curve is in order and draws never are; a coded level takes few values."""
-    axis = {"summary_rate": 0.7391, "grid": [0.1 + i * 0.00371 for i in range(300)]}
-    assert _tokens(check("The point at index 57 was 0.3115.", result_json=axis)) == []
-    coded = {"summary_rate": 0.7391, "level": [0.1234] * 100 + [0.5678] * 100 + [0.9012] * 100}
-    assert _tokens(check("The coded level 0.5678 was used.", result_json=coded)) == []
-    # ...and a kept long column also has its statistics
-    mean, _sd = _mean_sd(axis["grid"])
-    assert _tokens(check(f"The mean position was {mean:.4f}.", result_json=axis)) == []
-
-
 def test_records_are_pooled_within_a_group_never_across_groups() -> None:
     """A treatment mean is the mean of the treatment records. Pooling every record into one column made it no one's
     statistic, and an honest subgroup mean was flagged."""
@@ -917,13 +906,6 @@ def test_records_are_pooled_within_a_group_never_across_groups() -> None:
     assert _tokens(check(text, result_json=run)) == []
     pick = round(treat[10], 4)
     assert _tokens(check(f"The treatment arm reached {pick}.", result_json=run)) == [str(pick)]
-
-
-def test_a_small_group_of_a_long_list_of_records_keeps_its_elements() -> None:
-    rows = [{"arm": "a", "y": 0.2 + 0.3 * ((i * 7919) % 1009) / 1009} for i in range(300)]
-    rows += [{"arm": "b", "y": 0.7 + 0.01 * i} for i in range(5)]
-    run = {"summary_rate": 0.7391, "rows": rows}
-    assert _tokens(check("Arm b reached 0.7300 at its fourth record.", result_json=run)) == []
 
 
 def _crowd(prefix: str) -> dict:
@@ -999,7 +981,84 @@ def test_a_million_raw_values_are_checked_in_seconds_and_correctly() -> None:
     assert _tokens(wrong) == ["0.4123"]
 
 
-def test_two_hundred_thousand_records_are_pooled_without_per_record_paths() -> None:
+# --- second review pass ---------------------------------------------------------
+
+def test_a_long_column_with_few_values_keeps_them_and_a_fabricated_number_is_flagged() -> None:
+    coded = {"summary_rate": 0.7391, "level": [0.1234] * 100 + [0.5678] * 100 + [0.9012] * 100}
+    assert _tokens(check("The coded level 0.5678 was used.", result_json=coded)) == []
+    assert _tokens(check("The coded level 0.5679 was used.", result_json=coded)) == ["0.5679"]
+
+
+def test_a_long_sorted_column_does_not_keep_its_elements() -> None:
+    """A cumulative sum, sorted errors or arrival times are in order and still the result of a computation over
+    thousands of values: each element is not a target (and not an operand of a derivation)."""
+    cumulative = {"summary_rate": 0.7391, "cumulative": [0.1 + i * 0.00371 for i in range(300)]}
+    pick = round(cumulative["cumulative"][57], 4)  # 0.3115
+    assert _tokens(check(f"The point at index 57 was {pick}.", result_json=cumulative)) == [str(pick)]
+    mean, _sd = _mean_sd(cumulative["cumulative"])
+    assert _tokens(check(f"The mean position was {mean:.4f}.", result_json=cumulative)) == []
+    assert _tokens(check(f"The mean position was {mean + 0.0007:.4f}.", result_json=cumulative)) != []
+
+
+def test_a_stratum_label_or_an_array_length_is_gated_like_any_result() -> None:
+    """Only the configuration and the design are told to the run; a stratum label and a length are results, so in a
+    crowded run an unnamed match to one is luck."""
+    crowd = _crowd("gain")
+    labelled = {**crowd, "by_alpha.0.713.metric": 1.5}
+    assert labelled and _tokens(check("The widget was 0.713.", result_json=labelled)) == ["0.713"]
+
+
+def test_a_group_field_holding_a_list_in_some_record_does_not_crash() -> None:
+    rows = [{"arm": "a", "y": ((i * 7919) % 1009) / 1009} for i in range(300)]
+    rows[5]["arm"] = ["a", "b"]
+    rows[6]["arm"] = {"x": 1}
+    run = {"summary_rate": 0.7391, "rows": rows}
+    report = check("The summary rate was 0.7391 and a made-up value 0.1234 appeared.", result_json=run)
+    assert not report.skipped and _tokens(report) == ["0.1234"]
+
+
+def test_a_small_group_has_its_own_statistics() -> None:
+    """Two arms of 150 records each (a long list, small groups): an arm mean is a result of that arm."""
+    rows = []
+    for i in range(150):
+        rows.append({"arm": "control", "y": 0.2 + 0.3 * ((i * 7919) % 1009) / 1009})
+        rows.append({"arm": "treatment", "y": 0.6 + 0.3 * ((i * 4513) % 1013) / 1013})
+    run = {"summary_rate": 0.7391, "rows": rows}
+    t_mean, t_sd = _mean_sd([r["y"] for r in rows if r["arm"] == "treatment"])
+    c_mean = _mean_sd([r["y"] for r in rows if r["arm"] == "control"])[0]
+    text = f"The treatment arm averaged {t_mean:.4f} (SD {t_sd:.4f}) and the control arm {c_mean:.4f}."
+    assert _tokens(check(text, result_json=run)) == []
+    assert _tokens(check(f"The treatment arm averaged {t_mean + 0.0011:.4f}.", result_json=run)) != []
+
+
+def test_a_small_group_of_a_long_list_of_records_keeps_its_elements_and_a_fabrication_is_flagged() -> None:
+    rows = [{"arm": "a", "y": 0.2 + 0.3 * ((i * 7919) % 1009) / 1009} for i in range(300)]
+    rows += [{"arm": "b", "y": 0.7 + 0.01 * i} for i in range(5)]
+    run = {"summary_rate": 0.7391, "rows": rows}
+    assert _tokens(check("Arm b reached 0.7300 at its fourth record.", result_json=run)) == []
+    assert _tokens(check("Arm b reached 0.7350 at its fourth record.", result_json=run)) == ["0.7350"]
+
+
+def test_a_sentence_soft_wrapped_over_lines_is_read_whole() -> None:
+    crowd = _crowd("gain")
+    value = crowd["gain_137"]
+    wrapped = f"The measured gain\nof the widget under\nstudy was\n{value} in the end."
+    assert _tokens(check(wrapped, result_json=crowd)) == []
+    separate = f"The gain was large.\n\nThe widget was {value}."
+    assert _tokens(check(separate, result_json=crowd)) == [str(value)]
+    row = f"The gain is tabulated below.\n| widget | {value} |"
+    assert _tokens(check(row, result_json=crowd)) == [str(value)]
+
+
+def test_a_statistic_whose_leaf_names_nothing_is_named_by_its_ancestor() -> None:
+    """``calibration.error.@mean``: ``error`` names nothing, so the sentence has to be able to name it by ``calibration``."""
+    run = {"calibration": {"error": _draws(400)}, **_crowd("gain")}
+    mean, _sd = _mean_sd(run["calibration"]["error"])
+    assert _tokens(check(f"The calibration averaged {mean:.3f}.", result_json=run)) == []
+    assert _tokens(check(f"The widget averaged {mean:.3f}.", result_json=run)) == [f"{mean:.3f}"]
+
+
+def test_two_hundred_thousand_records_are_pooled_correctly() -> None:
     import time
 
     rows = [{"arm": "a" if i % 2 else "b", "y": ((i * 7919) % 100003) / 100003, "z": (i * 31 % 977) / 977}
@@ -1009,4 +1068,6 @@ def test_two_hundred_thousand_records_are_pooled_without_per_record_paths() -> N
     started = time.time()
     report = check(f"The b arm averaged {b_mean:.4f}, the rate 0.7391.", result_json=run)
     assert time.time() - started < 60
-    assert report.ok and report.traceable_values < 1000
+    assert not report.skipped and report.ok and report.paper_numbers == 2 and report.traceable_values < 1000
+    fabricated = check(f"The b arm averaged {b_mean + 0.0009:.4f}, the rate 0.7391.", result_json=run)
+    assert not fabricated.skipped and _tokens(fabricated) == [f"{b_mean + 0.0009:.4f}"]

@@ -197,8 +197,7 @@ _CONTEXT_CHARS = 170
 RAW_COLUMN_MIN = 200
 
 # ...except that a long column keeps its elements when they cannot be a crowd of lucky matches: it takes few distinct
-# values (a 0/1 outcome, a coded level), or it is sorted (a grid, a time axis, a cumulative curve; draws are never in
-# order).
+# values (a 0/1 outcome, a coded level).
 _MAX_DISTINCT_KEPT = 50
 
 # A string or boolean field of a record that takes at most this many values names a GROUP (arm, method, dataset): the
@@ -501,8 +500,8 @@ _WORD = re.compile(r"[a-z]{3,}")
 _GROUP_TAG = re.compile(r"\{[^}]*\}")
 _INDEX_OR_STAT = re.compile(r"\[\d*\]|\.@\w+$")
 
-# A result that is part of what the run was told or declared is not a computed value that could match by luck.
-_UNGATED_PREFIXES = ("config.", "design.", "stratum ", "len(")
+# A value the run was told or declared (configuration, design) is not a computed value that could match by luck.
+_UNGATED_PREFIXES = ("config.", "design.")
 
 
 def _leaf_name(path: str) -> str:
@@ -661,7 +660,7 @@ class Traceable:
         return min(1.0, buckets.get((key > 0, e), 0) / slots)
 
     def is_declared(self, path: str) -> bool:
-        """Is this path something the run was told (configuration, design, a stratum label, an array's length)?"""
+        """Is this path something the run was told (its configuration or its design)?"""
         return path.startswith(_UNGATED_PREFIXES)
 
     def words_of(self, path: str) -> frozenset[str]:
@@ -669,7 +668,15 @@ class Traceable:
         got = self._words_of.get(path)
         if got is None:
             tags = " ".join(_GROUP_TAG.findall(path))
-            got = self._words_of[path] = _name_stems(_leaf_name(path) + " " + tags, _PATH_STOP)
+            got = _name_stems(_leaf_name(path) + " " + tags, _PATH_STOP)
+            if not got and ".@" in path:
+                # ``trials.error.@mean``: "error" names nothing, so the statistic is named by what it is of
+                bare = _GROUP_TAG.sub("", _INDEX_OR_STAT.sub("", path))
+                for segment in reversed(bare.split(".")[:-1]):
+                    got = _name_stems(segment, _PATH_STOP)
+                    if got:
+                        break
+            self._words_of[path] = got
         return got
 
     def find_near(self, value: float, tol: float) -> str | None:
@@ -727,24 +734,17 @@ def _column_stats(path: str, vals: Any, derived: dict[str, float]) -> None:
 
 
 def _kept_elements(vals: Any) -> list[int]:
-    """The positions of a long column whose elements a paper may still quote one by one, else ``[]``: a column with few
-    distinct values keeps one position per value (a coded level, a 0/1 outcome); a column that is sorted and not all
-    whole numbers keeps all (a grid, a time axis, a cumulative curve: draws are never in order, and a sorted run of
-    whole numbers is an index or an id, not a result)."""
+    """The positions of a long column whose elements a paper may still quote one by one, else ``[]``: only a column with
+    few distinct values (a coded level, a 0/1 outcome), one position per value. A long column in order is NOT kept: a
+    cumulative sum, sorted errors or arrival times are results of a computation over thousands of values, and keeping
+    each as a target would make nearly any number match."""
     first: dict[float, int] = {}
     for i, v in enumerate(vals):
         if v not in first:
             first[v] = i
             if len(first) > _MAX_DISTINCT_KEPT:
-                break
-    else:
-        return sorted(first.values())
-    ascending = all(a <= b for a, b in zip(vals, islice(vals, 1, None)))
-    if not ascending and not all(a >= b for a, b in zip(vals, islice(vals, 1, None))):
-        return []
-    if all(float(v).is_integer() for v in vals):
-        return []
-    return list(range(len(vals)))
+                return []
+    return sorted(first.values())
 
 
 def _emit_column(
@@ -801,13 +801,14 @@ def _walk_records(
     group_keys = [k for k, vs in seen.items() if len(vs) <= _MAX_GROUPS]
     groups: dict[tuple, list[int]] = {}
     for i, rec in enumerate(records):
-        key = tuple((k, rec.get(k)) for k in group_keys if k in rec) if isinstance(rec, dict) else ()
+        if isinstance(rec, dict):
+            # Only a string, boolean or null names a group; a list or dict in that field is treated as missing.
+            key = tuple((k, v if isinstance(v, (str, bool)) or v is None else None)
+                        for k in group_keys if k in rec for v in (rec[k],))
+        else:
+            key = ()
         groups.setdefault(key, []).append(i)
     for key, idxs in groups.items():
-        if len(idxs) <= RAW_COLUMN_MIN:
-            for i in idxs:
-                _walk(records[i], f"{path}[{i}]", kept, derived)
-            continue
         tag = "{" + ",".join(f"{k}={v}" for k, v in key) + "}" if key else ""
         cols: dict[str, tuple[array, array]] = {}
         names: dict[tuple[str, str], str] = {}
@@ -839,12 +840,15 @@ def _walk_records(
         for i in idxs:
             collect(records[i], "", i)
         for col, (ix, vs) in cols.items():
+            label = f"{path}[]{tag}{col}"
             if len(vs) <= RAW_COLUMN_MIN:
+                # a small group keeps every element, and its mean / SD / extremes are a group's results too
+                _column_stats(label, vs, derived)
                 for i, v in zip(ix, vs):
                     if abs(v) > MIN_MAGNITUDE:
                         kept.append((f"{path}[{i}]{col}", v))
             else:
-                _emit_column(f"{path}[]{tag}{col}", vs, lambda j, ix=ix, col=col: f"{path}[{ix[j]}]{col}", kept, derived)
+                _emit_column(label, vs, lambda j, ix=ix, col=col: f"{path}[{ix[j]}]{col}", kept, derived)
 
 
 def _trace_values(obj: Any, prefix: str = "") -> tuple[list[tuple[str, float]], dict[str, float]]:
@@ -1047,20 +1051,31 @@ _NAMING_FALLBACK = 120
 _SENTENCE_MAX = 500
 
 
+_BLANK_LINE = re.compile(r"\n[ \t]*\n")
+
+
 def _sentence_around(text: str, start: int, end: int) -> str:
-    """The sentence of ``text`` holding ``[start, end)``: bounded by line breaks and sentence ends."""
+    """The sentence of ``text`` holding ``[start, end)``. A table row is one line; elsewhere a sentence ends at a full
+    stop followed by a capital or at a blank line, so a paragraph soft-wrapped over several lines is read whole."""
     line_lo = text.rfind("\n", 0, start) + 1
     line_hi = text.find("\n", end)
     line_hi = len(text) if line_hi < 0 else line_hi
-    lo = line_lo
-    for m in _SENTENCE_END.finditer(text, line_lo, line_hi):
-        if m.end() <= start:
-            lo = m.end()
-        else:
-            hi = m.start()
-            break
+    if text[line_lo:line_hi].lstrip().startswith("|"):
+        lo, hi = line_lo, line_hi
     else:
-        hi = line_hi
+        lo = 0
+        for m in _BLANK_LINE.finditer(text, 0, start):
+            lo = m.end()
+        m_end = _BLANK_LINE.search(text, end)
+        hi = m_end.start() if m_end else len(text)
+        stop = hi
+        for m in _SENTENCE_END.finditer(text, lo, hi):
+            if m.end() <= start:
+                lo = m.end()
+            else:
+                stop = m.start()
+                break
+        hi = stop
     sentence = text[lo:hi]
     if len(sentence) <= _SENTENCE_MAX:
         return sentence
@@ -1095,7 +1110,7 @@ def _is_accounted_for(
     paths = traceable.paths_at(cand, dec)
     if not paths:
         return False
-    # A value the run was told or declared (configuration, design, a stratum label, an array's length) is no luck.
+    # A value the run was told or declared (configuration, design) is no luck.
     if any(traceable.is_declared(path) for path in paths):
         return True
     # A scale or complement change is one more way to match by luck, so the unnamed match must be that much rarer.
