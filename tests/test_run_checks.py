@@ -422,7 +422,9 @@ async def test_an_answer_that_is_not_a_smaller_run_of_the_same_settings_is_not_u
         tmp_path, timeout_s=8,
         answers=[_smaller({"m": [1, 2]}, 4), _smaller({"n": [1, 2, 4, 8]}, 40)])
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None and len(model.asked) == 2
+    # Two answers, then one more ask: an answer refused for its form earns the schema retries (core/engine.py
+    # _SCHEMA_RETRY_ASKS); the plan stays as it was whatever the count.
+    assert patch is not None and len(model.asked) == 3
     design = plan.load_design(eng.quest_root)[0]
     assert design["protocol"]["grid"] == {"n": [1, 2, 4]} and design["protocol"]["runs_per_setting"] == 40
     assert "complete now" not in capsys.readouterr().out
