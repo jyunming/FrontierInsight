@@ -156,9 +156,9 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
-from core.numeric_oracle import _MINUS_SIGN, extract_paper_numbers, flatten_numbers
+from core.numeric_oracle import MIN_MAGNITUDE, _MINUS_SIGN, extract_paper_numbers, flatten_numbers
 from core.stat_claims import normalise
 
 # A number must carry this many significant digits before its value says
@@ -184,6 +184,21 @@ HEDGED_REL_TOL = 0.10
 MAX_FINDINGS = 8
 
 _CONTEXT_CHARS = 170
+
+# A column of more than this many numbers under one result name (an array of per-trial values, or one field of a long
+# list of records) is RAW DATA: a paper reports what was computed from it, never one element picked at random. Such a
+# column accounts for a paper number only through the statistics derived from it (see ``_column_stats``); its
+# individual elements do not. Shorter columns (a sweep, a table row, a per-seed list) keep every element, because a
+# paper does print those one by one. Without this, a result file with hundreds of thousands of trial values held
+# nearly every number a paper could print: papers checked against ANOTHER quest's results had more than half their
+# numbers "accounted for" by pure coincidence.
+RAW_COLUMN_MIN = 50
+
+# Percentiles a paper reports from raw trials, with the label each is stored under (no digits that could read as a
+# stratum label).
+_PERCENTILES = (
+    (2.5, "q2_5"), (5.0, "q5"), (25.0, "q25"), (75.0, "q75"), (95.0, "q95"), (97.5, "q97_5"),
+)
 
 
 @dataclass(frozen=True)
@@ -462,6 +477,33 @@ _PATH_NUMBER = re.compile(r"(?<![\w])\d+(?:\.\d+)*(?![\w])")
 _TEXT_NUMBER = re.compile(r"(?<![\w.])(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)(?![\w])")
 
 
+# Words that name nothing: a connective, a statistic every result has, the structure the run's own record is stored in.
+_COMMON_STOP = frozenset((
+    "the and for with from that this are was were per over all each value values mean median std sem min max low lower "
+    "high upper ledger trial trials result results data").split())
+_PATH_STOP = _COMMON_STOP | frozenset((
+    "replicates config design oracle figure comparisons optimisation stratum len records cells settings setting seeds "
+    "seed over key keys").split())
+_WORD = re.compile(r"[a-z]{3,}")
+
+
+_INDEX_OR_STAT = re.compile(r"\[\d+\]|\.@\w+$")
+
+
+def _leaf_name(path: str) -> str:
+    """The last segment of a result path, which names the quantity (``by_noise.0.1.k_coverage_probability[1]`` ->
+    ``k_coverage_probability``); the segments before it are the strata it was computed in."""
+    path = _INDEX_OR_STAT.sub("", _INDEX_OR_STAT.sub("", path))
+    return path.rsplit(".", 1)[-1] if "." in path else path
+
+
+def _name_stems(text: str, stop: frozenset[str]) -> frozenset[str]:
+    """The first four letters of each word in ``text`` that names something, so ``coverage`` and ``covered`` meet."""
+    return frozenset(
+        w[:4] for w in _WORD.findall(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text).lower()) if w not in stop
+    )
+
+
 class Traceable:
     """The set of values this run can account for, indexed for rounded lookup.
 
@@ -476,6 +518,10 @@ class Traceable:
         self.values = values
         self._by_dec: dict[int, dict[float, str]] = {}
         self._trunc_by_dec: dict[int, dict[float, str]] = {}
+        self._lists_by_dec: dict[int, dict[float, list[str]]] = {}
+        self._trunc_lists_by_dec: dict[int, dict[float, list[str]]] = {}
+        self._decades_by_dec: dict[int, dict[int, int]] = {}
+        self._words_of: dict[str, frozenset[str]] = {}
 
     def __len__(self) -> int:
         return len(self.values)
@@ -528,6 +574,71 @@ class Traceable:
             return None
         return self._trunc_table(dec).get(key)
 
+    def _lists(self, dec: int) -> dict[float, list[str]]:
+        table = self._lists_by_dec.get(dec)
+        if table is None:
+            table = {}
+            for path, value in self.values.items():
+                try:
+                    table.setdefault(round(value, dec), []).append(path)
+                except (ValueError, OverflowError):
+                    continue
+            self._lists_by_dec[dec] = table
+        return table
+
+    def _trunc_lists(self, dec: int) -> dict[float, list[str]]:
+        table = self._trunc_lists_by_dec.get(dec)
+        if table is None:
+            table = {}
+            scale = 10.0 ** dec
+            for path, value in self.values.items():
+                try:
+                    table.setdefault(math.floor(value * scale) / scale, []).append(path)
+                except (ValueError, OverflowError):
+                    continue
+            self._trunc_lists_by_dec[dec] = table
+        return table
+
+    def paths_at(self, value: float, dec: int) -> list[str]:
+        """Every path holding ``value`` rounded (or truncated) to ``dec`` decimals; empty when none does."""
+        scale = 10.0 ** dec
+        try:
+            hit = list(self._lists(dec).get(round(value, dec), ()))
+            hit += self._trunc_lists(dec).get(math.floor(value * scale) / scale, ())
+        except (ValueError, OverflowError):
+            return []
+        return hit
+
+    def chance(self, value: float, dec: int) -> float:
+        """How likely a number written like this is to equal SOME value here by luck alone: the share of the numbers
+        of its size, at its precision, that this run's values already take. A run holding 400 distinct values between
+        0.1 and 1 holds about 40% of the 900 numbers ``0.xyz`` can be, so a 3-digit number in that range matches one of
+        them on a coin flip; a run of 5 such values holds 0.6% of them."""
+        try:
+            key = round(value, dec)
+        except (ValueError, OverflowError):
+            return 1.0
+        if not key:
+            return 1.0
+        decades = self._decades_by_dec.get(dec)
+        if decades is None:
+            decades = {}
+            for k in self._lists(dec):
+                if k:
+                    e = math.floor(math.log10(abs(k)))
+                    decades[e] = decades.get(e, 0) + 1
+            self._decades_by_dec[dec] = decades
+        e = math.floor(math.log10(abs(key)))
+        slots = 9.0 * 10.0 ** (max(e + 1 + dec, 1) - 1)
+        return min(1.0, decades.get(e, 0) / slots)
+
+    def words_of(self, path: str) -> frozenset[str]:
+        """The words a result path names its quantity with (``by_noise.0.1.coverage_95`` -> ``noise``, ``coverage``)."""
+        got = self._words_of.get(path)
+        if got is None:
+            got = self._words_of[path] = _name_stems(_leaf_name(path), _PATH_STOP)
+        return got
+
     def find_near(self, value: float, tol: float) -> str | None:
         """Nearest value within a relative tolerance, for a hedged number."""
         for path, actual in self.values.items():
@@ -535,6 +646,89 @@ class Traceable:
             if denom and abs(value - actual) / denom <= tol:
                 return path
         return None
+
+
+# --- raw columns: only what is derived from them is a result -------------------
+
+def _numeric_leaves(
+    obj: Any, path: str, col: str,
+    scalars: list[tuple[str, str, float]], arrays: list[tuple[str, list[float]]],
+) -> None:
+    """Collect ``(path, column, value)`` for each numeric leaf, and lift every long array of plain numbers out whole.
+    ``column`` is the path with its list indices dropped, so every element of a list of records shares one."""
+    if isinstance(obj, bool):
+        return
+    if isinstance(obj, (int, float)):
+        if math.isfinite(obj):
+            scalars.append((path or "<root>", col or "<root>", float(obj)))
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            _numeric_leaves(v, f"{path}.{k}" if path else str(k), f"{col}.{k}" if col else str(k), scalars, arrays)
+        return
+    if isinstance(obj, (list, tuple)):
+        if len(obj) > RAW_COLUMN_MIN and set(map(type, obj)) <= {int, float}:
+            arrays.append((path or "<root>", [float(x) for x in obj if math.isfinite(x)]))
+            return
+        for i, v in enumerate(obj):
+            _numeric_leaves(v, f"{path}[{i}]", f"{col}[]", scalars, arrays)
+
+
+def _quantile(ordered: list[float], pct: float) -> float:
+    """The linear-interpolation percentile (numpy's default) of an already sorted list."""
+    pos = (len(ordered) - 1) * pct / 100.0
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(ordered) - 1)
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+
+
+def _column_stats(path: str, vals: list[float], out: dict[str, float]) -> None:
+    """What a paper reports from a column of raw values, none of which it reports itself: mean, median, SD (population
+    and sample), standard error, a 95% interval for the mean, extremes, and the percentiles an interval or a median
+    with its quartiles is written from. Computed here, deterministically, from the values themselves."""
+    n = len(vals)
+    if n < 2:
+        return
+    ordered = sorted(vals)
+    total = math.fsum(vals)
+    mean = total / n
+    ss = math.fsum((v - mean) ** 2 for v in vals)
+    sd_pop, sd_smp = math.sqrt(ss / n), math.sqrt(ss / (n - 1))
+    sem = sd_smp / math.sqrt(n)
+    stats = {
+        "mean": mean, "median": _quantile(ordered, 50.0), "sd": sd_smp, "sd_pop": sd_pop, "sem": sem,
+        "ci95_lower": mean - 1.96 * sem, "ci95_upper": mean + 1.96 * sem,
+        "min": ordered[0], "max": ordered[-1],
+    }
+    for q, label in _PERCENTILES:
+        stats[label] = _quantile(ordered, q)
+    for name, value in stats.items():
+        if math.isfinite(value) and abs(value) > MIN_MAGNITUDE:
+            out.setdefault(f"{path}.@{name}", value)
+
+
+def _trace_values(obj: Any, prefix: str = "") -> Iterator[tuple[str, float]]:
+    """Like ``flatten_numbers``, except that raw columns (see ``RAW_COLUMN_MIN``) yield their derived statistics and
+    not their elements."""
+    scalars: list[tuple[str, str, float]] = []
+    arrays: list[tuple[str, list[float]]] = []
+    _numeric_leaves(obj, "", "", scalars, arrays)
+    per_col: dict[str, int] = {}
+    for _path, col, _v in scalars:
+        per_col[col] = per_col.get(col, 0) + 1
+    pooled: dict[str, list[float]] = {}
+    for path, col, value in scalars:
+        if per_col[col] > RAW_COLUMN_MIN:
+            pooled.setdefault(col, []).append(value)
+        elif abs(value) > MIN_MAGNITUDE:
+            yield f"{prefix}{path}", value
+    stats: dict[str, float] = {}
+    for col, vals in pooled.items():
+        _column_stats(col, vals, stats)
+    for path, vals in arrays:
+        _column_stats(path, vals, stats)
+    for path, value in stats.items():
+        yield f"{prefix}{path}", value
 
 
 def _list_lengths(obj: Any, path: str, out: dict[str, float]) -> None:
@@ -620,10 +814,10 @@ def build_traceable(
     computed nothing has nothing to check a paper against)."""
     values: dict[str, float] = {}
 
-    for path, value in flatten_numbers(result_json or {}):
+    for path, value in _trace_values(result_json or {}):
         values.setdefault(path, value)
-    for path, value in flatten_numbers(replicates or []):
-        values.setdefault(f"replicates{path}", value)
+    for path, value in _trace_values(replicates or [], "replicates"):
+        values.setdefault(path, value)
     _stat_values(intervals, "mean_over_seeds", values)
     _stat_values(aggregate, "over_seeds", values)
     _list_lengths(result_json or {}, "", values)
@@ -641,7 +835,7 @@ def build_traceable(
     # A figure's own numbers, axis limits included. An axis limit printed as a
     # count IS a defect, but stat_claims recomputes and names it; flagging it
     # here too would report one mistake twice.
-    for path, value in flatten_numbers(figure_records or {}):
+    for path, value in _trace_values(figure_records or {}):
         values.setdefault(f"figure.{path}", value)
 
     # The pairwise comparison aggregate: each stratum's interval and every
@@ -649,20 +843,20 @@ def build_traceable(
     # are absent from RESULT_JSON, so an effect size the paper quotes has
     # nowhere else to trace to. Whether such a claim is overstated is a
     # different question, and stat_claims already answers it.
-    for path, value in flatten_numbers(comparison_stats or {}):
+    for path, value in _trace_values(comparison_stats or {}):
         values.setdefault(f"comparisons.{path}", value)
 
     # The engine's oracle checks before the main run: what the script measured on each check case, and the expected
     # value and limit it was judged against. These are numbers this run computed, just not in RESULT_JSON; a paper
     # that reports "the energy drift was 1.25e-5, within 2e-5" quotes them.
-    for path, value in flatten_numbers(oracle_checks or []):
-        values.setdefault(f"oracle{path}", value)
+    for path, value in _trace_values(oracle_checks or [], "oracle"):
+        values.setdefault(path, value)
 
     # A search for the best design: FI's own record of the search and of its check at finer numerical settings
     # (results/best_design.json, needs/OPTIMUM_CHECK.json: core/best_design_report.py). The paper's "Best design found"
     # section prints them at every level of the numerical settings; they are numbers this run computed, not the
     # script's, and FI wrote them.
-    for path, value in flatten_numbers(optimisation or {}):
+    for path, value in _trace_values(optimisation or {}):
         values.setdefault(f"optimisation.{path}", value)
 
     # The run configuration, including numbers the user wrote into the topic.
@@ -712,6 +906,48 @@ def _variants(value: float, token: str) -> Iterator[tuple[float, int, str]]:
         yield 1.0 - value / 100.0, dec + 2, " (as the complement of a percentage)"
 
 
+# A match that shares no word with the sentence it stands in is accepted only when it is unlikely to be luck.
+MAX_CHANCE_UNNAMED = 0.2
+SHIFT_CHANCE_DIVISOR = 4
+
+
+# How far around a number the words that name its quantity are read: about a sentence either side, or a small table's
+# header and row label.
+_NAMING_WINDOW = 300
+
+
+def _naming_words(flat_text: str, token: str, context: str) -> frozenset[str]:
+    """The words that name the quantity ``token`` stands for: those around it, wherever the paper writes it."""
+    words = set(_name_stems(context, _COMMON_STOP))
+    found = 0
+    for m in re.finditer(r"(?<![\d.])" + re.escape(token) + r"(?!\d)", flat_text):
+        words |= _name_stems(flat_text[max(0, m.start() - _NAMING_WINDOW): m.end() + _NAMING_WINDOW], _COMMON_STOP)
+        found += 1
+        if found >= 4:
+            break
+    return frozenset(words)
+
+
+def _is_accounted_for(
+    traceable: Traceable, cand: float, dec: int, named: Callable[[], frozenset[str]], *, shifted: bool = False,
+) -> bool:
+    """Does a result hold ``cand`` (rounded or truncated at ``dec`` decimals) as the quantity the sentence names?
+
+    A value equal to the number is not enough when the run holds thousands of values: by luck alone a 3-digit number
+    equals one of them. So a match counts when the words around the number name what the matching result is
+    (``coverage`` in the sentence, ``coverage`` in the result's name), or when the run holds so few values of that
+    size that a match is not luck (``Traceable.chance``).
+    """
+    paths = traceable.paths_at(cand, dec)
+    if not paths:
+        return False
+    # A scale or complement change is one more way to match by luck, so the unnamed match must be that much rarer.
+    if traceable.chance(cand, dec) <= MAX_CHANCE_UNNAMED / (SHIFT_CHANCE_DIVISOR if shifted else 1):
+        return True
+    words = named()
+    return any(traceable.words_of(path) & words for path in paths)
+
+
 def check(
     paper_text: str,
     *,
@@ -755,6 +991,7 @@ def check(
         return report
 
     seen: set[float] = set()
+    flat_text = " ".join(normalise(paper_text).replace(_MINUS_SIGN, "-").split())
     for value, token, context in paper_numbers(paper_text):
         if not _carries_enough_precision(token) or _is_year(value, token):
             continue
@@ -766,10 +1003,11 @@ def check(
         # A number after a plus-minus sign is two numbers, and either traces.
         readings = (value, -value) if _either_sign(token, context) else (value,)
         if any(
-            traceable.find(cand, dec) is not None
-            or traceable.find_truncated(cand, dec) is not None
+            _is_accounted_for(
+                traceable, cand, dec, lambda: _naming_words(flat_text, token, context), shifted=bool(how),
+            )
             for reading in readings
-            for cand, dec, _ in _variants(reading, token)
+            for cand, dec, how in _variants(reading, token)
         ):
             continue
         if hedged and traceable.find_near(value, HEDGED_REL_TOL) is not None:

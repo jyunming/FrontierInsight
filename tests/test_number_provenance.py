@@ -819,3 +819,63 @@ def test_a_rounded_integer_is_not_scaled_down_at_a_coarser_precision() -> None:
 def test_a_rounded_integer_is_not_matched_by_truncation() -> None:
     """Nobody truncates 2326.66 to 2320: 2320 is flagged (it would widen the window to [2315, 2330))."""
     assert _tokens(check("The SD of Ea was 2320 J/mol.", result_json=SD_RUN)) == ["2320"]
+
+# --- raw trial values and luck: a match must mean something ---------------------
+
+def _raw_run(n: int = 200) -> dict:
+    """A run whose results hold ``n`` raw per-trial values plus one named summary."""
+    return {"summary_rate": 0.7391, "trial_values": [0.1 + i * 0.00371 for i in range(n)]}
+
+
+def test_one_raw_trial_value_does_not_account_for_a_number() -> None:
+    """The paper prints 0.3115, which equals only trial 57 of 200 (0.1 + 57 * 0.00371 = 0.31147). A paper reports what
+    was computed from trials, never one trial picked at random, so this is luck and not a source."""
+    raw = _raw_run()
+    assert round(raw["trial_values"][57], 4) == 0.3115
+    report = check("The measured score was 0.3115.", result_json=raw)
+    assert _tokens(report) == ["0.3115"]
+
+
+def test_a_statistic_of_the_raw_trials_is_accounted_for() -> None:
+    raw = _raw_run()
+    vals = raw["trial_values"]
+    mean = sum(vals) / len(vals)
+    sd = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
+    ordered = sorted(vals)
+    median = ordered[len(ordered) // 2 - 1] / 2 + ordered[len(ordered) // 2] / 2
+    text = (f"The mean score was {mean:.4f} (SD {sd:.4f}), ranging from {ordered[0]:.4f} to {ordered[-1]:.4f}, "
+            f"and the median was {median:.4f}.")
+    assert _tokens(check(text, result_json=raw)) == []
+
+
+def test_every_element_of_a_short_list_is_still_a_result() -> None:
+    """A sweep or a per-seed list is printed one entry at a time; only a long column is raw data."""
+    short = {"summary_rate": 0.7391, "by_setting": [0.1 + i * 0.00371 for i in range(10)]}
+    assert _tokens(check("The score at the fifth setting was 0.1148.", result_json=short)) == []
+
+
+def test_a_long_list_of_records_is_one_raw_column() -> None:
+    records = {"summary_rate": 0.7391, "trials": [{"error": 0.2 + i * 0.00417} for i in range(120)]}
+    pick = round(0.2 + 41 * 0.00417, 4)  # trial 41's own error
+    assert _tokens(check(f"The error was {pick}.", result_json=records)) == [str(pick)]
+    mean = sum(r["error"] for r in records["trials"]) / 120
+    assert _tokens(check(f"The mean error was {mean:.4f}.", result_json=records)) == []
+
+
+def test_a_match_that_names_nothing_in_a_crowded_run_is_luck() -> None:
+    """400 distinct values between 0.1 and 0.9 take about 44% of the 900 numbers ``0.xyz`` can be, so a 3-digit number
+    equals one of them by luck. It counts when the sentence names the quantity (``gain``), not when it does not."""
+    crowd = {f"gain_{i}": round(0.1 + i * 0.00203, 3) for i in range(400)}
+    value = crowd["gain_137"]
+    assert _tokens(check(f"The gain was {value}.", result_json=crowd)) == []
+    assert _tokens(check(f"The widget was {value}.", result_json=crowd)) == [str(value)]
+
+
+def test_a_million_raw_values_are_checked_in_seconds() -> None:
+    import time
+
+    big = {"summary_rate": 0.7391, "trial_values": [((i * 7919) % 100003) / 100003 for i in range(1_000_000)]}
+    started = time.time()
+    report = check("The score was 0.7391 and the mean was 0.5000.", result_json=big)
+    assert time.time() - started < 60
+    assert report.traceable_values < 1000
