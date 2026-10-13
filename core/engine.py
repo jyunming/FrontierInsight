@@ -11756,11 +11756,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                               " (the run's results decide whether the study stops)" if v.get("headline") else "")
         return None
 
-    def _finding_test_env(self) -> dict[str, str]:
+    def _finding_test_env(self, *, stand_ins: bool = True) -> dict[str, str]:
         """The environment a finding test runs in: the process's own plus the ``FI_*`` variables the run gives the code
-        (:func:`core.finding_repair.run_environment`), so a module that reads them when it is imported can be tested."""
+        (:func:`core.finding_repair.run_environment`), so a module that reads them when it is imported can be tested. Before
+        the run a stand-in holds a file the run has not written yet; at the evidence gate (``stand_ins=False``) only real files
+        are used."""
         return {**os.environ, **_finding_repair.run_environment(
-            self.quest_root, _split_run.env_value(self._raw_root(), self.quest_root))}
+            self.quest_root, _split_run.env_value(self._raw_root(), self.quest_root), stand_ins=stand_ins)}
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
                           env: dict[str, str] | None = None) -> tuple[int, str, str]:
@@ -18295,7 +18297,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         try:
             _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [rel])],
                                                      timeout_s=_code_findings.SHOWN_TEST_TIMEOUT_S,
-                                                     env=self._finding_test_env())
+                                                     env=self._finding_test_env(stand_ins=False))
         except Exception as exc:  # noqa: BLE001 - a run past its time limit raises from the executor
             self._log.info("[evidence_gate] the test %s gave no answer (%s)", rel, _one_line(str(exc), 120))
             return None
@@ -24545,7 +24547,8 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
   which computes, with the SAME simulation code, the values those oracles name, returned as a dict keyed by the oracle
   names; this replaces the `FI_ORACLE` rule above. `FI_PILOT` does not apply.
 
-**experiment.py is the analysis.** FI runs it once, after all the trials. It reads FI's record of them from the file
+**experiment.py is the analysis.** FI runs it once, after all the trials; its top-level run (calling `main()`, printing
+`RESULT_JSON`) sits under `if __name__ == "__main__":`, so importing it runs nothing. It reads FI's record of them from the file
 the environment variable `FI_TRIALS` names: `json.load(open(os.environ["FI_TRIALS"]))` gives
 `{"thresholds": {"<name>": <value>}, "cells": [{"cell": {...}, "key": "R0=1.5,N=1000", "planned": n, "ok": k,
 "failed": f, "metrics": {"<name>": {"values": [...], "trials": [...], "count": k, "total": ...}}}]}`, one entry per

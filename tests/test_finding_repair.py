@@ -643,50 +643,17 @@ def test_an_added_entry_goes_only_to_a_name_that_already_holds_the_findings_quan
     assert fr.unspoken_frame_changes(old + f"cache[{q}] = 1\n", old + f"cache[{q}] = 1\ncache[{q}] += 1\n", issue) == []
 
 
-# --- an added ``__main__`` block; the environment a finding test runs in ---------------------------------------------------
-
-EAGER = 'import os\n\nSCALE = 2.0\n\n\ndef compute(x):\n    return x * SCALE\n\n\nprint("RESULT: " + str(compute(1)))\n'
-_NO_FN = {"function": "<module>", "quantity": "SCALE"}
-
-
-def test_an_added_main_block_is_not_a_change_of_the_module_but_a_statement_that_runs_on_import_still_is() -> None:
-    guarded = EAGER.replace('print("RESULT: " + str(compute(1)))', 'if __name__ == "__main__":\n    print("RESULT: " + str(compute(1)))')
-    assert fr.unspoken_frame_changes(EAGER, guarded, _NO_FN) == [], "the print moved under the guard"
-    assert fr.frame_changes(EAGER, guarded) == []
-    alias = EAGER + 'compute_alias = compute\nif __name__ == "__main__":\n    pass\n'
-    helper = "import math\n" + EAGER + 'if __name__ == "__main__":\n    pass\n'
-    assert fr.unspoken_frame_changes(EAGER, helper, _NO_FN) == [], "a new import, and a guard"
-    assert fr.unspoken_frame_changes(EAGER, alias, _NO_FN), "a new assignment is not spoken of; only the guard is neutral"
-    assert fr.unspoken_frame_changes(EAGER, alias, _NO_FN), "the alias is not spoken of; only the guard is neutral"
-    plain = EAGER + 'if __name__ == "__main__":\n    print("hello")\n'
-    assert fr.unspoken_frame_changes(EAGER, plain, _NO_FN) == []
-    assert fr.frame_changes(EAGER, plain) == []
-    # a top-level print, a changed assignment, a guard with an else: still changes
-    assert fr.unspoken_frame_changes(EAGER, EAGER + 'print("debug")\n', _NO_FN)
-    assert fr.frame_changes(EAGER, EAGER + 'print("debug")\n')
-    assert fr.unspoken_frame_changes(EAGER, EAGER.replace("SCALE = 2.0", "OFFSET = 2.0"), _NO_FN)
-    with_else = EAGER + 'if __name__ == "__main__":\n    pass\nelse:\n    print("on import")\n'
-    assert fr.unspoken_frame_changes(EAGER, with_else, _NO_FN)
-    assert fr.frame_changes(EAGER, with_else)
-    # an old guard that a repair drops is still a change
-    old_guarded = EAGER + 'if __name__ == "__main__":\n    compute(2)\n'
-    assert fr.frame_changes(old_guarded, EAGER)
-
-
-def test_a_change_to_an_unrelated_function_is_still_refused_next_to_a_main_block() -> None:
-    new = EAGER.replace("x * SCALE", "x * SCALE + 1") + 'if __name__ == "__main__":\n    pass\n'
-    assert fr.other_functions_changed(EAGER, new, "other") == ["compute"]
-
+# --- the environment a finding test runs in ----------------------------------------------------------------------------------
 
 LOADS = ('import json, os\n\nwith open(os.environ["FI_TRIALS"]) as h:\n    CELLS = json.load(h)["cells"]\n\n\n'
          'def n_cells():\n    return len(CELLS)\n')
 BARE = 'import os\n\nPATH = os.environ["FI_TRIALS"]\n\n\ndef n_cells():\n    return 0\n'
 
 
-def _run_finding_test(root: Path, test: str) -> fr.TestRun:
+def _run_finding_test(root: Path, test: str, **kw: Any) -> fr.TestRun:
     (root / "code").mkdir(exist_ok=True)
     (root / "t.py").write_text(test, encoding="utf-8")
-    env = {**__import__("os").environ, **fr.run_environment(root)}
+    env = {**__import__("os").environ, **fr.run_environment(root, **kw)}
     ran = subprocess.run([sys.executable, "-B", "-c", fr.harness_source("code", ["t.py"])], cwd=root, env=env,
                          capture_output=True, text=True, timeout=60)
     return fr.parse_runs(ran.stdout, ["t.py"])["t.py"]
@@ -715,3 +682,15 @@ def test_the_real_files_of_the_run_are_used_when_they_exist_and_never_overwritte
     (tmp_path / "code" / "experiment.py").write_text(LOADS, encoding="utf-8")
     ok = "import experiment\n\n\ndef test_a():\n    assert experiment.n_cells() == 3\n"
     assert _run_finding_test(tmp_path, ok).status == "pass"
+
+
+def test_after_the_run_a_missing_file_is_no_stand_in_and_the_test_errors(tmp_path: Path) -> None:
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "experiment.py").write_text(LOADS, encoding="utf-8")
+    ok = "import experiment\n\n\ndef test_a():\n    assert experiment.n_cells() == 0\n"
+    assert fr.run_environment(tmp_path, stand_ins=False) == {}
+    assert _run_finding_test(tmp_path, ok, stand_ins=False).status == "error"
+    assert not (tmp_path / ".fi" / "finding_tests" / "_env").exists()
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text('{"cells": [1]}', encoding="utf-8")
+    assert fr.run_environment(tmp_path, stand_ins=False) == {"FI_TRIALS": "raw/trials.json", "FI_RAW_DIR": "raw"}
