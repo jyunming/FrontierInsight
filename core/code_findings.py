@@ -305,8 +305,24 @@ def changing_open(record: dict[str, Any]) -> list[dict[str, Any]]:
                    and not i.get("plan_conflict") and i.get("outcome") not in (FIXED, GONE)), key=rank_key)
 
 
-#: The most shown issues whose test is run again at the evidence gate.
-MAX_SHOWN_RERUNS = 5
+#: The most shown issues whose test is run again at the evidence gate, and each run's time limit (a test runs at most twice).
+MAX_SHOWN_RERUNS = 10
+SHOWN_TEST_TIMEOUT_S = 90
+
+
+def flagged_now(issue: dict[str, Any]) -> bool:
+    """The latest reading of the code still flags this issue, and no repair since made its test pass."""
+    return _open_now(issue) and issue.get("outcome") not in (FIXED, GONE)
+
+
+def shown_ever(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every issue that changes a reported result and was shown by a failing test, whatever became of it afterwards (a
+    later reading not mentioning it, a repair): the evidence gate runs each one's test again on the code that produced the
+    results. The ones the latest reading still flags come first, then by ``rank_key``. A contradiction inside the plan is
+    left out (it is not a fault of the code)."""
+    pool = [i for i in issues_of(record).values() if isinstance(i, dict) and i.get("changes_result") is True
+            and (i.get("demonstrated") is True or i.get("outcome") == FIXED) and i.get("test") and not i.get("plan_conflict")]
+    return sorted(pool, key=lambda i: (not flagged_now(i), *rank_key(i)))
 
 
 def shown_open(record: dict[str, Any]) -> list[dict[str, Any]]:
