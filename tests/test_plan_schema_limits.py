@@ -106,6 +106,24 @@ def test_a_name_valued_scan_that_looks_like_a_misspelt_design_variable_is_still_
     assert fixed is not None and fixed["fixed"]["family"] == "a", why
 
 
+def test_a_named_comparison_near_a_variable_that_takes_numbers_is_not_a_typo() -> None:
+    # a live plan compared `source_family` across named sources while its search changed `source_pixels` (an array of
+    # numbers): the close spelling refused the comparison every time, and the refusal told the model no entry was needed
+    block = {**BLOCK, "design_variables": [*BLOCK["design_variables"],
+                                           {"name": "source_pixels", "shape": [2, 2], "kind": "continuous",
+                                            "low": 0.0, "high": 1.0}],
+             "baseline": {"values": {"x": 0.0, "y": 0.0, "source_pixels": [[0.5, 0.5], [0.5, 0.5]]},
+                          "source": "the design in use"}}
+    fixed, why = op.normalize({**block, "grid": {"source_family": ["conventional", "annular", "quasar"]}})
+    assert fixed is not None and fixed["fixed"]["source_family"] == "conventional", why
+    # the refusal of a real typo names the variable it looks like
+    choice = {**BLOCK, "design_variables": [*BLOCK["design_variables"],
+                                            {"name": "solver_type", "kind": "choice", "values": ["rk4", "euler"]}],
+              "baseline": {"values": {"x": 0.0, "y": 0.0, "solver_type": "rk4"}, "source": "the design in use"}}
+    _, why = op.normalize({**choice, "grid": {"solvr_type": ["rk4", "euler"]}})
+    assert why and "misspelling of the design variable `solver_type`" in why
+
+
 def test_a_scan_over_numbers_that_are_neither_a_variable_nor_fixed_is_still_refused() -> None:
     _, why = op.normalize({**BLOCK, "grid": {"unlisted": [1.0, 2.0]}})
     assert why and "unlisted" in why and "optimisation.fixed" in why

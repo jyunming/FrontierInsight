@@ -5730,7 +5730,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # `what` is a part of the plan ("settings the experiment needs") or, when it begins "what", the thing the plan lacks.
             lacking = f"the plan lacks {what}" if what.startswith("what ") else f"the plan's {what} was missing"
             self._log.warning("[plan] %s: %s; FI asked the plan to complete it (%d of %d)", lacking,
-                              "; ".join(gaps), count + 1, _SEARCH_ASKS)
+                              "; ".join(gaps), count + 1,
+                              (_SEARCH_ASKS if ask_limit is None else min(_SEARCH_ASKS, ask_limit))
+                              + (_SCHEMA_RETRY_ASKS if schema else 0))
             self._progress(f"Asking the model to complete {what} in the plan" if what.startswith("what ")
                            else f"Asking the model to complete the {what} in the plan")
             ask = request(design, text)

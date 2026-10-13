@@ -453,19 +453,27 @@ def _grid(grid: Any, variables: dict[str, dict[str, Any]], fixed: dict[str, Any]
             if len({isinstance(v, str) for v in values}) > 1:
                 return f"{_P}.grid` `{axis}`: the settings to compare are all numbers or all names, not a mix"
         else:
+            near = _near_a_variable(str(axis), variables)
+            if near and values and all(isinstance(v, str) for v in values):
+                return (f"{_P}.grid` scans `{axis}`, which looks like a misspelling of the design variable `{near}`: "
+                        f"write `{near}`, or rename the comparison so it is not mistaken for it")
             return (f"{_P}.grid` scans `{axis}`, which is neither a design variable nor a condition held fixed: to "
                     f"compare the study across `{axis}`, also list it under `protocol.optimisation.fixed` with the value "
                     "the search holds it at (a setting whose values are names needs no such entry)")
     return None
 
 
-def _near_a_variable(axis: str, variables: Any) -> bool:
-    """True when ``axis`` looks like a misspelling of a design variable (a close spelling, or one name inside the other):
-    such an axis is not taken as an outer comparison; the plan is refused as before, so the typo is seen."""
-    names = [str(v) for v in (variables or [])]
+def _near_a_variable(axis: str, variables: dict[str, dict[str, Any]]) -> str | None:
+    """The design variable that takes names (a ``choice``) whose misspelling ``axis`` looks like (a close spelling, or one
+    name inside the other), else ``None``: such an axis is not taken as an outer comparison; the plan is refused, so the
+    typo is seen. A variable that takes numbers is never matched: names are never its values, so a named scan near its
+    name (``source_family`` beside ``source_pixels``) is a comparison, not a typo of it."""
+    names = [str(n) for n, v in (variables or {}).items() if isinstance(v, dict) and kind_of(v) == "choice"]
     a = axis.lower()
-    return bool(difflib.get_close_matches(axis, names, n=1, cutoff=0.6)
-                or any(n.lower() in a or a in n.lower() for n in names if len(n) >= 3 and len(a) >= 3))
+    close = difflib.get_close_matches(axis, names, n=1, cutoff=0.6)
+    if close:
+        return close[0]
+    return next((n for n in names if len(n) >= 3 and len(a) >= 3 and (n.lower() in a or a in n.lower())), None)
 
 
 def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
