@@ -102,6 +102,10 @@ def run_environment(root: Path, raw_dir: str = _trials.RAW_DIRNAME, *, stand_ins
     a real file) when ``stand_ins`` is true, so a module that reads one while it is imported does not fail on a variable that
     is not set; a test run after the real run (``stand_ins=False``) gets only real files, and a missing one makes it error."""
     env: dict[str, str] = {}
+    if not all(runs_nothing_on_import(f) for f in sorted((root / "code").glob("*.py"))):
+        # importing such a script would run the analysis again in the quest folder (and could rewrite its results):
+        # it gets no FI_* variables, as before, so the import stops at the first one it reads
+        return env
     for var, rel, content in _RUN_FILES:
         if (root / rel).is_file():
             env[var] = rel.as_posix()
@@ -124,6 +128,28 @@ def run_environment(root: Path, raw_dir: str = _trials.RAW_DIRNAME, *, stand_ins
         except OSError:
             pass
     return env
+
+
+def runs_nothing_on_import(path: Path) -> bool:
+    """Whether importing the script runs nothing: at its top level only imports, definitions, assignments that call
+    nothing, a docstring and an ``if __name__ == "__main__":`` block. A file that cannot be read or parsed does not."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return False
+    from .code_layout import _is_main_guard
+
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+            continue
+        if _is_main_guard(stmt) and not stmt.orelse:
+            continue
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and not any(isinstance(n, ast.Call) for n in ast.walk(stmt)):
+            continue
+        return False
+    return True
 
 
 def harness_source(code_dir: str, paths: list[str]) -> str:

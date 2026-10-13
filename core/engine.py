@@ -24792,6 +24792,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 "protocol": {
   "grid": {"<parameter, named as the code will name it>": [<every value it takes>]},
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
+  "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it, never below, and keeps every setting; leave out for a deterministic study>,
   "thresholds": {"<name>": <value>},
   "seed_policy": "<how randomness is seeded: one independent stream per setting and run, or say why streams are shared>",
   "failure_policy": "<how a trial that fails (a solver that does not converge, an exception) is treated: counted as a failure, excluded and reported, or retried; every failed trial is listed by the run>",

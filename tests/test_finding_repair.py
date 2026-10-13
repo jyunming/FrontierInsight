@@ -648,6 +648,9 @@ def test_an_added_entry_goes_only_to_a_name_that_already_holds_the_findings_quan
 LOADS = ('import json, os\n\nwith open(os.environ["FI_TRIALS"]) as h:\n    CELLS = json.load(h)["cells"]\n\n\n'
          'def n_cells():\n    return len(CELLS)\n')
 BARE = 'import os\n\nPATH = os.environ["FI_TRIALS"]\n\n\ndef n_cells():\n    return 0\n'
+# reads the run's file when called, and runs its analysis only as a script
+GUARDED = ('import json, os\n\nPATH = os.environ["FI_TRIALS"]\n\n\ndef n_cells():\n    with open(PATH) as h:\n'
+           '        return len(json.load(h)["cells"])\n\n\nif __name__ == "__main__":\n    print(n_cells())\n')
 
 
 def _run_finding_test(root: Path, test: str, **kw: Any) -> fr.TestRun:
@@ -659,7 +662,7 @@ def _run_finding_test(root: Path, test: str, **kw: Any) -> fr.TestRun:
     return fr.parse_runs(ran.stdout, ["t.py"])["t.py"]
 
 
-@pytest.mark.parametrize("module", [BARE, LOADS])
+@pytest.mark.parametrize("module", [BARE, GUARDED])
 def test_a_module_that_reads_the_runs_files_when_imported_gives_a_pass_or_a_fail_on_the_assertion(tmp_path: Path, module: str) -> None:
     (tmp_path / "code").mkdir()
     (tmp_path / "code" / "experiment.py").write_text(module, encoding="utf-8")
@@ -679,14 +682,14 @@ def test_the_real_files_of_the_run_are_used_when_they_exist_and_never_overwritte
     assert (tmp_path / "raw" / "trials.json").read_text(encoding="utf-8") == '{"cells": [1, 2, 3]}'
     assert env["FI_BEST_DESIGN"].startswith(".fi/finding_tests/_env/")
     (tmp_path / "code").mkdir()
-    (tmp_path / "code" / "experiment.py").write_text(LOADS, encoding="utf-8")
+    (tmp_path / "code" / "experiment.py").write_text(GUARDED, encoding="utf-8")
     ok = "import experiment\n\n\ndef test_a():\n    assert experiment.n_cells() == 3\n"
     assert _run_finding_test(tmp_path, ok).status == "pass"
 
 
 def test_after_the_run_a_missing_file_is_no_stand_in_and_the_test_errors(tmp_path: Path) -> None:
     (tmp_path / "code").mkdir()
-    (tmp_path / "code" / "experiment.py").write_text(LOADS, encoding="utf-8")
+    (tmp_path / "code" / "experiment.py").write_text(GUARDED, encoding="utf-8")
     ok = "import experiment\n\n\ndef test_a():\n    assert experiment.n_cells() == 0\n"
     assert fr.run_environment(tmp_path, stand_ins=False) == {}
     assert _run_finding_test(tmp_path, ok, stand_ins=False).status == "error"
@@ -694,3 +697,17 @@ def test_after_the_run_a_missing_file_is_no_stand_in_and_the_test_errors(tmp_pat
     (tmp_path / "raw").mkdir()
     (tmp_path / "raw" / "trials.json").write_text('{"cells": [1]}', encoding="utf-8")
     assert fr.run_environment(tmp_path, stand_ins=False) == {"FI_TRIALS": "raw/trials.json", "FI_RAW_DIR": "raw"}
+
+
+def test_a_script_that_runs_its_analysis_when_imported_gets_no_run_files(tmp_path: Path) -> None:
+    # importing it would run the analysis again in the quest folder and could rewrite the run's results
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text('{"cells": [1]}', encoding="utf-8")
+    (tmp_path / "code").mkdir()
+    for module in (LOADS, GUARDED + "main_result = n_cells()\n", GUARDED.replace("if __name__", "print(1)\nif __name__")):
+        (tmp_path / "code" / "experiment.py").write_text(module, encoding="utf-8")
+        assert fr.run_environment(tmp_path) == {} and fr.run_environment(tmp_path, stand_ins=False) == {}
+    (tmp_path / "code" / "experiment.py").write_text(GUARDED, encoding="utf-8")
+    assert fr.run_environment(tmp_path, stand_ins=False)["FI_TRIALS"] == "raw/trials.json"
+    (tmp_path / "code" / "experiment.py").write_text("def f(:\n", encoding="utf-8")
+    assert fr.run_environment(tmp_path) == {}, "a file that does not parse is not known to run nothing"

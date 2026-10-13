@@ -4,9 +4,9 @@
   is a number typed into the code is sent back to be computed (or removed), at most twice; one that is still typed in
   afterwards is left out of the results the paper may use, and the paper says so.
 * **The run fits the time it is allowed** (``core/run_estimate.py``): a few real trials are timed before the freeze and
-  added up; a study that would not finish is shrunk by the plan's model (fewer runs per setting, fewer or coarser
-  settings, with the measured numbers in the request; nothing that decides whether a result is right may change), at most
-  twice; one that still would not fit stops the quest plainly with no paper.
+  added up; a study that would not finish gets fewer runs per setting from FI itself (no model is asked; every setting
+  is kept, and the runs never go below the fewest the plan allows); one that still would not fit stops the quest
+  plainly with no paper.
 * **The simulation measures what the protocol names** (the same trials, ``RunChecksMixin._pilot_gate``): what the timed trials
   returned is read before the full run; a metric that is not a number in any pilot trial at any pilot setting (after the
   settings with few values were tried in every combination), one that never moves while others do, or an output that is the
