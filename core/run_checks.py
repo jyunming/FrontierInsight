@@ -714,7 +714,7 @@ class RunChecksMixin:
         return "\n".join(lines) + "\nSay so plainly in the limitations, with the numbers: this was recorded, and the study was run as written."
 
     def _design_after_sizing(self, state: Any) -> dict[str, Any] | None:
-        """The state's design with the protocol parts the plan's model made smaller, or ``None`` when none were."""
+        """The state's design with the runs per setting FI lowered, or ``None`` when none were."""
         sized = getattr(self, "_sized_protocol", None)
         if not sized:
             return None

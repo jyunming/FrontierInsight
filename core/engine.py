@@ -15620,7 +15620,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # The checks passed on this version of the code: the receipt the run is held to (core/gate_receipt.py). A rewrite
         # after this point that changes what the code computes is checked again before the run, or the run does not start.
         _gate_receipt.write(self.quest_root)
-        # The whole run is timed on a few real trials and made smaller by the plan's model when it would not fit the time
+        # The whole run is timed on a few real trials and has its runs per setting lowered by FI when it would not fit the time
         # allowed (core/run_estimate.py); one that still would not fit stops the quest here, with no paper.
         too_long = await self._size_the_run(state, runner, py, exec_env)
         if too_long is not None:
