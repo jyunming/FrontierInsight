@@ -307,7 +307,7 @@ def changing_open(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 #: The most shown issues whose test is run again at the evidence gate, and each run's time limit (a test runs at most twice).
 MAX_SHOWN_RERUNS = 10
-SHOWN_TEST_TIMEOUT_S = 90
+SHOWN_TEST_TIMEOUT_S = 60
 
 
 def flagged_now(issue: dict[str, Any]) -> bool:
@@ -315,21 +315,16 @@ def flagged_now(issue: dict[str, Any]) -> bool:
     return _open_now(issue) and issue.get("outcome") not in (FIXED, GONE)
 
 
-def shown_ever(record: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every issue that changes a reported result and was shown by a failing test, whatever became of it afterwards (a
-    later reading not mentioning it, a repair): the evidence gate runs each one's test again on the code that produced the
-    results. The ones the latest reading still flags come first, then by ``rank_key``. A contradiction inside the plan is
-    left out (it is not a fault of the code)."""
-    pool = [i for i in issues_of(record).values() if isinstance(i, dict) and i.get("changes_result") is True
-            and (i.get("demonstrated") is True or i.get("outcome") == FIXED) and i.get("test") and not i.get("plan_conflict")]
-    return sorted(pool, key=lambda i: (not flagged_now(i), *rank_key(i)))
-
-
 def shown_open(record: dict[str, Any]) -> list[dict[str, Any]]:
     """Open issues that change a reported result and were shown by a failing test, most urgent first: the candidates for
     the evidence gate's stop. An issue the reading no longer flags, one repaired, one whose test passed on the code, one
     never tested and a contradiction inside the plan are left out. The reader's word is not enough to stop a quest: the
-    gate runs each one's test again on the code that produced the results."""
+    gate runs each one's test again on the code that produced the results.
+
+    Repaired and no-longer-flagged issues are left out on purpose: a finding test usually turns any exception into a
+    failed assertion (``except Exception: assert False``), so after a repair changes a function's interface its old test
+    "fails" on correct code. Re-running them stopped both trustworthy papers of the suite (a fixed fault whose test now
+    indexes a shorter return value)."""
     return sorted((i for i in open_issues(record) if i.get("changes_result") is True and i.get("demonstrated") is True
                    and not i.get("plan_conflict") and i.get("outcome") not in (FIXED, GONE)), key=rank_key)
 

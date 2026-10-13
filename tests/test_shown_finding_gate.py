@@ -150,7 +150,7 @@ async def test_a_test_runner_that_gives_no_answer_stops_nothing_and_says_so(
         assert await engine._shown_fault_verdict(STATE) is None
     finally:
         engine._log.removeHandler(sink)
-    assert any("gave any answer" in m for m in sink.messages)
+    assert any("cannot run a test at all" in m for m in sink.messages)
 
 
 @pytest.mark.asyncio
@@ -188,54 +188,63 @@ def test_shown_open_ranks_result_changing_high_severity_first() -> None:
 
 
 NOT_FLAGGED = [{"outcome": cf.FIXED}, {"outcome": cf.GONE, "readings": [{"n": 1, "status": "open"}, {"n": 2, "status": "not flagged"}]},
-               {"readings": [{"n": 1, "status": "open"}, {"n": 2, "status": "not flagged"}]}]
+               {"readings": [{"n": 1, "status": "open"}, {"n": 2, "status": "not flagged"}]},
+               {"outcome": cf.REOPENED, "demonstrated": None, "fixed_by": "a-model"}]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("over", NOT_FLAGGED)
-async def test_a_shown_fault_a_later_reading_left_out_still_stops_when_its_test_fails(tmp_path: Path, over: dict[str, Any]) -> None:
+async def test_a_repaired_or_no_longer_flagged_fault_is_not_run_again(
+        tmp_path: Path, over: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    # a finding test turns any exception into a failed assertion, so after a repair changes an interface its old test
+    # "fails" on correct code: running these again stopped both trustworthy papers of the suite
     engine = _engine(tmp_path)
     _record(engine, _issue(**over))
-    verdict = await engine._shown_fault_verdict(STATE)
-    assert verdict and "still fails" in verdict["rationale"]
+    ran: list[Any] = []
 
+    async def spy(self, argv, **kw):  # noqa: ANN001
+        ran.append(argv)
+        return 0, "", ""
 
-RENAMED = "import experiment\n\n\ndef test_x():\n    assert experiment.renamed() != 60.0\n"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("over", NOT_FLAGGED)
-@pytest.mark.parametrize("test", [RENAMED, PASSING, None])
-async def test_a_fault_no_longer_flagged_whose_test_no_longer_runs_passes_or_is_gone_stops_nothing(
-        tmp_path: Path, over: dict[str, Any], test: str | None) -> None:
-    engine = _engine(tmp_path)
-    _record(engine, _issue(**over), test=test)
+    monkeypatch.setattr(Engine, "_run_in_env", spy)
     assert await engine._shown_fault_verdict(STATE) is None
+    assert ran == []
+
+
+HANG = "import time\n\n\ndef test_x():\n    time.sleep(60)\n"
 
 
 @pytest.mark.asyncio
-async def test_a_hung_test_does_not_hide_the_others(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cf, "SHOWN_TEST_TIMEOUT_S", 5)
-    engine = _engine(tmp_path)
-    later = [{"n": 1, "status": "open"}, {"n": 2, "status": "not flagged"}]
-    _record(engine, _issue("F-1", first_seen=1, readings=later), _issue("F-2", first_seen=2, readings=later))
-    (engine.quest_root / ".fi" / "finding_tests" / "F-1_1.py").write_text(
-        "import time\n\n\ndef test_x():\n    time.sleep(60)\n", encoding="utf-8")
-    verdict = await engine._shown_fault_verdict(STATE)
-    # F-1's test hangs (and is no longer flagged, so its silence stops nothing); F-2's test still runs and fails
-    assert verdict and verdict["stuck_reason"] == "shown_fault_open" and "still fails" in verdict["rationale"]
-
-
-@pytest.mark.asyncio
-async def test_a_flagged_fault_whose_test_hangs_stops_the_quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_flagged_fault_whose_test_hangs_stops_the_quest_and_does_not_hide_another(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cf, "SHOWN_TEST_TIMEOUT_S", 5)
     engine = _engine(tmp_path)
     _record(engine, _issue("F-1", first_seen=1), _issue("F-2", first_seen=2))
-    (engine.quest_root / ".fi" / "finding_tests" / "F-1_1.py").write_text(
-        "import time\n\n\ndef test_x():\n    time.sleep(60)\n", encoding="utf-8")
+    (engine.quest_root / ".fi" / "finding_tests" / "F-1_1.py").write_text(HANG, encoding="utf-8")
     (engine.quest_root / ".fi" / "finding_tests" / "F-2_1.py").write_text(PASSING, encoding="utf-8")
     verdict = await engine._shown_fault_verdict(STATE)
     assert verdict and "gave no answer" in verdict["rationale"]
+
+
+@pytest.mark.asyncio
+async def test_a_sole_flagged_fault_whose_test_hangs_stops_the_quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cf, "SHOWN_TEST_TIMEOUT_S", 5)
+    engine = _engine(tmp_path)
+    _record(engine, _issue(), test=HANG)
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and "gave no answer" in verdict["rationale"]
+    assert not (engine.quest_root / ".fi" / "finding_tests" / "_probe_runs.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_error_in_the_second_run_does_not_hide_a_failing_first_run(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    fail_then_error = ("from pathlib import Path\n\n\ndef test_x():\n    p = Path('flag2.txt')\n"
+                       "    if p.exists():\n        raise RuntimeError('second run')\n"
+                       "    p.write_text('1')\n    assert False, 'first run'\n")
+    _record(engine, _issue(), test=fail_then_error)
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and "still fails" in verdict["rationale"]
 
 
 @pytest.mark.asyncio

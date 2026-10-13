@@ -18126,30 +18126,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return f"it says {said[:100]}, and has no number for {', '.join(ids[:4])}"
 
     async def _shown_fault_verdict(self, state: QuestState) -> dict[str, Any] | None:
-        """The gate's stop for a fault in the code that changes a reported number, was shown by a failing test, and was
-        never shown to be gone from the code that produced the results; else ``None``.
+        """The gate's stop for a fault in the code that changes a reported number, was shown by a failing test, is still
+        flagged by the latest reading, and was never shown to be gone from the code that produced the results; else
+        ``None``.
 
-        The code reader's record (``.fi/code_review.json``) lists such issues, but the code may have changed since the last
-        reading (a repair of the run, a rewrite), a later reading may simply not mention an issue again, and a reader's
-        word alone never stops a quest. So the test written for every shown issue that changes a result (the ones the
-        reader still flags first, at most ``MAX_SHOWN_RERUNS``) is run again on the code as it is now, each in its own
-        process with its own time limit, and a test that does not pass is run once more (a flaky test does not stop a
-        quest). Then:
-
-        - an issue the latest reading still flags counts as gone only when its test passes: a test that fails, no longer
-          runs on the code (the function it calls was renamed, the test breaks on the new code, it runs past its time),
-          or is gone from disk stops the quest (a live run delivered a typed-in headline number whose test had come to
-          error on the rewritten code);
-        - an issue the latest reading no longer flags (or one repaired earlier) stops the quest only when its test still
-          fails by an assertion: a test that no longer runs on refactored code shows nothing either way.
-
-        When no test gave any answer at all (the environment, not the code), nothing is stopped, with a warning; an error
-        inside this check with an issue still flagged stops the quest (nothing shows the fault is gone). Deterministic given
-        the files on disk, so a re-entry of the node gives the same answer."""
+        The code may have changed since the last reading (a repair of the run, a rewrite), and a reader's word alone never
+        stops a quest, so the test written for each such fault (at most ``MAX_SHOWN_RERUNS``) is run again on the code as
+        it is now, each in its own process with its own time limit; a test that does not pass is run once more (a flaky
+        test does not stop a quest). The fault counts as gone only when its test passes: a test that still fails, no
+        longer runs on the code (a live run delivered a typed-in headline number whose test had come to error on the
+        rewritten code), gives no answer, or is gone from disk stops the quest. When the environment cannot run even a test
+        that does nothing, the silent tests stop nothing, with a warning; an error inside this check stops the quest.
+        Repaired and no-longer-flagged faults are not run again (see ``code_findings.shown_open``). Deterministic given the
+        files on disk, so a re-entry of the node gives the same answer."""
         exec_result = state.get("exec_result")
         if not (isinstance(exec_result, dict) and exec_result) or state.get("no_simulation_resolved"):
             return None
-        shown = _code_findings.shown_ever(_code_review.load(self.quest_root))
+        shown = _code_findings.shown_open(_code_review.load(self.quest_root))
         if not shown:
             return None
         if len(shown) > _code_findings.MAX_SHOWN_RERUNS:
@@ -18168,6 +18161,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     async def _shown_fault_check(self, shown: list[dict[str, Any]]) -> dict[str, Any] | None:
         verdicts: list[tuple[dict[str, Any], str]] = []
+        silent: list[dict[str, Any]] = []
         answered = 0
         for issue in shown:
             flagged = _code_findings.flagged_now(issue)
@@ -18176,10 +18170,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if flagged:
                     verdicts.append((issue, f"its test is no longer on disk ({rel or 'no test recorded'})"))
                 continue
-            run = await self._rerun_finding_test(rel)
-            if run is not None and run.status != "pass":
-                run = await self._rerun_finding_test(rel) or run  # a test that does not pass is run once more
+            runs = [await self._rerun_finding_test(rel)]
+            if runs[0] is None or runs[0].status != "pass":
+                runs.append(await self._rerun_finding_test(rel))  # a test that does not pass is run once more
+            # a pass in either run clears it (a flaky test stops nothing); else a failing assertion in either run stands
+            # (an error in the other run does not hide it); else an error; else no answer at all
+            given = [r for r in runs if r is not None]
+            run = next((r for status in ("pass", "fail", "error") for r in given if r.status == status), None)
             if run is None:
+                silent.append(issue)
                 if flagged:
                     verdicts.append((issue, "its test gave no answer on it (it ran past its time or ended the process)"))
                 continue
@@ -18191,14 +18190,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             elif flagged:
                 verdicts.append((issue, "its test no longer runs on it, so nothing shows the fault was removed ("
                                  + _one_line(run.detail or "", 120) + ")"))
-        if not answered and not any("on disk" in how for _i, how in verdicts):
-            if verdicts:
-                self._log.warning("[evidence_gate] no test of a shown fault gave any answer (the environment, not the code);"
-                                  " they cannot stop the quest: %s", ", ".join(str(i.get("id")) for i, _h in verdicts))
-            return None
+        if silent and not answered and not await self._finding_tests_can_run():
+            # no test answered, and a test that does nothing gives no answer either: the environment, not the code
+            self._log.warning("[evidence_gate] the environment cannot run a test at all, so the tests of %s gave no answer;"
+                              " they cannot stop the quest", ", ".join(str(i.get("id")) for i in silent))
+            verdicts = [(i, how) for i, how in verdicts if i not in silent]
         if not verdicts:
             return None
         return self._shown_fault_stop(*verdicts[0])
+
+    async def _finding_tests_can_run(self) -> bool:
+        """Whether the quest's environment runs a finding test at all: a test file that does nothing, run the same way."""
+        probe = self.quest_root / ".fi" / "finding_tests" / "_probe_runs.py"
+        try:
+            probe.parent.mkdir(parents=True, exist_ok=True)
+            probe.write_text("def test_runs():\n    pass\n", encoding="utf-8")
+            run = await self._rerun_finding_test(probe.relative_to(self.quest_root).as_posix())
+        except OSError:
+            return False
+        finally:
+            probe.unlink(missing_ok=True)
+        return run is not None and run.status == "pass"
 
     async def _rerun_finding_test(self, rel: str) -> Any:
         """One finding test run on the code as it is, in its own process: its ``TestRun``, or ``None`` when the process
