@@ -569,7 +569,7 @@ def _stuck_stage(q: _Quest) -> str:
     text = str(q.stuck.get("problem") or "")
     if "contradict" in text or "claims" in text:
         return "paper"
-    if "main quantity" in text or "typed in" in text or "text still could not be checked" in text:
+    if "main quantity" in text or "typed in" in text or "shown by a failing test" in text or "text still could not be checked" in text:
         return "code"
     if "no number" in text or "could not run" in text or "the same result" in text or "time allowed" in text \
             or "nothing was run" in text:

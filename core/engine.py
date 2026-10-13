@@ -17813,7 +17813,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 ),
                 "key_findings_preview": [str(f)[:200] for f in findings[:6]],
             }
-            ruled = self._unreadable_analysis_verdict(state) or self._no_results_verdict(state) or _evidence_gate_rule(
+            ruled = self._unreadable_analysis_verdict(state) or self._no_results_verdict(state) or (
+                await self._shown_fault_verdict(state)) or _evidence_gate_rule(
                 protocol.topic_type, n_sources, n_supporting,
                 analyze_local_first=self.config.engine.analyze_local_first,
                 retrieval_on=self.config.knowledge.enabled,
@@ -18010,6 +18011,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                      *(["asked the model to repair the script" + (f" ({repairs} repair{'s' if repairs != 1 else ''})")]
                        if repairs else [])]
             ended = "the code still did not compute the study's main quantity"
+        if reason == "shown_fault_open":
+            # A fault that changes a reported number was shown by a failing test; the test still fails on the final code.
+            said = _one_line(str((state.get("evidence_assessment") or {}).get("rationale") or ""), 400).rstrip(".")
+            problem = f"{said}{', even after FI ' + after if after else ''}, so FI cannot vouch for the numbers"
+            review_record = _code_review.load(self.quest_root)
+            rounds = int(review_record.get("send_backs") or 0)
+            tried = ["asked a second model to read the code against the plan",
+                     "wrote a test for each problem it found and ran it: this one failed on the code",
+                     *([f"asked for the code to be repaired ({rounds} round{'s' if rounds != 1 else ''}); the problem stood"]
+                       if rounds else []),
+                     "ran the test again on the code that produced the results: it still fails"]
+            ended = "a fault shown by a failing test was still in the code"
         if reason == "not_run":
             said = str((state.get("exec_result") or {}).get("not_run") or "").strip().rstrip(".")
             problem = f"{said}, so nothing was run for the study"
@@ -18088,6 +18101,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "fix: needs/STUCK.json says what FI tried; " + (offered + " Or " if offered else "") + "run the quest again, "
             + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
                or reason == "flat" or headline_missing else
+               "or try another model for the code (`provider.node_models.implement`)." if reason == "shown_fault_open" else
                "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
                "or try another model for the code (`provider.node_models.implement`)." if reason == "cannot_repair" else
                "or ask for a change in words (`--revise-plan \"<what to change>\"`)." if reason in ("no_search", "topic_unmet") else
@@ -18110,6 +18124,50 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not said or len(_code_review.absent_from_results(ids, result)) != len(ids):
             return ""
         return f"it says {said[:100]}, and has no number for {', '.join(ids[:4])}"
+
+    async def _shown_fault_verdict(self, state: QuestState) -> dict[str, Any] | None:
+        """The gate's stop for a fault in the code that changes a reported number, was shown by a failing test, and is
+        still there in the code that produced the results; else ``None``.
+
+        The code reader's record (``.fi/code_review.json``) lists such issues, but the code may have changed since the last
+        reading (a repair of the run, a rewrite), and a reader's word alone never stops a quest. So the test written for
+        each of the few most urgent shown issues is run again on the code as it is now: only a test that still fails by an
+        assertion stops the quest. A test that passes, or that cannot be run (missing file, environment error), stops
+        nothing. Deterministic given the files on disk, so a re-entry of the node gives the same answer."""
+        exec_result = state.get("exec_result")
+        if not (isinstance(exec_result, dict) and exec_result) or state.get("no_simulation_resolved"):
+            return None
+        shown = _code_findings.shown_open(_code_review.load(self.quest_root))[:_code_findings.MAX_SHOWN_RERUNS]
+        runnable: list[tuple[dict[str, Any], str]] = []
+        for issue in shown:
+            rel = str(issue.get("test") or "")
+            if rel and (self.quest_root / rel).is_file():
+                runnable.append((issue, rel))
+            else:
+                self._log.warning("[evidence_gate] the test that showed %s is not on disk (%s); it cannot stop the quest",
+                                  issue.get("id"), rel or "no test recorded")
+        if not runnable:
+            return None
+        paths = [rel for _issue, rel in runnable]
+        _rc, text, err = await self._run_in_env(["-c", _finding_repair.harness_source("code", paths)], timeout_s=300)
+        runs = _finding_repair.parse_runs(text, paths)
+        for issue, rel in runnable:
+            run = runs.get(rel) or _finding_repair.TestRun("error", "not run")
+            if run.status == "error":
+                self._log.warning("[evidence_gate] the test that showed %s could not be run again (%s); it cannot stop "
+                                  "the quest", issue.get("id"), (run.detail or err or "")[:160])
+                continue
+            if run.status != "fail":
+                self._log.info("[evidence_gate] the test that showed %s now passes on the code that ran", issue.get("id"))
+                continue
+            where = " ".join(str(x) for x in (issue.get("file"), issue.get("function")) if x)
+            what = str(issue.get("text") or issue.get("why") or issue.get("quantity") or "")
+            why = ("a fault in the code that changes a reported number was shown by a failing test and is still there in "
+                   f"the code that produced the results ({_one_line((where + ': ' if where else '') + what, 200)})")
+            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
+            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
+                    "stuck_reason": "shown_fault_open"}
+        return None
 
     def _no_results_verdict(self, state: QuestState) -> dict[str, Any] | None:
         """The gate's verdict for a simulation whose experiment produced no results, else ``None``.

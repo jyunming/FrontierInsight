@@ -305,6 +305,19 @@ def changing_open(record: dict[str, Any]) -> list[dict[str, Any]]:
                    and not i.get("plan_conflict") and i.get("outcome") not in (FIXED, GONE)), key=rank_key)
 
 
+#: The most shown issues whose test is run again at the evidence gate.
+MAX_SHOWN_RERUNS = 5
+
+
+def shown_open(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Open issues that change a reported result and were shown by a failing test, most urgent first: the candidates for
+    the evidence gate's stop. An issue the reading no longer flags, one repaired, one whose test passed on the code, one
+    never tested and a contradiction inside the plan are left out. The reader's word is not enough to stop a quest: the
+    gate runs each one's test again on the code that produced the results."""
+    return sorted((i for i in open_issues(record) if i.get("changes_result") is True and i.get("demonstrated") is True
+                   and not i.get("plan_conflict") and i.get("outcome") not in (FIXED, GONE)), key=rank_key)
+
+
 def summary(record: dict[str, Any]) -> dict[str, Any]:
     """Counts for the reports: distinct issues, those that change a result, how many a test demonstrated, how many were
     repaired (and by which models), and what is still open."""

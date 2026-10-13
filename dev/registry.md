@@ -581,7 +581,7 @@ same PR that adds, splits or renames one.
   a requirement and a finding of logic about one quantity in one function are one issue. `update_issues` keeps `record["issues"]`
   in `.fi/code_review.json`: first seen, each reading's status, the wordings, whether a test showed it (`demonstrated`), the repairs
   tried and by which model, the `outcome` (`open`, `reopened`, `fixed`, `not demonstrated`, `plan problem`, `not repaired`,
-  `no longer flagged`). `ranked` / `changing_open` put what can change a reported result first; `summary` / `convergence_line`
+  `no longer flagged`). `shown_open` (open, result-changing issues a failing test showed, most urgent first; `Engine._shown_fault_verdict` runs the first `MAX_SHOWN_RERUNS` of their tests again on the final code at the evidence gate and ends the quest, reason `shown_fault_open`, only when one still fails) / `ranked` / `changing_open` put what can change a reported result first; `summary` / `convergence_line`
   count the issues a failing test showed; `PLAN_PARTS` / `plan_conflict_request` are what the plan's model is asked and may rewrite
   when the plan contradicts itself.
 - `core/finding_repair.py` — test first, one issue at a time, never a version that broke something. `repair_issues(Env)` takes the open
