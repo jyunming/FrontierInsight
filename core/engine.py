@@ -5813,10 +5813,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     def _as_design_parts(cls, obj: dict[str, Any]) -> dict[str, Any]:
         """The model's answer shaped like the design block: parts written beside ``protocol`` (or an answer with no
         ``protocol`` at all, just the parts) are put under it, as the plan's readers look only there."""
-        if not isinstance(obj.get("protocol"), dict):
-            top = {k: v for k, v in obj.items() if k in cls._DESIGN_TOP_KEYS}
-            obj = {**top, "protocol": {k: v for k, v in obj.items() if k not in cls._DESIGN_TOP_KEYS and k != "protocol"}}
-        return _plan.hoist_protocol_parts(obj)[0]
+        inner = obj.get("protocol") if isinstance(obj.get("protocol"), dict) else {}
+        beside = {k: v for k, v in obj.items() if k not in cls._DESIGN_TOP_KEYS and k != "protocol"}
+        top = {k: v for k, v in obj.items() if k in cls._DESIGN_TOP_KEYS}
+        # a part written under `protocol` wins over the same part written beside it
+        return {**top, "protocol": {**beside, **inner}}
 
     async def _ask_for_plan_parts(self, prompt: str) -> dict[str, Any]:
         """One JSON object of the asked parts from the plan's model (node ``plan_revise``, so it is the same model, limits

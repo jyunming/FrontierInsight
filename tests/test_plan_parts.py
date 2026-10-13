@@ -261,3 +261,12 @@ async def test_latex_with_single_backslashes_in_the_answer_is_read_as_written(tm
     eng._chat = chat  # type: ignore[method-assign]
     parts = await eng._ask_for_plan_parts("ask")
     assert parts["protocol"]["model"]["equations"][0]["formula"] == r"$\text{SNR} = \frac{a}{b}$"
+
+
+def test_a_ledger_part_written_beside_protocol_is_read_as_a_protocol_part() -> None:
+    from core.engine import Engine
+    shaped = Engine._as_design_parts({"protocol": {"metrics": [{"id": "m"}]}, "simplifications": ["s"],
+                                      "study_type": "measure"})
+    assert shaped == {"study_type": "measure", "protocol": {"simplifications": ["s"], "metrics": [{"id": "m"}]}}
+    # the same part under `protocol` wins over one beside it
+    assert Engine._as_design_parts({"protocol": {"grid": {"a": [1]}}, "grid": {"a": [2]}})["protocol"]["grid"] == {"a": [1]}
