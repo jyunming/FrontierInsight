@@ -71,16 +71,12 @@ def test_the_progress_line_says_settings_done_and_time_left() -> None:
     assert est.progress_line(0, 0, 0, 0, 0) == ""
 
 
-def test_the_request_to_the_plan_has_the_measured_numbers_and_no_expected_value() -> None:
+def test_the_estimate_keeps_the_measured_ratios_of_each_setting() -> None:
     grid = {"mesh": [8, 16, 32]}
     probes = [est.Probe(None, None, {"mesh": 16}, 100.0), est.Probe("mesh", 0, {"mesh": 8}, 50.0),
               est.Probe("mesh", 2, {"mesh": 32}, 400.0)]
     e = est.estimate(grid, 1000, False, probes)
-    assert e is not None
-    text = est.request(e, 3600.0, 1000, False)
-    assert "3 settings" in text and "1000 runs" in text and "`mesh` = 32 costs 4 times" in text
-    assert "protocol.runs_per_setting" in text and "protocol.grid" in text
-    assert "not a check, a threshold, a tolerance" in text and "expected" not in text.lower()
+    assert e is not None and e.cells == 3 and 4 in e.ratios["mesh"].values()
 
 
 # --- timing a toy simulation ------------------------------------------------------------------------------------------
@@ -176,11 +172,10 @@ def test_two_costly_settings_are_not_assumed_to_multiply() -> None:
     assert dearer is not None and dearer.seconds > 1.9 * product.seconds
 
 
-def test_the_request_names_the_corner() -> None:
+def test_the_estimate_keeps_the_corner_of_costly_settings() -> None:
     grid = {"a": [1, 2, 4], "b": [1, 2, 4]}
     e = est.estimate(grid, 1, True, _two_axis(100.0))
-    assert e is not None
-    assert "all the costly ends together (`a` = 4, `b` = 4) cost 10 times" in est.request(e, 100.0, 1, True)
+    assert e is not None and e.together["cell"] == {"a": 4, "b": 4} and round(e.together["ratio"]) == 10
 
 
 TWO_AXES = '''
@@ -234,20 +229,6 @@ def test_a_trial_that_runs_out_of_its_allowance_is_a_lower_bound_and_the_rest_is
     assert est.says(e, 3600.0).startswith("FI estimates the experiment takes at least ")
 
 
-def test_what_a_smaller_run_must_keep_is_said_in_plain_words() -> None:
-    before = {"n": [1, 2, 4, 8]}
-    proto = {"precision": {"target_half_width": 0.1}}
-    assert est.smaller_run_problems({}, before, 40, {"n": [1, 8]}, 10, False) == []
-    assert est.smaller_run_problems({}, before, 40, {"n": [2, 4, 8]}, 40, False)[0].startswith("it drops the first or last value")
-    assert "not marked as a numerical resolution" in est.smaller_run_problems({}, before, 40, {"n": [1, 3, 8]}, 10, False)[0]
-    assert est.smaller_run_problems({"numerical_axes": ["n"]}, before, 40, {"n": [1, 3, 8]}, 10, False) == []
-    assert "below the 40" in est.smaller_run_problems(proto, before, 40, {"n": [1, 8]}, 20, False)[0]
-    assert est.smaller_run_problems(proto, before, 400, {"n": [1, 8]}, 100, False) == [], "97 trials are enough for ±0.1"
-    assert est.smaller_run_problems({}, before, 40, before, 40, False) == ["it is not a smaller run"]
-    assert est.smaller_run_problems({}, before, 1, {"n": [1, 8]}, 1, True) == [], "a run once per setting has no runs to cut"
-    assert "changes which settings" in est.smaller_run_problems({}, before, 40, {"m": [1, 8]}, 10, False)[0]
-
-
 MEAN_PLAN = {"metrics": [{"id": "y", "kind": "mean", "estimand": "mean y", "unit": "one run"}],
              "precision": {"target_half_width": 0.5, "metric": "y"}}
 PROP_PLAN = {"metrics": [{"id": "hit", "kind": "proportion", "estimand": "hit rate", "unit": "one run"}],
@@ -269,16 +250,6 @@ def test_the_precision_floor_follows_the_kind_of_the_metric() -> None:
     assert est.runs_floor(MEAN_PLAN, 400, {"y": 0.0}) == 400 and est.runs_floor(MEAN_PLAN, 400, {"other": 1.0}) == 400
     # A stated minimum still applies on top.
     assert est.runs_floor({**MEAN_PLAN, "min_runs_per_setting": 50}, 400, {"y": 1.0}) == 50
-
-
-def test_a_smaller_run_is_judged_by_the_same_floor() -> None:
-    before = {"n": [1, 2, 4]}
-    assert est.smaller_run_problems(MEAN_PLAN, before, 400, {"n": [1, 4]}, 20, False, {"y": 1.0}) == []
-    assert "below the 16" in est.smaller_run_problems(MEAN_PLAN, before, 400, {"n": [1, 4]}, 15, False, {"y": 1.0})[0]
-    assert "below the 400" in est.smaller_run_problems(MEAN_PLAN, before, 400, {"n": [1, 4]}, 100, False, None)[0]
-    assert "below the 97" in est.smaller_run_problems(PROP_PLAN, before, 400, {"n": [1, 4]}, 96, False, None)[0]
-    assert "keep at least 400 runs per setting" in est.rules(MEAN_PLAN, 400, False, None)
-    assert "keep at least 16 runs per setting" in est.rules(MEAN_PLAN, 400, False, {"y": 1.0})
 
 
 NOISY = '''\

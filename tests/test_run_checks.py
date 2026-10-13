@@ -20,7 +20,6 @@ from core import plan, run_estimate, trial_runner
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
 from core.execution import SharedInterpreterExecutor
-from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, _NO_OBJECTIONS, _engine as _plan_engine
 
 # ---- a result typed into the code ---------------------------------------------------------------------------------------
@@ -264,10 +263,10 @@ MARK = "would take longer than the time it is allowed"
 
 
 class Model:
-    """The plan's model: drafts the plan, and answers the request to make the run smaller with the next answer."""
+    """The plan's model: drafts the plan. A request to make the run smaller (MARK) is recorded: FI must make none."""
 
-    def __init__(self, eng: Engine, draft: dict[str, Any], answers: list[Any]) -> None:
-        self.eng, self.draft, self.answers = eng, draft, list(answers)
+    def __init__(self, eng: Engine, draft: dict[str, Any]) -> None:
+        self.eng, self.draft = eng, draft
         self.asked: list[str] = []
         self.drafted = False
         eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=self.chat)})()
@@ -276,23 +275,11 @@ class Model:
         prompt = messages[-1]["content"]
         if MARK in prompt:
             self.asked.append(prompt)
-            answer = self.answers.pop(0) if self.answers else None
-            if answer is None:
-                raise RuntimeError("no answer")
-            return as_parts(answer(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")))
+            raise RuntimeError("FI must not ask the model to make the run smaller")
         if not self.drafted:
             self.drafted = True
             return json.dumps({**self.draft, "plan": EXTRA})
         return _NO_OBJECTIONS
-
-
-def _smaller(grid: dict[str, list[int]], runs: int, **tamper: Any) -> Any:
-    def answer(text: str) -> str:
-        out = plan.edit_design_block(text, lambda d: {**d, "protocol": {**d["protocol"], "grid": grid,
-                                                                       "runs_per_setting": runs, **tamper}})
-        assert out is not None
-        return out
-    return answer
 
 
 class _Counting(SharedInterpreterExecutor):
@@ -305,11 +292,11 @@ class _Counting(SharedInterpreterExecutor):
         return await super().execute(cmd, **kw)
 
 
-async def _sizing(tmp_path: Path, *, timeout_s: int, answers: list[Any], grid: dict[str, list[int]] | None = None,
+async def _sizing(tmp_path: Path, *, timeout_s: int, grid: dict[str, list[int]] | None = None,
                   runs: int = 40, **protocol: Any) -> tuple[Engine, Model, Any, _Counting]:
     eng = _plan_engine(tmp_path, [])
     eng.config.execution.timeout_s = timeout_s
-    model = Model(eng, _draft(grid or {"n": [1, 2, 4]}, runs, **protocol), answers)
+    model = Model(eng, _draft(grid or {"n": [1, 2, 4]}, runs, **protocol))
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     code = eng.quest_root / "code"
     code.mkdir(parents=True, exist_ok=True)
@@ -329,7 +316,7 @@ def _log(eng: Engine) -> str:
 
 @pytest.mark.asyncio
 async def test_a_run_that_fits_goes_on_after_one_plain_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[])
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600)
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
     assert model.asked == []
     line = re.search(r"FI estimates the experiment takes about (.+?); the limit is 1 h", _log(eng))
@@ -349,44 +336,35 @@ async def test_a_run_that_fits_goes_on_after_one_plain_line(tmp_path: Path, caps
 
 
 @pytest.mark.asyncio
-async def test_a_run_that_is_too_long_is_made_smaller_by_the_plans_model_and_then_goes_on(tmp_path: Path) -> None:
-    tolerance_tamper = {"oracles": [{"name": "baseline_energy_balance", "kind": "invariant", "check": "x", "expected": 0,
-                                     "tolerance": 5.0, "reference": "derivation: steady state"}]}
-    eng, model, runner, ex = await _sizing(
-        tmp_path, timeout_s=8, answers=[_smaller({"n": [1, 4]}, 4, **tolerance_tamper)])
+async def test_a_run_that_is_too_long_has_its_runs_lowered_by_fi_without_asking_and_then_goes_on(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8, min_runs_per_setting=8)
     before = copy.deepcopy(plan.load_design(eng.quest_root)[0]["protocol"]["oracles"])
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
-    assert len(model.asked) == 1
-    ask = model.asked[0]
-    assert "3 settings, each setting 40 runs" in ask
-    assert "`n` = 4 costs" in ask and "protocol.runs_per_setting" in ask and "protocol.grid" in ask
-    asked_part = ask[ask.index(MARK) - 80:]
-    assert "not a check, a threshold, a tolerance" in asked_part
-    design = plan.load_design(eng.quest_root)[0]
-    assert design["protocol"]["grid"] == {"n": [1, 4]} and design["protocol"]["runs_per_setting"] == 4
-    assert design["protocol"]["oracles"] == before, "a check the model also changed is put back"
-    assert eng._draft_protocol({"iteration": 0})["grid"] == {"n": [1, 4]}
-    assert eng._design_after_sizing({"design": {"hypothesis": "h"}})["protocol"]["runs_per_setting"] == 4
+    assert model.asked == [], "no request to the plan's model"
+    protocol = plan.load_design(eng.quest_root)[0]["protocol"]
+    assert protocol["grid"] == {"n": [1, 2, 4]} and 8 <= protocol["runs_per_setting"] < 40, "every setting is kept"
+    assert protocol["oracles"] == before
+    assert eng._design_after_sizing({"design": {"hypothesis": "h"}})["protocol"]["runs_per_setting"] == protocol["runs_per_setting"]
     log = _log(eng)
     assert "FI made the experiment smaller" in log and "the checks, thresholds and tolerances are unchanged" in log
     assert re.search(r"FI estimates the experiment takes about .+; the limit is 8 seconds", log)
-    note = eng._run_checks_note()
-    assert "3 setting(s) with 40 run(s) each to 2 setting(s) with 4 run(s) each" in note and "limitations" in note
+    assert "limitations" in eng._run_checks_note()
     assert run_estimate.read_record(eng.quest_root)["fits"] is True
     assert not (eng.quest_root / "raw").exists()
 
 
 @pytest.mark.asyncio
-async def test_a_run_that_is_still_too_long_after_the_requests_stops_plainly_and_a_resume_asks_no_more(
+async def test_a_run_that_cannot_fit_at_the_fewest_runs_stops_plainly_and_a_resume_times_nothing_again(
         tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(
-        tmp_path, timeout_s=6, answers=[_smaller({"n": [1, 2, 4]}, 30), _smaller({"n": [1, 2, 4]}, 20), _smaller({"n": [1]}, 1)])
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=6)  # the plan states no fewest runs
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None and len(model.asked) == 2, "asked twice, never a third time"
+    assert patch is not None and model.asked == []
     text = patch["exec_result"]["too_long"]
-    assert re.fullmatch(r"the experiment would take about .+, more than the 6 seconds allowed; "
-                        r"FI asked the plan 2 times to make it smaller", text), text
+    assert re.fullmatch(r"the experiment would take about .+, more than the 6 seconds allowed; FI does not run a smaller study "
+                        r"than the plan's settings, and they cannot fit even with the fewest runs per setting the plan allows",
+                        text), text
     assert patch["exec_give_up_reason"] == text and patch["result_json"] == {} and patch["exec_result"]["returncode"] == 1
+    assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == 40
     # The repair step does not try to fix a script, the gate stops without a second design, and the stop says it plainly.
     assert await eng._node_execute_reflect({"exec_result": patch["exec_result"],
                                             "exec_give_up_reason": text}) == {}
@@ -396,88 +374,26 @@ async def test_a_run_that_is_still_too_long_after_the_requests_stops_plainly_and
     assert verdict is not None and verdict["stuck"] is True and verdict["stuck_reason"] == "too_long"
     stuck = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": "too_long"},
                                                "exec_result": patch["exec_result"]})
-    assert "more than the 6 seconds allowed" in stuck["stuck"]["say"] and "asked the plan 2 times" in stuck["stuck"]["say"]
+    assert "more than the 6 seconds allowed" in stuck["stuck"]["say"] and "does not run a smaller study" in stuck["stuck"]["say"]
     assert "No paper was written" in stuck["stuck"]["say"]
     assert (eng.quest_root / "needs" / "STUCK.json").is_file() and not (eng.quest_root / "paper.md").exists()
-    # A resume stops again with the same words, asking and timing nothing.
     calls = ex.calls
     again = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert again is not None and again["exec_result"]["too_long"] == text
-    assert len(model.asked) == 2 and ex.calls == calls
+    assert again is not None and again["exec_result"]["too_long"] == text and ex.calls == calls
 
 
 @pytest.mark.asyncio
-async def test_a_plan_that_cannot_be_asked_stops_plainly_without_saying_it_asked(tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8, answers=[])
-    eng._client = None  # type: ignore[assignment]
+async def test_a_resume_after_the_runs_were_lowered_does_not_lower_them_a_second_time(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=6, min_runs_per_setting=2)
+    run_estimate.write_record(eng.quest_root, {"fits": False, "reduced": {"note": "FI lowered the runs per setting"}})
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None
-    text = patch["exec_result"]["too_long"]
-    assert "FI had no way to ask the plan to make it smaller" in text and "asked the plan" not in text
-
-
-@pytest.mark.asyncio
-async def test_an_answer_that_is_not_a_smaller_run_of_the_same_settings_is_not_used(
-        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    eng, model, runner, ex = await _sizing(
-        tmp_path, timeout_s=8,
-        answers=[_smaller({"m": [1, 2]}, 4), _smaller({"n": [1, 2, 4, 8]}, 40)])
-    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    # Two answers, then one more ask: an answer refused for its form earns the schema retries (core/engine.py
-    # _SCHEMA_RETRY_ASKS); the plan stays as it was whatever the count.
-    assert patch is not None and len(model.asked) == 3
-    design = plan.load_design(eng.quest_root)[0]
-    assert design["protocol"]["grid"] == {"n": [1, 2, 4]} and design["protocol"]["runs_per_setting"] == 40
-    assert "complete now" not in capsys.readouterr().out
-    assert "plan.md is unchanged" in _log(eng)
-
-
-def _rejected(log: str) -> str:
-    return " ".join(re.findall(r"could not be used: (.+)", log))
-
-
-@pytest.mark.asyncio
-async def test_a_smaller_run_may_not_drop_the_range_a_setting_covers_or_invent_values(tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(
-        tmp_path, timeout_s=6, answers=[_smaller({"n": [1, 2]}, 4), _smaller({"n": [1, 3, 4]}, 4)])
-    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is not None
-    said = _rejected(_log(eng))
-    assert "drops the first or last value of `n` (1 and 4)" in said and "the range the study covers" in said
-    assert "gives `n` values it did not have" in said and "`protocol.numerical_axes`" in said
-    assert plan.load_design(eng.quest_root)[0]["protocol"]["grid"] == {"n": [1, 2, 4]}
-    asked = model.asked[0]
-    assert "Keep the first and last value of every setting" in asked and "do not coarsen a numerical resolution" in asked
-
-
-@pytest.mark.asyncio
-async def test_a_setting_the_plan_marks_as_numerical_resolution_may_be_made_coarser(tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(
-        tmp_path, timeout_s=8, answers=[_smaller({"n": [1, 3, 4]}, 4)], numerical_axes=["n"])
-    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
-    assert plan.load_design(eng.quest_root)[0]["protocol"]["grid"] == {"n": [1, 3, 4]}
-    assert "only `n` (numerical resolution) may be made coarser" in model.asked[0]
-
-
-@pytest.mark.asyncio
-async def test_a_smaller_run_may_not_cut_the_runs_below_what_the_plans_precision_or_minimum_needs(tmp_path: Path) -> None:
-    # A target half-width of 0.1 needs 97 trials; the plan has 40 runs, so none may be cut away.
-    eng, model, runner, ex = await _sizing(
-        tmp_path, timeout_s=6, answers=[_smaller({"n": [1, 4]}, 10), _smaller({"n": [1, 4]}, 39)],
-        precision={"target_half_width": 0.1})
-    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is not None
-    assert "cuts the runs per setting to 10, below the 40 the plan's precision or stated minimum needs" in _rejected(_log(eng))
-    assert "keep at least 40 runs per setting" in model.asked[0]
-    # A stated minimum is a floor: FI itself lowers the runs to it (nothing is asked of the plan's model) and keeps every setting.
-    eng2, model2, runner2, _ = await _sizing(
-        tmp_path / "b", timeout_s=8, answers=[_smaller({"n": [1, 4]}, 12)], min_runs_per_setting=8)
-    assert await eng2._size_the_run({"iteration": 0}, runner2, sys.executable, None) is None
-    design2 = plan.load_design(eng2.quest_root)[0]["protocol"]
-    assert design2["runs_per_setting"] == 8 and design2["grid"] == {"n": [1, 2, 4]} and model2.asked == []
+    assert patch is not None and model.asked == []
+    assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == 40, "it was not cut again"
 
 
 @pytest.mark.asyncio
 async def test_nothing_is_timed_for_a_later_pass_or_a_cluster_job(tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8, answers=[])
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8)
     assert await eng._size_the_run({"iteration": 1}, runner, sys.executable, None) is None and ex.calls == 0
     eng.config.execution.background_jobs = True
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None and ex.calls == 0
@@ -504,7 +420,7 @@ def run_cell(cell):
 
 @pytest.mark.asyncio
 async def test_a_setting_that_fails_when_timed_goes_to_the_repair_of_the_simulation_naming_it(tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[])
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600)
     (eng.quest_root / "code" / "simulate.py").write_text(FAILS_AT_END, encoding="utf-8")
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and patch["exec_result"]["returncode"] == 1
@@ -517,7 +433,7 @@ async def test_a_setting_that_fails_when_timed_goes_to_the_repair_of_the_simulat
 
 @pytest.mark.asyncio
 async def test_a_corner_that_fails_is_a_failing_setting_too(tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[], grid={"a": [1, 2, 8], "b": [1, 2, 8]}, runs=1)
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, grid={"a": [1, 2, 8], "b": [1, 2, 8]}, runs=1)
     (eng.quest_root / "code" / "simulate.py").write_text(FAILS_TOGETHER, encoding="utf-8")
     runner.deterministic = True
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
@@ -590,7 +506,7 @@ def run_cell(cell):
 
 @pytest.mark.asyncio
 async def test_a_run_trial_that_is_a_cell_aggregate_goes_back_to_the_code_not_to_the_plan(tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[])
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600)
     (eng.quest_root / "code" / "simulate.py").write_text(AGGREGATING_SIM, encoding="utf-8")
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and patch["exec_result"]["failed_script"] == "simulate.py"
@@ -602,7 +518,7 @@ async def test_a_run_trial_that_is_a_cell_aggregate_goes_back_to_the_code_not_to
 
 @pytest.mark.asyncio
 async def test_an_honest_run_trial_that_calls_a_method_named_run_cell_is_not_sent_back(tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[])
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600)
     honest = SLOW_SIM.replace("    return {", "    sim_cell = type('S', (), {'run_cell': staticmethod(lambda s: s)})\n"
                                               "    sim_cell.run_cell(seed)\n    return {")
     (eng.quest_root / "code" / "simulate.py").write_text(honest + "\ndef run_cell(cell):\n    return {'y': 1.0}\n",
@@ -611,7 +527,7 @@ async def test_an_honest_run_trial_that_calls_a_method_named_run_cell_is_not_sen
     assert ex.calls > 0, "the experiment was timed as usual"
 
 
-# ---- a smaller run keeps what the topic asks for ------------------------------------------------------------------------
+# ---- a smaller run keeps every setting ---------------------------------------------------------------------------
 
 FDR_SIM = '''\
 import time
@@ -621,69 +537,31 @@ def run_trial(cell, trial, seed):
     return {"y": float(cell["m"]) * 0.001 + (seed % 3)}
 '''
 FDR_GRID = {"m": [20, 200, 2000], "pi1": [0.0, 0.05, 0.2], "procedure": ["uncorrected", "bonferroni", "Benjamini-Hochberg"]}
-FDR_TOPIC_READ = {
-    "factors": [
-        {"name": "m", "levels": [20.0, 200.0, 2000.0], "range": [], "stated": "m in {20, 200, 2000}", "main": False},
-        {"name": "pi1", "levels": [0.0, 0.05, 0.2], "range": [], "stated": "pi1 in {0.0, 0.05, 0.2}", "main": False},
-        {"name": "procedure", "levels": ["uncorrected", "Bonferroni", "Benjamini-Hochberg"], "range": [],
-         "stated": "Compare uncorrected, Bonferroni and Benjamini-Hochberg", "main": True}],
-    "quantities": [], "formulas": [], "comparisons": [], "constraints": [], "stated_results": []}
 
 
-async def _fdr_sizing(tmp_path: Path, answers: list[Any], *, runs: int = 1600, named: dict[str, Any] | None = None,
-                      **protocol: Any) -> tuple[Engine, Model, Any]:
-    eng, model, runner, _ex = await _sizing(tmp_path, timeout_s=900, answers=answers, grid=FDR_GRID, runs=runs, **protocol)
+async def _fdr_sizing(tmp_path: Path, *, runs: int = 1600, **protocol: Any) -> tuple[Engine, Model, Any]:
+    eng, model, runner, _ex = await _sizing(tmp_path, timeout_s=900, grid=FDR_GRID, runs=runs, **protocol)
     (eng.quest_root / "code" / "simulate.py").write_text(FDR_SIM, encoding="utf-8")
-    eng.fi_dir.mkdir(parents=True, exist_ok=True)
-    (eng.fi_dir / "topic_requirements.json").write_text(json.dumps(named or FDR_TOPIC_READ), encoding="utf-8")
     return eng, model, runner
 
 
 @pytest.mark.asyncio
-async def test_a_smaller_run_that_drops_what_the_topic_names_is_refused_and_the_quest_stops_rather_than_run_less(
-        tmp_path: Path) -> None:
+async def test_a_run_that_cannot_fit_at_the_plans_fewest_runs_stops_rather_than_run_a_smaller_study(tmp_path: Path) -> None:
     # The real numbers: 27 settings x 1600 runs, about 43 minutes (28 in the real run) against 15 minutes allowed, and the
-    # plan's fewest runs (its precision) is 1537. The plan's model dropped Bonferroni, m = 200 and pi1 = 0.05.
-    dropped = _smaller({"m": [20, 2000], "pi1": [0.0, 0.2], "procedure": ["uncorrected", "Benjamini-Hochberg"]}, 1537)
-    eng, model, runner = await _fdr_sizing(tmp_path, [dropped, dropped], min_runs_per_setting=1537)
+    # plan's fewest runs (its precision) is 1537: no model is asked and no setting is taken out.
+    eng, model, runner = await _fdr_sizing(tmp_path, min_runs_per_setting=1537)
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None, "it must not run a smaller study than the topic asks"
+    assert patch is not None and model.asked == []
     design = plan.load_design(eng.quest_root)[0]
     assert design["protocol"]["grid"] == FDR_GRID and design["protocol"]["runs_per_setting"] == 1600
-    said = _rejected(_log(eng))
-    assert "it leaves out what the topic asks for" in said and "200" in said and "cut the runs per setting" in said
-    assert "The topic names these values, so none of them may be taken out" in model.asked[0]
     text = patch["exec_result"]["too_long"]
-    assert "a smaller run it was given left out what the topic asks for" in text and "more than the 15 minutes allowed" in text
+    assert "does not run a smaller study than the plan's settings" in text and "more than the 15 minutes allowed" in text
     assert run_estimate.read_record(eng.quest_root).get("stopped") == text
 
 
 @pytest.mark.asyncio
-async def test_a_smaller_run_that_keeps_every_value_the_topic_names_and_cuts_runs_is_accepted(tmp_path: Path) -> None:
-    dropped = _smaller({"m": [20, 2000], "pi1": [0.0, 0.2], "procedure": ["uncorrected", "Benjamini-Hochberg"]}, 300)
-    fewer_runs = _smaller(FDR_GRID, 300)
-    eng, model, runner = await _fdr_sizing(tmp_path, [dropped, fewer_runs])
-    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
-    assert len(model.asked) == 2 and "it leaves out what the topic asks for" in _rejected(_log(eng))
-    design = plan.load_design(eng.quest_root)[0]
-    assert design["protocol"]["grid"] == FDR_GRID and design["protocol"]["runs_per_setting"] == 300
-    assert "to 27 setting(s) with 300 run(s) each" in eng._run_checks_note()
-
-
-@pytest.mark.asyncio
-async def test_a_value_the_topic_does_not_name_can_still_be_dropped(tmp_path: Path) -> None:
-    only_procedures = {**FDR_TOPIC_READ, "factors": FDR_TOPIC_READ["factors"][2:]}
-    smaller = _smaller({"m": [20, 2000], "pi1": [0.0, 0.2], "procedure": FDR_GRID["procedure"]}, 400)
-    eng, model, runner = await _fdr_sizing(tmp_path, [smaller], named=only_procedures)
-    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
-    assert len(model.asked) == 1
-    assert plan.load_design(eng.quest_root)[0]["protocol"]["grid"]["m"] == [20, 2000]
-    assert "The topic names these values" in model.asked[0] and "`procedure`" in model.asked[0] and "`m`:" not in model.asked[0]
-
-
-@pytest.mark.asyncio
 async def test_fi_lowers_the_runs_itself_down_to_the_fewest_the_plan_states_without_asking(tmp_path: Path) -> None:
-    eng, model, runner = await _fdr_sizing(tmp_path, [], min_runs_per_setting=200)
+    eng, model, runner = await _fdr_sizing(tmp_path, min_runs_per_setting=200)
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
     assert model.asked == [], "no request to the plan's model"
     design = plan.load_design(eng.quest_root)[0]

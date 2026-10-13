@@ -33,7 +33,6 @@ from . import probes as _probes
 from . import probes_run as _probes_run
 from . import run_estimate as _estimate
 from . import split_run as _split_run
-from . import topic_requirements as _topic_req
 from . import trial_runner as _trial_runner
 from . import typed_results as _typed
 
@@ -420,9 +419,9 @@ class RunChecksMixin:
 
     async def _size_the_run(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
         """Before the protocol is frozen and the study starts: time a few real trials, add them up, and compare the total with
-        ``execution.timeout_s``. Fits (or cannot be timed): go on, saying so in one line. Does not fit: ask the plan's model to
-        make the run smaller (at most :data:`core.run_estimate.ASKS` times, each followed by timing the new plan), and when
-        it still would not fit return the quest's stop (no paper). ``None`` to go on.
+        ``execution.timeout_s``. Fits (or cannot be timed): go on, saying so in one line. Does not fit: FI lowers the runs per
+        setting itself (no model is asked, every setting is kept, never below the fewest runs the plan states), times the
+        shorter run again, and when it still would not fit returns the quest's stop (no paper). ``None`` to go on.
 
         Only the trial contract is timed, and only before the first freeze: a frozen protocol cannot be changed, a search for
         the best design or a cluster job has its own limits, and a resume of a run that already fits is not timed again."""
@@ -449,14 +448,11 @@ class RunChecksMixin:
         budget_s = max(limit_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
         cached: dict[str, _estimate.Probe] = {}
         prior = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
-        # A sizing that did not finish (a request was made, or the run did not fit) goes on counting; one that fitted is over.
-        unfinished = prior.get("fits") is False
-        asks = int(prior.get("asks") or 0) if unfinished else 0
-        reduced = prior.get("reduced") if unfinished or prior.get("fits") else None
-        cut_done = False  # FI lowers the runs itself at most once; it is not one of the requests to the plan's model
-        refused: list[str] = []  # smaller runs the plan's model gave that left out what the topic asks for
-        self._topic_cut_refused = refused
-        for _round in range(_estimate.ASKS + 2):
+        # The note of a cut made before a resume is kept, whether the sizing finished or not.
+        reduced = prior.get("reduced") if prior.get("fits") is not None else None
+        # FI lowers the runs once; the lowered run is timed again, and a resume after the cut does not cut a second time.
+        cut_done = bool(reduced) and prior.get("fits") is False
+        for _round in range(2):
             grid, runs, thresholds = self._grid_and_runs(state)
             key = self._sizing_key(runner, grid, runs, limit_s)
             record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
@@ -491,41 +487,23 @@ class RunChecksMixin:
             if not _estimate.known_too_long(est, limit_s):
                 self._log.info("[execute] %s", line)  # type: ignore[attr-defined]
                 print(f"[FI] {line}")
-                _estimate.write_record(self.quest_root, {**base, "fits": True, "asks": 0})  # type: ignore[attr-defined]
+                _estimate.write_record(self.quest_root, {**base, "fits": True})  # type: ignore[attr-defined]
                 return None
             self._log.warning("[execute] %s, so it would not finish", line)  # type: ignore[attr-defined]
-            if not cut_done:
-                # Fewer runs per setting first: it keeps every setting the study compares, and is allowed only down to the
-                # fewest runs the plan itself states. The shorter run is timed again before it is used.
-                cut_done = True
-                fewer = _estimate.runs_that_fit(est, limit_s, runs, runner.deterministic, self._protocol_block(state) or {},  # type: ignore[attr-defined]
-                                                est.spreads)
-                note = self._lower_the_runs(state, runs, fewer, est, limit_s, grid) if fewer is not None else None
-                if note is not None:
-                    reduced = note
-                    self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fewer}
-                    _estimate.write_record(  # type: ignore[attr-defined]
-                        self.quest_root, {**base, "fits": False, "asks": asks, "reduced": reduced})
-                    await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
-                    continue
-            design, sha = self._design_from_plan()  # type: ignore[attr-defined]
-            can_ask = design is not None and bool(sha) and self._client is not None  # type: ignore[attr-defined]
-            if asks >= _estimate.ASKS or not can_ask:
-                text = self._too_long_text(est, limit_s, asks, can_ask, bool(refused))
-                _estimate.write_record(self.quest_root, {**base, "fits": False, "asks": asks, "stopped": text})  # type: ignore[attr-defined]
+            # Fewer runs per setting is the only cut FI makes: every setting the study compares is kept, and the runs never go
+            # below the fewest the plan states. The shorter run is timed again before it is used. No model is asked.
+            fewer = None if cut_done else _estimate.runs_that_fit(
+                est, limit_s, runs, runner.deterministic, self._protocol_block(state) or {}, est.spreads)  # type: ignore[attr-defined]
+            note = self._lower_the_runs(state, runs, fewer, est, limit_s, grid) if fewer is not None else None
+            if note is None:
+                text = self._too_long_text(est, limit_s)
+                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text})  # type: ignore[attr-defined]
                 return self._stop_too_long(text)
-            asks += 1
-            # Counted BEFORE the request, so a quest killed during it never asks more often than it may.
-            _estimate.write_record(self.quest_root, {**base, "fits": False, "asks": asks})  # type: ignore[attr-defined]
-            changed, reduced_now, made = await self._ask_to_make_the_run_smaller(
-                state, est, limit_s, runs, runner.deterministic, _estimate.ASKS - (asks - 1))
-            asks = asks - 1 + max(1, made)
-            if changed:
-                reduced = reduced_now
-                self._sized_protocol = {**(self._sized_protocol or {}), **changed}
-                _estimate.write_record(  # type: ignore[attr-defined]
-                    self.quest_root, {**base, "fits": False, "asks": asks, "reduced": reduced})
-                await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
+            cut_done = True
+            reduced = note
+            self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fewer}
+            _estimate.write_record(self.quest_root, {**base, "fits": False, "reduced": reduced})  # type: ignore[attr-defined]
+            await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
         return None
 
     async def _pilot_gate(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]],
@@ -773,116 +751,12 @@ class RunChecksMixin:
         return {"note": note, "from": {"grid": grid, "runs_per_setting": runs},
                 "to": {"grid": grid, "runs_per_setting": fewer}}
 
-    def _topic_values_lost(self, protocol: dict[str, Any], before_grid: dict[str, list[Any]],
-                           new_grid: dict[str, list[Any]]) -> list[str]:
-        """What the topic asks for that the plan's settings had and ``new_grid`` has not (the topic-requirement check of the
-        plan step, :func:`core.topic_requirements.match`, run on both): the sentences, empty when nothing is lost."""
-        req = self._topic_requirements_read()  # type: ignore[attr-defined]
-        if not isinstance(req, dict) or _topic_req.is_empty(req):
-            return []
-
-        def gaps_of(grid: dict[str, list[Any]]) -> set[str]:
-            found, _unresolved = _topic_req.match(req, _topic_req.view({}, {**protocol, "grid": grid}))
-            return {g["sentence"] for g in found}
-
-        return sorted(gaps_of(new_grid) - gaps_of(before_grid))
-
-    def _topic_named_values_rule(self, grid: dict[str, list[Any]]) -> str:
-        """The values the topic itself names for the plan's settings, as a rule for a smaller run (empty when it names none)."""
-        req = self._topic_requirements_read()  # type: ignore[attr-defined]
-        if not isinstance(req, dict):
-            return ""
-        named = []
-        for factor in req.get("factors") or []:
-            wanted = _topic_req._tokens(factor.get("name"))
-            if factor.get("levels") and wanted and any(
-                    _topic_req._tokens(a) and (_topic_req._tokens(a) <= wanted or wanted <= _topic_req._tokens(a)) for a in grid):
-                named.append(f"`{factor['name']}`: {', '.join(str(v) for v in factor['levels'][:8])}")
-        if not named:
-            return ""
-        return (" The topic names these values, so none of them may be taken out; cut the runs per setting, or values of "
-                "settings the topic does not name, instead: " + "; ".join(named) + ".")
-
-    async def _ask_to_make_the_run_smaller(self, state: Any, est: _estimate.Estimate, limit_s: float, runs: int,
-                                           deterministic: bool, remaining: int) -> tuple[dict[str, Any], dict[str, Any] | None, int]:
-        """One request to the plan's model (the bounded one every part of the plan uses): ``({"grid": ..., "runs_per_setting":
-        ...}, the note, requests made)`` as the plan now has them when it was made smaller, else ``({}, None, n)``. Only those two parts of the
-        answer are kept; a different set of settings, or a run that is not smaller, is not used."""
-        design, sha = self._design_from_plan()  # type: ignore[attr-defined]
-        if design is None or not sha or self._client is None:  # type: ignore[attr-defined]
-            return {}, None, 0
-        before_grid, before_runs, _t = self._grid_and_runs(state)
-        before_protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
-        words = "at least " if est.at_least else "about "
-        asked = {"n": 0}
-        refused: list[str] = self._topic_cut_refused
-
-        def lacks(now: Any) -> list[str]:
-            # The run is still too big until it has become smaller; the number of requests is bounded by the helper.
-            protocol = now.get("protocol") if isinstance(now, dict) and isinstance(now.get("protocol"), dict) else {}
-            grid = {str(k): list(v) for k, v in (protocol.get("grid") or {}).items() if isinstance(v, list) and v}
-            now_runs = max(1, int(protocol.get("runs_per_setting") or before_runs))
-            smaller = (_estimate.trial_count(grid, now_runs, deterministic)
-                       < _estimate.trial_count(before_grid, before_runs, deterministic))
-            if smaller:
-                return []
-            return [f"a smaller run (the experiment would take {words}"
-                    f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
-                    f"{_estimate.plain_duration(limit_s)} allowed)"]
-
-        def request(_now: Any, _text: str) -> str:
-            asked["n"] += 1
-            return _estimate.request(est, limit_s, runs, deterministic,
-                                     _estimate.rules(before_protocol, before_runs, deterministic, est.spreads)
-                                     + self._topic_named_values_rule(before_grid))
-
-        def keep(before: str, answer: dict[str, Any]) -> str:
-            kept = self._keep_only_the_parts(before, answer, ["grid", "runs_per_setting"])  # type: ignore[attr-defined]
-            if kept is None:
-                raise ValueError("your answer has no smaller run in a form that can be read; plan.md is unchanged")
-            block = _plan.raw_design_block(kept)
-            protocol = block.get("protocol") if isinstance(block, dict) and isinstance(block.get("protocol"), dict) else {}
-            grid = {str(k): list(v) for k, v in (protocol.get("grid") or {}).items() if isinstance(v, list) and v}
-            new_runs = max(1, int(protocol.get("runs_per_setting") or before_runs))
-            problems = _estimate.smaller_run_problems(
-                before_protocol, before_grid, before_runs, grid, new_runs, deterministic, est.spreads)
-            lost = self._topic_values_lost(before_protocol, before_grid, grid)
-            if lost:
-                refused.append(" ".join(lost))
-                problems.append("it leaves out what the topic asks for (" + " ".join(lost) + ") -- cut the runs per setting, "
-                                "or the values of settings the topic does not name, instead")
-            if problems:
-                raise ValueError("your answer is not used: " + "; ".join(problems) + "; plan.md is unchanged")
-            return kept
-
-        await self._ask_plan_to_complete(  # type: ignore[attr-defined]
-            design, sha, lacks=lacks, request=request, keep=keep, file="run_size_asked.json", what="run size",
-            short="a smaller run", note="a smaller run, so the experiment fits the time allowed, written by the plan's model",
-            ask_limit=remaining + self._search_record(sha, "run_size_asked.json")[0])  # type: ignore[attr-defined]
-        grid, new_runs, _t = self._grid_and_runs(state)
-        if (grid, new_runs) == (before_grid, before_runs):
-            return {}, None, asked["n"]
-        note = (f"FI made the experiment smaller so that it fits the time allowed ({_estimate.plain_duration(limit_s)}): it "
-                f"would have taken {words}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}. The plan's model changed "
-                f"it from {_estimate.cell_count(before_grid)} setting(s) with {before_runs} run(s) each to "
-                f"{_estimate.cell_count(grid)} setting(s) with {new_runs} run(s) each; the checks, thresholds and "
-                "tolerances are unchanged.")
-        self._log.warning("[execute] %s", note)  # type: ignore[attr-defined]
-        print(f"[FI] {note}")
-        return ({"grid": grid, "runs_per_setting": new_runs},
-                {"note": note, "from": {"grid": before_grid, "runs_per_setting": before_runs},
-                 "to": {"grid": grid, "runs_per_setting": new_runs}}, asked["n"])
-
     @staticmethod
-    def _too_long_text(est: _estimate.Estimate, limit_s: float, asks: int, can_ask: bool, topic_kept: bool = False) -> str:
-        said = (f"the experiment would take {'at least ' if est.at_least else 'about '}"
+    def _too_long_text(est: _estimate.Estimate, limit_s: float) -> str:
+        return (f"the experiment would take {'at least ' if est.at_least else 'about '}"
                 f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
-                f"{_estimate.plain_duration(limit_s)} allowed")
-        if asks:
-            kept = ("; a smaller run it was given left out what the topic asks for, and FI does not run a smaller study "
-                    "than the topic asks" if topic_kept else "")
-            return f"{said}; FI asked the plan {asks} time{'s' if asks != 1 else ''} to make it smaller{kept}"
-        return said if can_ask else f"{said}; FI had no way to ask the plan to make it smaller"
+                f"{_estimate.plain_duration(limit_s)} allowed; FI does not run a smaller study than the plan's settings, and "
+                "they cannot fit even with the fewest runs per setting the plan allows")
 
     def _sizing_failed(self, why: str, text: str | None = None) -> dict[str, Any]:
         """A failed run for the existing repair of the simulation: it failed while the experiment was timed, at the setting

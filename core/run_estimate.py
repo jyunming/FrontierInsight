@@ -61,8 +61,6 @@ from . import trial_runner as _tr
 SAFETY = 1.5
 #: The most varying settings that are timed one by one (the first ones, largest range first); the rest are taken as 1.
 MAX_AXES = 6
-#: How many times FI asks the plan to make the run smaller before it stops.
-ASKS = 2
 RECORD = Path(".fi") / "run_estimate.json"
 
 
@@ -762,7 +760,7 @@ def runs_that_fit(est: Estimate, limit_s: float, runs: int, deterministic: bool,
                   spreads: dict[str, float] | None = None) -> int | None:
     """The runs per setting that make the experiment fit the time allowed with every setting kept, or ``None`` when the
     runs alone cannot do it (the plan states no fewest number of runs, or its fewest still takes too long). Aims at half the
-    limit, as the request to the plan's model does; never below :func:`runs_floor`. The result is timed again before it is used."""
+    limit; never below :func:`runs_floor`. The result is timed again before it is used."""
     if deterministic or int(runs) <= 1 or not floor_is_stated(protocol) or not est.seconds > 0:
         return None
     full = est.seconds * SAFETY
@@ -775,77 +773,3 @@ def runs_that_fit(est: Estimate, limit_s: float, runs: int, deterministic: bool,
     else:
         return None
     return n if floor <= n < int(runs) else None
-
-
-def numerical_axes(protocol: dict[str, Any] | None) -> set[str]:
-    """The settings the plan marks as numerical resolution (`protocol.numerical_axes`): the only ones that may be made coarser."""
-    marked = protocol.get("numerical_axes") if isinstance(protocol, dict) else None
-    return {str(n) for n in marked} if isinstance(marked, list) else set()
-
-
-def smaller_run_problems(protocol: dict[str, Any] | None, before_grid: dict[str, list[Any]], before_runs: int,
-                         new_grid: dict[str, list[Any]], new_runs: int, deterministic: bool,
-                         spreads: dict[str, float] | None = None) -> list[str]:
-    """Why a smaller run is not one the study can use, in plain words; empty when it is. The range every setting covers stays
-    (its first and last value), no setting is added or removed, a setting gets no value it did not have unless the plan marks
-    it as numerical resolution, the runs per setting stay at the plan's own minimum, and the run is strictly smaller."""
-    problems: list[str] = []
-    before, new = dict(axes_of(before_grid)), dict(axes_of(new_grid))
-    if before and set(before) != set(new):
-        problems.append("it changes which settings the experiment varies")
-    marked = numerical_axes(protocol)
-    for name, values in before.items():
-        got = new.get(name)
-        if got is None or name in marked:
-            continue
-        if values[0] not in got or values[-1] not in got:
-            problems.append(f"it drops the first or last value of `{name}` ({values[0]} and {values[-1]}), the range the "
-                            "study covers")
-        elif any(v not in values for v in got):
-            problems.append(f"it gives `{name}` values it did not have, and `{name}` is not marked as a numerical resolution "
-                            "(`protocol.numerical_axes`)")
-    floor = runs_floor(protocol, before_runs, spreads)
-    if not deterministic and new_runs < floor:
-        problems.append(f"it cuts the runs per setting to {new_runs}, below the {floor} the plan's precision or stated "
-                        "minimum needs")
-    if trial_count(new_grid, new_runs, deterministic) >= trial_count(before_grid, before_runs, deterministic):
-        problems.append("it is not a smaller run")
-    return problems
-
-
-def rules(protocol: dict[str, Any] | None, before_runs: int, deterministic: bool,
-          spreads: dict[str, float] | None = None) -> str:
-    """The rules a smaller run must keep, as the request to the plan's model states them."""
-    marked = sorted(numerical_axes(protocol))
-    text = ("Keep the first and last value of every setting (the range the study covers) and the same settings: take out "
-            "values in between instead")
-    text += (f"; only {', '.join('`' + m + '`' for m in marked)} (numerical resolution) may be made coarser, with other values"
-             if marked else "; do not coarsen a numerical resolution or give a setting values it did not have")
-    if not deterministic:
-        text += f"; keep at least {runs_floor(protocol, before_runs, spreads)} runs per setting"
-    return text + "."
-
-
-def request(est: Estimate, limit_s: float, runs: int, deterministic: bool, rules_text: str = "") -> str:
-    """What the plan's model is asked, with the measured numbers: shrink the run, change nothing that decides whether a
-    result is right."""
-    lines = []
-    for name, per in est.ratios.items():
-        shown = "; ".join(f"`{name}` = {v} costs {r:g} times the time of `{name}` = {est.base.get(name)}" for v, r in per.items())
-        lines.append(f"- {shown}")
-    if est.together:
-        cell = ", ".join(f"`{k}` = {v}" for k, v in est.together["cell"].items() if k in est.ratios)
-        lines.append(f"- all the costly ends together ({cell}) cost {est.together['ratio']:g} times the time of the base setting")
-    per_trial = "" if deterministic else f", each setting {int(runs)} runs"
-    return (
-        "The experiment this plan describes would take longer than the time it is allowed on this machine, so it cannot "
-        f"finish. FI timed a few real trials: the whole experiment ({est.cells} settings{per_trial}) would take "
-        f"{'at least ' if est.at_least else 'about '}{plain_duration(est.seconds * SAFETY)}, and it is allowed "
-        f"{plain_duration(limit_s)}.\n"
-        + ("How the time changes with each setting, as measured:\n" + "\n".join(lines) + "\n" if lines else "")
-        + f"Make the experiment smaller so that it takes about {plain_duration(limit_s / 2)} or less: use fewer runs per "
-        "setting (`protocol.runs_per_setting`) and/or fewer values of the settings in `protocol.grid`. "
-        + (rules_text + " " if rules_text else "") + "Write only `protocol.grid` and `protocol.runs_per_setting` again.\n"
-        "Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion, and not any other part of "
-        "the protocol."
-    )
