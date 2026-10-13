@@ -111,30 +111,56 @@ async def test_an_issue_that_is_not_shown_open_and_result_changing_is_never_run(
 
 
 @pytest.mark.asyncio
-async def test_a_test_that_cannot_run_stops_nothing_and_says_so(tmp_path: Path) -> None:
+@pytest.mark.parametrize("test", [
+    # the shape of a live run: the test breaks on the rewritten code (an error, not an assertion), the fault is still there
+    "import experiment\n\n\ndef test_x():\n    assert experiment.dose.co_names\n",
+    # the function the test calls was renamed
+    "import experiment\n\n\ndef test_x():\n    assert experiment.compute_dose() != 60.0\n",
+    "import module_that_is_not_there\n\n\ndef test_x():\n    assert False\n",
+])
+async def test_a_test_that_no_longer_runs_on_the_final_code_still_stops_the_quest(tmp_path: Path, test: str) -> None:
     engine = _engine(tmp_path)
-    broken = "import module_that_is_not_there\n\n\ndef test_x():\n    assert False\n"
-    _record(engine, _issue(), test=broken)
-    sink = _Sink()
-    engine._log.addHandler(sink)
-    try:
-        assert await engine._shown_fault_verdict(STATE) is None
-    finally:
-        engine._log.removeHandler(sink)
-    assert any("could not be run again" in m for m in sink.messages)
+    _record(engine, _issue(), test=test)
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and verdict["stuck_reason"] == "shown_fault_open"
+    assert "no longer runs" in verdict["rationale"] and "typed-in value" in verdict["rationale"]
 
 
 @pytest.mark.asyncio
-async def test_a_missing_test_file_stops_nothing_and_is_warned_about(tmp_path: Path) -> None:
+async def test_a_missing_test_file_still_stops_the_quest(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     _record(engine, _issue(), test=None)
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and verdict["stuck_reason"] == "shown_fault_open"
+    assert "no longer on disk" in verdict["rationale"]
+
+
+@pytest.mark.asyncio
+async def test_a_test_runner_that_gives_no_answer_stops_nothing_and_says_so(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue())
+
+    async def no_answer(self, argv, **kw):  # noqa: ANN001
+        return 1, "", "the environment is broken"
+
+    monkeypatch.setattr(Engine, "_run_in_env", no_answer)
     sink = _Sink()
     engine._log.addHandler(sink)
     try:
         assert await engine._shown_fault_verdict(STATE) is None
     finally:
         engine._log.removeHandler(sink)
-    assert any("not on disk" in m for m in sink.messages)
+    assert any("gave no answer" in m for m in sink.messages)
+
+
+@pytest.mark.asyncio
+async def test_one_passing_test_does_not_hide_another_that_still_fails(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue("F-1", first_seen=1), _issue("F-2", first_seen=2))
+    (engine.quest_root / ".fi" / "finding_tests" / "F-1_1.py").write_text(PASSING, encoding="utf-8")
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and "still fails" in verdict["rationale"]
 
 
 @pytest.mark.asyncio

@@ -18021,8 +18021,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                      "wrote a test for each problem it found and ran it: this one failed on the code",
                      *([f"asked for the code to be repaired ({rounds} round{'s' if rounds != 1 else ''}); the problem stood"]
                        if rounds else []),
-                     "ran the test again on the code that produced the results: it still fails"]
-            ended = "a fault shown by a failing test was still in the code"
+                     "ran the test again on the code that produced the results: it did not pass"]
+            ended = "a fault shown by a failing test was never shown to be gone from the code"
         if reason == "not_run":
             said = str((state.get("exec_result") or {}).get("not_run") or "").strip().rstrip(".")
             problem = f"{said}, so nothing was run for the study"
@@ -18131,43 +18131,57 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
         The code reader's record (``.fi/code_review.json``) lists such issues, but the code may have changed since the last
         reading (a repair of the run, a rewrite), and a reader's word alone never stops a quest. So the test written for
-        each of the few most urgent shown issues is run again on the code as it is now: only a test that still fails by an
-        assertion stops the quest. A test that passes, or that cannot be run (missing file, environment error), stops
-        nothing. Deterministic given the files on disk, so a re-entry of the node gives the same answer."""
+        each of the few most urgent shown issues is run again on the code as it is now. A shown fault counts as gone only
+        when its test passes: a test that still fails, or that no longer runs on the code (the function it calls was
+        renamed, the test itself breaks on the new code, its file is gone) stops the quest, because nothing shows the
+        fault was removed (a live run delivered a typed-in headline number whose test had come to error on the rewritten
+        code). Only when the test runner itself gave no answer at all (the environment, not the code) does it stop nothing,
+        with a warning. Deterministic given the files on disk, so a re-entry of the node gives the same answer."""
         exec_result = state.get("exec_result")
         if not (isinstance(exec_result, dict) and exec_result) or state.get("no_simulation_resolved"):
             return None
         shown = _code_findings.shown_open(_code_review.load(self.quest_root))[:_code_findings.MAX_SHOWN_RERUNS]
+        if not shown:
+            return None
+        verdicts: list[tuple[dict[str, Any], str]] = []
         runnable: list[tuple[dict[str, Any], str]] = []
         for issue in shown:
             rel = str(issue.get("test") or "")
             if rel and (self.quest_root / rel).is_file():
                 runnable.append((issue, rel))
             else:
-                self._log.warning("[evidence_gate] the test that showed %s is not on disk (%s); it cannot stop the quest",
-                                  issue.get("id"), rel or "no test recorded")
-        if not runnable:
+                verdicts.append((issue, f"its test is no longer on disk ({rel or 'no test recorded'})"))
+        if runnable:
+            paths = [rel for _issue, rel in runnable]
+            _rc, text, err = await self._run_in_env(["-c", _finding_repair.harness_source("code", paths)], timeout_s=300)
+            if _finding_repair.MARK not in (text or ""):
+                # the runner printed nothing it could read: a fault of the environment, not evidence about the code
+                self._log.warning("[evidence_gate] the tests that showed %s could not be run again (the test runner gave "
+                                  "no answer: %s); they cannot stop the quest",
+                                  ", ".join(str(i.get("id")) for i, _r in runnable), (err or "no output")[:160])
+            else:
+                runs = _finding_repair.parse_runs(text, paths)
+                for issue, rel in runnable:
+                    run = runs.get(rel) or _finding_repair.TestRun("error", "not run")
+                    if run.status == "pass":
+                        self._log.info("[evidence_gate] the test that showed %s now passes on the code that ran",
+                                       issue.get("id"))
+                    elif run.status == "fail":
+                        verdicts.append((issue, "its test still fails on it"))
+                    else:
+                        verdicts.append((issue, "its test no longer runs on it, so nothing shows the fault was removed ("
+                                         + _one_line(run.detail or "", 120) + ")"))
+        if not verdicts:
             return None
-        paths = [rel for _issue, rel in runnable]
-        _rc, text, err = await self._run_in_env(["-c", _finding_repair.harness_source("code", paths)], timeout_s=300)
-        runs = _finding_repair.parse_runs(text, paths)
-        for issue, rel in runnable:
-            run = runs.get(rel) or _finding_repair.TestRun("error", "not run")
-            if run.status == "error":
-                self._log.warning("[evidence_gate] the test that showed %s could not be run again (%s); it cannot stop "
-                                  "the quest", issue.get("id"), (run.detail or err or "")[:160])
-                continue
-            if run.status != "fail":
-                self._log.info("[evidence_gate] the test that showed %s now passes on the code that ran", issue.get("id"))
-                continue
-            where = " ".join(str(x) for x in (issue.get("file"), issue.get("function")) if x)
-            what = str(issue.get("text") or issue.get("why") or issue.get("quantity") or "")
-            why = ("a fault in the code that changes a reported number was shown by a failing test and is still there in "
-                   f"the code that produced the results ({_one_line((where + ': ' if where else '') + what, 200)})")
-            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
-            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
-                    "stuck_reason": "shown_fault_open"}
-        return None
+        issue, how = verdicts[0]
+        where = " ".join(str(x) for x in (issue.get("file"), issue.get("function")) if x)
+        what = str(issue.get("text") or issue.get("why") or issue.get("quantity") or "")
+        why = ("a fault in the code that changes a reported number was shown by a failing test, and was never shown to be "
+               f"gone from the code that produced the results: {how} "
+               f"({_one_line((where + ': ' if where else '') + what, 200)})")
+        self._log.warning("[evidence_gate] %s; stopping without a paper", why)
+        return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
+                "stuck_reason": "shown_fault_open"}
 
     def _no_results_verdict(self, state: QuestState) -> dict[str, Any] | None:
         """The gate's verdict for a simulation whose experiment produced no results, else ``None``.
