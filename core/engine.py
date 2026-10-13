@@ -11587,7 +11587,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return await self._chat(prompt, node=node)
 
         async def run_tests(paths: list[str]) -> dict[str, Any]:
-            _rc, out, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", paths)], timeout_s=180)
+            _rc, out, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", paths)], timeout_s=180,
+                                                    env=self._finding_test_env())
             return _finding_repair.parse_runs(out, paths)
 
         async def snapshot() -> dict[str, str]:
@@ -11648,7 +11649,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     out[f"equation:{r.get('id')}"] = "pass" if r.get("status") == _equation_tests.OK else "fail"
         accepted = [p for p in record.get("accepted_tests") or [] if isinstance(p, str)]
         if accepted:
-            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", accepted)], timeout_s=300)
+            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", accepted)], timeout_s=300,
+                                                     env=self._finding_test_env())
             for path, run in _finding_repair.parse_runs(text, accepted).items():
                 out[f"finding:{path}"] = run.status
         return out
@@ -11753,6 +11755,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                               "missing" if v.get("status") == _code_review.MISSING else "implemented differently", v["text"],
                               " (the run's results decide whether the study stops)" if v.get("headline") else "")
         return None
+
+    def _finding_test_env(self) -> dict[str, str]:
+        """The environment a finding test runs in: the process's own plus the ``FI_*`` variables the run gives the code
+        (:func:`core.finding_repair.run_environment`), so a module that reads them when it is imported can be tested."""
+        return {**os.environ, **_finding_repair.run_environment(
+            self.quest_root, _split_run.env_value(self._raw_root(), self.quest_root))}
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
                           env: dict[str, str] | None = None) -> tuple[int, str, str]:
@@ -18286,7 +18294,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         printed no answer (it ran past its time, or ended the process)."""
         try:
             _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [rel])],
-                                                     timeout_s=_code_findings.SHOWN_TEST_TIMEOUT_S)
+                                                     timeout_s=_code_findings.SHOWN_TEST_TIMEOUT_S,
+                                                     env=self._finding_test_env())
         except Exception as exc:  # noqa: BLE001 - a run past its time limit raises from the executor
             self._log.info("[evidence_gate] the test %s gave no answer (%s)", rel, _one_line(str(exc), 120))
             return None

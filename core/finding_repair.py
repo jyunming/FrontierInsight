@@ -86,6 +86,43 @@ print({mark!r} + json.dumps(out))
 '''
 
 
+#: What a script reads from the environment FI gives a run (core/code_project.py): the variable, the file it names
+#: (relative to the quest folder, where the run puts it) and what a stand-in holds until the run has written the real one.
+_RUN_FILES = (("FI_TRIALS", "raw/trials.json", '{"cells": []}'),
+              ("FI_OPTIMISATION", "raw/optimisation_ledger.jsonl", ""),
+              ("FI_BEST_DESIGN", "results/best_design.json", "{}"))
+STAND_IN_DIR = TEST_DIR / "_env"
+
+
+def run_environment(root: Path, raw_dir: str = "raw") -> dict[str, str]:
+    """The ``FI_*`` variables a finding test runs with, the ones the real run gives the code: the real file when the run
+    has written it, else a stand-in under ``.fi/finding_tests/_env/`` (never under ``raw/`` or ``results/``, and never over
+    a real file), so a module that reads one while it is imported does not fail on a variable that is not set. A test then
+    passes or fails on its assertion. ``FI_RAW_DIR`` is the run's folder when it exists, else an empty stand-in."""
+    env: dict[str, str] = {}
+    for var, rel, content in _RUN_FILES:
+        if (root / rel).is_file():
+            env[var] = rel
+            continue
+        stand = STAND_IN_DIR / Path(rel).name
+        try:
+            (root / stand).parent.mkdir(parents=True, exist_ok=True)
+            if not (root / stand).is_file():
+                (root / stand).write_text(content, encoding="utf-8")
+            env[var] = stand.as_posix()
+        except OSError:
+            pass  # the test then runs as it did before: an import that needs the variable shows as an error
+    if (root / raw_dir).is_dir():
+        env["FI_RAW_DIR"] = raw_dir
+    else:
+        try:
+            (root / STAND_IN_DIR / "raw").mkdir(parents=True, exist_ok=True)
+            env["FI_RAW_DIR"] = (STAND_IN_DIR / "raw").as_posix()
+        except OSError:
+            pass
+    return env
+
+
 def harness_source(code_dir: str, paths: list[str]) -> str:
     return HARNESS.format(code=str(code_dir), paths=[str(p) for p in paths], mark=MARK)
 
@@ -295,11 +332,58 @@ def _frame(tree: ast.Module) -> list[tuple[str, str]]:
     return out
 
 
+def _is_main_guard(node: ast.stmt) -> bool:
+    """``if __name__ == "__main__":`` with no ``else`` (an ``else`` runs on import)."""
+    t = node.test if isinstance(node, ast.If) else None
+    return (isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__" and len(t.ops) == 1
+            and isinstance(t.ops[0], ast.Eq) and len(t.comparators) == 1 and isinstance(t.comparators[0], ast.Constant)
+            and t.comparators[0].value == "__main__" and not node.orelse)
+
+
+def _without_main_guards(old: str, new: str) -> tuple[str, str]:
+    """``(old, new)`` for the comparison of module-level statements, without a ``__main__`` guard the repair ADDED. Such a
+    block does not run when the file is imported and changes no function, so it is not a change of the module; a statement
+    that ``old`` had at module level and ``new`` has moved inside the block is the same statement (it still runs when the
+    file is run). A guard ``old`` already had stays, so removing or altering it is still a change; a statement in a new
+    guard that ``old`` did not have is inert and ignored. Everything outside a new guard is compared as before."""
+    try:
+        before, after = ast.parse(old), ast.parse(new)
+    except SyntaxError:
+        return old, new
+    seen = [ast.dump(n) for n in before.body if _is_main_guard(n)]
+    added: list[ast.If] = []
+    kept: list[ast.stmt] = []
+    for node in after.body:
+        dump = ast.dump(node)
+        if _is_main_guard(node) and dump in seen:
+            seen.remove(dump)
+            kept.append(node)
+        elif _is_main_guard(node):
+            added.append(node)  # type: ignore[arg-type]
+        else:
+            kept.append(node)
+    if not added:
+        return old, new
+    moved = [ast.dump(s) for g in added for s in g.body
+             if not isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    stay: list[ast.stmt] = []
+    for node in before.body:
+        dump = ast.dump(node)
+        if dump in moved and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            moved.remove(dump)
+        else:
+            stay.append(node)
+    before.body, after.body = stay, kept
+    return ast.unparse(before), ast.unparse(after)
+
+
 def frame_changes(old: str, new: str) -> list[str]:
     """What a repair changed outside the functions: a module-level or class-level statement of ``old`` that is not in ``new``
     as it was, or one that ``new`` adds. Allowed additions, which are not listed: a new top-level function or class (a
     helper), and a new import that binds only names the file did not bind before (it brings a module in, and changes no
-    name that exists). Everything else, a constant given another value included, is a change."""
+    name that exists), and an ``if __name__ == "__main__":`` block (:func:`_without_main_guards`). Everything else, a
+    constant given another value included, is a change."""
+    old, new = _without_main_guards(old, new)
     try:
         before, after = ast.parse(old), ast.parse(new)
     except SyntaxError:
@@ -515,7 +599,9 @@ def _frame_nodes(tree: ast.Module) -> list[tuple[str, str, ast.stmt]]:
 def unspoken_frame_changes(old: str, new: str, issue: dict[str, Any]) -> list[str]:
     """What a repair changed at module or class level that the finding does not speak of: a statement that binds no name
     the finding names and is not a change of the entries of the finding's own quantity
-    (:func:`changes_only_quantity_entries`)."""
+    (:func:`changes_only_quantity_entries`). A ``__main__`` block the repair added is not a change
+    (:func:`_without_main_guards`)."""
+    old, new = _without_main_guards(old, new)
     spoken, quantities = issue_names(issue), _quantity_keys(issue)
     everything = frame_altered(old, new)
     if everything and not everything[0][2]:  # the file does not parse
