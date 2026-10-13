@@ -15,6 +15,7 @@ import pytest
 
 from core import plan
 from core import topic_requirements as tr
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, Paused, _engine, _NO_OBJECTIONS
 
 TOPIC = (
@@ -148,7 +149,9 @@ class Reader:
             return self._judge(prompt)
         if "The topic asks for things this plan does not yet include" in prompt:
             self.asked.append(prompt)
-            return self._rewrite(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8"))
+            whole = self._rewrite(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8"))
+            # The plan step's model is asked for the parts alone, as JSON; the design step's request is not changed here.
+            return as_parts(whole) if kw.get("node") == "plan_revise" else whole
         if not self.drafted:
             self.drafted = True
             return json.dumps({**self.draft, "plan": EXTRA})

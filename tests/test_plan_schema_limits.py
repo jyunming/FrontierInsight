@@ -159,11 +159,11 @@ def test_the_plan_step_stops_asking_when_the_model_repeats_an_answer_that_was_re
     plan.plan_path(engine.quest_root).write_text("# plan\n", encoding="utf-8")
     asked: list[str] = []
 
-    async def rewrite(ask, path, **kwargs):
+    async def complete(ask, path, **kwargs):
         asked.append(ask)
         raise ValueError("`protocol.grid.a` is not readable; plan.md is unchanged")
 
-    engine._rewrite_plan = rewrite  # type: ignore[method-assign]
+    engine._complete_plan_parts = complete  # type: ignore[method-assign]
     engine._design_from_plan = lambda: ({"a": 1}, "sha2")  # type: ignore[method-assign]
     engine._progress = lambda *a, **k: None  # type: ignore[method-assign]
     asyncio.run(engine._ask_plan_to_complete(

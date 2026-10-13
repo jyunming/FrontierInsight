@@ -757,10 +757,10 @@ class RunChecksMixin:
             return _estimate.request(est, limit_s, runs, deterministic,
                                      _estimate.rules(before_protocol, before_runs, deterministic, est.spreads))
 
-        def keep(before: str, revised: str) -> str:
-            kept = self._keep_only_the_parts(before, revised, ["grid", "runs_per_setting"])  # type: ignore[attr-defined]
+        def keep(before: str, answer: dict[str, Any]) -> str:
+            kept = self._keep_only_the_parts(before, answer, ["grid", "runs_per_setting"])  # type: ignore[attr-defined]
             if kept is None:
-                raise ValueError("the revised plan has no smaller run in a form that can be read; plan.md is unchanged")
+                raise ValueError("your answer has no smaller run in a form that can be read; plan.md is unchanged")
             block = _plan.raw_design_block(kept)
             protocol = block.get("protocol") if isinstance(block, dict) and isinstance(block.get("protocol"), dict) else {}
             grid = {str(k): list(v) for k, v in (protocol.get("grid") or {}).items() if isinstance(v, list) and v}
@@ -768,7 +768,7 @@ class RunChecksMixin:
             problems = _estimate.smaller_run_problems(
                 before_protocol, before_grid, before_runs, grid, new_runs, deterministic, est.spreads)
             if problems:
-                raise ValueError("the revised plan is not used: " + "; ".join(problems) + "; plan.md is unchanged")
+                raise ValueError("your answer is not used: " + "; ".join(problems) + "; plan.md is unchanged")
             return kept
 
         await self._ask_plan_to_complete(  # type: ignore[attr-defined]

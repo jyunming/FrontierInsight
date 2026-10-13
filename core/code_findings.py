@@ -381,8 +381,7 @@ def plan_conflict_request(topic: Any, conflicts: list[tuple[str, str]], values: 
         "it define the same thing differently, so no code can satisfy both.\n\n"
         + "\n".join(lines)
         + "\n\nThe topic is the specification:\n\n" + str(topic or "")[:1500]
-        + "\n\nRewrite the plan so that each of these is defined in ONE way, the way the topic asks for, and say that "
-        "definition in every place the plan mentions it. Change only `protocol.metrics`, `protocol.ci_method` and "
-        "`protocol.model` (and the prose of the plan that repeats them). Do not change a check, a threshold, a "
-        "tolerance, an expected value, a precision target, the grid or the number of runs. Keep everything else the "
-        "plan already has.")
+        + "\n\nWrite `protocol.metrics`, `protocol.ci_method` and `protocol.model` again so that each of these is defined in "
+        "ONE way, the way the topic asks for, and say that definition in every place those parts mention it. Answer with "
+        "those parts only (the ones that need to change). Do not change a check, a threshold, a "
+        "tolerance, an expected value, a precision target, the grid or the number of runs.")

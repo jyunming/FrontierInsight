@@ -1,0 +1,143 @@
+{
+  "ledger_left": [
+    "`protocol.simplifications` is incomplete: the topic asks for pitches, which the plan neither includes nor names in `simplifications`; the topic asks for neighbour moved, which the plan neither includes nor names in `simplifications`; the topic asks for two independent ways, which the plan neither includes nor names in `simplifications`; the topic asks for the mask bias OPC needs, which the plan neither includes nor names in `simplifications`; the topic asks for whether an attenuated-mask side lobe reaches the printing threshold, which the plan neither includes nor names in `simplifications`; the topic asks for forbidden pitches, which the plan neither includes nor names in `simplifications`; the topic asks for the CD change of the isolated line as its neighbour moves away, which the plan neither includes nor names in `simplifications`; the topic asks for the distance beyond which it stays below 0.1 nm, which the plan neither includes nor names in `simplifications`; the topic asks for how far its oscillation is still visible, which the plan neither includes nor names in `simplifications`; the topic asks for partially coherent aerial image, which the plan neither includes nor names in `simplifications`; the topic asks for first zero, which the plan neither includes nor names in `simplifications`"
+  ],
+  "unsourced_definitions": [
+    "ambit_distance_nm",
+    "cd_change_nm",
+    "common_dof_nm",
+    "dof_nm",
+    "forbidden_pitch",
+    "iso_dense_bias_nm",
+    "mask_bias_nm",
+    "meef",
+    "mutual_coherence",
+    "nils",
+    "side_lobe_prints",
+    "visible_oscillation_distance_nm"
+  ],
+  "judge_calls": 1,
+  "judged": {
+    "723b74f150f5e93a625f": {
+      "F1": "missing",
+      "F2": "missing",
+      "F3": "missing",
+      "F4": "missing",
+      "F5": "missing",
+      "F6": "missing",
+      "F7": "missing",
+      "F8": "missing",
+      "F9": "missing",
+      "Q4": "covered",
+      "Q5": "covered",
+      "Q6": "covered",
+      "Q7": "covered",
+      "Q8": "covered",
+      "Q9": "covered",
+      "Q10": "covered",
+      "Q11": "covered",
+      "Q13": "missing",
+      "Q14": "missing",
+      "M1": "covered",
+      "M2": "covered",
+      "M3": "covered",
+      "M4": "covered"
+    }
+  },
+  "ever_missing": [
+    "Sources",
+    "pitches",
+    "neighbour moved",
+    "conventional",
+    "annular",
+    "pole centre",
+    "pole radius",
+    "sigma",
+    "two independent ways",
+    "runtime",
+    "numerical error"
+  ],
+  "plan_done": true,
+  "left": [
+    {
+      "kind": "factor",
+      "name": "Sources",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare Sources (conventional, annular, x-dipole, quasar, free-form pixelated source), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "pitches",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare pitches (80 to 2000), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "neighbour moved",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare neighbour moved (80 to 2000), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "conventional",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare conventional (0.3 to 0.9), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "annular",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare annular (inner/outer sigma pairs), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "pole centre",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare pole centre (0.5 to 0.95), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "pole radius",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare pole radius (0.1 to 0.2), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "sigma",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare sigma (0.1 to 0.95), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "two independent ways",
+      "main": false,
+      "axis": "",
+      "sentence": "The topic says to vary or compare two independent ways (Abbe, Hopkins), but the plan's settings do not include it."
+    },
+    {
+      "kind": "quantity",
+      "name": "runtime",
+      "main": false,
+      "axis": "",
+      "sentence": "The topic asks to report runtime, but the plan does not measure it."
+    },
+    {
+      "kind": "quantity",
+      "name": "numerical error",
+      "main": false,
+      "axis": "",
+      "sentence": "The topic asks to report numerical error, but the plan does not measure it."
+    }
+  ],
+  "unjudged": [],
+  "asked": 4,
+  "checked_at_design": true
+}

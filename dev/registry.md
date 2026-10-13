@@ -208,7 +208,12 @@ same PR that adds, splits or renames one.
   rewrite, `Engine._keep_only_the_search`, which also keeps every part of the plan's own block that was readable; a plan saved meanwhile is not overwritten, `_PlanEditedMeanwhile`; "measure instead" is checked by `Engine._check_measure_instead`; `plan.refresh_optimisation_section` shows the section again). The stop speaks in
   plain words (`optimisation_plan.plain_gaps`) plus the reader's exact reason; `optimisation_plan.MEASURE_INSTEAD` remains a `--revise-plan` request a person may make. Every ask quotes the exact reason: `plan.offending_entry` (the entry a reason names, as written), `Engine._search_problems`, and the reason a rewrite was refused (`Engine._ask_plan_to_complete` keeps it in the record as `problem` and puts it in the next ask; `_keep_only_the_search` / `_keep_only_the_parts` raise it). `plan.hoist_protocol_parts` / `plan.raw_design_block` / `Engine._move_misplaced_parts` move a protocol part written beside `protocol:` under it (`plan.PROTOCOL_PARTS`). `optimisation_plan.read_kind` reads a `kind` sentence that names exactly one allowed word, and refuses one that says the variable is an array (`optimisation_plan.SCALAR_NOTE` is what the ask tells the model: the search takes scalar variables).
   `Engine._ask_plan_to_complete` is the bounded request itself (counted in the record BEFORE each call; the search block
-  and the protocol parts share it). A protocol part that changes what is measured and could not be read (`plan.ASKED_PARTS`:
+  and the protocol parts share it). It asks for ONLY the missing parts, as one JSON object shaped like the design block
+  (`agents/plan_parts.md`; `Engine._complete_plan_parts` -> `_ask_for_plan_parts`, node `plan_revise`, one short re-ask on
+  unreadable JSON, so at most two chat calls an ask; `_as_design_parts` puts parts written beside `protocol` under it), and
+  every `keep(plan_text, parts)` (`_keep_only_the_search`, `_keep_only_the_parts`, `_keep_only_what_the_topic_asked`) splices
+  the accepted parts into the plan with `plan.edit_design_block`: FI is the only writer of the YAML on this path.
+  `_rewrite_plan` + `agents/plan_revise.md` (whole file) stay for `--revise-plan`, `_fill_plan_sources` and `_guide_oracles`. A protocol part that changes what is measured and could not be read (`plan.ASKED_PARTS`:
   grid, metrics, runs_per_setting, precision; FI's own note in plan.md names it, `plan.ASK_MARK`) is asked the same way by
   `Engine._ask_plan_for_the_parts` (`plan.part_request`, `PART_RULES`; record `.fi/protocol_part_asked.json`; only the asked
   parts are kept, `_keep_only_the_parts`). `Engine._stop_if_no_settings_to_vary` stops a sweep that stays unreadable

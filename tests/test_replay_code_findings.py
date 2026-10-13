@@ -338,12 +338,12 @@ async def test_a_contradiction_in_the_plan_is_put_to_the_plan_and_never_to_the_c
 
     revised = _plan.edit_design_block(before, lambda d: {**d, "protocol": {
         **d["protocol"], "metrics": [{**m, "estimand": "the spread of the estimate"} for m in d["protocol"]["metrics"]]}})
-    kept = asked[0]["keep"](before, revised)
+    kept = asked[0]["keep"](before, _plan.raw_design_block(revised))  # the model's answer is JSON shaped like the design block
     assert "the spread of the estimate" in kept
     loosened = _plan.edit_design_block(before, lambda d: {**d, "protocol": {
         **d["protocol"], "oracles": [{**o, "tolerance": 1.0} for o in d["protocol"]["oracles"]]}})
     with pytest.raises(ValueError):
-        asked[0]["keep"](before, loosened)
+        asked[0]["keep"](before, _plan.raw_design_block(loosened))
 
 
 @pytest.mark.asyncio

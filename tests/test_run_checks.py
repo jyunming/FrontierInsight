@@ -20,6 +20,7 @@ from core import plan, run_estimate, trial_runner
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
 from core.execution import SharedInterpreterExecutor
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, _NO_OBJECTIONS, _engine as _plan_engine
 
 # ---- a result typed into the code ---------------------------------------------------------------------------------------
@@ -278,7 +279,7 @@ class Model:
             answer = self.answers.pop(0) if self.answers else None
             if answer is None:
                 raise RuntimeError("no answer")
-            return answer(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8"))
+            return as_parts(answer(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")))
         if not self.drafted:
             self.drafted = True
             return json.dumps({**self.draft, "plan": EXTRA})

@@ -16,6 +16,7 @@ import pytest
 from core import engine as engine_mod
 from core import plan, plan_ledger, plan_steps
 from core import topic_requirements as tr
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, _engine, _NO_OBJECTIONS
 
 TOPIC = "Measure how fin spacing changes the base temperature of a heat sink, with fins from 2 to 4 mm apart"
@@ -74,7 +75,7 @@ class Model:
             answer = self.answers.pop(0) if self.answers else None
             if answer is None:
                 raise RuntimeError("no answer")
-            return answer(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")) if callable(answer) else answer
+            return as_parts(answer(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")) if callable(answer) else answer)
         if prompt.lstrip().startswith("# Is It In The Plan?"):
             return json.dumps({"items": []})
         if not self.drafted:
@@ -311,12 +312,14 @@ def test_the_two_reader_prompts_ask_about_what_is_approximated_without_an_entry(
 # -- review fixes ---------------------------------------------------------------------------------------------------------
 
 
-def _texts(eng: Any, **protocol: Any) -> tuple[str, str]:
-    """plan.md as it stands, and the same plan with ``protocol`` keys set (what a model's rewrite would send back)."""
+def _texts(eng: Any, **protocol: Any) -> tuple[str, dict[str, Any]]:
+    """plan.md as it stands, and the design block with ``protocol`` keys set (what the model's JSON answer carries)."""
     before = _plan_text(eng)
     after = plan.edit_design_block(before, lambda d: {**d, "protocol": {**d["protocol"], **protocol}})
     assert after is not None
-    return before, after
+    block = plan.raw_design_block(after)
+    assert isinstance(block, dict)
+    return before, block
 
 
 @pytest.mark.asyncio

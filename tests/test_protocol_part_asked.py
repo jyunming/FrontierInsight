@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core import plan
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, Paused, _engine, _NO_OBJECTIONS
 
 TOPIC = "Measure how fin spacing changes the base temperature of a heat sink"
@@ -50,7 +51,7 @@ class Model:
             answer = self.answers.pop(0) if self.answers else None
             if answer is None:
                 raise RuntimeError("no answer")
-            return answer(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")) if callable(answer) else answer
+            return as_parts(answer(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")) if callable(answer) else answer)
         if not self.drafted:
             self.drafted = True
             return json.dumps({**self.draft, "plan": EXTRA})

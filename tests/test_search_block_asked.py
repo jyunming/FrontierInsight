@@ -12,6 +12,7 @@ import pytest
 
 from core import optimisation_plan as op
 from core import plan
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import BLOCK, EXTRA, HEAT_SINK, Paused, _engine, _NO_OBJECTIONS
 
 TOPIC = "Find the fin spacing and thickness that minimise the base temperature of a heat sink"
@@ -52,7 +53,7 @@ class Model:
             if answer is None:
                 raise RuntimeError("no answer")
             text = plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")
-            return answer(text) if callable(answer) else answer
+            return as_parts(answer(text) if callable(answer) else answer)
         if not self.drafted:
             self.drafted = True
             return json.dumps({**self.draft, "plan": EXTRA})
@@ -61,7 +62,7 @@ class Model:
     @property
     def requests(self) -> int:
         """Requests, not tries: a reply that cannot be used is asked once more with the reason, inside one request."""
-        return len([p for p in self.asked if "Your last reply could not be used" not in p])
+        return len([p for p in self.asked if "Your previous reply could not be used" not in p])
 
 
 def _complete(text: str) -> str:

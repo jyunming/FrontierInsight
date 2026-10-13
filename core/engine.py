@@ -5710,8 +5710,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         every such part (the search block, the settings to sweep, the metrics ...): at most ``_SEARCH_ASKS`` requests and
         ``_SEARCH_CALLS`` chat calls per plan and model, counted in ``.fi/<file>`` BEFORE each call so a resume never asks
         again. ``lacks(design)``: what the plan still lacks, in plain sentences (empty when complete);
-        ``request(design, text)``: what to ask; ``keep(before_text, revised_text)``: the text to write, which keeps only the
-        asked part (``None`` or ``ValueError``: the answer is not used). Returns the design to use and its plan's hash."""
+        ``request(design, text)``: what to ask; ``keep(before_text, parts)``: the text to write, which keeps only the
+        asked parts of ``parts`` (the model's answer, a JSON object shaped like the design block: ``None`` or ``ValueError``:
+        the answer is not used). The model is asked for those parts alone, never for the whole plan; FI writes the YAML. Returns the design to use and its plan's hash."""
         path = _plan.plan_path(self.quest_root)
         gaps = lacks(design)
         if inspect.isawaitable(gaps):
@@ -5753,9 +5754,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             last_problem = ""
             schema = False
             try:
-                await self._rewrite_plan(
-                    ask, path, by="engine", expect=text,
-                    finish=lambda revised, text=text: keep(text, revised), note=note)
+                await self._complete_plan_parts(ask, path, expect=text, keep=keep, note=note)
             except _PlanEditedMeanwhile:
                 outcome = "plan changed meanwhile"
                 self._log.warning("[plan] plan.md was changed while FI waited for the plan's model; FI kept the version "
@@ -5806,6 +5805,72 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 print(f"[FI] {whole}; going on")
                 return design, plan_sha
         return design, plan_sha
+
+    #: A top-level key of the design block that is not under ``protocol``; every other key of a flat answer is a protocol part.
+    _DESIGN_TOP_KEYS = ("study_type", "variables")
+
+    @classmethod
+    def _as_design_parts(cls, obj: dict[str, Any]) -> dict[str, Any]:
+        """The model's answer shaped like the design block: parts written beside ``protocol`` (or an answer with no
+        ``protocol`` at all, just the parts) are put under it, as the plan's readers look only there."""
+        if not isinstance(obj.get("protocol"), dict):
+            top = {k: v for k, v in obj.items() if k in cls._DESIGN_TOP_KEYS}
+            obj = {**top, "protocol": {k: v for k, v in obj.items() if k not in cls._DESIGN_TOP_KEYS and k != "protocol"}}
+        return _plan.hoist_protocol_parts(obj)[0]
+
+    async def _ask_for_plan_parts(self, prompt: str) -> dict[str, Any]:
+        """One JSON object of the asked parts from the plan's model (node ``plan_revise``, so it is the same model, limits
+        and call count as every other request of the plan step). A reply that holds no such object is asked once more,
+        short (``agents/json_reanswer.md``): at most two calls. ``ValueError`` (the reader's reason, sent back with the next
+        request) when neither reply can be read."""
+        text = await self._chat(prompt, node="plan_revise")
+        obj = _parse_json_lenient(text, node="plan_revise")
+        if isinstance(obj, dict) and obj:
+            return self._as_design_parts(obj)
+        objects = _top_level_json_objects(text or "")
+        if not (text or "").strip():
+            wrong = "it was empty"
+        elif not objects:
+            wrong = f"it was {len(text):,} characters with no JSON object in it"
+        elif len(objects) > 1:
+            wrong = f"it held {len(objects)} separate JSON objects, not one"
+        else:
+            wrong = "its JSON object was empty"
+        self._log.warning("[plan] the plan step's reply could not be used (%s); asking once more for one short JSON object", wrong)
+        echo = (f"\nYour previous reply, for reference (say the same things, in the asked-for shape):\n\n{text}\n"
+                if text and len(text) <= self._REANSWER_ECHO_CHARS else "")
+        retry = self._prompts["json_reanswer"].substitute(
+            original_prompt=prompt, what_was_wrong=wrong,
+            keys="`protocol` (the asked parts under their names), and `study_type` or `variables` only when asked", earlier_reply=echo)
+        text = await self._chat(retry, node="plan_revise")
+        obj = _parse_json_lenient(text, node="plan_revise")
+        if isinstance(obj, dict) and obj:
+            self._log.info("[plan] the second, shorter answer could be read")
+            return self._as_design_parts(obj)
+        raise ValueError("your answer was not one JSON object holding the asked parts (`protocol` with the parts under their "
+                         "names); plan.md is unchanged")
+
+    async def _complete_plan_parts(self, request: str, path: Path, *, expect: str, keep: Any, note: str) -> dict[str, Any]:
+        """The plan's model is asked for ONLY the missing parts, as JSON (:meth:`_ask_for_plan_parts`); FI is the only writer
+        of the YAML: ``keep(plan_text, parts)`` splices the parts it accepts into the plan as it stands (every check on them
+        is the keep's own) and returns the text to write, or ``None`` / raises ``ValueError`` for an answer that must not be
+        used. ``expect``: the plan as it was when the request was made; when plan.md differs just before the write (a
+        person saved a change meanwhile) nothing is written (:class:`_PlanEditedMeanwhile`)."""
+        current = path.read_text(encoding="utf-8")
+        _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
+        prompt = self._prompts["plan_parts"].substitute(topic=self.config.topic, plan_md=current, request=request)
+        parts = await self._ask_for_plan_parts(prompt)
+        kept = keep(current, parts)
+        if kept is None:
+            raise ValueError("your answer has none of the asked parts in a form that can be read; plan.md is unchanged")
+        # The model and search sections are shown from the block and never read back: shown again from the block as it is now.
+        kept = _plan.refresh_optimisation_section(_plan.refresh_model_section(kept))
+        if path.read_text(encoding="utf-8") != expect:
+            raise _PlanEditedMeanwhile("plan.md was changed while the request was being answered")
+        path.write_text(kept, encoding="utf-8")
+        entry = _plan.record_version(self.quest_root, kept, by="engine", note=note[:300])
+        self._log.info("[plan] completed by the plan's model (the asked parts only): version %d", entry["version"])
+        return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
 
     async def _complete_the_search_in_the_plan(self, state: QuestState) -> None:
         """At the plan step, before a person reads the plan: a search for the best design whose block is missing is
@@ -6015,19 +6080,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._topic_covered_write(ever_missing=[*ever, *fresh])
         return found, unjudged
 
-    def _keep_only_what_the_topic_asked(self, before_text: str, after_text: str, gaps: list[dict[str, Any]]) -> str:
-        """``before_text`` with only what the topic asked for taken from ``after_text`` (:func:`core.topic_requirements.merge`);
-        everything else is the plan's as it was. ``ValueError`` when none of it came back in a form that can be read."""
-        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+    def _keep_only_what_the_topic_asked(self, before_text: str, parts: dict[str, Any], gaps: list[dict[str, Any]]) -> str:
+        """``before_text`` with only what the topic asked for taken from ``parts`` (the model's answer, shaped like the design
+        block: :func:`core.topic_requirements.merge`); everything else is the plan's as it was. ``ValueError`` when none of it
+        came back in a form that can be read."""
+        old, new = _plan.raw_design_block(before_text), parts
         merged = _topic_req.merge(old, new, gaps) if isinstance(old, dict) and isinstance(new, dict) else None
         if merged is None:
-            raise ValueError("the revised plan has none of what was asked in a form that can be read; plan.md is unchanged")
+            raise ValueError("your answer has none of what was asked in a form that can be read; plan.md is unchanged")
         fixed, why = _plan.normalize_protocol(merged.get("protocol"))
         if fixed is None:
             raise ValueError(f"what the plan added cannot be read ({why}); plan.md is unchanged")
         edited = _plan.edit_design_block(before_text, lambda _design: {**merged, "protocol": fixed})
         if edited is None or _plan.parse(edited).design is None:
-            raise ValueError("the revised plan cannot be read; plan.md is unchanged")
+            raise ValueError("the plan with your answer in it cannot be read; plan.md is unchanged")
         return _plan.refresh_model_section(edited)
 
     async def _ask_plan_for_the_topic(self, state: QuestState, design: Any, plan_sha: str,
@@ -6049,7 +6115,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
         return await self._ask_plan_to_complete(
             design, plan_sha, lacks=lacks, request=request,
-            keep=lambda before, revised: self._keep_only_what_the_topic_asked(before, revised, current["gaps"]),
+            keep=lambda before, parts: self._keep_only_what_the_topic_asked(before, parts, current["gaps"]),
             file=_TOPIC_ASKED, what="what the topic asks for", short="what the topic asks for",
             note="what the topic asks for and the plan lacked, written by the plan's model")
 
@@ -6303,16 +6369,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     found[part] = line.strip().lstrip("-").strip()
         return found
 
-    def _keep_only_the_parts(self, before_text: str, after_text: str, parts: list[str], passages: str = "") -> str | None:
-        """``before_text`` with only the asked ``parts`` of the protocol taken from ``after_text`` (each only when it can be
-        read as the plan reads it); everything else, a check, a threshold, a tolerance, is the plan's own as it was.
+    def _keep_only_the_parts(self, before_text: str, answer: dict[str, Any], parts: list[str], passages: str = "") -> str | None:
+        """``before_text`` with only the asked ``parts`` of the protocol taken from ``answer`` (the model's JSON, shaped like
+        the design block; each part only when it can be read as the plan reads it); everything else, a check, a threshold, a tolerance, is the plan's own as it was.
         ``None`` when none of the asked parts came back usable.
 
         The plan's ledger parts (``simplifications``, ``definitions``, the step cards ``steps``) are held to their own readers
         (:mod:`core.plan_ledger`, :mod:`core.plan_steps`, and a quoted definition against ``passages``) and not only to
         :func:`core.plan.normalize_protocol`, which does not check them: one that does not pass is not taken, and its exact
         reasons go back to the model with the next request."""
-        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        old, new = _plan.raw_design_block(before_text), answer
         if not isinstance(old, dict) or not isinstance(new, dict):
             return None
         old_protocol = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
@@ -6510,10 +6576,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return _plan.part_request(state.get("topic") or self.config.topic,
                                           {k: v for k, v in unread(now).items() if k in asked})
 
-            def keep(before: str, revised: str) -> str:
-                kept = self._keep_only_the_parts(before, revised, asked, passages)
+            def keep(before: str, answer: dict[str, Any]) -> str:
+                kept = self._keep_only_the_parts(before, answer, asked, passages)
                 if kept is None:
-                    raise ValueError("the revised plan has none of the asked parts in a form that can be read; plan.md is unchanged")
+                    raise ValueError("your answer has none of the asked parts in a form that can be read; plan.md is unchanged")
                 return kept
 
             design, plan_sha = await self._ask_plan_to_complete(
@@ -6842,13 +6908,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             payload={"quest_id": self.quest_id, "plan_file": str(path), "settings_stage": True},
         )
 
-    def _keep_only_the_search(self, before_text: str, after_text: str) -> str | None:
-        """``before_text`` with only the search part of ``after_text`` (``study_type`` and ``protocol.optimisation``)
+    def _keep_only_the_search(self, before_text: str, answer: dict[str, Any]) -> str | None:
+        """``before_text`` with only the search part of ``answer`` (the model's JSON, shaped like the design block: ``study_type`` and ``protocol.optimisation``)
         taken in, its sections shown again from the block; a plain ``protocol.grid`` beside the block is dropped. Every part
         of the plan's own block that could already be read is kept as the plan had it (a tolerance, a target, a margin, a
         range, a baseline): the model supplies only what was missing or could not be read, and a value it changed for a part
         the plan already had is put back. ``None`` when the rewrite has no search block or the result cannot be used."""
-        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        old, new = _plan.raw_design_block(before_text), answer
         protocol = new.get("protocol") if isinstance(new, dict) else None
         block = protocol.get("optimisation") if isinstance(protocol, dict) else None
         if not isinstance(old, dict):
@@ -11638,10 +11704,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 state.get("topic") or self.config.topic,
                 [(str(i.get("text") or ""), str(i.get("why") or "")) for i in conflicts], values)
 
-        def keep(before: str, revised: str) -> str:
-            kept = self._keep_only_the_parts(before, revised, list(_code_findings.PLAN_PARTS))
+        def keep(before: str, answer: dict[str, Any]) -> str:
+            kept = self._keep_only_the_parts(before, answer, list(_code_findings.PLAN_PARTS))
             if kept is None or _plan.sha256(kept) == _plan.sha256(before):
-                raise ValueError("the revised plan resolves none of the contradictions in a form that can be read; "
+                raise ValueError("your answer resolves none of the contradictions in a form that can be read; "
                                  "plan.md is unchanged")
             return kept
 
@@ -23427,6 +23493,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "clarify", "ideate", "ideate_reflect", "ideate_tournament",
         "design", "design_self_critique",   # second-pass methodology audit
         "plan_revise",                      # --revise-plan: rewrite plan.md as the person asked
+        "plan_parts",                       # FI asks for ONLY the missing parts of the plan, as JSON (never the whole file)
         "plan_criteria",                    # the plan named no check of correctness: ask once more
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "oracle_review",                    # a second model reads the plan's checks against known answers
@@ -24554,8 +24621,8 @@ _ANALYSIS_REPAIR_TRIES = 3
 #: than ``_SEARCH_ASKS``, and the chat calls they need: a reason that names the field can usually be fixed in one more try.
 #: An answer that never came (a failed call, no complete answer) earns nothing extra.
 _SCHEMA_RETRY_ASKS = 2
-_SEARCH_CALLS_PER_ASK = 3  # one request can make up to three chat calls (two whole-file tries and one for the block alone)
-_SEARCH_CALLS = 6  # at most this many chat calls in all, per plan and model
+_SEARCH_CALLS_PER_ASK = 2  # one request makes up to two chat calls (the asked parts as JSON, and once more if it could not be read)
+_SEARCH_CALLS = 4  # at most this many chat calls in all, per plan and model
 
 
 def _manifest_repair_budget(configured: int, analysis_only: bool) -> int:

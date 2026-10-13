@@ -1,0 +1,242 @@
+{
+  "factors": [
+    {
+      "name": "Sources",
+      "levels": [
+        "conventional",
+        "annular",
+        "x-dipole",
+        "quasar",
+        "free-form pixelated source"
+      ],
+      "range": [],
+      "stated": "Sources (a) parametric families swept: conventional (sigma 0.3 to 0.9), annular (inner/outer sigma pairs), x-dipole (pole centre 0.5 to 0.95, pole radius 0.1 to 0.2) and quasar; (b) a free-form pixelated source optimized to maximize the common depth of focus of a representative set of pitches (dense",
+      "main": true
+    },
+    {
+      "name": "pitches",
+      "levels": [],
+      "range": [
+        80.0,
+        2000.0
+      ],
+      "stated": "pitches from 80 nm (k1 = 0.28) to isolated (2000 nm), with enough pitches to resolve forbidden-pitch dips",
+      "main": true
+    },
+    {
+      "name": "neighbour moved",
+      "levels": [],
+      "range": [
+        80.0,
+        2000.0
+      ],
+      "stated": "a single isolated line with one neighbour moved from 80 nm to 2000 nm away for the ambit study",
+      "main": true
+    },
+    {
+      "name": "conventional",
+      "levels": [],
+      "range": [
+        0.3,
+        0.9
+      ],
+      "stated": "conventional (sigma 0.3 to 0.9)",
+      "main": true
+    },
+    {
+      "name": "annular",
+      "levels": [
+        "inner/outer sigma pairs"
+      ],
+      "range": [],
+      "stated": "annular (inner/outer sigma pairs)",
+      "main": true
+    },
+    {
+      "name": "pole centre",
+      "levels": [],
+      "range": [
+        0.5,
+        0.95
+      ],
+      "stated": "pole centre 0.5 to 0.95",
+      "main": true
+    },
+    {
+      "name": "pole radius",
+      "levels": [],
+      "range": [
+        0.1,
+        0.2
+      ],
+      "stated": "pole radius 0.1 to 0.2",
+      "main": true
+    },
+    {
+      "name": "sigma",
+      "levels": [],
+      "range": [
+        0.1,
+        0.95
+      ],
+      "stated": "for conventional sources with sigma from 0.1 to 0.95",
+      "main": true
+    },
+    {
+      "name": "two independent ways",
+      "levels": [
+        "Abbe",
+        "Hopkins"
+      ],
+      "range": [],
+      "stated": "The partially coherent aerial image can be computed two independent ways that must agree: Abbe (a sum over source points of coherent images) and Hopkins (the transmission cross coefficient, TCC).",
+      "main": false
+    }
+  ],
+  "quantities": [
+    {
+      "name": "depth of focus",
+      "stated": "depth of focus at 5% exposure latitude with a CD tolerance of +/-10% of 40 nm",
+      "main": true
+    },
+    {
+      "name": "NILS at best focus",
+      "stated": "NILS at best focus",
+      "main": true
+    },
+    {
+      "name": "MEEF",
+      "stated": "MEEF",
+      "main": true
+    },
+    {
+      "name": "the mask bias OPC needs",
+      "stated": "the mask bias OPC needs",
+      "main": true
+    },
+    {
+      "name": "the iso-dense bias before OPC",
+      "stated": "the iso-dense bias before OPC",
+      "main": true
+    },
+    {
+      "name": "whether an attenuated-mask side lobe reaches the printing threshold",
+      "stated": "whether an attenuated-mask side lobe reaches the printing threshold",
+      "main": true
+    },
+    {
+      "name": "forbidden pitches",
+      "stated": "Name the forbidden pitches of each source.",
+      "main": true
+    },
+    {
+      "name": "the CD change of the isolated line as its neighbour moves away",
+      "stated": "the CD change of the isolated line as its neighbour moves away",
+      "main": true
+    },
+    {
+      "name": "the distance beyond which it stays below 0.1 nm",
+      "stated": "the distance beyond which it stays below 0.1 nm",
+      "main": true
+    },
+    {
+      "name": "how far its oscillation is still visible",
+      "stated": "how far its oscillation is still visible",
+      "main": true
+    },
+    {
+      "name": "partially coherent aerial image",
+      "stated": "The partially coherent aerial image can be computed two independent ways that must agree: Abbe (a sum over source points of coherent images) and Hopkins (the transmission cross coefficient, TCC).",
+      "main": false
+    },
+    {
+      "name": "common depth of focus",
+      "stated": "maximize the common depth of focus of a representative set of pitches (dense, semi-dense, the worst forbidden pitch, isolated)",
+      "main": false
+    },
+    {
+      "name": "runtime",
+      "stated": "report the runtime.",
+      "main": false
+    },
+    {
+      "name": "numerical error",
+      "stated": "Report every number with its numerical error (grid, source sampling, focus step)",
+      "main": false
+    }
+  ],
+  "formulas": [
+    {
+      "name": "pupil phase",
+      "text": "2*pi/lambda * z * (n - sqrt(n**2 - (lambda*f)**2))",
+      "main": true
+    },
+    {
+      "name": "mutual coherence",
+      "text": "2*J1(u)/u with u = 2*pi*sigma*NA*d/lambda",
+      "main": false
+    },
+    {
+      "name": "first zero",
+      "text": "d = 0.61*lambda/(sigma*NA)",
+      "main": false
+    },
+    {
+      "name": "dipole poles",
+      "text": "sigma = lambda/(2*p*NA)",
+      "main": false
+    },
+    {
+      "name": "frequencies that never reach the wafer",
+      "text": "NA*(1+sigma_max)/lambda",
+      "main": false
+    }
+  ],
+  "comparisons": [
+    {
+      "what": "Compare the partially coherent aerial images computed independently using the Abbe and Hopkins formulations to verify that they agree.",
+      "between": [
+        "Abbe",
+        "Hopkins"
+      ]
+    },
+    {
+      "what": "Compare the optimized free-form source next to the best parametric source.",
+      "between": [
+        "optimized free-form source",
+        "best parametric source"
+      ]
+    },
+    {
+      "what": "Compare the oscillation of the CD change of the isolated line as its neighbour moves away with the mutual coherence function.",
+      "between": [
+        "oscillation",
+        "mutual coherence function"
+      ]
+    }
+  ],
+  "constraints": [
+    "Exposure is fixed at wavelength 193.368 nm through water (refractive index 1.436) with a projection lens of NA 1.35.",
+    "The mask is held fixed as a thin 6% attenuated phase-shift mask where dark regions transmit amplitude sqrt(0.06) with a phase of pi using the Kirchhoff thin-mask approximation.",
+    "Imaging must be scalar with no polarization.",
+    "The paper must state plainly that imaging is scalar and what that changes at NA 1.35, specifically that it overstates contrast and depth of focus.",
+    "The partially coherent aerial image must be computed two independent ways (Abbe and Hopkins) that must agree.",
+    "Patterns are constrained to vertical lines (dark on the attenuated mask) and spaces with a target line width of 40 nm.",
+    "Resist imaging is constrained to a constant-threshold aerial image with no resist blur.",
+    "Dose must be anchored so the densest pitch prints at 40 nm at best focus.",
+    "A one-dimensional OPC must set the mask line width at every pitch so it prints at 40 nm at best focus.",
+    "The process window tolerance requires a CD tolerance of +/-10% of 40 nm at 5% exposure latitude.",
+    "The free-form pixelated source optimization must keep mirror symmetry.",
+    "Computations must be CPU only.",
+    "A long run is allowed (source optimization may take hours), and the runtime must be reported.",
+    "Every number must be reported with its numerical error (grid, source sampling, focus step) and it must be stated when a result is only a check of the code.",
+    "The implementation must use Python with numpy and scipy, and matplotlib with the Agg backend.",
+    "The study must produce a paper that answers the question with numbers.",
+    "Only sources that have actually been found and read may be cited, and unconfirmed references must be stated as such rather than cited."
+  ],
+  "stated_results": [],
+  "reviewer": "gemini-3.8-flash-high",
+  "planner": "gpt-5.6-terra",
+  "same_model": false,
+  "at": "2026-10-13T06:53:18+00:00"
+}

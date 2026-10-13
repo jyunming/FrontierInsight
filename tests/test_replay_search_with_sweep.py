@@ -23,6 +23,7 @@ import pytest
 
 from core import plan
 from core import topic_requirements as tr
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import Paused, _engine
 
 FIXTURE = Path(__file__).parent / "fixtures" / "replay" / "search_with_sweep"
@@ -125,7 +126,7 @@ def _setup(tmp_path: Path, plan_replies: list[str]) -> tuple[Any, list[str], lis
             asked.append(content)
             if not pending:
                 raise RuntimeError("no answer")
-            return pending.pop(0)
+            return as_parts(pending.pop(0))
         # the reader of the topic, as it answered in the real quest
         return json.dumps({"items": [{"id": i, "verdict": v} for i, v in JUDGED.items()]})
 
@@ -166,7 +167,9 @@ async def test_an_answer_with_the_sweep_beside_the_search_is_refused_once_then_t
     out, _sha = await eng._ask_plan_for_the_topic({"topic": "t"}, design, sha, REQ)
     assert paused == []
     assert len(asked) >= 2 and "protocol.optimisation.grid" in asked[0], "the ask names the place the settings go"
-    assert "cannot both be given" in asked[1], "the first answer was refused, and the model was told exactly why"
+    # The sweep written beside the search is read as the search's own scan (so a plan never holds both); that scan names a
+    # setting the search neither varies nor holds fixed, and the reader's exact reason goes back to the model.
+    assert "neither a design variable nor a condition held fixed" in asked[1], "the first answer was refused, and the model was told exactly why"
     assert set(_comparison()) <= set(out["protocol"]["optimisation"]["grid"]), "the plan covers what the topic asked"
     assert "grid" not in out["protocol"]
 

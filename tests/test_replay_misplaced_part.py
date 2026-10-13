@@ -16,6 +16,7 @@ import pytest
 
 from core import optimisation_plan as optim
 from core import plan
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import Paused, _engine
 
 FIXTURE = Path(__file__).parent / "fixtures" / "replay" / "plan_part_misplaced"
@@ -42,7 +43,7 @@ def _setup(tmp_path: Path, replies: list[str]) -> tuple[Any, list[str], list[dic
         asked.append(messages[-1]["content"])
         if not pending:
             raise RuntimeError("no answer")
-        return pending.pop(0)
+        return as_parts(pending.pop(0))
 
     eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=chat)})()
     paused: list[dict[str, Any]] = []
