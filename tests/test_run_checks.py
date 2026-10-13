@@ -467,13 +467,12 @@ async def test_a_smaller_run_may_not_cut_the_runs_below_what_the_plans_precision
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is not None
     assert "cuts the runs per setting to 10, below the 40 the plan's precision or stated minimum needs" in _rejected(_log(eng))
     assert "keep at least 40 runs per setting" in model.asked[0]
-    # A stated minimum is a floor for a run that has more; thinning the settings is still allowed.
+    # A stated minimum is a floor: FI itself lowers the runs to it (nothing is asked of the plan's model) and keeps every setting.
     eng2, model2, runner2, _ = await _sizing(
-        tmp_path / "b", timeout_s=8, answers=[_smaller({"n": [1, 4]}, 12), _smaller({"n": [1, 4]}, 6)],
-        min_runs_per_setting=8)
+        tmp_path / "b", timeout_s=8, answers=[_smaller({"n": [1, 4]}, 12)], min_runs_per_setting=8)
     assert await eng2._size_the_run({"iteration": 0}, runner2, sys.executable, None) is None
-    assert plan.load_design(eng2.quest_root)[0]["protocol"]["runs_per_setting"] == 12
-    assert "keep at least 8 runs per setting" in model2.asked[0]
+    design2 = plan.load_design(eng2.quest_root)[0]["protocol"]
+    assert design2["runs_per_setting"] == 8 and design2["grid"] == {"n": [1, 2, 4]} and model2.asked == []
 
 
 @pytest.mark.asyncio
@@ -610,3 +609,93 @@ async def test_an_honest_run_trial_that_calls_a_method_named_run_cell_is_not_sen
                                                          encoding="utf-8")
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
     assert ex.calls > 0, "the experiment was timed as usual"
+
+
+# ---- a smaller run keeps what the topic asks for ------------------------------------------------------------------------
+
+FDR_SIM = '''\
+import time
+
+def run_trial(cell, trial, seed):
+    time.sleep(0.04)
+    return {"y": float(cell["m"]) * 0.001 + (seed % 3)}
+'''
+FDR_GRID = {"m": [20, 200, 2000], "pi1": [0.0, 0.05, 0.2], "procedure": ["uncorrected", "bonferroni", "Benjamini-Hochberg"]}
+FDR_TOPIC_READ = {
+    "factors": [
+        {"name": "m", "levels": [20.0, 200.0, 2000.0], "range": [], "stated": "m in {20, 200, 2000}", "main": False},
+        {"name": "pi1", "levels": [0.0, 0.05, 0.2], "range": [], "stated": "pi1 in {0.0, 0.05, 0.2}", "main": False},
+        {"name": "procedure", "levels": ["uncorrected", "Bonferroni", "Benjamini-Hochberg"], "range": [],
+         "stated": "Compare uncorrected, Bonferroni and Benjamini-Hochberg", "main": True}],
+    "quantities": [], "formulas": [], "comparisons": [], "constraints": [], "stated_results": []}
+
+
+async def _fdr_sizing(tmp_path: Path, answers: list[Any], *, runs: int = 1600, named: dict[str, Any] | None = None,
+                      **protocol: Any) -> tuple[Engine, Model, Any]:
+    eng, model, runner, _ex = await _sizing(tmp_path, timeout_s=900, answers=answers, grid=FDR_GRID, runs=runs, **protocol)
+    (eng.quest_root / "code" / "simulate.py").write_text(FDR_SIM, encoding="utf-8")
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    (eng.fi_dir / "topic_requirements.json").write_text(json.dumps(named or FDR_TOPIC_READ), encoding="utf-8")
+    return eng, model, runner
+
+
+@pytest.mark.asyncio
+async def test_a_smaller_run_that_drops_what_the_topic_names_is_refused_and_the_quest_stops_rather_than_run_less(
+        tmp_path: Path) -> None:
+    # The real numbers: 27 settings x 1600 runs, about 43 minutes (28 in the real run) against 15 minutes allowed, and the
+    # plan's fewest runs (its precision) is 1537. The plan's model dropped Bonferroni, m = 200 and pi1 = 0.05.
+    dropped = _smaller({"m": [20, 2000], "pi1": [0.0, 0.2], "procedure": ["uncorrected", "Benjamini-Hochberg"]}, 1537)
+    eng, model, runner = await _fdr_sizing(tmp_path, [dropped, dropped], min_runs_per_setting=1537)
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None, "it must not run a smaller study than the topic asks"
+    design = plan.load_design(eng.quest_root)[0]
+    assert design["protocol"]["grid"] == FDR_GRID and design["protocol"]["runs_per_setting"] == 1600
+    said = _rejected(_log(eng))
+    assert "it leaves out what the topic asks for" in said and "200" in said and "cut the runs per setting" in said
+    assert "The topic names these values, so none of them may be taken out" in model.asked[0]
+    text = patch["exec_result"]["too_long"]
+    assert "a smaller run it was given left out what the topic asks for" in text and "more than the 15 minutes allowed" in text
+    assert run_estimate.read_record(eng.quest_root).get("stopped") == text
+
+
+@pytest.mark.asyncio
+async def test_a_smaller_run_that_keeps_every_value_the_topic_names_and_cuts_runs_is_accepted(tmp_path: Path) -> None:
+    dropped = _smaller({"m": [20, 2000], "pi1": [0.0, 0.2], "procedure": ["uncorrected", "Benjamini-Hochberg"]}, 300)
+    fewer_runs = _smaller(FDR_GRID, 300)
+    eng, model, runner = await _fdr_sizing(tmp_path, [dropped, fewer_runs])
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert len(model.asked) == 2 and "it leaves out what the topic asks for" in _rejected(_log(eng))
+    design = plan.load_design(eng.quest_root)[0]
+    assert design["protocol"]["grid"] == FDR_GRID and design["protocol"]["runs_per_setting"] == 300
+    assert "to 27 setting(s) with 300 run(s) each" in eng._run_checks_note()
+
+
+@pytest.mark.asyncio
+async def test_a_value_the_topic_does_not_name_can_still_be_dropped(tmp_path: Path) -> None:
+    only_procedures = {**FDR_TOPIC_READ, "factors": FDR_TOPIC_READ["factors"][2:]}
+    smaller = _smaller({"m": [20, 2000], "pi1": [0.0, 0.2], "procedure": FDR_GRID["procedure"]}, 400)
+    eng, model, runner = await _fdr_sizing(tmp_path, [smaller], named=only_procedures)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert len(model.asked) == 1
+    assert plan.load_design(eng.quest_root)[0]["protocol"]["grid"]["m"] == [20, 2000]
+    assert "The topic names these values" in model.asked[0] and "`procedure`" in model.asked[0] and "`m`:" not in model.asked[0]
+
+
+@pytest.mark.asyncio
+async def test_fi_lowers_the_runs_itself_down_to_the_fewest_the_plan_states_without_asking(tmp_path: Path) -> None:
+    eng, model, runner = await _fdr_sizing(tmp_path, [], min_runs_per_setting=200)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert model.asked == [], "no request to the plan's model"
+    design = plan.load_design(eng.quest_root)[0]
+    runs = design["protocol"]["runs_per_setting"]
+    assert design["protocol"]["grid"] == FDR_GRID and 200 <= runs < 1600
+    assert eng._design_after_sizing({"design": {"hypothesis": "h"}})["protocol"]["runs_per_setting"] == runs
+    assert f"FI lowered the runs per setting from 1600 to {runs} and kept all 27 setting(s)" in eng._run_checks_note()
+
+
+def test_the_runs_that_fit_need_a_fewest_the_plan_itself_states() -> None:
+    est = run_estimate.Estimate(seconds=1000.0 / run_estimate.SAFETY, at_least=False, complete=True, cells=27, trials=43200)
+    assert run_estimate.runs_that_fit(est, 900.0, 1600, False, {}) is None, "FI invents no number of runs"
+    assert run_estimate.runs_that_fit(est, 900.0, 1600, False, {"min_runs_per_setting": 100}) == 720
+    assert run_estimate.runs_that_fit(est, 900.0, 1600, False, {"min_runs_per_setting": 1537}) is None
+    assert run_estimate.runs_that_fit(est, 900.0, 1600, True, {"min_runs_per_setting": 1}) is None

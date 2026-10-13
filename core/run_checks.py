@@ -33,6 +33,7 @@ from . import probes as _probes
 from . import probes_run as _probes_run
 from . import run_estimate as _estimate
 from . import split_run as _split_run
+from . import topic_requirements as _topic_req
 from . import trial_runner as _trial_runner
 from . import typed_results as _typed
 
@@ -452,7 +453,10 @@ class RunChecksMixin:
         unfinished = prior.get("fits") is False
         asks = int(prior.get("asks") or 0) if unfinished else 0
         reduced = prior.get("reduced") if unfinished or prior.get("fits") else None
-        for _round in range(_estimate.ASKS + 1):
+        cut_done = False  # FI lowers the runs itself at most once; it is not one of the requests to the plan's model
+        refused: list[str] = []  # smaller runs the plan's model gave that left out what the topic asks for
+        self._topic_cut_refused = refused
+        for _round in range(_estimate.ASKS + 2):
             grid, runs, thresholds = self._grid_and_runs(state)
             key = self._sizing_key(runner, grid, runs, limit_s)
             record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
@@ -490,10 +494,24 @@ class RunChecksMixin:
                 _estimate.write_record(self.quest_root, {**base, "fits": True, "asks": 0})  # type: ignore[attr-defined]
                 return None
             self._log.warning("[execute] %s, so it would not finish", line)  # type: ignore[attr-defined]
+            if not cut_done:
+                # Fewer runs per setting first: it keeps every setting the study compares, and is allowed only down to the
+                # fewest runs the plan itself states. The shorter run is timed again before it is used.
+                cut_done = True
+                fewer = _estimate.runs_that_fit(est, limit_s, runs, runner.deterministic, self._protocol_block(state) or {},  # type: ignore[attr-defined]
+                                                est.spreads)
+                note = self._lower_the_runs(state, runs, fewer, est, limit_s, grid) if fewer is not None else None
+                if note is not None:
+                    reduced = note
+                    self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fewer}
+                    _estimate.write_record(  # type: ignore[attr-defined]
+                        self.quest_root, {**base, "fits": False, "asks": asks, "reduced": reduced})
+                    await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
+                    continue
             design, sha = self._design_from_plan()  # type: ignore[attr-defined]
             can_ask = design is not None and bool(sha) and self._client is not None  # type: ignore[attr-defined]
             if asks >= _estimate.ASKS or not can_ask:
-                text = self._too_long_text(est, limit_s, asks, can_ask)
+                text = self._too_long_text(est, limit_s, asks, can_ask, bool(refused))
                 _estimate.write_record(self.quest_root, {**base, "fits": False, "asks": asks, "stopped": text})  # type: ignore[attr-defined]
                 return self._stop_too_long(text)
             asks += 1
@@ -726,6 +744,65 @@ class RunChecksMixin:
         design["protocol"] = {**(design.get("protocol") if isinstance(design.get("protocol"), dict) else {}), **sized}
         return design
 
+    def _lower_the_runs(self, state: Any, runs: int, fewer: int, est: _estimate.Estimate, limit_s: float,
+                        grid: dict[str, list[Any]]) -> dict[str, Any] | None:
+        """FI's own smaller run: the same settings with ``fewer`` runs each, written into plan.md as a version of the engine
+        (no request to the plan's model). The record of it, or ``None`` when plan.md could not be changed."""
+        path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
+        try:
+            text = path.read_text(encoding="utf-8")
+            edited = _plan.edit_design_block(
+                text, lambda d: {**d, "protocol": {**(d.get("protocol") or {}), "runs_per_setting": int(fewer)}})
+            if edited is None or _plan.parse(edited).design is None:
+                return None
+            edited = _plan.refresh_model_section(edited)
+            _plan.note_edit(self.quest_root, text)  # type: ignore[attr-defined]
+            path.write_text(edited, encoding="utf-8")
+            _plan.record_version(self.quest_root, edited, by="engine",  # type: ignore[attr-defined]
+                                 note="fewer runs per setting, so the experiment fits the time allowed, set by FI")
+        except OSError as e:
+            self._log.warning("[execute] FI could not lower the runs per setting in plan.md: %r", e)  # type: ignore[attr-defined]
+            return None
+        words = "at least " if est.at_least else "about "
+        note = (f"FI made the experiment smaller so that it fits the time allowed ({_estimate.plain_duration(limit_s)}): it "
+                f"would have taken {words}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}. FI lowered the runs per "
+                f"setting from {runs} to {fewer} and kept all {_estimate.cell_count(grid)} setting(s); the checks, thresholds "
+                "and tolerances are unchanged.")
+        self._log.warning("[execute] %s", note)  # type: ignore[attr-defined]
+        print(f"[FI] {note}")
+        return {"note": note, "from": {"grid": grid, "runs_per_setting": runs},
+                "to": {"grid": grid, "runs_per_setting": fewer}}
+
+    def _topic_values_lost(self, protocol: dict[str, Any], before_grid: dict[str, list[Any]],
+                           new_grid: dict[str, list[Any]]) -> list[str]:
+        """What the topic asks for that the plan's settings had and ``new_grid`` has not (the topic-requirement check of the
+        plan step, :func:`core.topic_requirements.match`, run on both): the sentences, empty when nothing is lost."""
+        req = self._topic_requirements_read()  # type: ignore[attr-defined]
+        if not isinstance(req, dict) or _topic_req.is_empty(req):
+            return []
+
+        def gaps_of(grid: dict[str, list[Any]]) -> set[str]:
+            found, _unresolved = _topic_req.match(req, _topic_req.view({}, {**protocol, "grid": grid}))
+            return {g["sentence"] for g in found}
+
+        return sorted(gaps_of(new_grid) - gaps_of(before_grid))
+
+    def _topic_named_values_rule(self, grid: dict[str, list[Any]]) -> str:
+        """The values the topic itself names for the plan's settings, as a rule for a smaller run (empty when it names none)."""
+        req = self._topic_requirements_read()  # type: ignore[attr-defined]
+        if not isinstance(req, dict):
+            return ""
+        named = []
+        for factor in req.get("factors") or []:
+            wanted = _topic_req._tokens(factor.get("name"))
+            if factor.get("levels") and wanted and any(
+                    _topic_req._tokens(a) and (_topic_req._tokens(a) <= wanted or wanted <= _topic_req._tokens(a)) for a in grid):
+                named.append(f"`{factor['name']}`: {', '.join(str(v) for v in factor['levels'][:8])}")
+        if not named:
+            return ""
+        return (" The topic names these values, so none of them may be taken out; cut the runs per setting, or values of "
+                "settings the topic does not name, instead: " + "; ".join(named) + ".")
+
     async def _ask_to_make_the_run_smaller(self, state: Any, est: _estimate.Estimate, limit_s: float, runs: int,
                                            deterministic: bool, remaining: int) -> tuple[dict[str, Any], dict[str, Any] | None, int]:
         """One request to the plan's model (the bounded one every part of the plan uses): ``({"grid": ..., "runs_per_setting":
@@ -738,6 +815,7 @@ class RunChecksMixin:
         before_protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
         words = "at least " if est.at_least else "about "
         asked = {"n": 0}
+        refused: list[str] = self._topic_cut_refused
 
         def lacks(now: Any) -> list[str]:
             # The run is still too big until it has become smaller; the number of requests is bounded by the helper.
@@ -755,7 +833,8 @@ class RunChecksMixin:
         def request(_now: Any, _text: str) -> str:
             asked["n"] += 1
             return _estimate.request(est, limit_s, runs, deterministic,
-                                     _estimate.rules(before_protocol, before_runs, deterministic, est.spreads))
+                                     _estimate.rules(before_protocol, before_runs, deterministic, est.spreads)
+                                     + self._topic_named_values_rule(before_grid))
 
         def keep(before: str, answer: dict[str, Any]) -> str:
             kept = self._keep_only_the_parts(before, answer, ["grid", "runs_per_setting"])  # type: ignore[attr-defined]
@@ -767,6 +846,11 @@ class RunChecksMixin:
             new_runs = max(1, int(protocol.get("runs_per_setting") or before_runs))
             problems = _estimate.smaller_run_problems(
                 before_protocol, before_grid, before_runs, grid, new_runs, deterministic, est.spreads)
+            lost = self._topic_values_lost(before_protocol, before_grid, grid)
+            if lost:
+                refused.append(" ".join(lost))
+                problems.append("it leaves out what the topic asks for (" + " ".join(lost) + ") -- cut the runs per setting, "
+                                "or the values of settings the topic does not name, instead")
             if problems:
                 raise ValueError("your answer is not used: " + "; ".join(problems) + "; plan.md is unchanged")
             return kept
@@ -790,12 +874,14 @@ class RunChecksMixin:
                  "to": {"grid": grid, "runs_per_setting": new_runs}}, asked["n"])
 
     @staticmethod
-    def _too_long_text(est: _estimate.Estimate, limit_s: float, asks: int, can_ask: bool) -> str:
+    def _too_long_text(est: _estimate.Estimate, limit_s: float, asks: int, can_ask: bool, topic_kept: bool = False) -> str:
         said = (f"the experiment would take {'at least ' if est.at_least else 'about '}"
                 f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
                 f"{_estimate.plain_duration(limit_s)} allowed")
         if asks:
-            return f"{said}; FI asked the plan {asks} time{'s' if asks != 1 else ''} to make it smaller"
+            kept = ("; a smaller run it was given left out what the topic asks for, and FI does not run a smaller study "
+                    "than the topic asks" if topic_kept else "")
+            return f"{said}; FI asked the plan {asks} time{'s' if asks != 1 else ''} to make it smaller{kept}"
         return said if can_ask else f"{said}; FI had no way to ask the plan to make it smaller"
 
     def _sizing_failed(self, why: str, text: str | None = None) -> dict[str, Any]:

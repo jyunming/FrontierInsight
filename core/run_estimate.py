@@ -745,6 +745,38 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
     return min(int(before_runs), floor)
 
 
+def floor_is_stated(protocol: dict[str, Any] | None) -> bool:
+    """Whether the plan itself states how few runs per setting it may have (`protocol.min_runs_per_setting`, or a precision
+    target): only then may FI lower the runs on its own. FI never makes up a number of runs."""
+    if not isinstance(protocol, dict):
+        return False
+    least = protocol.get("min_runs_per_setting")
+    if isinstance(least, (int, float)) and not isinstance(least, bool) and least >= 1:
+        return True
+    precision = protocol.get("precision")
+    target = precision.get("target_half_width") if isinstance(precision, dict) else None
+    return isinstance(target, (int, float)) and not isinstance(target, bool) and float(target) > 0
+
+
+def runs_that_fit(est: Estimate, limit_s: float, runs: int, deterministic: bool, protocol: dict[str, Any] | None,
+                  spreads: dict[str, float] | None = None) -> int | None:
+    """The runs per setting that make the experiment fit the time allowed with every setting kept, or ``None`` when the
+    runs alone cannot do it (the plan states no fewest number of runs, or its fewest still takes too long). Aims at half the
+    limit, as the request to the plan's model does; never below :func:`runs_floor`. The result is timed again before it is used."""
+    if deterministic or int(runs) <= 1 or not floor_is_stated(protocol) or not est.seconds > 0:
+        return None
+    full = est.seconds * SAFETY
+    floor = runs_floor(protocol, runs, spreads)
+    want = int(runs * (limit_s / 2.0) / full)
+    if want >= floor:
+        n = want
+    elif full * floor / runs <= limit_s * 0.9:
+        n = floor
+    else:
+        return None
+    return n if floor <= n < int(runs) else None
+
+
 def numerical_axes(protocol: dict[str, Any] | None) -> set[str]:
     """The settings the plan marks as numerical resolution (`protocol.numerical_axes`): the only ones that may be made coarser."""
     marked = protocol.get("numerical_axes") if isinstance(protocol, dict) else None
