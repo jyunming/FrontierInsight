@@ -11621,6 +11621,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         reader = str(record.get("reviewer") or "")
         record["send_backs"] = int(record.get("send_backs") or 0) + 1
         _code_review.save(self.quest_root, record)
+        fixed_before = sum(1 for i in _code_findings.issues_of(record).values() if i.get("outcome") == _code_findings.FIXED)
 
         async def ask(prompt: str, who: str, kind: str) -> str:
             node = (review_node + ".repair") if who == "other" else f"implement.finding_{'test' if kind == 'test' else 'repair'}"
@@ -11660,6 +11661,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             on_accept=on_accept)
         changed = await _finding_repair.repair_issues(env)
         record["repaired"] = bool(changed)
+        # Progress is what FI's own test runs show: the faults a failing test showed that now pass it (code_review.note_reading).
+        record["round_fixed"] = sum(1 for i in _code_findings.issues_of(record).values()
+                                    if i.get("outcome") == _code_findings.FIXED) - fixed_before
         _code_review.save(self.quest_root, record)
         for issue in _code_findings.issues_of(record).values():
             if issue.get("outcome") in (_code_findings.NOT_DEMONSTRATED, _code_findings.GAVE_UP):

@@ -422,7 +422,8 @@ def test_the_reader_s_list_is_no_longer_cut_at_twelve() -> None:
 @pytest.mark.asyncio
 async def test_what_was_found_is_kept_in_the_record_with_its_history_across_the_readings_of_a_quest(tmp_path: Path) -> None:
     """The reader flags a repaired issue again in other words: it keeps its id, its first reading and both statuses, and is
-    reopened rather than counted as a new finding."""
+    reopened rather than counted as a new finding. The round that fixed it was progress (its failing test passed), so it is
+    tested again in the next round; that test passes on the repaired code, and the reader's repeat is not demonstrated."""
     first = _finding(_logic(SMALL, FIRST["finding"]), severity="high")
     reworded = {**first, "what": INFO["reworded_what"], "where": f"{INFO['module']}:19"}
     models = Models(lambda n, code: [first if n == 1 else reworded], lambda prompt: FIRST_TEST, lambda who, prompt: _block(FIRST_GOOD))
@@ -432,7 +433,8 @@ async def test_what_was_found_is_kept_in_the_record_with_its_history_across_the_
     assert len(record["issues"]) == 1, "the reworded finding is the same issue"
     (issue,) = record["issues"].values()
     assert [r["n"] for r in issue["readings"]] == [1, 2] and issue["first_seen"] == 1
-    assert len(issue["wordings"]) == 2 and issue["rounds"] == 1 and issue["outcome"] == "reopened"
+    assert len(issue["wordings"]) == 2 and issue["rounds"] == 1 and issue["outcome"] == "not demonstrated"
     assert [r["outcome"] for r in issue["repairs"]] == ["accepted"]
-    assert record["converged"] is False, "a round that fixed a demonstrated issue the reader still flags is not progress"
+    assert record["converged"] is True, "progress is the fault's failing test passing, not the reader's list"
+    assert record["readings"][1]["fixed_in_round"] == 1
     assert DESIGN and STATE  # (kept imported: the neutral fixtures of the code-review tests)

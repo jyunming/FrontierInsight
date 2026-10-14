@@ -463,7 +463,7 @@ def repair_problem(old: str, new: str, rel: str, *, equations: list[str], packag
 
 #: What a record keeps from one code version to the next (the quest-wide counters and the history of the readings).
 CARRIED = ("reviews_total", "send_backs", "repair_calls", "finding_calls", "test_calls", "readings", "converged", "repaired",
-           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts", "read_problems")
+           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts", "read_problems", "round_fixed")
 
 
 def carried(record: dict[str, Any]) -> dict[str, Any]:
@@ -488,8 +488,8 @@ def earlier_block(previous: list[dict[str, Any]]) -> str:
 
 def may_repair(record: dict[str, Any]) -> str:
     """Why the problems the last reading found are not to be repaired now (``""`` when they are): the rounds or the requests
-    are spent, no reading is left to read the repaired version, or the last repair did not reduce the open high-severity
-    findings."""
+    are spent, no reading is left to read the repaired version, or the last round made no fault a failing test showed
+    pass its test (:func:`note_reading`)."""
     if int(record.get("send_backs") or 0) >= MAX_SEND_BACKS:
         return f"the {MAX_SEND_BACKS} rounds of repair allowed in a quest are spent"
     if int(record.get("finding_calls") or 0) >= MAX_FINDING_CALLS:
@@ -497,7 +497,7 @@ def may_repair(record: dict[str, Any]) -> str:
     if int(record.get("reviews_total") or 0) >= MAX_REVIEWS:
         return "no reading is left to read a repaired version"
     if record.get("converged") is False:
-        return "the last repair did not reduce the open findings that change a result"
+        return "the last round of repairs made no fault a failing test showed pass its test"
     return ""
 
 
@@ -519,8 +519,10 @@ def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[s
                  code_dir: Path | None = None) -> None:
     """Record a reading: the open findings in it (distinct issues, when ``code_dir`` is given: the id of each finding is
     stable, :mod:`core.code_findings`) and the ones that can change a reported result. When it is the reading of a version
-    a repair made, it is compared with the reading before: the repairs have converged while each round reduced the open
-    issues that change a result (or, with none open, the open issues), and not when one did not."""
+    a repair made, the repairs have converged while each round made a fault a failing test showed pass its test
+    (``round_fixed``, counted by the repair round): FI's own test runs, not the reader's list, which can name the same
+    problem again under a new id (a real quest stopped its repairs when the second reading reworded three findings). A
+    record without that count compares the open issues that change a result with the reading before."""
     from . import code_findings as _issues
 
     readings = [r for r in record.get("readings") or [] if isinstance(r, dict)]
@@ -537,11 +539,19 @@ def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[s
     entry: dict[str, Any] = {"n": n, "version": version_now, "open": total, "high": high, "changing": changing}
     if code_dir is not None:
         entry["ids"] = [i["id"] for i in _issues.open_issues(record)]
+    fixed = record.pop("round_fixed", None)
+    if code_dir is not None:
+        entry["shown_failing"] = sum(1 for i in _issues.issues_of(record).values() if isinstance(i, dict)
+                                     and i.get("demonstrated") is True and i.get("outcome") not in (_issues.FIXED, _issues.GONE))
     if record.get("repaired") and readings:
         before = readings[-1]
         before_changing = int(before.get("changing", before.get("high")) or 0)
-        improved = changing < before_changing or (
-            changing == before_changing == 0 and total < int(before.get("open") or 0))
+        if isinstance(fixed, int) and not isinstance(fixed, bool):
+            improved = fixed > 0
+            entry["fixed_in_round"] = fixed
+        else:
+            improved = changing < before_changing or (
+                changing == before_changing == 0 and total < int(before.get("open") or 0))
         entry["improved"] = improved
         record["converged"] = bool(improved) and record.get("converged") is not False
     record["repaired"] = False

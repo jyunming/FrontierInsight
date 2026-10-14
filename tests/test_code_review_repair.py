@@ -183,25 +183,29 @@ async def test_the_repair_request_names_the_topic_and_the_equations_but_never_an
 
 
 @pytest.mark.asyncio
-async def test_a_repair_that_does_not_reduce_the_open_high_findings_stops_the_repairs_and_leaves_the_budget_unspent(
-        tmp_path: Path) -> None:
+async def test_a_repair_that_passes_its_test_is_progress_even_when_the_reader_repeats_the_finding(tmp_path: Path) -> None:
+    """Progress is what FI's own test runs show, not the reader's list: the repair made the finding's failing test pass, so
+    the round counts, though the next reading flags the same finding again (it is tested again in the next round)."""
     engine = _engine(tmp_path)
     script = _Script(lambda n, code: [HEADLINE_FINDING], lambda rel, n: attempt(n))
     engine._client = script
     assert await engine._code_review_gate(WITH_PLAN) is None
     record = cr.load(engine.quest_root)
-    assert len(script.prompts) == 2 and len(script.repair_prompts) == 1, "read, repaired once, read again, and no second repair"
-    assert len(script.test_prompts) == 1, "the finding was shown by a test before it was repaired"
     assert [(r["open"], r["high"]) for r in record["readings"]] == [(1, 1), (1, 1)]
-    assert record["converged"] is False and record["final"] is True
-    assert record["send_backs"] == 1 < cr.MAX_SEND_BACKS and record["reviews_total"] == 2 < cr.MAX_REVIEWS
-    assert "did not reduce" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
-    note = cr.write_note(engine.quest_root, engine.quest_root / "code")
-    assert "stopped because a round did not reduce" in note and "quality_factor ignores the damping" in note
-    # The version that will run is the one read last; the late call asks and repairs nothing more.
-    assert await engine._code_review_gate(WITH_PLAN, final=True) is None
-    assert len(script.prompts) == 2 and len(script.repair_prompts) == 1
-    assert cr.load(engine.quest_root)["final_read"] is True
+    assert record["readings"][1]["fixed_in_round"] == 1 and record["readings"][1]["improved"] is True
+    assert record["converged"] is True
+    assert len(script.test_prompts) == 2 and len(script.repair_prompts) == 2, "shown and repaired again in the second round"
+    assert record["send_backs"] == 2 == cr.MAX_SEND_BACKS, "bounded at two rounds"
+
+
+def test_a_round_that_made_no_shown_fault_pass_its_test_did_not_converge() -> None:
+    def record(fixed: int) -> dict[str, Any]:
+        rec: dict[str, Any] = {"repaired": True, "round_fixed": fixed, "readings": [{"n": 1, "open": 1, "high": 1, "changing": 1}]}
+        cr.note_reading(rec, "v2", [], None)
+        return rec
+
+    assert record(0)["converged"] is False and record(0)["readings"][-1]["fixed_in_round"] == 0
+    assert record(2)["converged"] is True and "round_fixed" not in record(2)
 
 
 @pytest.mark.asyncio
