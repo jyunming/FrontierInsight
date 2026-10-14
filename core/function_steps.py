@@ -309,6 +309,24 @@ def is_stub(source: str, name: str) -> bool:
     return any(isinstance(n, ast.Raise) and _STUB_MARK in ast.dump(n) for n in ast.walk(node))
 
 
+def changed_signatures(source: str, fixed: dict[str, str]) -> list[str]:
+    """For each function of ``fixed`` (its name to the ``def`` line the outline gave it) that ``source`` defines at the
+    top level with other parameters: a plain sentence saying so. The outline is the one place a function's parameters
+    are fixed: the tests FI writes before the run call the function by them, so a repair that changes them makes the
+    next test fail on names alone (and the next repair change them back). Only names are compared."""
+    out = []
+    for name, signature in fixed.items():
+        node = _find(source, name)
+        if node is None:
+            continue
+        want = _param_names(ast.parse(signature.rstrip().rstrip(":") + ":\n    pass").body[0])  # type: ignore[arg-type]
+        have = _param_names(node)
+        if have != want:
+            out.append(f"`{name}` must keep the parameters ({', '.join(want)}) the outline fixed; the repair gave "
+                       f"({', '.join(have)})")
+    return out
+
+
 def _find(source: str, name: str) -> ast.FunctionDef | None:
     try:
         tree = ast.parse(source)
@@ -728,7 +746,9 @@ class FunctionFiller:
         if row.get("random"):
             text += "Its result is a random draw: FI compares the mean of many draws.\n"
         elif with_expected:
-            text += (f"FI computed the result for these inputs from the plan's own formula: {row['expected']:.10g} "
+            shown = (", ".join(f"{k} = {v:.10g}" for k, v in row["expected"].items())
+                     if isinstance(row["expected"], dict) else f"{row['expected']:.10g}")
+            text += (f"FI computed the result for these inputs from the plan's own formula: {shown} "
                      f"(relative tolerance {row['rel']:g}). The function as it is does not give it; find out why from the "
                      "step's description, do not write the number into the function.\n")
         return text

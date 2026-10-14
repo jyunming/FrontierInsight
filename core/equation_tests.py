@@ -98,7 +98,9 @@ EXAMPLE_RULE = (
     "(a count or value drawn from a distribution), add `\"random\": true`: then `expected_formula` is the distribution's "
     "MEAN for those inputs (and, if you can state it, add `\"variance_formula\"`, its variance); the function takes one "
     "more parameter after the inputs, `rng` (a numpy random generator) or `seed`, draws with it, and FI calls it many "
-    "times with fixed seeds and compares the mean (and variance) of the draws with yours, within five standard errors.")
+    "times with fixed seeds and compares the mean (and variance) of the draws with yours, within five standard errors. "
+    "When the formula defines several named outputs (`a = ...; b = ...`), the function returns them by name (a dict with "
+    "those keys) and `expected_formula` is a mapping from each output's name to its formula, one for every output.")
 
 
 def _text(value: Any) -> str:
@@ -134,6 +136,51 @@ def is_random(equation: dict[str, Any]) -> bool:
     if equation.get("random") not in unset:  # the plan wrote the flag beside the example instead of inside it
         return True
     return bool(_DRAW_WORDS.search(_text(equation.get("formula"))))
+
+
+_DEFINES = re.compile(r"^\s*([A-Za-z_]\w*)\s*=(?!=)")
+
+
+def _statements(formula: str) -> list[str]:
+    """The formula split on ``;`` and line breaks, but only outside brackets (``f(a; b)`` stays one statement)."""
+    out: list[str] = []
+    depth, start = 0, 0
+    text = str(formula or "")
+    for i, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(depth - 1, 0)
+        elif ch in ";\n" and depth == 0:
+            out.append(text[start:i])
+            start = i + 1
+    out.append(text[start:])
+    return [s for s in out if s.strip()]
+
+
+def outputs(formula: str) -> list[str]:
+    """The named outputs a formula defines, in order, read from its text alone. The formula is split into statements on
+    ``;`` and line breaks (outside brackets); a statement that starts with a bare name and a single ``=`` (``Ea = ...``)
+    defines an output of that name. A statement whose left side is anything else (``ln(k) = ...``, ``c(t) = ...``, an
+    inequality, ``x == y``, a clause such as ``where x = 1``) is a relation or a remark, not an output. A formula of
+    one statement, or with no ``=``, names at most one output; an equation is multi-output when this returns two or more
+    names (:func:`is_multi_output`). A name defined twice counts once. A name an earlier statement already uses
+    (``gamma = 2*J1(u)/u; u = ...``) is a definition of a term of that statement, not an output; a name defined first
+    and used by a later statement (``Ea = ...; lnA = alpha + Ea*...``) is still an output."""
+    seen: list[str] = []
+    before = ""  # the text of the statements read so far
+    for statement in _statements(formula):
+        m = _DEFINES.match(statement)
+        if (m and m.group(1) not in seen
+                and not re.search(rf"(?<![A-Za-z0-9_.]){re.escape(m.group(1))}(?![A-Za-z0-9_])", before)):
+            seen.append(m.group(1))
+        before += " " + statement
+    return seen
+
+
+def is_multi_output(formula: str) -> bool:
+    """Whether the formula defines several named outputs (:func:`outputs`)."""
+    return len(outputs(formula)) >= 2
 
 
 def eligible(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -197,9 +244,12 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     another check of it must exist: ``covered_by`` names it) or ``unprotected`` (untestable, and nothing else checks it)."""
     rows: list[dict[str, Any]] = []
     for eq in eligible(protocol):
+        found = outputs(str(eq.get("formula") or ""))
+        names = found if len(found) >= 2 else []  # several named outputs: the example gives a formula for each
         row = {"id": _text(eq["id"]), "formula": _text(eq["formula"]), "state": "missing",
                "why": "the plan gave no worked example", "inputs": {}, "expected": None,
-               "rel": RELATIVE, "abs": ABSOLUTE_FLOOR, "method": "", "random": is_random(eq), "variance": None}
+               "rel": RELATIVE, "abs": ABSOLUTE_FLOOR, "method": "", "random": is_random(eq), "variance": None,
+               "outputs": names}
         rows.append(row)
         example = eq.get("example")
         if example is None or (isinstance(example, str) and not example.strip()):
@@ -225,6 +275,9 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
             row.update(state="unusable", why="`inputs` must be a mapping of names (that are valid parameter names) to numbers")
             continue
         formula = example.get("expected_formula")
+        if names:
+            _multi_output_row(row, example, good, names)
+            continue
         if formula is None or not _text(formula):
             row.update(state="unusable", why=(
                 "its output is a random draw, so it cannot be held to one exact value, and the plan gave inputs but no "
@@ -249,6 +302,52 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
         if row["random"]:
             row["variance"] = _stated_variance(example if "variance_formula" in example else eq, good)
     return rows
+
+
+def _multi_output_row(row: dict[str, Any], example: dict[str, Any], good: dict[str, float], names: list[str]) -> None:
+    """Judge the example of an equation whose formula defines several named outputs (:func:`outputs`): ``expected_formula``
+    must be a mapping from every output's name to its formula, each computed by FI from the example's inputs. The row's
+    ``expected`` is then ``{name: number}`` and its ``abs`` is ``{name: absolute tolerance}`` (the round-off floor only for
+    an output that is exactly 0). A random equation with several outputs is not tested this way: it must be split."""
+    listed = ", ".join(names)
+    if row["random"]:
+        row.update(state="unusable", why=f"its output is a random draw and the formula defines several outputs ({listed}); "
+                                         "a random equation is tested one output at a time, so split it into one equation per output")
+        return
+    formula = example.get("expected_formula")
+    if not isinstance(formula, dict):
+        row.update(state="unusable", why=(
+            f"the formula defines several outputs ({listed}); give `expected_formula` as a mapping from each output's "
+            "name to its formula" if formula is not None and _text(formula) else
+            f"the formula defines several outputs ({listed}), and it gave inputs but no `expected_formula`; give it as a "
+            "mapping from each output's name to its formula"))
+        return
+    given = {str(k).strip(): v for k, v in formula.items()}
+    absent = [n for n in names if n not in given or given[n] is None or not _text(given[n])]
+    extra = [k for k in given if k not in names]
+    if absent or extra:
+        parts = ([f"no formula for {', '.join(absent)}"] if absent else []) + (
+            [f"{', '.join(extra)} is not an output of the formula" if len(extra) == 1 else
+             f"{', '.join(extra)} are not outputs of the formula"] if extra else [])
+        row.update(state="unusable", why=f"its `expected_formula` must give a formula for each output ({listed}): "
+                                         + "; ".join(parts))
+        return
+    values: dict[str, float] = {}
+    for n in names:
+        value, why, unset, _used = _forms._formula_result({"expected_formula": given[n], "case": good}, None)
+        if value is None:
+            row.update(state="unusable", why=(
+                f"its `expected_formula` for {n} uses {', '.join(unset)}, which are not among its `inputs`" if unset
+                else f"its `expected_formula` for {n} cannot be computed ({why})"))
+            return
+        values[n] = float(value)
+    rel, abs_tol, method, problem = _tolerance(example)
+    if problem:
+        row.update(state="unusable", why=problem)
+        return
+    floors = {n: (0.0 if v != 0.0 and abs_tol == ABSOLUTE_FLOOR else abs_tol) for n, v in values.items()}
+    row.update(state="ok", why="", inputs={k: float(v) for k, v in good.items()}, expected=values, rel=rel, abs=floors,
+               method=method)
 
 
 def request(rows: list[dict[str, Any]], *, last: bool = True) -> str:
@@ -311,9 +410,20 @@ def rederive_request(items: list[dict[str, Any]]) -> str:
     return ("FI tested each equation of the model before the study ran, from the worked example the plan gave. For the "
             "equations below the example could not be met by code that follows the equation as written, so the example "
             "may be the fault. Work each one out again from its equation as it is written: `inputs` are that equation's own "
-            "variables (the names its formula uses, which are the parameters of the function that computes it), each a "
+            "variables (the names its formula uses, which are the parameters of the function that computes it; for an "
+            "equation with several named outputs, the names the output formulas use), each a "
             "number, and `expected_formula` is the equation's output for exactly those inputs. " + EXAMPLE_RULE + "\n"
             + "\n".join(lines) + "\nChange only these equations' `example`, and nothing else in the plan.")
+
+
+def unsupplied(required: list[str], inputs: Any, *, random: bool = False) -> list[str]:
+    """The parameters without a default that the test would not give a value: not one of the example's ``inputs`` (and, for a
+    random equation, not ``rng``/``random_state``/``generator``/``seed``, which FI supplies). The test file applies the same
+    rule (``_run`` in :data:`_TEMPLATE`, which cannot import this module); a test checks that the two agree."""
+    given = set(inputs)
+    if random:
+        given |= {*RNG_PARAMS, SEED_PARAM}
+    return [n for n in required if n not in given]
 
 
 def parameter_problems(rows: list[dict[str, Any]],
@@ -328,9 +438,8 @@ def parameter_problems(rows: list[dict[str, Any]],
         names, required = params.get(r["id"]) or (None, [])
         if r["state"] != "ok" or names is None or any(n.startswith("*") for n in names):
             continue
-        extra = {*RNG_PARAMS, SEED_PARAM} if r.get("random") else set()
         want = set(r["inputs"])
-        if not want <= set(names) or not {n for n in required if n not in extra} <= want:
+        if not want <= set(names) or unsupplied(required, want, random=bool(r.get("random"))):
             out[r["id"]] = (f"the function for it is planned with the parameters ({', '.join(names)}), but the example's "
                             f"inputs are ({', '.join(sorted(want))}); they must be the same names")
     return out
@@ -420,7 +529,8 @@ def cases(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None])
         if r["state"] == "ok" and where:
             out.append({"id": r["id"], "formula": r["formula"], "module": where["module"], "function": where["function"],
                         "inputs": r["inputs"], "expected": r["expected"], "rel": r["rel"], "abs": r["abs"],
-                        "method": r["method"], "random": bool(r.get("random")), "variance": r.get("variance")})
+                        "method": r["method"], "random": bool(r.get("random")), "variance": r.get("variance"),
+                        "outputs": list(r.get("outputs") or [])})
     return out
 
 
@@ -508,6 +618,64 @@ def _run_random(case, fn, params):
     return "ok", "", mean, tol
 
 
+def _unsupplied(params, inputs, random):
+    """The parameters without a default that the example gives no value (the rule of core.equation_tests.unsupplied)."""
+    if any(p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL) for p in params.values()):
+        return []
+    given = set(inputs) | (set(RNG_PARAMS) | {{"seed"}} if random else set())
+    return [n for n, p in params.items() if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+            and n not in given]
+
+
+def _output(result, name):
+    """The output called ``name`` of what the function returned: a dict-like's key, else an attribute (a namedtuple, a
+    dataclass); a plain tuple, list or number has none. Raises LookupError when it has no such output."""
+    if hasattr(result, "keys"):
+        try:
+            return result[name]
+        except Exception:  # noqa: BLE001
+            raise LookupError(name)
+    if isinstance(result, (tuple, list, str, bytes)) and not hasattr(result, "_fields"):
+        raise LookupError(name)
+    try:
+        return getattr(result, name)
+    except AttributeError:
+        raise LookupError(name)
+
+
+def _run_multi(case, fn):
+    """A formula that defines several named outputs: the function returns them by name and each is held to its own tolerance."""
+    want = case["expected"]
+    names = list(want)
+    try:
+        result = fn(**case["inputs"])
+    except Exception as e:  # noqa: BLE001
+        return "error", (type(e).__name__ + ": " + str(e))[:300], None, None, want
+    got, absent = {{}}, []
+    for n in names:
+        try:
+            got[n] = _output(result, n)
+        except LookupError:
+            absent.append(n)
+    if absent:
+        return "contract", "return the outputs by name: " + ", ".join(names) + " (a dict with these keys); no output called " + ", ".join(absent), None, None, want
+    values, tols, bad = {{}}, {{}}, []
+    for n in names:
+        absolute = case["abs"][n] if isinstance(case["abs"], dict) else case["abs"]
+        tols[n] = max(case["rel"] * abs(want[n]), absolute)
+        try:
+            values[n] = float(got[n])
+        except (TypeError, ValueError):
+            values[n] = None
+            bad.append(n)
+            continue
+        if not math.isfinite(values[n]) or abs(values[n] - want[n]) > tols[n]:
+            bad.append(n)
+    if bad:
+        return "mismatch", "the output " + ", ".join(bad) + (" does" if len(bad) == 1 else " do") + " not agree", values, tols, want
+    return "ok", "", values, tols, want
+
+
 def _run(case):
     """(status, detail, value, tolerance, expected): status ok | mismatch | contract | error. The detail never holds the
     expected value (it goes to the model that repairs the function); the last three are for the record and the log."""
@@ -521,6 +689,12 @@ def _run(case):
         missing = [n for n in case["inputs"] if n not in params]
         if missing:
             return "contract", "the function must take " + ", ".join(missing) + " as arguments, named so", None, None, want
+    required = _unsupplied(params, case["inputs"], case.get("random"))
+    if required:
+        return "contract", ("the parameter " + ", ".join(required) + (" has" if len(required) == 1 else " have")
+                            + " no default and is not one of the example's inputs; give it a default or take it out of this function"), None, None, want
+    if isinstance(want, dict):
+        return _run_multi(case, fn)
     if case.get("random"):
         out = _run_random(case, fn, params)
         return (*out, want) if len(out) == 4 else out
@@ -632,6 +806,16 @@ def failure_reason(result: dict[str, Any]) -> str:
     status = result.get("status")
     got, want, tol = result.get("got"), result.get("expected"), result.get("tolerance")
     detail = _text(result.get("detail"))
+    if status == MISMATCH and isinstance(got, dict) and isinstance(want, dict):
+        tols = tol if isinstance(tol, dict) else {}
+        parts = []
+        for n, w in want.items():
+            g, t = got.get(n), tols.get(n)
+            if g is None:
+                parts.append(f"{n}: got nothing usable, expected {w:.10g}")
+            elif not (isinstance(t, (int, float)) and abs(g - w) <= t):
+                parts.append(f"{n}: got {g:.10g}, expected {w:.10g}" + (f", tolerance {t:.3g}" if isinstance(t, (int, float)) else ""))
+        return "; ".join(parts) + (f" ({detail})" if detail else "")
     if status == MISMATCH and got is not None and want is not None:
         text = f"got {got:.10g}, expected {want:.10g}" + (f", tolerance {tol:.3g}" if isinstance(tol, (int, float)) else "")
         return text + (f" ({detail})" if detail else "")

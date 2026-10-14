@@ -12114,6 +12114,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         spent: dict[str, int] = {}
         failures: list[dict[str, Any]] = []
         rederived: list[str] = []
+        fixed = self._outline_signatures(state)
         # One more pass than the repairs allow: it is made only when the plan has worked a failing example out again.
         for attempt in range(_function_steps.REPAIRS + 2):
             sources = self._equation_sources()
@@ -12170,7 +12171,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     spent[eid] = _function_steps.REPAIRS
                     continue
                 spent[eid] = spent.get(eid, 0) + 1
-                await self._repair_equation_function(f, sources, located)
+                await self._repair_equation_function(f, sources, located, fixed)
         record["failed"] = [{"id": f.get("id"), "function": f.get("function"), "status": f.get("status"),
                              "reason": _equation_tests.failure_reason(f)} for f in failures]
         record["repairs"] = spent
@@ -12333,11 +12334,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except OSError as e:
             self._log.warning("[plan] could not write %s: %r", path.name, e)
 
+    def _outline_signatures(self, state: QuestState) -> dict[str, str]:
+        """The parameters the outline fixed for each function that implements an equation of the plan's model: the
+        function's name to its ``def`` line. They are the one authority for those parameters (the equation tests call
+        the function by them): a repair keeps them, never the parameters some earlier repair left. ``{}`` when the code
+        was not written from an outline that names a function per equation."""
+        protocol = self._protocol_block(state)
+        try:
+            specs, _notes = _function_steps.model_functions(state.get("implement_outline") or {},
+                                                            protocol if isinstance(protocol, dict) else None)
+        except Exception:  # noqa: BLE001 -- without a readable outline there is no fixed signature to hold to
+            return {}
+        return {s.name: s.signature for s in specs if s.kind == _function_steps.EQUATION}
+
     async def _repair_equation_function(self, failure: dict[str, Any], sources: dict[str, str],
-                                        located: dict[str, dict[str, str] | None]) -> bool:
+                                        located: dict[str, dict[str, str] | None],
+                                        fixed: dict[str, str] | None = None) -> bool:
         """ONE repair of the function a failed equation test names, alone: it is shown that function, its equation and the
         problem (never the expected value or the study's script). Kept only when the file still parses and the function
-        keeps the parameters it had."""
+        has the parameters the outline fixed (``fixed``, :meth:`_outline_signatures`), or, for a function the outline
+        does not name, the parameters it has now."""
         where = located.get(str(failure.get("id")))
         if not where:
             return False
@@ -12347,8 +12363,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             node = _function_steps._find(source, where["function"])
             if node is None:
                 return False
-            # The parameters exactly as the function has them now (the contract the test calls it by).
-            header = f"def {where['function']}({ast.unparse(node.args)}):"
+            # The contract the test calls it by: the outline's parameters, else the parameters exactly as it has them now.
+            header = (fixed or {}).get(where["function"]) or f"def {where['function']}({ast.unparse(node.args)}):"
             problem = _equation_tests.failure_message(failure, str(failure.get("formula") or ""))
             equation = str(failure.get("id"))
             block = f"{equation}: {failure.get('formula') or ''}"
@@ -12393,14 +12409,32 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _package_repair_note(self, state: QuestState) -> str:
         shown = self._package_shown(state)
-        return _code_layout.repair_note(*shown) if shown else ""
+        if not shown:
+            return ""
+        fixed = self._outline_signatures(state)
+        return _code_layout.repair_note(*shown) + (
+            "Keep the parameters of these functions of the package exactly as they are (FI's tests call them by these "
+            "names before the study runs; a package file that changes them is not used): "
+            + "; ".join(f"`{sig.rstrip(':')}`" for sig in fixed.values()) + "\n" if fixed else "")
+
+    def _package_files_kept(self, state: QuestState, package: str, parsed: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+        """The package files a repair gave back that can be used, and the ones left out with why: a file that does not
+        parse, or that changes the parameters the outline fixed for an equation's function (:meth:`_outline_signatures`)."""
+        files, dropped = _code_layout.repair_files(parsed.get("package_files"), package)
+        fixed = self._outline_signatures(state)
+        for rel in list(files):
+            changed = _function_steps.changed_signatures(files[rel], fixed) if fixed else []
+            if changed:
+                dropped.append(f"{rel} ({'; '.join(changed)})")
+                del files[rel]
+        return files, dropped
 
     def _apply_package_repair(self, state: QuestState, parsed: Any, *, node: str) -> list[str]:
         """Write the package files a repair gave back (its JSON ``package_files``); returns the files written."""
         shown = self._package_shown(state)
         if not shown or not isinstance(parsed, dict):
             return []
-        files, dropped = _code_layout.repair_files(parsed.get("package_files"), shown[0])
+        files, dropped = self._package_files_kept(state, shown[0], parsed)
         if dropped:
             self._log.warning("[%s] the repair's package files not used: %s", node, "; ".join(dropped))
         if not files:
@@ -12419,7 +12453,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         shown = self._package_shown(state)
         if not shown or not isinstance(parsed, dict):
             return {}
-        files = _code_layout.repair_files(parsed.get("package_files"), shown[0])[0]
+        files = self._package_files_kept(state, shown[0], parsed)[0]
         return {rel: text for rel, text in files.items()
                 if rel not in shown[1] or not _split_run.same_script(shown[1][rel], text)}
 
