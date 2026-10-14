@@ -200,3 +200,14 @@ def test_trimming_never_offers_the_block(tmp_path: Path) -> None:
     assert paper_trim._ENGINE_NOTE_RE.search(paper)
     cut = [(m.start(), m.end()) for m in paper_trim._ENGINE_NOTE_RE.finditer(paper)]
     assert any(paper[a:b].startswith("<!-- fi:run-record:") for a, b in cut)
+
+
+def test_a_copy_of_the_record_without_its_markers_is_replaced(tmp_path: Path) -> None:
+    from core import disclosure
+
+    text = "**What FI recorded about this run.** Each trial's random seed is derived from base seed 7."
+    md = "# P\n\n## Limitations\nThe grid is coarse.\n\n" + text + "\n\n## References\n[1] A.\n"
+    out = disclosure.mark_run_record(disclosure.without_block(md), "**What FI recorded about this run.** Base seed 0.")
+    assert "base seed 7" not in out and out.count("What FI recorded about this run") == 1
+    # The checks still read a copy that lost its markers (only a block whose checksum matches is left out).
+    assert "base seed 7" in disclosure.strip_for_checks(md)

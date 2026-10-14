@@ -113,3 +113,15 @@ def test_the_engine_passes_the_quest_s_records(tmp_path: Path) -> None:
     assert len(hits) == 1 and hits[0].startswith("mislabelled_statistic:") and "20261013" in hits[0]
     audit = json.loads((root / "paper" / "statistics_audit.json").read_text(encoding="utf-8"))
     assert "seed_not_recorded" in audit["checks_run"] and audit["findings"][0]["kind"] == "seed_not_recorded"
+
+
+def test_the_third_of_ten_seeds_is_not_a_seed_value(tmp_path: Path) -> None:
+    seeds = seed_records(_quest(tmp_path))
+    assert _seed_findings("Results are shown for seed 3 of 10 and seed 4 out of 10.", seeds) == []
+
+
+def test_only_seed_names_are_seeds_in_the_code(tmp_path: Path) -> None:
+    root = _quest(tmp_path)
+    (root / "code" / "simulate.py").write_text("use_seed = 1\nn_seed_batches = 4\nrandom_seed = 77\n", encoding="utf-8")
+    values = {v for _loc, v in seed_records(root).code_seeds}
+    assert 77 in values and 1 not in values and 4 not in values

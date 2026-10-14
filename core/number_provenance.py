@@ -560,6 +560,10 @@ class Traceable:
         self._buckets_by_dec: dict[int, dict[tuple[bool, int], int]] = {}
         self._words_of: dict[str, frozenset[str]] = {}
 
+    def all_paths(self) -> Iterator[str]:
+        """Every path this set holds, stored and derived."""
+        return iter(self._all)
+
     def __len__(self) -> int:
         return len(self._all)
 
@@ -1150,24 +1154,42 @@ def _intervals_beside(text: str) -> dict[str, list[tuple[str, str, str]]]:
     return out
 
 
+#: The most numbers one result may hold for its value and interval to be read as one: an estimate, its interval's two
+#: ends and a few counts. A larger group (a list, a whole table) holds an unrelated pair by luck.
+RESULT_GROUP_MAX = 8
+
+
+def _parent(path: str) -> str:
+    """``path`` without its last part (``a.b.estimate`` -> ``a.b``, ``a.vals[3]`` -> ``a.vals``); ``""`` at the top."""
+    cut = max(path.rfind("."), path.rfind("["))
+    return path[:cut] if cut > 0 else ""
+
+
+def _under(path: str, parent: str) -> bool:
+    return path.startswith(parent + ".") or path.startswith(parent + "[")
+
+
 def _interval_of_a_result(token: str, beside: dict[str, list[tuple[str, str, str]]], traceable: Traceable) -> bool:
     """Is ``token`` an end of the interval printed beside a value, where one result holds the value and both ends:
     ``….coverage.estimate`` 0.9175 and ``….coverage.wilson_95_ci[0]``/``[1]`` 0.886/0.941? A run holding thousands of
     numbers matches a 3-digit endpoint by luck, so the endpoint alone is not enough; the value and both ends under one
-    result are."""
+    result -- a group of at most ``RESULT_GROUP_MAX`` numbers -- are."""
     for value, lower, upper in beside.get(token, ()):
         ends = [traceable.paths_at(float(t), _written_precision(t)) for t in (lower, upper)]
         if not all(ends):
             continue
         for path in traceable.paths_at(float(value), _written_precision(value)):
-            parent = path.rsplit(".", 1)[0] + "." if "." in path else ""
-            if parent and all(any(p.startswith(parent) for p in paths) for paths in ends):
+            parent = _parent(path)
+            if not parent or not all(any(_under(p, parent) for p in paths) for paths in ends):
+                continue
+            if sum(1 for p in traceable.all_paths() if _under(p, parent)) <= RESULT_GROUP_MAX:
                 return True
     return False
 
 
 def _is_accounted_for(
     traceable: Traceable, cand: float, dec: int, named: Callable[[], frozenset[str]], *, shifted: bool = False,
+    max_chance: float = MAX_CHANCE_UNNAMED,
 ) -> bool:
     """Does a result hold ``cand`` (rounded or truncated at ``dec`` decimals) as the quantity the sentence names?
 
@@ -1183,7 +1205,7 @@ def _is_accounted_for(
     if any(traceable.is_declared(path) for path in paths):
         return True
     # A scale or complement change is one more way to match by luck, so the unnamed match must be that much rarer.
-    if traceable.chance(cand, dec) <= MAX_CHANCE_UNNAMED / (SHIFT_CHANCE_DIVISOR if shifted else 1):
+    if traceable.chance(cand, dec) <= max_chance / (SHIFT_CHANCE_DIVISOR if shifted else 1):
         return True
     words = named()
     return any(traceable.words_of(path) & words for path in paths)
@@ -1268,10 +1290,12 @@ def check(
             continue
         if _interval_of_a_result(token, beside, traceable):
             continue
+        # A number gets a second chance to match by luck here, so an unnamed match must be that much rarer.
         if table is not None and (
             any(
                 _is_accounted_for(
                     table, cand, dec, lambda: _naming_words(flat_text, token, context), shifted=bool(how),
+                    max_chance=MAX_CHANCE_UNNAMED / SHIFT_CHANCE_DIVISOR,
                 )
                 for reading in readings
                 for cand, dec, how in _variants(reading, token)

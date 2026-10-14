@@ -87,3 +87,22 @@ def test_the_writer_gets_the_table(tmp_path: Path, monkeypatch: pytest.MonkeyPat
                                  "exec_result": {"returncode": 0}, "result_json": {"x": 1.5}}))
     assert (root / "paper" / "results_table.md").exists()
     assert any("FI's table of what every trial gave" in p and "| 1849 |" in p for p in seen)
+
+
+def test_malformed_records_are_skipped_not_fatal(tmp_path: Path) -> None:
+    cells = [{"cell": {"m": 1}, "key": "m=1", "metrics": {"loss": 0.05, "x": {"values": 3.0},
+                                                          "y": {"values": [1.0, float("nan"), 2.0, "a", None]}}},
+             {"cell": {"m": 2}, "key": "m=2", "metrics": {"y": {"values": [4.0, 5.0]}}}]
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}).replace("NaN", "NaN"), encoding="utf-8")
+    table = trial_table.rows(tmp_path)
+    assert {r["metric"] for r in table} == {"y"} and _row(table, "m=1", "y")["n"] == 2
+    assert "nan" not in trial_table.markdown(table)
+
+
+def test_the_table_s_unnamed_matches_must_be_rarer(tmp_path: Path) -> None:
+    """A number gets a second chance to match by luck in the table, so an unnamed match there needs a quarter of the
+    usual chance."""
+    import inspect
+
+    assert "max_chance=MAX_CHANCE_UNNAMED / SHIFT_CHANCE_DIVISOR" in inspect.getsource(npv.check)

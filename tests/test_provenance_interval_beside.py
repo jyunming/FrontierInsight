@@ -52,3 +52,18 @@ def test_only_a_pair_that_holds_the_value_is_its_interval() -> None:
     assert npv._intervals_beside("It was 0.5 (95% CI 0.41-0.59).")["0.41"] == [("0.5", "0.41", "0.59")]
     assert npv._intervals_beside("0.813 for OLS (325/400; 0.771–0.848)")["0.848"] == [("0.813", "0.771", "0.848")]
     assert npv._intervals_beside("0.813 for the OLS fit at (0.771–0.848)") == {}
+
+
+def test_a_large_group_is_not_one_result() -> None:
+    """A value and two ends anywhere in a wide dictionary or a list are not one result's interval."""
+    wide = {"summary": {f"k{i}": round(0.3 + 0.001 * i, 3) for i in range(300)}}
+    text = "The rate was 0.35 (0.31 to 0.39)."
+    beside = npv._intervals_beside(text)
+    traceable, _ = npv.build_traceable(result_json=wide)
+    assert not npv._interval_of_a_result("0.31", beside, traceable)
+    listed = {"x": {"vals": [0.31, 0.35, 0.39] + [round(0.5 + 0.001 * i, 3) for i in range(20)]}}
+    traceable, _ = npv.build_traceable(result_json=listed)
+    assert not npv._interval_of_a_result("0.31", beside, traceable)
+    one = {"x": {"rate": {"estimate": 0.35, "ci": [0.31, 0.39], "n": 400}}}
+    traceable, _ = npv.build_traceable(result_json=one)
+    assert npv._interval_of_a_result("0.31", beside, traceable)

@@ -373,8 +373,10 @@ def _count_sentence(rows: Any) -> str:
         return ""
     planned, trials = rows
     cells = sorted({cell for cell, _t in trials} | set(planned))
-    per = sorted(set(planned.values())) or sorted(
-        {sum(1 for c, _t in trials if c == cell) for cell in cells})
+    counts: dict[str, int] = {}
+    for c, _t in trials:
+        counts[c] = counts.get(c, 0) + 1
+    per = sorted(set(planned.values())) or sorted({counts.get(cell, 0) for cell in cells})
     each = f"{per[0]:,}" if len(per) == 1 else f"{per[0]:,} to {per[-1]:,}"
     finished = sum(1 for status, _s in trials.values() if status == "ok")
     failed = sum(1 for status, _s in trials.values() if status == "failed")
@@ -443,6 +445,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
 #: paragraph under the engine's lead words outside the markers (the passage editor can drop a marker and keep the rest).
 _ANY_BLOCK = re.compile(r"\n*[ \t]*" + re.escape(BEGIN) + r".*?" + re.escape(END) + r"[ \t]*\n*", re.S)
 _STRAY_MARKER = re.compile(r"(?:" + re.escape(BEGIN) + "|" + re.escape(END) + r")")
+_RECORD_LEAD_LINE = re.compile(r"\n*^[ \t]*" + re.escape(_RECORD_LEAD) + r"[^\n]*(?:\n|\Z)\n*", re.M)
 _LEAD_LINE = re.compile(r"\n*^[ \t]*" + re.escape(LEAD) + r"[^\n]*(?:\n|\Z)\n*", re.M)
 
 _SECTION_NUMBER = r"(?:(?:\d+(?:\.\d+)*|[IVXLC]+)\.?[ \t]+)?"
@@ -504,12 +507,15 @@ def without_block_findings(markdown: str) -> str:
 
 
 def without_block_run_record(markdown: str) -> str:
-    """``markdown`` with only the run record block (and any marker of it left on its own) taken out."""
+    """``markdown`` with only the run record block (and any marker of it left on its own) taken out, and a paragraph
+    under the record's lead words that lost its markers: a copy the writer carried over is FI's text, not the
+    writer's, and is put back by :func:`mark_run_record` with its markers."""
     text = markdown
     while True:
         before = text
         text = _RECORD_ANY.sub(_gap, text)
         text = _RECORD_STRAY.sub("", text)
+        text = _RECORD_LEAD_LINE.sub(_gap, text)
         if text == before:
             return text
 

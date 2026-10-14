@@ -18769,7 +18769,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             evidence_note = f"{evidence_note}\n\n{numbers_note}".strip()
         try:
             table_note = _trial_table.write_note(_trial_table.write(self.quest_root))
-        except OSError as e:  # the table is a help to the writer, never a reason to stop
+        except Exception as e:  # noqa: BLE001 -- the table is a help to the writer, never a reason to stop
             self._log.warning("[write] FI's table of the trials could not be written (%s)", e)
             table_note = ""
         if table_note:
@@ -18978,9 +18978,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # What FI recorded about the run (seeds, run time against the topic's limit, counts, a reduced size, the topic's
         # requirements not done, equations not tested), in the limitations: FI's words from its records, never asked of
         # the writer (core/disclosure.py:run_record). Before the code findings, which go after it.
-        markdown = _disclosure.mark_run_record(markdown, _disclosure.run_record(
-            self.quest_root, topic=str(self.config.topic or ""),
-            duration_s=(state.get("exec_result") or {}).get("duration_s")))
+        try:
+            markdown = _disclosure.mark_run_record(markdown, _disclosure.run_record(
+                self.quest_root, topic=str(self.config.topic or ""),
+                duration_s=(state.get("exec_result") or {}).get("duration_s")))
+        except Exception as e:  # noqa: BLE001 -- a record FI cannot read is left out, never a reason to stop
+            self._log.warning("[write] FI's record of the run could not be written into the paper (%s: %s)",
+                              type(e).__name__, str(e)[:200])
         # What the second model's reading of the code left unresolved, in the limitations: the engine's words from its
         # record, so the paper states it whatever the writer did with the note (core/code_review.py, core/disclosure.py).
         markdown = _disclosure.mark_findings(markdown, _code_review.findings_block(self.quest_root, self.quest_root / "code"))
@@ -20533,7 +20537,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             n_seeds=len(replicates),
             optimisation=(_best_report.records(self.quest_root)
                           if _optimise.block_of(self._protocol_block(state)) is not None else None),
-            run_facts={"duration_s": (state.get("exec_result") or {}).get("duration_s")},
+            run_facts={k: v for k, v in {"duration_s": (state.get("exec_result") or {}).get("duration_s")}.items()
+                       if isinstance(v, (int, float)) and not isinstance(v, bool)},
             trial_table=_trial_table.traceable(_trial_table.rows(self.quest_root)),
         )
 
@@ -25434,8 +25439,11 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
         parts.append(record)
     # The same run record FI writes into the paper's limitations (core/disclosure.py:run_record): a sentence of the paper
     # that states a seed or the run time is grounded in it, as the block itself is.
-    run = _disclosure.run_record(quest_root, topic=str(state.get("topic") or ""),
-                                 duration_s=(state.get("exec_result") or {}).get("duration_s"))
+    try:
+        run = _disclosure.run_record(quest_root, topic=str(state.get("topic") or ""),
+                                     duration_s=(state.get("exec_result") or {}).get("duration_s"))
+    except Exception:  # noqa: BLE001 -- evidence FI cannot read is left out
+        run = ""
     if run:
         parts.append("WHAT FI RECORDED ABOUT THIS RUN (FI's own records; the paper's limitations hold the same text):\n"
                      + run.replace("**What FI recorded about this run.** ", ""))

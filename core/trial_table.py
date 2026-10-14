@@ -19,6 +19,7 @@ the provenance check as numbers the run computed.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,10 @@ def _record(quest_root: Path) -> list[dict[str, Any]]:
 
 def _values(metric: Any) -> list[float]:
     raw = metric.get("values") if isinstance(metric, dict) else metric
-    return [float(v) for v in raw or [] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [float(v) for v in raw
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))]
 
 
 def _is_index(values: list[float]) -> bool:

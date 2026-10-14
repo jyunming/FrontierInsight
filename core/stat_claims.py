@@ -691,11 +691,11 @@ def _check_probability_complement(
 # ``torch.manual_seed(N)``, ``seed=N``, ``random_state=N``, ``BASE_SEED = N``.
 _CODE_SEED = re.compile(
     r"\b(?:default_rng|RandomState|seed|manual_seed|PRNGKey|Random|SeedSequence)\s*\(\s*(-?[0-9]+)\s*\)"
-    r"|\b(?i:\w*seed|random_state)\s*=\s*(-?[0-9]+)\b"
+    r"|\b(?i:(?:base_|random_|rng_|global_|master_|root_)?seed|random_state)\s*=\s*(-?[0-9]+)\b"
 )
 _SEED_VERB = r"(?:\s*(?:value\s+)?(?:of|=|:|was|is|equal\s+to|set\s+to))?\s*"
-# The number must end there: "seed of 1,537 trials" is not seed 1.
-_SEED_NUMBER = r"(-?[0-9]+)(?![0-9]|[.,][0-9])"
+# The number must end there: "seed of 1,537 trials" is not seed 1, and "seed 3 of 10" is the third of ten seeds.
+_SEED_NUMBER = r"(-?[0-9]+)(?![0-9]|[.,][0-9])(?!\s*(?:of|out\s+of|/)\s*[0-9])"
 _BASE_SEED = re.compile(
     rf"\b(?:base|master|root|global)[\s_-]+(?:random[\s_-]+)?seed\b{_SEED_VERB}{_SEED_NUMBER}", re.I,
 )
