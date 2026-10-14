@@ -13604,8 +13604,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     @staticmethod
     def _run_has_no_result(state: QuestState) -> bool:
-        """The run gave up, exited with an error, or printed no result (the one test the improve loop and the
-        literature cross-check share)."""
+        """The run gave up, exited with an error, or printed no result (the improve loop's test)."""
         result = state.get("exec_result") or {}
         return bool(state.get("exec_give_up_reason") or result.get("returncode", 1) != 0
                     or not state.get("result_json"))
@@ -13613,13 +13612,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     def _experiment_gave_no_result(self, state: QuestState) -> bool:
         """A simulation ran (its record is there) and produced no result at all. A quest with no simulation, one that has
         not run an experiment at all, or a run that failed after it wrote some results (a time limit part way through)
-        is not this case: what it wrote is checked as before."""
+        is not this case: what it wrote is checked as before. No number in the result is no result, as at the evidence
+        gate (:meth:`_no_results_verdict`)."""
         exec_result = state.get("exec_result")
         if not (isinstance(exec_result, dict) and exec_result):
             return False
         if state.get("no_simulation_resolved") or state.get("survey_mode_resolved"):
             return False
-        return not state.get("result_json")
+        from . import numeric_oracle as _numeric_oracle
+
+        return not any(True for _ in _numeric_oracle.flatten_numbers(state.get("result_json"), keep_zero=True))
 
     def _improve_skip(self, state: QuestState) -> str | None:
         """Why the improve loop does not run after this run, or ``None`` when it may."""
@@ -17963,7 +17965,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if parsed.get("first_pass") is not None:
                 entry["first_pass"] = parsed.get("first_pass")
             out.append(entry)
-        self._log.info("[cross_check] checked %d findings", len(out))
+        if not no_result:
+            self._log.info("[cross_check] checked %d findings", len(out))
         patch: QuestState = {"cross_check": out}
         # Cross-check iteration accounting: if analyze flagged a re-route AND
         # there's budget left, bump the shared iteration counter here so
