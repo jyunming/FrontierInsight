@@ -80,7 +80,8 @@ MARK = "EQUATION_TESTS:"
 
 OK, MISMATCH, CONTRACT, ERROR = "ok", "mismatch", "contract", "error"
 #: The function returned its outputs by name (a mapping) for a formula that defines several names, and the plan's
-#: example gives one value: the example is at fault (it must give a formula per output), not the code.
+#: example gives one value: the test cannot tell which output the value is for. The equation is not tested before the
+#: run (:func:`cannot_judge_note`, said in the limitations); it is never a failure that stops the study.
 OUTPUTS = "outputs"
 #: The kinds of check of the protocol that count as another check of an equation declared untestable.
 PROPERTY_KINDS = ("special_case", "invariant", "symmetry", "second_implementation")
@@ -379,8 +380,6 @@ _COULD_NOT_MEET = {
     CONTRACT: "the function written from the formula cannot take the example's inputs (its parameters are not the "
               "example's input names)",
     ERROR: "the function written from the formula failed when it was called with the example's inputs",
-    OUTPUTS: "the function written from the formula returns its outputs by name, and the example gives one value; give "
-             "`expected_formula` as a mapping from each name the formula defines to its formula",
 }
 
 
@@ -388,7 +387,7 @@ def repairable_by_example(result: dict[str, Any]) -> bool:
     """Whether a failed equation test may be a fault of the worked example (so the plan is asked about it): a wrong number,
     inputs the function cannot take, or an error when called. Not a function that cannot be found or imported."""
     status = result.get("status")
-    if status in (MISMATCH, CONTRACT, OUTPUTS):
+    if status in (MISMATCH, CONTRACT):
         return True
     detail = _text(result.get("detail"))
     return status == ERROR and not re.match(r"(?:ImportError|ModuleNotFoundError|SyntaxError|AttributeError)\b", detail)
@@ -467,6 +466,12 @@ def with_examples(protocol: dict[str, Any] | None, examples: dict[str, dict[str,
             eq["example"] = new["example"]
             changed = True
     return {**protocol, "model": {**model, key: items}} if changed else protocol
+
+
+def cannot_judge_note(eid: str) -> str:
+    """The plain sentence for an equation the test could not judge (:data:`OUTPUTS`)."""
+    return (f"equation {eid} is not tested before the run: its function returns several outputs by name and the plan's "
+            "worked example gives one value, so FI cannot tell which output the value is for")
 
 
 def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None]) -> list[str]:
@@ -801,9 +806,6 @@ def failure_message(result: dict[str, Any], formula: str) -> str:
                 "this equation." + (f" ({result.get('detail')})" if result.get("detail") else ""))
     if status == CONTRACT:
         return head + f" FI could not call it: {result.get('detail')}. The parameters are named as the equation's inputs."
-    if status == OUTPUTS:
-        return (head + " It returns its outputs by name, and the plan's worked example gives one value, so the example is "
-                "asked for a value of each output; keep the function returning them by name.")
     return head + f" Calling it with the equation's inputs raised: {result.get('detail')}"
 
 

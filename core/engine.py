@@ -12142,17 +12142,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             numbers = _equation_tests.load_numbers(self.quest_root / "code")
             failures = [{**r, **numbers.get(str(r.get("id")), {}), "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
                          "module": by_id.get(str(r.get("id")), {}).get("module", "")}
-                        for r in results if r.get("status") != _equation_tests.OK]
-            record["tested"] = [str(r.get("id")) for r in results]
+                        for r in results if r.get("status") not in (_equation_tests.OK, _equation_tests.OUTPUTS)]
+            # The test could not judge it (one value for outputs returned by name): not tested before the run, said so in the
+            # record and the limitations; never a failure that stops the study (FI's tool, not the code, fell short).
+            shape = [str(r.get("id")) for r in results if r.get("status") == _equation_tests.OUTPUTS]
+            for eid in shape:
+                note = _equation_tests.cannot_judge_note(eid)
+                if note not in notes:
+                    notes.append(note)
+                    self._log.info("[equations] %s", note)
+            record["not_tested"] = notes
+            record["tested"] = [str(r.get("id")) for r in results if str(r.get("id")) not in shape]
             if not failures:
                 self._log.info("[equations] the model's %d tested equation(s) agree with the plan's worked examples",
-                               len(results))
+                               len(record["tested"]))
                 break
-            if attempt >= _function_steps.REPAIRS or all(f.get("status") == _equation_tests.OUTPUTS for f in failures):
+            if attempt >= _function_steps.REPAIRS:
                 # Code that follows the formula could not meet the plan's example: the example is the plan's own, so the
                 # plan is asked (once per equation) to work it out again from the formula, and the tests run once more,
-                # unchanged. Nothing about the code or the number it gave goes into the request. A function that returns
-                # its outputs by name where the example gives one value is not repaired first: the example is at fault.
+                # unchanged. Nothing about the code or the number it gave goes into the request.
                 if rederived or attempt > _function_steps.REPAIRS:
                     break
                 rederived = await self._rederive_failed_examples(state, protocol, failures)
@@ -12164,7 +12172,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 continue
             for f in failures:
                 eid = str(f.get("id"))
-                if spent.get(eid, 0) >= _function_steps.REPAIRS or f.get("status") == _equation_tests.OUTPUTS:
+                if spent.get(eid, 0) >= _function_steps.REPAIRS:
                     continue
                 if not _function_steps.spend(self.quest_root, _function_steps.MAX_CALLS):
                     self._log.warning("[equations] the most requests the function steps may make in this quest are spent; "

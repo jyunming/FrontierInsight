@@ -82,17 +82,17 @@ def _plan_example(engine) -> Any:  # noqa: ANN001
 
 
 @pytest.mark.asyncio
-async def test_a_one_value_example_for_outputs_returned_by_name_goes_to_the_plan_with_no_function_repair(tmp_path: Path) -> None:
+async def test_a_one_value_example_for_outputs_returned_by_name_is_not_tested_and_the_study_runs(tmp_path: Path) -> None:
+    # The person's decision (2026-10-14): when FI's own test cannot judge the function, the equation is recorded as not
+    # tested before the run (said in the limitations) and the study goes on; nothing is repaired or asked.
     engine, model, state = _setup(tmp_path, ONE_VALUE, PER_OUTPUT)
     assert await engine._equation_gate(state, None, None) is None
-    assert model.other == [], "the function is right: no repair of it is asked"
-    assert len(model.revisions) == 1
-    asked = model.revisions[0].split("# What the person asked for", 1)[1]
-    assert "by name" in asked and "mapping from each name the formula defines" in asked
-    assert "8314" not in asked, "never the number the code computed"
-    assert _plan_example(engine) == PER_OUTPUT
+    assert model.other == [] and model.revisions == [], "no repair of the function, no request to the plan"
+    assert _plan_example(engine) == ONE_VALUE
     record = json.loads((engine.fi_dir / "equation_tests.json").read_text(encoding="utf-8"))
-    assert record["failed"] == [] and record["example_rederived"] == ["E4"]
+    assert record["failed"] == [] and record["tested"] == []
+    assert any("equation E4 is not tested before the run" in n and "by name" in n for n in record["not_tested"])
+    assert "equation E4 is not tested before the run" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -106,9 +106,11 @@ async def test_with_a_value_for_each_output_a_wrong_output_is_still_caught_and_r
 
 
 @pytest.mark.asyncio
-async def test_a_plan_that_keeps_one_value_ends_in_the_existing_whole_script_repair(tmp_path: Path) -> None:
-    engine, model, state = _setup(tmp_path, ONE_VALUE, None)
+async def test_a_wrong_function_returning_one_number_is_still_caught_with_a_one_value_example(tmp_path: Path) -> None:
+    # Not testing applies only when the test cannot judge: a function that returns one number is held to the value as before.
+    wrong_one = ("# E4\ndef arrhenius_parameters(alpha, beta, R, mean_invT):\n"
+                 "    return alpha + beta * mean_invT\n")
+    engine, model, state = _setup(tmp_path, ONE_VALUE, None, code=wrong_one)
     patch = await engine._equation_gate(state, None, None)
-    assert patch is not None and patch["exec_result"]["returncode"] == 1 and model.other == []
-    assert "by name" in patch["exec_result"]["stderr_tail"] and "8314" not in patch["exec_result"]["stderr_tail"]
-    assert len(model.revisions) == 1
+    assert patch is not None and patch["exec_result"]["returncode"] == 1
+    assert len(model.other) == 2, "the function's repairs as before"

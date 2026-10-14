@@ -123,17 +123,16 @@ def _run(tmp_path: Path, source: str, example: Any, formula: str = FORMULA) -> d
     return results[0]
 
 
-def test_a_function_returning_its_outputs_by_name_for_a_one_value_example_puts_the_example_at_fault(tmp_path: Path) -> None:
+def test_a_function_returning_its_outputs_by_name_for_a_one_value_example_cannot_be_judged(tmp_path: Path) -> None:
     assert eqt.outputs(FORMULA) == ["Ea_hat", "ln_A_hat"] and eqt.is_multi_output(FORMULA)
     for example in (V13_EXAMPLE, V10_EXAMPLE):
         assert eqt.example_rows(_protocol(example))[0]["state"] == "ok", "the text alone does not reject the example"
-    # The run's code (correct, outputs by name): the example is at fault, and the plan is asked for a value per output.
+    # The run's code (correct, outputs by name): the test cannot judge which output the one value is for, so the
+    # equation is recorded as not tested (the engine side: tests/test_replay_multi_output_gate.py), never failed.
     result = _run(tmp_path, DEFAULTED, V13_EXAMPLE)
-    assert result["status"] == eqt.OUTPUTS and eqt.repairable_by_example(result)
-    message = eqt.failure_message({**result, "function": "arrhenius_parameters", "id": "E4"}, FORMULA)
-    assert "by name" in message and "6.0" not in message
-    ask = eqt.rederive_request([{"id": "E4", "formula": FORMULA, "example": V13_EXAMPLE, "why": result["status"]}])
-    assert "mapping from each name the formula defines" in ask and "6.0" not in ask.split("could not be met")[1]
+    assert result["status"] == eqt.OUTPUTS and "6.0" not in result["detail"]
+    assert not eqt.repairable_by_example(result)
+    assert "not tested before the run" in eqt.cannot_judge_note("E4")
     # The same return for a formula that defines one name is the code's fault, as before.
     one = _run(tmp_path, DEFAULTED, V13_EXAMPLE, "ln_A_hat = alpha + Ea_hat*mean(1/T)/R")
     assert one["status"] == "mismatch" and "not one number" in one["detail"]
