@@ -32,6 +32,10 @@ def test_a_tolerance_of_0_on_a_computed_value_passes_rounding_and_a_count_off_by
 def test_the_floor_scales_with_the_expected_value_and_leaves_ordinary_tolerances_alone() -> None:
     limit = oc.limit_of({"expected": 1e6, "tolerance": 0.0, "tolerance_mode": "absolute"})[1]
     assert limit is not None and 1e6 * 2.2e-16 < limit < 1e6 * 1e-13
+    tiny = oc.limit_of({"expected": 1e-20, "tolerance": 0.0, "tolerance_mode": "absolute"})[1]
+    assert tiny is not None and tiny < 1e-32
+    assert oc.limit_of({"expected": 1e-20, "tolerance": 1e-22, "tolerance_mode": "absolute"})[1] == 1e-22
+    assert oc.limit_of({"expected": 1e-16, "tolerance": 0.01, "tolerance_mode": "relative"})[1] == 0.01 * 1e-16
     assert oc.limit_of({"expected": 2.0, "tolerance": 0.01, "tolerance_mode": "absolute"})[1] == 0.01
     assert oc.limit_of({"expected": 2.0, "tolerance": 0.01, "tolerance_mode": "relative"})[1] == 0.02
     # A relative tolerance around 0 still cannot be judged.
