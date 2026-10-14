@@ -103,10 +103,6 @@ class ResultChecksMixin:
             found.extend(self._degenerate_findings(state, result_json, cells))
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
             self._log.warning("[execute] could not check the run's results for empty figures and constants (%r)", exc)  # type: ignore[attr-defined]
-        try:
-            found.extend(self._no_figures_findings(state))
-        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
-            self._log.warning("[execute] could not check whether the planned figures were drawn (%r)", exc)  # type: ignore[attr-defined]
         return found
 
     def _saved_figures(self) -> list[str]:
@@ -115,9 +111,16 @@ class ResultChecksMixin:
         folder = self.quest_root / "figures"  # type: ignore[attr-defined]
         return sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _e._FIGURE_SUFFIXES) if folder.is_dir() else []
 
+    def _no_figures_standing(self, state: Any) -> list[Found]:
+        try:
+            return self._no_figures_findings(state)
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[execute] could not check whether the planned figures were drawn (%r)", exc)  # type: ignore[attr-defined]
+            return []
+
     def _no_figures_findings(self, state: Any) -> list[Found]:
-        """The plan has figures and the run, which finished, saved none: nothing was drawn, so the paper has no figure. Sent back
-        like any other fault (the analysis draws them from the saved results), and what stays is said in the limitations."""
+        """The plan has figures and the run, which finished, saved none: nothing was drawn, so the paper has no figure. Not
+        sent back (the results stand); the writer is told, and the limitations say so."""
         planned = (state.get("design") or {}).get("figures_planned")
         names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
         if not names or self._saved_figures():
@@ -250,7 +253,11 @@ class ResultChecksMixin:
         self._result_marked = []
         found = self._result_findings(state, result_json) if getattr(self, "_trial_mode", False) else []
         # What a second model found the code computes otherwise cannot be repaired here (its repairs were spent before the run).
-        standing = [*self._code_reader_findings(result_json), *self._figure_gap_findings(set())]
+        # A run that drew none of the planned figures still has its results: they stand, and the writer is told there is
+        # no figure. Sent back like a failed run, a repair that gave up would have thrown the results away and stopped the
+        # quest with nothing to write up (a false stop).
+        standing = [*self._code_reader_findings(result_json), *self._figure_gap_findings(set()),
+                    *self._no_figures_standing(state)]
         if not found and not standing:
             if self._result_marked:
                 self._write_marked(record_path)
@@ -272,7 +279,7 @@ class ResultChecksMixin:
             return result, to_fix
         if found:  # a figure that is taken out has no gap to report
             standing = [*self._code_reader_findings(result_json),
-                        *self._figure_gap_findings({n for f in found for n in f.figures})]
+                        *self._figure_gap_findings({n for f in found for n in f.figures}), *self._no_figures_standing(state)]
         self._leave_out_results([*found, *standing], record_path, result_json)
         return result, failed_script
 

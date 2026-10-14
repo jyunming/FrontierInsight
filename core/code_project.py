@@ -657,7 +657,7 @@ def _git(code_dir: Path, *args: str) -> Any:
     null = "\\\\.\\nul" if os.name == "nt" else os.devnull
     # And git never looks above code/ for a repository: with code/.git gone or broken, a commit must fail, never land in
     # a repository that happens to hold the quest folder (with whatever that repository has uncommitted).
-    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+    env = {**scrub_secrets(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
            "GIT_CEILING_DIRECTORIES": str(Path(code_dir).resolve().parent)}
     return subprocess.run(
         ["git", "-c", "user.name=Frontier Insight", "-c", "user.email=fi@localhost", "-c", "commit.gpgsign=false",

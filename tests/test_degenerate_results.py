@@ -193,6 +193,31 @@ def test_a_panel_with_only_a_reference_line_is_empty_and_a_normal_figure_raises_
     assert dr.figure_problems(twin, ["twin.png"]) == []
 
 
+def test_a_constant_series_with_markers_a_twin_made_with_add_axes_and_a_legend_panel_are_not_empty(tmp_path: Path) -> None:
+    # a measured series that happens to be constant, drawn dashed with markers, is data (each marker a setting)
+    (tmp_path / "marked").mkdir()
+    marked = _draw(tmp_path / "marked", "fig, ax = plt.subplots(); ax.plot([1, 2, 3], [0.0, 0.0, 0.0], 'o--', label='error')\n"
+                                        "ax.set_title('Error'); fig.savefig('marked.png')\n")
+    assert dr.figure_problems(marked, ["marked.png"]) == []
+    # twin axes on axes made without a grid (add_axes) share the place
+    (tmp_path / "boxes").mkdir()
+    boxes = _draw(tmp_path / "boxes", "fig = plt.figure(); ax = fig.add_axes([0.1, 0.1, 0.8, 0.8]); ax.axhline(1.0)\n"
+                                      "ax.set_title('left'); ax2 = ax.twinx(); ax2.plot([1, 2, 3], [3, 2, 1])\n"
+                                      "fig.savefig('boxes.png')\n")
+    assert dr.figure_problems(boxes, ["boxes.png"]) == []
+    # a panel that only holds the legend the other panels share
+    (tmp_path / "legend").mkdir()
+    legend = _draw(tmp_path / "legend", "fig, (a, b) = plt.subplots(1, 2); h, = a.plot([1, 2, 3], [1, 2, 3], label='x')\n"
+                                        "a.set_title('Data'); b.axis('off'); b.legend(handles=[h]); b.set_title('Legend')\n"
+                                        "fig.savefig('legend.png')\n")
+    assert dr.figure_problems(legend, ["legend.png"]) == []
+    # the same reference line alone, with no data anywhere, is still empty
+    (tmp_path / "alone").mkdir()
+    alone = _draw(tmp_path / "alone", "fig, ax = plt.subplots(); ax.plot([1, 2, 3], [0.5, 0.5, 0.5], '--')\n"
+                                      "ax.set_title('Only the line'); fig.savefig('alone.png')\n")
+    assert [p.kind for p in dr.figure_problems(alone, ["alone.png"])] == ["empty"]
+
+
 def test_a_series_that_misses_settings_the_figure_otherwise_shows_is_counted_from_the_plotted_data(tmp_path: Path) -> None:
     records = _draw(tmp_path, THREE_FIGURES)
     lines = json.loads((records / "none_values.seed0.json").read_text(encoding="utf-8"))["axes"][0]["lines"]
@@ -287,7 +312,7 @@ async def test_a_figure_alone_goes_back_to_the_analysis(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_a_run_that_saved_no_figure_though_the_plan_has_some_is_sent_back_then_said_plainly(
+async def test_a_run_that_saved_no_figure_though_the_plan_has_some_keeps_its_results_and_says_so_plainly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     eng = _engine(tmp_path, monkeypatch)
@@ -297,10 +322,7 @@ async def test_a_run_that_saved_no_figure_though_the_plan_has_some_is_sent_back_
                         for c in _cells(gain=lambda r: 3 * r, level=lambda r: r * r)]}
     (eng.quest_root / "raw" / "trials.json").write_text(json.dumps(record), encoding="utf-8")
     state: dict[str, Any] = {"iteration": 0, "design": {"figures_planned": ["figures/power.png", "figures/fdr.png"]}}
-    for _ in (1, 2):
-        result, script = await eng._results_match_run(state, _run(), None, True)
-        assert result.returncode == 1 and script == "experiment.py"
-        assert "the plan has figures (`power.png`, `fdr.png`) and the run saved none" in result.stderr
+    # Not sent back: a repair that gave up would throw the results away and stop the quest with nothing to write up.
     result, _ = await eng._results_match_run(state, _run(), None, True)
     assert result.returncode == 0
     note = eng._run_checks_note()

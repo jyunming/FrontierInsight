@@ -13269,7 +13269,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "print('\\n'.join(sorted(rows.values())))\n")
         try:
             tree = await AsyncProcessTree.start(str(py), "-c", code, stdout=asyncio.subprocess.PIPE,
-                                                stderr=asyncio.subprocess.PIPE)
+                                                stderr=asyncio.subprocess.PIPE, env=scrub_secrets())
             aborted = False
             try:
                 out, _err = await asyncio.wait_for(tree.proc.communicate(), timeout=_PIP_FREEZE_TIMEOUT_S)

@@ -101,13 +101,15 @@ _DASHED = ("--", ":", "-.", "dashed", "dotted", "dashdot")
 
 
 def _is_reference(line: Any) -> bool:
-    """A recorded line that is a reference drawn on purpose: ``axhline`` / ``axvline``, or a dashed line at one value."""
+    """A recorded line that is a reference drawn on purpose: ``axhline`` / ``axvline``, or a dashed line at one value
+    with no markers. A constant drawn with markers is a measured series (each marker is a setting), not a reference."""
     if not isinstance(line, dict):
         return False
     if line.get("kind") in ("hline", "vline"):
         return True
     y = line.get("y")
     return (line.get("kind") == "data" and line.get("linestyle") in _DASHED and isinstance(y, list) and len(y) > 1
+            and str(line.get("marker") or "None") in ("None", "none", "", " ")
             and len(_rs._distinct([float(v) for v in y])) == 1)
 
 
@@ -119,9 +121,12 @@ def _has_data(panel: Any) -> bool:
 
 
 def _shares_place_with_data(panels: list[Any], i: int) -> bool:
-    grid = panels[i].get("grid") if isinstance(panels[i], dict) else None
-    return grid is not None and any(j != i and isinstance(p, dict) and p.get("grid") == grid and _has_data(p)
-                                    for j, p in enumerate(panels))
+    """Another panel in the same place holds data (a twin axis): the same cell of a grid, or the same box on the figure
+    for axes made without a grid."""
+    me = panels[i] if isinstance(panels[i], dict) else {}
+    keys = [k for k in ("grid", "place") if me.get(k) is not None]
+    return bool(keys) and any(j != i and isinstance(p, dict) and any(p.get(k) == me[k] for k in keys) and _has_data(p)
+                              for j, p in enumerate(panels))
 
 
 #: A panel's series are compared point for point only when the longer of the two has at most this many points (a grid of
@@ -159,7 +164,8 @@ def figure_gaps(records_dir: Path, figures: list[str]) -> list[FigureGap]:
             lines = [ln for ln in (panel.get("lines") if isinstance(panel.get("lines"), list) else [])
                      if isinstance(ln, dict) and ln.get("kind") == "data" and not _is_reference(ln)]
             title = str(panel.get("title") or "")
-            xs = [set(_numbers(ln.get("x"))) for ln in lines]
+            # Compared at 9 significant digits: the same setting written as 0.1 and as np.arange's 0.1000000000000001.
+            xs = [{float(f"{v:.9g}") for v in _numbers(ln.get("x"))} for ln in lines]
             for k, ln in enumerate(lines):
                 label = str(ln.get("label") or "")
                 gone = _numbers(ln.get("missing_x"))
@@ -181,8 +187,9 @@ def gap_note(gaps: list[FigureGap]) -> str:
     """For the writer: where a figure has no point, and what that means for the sentences about it."""
     shown = "; ".join(g.says() for g in gaps[:6])
     return (f"Where the figures show no point: {shown}. Do not say a figure shows, confirms or reaches a value at those "
-            "settings, and do not write \"as shown in Figure N\" for them: give the value from the results in the text or a "
-            "table, and say in the caption which settings the figure has no point for.")
+            "settings, and do not write \"as shown in Figure N\" for them: where the results hold the value, give it in the text or a "
+            "table; where they do not, say it was not computed; and say in the caption which settings the figure has no "
+            "point for.")
 
 
 def figure_problems(records_dir: Path, figures: list[str]) -> list[FigureProblem]:
@@ -200,7 +207,9 @@ def figure_problems(records_dir: Path, figures: list[str]) -> list[FigureProblem
             title = str(panel.get("title") or labelled.get("title") or "")
             named = bool(title or panel.get("xlabel") or panel.get("ylabel") or labelled.get("xlabel"))
             drawn = panel.get("lines") if isinstance(panel.get("lines"), list) else []
-            if not drawn and not labelled.get("series") and not panel.get("draws_other") and named:
+            # A panel that only holds a legend (shared by the other panels) is not empty.
+            if (not drawn and not labelled.get("series") and not panel.get("draws_other") and not panel.get("legend")
+                    and named):
                 out.append(FigureProblem(Path(name).name, title, "empty"))
                 continue
             # A panel whose only lines are reference lines (a threshold, a known value) holds no result: the axes are

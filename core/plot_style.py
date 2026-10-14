@@ -521,8 +521,13 @@ try:
                 grid = [rows, cols, spec.rowspan.start, spec.rowspan.stop, spec.colspan.start, spec.colspan.stop]
             formatters = {type(axis.get_major_formatter()).__name__ for axis in (ax.xaxis, ax.yaxis)}
             others = (ax.patches, ax.collections, ax.images, ax.texts, ax.tables, ax.artists, ax.child_axes)
+            try:  # where the panel sits on the figure: twin axes share it, also when made with add_axes (no grid)
+                place = [round(float(v), 4) for v in ax.get_position().bounds]
+            except Exception:
+                place = None
             return {
                 "grid": grid,
+                "place": place,
                 "title": " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t),
                 "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
