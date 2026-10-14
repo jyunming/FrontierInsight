@@ -18542,7 +18542,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                               ", ".join(str(i.get("id")) for i in shown[_code_findings.MAX_SHOWN_RERUNS:])[:200])
         shown = shown[:_code_findings.MAX_SHOWN_RERUNS]
         try:
-            return await self._shown_fault_check(shown)
+            return await self._shown_fault_check(shown, record, state.get("result_json"))
         except Exception as exc:  # noqa: BLE001 - a broken check must not let a flagged fault through
             flagged = [i for i in shown if _code_findings.flagged_now(i)]
             if not flagged:
@@ -18550,7 +18550,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return None
             return self._shown_fault_stop(flagged[0], f"FI could not run its test again ({type(exc).__name__}: {exc})")
 
-    async def _shown_fault_check(self, shown: list[dict[str, Any]]) -> dict[str, Any] | None:
+    async def _shown_fault_check(self, shown: list[dict[str, Any]], record: dict[str, Any] | None = None,
+                                 result: Any = None) -> dict[str, Any] | None:
         verdicts: list[tuple[dict[str, Any], str]] = []
         silent: list[dict[str, Any]] = []
         answered = 0
@@ -18588,7 +18589,56 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             verdicts = [(i, how) for i, how in verdicts if i not in silent]
         if not verdicts:
             return None
-        return self._shown_fault_stop(*verdicts[0])
+        return self._shown_fault_outcome(verdicts, record or {}, result)
+
+    def _shown_fault_outcome(self, verdicts: list[tuple[dict[str, Any], str]], record: dict[str, Any],
+                             result: Any) -> dict[str, Any] | None:
+        """What the faults a failing test showed, and nothing showed gone, do to the quest, from the records alone. A fault
+        about the study's main quantity (the plan's first dependent variable or its precision metric) stops it with no
+        paper: there is nothing to report. A plan quantity the code does not compute (and the results do not hold under
+        another name) is a part not done, which the paper states. A fault in another quantity takes that quantity out of
+        the results the paper may use, and the paper states it. A fault whose quantity the results do not hold, or whose
+        removal leaves no result, stops the quest: nothing can be left out, and a wrong number may stand."""
+        stops: list[tuple[dict[str, Any], str]] = []
+        left_out: list[tuple[dict[str, Any], str, list[str]]] = []
+        not_done: list[tuple[dict[str, Any], str, list[str]]] = []
+        for issue, how in verdicts:
+            if issue.get("headline"):
+                stops.append((issue, how))
+            elif missing := _code_review.missing_quantities(record, issue):
+                not_done.append((issue, how, missing))
+            elif keys := _code_review.keys_of_issue(record, issue, result):
+                left_out.append((issue, how, keys))
+            else:
+                stops.append((issue, how + "; FI cannot find which of the results it changes, so it cannot leave them out"))
+        if not stops and left_out:
+            from . import numeric_oracle as _numeric_oracle
+            from . import typed_results as _typed
+
+            gone = {k for _i, _h, keys in left_out for k in keys}
+            if not any(True for _ in _numeric_oracle.flatten_numbers(_typed.strip_keys(result, gone), keep_zero=True)):
+                stops.append((left_out[0][0], left_out[0][1] + "; leaving out what it changes leaves no result"))
+        if stops:
+            return self._shown_fault_stop(*stops[0])
+        issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+        for issue, how, keys in left_out:
+            self._log.warning("[evidence_gate] %s: %s; FI leaves %s out of the results the paper may use, and the paper says "
+                              "so", issue.get("id"), how, ", ".join(keys)[:200])
+        for issue, how, names in not_done:
+            self._log.warning("[evidence_gate] %s: the code does not compute %s (%s); the paper says so, as a part not done",
+                              issue.get("id"), ", ".join(names)[:200], how)
+        for issue, how, names, outcome in [*((i, h, k, "left_out") for i, h, k in left_out),
+                                           *((i, h, n, "not_computed") for i, h, n in not_done)]:
+            saved = issues.get(str(issue.get("id")))
+            if isinstance(saved, dict):
+                saved["at_gate"] = {"outcome": outcome, "how": how, "keys" if outcome == "left_out" else "names": names,
+                                    "quantity": (_code_review.quantity_names(record, issue) or names)[0]}
+        if left_out or not_done:
+            _code_review.save(self.quest_root, record)
+            self._leave_out_shown_faults(
+                [((_code_review.quantity_names(record, i) or k)[0], k, h) for i, h, k in left_out],
+                [(n, h) for _i, h, names in not_done for n in names], result)
+        return None
 
     async def _finding_tests_can_run(self) -> bool:
         """Whether the quest's environment runs a finding test at all: a test file that does nothing, run the same way."""

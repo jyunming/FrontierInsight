@@ -10,6 +10,7 @@ import asyncio
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 from core import code_findings
 from core import code_review
@@ -41,19 +42,75 @@ def test_r7_s_shown_faults_are_untouched(tmp_path: Path) -> None:
     assert all(code_review.reported_under_another_name(record, i, result) == [] for i in shown)
 
 
-def test_the_gate_does_not_stop_on_a_name_and_says_why(tmp_path: Path) -> None:
+def _gate(name: str, tmp_path: Path, monkeypatch: Any) -> tuple[Path, Any, Any]:
+    """The evidence gate on a fixture, with every finding test still failing on the code (the tests and the code are not
+    in the fixture: each test file is a stand-in, and its run is FI's record that it failed)."""
+    root, _record, result = _load(name, tmp_path)
+    return _gate_on(root, result, monkeypatch)
+
+
+def _gate_on(root: Path, result: Any, monkeypatch: Any) -> tuple[Path, Any, Any]:
+    from core import finding_repair
     from tests.test_disclosure import _engine
 
-    root, _record, result = _load("kinetics_r8", tmp_path)
+    record = code_review.load(root)
+    for issue in code_findings.shown_open(record):
+        test = root / str(issue["test"])
+        test.parent.mkdir(parents=True, exist_ok=True)
+        test.write_text("def test_x():\n    assert False\n", encoding="utf-8")
     eng = _engine(root)
+
+    async def still_fails(rel: str) -> Any:
+        return finding_repair.TestRun("fail", "test_x: the assertion failed")
+
+    monkeypatch.setattr(eng, "_rerun_finding_test", still_fails)
     verdict = asyncio.run(eng._shown_fault_verdict(  # type: ignore[arg-type]
         {"exec_result": {"returncode": 0}, "result_json": result}))
-    # It still stops on a fault the names do not explain (the finding tests are not in the fixture, so the first one
-    # left is cited as "no longer on disk"), never on the two quantities held under another name.
-    assert verdict is not None and verdict["stuck_reason"] == "shown_fault_open"
-    assert "k_relative_bias" not in verdict["rationale"] and "k_95_coverage" not in verdict["rationale"]
+    return root, verdict, eng
+
+
+def test_r8_does_not_stop_and_the_paper_states_what_is_left_out(tmp_path: Path, monkeypatch: Any) -> None:
+    from core import disclosure
+
+    root, verdict, eng = _gate("kinetics_r8", tmp_path, monkeypatch)
+    assert verdict is None
     saved = code_review.load(root)["issues"]
+    # held under another name: a difference of names, not a fault
     assert saved["F-b5e6edb8"]["changes_result"] is False
     assert saved["F-b5e6edb8"]["reported_as"] == ["k_relative_bias_by_temp"]
-    assert saved["F-650ad5f3"]["changes_result"] is True
     assert {"F-b5e6edb8", "F-fe5d51ce"}.isdisjoint({i["id"] for i in code_findings.shown_open(code_review.load(root))})
+    # the plan's quantity the code does not compute: a part not done
+    assert saved["F-650ad5f3"]["at_gate"]["outcome"] == "not_computed"
+    assert saved["F-650ad5f3"]["at_gate"]["names"] == ["Ea_lnA_correlation"]
+    # a fault a test showed in a quantity that is not the study's main one: left out of the results
+    assert saved["F-3af8cc05"]["at_gate"]["outcome"] == "left_out"
+    assert saved["F-3af8cc05"]["at_gate"]["keys"] == ["Ea_lnA_empirical_correlation"]
+    checked = json.loads((root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
+    assert checked["removed_quantities"] == ["Ea_lnA_empirical_correlation"]
+    assert checked["removed_values"]["Ea_lnA_empirical_correlation"]
+    assert "Do NOT report" in checked["say"] and "`Ea_lnA_correlation` was not computed" in checked["say"]
+    record = disclosure.run_record(root)
+    assert "computes `Ea_lnA_empirical_correlation` wrongly" in record
+    assert "does not compute `Ea_lnA_correlation`, which the plan asks for" in record
+    # the gate run again on the same files adds nothing
+    asyncio.run(eng._shown_fault_verdict(  # type: ignore[arg-type]
+        {"exec_result": {"returncode": 0}, "result_json": _load("kinetics_r8", tmp_path / "again")[2]}))
+    assert json.loads((root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8")) == checked
+
+
+def test_r7_still_stops_on_its_typed_in_dose(tmp_path: Path, monkeypatch: Any) -> None:
+    root, verdict, _eng = _gate("euv_r7", tmp_path, monkeypatch)
+    assert verdict is not None and verdict["stuck_reason"] == "shown_fault_open"
+    assert "dose_to_size_mJ_cm2" in verdict["rationale"]
+    assert not (root / "needs" / "RESULT_CHECK.json").exists()
+
+
+def test_a_fault_whose_quantity_the_results_do_not_hold_still_stops(tmp_path: Path, monkeypatch: Any) -> None:
+    root, record, result = _load("kinetics_r8", tmp_path)
+    record["issues"]["F-3af8cc05"]["quantity"] = "nothing_like_it"
+    for v in record["read_problems"]:
+        if v.get("fid") == "F-3af8cc05":
+            v["name"], v["quantities"] = "nothing_like_it", []
+    code_review.save(root, record)
+    _root, verdict, _eng = _gate_on(root, result, monkeypatch)
+    assert verdict is not None and "cannot find which of the results it changes" in verdict["rationale"]

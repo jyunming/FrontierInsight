@@ -302,6 +302,46 @@ class ResultChecksMixin:
         self._log.warning(  # type: ignore[attr-defined]
             "[execute] %s. The paper is told and says so in its limitations.", record["note"])
 
+    def _leave_out_shown_faults(self, left_out: list[tuple[str, list[str], str]], not_done: list[tuple[str, str]],
+                                result_json: Any) -> None:
+        """At the evidence gate: the quantities a failing test showed the code computes wrongly (``(quantity, keys, how)``)
+        are left out of the results the paper may use, and the plan's quantities the code does not compute
+        (``(quantity, how)``) are named, by adding them to ``needs/RESULT_CHECK.json`` (what the run's checks left out
+        stays). The same issues found again add nothing."""
+        path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
+        record = _read_json(path)
+        found: list[Found] = []
+        for quantity, keys, how in left_out:
+            note = f"a test FI ran on the code that produced the results shows a fault in how it computes `{quantity}` ({how})"
+            say = (f"A test FI ran on the code that produced the results fails because of a fault in how `{quantity}` is "
+                   f"computed ({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
+                   f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, in "
+                   f"the limitations, that `{quantity}` is left out of this paper because a test showed the code computes it "
+                   "wrongly.")
+            found.append(Found("shown_fault", ANALYSIS, "", note, say, keys=list(keys), quantity=quantity))
+        for quantity, how in not_done:
+            note = f"the code does not compute the plan's `{quantity}` ({how})"
+            say = (f"The code does not compute `{quantity}`, which the plan asks for ({how}). Do not report a value for it or "
+                   f"call another number by its name. Say plainly, in the limitations, that `{quantity}` was not computed.")
+            found.append(Found("not_computed", ANALYSIS, "", note, say, quantity=quantity))
+        checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
+        seen = {(c.get("kind"), c.get("quantity")) for c in checks}
+        new = [f for f in found if (f.kind, f.quantity) not in seen]
+        if not new:
+            return
+        keys = sorted({*(str(k) for k in record.get("removed_quantities") or []), *(k for f in new for k in f.keys)})
+        record.update({
+            "removed_quantities": keys, "removed_figures": list(record.get("removed_figures") or []),
+            "removed_values": _values_left_out(result_json, set(keys)),
+            "checks": [*checks, *({"kind": f.kind, "note": f.note, "quantity": f.quantity, "keys": f.keys} for f in new)],
+            "note": "; ".join(x for x in [str(record.get("note") or ""), *(f.note for f in new)] if x),
+            "say": "\n\n".join(x for x in [str(record.get("say") or ""), *(f.say for f in new)] if x)})
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[evidence_gate] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
+
     def _marked_say(self) -> list[str]:
         marked = getattr(self, "_result_marked", None) or []
         if not marked:

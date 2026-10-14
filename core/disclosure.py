@@ -388,6 +388,44 @@ def _count_sentence(rows: Any) -> str:
 _UNTESTED_ID = re.compile(r"\bequation\s+(\S+?)\s+is not tested( at all)?\b", re.I)
 
 
+def _code_faults_sentence(quest_root: Path) -> str:
+    """The quantities FI left out because a test it ran on the code that produced the results showed them computed
+    wrongly, and the plan's quantities the code does not compute (the evidence gate's record of each, in
+    ``.fi/code_review.json``)."""
+    record = _read_json(quest_root / ".fi" / "code_review.json")
+    issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
+    wrong: list[str] = []
+    missing: list[str] = []
+    for issue in issues.values():
+        gate = issue.get("at_gate") if isinstance(issue, dict) else None
+        if not isinstance(gate, dict):
+            continue
+        if gate.get("outcome") == "left_out" and str(gate.get("quantity") or "").strip():
+            name = str(gate["quantity"]).strip()
+            if name not in wrong:
+                wrong.append(name)
+        elif gate.get("outcome") == "not_computed":
+            for n in gate.get("names") if isinstance(gate.get("names"), list) else []:
+                if str(n).strip() and str(n).strip() not in missing:
+                    missing.append(str(n).strip())
+    said = []
+    if wrong:
+        said.append("Tests FI ran on the code that produced these results showed it computes " + _names(wrong)
+                    + " wrongly, so " + ("this quantity is" if len(wrong) == 1 else "these quantities are")
+                    + " left out of the results reported here.")
+    if missing:
+        said.append("The code does not compute " + _names(missing) + ", which the plan asks for.")
+    return " ".join(said)
+
+
+def _names(names: list[str]) -> str:
+    shown = [f"`{n}`" for n in names[:_SHOWN]]
+    more = len(names) - _SHOWN
+    if more > 0:
+        return ", ".join(shown) + f" and {more} more"
+    return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+
+
 def _untested_sentence(notes: list[str]) -> str:
     """The equations FI did not test before the run, by id, in one short sentence (the paper has little room; the reasons
     are in the quality report, from the same record). A note whose id cannot be read is kept as written."""
@@ -431,6 +469,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     left = _items(covered.get("left")) if isinstance(covered, dict) else []
     if left:
         parts.append(_listed("FI did not do all of the topic's requirements.", left))
+    parts.append(_code_faults_sentence(quest_root))
     tests = _read_json(quest_root / ".fi" / "equation_tests.json")
     untested = _items(tests.get("not_tested")) if isinstance(tests, dict) else []
     if untested:

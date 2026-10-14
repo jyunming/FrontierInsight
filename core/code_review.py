@@ -758,16 +758,52 @@ def reported_under_another_name(record: dict[str, Any], issue: dict[str, Any], r
 
     A real run stopped without a paper on such an issue: its test asserted the plan's key in a dictionary that held the
     same per-temperature values under ``k_relative_bias_by_temp``."""
-    fid = issue.get("id")
-    reqs = [v for v in record.get("read_problems") or [] if isinstance(v, dict) and fid and v.get("fid") == fid]
-    if not reqs or any(v.get("kind") not in QUANTITY_KINDS or v.get("status") != MISSING for v in reqs):
-        return []
+    names = missing_quantities(record, issue)
     keys: set[str] = set()
-    for v in reqs:
-        found = named_in_results(str(v.get("name") or ""), result)
+    for name in names:
+        found = named_in_results(name, result)
         if not found:
             return []
         keys |= found
+    return sorted(keys)
+
+
+def _requirements_of(record: dict[str, Any], issue: dict[str, Any]) -> list[dict[str, Any]]:
+    """The requirements of the latest reading that an issue stands for (by its ``fid``)."""
+    fid = issue.get("id")
+    return [v for v in record.get("read_problems") or [] if isinstance(v, dict) and fid and v.get("fid") == fid]
+
+
+def missing_quantities(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
+    """The plan's quantities an issue says the code does not compute, when that is all the issue says: every requirement
+    it stands for in the latest reading is a quantity of the plan (a dependent variable, a metric) the reader called
+    missing. ``[]`` otherwise. Such an issue makes no reported number wrong: the paper is short of a quantity the plan
+    asks for."""
+    reqs = _requirements_of(record, issue)
+    if not reqs or any(v.get("kind") not in QUANTITY_KINDS or v.get("status") != MISSING for v in reqs):
+        return []
+    return list(dict.fromkeys(n for v in reqs if (n := str(v.get("name") or "").strip())))
+
+
+def quantity_names(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
+    """The names of the quantities an issue is about: those the latest reading gives its requirements, else the issue's
+    own quantity."""
+    names: list[str] = []
+    for v in _requirements_of(record, issue):
+        for n in [v.get("name"), *(v.get("quantities") if isinstance(v.get("quantities"), list) else [])]:
+            if (n := str(n or "").strip()) and n not in names:
+                names.append(n)
+    if not names and str(issue.get("quantity") or "").strip():
+        names.append(str(issue["quantity"]).strip())
+    return names
+
+
+def keys_of_issue(record: dict[str, Any], issue: dict[str, Any], result: Any) -> list[str]:
+    """The keys of the run's results that hold the quantities an issue is about (:func:`named_in_results` for each of
+    :func:`quantity_names`). ``[]`` when the results hold none of them."""
+    keys: set[str] = set()
+    for name in quantity_names(record, issue):
+        keys |= named_in_results(name, result)
     return sorted(keys)
 
 
