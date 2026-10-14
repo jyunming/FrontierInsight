@@ -961,6 +961,7 @@ def build_traceable(
     design: Any = None,
     oracle_checks: Any = None,
     optimisation: Any = None,
+    run_facts: Any = None,
 ) -> tuple[Traceable, int]:
     """Everything this run can account for, and how much of it came from the
     experiment itself (the second number gates the whole check: a run that
@@ -1013,6 +1014,10 @@ def build_traceable(
     # section prints them at every level of the numerical settings; they are numbers this run computed, not the
     # script's, and FI wrote them.
     take(optimisation or {}, "optimisation")
+
+    # What FI recorded about the run itself (how long it took): a paper or an analysis that says "the run took
+    # 111.3 s" quotes FI's record, not a result.
+    take(run_facts or {}, "run")
 
     # The run configuration, including numbers the user wrote into the topic.
     if config is not None:
@@ -1198,6 +1203,7 @@ def check(
     oracle_checks: Any = None,
     n_seeds: int = 0,
     optimisation: Any = None,
+    run_facts: Any = None,
 ) -> ProvenanceReport:
     """Flag every number in the paper that nothing in this run accounts for.
 
@@ -1214,7 +1220,7 @@ def check(
         result_json=result_json, replicates=replicates, intervals=intervals,
         aggregate=aggregate, figure_records=figure_records,
         comparison_stats=comparison_stats, config=config, design=design,
-        oracle_checks=oracle_checks, optimisation=optimisation,
+        oracle_checks=oracle_checks, optimisation=optimisation, run_facts=run_facts,
     )
     report.traceable_values = len(traceable)
     # The experiment recorded nothing: it crashed, or its last RESULT_JSON is

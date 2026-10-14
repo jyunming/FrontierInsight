@@ -39,7 +39,7 @@ import yaml
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, TypedDict, get_args
+from typing import Any, Awaitable, Callable, Iterator, TypedDict, get_args
 
 # User-supplied async function that collects answers to clarify-node
 # questions. Receives the ``clarify_questions`` dict and must return
@@ -18764,6 +18764,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             evidence_note = f"{evidence_note}\n\n{run_note}".strip()
         if drafted_note := self._drafted_parts_note():
             evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
+        if numbers_note := self._analysis_numbers_note(state):
+            evidence_note = f"{evidence_note}\n\n{numbers_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
@@ -20488,6 +20490,70 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except Exception:  # noqa: BLE001 -- a hint
             return ""
 
+    def _provenance_report(self, text: str, state: QuestState) -> Any:
+        """``number_provenance.check`` of ``text`` against everything this run can account for: the results, the
+        replicates and their aggregates, the figures, the configuration, the design and the known-answer checks."""
+        from core import number_provenance
+
+        replicates = list(state.get("result_json_replicates") or [])
+        assertions = _replicate_assertions(state)
+        comparison_stats: dict[str, Any] = {}
+        aggregate: dict[str, Any] = {}
+        if replicates:
+            aggregate = _aggregate_result_json_replicates(
+                replicates, assertions=assertions, kinds=_replicate_metric_kinds(state),
+            )
+        if len(replicates) >= 2:
+            comparison_stats = self._comparison_stats(
+                state, replicates, max_effect_sizes=10**9, assertions=assertions,
+            )
+        try:
+            config_dump: Any = self.config.model_dump(mode="json")
+        except Exception:  # noqa: BLE001 - the config is a convenience here
+            config_dump = None
+        return number_provenance.check(
+            text,
+            result_json=state.get("result_json") or {},
+            replicates=replicates,
+            intervals=_replicate_result_intervals(state),
+            aggregate=aggregate,
+            figure_records=state.get("figure_records") or {},
+            comparison_stats=comparison_stats,
+            config=config_dump,
+            design=state.get("design") or {},
+            oracle_checks=self._judged_checks(),
+            n_seeds=len(replicates),
+            optimisation=(_best_report.records(self.quest_root)
+                          if _optimise.block_of(self._protocol_block(state)) is not None else None),
+            run_facts={"duration_s": (state.get("exec_result") or {}).get("duration_s")},
+        )
+
+    def _analysis_numbers_note(self, state: QuestState) -> str:
+        """The numbers of the analysis that nothing in this run accounts for, for the writer, who copies its numbers
+        from the analysis: the same check the paper gets, run before the paper is written. A real quest's analysis gave
+        an SD of 1,920 where the run computed 1,849.0, and the paper printed it. ``""`` when every number traces, the
+        run recorded nothing, or the check fails."""
+        texts = [s for s in _strings_of(state.get("analysis")) if any(ch.isdigit() for ch in s)]
+        if not texts:
+            return ""
+        from core import number_provenance
+
+        try:
+            report = self._provenance_report("\n\n".join(texts), state)
+        except Exception as e:  # noqa: BLE001 - a note, never a reason to stop
+            self._log.warning("[number_provenance] the analysis could not be checked (%s); skipping", e)
+            return ""
+        if report.skipped or report.ok:
+            return ""
+        listed = "; ".join(f"{f.token} (\u201c{f.context[:120]}\u201d)" for f in report.findings)
+        # The check lists at most MAX_FINDINGS distinct numbers; a full list means there may be more.
+        more = "; and others like them" if len(report.findings) >= number_provenance.MAX_FINDINGS else ""
+        self._log.warning("[number_provenance] the analysis gives number(s) nothing in this run accounts for: %s",
+                          listed[:600])
+        return ("FI checked the numbers of the analysis against everything this run recorded. These match nothing it "
+                f"computed: {listed}{more}. Do not print them; give the value the run computed for that quantity, or "
+                "leave the sentence out.")
+
     def _number_provenance_hits(
         self, paper_md: str, state: QuestState,
     ) -> list[str]:
@@ -20514,39 +20580,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         checker must never block a paper.
         """
         try:
-            from core import number_provenance
-
-            replicates = list(state.get("result_json_replicates") or [])
-            assertions = _replicate_assertions(state)
-            comparison_stats: dict[str, Any] = {}
-            aggregate: dict[str, Any] = {}
-            if replicates:
-                aggregate = _aggregate_result_json_replicates(
-                    replicates, assertions=assertions, kinds=_replicate_metric_kinds(state),
-                )
-            if len(replicates) >= 2:
-                comparison_stats = self._comparison_stats(
-                    state, replicates, max_effect_sizes=10**9, assertions=assertions,
-                )
-            try:
-                config_dump: Any = self.config.model_dump(mode="json")
-            except Exception:  # noqa: BLE001 - the config is a convenience here
-                config_dump = None
-            report = number_provenance.check(
-                paper_md,
-                result_json=state.get("result_json") or {},
-                replicates=replicates,
-                intervals=_replicate_result_intervals(state),
-                aggregate=aggregate,
-                figure_records=state.get("figure_records") or {},
-                comparison_stats=comparison_stats,
-                config=config_dump,
-                design=state.get("design") or {},
-                oracle_checks=self._judged_checks(),
-                n_seeds=len(replicates),
-                optimisation=(_best_report.records(self.quest_root)
-                              if _optimise.block_of(self._protocol_block(state)) is not None else None),
-            )
+            report = self._provenance_report(paper_md, state)
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
             self._log.warning("[number_provenance] check failed (%s); skipping", e)
             return []
@@ -27158,6 +27192,18 @@ def _series_at(
             return None
         vals.append(float(node))
     return vals
+
+
+def _strings_of(value: Any) -> Iterator[str]:
+    """Every string a JSON value holds, at any depth (not its keys)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings_of(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings_of(v)
 
 
 def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, Any]]:
