@@ -20384,6 +20384,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 comparison_stats=comparison_stats,
                 figure_records=state.get("figure_records") or {},
                 n_seeds=len(replicates),
+                seeds=stat_claims.seed_records(self.quest_root),
             )
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
             self._log.warning("[stat_claims] check failed (%s); skipping", e)

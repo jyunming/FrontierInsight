@@ -303,6 +303,16 @@ def _ledger_rows(quest_root: Path) -> tuple[dict[str, int], dict[tuple[str, int]
     return (planned, trials) if trials else None
 
 
+def recorded_seeds(quest_root: Path) -> tuple[int | None, frozenset[int]]:
+    """What the run's own records say its seeds were: the base seed in the study record (``code/study.json``) and
+    every trial seed in FI's ledger (``raw/ledger.jsonl``); ``None`` and an empty set where a record is missing."""
+    study = _read_json(Path(quest_root) / "code" / "study.json")
+    base = _whole(study.get("base_seed")) if isinstance(study, dict) else None
+    rows = _ledger_rows(quest_root)
+    trial = frozenset(seed for _status, seed in rows[1].values() if seed is not None) if rows else frozenset()
+    return base, trial
+
+
 def _seeds_paired(trials: dict[tuple[str, int], tuple[str, int | None]]) -> bool | None:
     """Whether the ledger shows every setting using the same seed for the same trial number (``True``), or no two
     settings sharing one (``False``); ``None`` when it shows neither (one setting only, or a mixture)."""
