@@ -629,18 +629,22 @@ async def test_a_scan_of_billions_of_settings_stops_before_any_is_listed(tmp_pat
     assert time.monotonic() - started < 5
     assert patch is not None and patch["exec_result"]["returncode"] == 1
     text = patch["exec_result"]["too_long"]
-    assert re.fullmatch(r"the experiment's 19,245,600,000 settings would take about .+, more than the 1 h allowed; "
-                        r"FI does not run a smaller study than the plan's settings", text), text
+    assert re.fullmatch(r"the plan asks for 19,245,600,000 settings .+; FI does not list or run more than 500,000 settings\. "
+                        r"Fewer settings or fewer values for each must be planned; FI does not choose which to leave out\.",
+                        text), text
     assert eng.executor.calls == 0  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
 async def test_a_scan_with_no_stated_time_is_timed_on_one_real_evaluation_and_stops_before_listing(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    eng, runner = await _search_engine(tmp_path, copy.deepcopy(_SCAN_BLOCK))
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": list(range(5)), "axis1": list(range(33)), "axis2": list(range(10)), "axis3": list(range(5))}
+    eng, runner = await _search_engine(tmp_path, block)
+    eng.config.execution.timeout_s = 1
     _nothing_is_listed(monkeypatch)
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None and "19,245,600,000 settings" in patch["exec_result"]["too_long"]
+    assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
     assert eng.executor.calls >= 1  # type: ignore[attr-defined]
 
 
@@ -651,3 +655,98 @@ async def test_a_small_scan_that_fits_goes_on(tmp_path: Path) -> None:
     block["evaluation_budget"]["seconds_per_evaluation"] = 20
     eng, runner = await _search_engine(tmp_path, block)
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_protocol_still_gets_the_scan_check_and_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import frozen_protocol
+
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["evaluation_budget"]["seconds_per_evaluation"] = 20
+    eng, runner = await _search_engine(tmp_path, block)
+    frozen_protocol.freeze(eng.quest_root, {"optimisation": block, "thresholds": {}}, approved_by="engine", source="test")
+    assert frozen_protocol.load(eng.quest_root) is not None
+    _nothing_is_listed(monkeypatch)
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and "19,245,600,000 settings" in patch["exec_result"]["too_long"]
+    eng.config.execution.background_jobs = True
+    patch = await eng._size_the_run({"iteration": 1}, runner, sys.executable, None)
+    assert patch is not None and "19,245,600,000 settings" in patch["exec_result"]["too_long"]
+
+
+@pytest.mark.asyncio
+async def test_a_tiny_claimed_time_with_a_huge_grid_still_stops_without_listing(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["evaluation_budget"]["seconds_per_evaluation"] = 1e-9
+    eng, runner = await _search_engine(tmp_path, block)
+    _nothing_is_listed(monkeypatch)
+    started = time.monotonic()
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert time.monotonic() - started < 5
+    assert patch is not None and "19,245,600,000 settings" in patch["exec_result"]["too_long"]
+    assert "FI does not list or run more than" in patch["exec_result"]["too_long"]
+
+
+_MID_GRID = {"axis0": list(range(5)), "axis1": list(range(33)), "axis2": list(range(10)), "axis3": list(range(5))}
+
+
+@pytest.mark.asyncio
+async def test_a_tiny_claimed_time_is_raised_to_the_measured_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under the ceiling, the plan's claim alone does not decide: one real evaluation of the baseline is timed too."""
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = dict(_MID_GRID)
+    block["evaluation_budget"]["seconds_per_evaluation"] = 1e-9
+    eng, runner = await _search_engine(tmp_path, block)
+
+    async def slow(*a: Any, **k: Any) -> Any:
+        return run_estimate.Probe(None, None, {}, 60.0), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", slow)
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
+
+
+@pytest.mark.asyncio
+async def test_a_baseline_that_cannot_be_timed_keeps_the_plans_claim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = dict(_MID_GRID)
+    block["evaluation_budget"]["seconds_per_evaluation"] = 20
+    eng, runner = await _search_engine(tmp_path, block)
+
+    async def broken(*a: Any, **k: Any) -> Any:
+        return None, "a trial failed: boom"
+
+    monkeypatch.setattr(run_estimate, "_time_one", broken)
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
+    block["evaluation_budget"].pop("seconds_per_evaluation")
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None  # nothing to judge by
+
+
+@pytest.mark.asyncio
+async def test_the_scan_probe_gets_the_allowance_of_a_measurement_not_the_whole_limit(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": list(range(5)), "axis1": list(range(33))}
+    eng, runner = await _search_engine(tmp_path, block)
+    seen: list[int] = []
+
+    async def fast(*a: Any, **k: Any) -> Any:
+        seen.append(k["timeout_s"])
+        return run_estimate.Probe(None, None, {}, 0.01), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", fast)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert seen and seen[0] < 3600  # max(60, 3 * 3600 / 165) -> 65 s
+
+
+def test_a_grid_too_large_to_list_ends_the_execute_step_in_the_plain_stop(tmp_path: Path) -> None:
+    """The engine turns the listing's own refusal into the quest's stop (no crash, no smaller study)."""
+    from core import optimise_search
+
+    eng = _plan_engine(tmp_path, [])
+    exc = optimise_search.TooManySettings("the plan asks for 9 settings")
+    assert isinstance(exc, ValueError)
+    patch = eng._stop_too_long(str(exc))
+    assert patch["exec_result"]["too_long"] == "the plan asks for 9 settings" and patch["exec_give_up_reason"]

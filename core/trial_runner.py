@@ -43,6 +43,7 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
+from . import optimise_search as _search
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 
@@ -160,6 +161,7 @@ main()
 def cells(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
     """Every combination of the grid's values, axes in the grid's order, values in theirs. An empty grid is one cell
     with no axes (a study that runs one setting)."""
+    _search.check_listable(grid)
     axes = list(grid.items())
     if not axes:
         return [{}]

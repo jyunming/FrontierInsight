@@ -134,6 +134,7 @@ from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
 from . import optimise as _optimise
 from . import optimise_refine as _optimise_refine
+from . import optimise_search as _optimise_search
 from . import best_design_report as _best_report
 from . import protocol_check as _protocol
 from . import retractions as _retractions
@@ -15737,16 +15738,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                            if _phased.stage(self.quest_root) == _phased.EXPLORE else
                            "confirm stage: running the frozen design on data or seeds exploration never saw")
         run_started = time.time()
-        result: ExecutionResult = await self._await_with_heartbeat(
-            runner.execute(
-                [str(py), str(code_path)],
-                cwd=self.quest_root,
-                timeout_s=self.config.execution.timeout_s,
-                env=primary_env,
-            ),
-            label="running simulate.py and experiment.py" if split else "running experiment.py",
-            progress=getattr(runner, "progress_text", None),
-        )
+        try:
+            result: ExecutionResult = await self._await_with_heartbeat(
+                runner.execute(
+                    [str(py), str(code_path)],
+                    cwd=self.quest_root,
+                    timeout_s=self.config.execution.timeout_s,
+                    env=primary_env,
+                ),
+                label="running simulate.py and experiment.py" if split else "running experiment.py",
+                progress=getattr(runner, "progress_text", None),
+            )
+        except _optimise_search.TooManySettings as exc:
+            # A plan that names more settings than FI lists, and no earlier size check met it (a frozen or resumed run): the
+            # plain stop with its count, never a crash and never a smaller study than the plan's.
+            return self._stop_too_long(str(exc))
         # Observed on Windows-native: the first invocation of a freshly-
         # created venv's python.exe — even after a warmup `python -c
         # "import <deps>"` — sometimes exits with rc != 0 and duration <

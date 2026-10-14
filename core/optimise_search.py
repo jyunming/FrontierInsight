@@ -969,8 +969,33 @@ def search(block, *, seed, method=None, rounds=None):
     return (yield from _Search(block, seed, method, rounds).run())
 
 
+#: The most settings FI lists (or runs) from one grid: each listed setting is a dict, about a kilobyte with its key, so this
+#: many is about half a gigabyte; a plan that asks for more is stopped with its count, never cut and never listed.
+MAX_LISTED_SETTINGS = 500_000
+
+
+class TooManySettings(ValueError):
+    """A grid has more settings than FI lists. The message is what a person reads."""
+
+
+def grid_size(grid):
+    """How many settings a grid names: the product of its axes' lengths, counted without listing any."""
+    return math.prod(len(values) for values in grid.values())
+
+
+def check_listable(grid):
+    """Raise :class:`TooManySettings` when listing the whole grid would hold more than :data:`MAX_LISTED_SETTINGS`."""
+    size = grid_size(grid)
+    if size > MAX_LISTED_SETTINGS:
+        raise TooManySettings(
+            f"the plan asks for {size:,} settings (every combination of the settings' values); FI does not "
+            f"list or run more than {MAX_LISTED_SETTINGS:,} settings. Fewer settings or fewer values for each must be "
+            "planned; FI does not choose which to leave out.")
+
+
 def grid_cells(grid):
     """Every combination of a grid's values (axes in order), as the trial runner makes them."""
+    check_listable(grid)
     axes = list(grid.items())
     return [dict(zip((a for a, _ in axes), combo)) for combo in itertools.product(*(v for _, v in axes))]
 

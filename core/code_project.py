@@ -60,7 +60,13 @@ QUEST = HERE.parent if (HERE.parent / ".fi").is_dir() else None
 WORK = (QUEST / "run_output") if QUEST else (HERE / "output")
 
 
+MAX_SETTINGS = 500000  # the most settings listed from one grid (core.optimise_search.MAX_LISTED_SETTINGS)
+
+
 def cells(grid):
+    size = math.prod(len(v) for v in grid.values())
+    if size > MAX_SETTINGS:
+        raise SystemExit("the study asks for {:,} settings; this script does not list or run more than {:,}".format(size, MAX_SETTINGS))
     axes = list(grid.items())
     if not axes:
         return [{}]

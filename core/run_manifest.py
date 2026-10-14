@@ -43,6 +43,8 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
+from . import optimise_search as _search
+
 SCHEMA = "fi.run-manifest/v1"
 NAME = "run_manifest.json"
 LEDGER_NAME = "trial_ledger.jsonl"
@@ -340,6 +342,7 @@ def _canonicalize_cell(key: Any, grid: dict[str, list[Any]]) -> tuple[frozenset[
 def _all_cells(grid: dict[str, list[Any]]) -> set[frozenset[tuple[str, Any]]]:
     """Every setting the protocol's grid names — its full Cartesian product, canonically keyed the same way
     :func:`_canonicalize_cell` keys a manifest's cells, so the two sets can be compared for exact equality."""
+    _search.check_listable(grid)
     axes = list(grid.items())
     return {frozenset(zip((a for a, _ in axes), (_freeze(c) for c in combo))) for combo in product(*(v for _, v in axes))}
 

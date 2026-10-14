@@ -410,3 +410,40 @@ def test_a_local_name_that_is_also_run_cell_is_not_the_modules_run_cell() -> Non
         assert trial_runner.trial_aggregates(src) == "", src
     # ... while the module's own function is still found when nothing shadows it.
     assert trial_runner.trial_aggregates("def run_trial(c, t, s):\n    return run_cell(c)\n")
+
+
+# ---- a grid too large to list is refused by its count, before anything is allocated -------------------------------------
+
+
+def _huge_grid() -> dict[str, list[int]]:
+    return {f"axis{i}": list(range(n)) for i, n in enumerate((5, 33, 10, 5, 6, 6, 3, 4, 5, 3, 18, 10, 2))}
+
+
+def test_listing_a_grid_over_the_ceiling_is_refused_quickly_with_a_plain_reason() -> None:
+    import time
+
+    import pytest
+
+    from core import optimise_search
+
+    grid = _huge_grid()
+    started = time.monotonic()
+    for listing in (trial_runner.cells, optimise_search.grid_cells, run_manifest._all_cells):
+        with pytest.raises(ValueError, match=r"the plan asks for 19,245,600,000 settings .*does not list or run more than 500,000"):
+            listing(grid)
+    assert time.monotonic() - started < 1
+
+
+def test_small_grids_are_listed_as_before() -> None:
+    from core import optimise_search
+
+    grid = {"a": [1, 2, 3], "b": ["x", "y"]}
+    assert len(trial_runner.cells(grid)) == len(optimise_search.grid_cells(grid)) == len(run_manifest._all_cells(grid)) == 6
+    assert trial_runner.cells({}) == [{}]
+    assert trial_runner.cells({"n": list(range(optimise_search.MAX_LISTED_SETTINGS))})[-1] == {"n": 499999}
+
+
+def test_the_standalone_run_script_has_the_same_ceiling() -> None:
+    from core import code_project, optimise_search
+
+    assert f"MAX_SETTINGS = {optimise_search.MAX_LISTED_SETTINGS}" in code_project.RUN_SOURCE
