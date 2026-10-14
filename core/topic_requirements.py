@@ -620,8 +620,8 @@ def write_note(quest_root: Any) -> str:
                      "formulas), so the plan was not held against it. Say plainly in the limitations that this was not checked.")
     if left:
         sentences = "; ".join(str(g.get("sentence") or "").rstrip(".") for g in left if isinstance(g, dict))
-        parts.append(f"The topic asked for more than this study did: {sentences}. Say plainly in the limitations that these "
-                     "were not studied, and do not write a result for them.")
+        parts.append(f"The topic asked for more than this study did: {sentences}. FI states this in its own record of the run "
+                     "at the end of the limitations; do not write a result for them.")
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
@@ -642,10 +642,11 @@ def write_note(quest_root: Any) -> str:
     constraints = [str(c).strip().rstrip(".").strip() for c in (raw if isinstance(raw, list) else [])]
     constraints = [c for c in constraints if c]
     if constraints:
-        parts.append(f"The topic set these requirements on the study and the paper: {'; '.join(constraints)}. For each one the "
-                     "study did not meet (check it against the run record: run time, the code files, the seed, the uncertainty "
-                     "of every number), say plainly in the limitations that it was not met and why; never leave one out "
-                     "silently, and never claim one was met unless the record shows it.")
+        parts.append(f"The topic set these requirements on the study and the paper: {'; '.join(constraints)}. FI's own record "
+                     "of the run, at the end of the limitations, states the seeds and the run time against the topic's limit; "
+                     "do not state them again. For each other requirement the study did not meet (the code files, the "
+                     "uncertainty of every number), say plainly in the limitations that it was not met and why; never leave "
+                     "one out silently, and never claim one was met unless the record shows it.")
     return " ".join(parts)
 
 

@@ -18965,6 +18965,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             survey=bool(state.get("survey_mode_resolved"))))
         # A search for the best design: the engine's "Best design found" section, from FI's own records.
         markdown = self._mark_best_design(state, markdown)
+        # What FI recorded about the run (seeds, run time against the topic's limit, counts, a reduced size, the topic's
+        # requirements not done, equations not tested), in the limitations: FI's words from its records, never asked of
+        # the writer (core/disclosure.py:run_record). Before the code findings, which go after it.
+        markdown = _disclosure.mark_run_record(markdown, _disclosure.run_record(
+            self.quest_root, topic=str(self.config.topic or ""),
+            duration_s=(state.get("exec_result") or {}).get("duration_s")))
         # What the second model's reading of the code left unresolved, in the limitations: the engine's words from its
         # record, so the paper states it whatever the writer did with the note (core/code_review.py, core/disclosure.py).
         markdown = _disclosure.mark_findings(markdown, _code_review.findings_block(self.quest_root, self.quest_root / "code"))
@@ -25382,6 +25388,13 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
     record = _claim_fi_record_block(quest_root)
     if record:
         parts.append(record)
+    # The same run record FI writes into the paper's limitations (core/disclosure.py:run_record): a sentence of the paper
+    # that states a seed or the run time is grounded in it, as the block itself is.
+    run = _disclosure.run_record(quest_root, topic=str(state.get("topic") or ""),
+                                 duration_s=(state.get("exec_result") or {}).get("duration_s"))
+    if run:
+        parts.append("WHAT FI RECORDED ABOUT THIS RUN (FI's own records; the paper's limitations hold the same text):\n"
+                     + run.replace("**What FI recorded about this run.** ", ""))
     code = _claim_code_block(quest_root / "code")
     if code:
         parts.append(code)

@@ -402,7 +402,8 @@ class RunChecksMixin:
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
-            parts.append(f"{reduced['note']} Say so plainly in the limitations, with the numbers.")
+            parts.append(f"{reduced['note']} FI states this, with the numbers, in its own record of the run at the end "
+                         "of the limitations; do not repeat it, and write no result for what was left out.")
         return "\n\n".join(parts)
 
     # ---- the run fits the time it is allowed ---------------------------------------------------------------------------

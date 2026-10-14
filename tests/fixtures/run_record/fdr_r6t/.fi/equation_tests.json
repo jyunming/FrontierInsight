@@ -1,0 +1,48 @@
+{
+ "equations": {
+  "E1": {
+   "state": "ok",
+   "why": ""
+  },
+  "E2": {
+   "state": "unprotected",
+   "why": "The required pre-run expression language does not include the normal CDF Phi; the implementation uses scipy.stats.norm.sf."
+  },
+  "E3": {
+   "state": "ok",
+   "why": ""
+  },
+  "E4": {
+   "state": "untestable",
+   "why": "The maximum over a variable-length set and ordered vector cannot be represented in the restricted scalar pre-run formula language; the independent rank-loop oracle tests this implementation."
+  },
+  "E5": {
+   "state": "ok",
+   "why": ""
+  },
+  "E6": {
+   "state": "ok",
+   "why": ""
+  },
+  "E7": {
+   "state": "missing",
+   "why": "the plan gave no worked example"
+  }
+ },
+ "untested_core": [
+  "E2"
+ ],
+ "not_tested": [
+  "equation E2 is not tested at all: the plan says it has no closed form for its output (The required pre-run expression language does not include the normal CDF Phi; the implementation uses scipy.stats.norm.sf.) and no limit, symmetry, conservation or second implementation checks it",
+  "equation E4 is not tested before the run: the plan says it has no closed form for its output (The maximum over a variable-length set and ordered vector cannot be represented in the restricted scalar pre-run formula language; the independent rank-loop oracle tests this implementation.)",
+  "equation E7 is not tested before the run: the plan gave no worked example for it"
+ ],
+ "tested": [
+  "E1",
+  "E3",
+  "E5",
+  "E6"
+ ],
+ "failed": [],
+ "repairs": {}
+}
