@@ -91,7 +91,9 @@ async def test_a_function_still_wrong_after_its_repairs_is_sent_to_the_existing_
     writer = _Writer({"quality": [WRONG_Q]})
     engine._client = writer
     patch = await engine._equation_gate(STATE, None, None)
-    assert len(writer.prompts) == 2, "at most function_steps.REPAIRS repairs of one function"
+    repairs = [p for p in writer.prompts if "You are revising the plan" not in p]
+    assert len(repairs) == 2, "at most function_steps.REPAIRS repairs of one function"
+    assert len(writer.prompts) == 3, "and the one request to the plan about its example (tests/test_replay_bad_example.py)"
     assert patch is not None and patch["exec_result"]["returncode"] == 1 and patch["result_json"] == {}
     assert patch["exec_result"]["failed_script"] == "simulate.py"
     stderr = patch["exec_result"]["stderr_tail"]
@@ -189,6 +191,8 @@ async def test_no_request_that_writes_or_repairs_code_holds_an_example_or_an_exp
     nodes = {n for n, _p in prompts}
     assert {"implement", "implement_outline", "implement_oracle", "implement_protocol", "execute_reflect"} <= nodes, nodes
     for node, prompt in prompts:
+        if node == "plan_revise":
+            continue  # the plan is shown its own example, as it wrote it (never the code's number); a model that writes code is not
         # (A check's own `expected` stays in the oracle repair: its `oracle_change` reply argues about that number.)
         for secret in _SECRETS:
             assert secret not in prompt, f"{secret!r} reached a request of the step {node!r}"

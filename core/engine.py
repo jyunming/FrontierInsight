@@ -9982,6 +9982,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return self._draft_protocol(state)
 
     def _draft_protocol(self, state: QuestState) -> dict[str, Any] | None:
+        """The protocol before it is frozen (:meth:`_draft_protocol_base`), with the worked examples the plan worked out again
+        when asked (:meth:`_rederive_examples`) in place of the ones a redesign would have kept."""
+        protocol = self._draft_protocol_base(state)
+        if not isinstance(protocol, dict):
+            return protocol
+        examples = self._examples_rederived().get("examples")
+        return _equation_tests.with_examples(protocol, examples) if isinstance(examples, dict) and examples else protocol
+
+    def _draft_protocol_base(self, state: QuestState) -> dict[str, Any] | None:
         """The protocol before it is frozen: on the first pass it is read from ``plan.md``, which is the source of truth
         for it (a person who edits the protocol while the quest is stopped, or asks for a change, is heard at the next
         implement or execute); a later pass, which only happens for a quest that was never frozen (one begun before the
@@ -11993,6 +12002,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return False
             protocol = self._protocol_block(state)
             specs, notes = _function_steps.model_functions(outline, protocol if isinstance(protocol, dict) else None)
+            if specs and isinstance(protocol, dict):
+                # The function's parameters are the example's inputs (core/equation_tests.py): both are known before any
+                # code is written, so a disagreement of names is put to the plan now (once), not found by a failing test.
+                problems = _equation_tests.parameter_problems(
+                    _equation_tests.example_rows(protocol),
+                    {s.equation: s.params() for s in specs if s.kind == _function_steps.EQUATION})
+                if problems:
+                    by_id = {str(eq["id"]).strip(): eq for eq in _equation_tests.eligible(protocol)}
+                    changed = await self._rederive_examples(state, protocol, [
+                        {"id": eid, "formula": " ".join(str(by_id[eid].get("formula") or "").split()),
+                         "example": by_id[eid].get("example"), "why": why, "source": "parameters"}
+                        for eid, why in problems.items() if eid in by_id])
+                    if changed:
+                        protocol = self._protocol_block(state)
+                        specs, notes = _function_steps.model_functions(
+                            outline, protocol if isinstance(protocol, dict) else None)
             if not specs:
                 self._log.info("[implement] the model's functions are written with the rest of the code (%s)",
                                "; ".join(notes) or "the outline names no function per equation")
@@ -12061,7 +12086,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
         spent: dict[str, int] = {}
         failures: list[dict[str, Any]] = []
-        for attempt in range(_function_steps.REPAIRS + 1):
+        rederived: list[str] = []
+        # One more pass than the repairs allow: it is made only when the plan has worked a failing example out again.
+        for attempt in range(_function_steps.REPAIRS + 2):
             sources = self._equation_sources()
             located = _equation_tests.locate(protocol, sources)
             case_list = _equation_tests.cases(rows, located)
@@ -12093,8 +12120,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.info("[equations] the model's %d tested equation(s) agree with the plan's worked examples",
                                len(results))
                 break
-            if attempt == _function_steps.REPAIRS:
-                break
+            if attempt >= _function_steps.REPAIRS:
+                # Code that follows the formula could not meet the plan's example: the example is the plan's own, so the
+                # plan is asked (once per equation) to work it out again from the formula, and the tests run once more,
+                # unchanged. Nothing about the code or the number it gave goes into the request.
+                if rederived or attempt > _function_steps.REPAIRS:
+                    break
+                rederived = await self._rederive_failed_examples(state, protocol, failures)
+                if not rederived:
+                    break
+                protocol = self._protocol_block(state)
+                rows = _equation_tests.example_rows(protocol)
+                record["equations"] = {r["id"]: {"state": r["state"], "why": r["why"]} for r in rows}
+                continue
             for f in failures:
                 eid = str(f.get("id"))
                 if spent.get(eid, 0) >= _function_steps.REPAIRS:
@@ -12109,6 +12147,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         record["failed"] = [{"id": f.get("id"), "function": f.get("function"), "status": f.get("status"),
                              "reason": _equation_tests.failure_reason(f)} for f in failures]
         record["repairs"] = spent
+        if rederived:
+            record["example_rederived"] = rederived
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.fi_dir / "equation_tests.json").write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
@@ -12135,6 +12175,132 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
             "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
         }
+
+    def _examples_rederived_path(self) -> Path:
+        return self.fi_dir / "examples_rederived.json"
+
+    def _examples_rederived(self) -> dict[str, Any]:
+        """What FI asked the plan about worked examples that code could not meet (``.fi/examples_rederived.json``):
+        ``asked`` (``"<equation>:<why>"``, each asked once) and ``examples`` (the example the plan gave back for an
+        equation, with the formula it was worked out from). ``{}`` when nothing was asked."""
+        try:
+            record = json.loads(self._examples_rederived_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return record if isinstance(record, dict) else {}
+
+    async def _rederive_failed_examples(self, state: QuestState, protocol: dict[str, Any] | None,
+                                        failures: list[dict[str, Any]]) -> list[str]:
+        """An equation test that still fails after its repairs is not a crashed experiment (nothing ran): the example is
+        the plan's own, so the plan is asked, once per equation, to work it out again from the equation. The ids whose
+        example changed (:meth:`_rederive_examples`)."""
+        by_id = {str(eq["id"]).strip(): eq for eq in _equation_tests.eligible(protocol)}
+        asks = [{"id": str(f.get("id")), "formula": " ".join(str(f.get("formula") or "").split()),
+                 "example": _equation_tests.example_as_written(protocol, str(f.get("id"))), "why": f.get("status"),
+                 "source": "tests"}
+                for f in failures if str(f.get("id")) in by_id and _equation_tests.repairable_by_example(f)]
+        return await self._rederive_examples(state, protocol, asks)
+
+    async def _rederive_examples(self, state: QuestState, protocol: dict[str, Any] | None,
+                                 asks: list[dict[str, Any]]) -> list[str]:
+        """Ask the plan, once per equation and per reason (``tests``: code could not meet the example; ``parameters``: the
+        outline's function takes other names than the example's inputs), to work the worked example of each equation in
+        ``asks`` out again from the equation as written: ``id``, ``formula``, ``example`` (as written), ``why``.
+
+        The request holds the equation, the example as written and the kind of failure, never the number the code gave and
+        never the code. Only the asked equations' ``example`` is kept from the rewrite (:meth:`_revise_checks_only` keeps
+        only examples; another equation's example is put back as it was). Before the protocol is frozen only: a frozen
+        protocol is never changed here. The new example is kept in ``.fi/examples_rederived.json`` and used by
+        :meth:`_draft_protocol` (a redesign does not bring the old one back), and plan.md says what was done. The test
+        itself is unchanged: FI computes the new example's value as before. The ids whose example changed."""
+        path = _plan.plan_path(self.quest_root)
+        if (not asks or self.config.engine.oracle_check == "off" or not self._runs_code(state)
+                or _frozen.load(self.quest_root) is not None or not path.is_file()):
+            return []
+        record = self._examples_rederived()
+        asked = record.get("asked") if isinstance(record.get("asked"), dict) else {}
+        asks = [a for a in asks if f"{a['id']}:{a['source']}" not in asked]
+        if not asks:
+            return []
+        # Recorded before the request: a killed run does not ask again.
+        asked = {**asked, **{f"{a['id']}:{a['source']}": True for a in asks}}
+        record = {**record, "asked": asked}
+        self._write_json_quiet(self._examples_rederived_path(), record)
+        ids = [a["id"] for a in asks]
+        for a in asks:
+            self._log.info("[plan] the plan's worked example for %s could not be met by code that follows its formula; FI asks "
+                           "the plan to work the example out again from the formula", a["id"])
+        design_before, _why = _plan.load_design(self.quest_root)
+        protocol_before = design_before.get("protocol") if isinstance(design_before, dict) else None
+        examples_before = {str(e["id"]).strip(): e.get("example") for e in _equation_tests.eligible(
+            protocol_before if isinstance(protocol_before, dict) else None)}
+        failed = await self._revise_checks_only(_equation_tests.rederive_request(asks), equations="example")
+        if failed:
+            self._log.warning("[plan] %s", failed)
+            return []
+        # Only the asked equations' examples change: another equation's example is put back as it was.
+        after_text = path.read_text(encoding="utf-8")
+
+        def put_back(block: dict[str, Any]) -> dict[str, Any] | None:
+            proto = dict(block.get("protocol") or {})
+            model = proto.get("model")
+            if not isinstance(model, dict):
+                return None
+            key = next((k for k in _oracle._EQUATION_KEYS if str(model.get(k) or "").strip()), None)
+            if key is None:
+                return None
+            items = [dict(e) for e in _oracle.equation_items(model[key])]
+            moved = False
+            for eq in items:
+                eid = str(eq.get("id") or "").strip()
+                if eid not in ids and eid in examples_before and eq.get("example") != examples_before[eid]:
+                    if examples_before[eid] is None:
+                        eq.pop("example", None)
+                    else:
+                        eq["example"] = examples_before[eid]
+                    moved = True
+            return {**block, "protocol": {**proto, "model": {**model, key: items}}} if moved else None
+
+        restored = _plan.edit_design_block(after_text, put_back)
+        if restored is not None and _plan.parse(restored).design is not None:
+            restored = _plan.refresh_model_section(restored)
+            path.write_text(restored, encoding="utf-8")
+            _plan.record_version(self.quest_root, restored, by="engine",
+                                 note="the examples of the equations FI did not ask about put back as they were")
+        design_after, _why = _plan.load_design(self.quest_root)
+        protocol_after = design_after.get("protocol") if isinstance(design_after, dict) else None
+        formulas = {str(a["id"]): a["formula"] for a in asks}
+        protocol_after = protocol_after if isinstance(protocol_after, dict) else None
+        # A new example counts only when FI can compute it (not "untestable", not unreadable): the equation stays tested.
+        usable = {r["id"] for r in _equation_tests.example_rows(protocol_after) if r["state"] == "ok"}
+        taken: dict[str, dict[str, Any]] = {}
+        for eq in _equation_tests.eligible(protocol_after):
+            eid = str(eq["id"]).strip()
+            if (eid in ids and eid in usable and eq.get("example") != examples_before.get(eid)
+                    and " ".join(str(eq.get("formula") or "").split()) == formulas[eid]):
+                taken[eid] = {"formula": formulas[eid], "example": eq["example"]}
+        lines = []
+        for eid in ids:
+            lines.append(f"- FI asked the plan to work the example of equation {eid} out again from its formula, because code "
+                         "that follows the formula could not meet it, and "
+                         + ("the plan gave a new one." if eid in taken else "the plan kept the example as it was."))
+        self._write_plan_section(path, ["", *lines], note="what FI asked the plan about a worked example it could not meet")
+        for eid in ids:
+            if eid in taken:
+                self._log.info("[plan] the plan worked the example of %s out again; the equation is tested once more with it", eid)
+            else:
+                self._log.warning("[plan] the plan kept the example of %s as it was; the equation's test goes on as before", eid)
+        if taken:
+            self._write_json_quiet(self._examples_rederived_path(),
+                                   {**self._examples_rederived(), "examples": {**(record.get("examples") or {}), **taken}})
+        return sorted(taken)
+
+    def _write_json_quiet(self, path: Path, value: dict[str, Any]) -> None:
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value, indent=1, default=str) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] could not write %s: %r", path.name, e)
 
     async def _repair_equation_function(self, failure: dict[str, Any], sources: dict[str, str],
                                         located: dict[str, dict[str, str] | None]) -> bool:

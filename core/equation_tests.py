@@ -272,6 +272,88 @@ def request(rows: list[dict[str, Any]], *, last: bool = True) -> str:
             + ("\nChange only these equations' `example`, and nothing else in the plan." if last else ""))
 
 
+#: How a failed example is put to the plan, in plain words (:func:`rederive_request`): never the number the code gave.
+_COULD_NOT_MEET = {
+    MISMATCH: "code written from the formula computes another number than the example says",
+    CONTRACT: "the function written from the formula cannot take the example's inputs (its parameters are not the "
+              "example's input names)",
+    ERROR: "the function written from the formula failed when it was called with the example's inputs",
+}
+
+
+def repairable_by_example(result: dict[str, Any]) -> bool:
+    """Whether a failed equation test may be a fault of the worked example (so the plan is asked about it): a wrong number,
+    inputs the function cannot take, or an error when called. Not a function that cannot be found or imported."""
+    status = result.get("status")
+    if status in (MISMATCH, CONTRACT):
+        return True
+    detail = _text(result.get("detail"))
+    return status == ERROR and not re.match(r"(?:ImportError|ModuleNotFoundError|SyntaxError|AttributeError)\b", detail)
+
+
+def example_as_written(protocol: dict[str, Any] | None, eid: str) -> Any:
+    """The ``example`` the plan wrote for equation ``eid`` (``None`` when there is none)."""
+    for eq in eligible(protocol):
+        if _text(eq["id"]) == eid:
+            return eq.get("example")
+    return None
+
+
+def rederive_request(items: list[dict[str, Any]]) -> str:
+    """The one request to the plan that asks it to work a worked example out again from its equation: for each item
+    (``id``, ``formula``, ``example`` as written, ``why``: a key of :data:`_COULD_NOT_MEET` or a sentence) the equation, the
+    example as written and the kind of failure. It never holds the value the code computed, nor the code."""
+    lines = []
+    for it in items:
+        why = _COULD_NOT_MEET.get(it.get("why"), _text(it.get("why")))
+        written = json.dumps(it.get("example"), ensure_ascii=False, default=str) if it.get("example") is not None else "none"
+        lines.append(f"- {it['id']} (`{it['formula']}`): the example you gave, `{written}`, could not be met: {why}.")
+    return ("FI tested each equation of the model before the study ran, from the worked example the plan gave. For the "
+            "equations below the example could not be met by code that follows the equation as written, so the example "
+            "may be the fault. Work each one out again from its equation as it is written: `inputs` are that equation's own "
+            "variables (the names its formula uses, which are the parameters of the function that computes it), each a "
+            "number, and `expected_formula` is the equation's output for exactly those inputs. " + EXAMPLE_RULE + "\n"
+            + "\n".join(lines) + "\nChange only these equations' `example`, and nothing else in the plan.")
+
+
+def parameter_problems(rows: list[dict[str, Any]], params: dict[str, list[str]]) -> dict[str, str]:
+    """For each equation whose example is usable and whose function is already named with its parameters (``params``: the
+    equation's id to the parameter names the outline fixed): why they disagree with the example's inputs, in plain words.
+    The contract is exact (the function's parameters are the example's inputs, and for a random equation also ``rng`` or
+    ``seed``); a function that takes ``*args`` or ``**kwargs`` is not judged. Only names are compared, nothing is guessed."""
+    out: dict[str, str] = {}
+    for r in rows:
+        names = params.get(r["id"])
+        if r["state"] != "ok" or names is None or any(n.startswith("*") for n in names):
+            continue
+        extra = {*RNG_PARAMS, SEED_PARAM} if r.get("random") else set()
+        have, want = {n for n in names if n not in extra}, set(r["inputs"])
+        if have != want:
+            out[r["id"]] = (f"the function for it is planned with the parameters ({', '.join(names)}), but the example's "
+                            f"inputs are ({', '.join(sorted(want))}); they must be the same names")
+    return out
+
+
+def with_examples(protocol: dict[str, Any] | None, examples: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """``protocol`` with the worked example of each equation in ``examples`` (id to ``{"formula", "example"}``) replaced,
+    for an equation whose formula is still the one the example was worked out from. Nothing else changes; the protocol
+    given is not modified."""
+    model = protocol.get("model") if isinstance(protocol, dict) else None
+    if not examples or not isinstance(model, dict):
+        return protocol
+    key = next((k for k in _oracle._EQUATION_KEYS if _text(model.get(k))), None)
+    if key is None:
+        return protocol
+    items = [dict(e) for e in _oracle.equation_items(model[key])]
+    changed = False
+    for eq in items:
+        new = examples.get(_text(eq.get("id")))
+        if new and _text(eq.get("formula")) == _text(new.get("formula")) and eq.get("example") != new.get("example"):
+            eq["example"] = new["example"]
+            changed = True
+    return {**protocol, "model": {**model, key: items}} if changed else protocol
+
+
 def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None]) -> list[str]:
     """One plain sentence for each equation that will not be tested before the run, and why."""
     notes = []
