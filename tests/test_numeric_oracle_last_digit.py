@@ -206,3 +206,17 @@ def test_a_tie_rounded_either_way_is_not_a_slip(paper, result) -> None:
 
 def test_a_tie_rounded_neither_way_is_still_a_slip() -> None:
     assert [k for k, _ in _flagged("It was 0.811 here.", {"m": 0.8125})] == ["near_miss"]
+
+
+def test_an_upward_slip_on_a_tie_is_judged_like_a_downward_one() -> None:
+    """0.8125 prints as 0.812 and reads as 0.813; 0.811 and 0.814 are each one unit from one of them, 0.815 is not."""
+    assert [k for k, _ in _flagged("It was 0.814 here.", {"m": 0.8125})] == ["near_miss"]
+    assert [k for k, _ in _flagged("It was 0.811 here.", {"m": 0.8125})] == ["near_miss"]
+    assert _flagged("It was 0.815 here.", {"m": 0.8125}) == []
+
+
+def test_a_latex_thousands_separator_is_one_number_in_the_oracle() -> None:
+    nums = [m.value for m in no._scan_paper_numbers(no._TEX_THOUSANDS.sub(",", r"E_a=24{,}122.394677"))]
+    assert 24122.394677 in nums and 24.0 not in nums
+    assert _flagged(r"The target was 24{,}122.394677 J.", {"truth": 24122.394677383}) == []
+    assert no.check(r"The target was 24{,}122.394677 J.", {"truth": 24122.394677383}).paper_numbers == 1

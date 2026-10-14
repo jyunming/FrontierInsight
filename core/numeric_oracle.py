@@ -934,11 +934,16 @@ def _is_repeating_constant(value: float, token: str) -> bool:
     return False
 
 
+# LaTeX writes a thousands separator as ``24{,}122``; it is the same separator as ``24,122``, and left as it is the
+# number reads as two: 24 and 122.
+_TEX_THOUSANDS = re.compile(r"(?<=\d)\{,\}(?=\d{3}(?!\d))")
+
+
 def _is_last_digit_slip(value: float, token: str, actual: float) -> bool:
     """Is the paper's number one unit of its own last printed digit away from
     ``actual`` correctly rounded to that precision (2.12 for 2.1259)?"""
     decimals = _decimals_of_token(token)
-    return decimals >= MIN_SLIP_DECIMALS and abs(round(actual, decimals) - value) <= 1.01 * 10 ** -decimals
+    return decimals >= MIN_SLIP_DECIMALS and min(abs(r - value) for r in roundings(actual, decimals)) <= 1.01 * 10 ** -decimals
 
 
 # Report order: the self-contradiction first, then the classic copy error,
@@ -976,7 +981,9 @@ def check(
     # findings depend on what the other does with the extractor.
     # A citation bracket holds reference numbers, not measurements: taken out for
     # this check only, since the extractor is shared with ``number_provenance``.
-    numbers = _scan_paper_numbers(_CITATION_GROUP.sub(" ", paper_text.replace(_MINUS_SIGN, "-")))
+    numbers = _scan_paper_numbers(
+        _CITATION_GROUP.sub(" ", _TEX_THOUSANDS.sub(",", paper_text).replace(_MINUS_SIGN, "-"))
+    )
     report.paper_numbers = len(numbers)
     settings = list(declared) if declared else []
 

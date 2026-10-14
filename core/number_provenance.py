@@ -160,7 +160,7 @@ from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, Callable, Iterator
 
-from core.numeric_oracle import MIN_MAGNITUDE, _MINUS_SIGN, extract_paper_numbers, flatten_numbers, roundings
+from core.numeric_oracle import MIN_MAGNITUDE, _MINUS_SIGN, _TEX_THOUSANDS, extract_paper_numbers, flatten_numbers, roundings
 from core.stat_claims import normalise
 
 # A number must carry this many significant digits before its value says
@@ -374,11 +374,6 @@ def _is_year(value: float, token: str) -> bool:
     )
 
 
-# LaTeX writes a thousands separator as ``24{,}122`` so that math mode does not put a space after the comma. It is the
-# same separator as ``24,122``, and left as it is the number reads as two: 24 and 122.
-_TEX_THOUSANDS = re.compile(r"(?<=\d)\{,\}(?=\d{3}(?!\d))")
-
-
 def paper_numbers(paper_text: str) -> list[tuple[float, str, str]]:
     """``(value, token, context)`` for every number the paper *claims*.
 
@@ -499,7 +494,14 @@ _STOP_WORDS = (
     "time times rate rates score scores error errors test tests case cases step steps run runs number total sample "
     "samples size level levels point points"
 ).split()
-_COMMON_STOP = frozenset(w[:4] for w in _STOP_WORDS)
+# The two-letter words of ordinary English. Written in capitals (a heading, a sentence in capitals, emphasis) or as a
+# part of a result's path (`in`, `no`, `id`), they are still connectives, not abbreviations: only a two-letter word
+# that is NOT one of these (SD, CI, SE) can name a result.
+_TWO_LETTER_WORDS = frozenset(
+    "ad ah am an as at aw ax be by do eh er ex go ha he hi id if in is it me my no of oh ok on or ow ox pa re so to uh um "
+    "up us we ye yo".split()
+)
+_COMMON_STOP = frozenset(w[:4] for w in _STOP_WORDS) | _TWO_LETTER_WORDS
 _PATH_STOP = _COMMON_STOP | frozenset(w[:4] for w in (
     "replicates config design oracle figure comparisons optimisation stratum len records cells settings setting seeds "
     "seed over key keys estimate"
@@ -509,7 +511,7 @@ _WORD = re.compile(r"[a-z]{3,}")
 # in a result's name it is a lowercase snake_case part (`Ea_estimate_sd_J_mol`). Any other two-letter word is a
 # connective ("of", "in", "is") and names nothing.
 _ABBREVIATION_IN_TEXT = re.compile(r"(?<![A-Za-z])[A-Z]{2}(?![A-Za-z])")
-_ABBREVIATION_IN_NAME = re.compile(r"(?<![a-z])[a-z]{2}(?![a-z])")
+_ABBREVIATION_IN_NAME = re.compile(r"(?<![A-Za-z])(?:[a-z]{2}|[A-Z]{2})(?![A-Za-z])")
 _GROUP_TAG = re.compile(r"\{[^}]*\}")
 _INDEX_OR_STAT = re.compile(r"\[\d*\]|\.@\w+$")
 
@@ -530,7 +532,7 @@ def _name_stems(text: str, stop: frozenset[str], *, of_a_name: bool = False) -> 
     kept (see ``_ABBREVIATION_IN_TEXT``); ``of_a_name`` says ``text`` is a result's name, not a sentence."""
     stems = {w[:4] for w in _WORD.findall(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text).lower())}
     stems.update(
-        (_ABBREVIATION_IN_NAME.findall(text) if of_a_name else [w.lower() for w in _ABBREVIATION_IN_TEXT.findall(text)])
+        ([w.lower() for w in _ABBREVIATION_IN_NAME.findall(text)] if of_a_name else [w.lower() for w in _ABBREVIATION_IN_TEXT.findall(text)])
     )
     return frozenset(stems - stop)
 

@@ -1130,3 +1130,23 @@ def test_a_latex_thousands_separator_is_one_number() -> None:
     run = {"truth": {"Ea_true": 24122.394677383}, "other": 1.5}
     assert _tokens(check(r"The target was \(E_a=24{,}122.394677\ \mathrm{J}\).", result_json=run)) == []
     assert _tokens(check(r"The target was \(E_a=24{,}199.394677\ \mathrm{J}\).", result_json=run)) == ["24,199.394677"]
+
+
+def _crowded(name: str) -> dict:
+    crowd = {f"filler_{i}": float(101 + 3 * i) for i in range(220)}
+    return {"filler": crowd, "ols": {name: {"estimate": 709.449}}}
+
+
+@pytest.mark.parametrize("word", ["IN", "NO", "ON", "OR", "IS", "AT", "BY", "TO", "ID", "OF"])
+def test_an_ordinary_two_letter_word_in_capitals_cannot_name_a_result(word: str) -> None:
+    """A heading or an emphasised sentence writes "IN"/"NO" in capitals; a result path may have an `in`/`no` segment.
+    Neither is an abbreviation, so the match 709 ~ 709.449 stays a coincidence and is flagged."""
+    run = _crowded(word.lower())
+    assert _tokens(check(f"At 8% noise the {word} declined to 709 units.", result_json=run)) == ["709"]
+
+
+@pytest.mark.parametrize("key", ["sd", "SD", "Ea_estimate_sd_J_mol", "Ea_ESTIMATE_SD"])
+def test_an_abbreviation_names_a_result_in_either_case_in_its_path(key: str) -> None:
+    run = _crowded(key)
+    assert _tokens(check("At 8% noise the SD declined to 709 units.", result_json=run)) == []
+    assert _tokens(check("At 8% noise the SD declined to 712 units.", result_json=run)) == ["712"]
