@@ -341,6 +341,10 @@ def test_a_fault_may_be_about_the_main_quantity_by_its_name_or_its_keys() -> Non
     assert code_review.about_headline({}, {"id": "F-2", "quantity": "totalyield"}, result, ["total_yield"])
     assert not code_review.about_headline({}, {"id": "F-3", "quantity": "runtime"}, result, ["total_yield"])
     assert code_review.about_headline({}, {"id": "F-4", "headline": True}, result, [])
+    # a short headline name (AUC) by its own name and by the keys it holds
+    assert code_review.about_headline({}, {"id": "F-5", "quantity": "AUC"}, {"auc": 0.85, "n": 3}, ["auc"])
+    assert code_review.about_headline({}, {"id": "F-6", "quantity": "auc"}, {"auc": 0.85}, ["AUC"])
+    assert not code_review.about_headline({}, {"id": "F-7", "quantity": "n"}, {"auc": 0.85, "n": 3}, ["auc"])
 
 
 @pytest.mark.asyncio

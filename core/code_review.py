@@ -821,12 +821,11 @@ def about_headline(record: dict[str, Any], issue: dict[str, Any], result: Any, h
     headline's. When in doubt it is: a fault there leaves nothing to report."""
     if issue.get("headline"):
         return True
-    wanted = [n for n in (_norm(h) for h in headline) if len(n) >= 4]
-    if not wanted:
-        return False
+    exact = {n for n in (_norm(h) for h in headline) if n}
+    wanted = [n for n in exact if len(n) >= 4]  # one name inside another only for names long enough to mean something
     for name in quantity_names(record, issue):
         n = _norm(name)
-        if len(n) >= 4 and any(n in w or w in n for w in wanted):
+        if n in exact or (len(n) >= 4 and any(n in w or w in n for w in wanted)):
             return True
     mine = set(keys_of_issue(record, issue, result))
     return bool(mine) and any(mine & named_in_results(h, result) for h in headline)
