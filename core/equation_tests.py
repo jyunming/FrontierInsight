@@ -316,19 +316,21 @@ def rederive_request(items: list[dict[str, Any]]) -> str:
             + "\n".join(lines) + "\nChange only these equations' `example`, and nothing else in the plan.")
 
 
-def parameter_problems(rows: list[dict[str, Any]], params: dict[str, list[str]]) -> dict[str, str]:
+def parameter_problems(rows: list[dict[str, Any]],
+                       params: dict[str, tuple[list[str], list[str]]]) -> dict[str, str]:
     """For each equation whose example is usable and whose function is already named with its parameters (``params``: the
-    equation's id to the parameter names the outline fixed): why they disagree with the example's inputs, in plain words.
-    The contract is exact (the function's parameters are the example's inputs, and for a random equation also ``rng`` or
-    ``seed``); a function that takes ``*args`` or ``**kwargs`` is not judged. Only names are compared, nothing is guessed."""
+    equation's id to ``(every parameter, the parameters without a default)`` the outline fixed): why the test would fail
+    on names alone, in plain words. That is exactly the test's own contract: every input of the example must be a
+    parameter, and a parameter without a default must be an input (for a random equation ``rng`` or ``seed`` is FI's);
+    a function that takes ``*args`` or ``**kwargs`` is not judged. Only names are compared, nothing is guessed."""
     out: dict[str, str] = {}
     for r in rows:
-        names = params.get(r["id"])
+        names, required = params.get(r["id"]) or (None, [])
         if r["state"] != "ok" or names is None or any(n.startswith("*") for n in names):
             continue
         extra = {*RNG_PARAMS, SEED_PARAM} if r.get("random") else set()
-        have, want = {n for n in names if n not in extra}, set(r["inputs"])
-        if have != want:
+        want = set(r["inputs"])
+        if not want <= set(names) or not {n for n in required if n not in extra} <= want:
             out[r["id"]] = (f"the function for it is planned with the parameters ({', '.join(names)}), but the example's "
                             f"inputs are ({', '.join(sorted(want))}); they must be the same names")
     return out
@@ -341,7 +343,7 @@ def with_examples(protocol: dict[str, Any] | None, examples: dict[str, dict[str,
     model = protocol.get("model") if isinstance(protocol, dict) else None
     if not examples or not isinstance(model, dict):
         return protocol
-    key = next((k for k in _oracle._EQUATION_KEYS if _text(model.get(k))), None)
+    key = next((k for k in _oracle._EQUATION_KEYS if _oracle.equation_items(model.get(k))), None)
     if key is None:
         return protocol
     items = [dict(e) for e in _oracle.equation_items(model[key])]

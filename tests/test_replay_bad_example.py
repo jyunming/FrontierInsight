@@ -124,6 +124,17 @@ async def test_an_example_the_plan_keeps_wrong_goes_the_old_way_and_is_asked_onl
 
 
 @pytest.mark.asyncio
+async def test_a_redesign_that_gives_the_equation_a_new_formula_may_be_asked_again(tmp_path: Path) -> None:
+    engine, model, state = _setup(tmp_path, BAD_EXAMPLE, STILL_WRONG)
+    assert await engine._equation_gate(state, None, None) is not None and len(model.revisions) == 1
+    new = engine._rederive_examples(state, _protocol(BAD_EXAMPLE), [
+        {"id": "E7", "formula": "p = 1-exp(-exp(beta0 + beta1*dose_mj_cm2 + 0))", "example": BAD_EXAMPLE,
+         "why": eqt.MISMATCH, "source": "tests"}])
+    await new
+    assert len(model.revisions) == 2
+
+
+@pytest.mark.asyncio
 async def test_a_plan_that_changes_nothing_or_gives_no_testable_example_falls_back_to_the_old_path(tmp_path: Path) -> None:
     engine, model, state = _setup(tmp_path, BAD_EXAMPLE, None)
     assert await engine._equation_gate(state, None, None) is not None and len(model.revisions) == 1
@@ -131,6 +142,10 @@ async def test_a_plan_that_changes_nothing_or_gives_no_testable_example_falls_ba
     patch = await engine2._equation_gate(state2, None, None)
     assert patch is not None, "untestable is not a way out of a failing example"
     assert not (engine2.fi_dir / "examples_rederived.json").read_text(encoding="utf-8").count('"examples"')
+    # The reply is not kept in plan.md either: a later pass still tests the equation with the example as it was.
+    assert _plan_example(engine2) == BAD_EXAMPLE
+    assert eqt.example_rows(engine2._draft_protocol({"iteration": 1, "design": {"protocol": _protocol(BAD_EXAMPLE)}}))[0][
+        "state"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -151,13 +166,19 @@ def test_the_request_holds_the_equation_the_example_and_the_kind_of_failure_only
 
 def test_parameters_that_are_not_the_examples_inputs_are_found_before_any_code_is_written() -> None:
     rows = eqt.example_rows(_protocol(BAD_EXAMPLE))
-    found = eqt.parameter_problems(rows, {"E7": ["beta0", "beta1", "line_width_sd_nm"]})
+    three = ["beta0", "beta1", "line_width_sd_nm"]
+    found = eqt.parameter_problems(rows, {"E7": (three, three)})
     assert list(found) == ["E7"] and "beta0, beta1, line_width_sd_nm" in found["E7"] and "line_width_sd_nm" in found["E7"]
-    assert eqt.parameter_problems(rows, {"E7": ["line_width_sd_nm"]}) == {}
-    assert eqt.parameter_problems(rows, {"E7": ["line_width_sd_nm", "**kw"]}) == {}
+    assert eqt.parameter_problems(rows, {"E7": (["line_width_sd_nm"], ["line_width_sd_nm"])}) == {}
+    assert eqt.parameter_problems(rows, {"E7": (["line_width_sd_nm", "**kw"], ["line_width_sd_nm"])}) == {}
     good = eqt.example_rows(_protocol(GOOD_EXAMPLE))
-    assert eqt.parameter_problems(good, {"E7": ["beta0", "beta1", "dose_mj_cm2"]}) == {}
-    assert eqt.parameter_problems(good, {"E7": ["beta0", "beta1", "dose_mj_cm2", "rng"]}) != {}, "rng only for a random equation"
+    names = ["beta0", "beta1", "dose_mj_cm2"]
+    assert eqt.parameter_problems(good, {"E7": (names, names)}) == {}
+    assert eqt.parameter_problems(good, {"E7": ([*names, "rng"], [*names, "rng"])}) != {}, "rng only for a random equation"
+    # A parameter with a default need not be an input (the test calls the function with the inputs only) ...
+    assert eqt.parameter_problems(good, {"E7": ([*names, "clip"], names)}) == {}
+    # ... but every input must be a parameter.
+    assert eqt.parameter_problems(good, {"E7": (["beta0", "beta1"], ["beta0", "beta1"])}) != {}
 
 
 @pytest.mark.asyncio

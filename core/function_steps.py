@@ -97,6 +97,13 @@ class Spec:
         node = ast.parse(self.signature.rstrip().rstrip(":") + ":\n    pass").body[0]
         return _param_names(node)  # type: ignore[arg-type]
 
+    def required_params(self) -> list[str]:
+        """The parameters a call must give (no default value, not ``*args`` or ``**kwargs``)."""
+        a = ast.parse(self.signature.rstrip().rstrip(":") + ":\n    pass").body[0].args  # type: ignore[attr-defined]
+        positional = [*a.posonlyargs, *a.args]
+        required = positional[:len(positional) - len(a.defaults)]
+        return [x.arg for x in required] + [x.arg for x, d in zip(a.kwonlyargs, a.kw_defaults) if d is None]
+
 
 def _param_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
     a = node.args

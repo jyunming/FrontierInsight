@@ -683,6 +683,12 @@ from core.config import ProviderName as _ProviderName  # noqa: E402
 #: which reports the vendor that answered (copilot, customendpoint, ollama-models).
 _FI_PROVIDER_NAMES = frozenset(get_args(_ProviderName)) - {"vscode_extension"}
 
+#: Why FI asks the plan to work an equation's example out again (core/engine.py ``_rederive_examples``), by source.
+_REDERIVE_BECAUSE = {
+    "tests": "could not be met by code that follows its formula",
+    "parameters": "names other inputs than the parameters the outline gave its function",
+}
+
 class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
@@ -12007,7 +12013,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 # code is written, so a disagreement of names is put to the plan now (once), not found by a failing test.
                 problems = _equation_tests.parameter_problems(
                     _equation_tests.example_rows(protocol),
-                    {s.equation: s.params() for s in specs if s.kind == _function_steps.EQUATION})
+                    {s.equation: (s.params(), s.required_params()) for s in specs
+                     if s.kind == _function_steps.EQUATION})
                 if problems:
                     by_id = {str(eq["id"]).strip(): eq for eq in _equation_tests.eligible(protocol)}
                     changed = await self._rederive_examples(state, protocol, [
@@ -12219,17 +12226,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return []
         record = self._examples_rederived()
         asked = record.get("asked") if isinstance(record.get("asked"), dict) else {}
-        asks = [a for a in asks if f"{a['id']}:{a['source']}" not in asked]
+        def ask_key(a: dict[str, Any]) -> str:  # a redesign that gives the id a new formula may be asked again
+            return f"{a['id']}:{a['source']}:{a['formula']}"
+        asks = [a for a in asks if ask_key(a) not in asked]
         if not asks:
             return []
         # Recorded before the request: a killed run does not ask again.
-        asked = {**asked, **{f"{a['id']}:{a['source']}": True for a in asks}}
+        asked = {**asked, **{ask_key(a): True for a in asks}}
         record = {**record, "asked": asked}
         self._write_json_quiet(self._examples_rederived_path(), record)
         ids = [a["id"] for a in asks]
         for a in asks:
-            self._log.info("[plan] the plan's worked example for %s could not be met by code that follows its formula; FI asks "
-                           "the plan to work the example out again from the formula", a["id"])
+            self._log.info("[plan] the plan's worked example for %s %s; FI asks the plan to work the example out again from "
+                           "the formula", a["id"], _REDERIVE_BECAUSE[a["source"]])
         design_before, _why = _plan.load_design(self.quest_root)
         protocol_before = design_before.get("protocol") if isinstance(design_before, dict) else None
         examples_before = {str(e["id"]).strip(): e.get("example") for e in _equation_tests.eligible(
@@ -12238,7 +12247,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if failed:
             self._log.warning("[plan] %s", failed)
             return []
-        # Only the asked equations' examples change: another equation's example is put back as it was.
+        # Only a usable new example of an asked equation is kept: every other example, an asked one the plan left
+        # unusable or `untestable` included, is put back as it was, so a reply can never take an equation out of the test.
+        design_after, _why = _plan.load_design(self.quest_root)
+        protocol_after = design_after.get("protocol") if isinstance(design_after, dict) else None
+        formulas = {str(a["id"]): a["formula"] for a in asks}
+        protocol_after = protocol_after if isinstance(protocol_after, dict) else None
+        usable = {r["id"] for r in _equation_tests.example_rows(protocol_after) if r["state"] == "ok"}
+        taken: dict[str, dict[str, Any]] = {}
+        for eq in _equation_tests.eligible(protocol_after):
+            eid = str(eq["id"]).strip()
+            if (eid in ids and eid in usable and eq.get("example") != examples_before.get(eid)
+                    and " ".join(str(eq.get("formula") or "").split()) == formulas[eid]):
+                taken[eid] = {"formula": formulas[eid], "example": eq["example"]}
         after_text = path.read_text(encoding="utf-8")
 
         def put_back(block: dict[str, Any]) -> dict[str, Any] | None:
@@ -12246,14 +12267,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             model = proto.get("model")
             if not isinstance(model, dict):
                 return None
-            key = next((k for k in _oracle._EQUATION_KEYS if str(model.get(k) or "").strip()), None)
+            key = next((k for k in _oracle._EQUATION_KEYS if _oracle.equation_items(model.get(k))), None)
             if key is None:
                 return None
             items = [dict(e) for e in _oracle.equation_items(model[key])]
             moved = False
             for eq in items:
                 eid = str(eq.get("id") or "").strip()
-                if eid not in ids and eid in examples_before and eq.get("example") != examples_before[eid]:
+                if eid not in taken and eid in examples_before and eq.get("example") != examples_before[eid]:
                     if examples_before[eid] is None:
                         eq.pop("example", None)
                     else:
@@ -12266,30 +12287,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             restored = _plan.refresh_model_section(restored)
             path.write_text(restored, encoding="utf-8")
             _plan.record_version(self.quest_root, restored, by="engine",
-                                 note="the examples of the equations FI did not ask about put back as they were")
-        design_after, _why = _plan.load_design(self.quest_root)
-        protocol_after = design_after.get("protocol") if isinstance(design_after, dict) else None
-        formulas = {str(a["id"]): a["formula"] for a in asks}
-        protocol_after = protocol_after if isinstance(protocol_after, dict) else None
-        # A new example counts only when FI can compute it (not "untestable", not unreadable): the equation stays tested.
-        usable = {r["id"] for r in _equation_tests.example_rows(protocol_after) if r["state"] == "ok"}
-        taken: dict[str, dict[str, Any]] = {}
-        for eq in _equation_tests.eligible(protocol_after):
-            eid = str(eq["id"]).strip()
-            if (eid in ids and eid in usable and eq.get("example") != examples_before.get(eid)
-                    and " ".join(str(eq.get("formula") or "").split()) == formulas[eid]):
-                taken[eid] = {"formula": formulas[eid], "example": eq["example"]}
+                                 note="the examples FI did not take from the plan's reply put back as they were")
         lines = []
         for eid in ids:
-            lines.append(f"- FI asked the plan to work the example of equation {eid} out again from its formula, because code "
-                         "that follows the formula could not meet it, and "
-                         + ("the plan gave a new one." if eid in taken else "the plan kept the example as it was."))
+            lines.append(f"- FI asked the plan to work the example of equation {eid} out again from its formula, because it "
+                         f"{_REDERIVE_BECAUSE[next(a['source'] for a in asks if a['id'] == eid)]}, and "
+                         + ("the plan gave a new one." if eid in taken
+                            else "the plan gave no new one FI can use, so the example is kept as it was."))
         self._write_plan_section(path, ["", *lines], note="what FI asked the plan about a worked example it could not meet")
         for eid in ids:
             if eid in taken:
                 self._log.info("[plan] the plan worked the example of %s out again; the equation is tested once more with it", eid)
             else:
-                self._log.warning("[plan] the plan kept the example of %s as it was; the equation's test goes on as before", eid)
+                self._log.warning("[plan] the plan gave no new example of %s that FI can use; the example is kept as it was "
+                                  "and the equation's test goes on as before", eid)
         if taken:
             self._write_json_quiet(self._examples_rederived_path(),
                                    {**self._examples_rederived(), "examples": {**(record.get("examples") or {}), **taken}})
