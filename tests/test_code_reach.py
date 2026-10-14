@@ -15,7 +15,11 @@ FIXTURE = Path(__file__).parent / "fixtures" / "code_reach_r9k"
 
 
 def _quest(tmp_path: Path) -> Path:
+    """The real quest's record, for the code as checked out (line endings change its bytes, so its hash is set again)."""
     shutil.copytree(FIXTURE, tmp_path, dirs_exist_ok=True)
+    record = code_review.load(tmp_path)
+    record["version"] = record["read_version"] = code_review.version(tmp_path / "code")
+    code_review.save(tmp_path, record)
     return tmp_path
 
 
