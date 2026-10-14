@@ -506,3 +506,47 @@ def test_the_local_listing_script_runs_on_this_interpreter():
     out = subprocess.run([sys.executable, "-c", _LOCAL_SCRIPT], capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() and all("==" in line or " @ " in line for line in out.stdout.splitlines())
+
+
+def test_scrub_secrets_drops_secret_names_and_keeps_ordinary_ones() -> None:
+    from core.execution import scrub_secrets
+
+    secret = ["FAKE_SERVICE_API_KEY", "openai_api_key", "GITHUB_TOKEN", "HF_TOKEN", "AWS_SECRET_ACCESS_KEY",
+              "AWS_ACCESS_KEY_ID", "DB_PASSWORD", "DB_PASSWD", "MY_CREDENTIALS", "SERVICEAPIKEY", "OLLAMA_API_KEY"]
+    ordinary = ["PATH", "PYTHONPATH", "HOME", "USERPROFILE", "TEMP", "SYSTEMROOT", "HTTPS_PROXY", "PIP_INDEX_URL",
+                "CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS", "FI_TRIALS", "FI_RAW_DIR", "TOKENIZERS_PARALLELISM"]
+    src = {k: "dummy" for k in secret + ordinary}
+    out = scrub_secrets(src)
+    assert not set(secret) & set(out)
+    assert set(ordinary) <= set(out)
+    assert "FAKE_SERVICE_API_KEY" in src  # the input is not changed
+
+
+def test_scrub_secrets_defaults_to_the_process_environment(monkeypatch) -> None:
+    from core.execution import scrub_secrets
+
+    monkeypatch.setenv("FAKE_SERVICE_API_KEY", "dummy")
+    monkeypatch.setenv("FAKE_ORDINARY", "x")
+    out = scrub_secrets()
+    assert "FAKE_SERVICE_API_KEY" not in out and out["FAKE_ORDINARY"] == "x"
+
+
+@pytest.mark.asyncio
+async def test_venv_executor_runs_code_without_secret_variables(venv_quest: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_SERVICE_API_KEY", "dummy")
+    exe = VenvExecutor()
+    await exe.setup(venv_quest)
+    py = exe.python_path(venv_quest)
+    code = "import os; print('present' if 'FAKE_SERVICE_API_KEY' in os.environ else 'absent', 'PATH' in os.environ or 'Path' in os.environ)"
+    for env in (None, {**__import__("os").environ, "FAKE_SERVICE_API_KEY": "dummy"}):
+        result = await exe.execute([str(py), "-c", code], cwd=venv_quest, timeout_s=60, env=env)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["absent", "True"]
+
+
+def test_the_engines_environment_builders_leave_out_secret_variables(monkeypatch) -> None:
+    from core.engine import _replicate_env
+
+    monkeypatch.setenv("FAKE_SERVICE_API_KEY", "dummy")
+    out = _replicate_env(None, 0, 1)
+    assert "FAKE_SERVICE_API_KEY" not in out and "FI_REPLICATE_SEED" in out

@@ -29,7 +29,7 @@ import time
 import venv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Protocol
+from typing import TYPE_CHECKING, Iterable, Mapping, Protocol
 
 from core.fi_home import fi_home
 from core.proc_tree import AsyncProcessTree
@@ -38,6 +38,27 @@ if TYPE_CHECKING:
     from core.skills.mounts import SkillMount
 
 _log = logging.getLogger("frontier_insight.execution")
+
+# Names of environment variables that hold a secret. FI's own process holds API keys (literature search, model
+# providers); a program a model wrote must not inherit them, so every executor drops these before it starts one.
+# Matched case-insensitively against the whole name: a key/token/password/secret/credential word anywhere in it.
+_SECRET_NAME = re.compile(
+    r"API_?KEY|ACCESS_?KEY|SECRET|PRIVATE_?KEY|CREDENTIAL|PASSW(?:OR)?D|(?:^|_)TOKEN$|^AUTH(?:ORIZATION)?$",
+    re.IGNORECASE,
+)
+
+
+def scrub_secrets(env: "Mapping[str, str] | None" = None) -> dict[str, str]:
+    """A copy of ``env`` (default: FI's own ``os.environ``) without the secret-looking variables.
+
+    Dropped: a name containing ``API_KEY`` / ``APIKEY``, ``ACCESS_KEY``, ``SECRET``, ``PRIVATE_KEY``, ``CREDENTIAL``,
+    ``PASSWORD`` / ``PASSWD``, or ending in ``_TOKEN`` (``OPENAI_API_KEY``, ``GITHUB_TOKEN``, ``HF_TOKEN``,
+    ``AWS_SECRET_ACCESS_KEY``, ``AWS_ACCESS_KEY_ID``). Everything else (PATH, PYTHONPATH, HOME, TEMP, proxy settings,
+    ``PIP_*``, ``CUDA_*``, ``FI_*``) stays. ``VenvExecutor`` and ``DockerExecutor`` apply this to whatever environment
+    they are given, and to ``os.environ`` when given none, so code a model wrote never sees FI's keys."""
+    base = os.environ if env is None else env
+    return {k: v for k, v in base.items() if not _SECRET_NAME.search(str(k))}
+
 
 # How long ``VenvExecutor.execute`` still reads a timed-out command's output after stopping it.
 _POST_KILL_READ_S = 30.0
@@ -221,7 +242,7 @@ class VenvExecutor:
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=env,
+            env=scrub_secrets(env),
         )
         proc = tree.proc
         aborted = False
@@ -1013,7 +1034,7 @@ class DockerExecutor:
         gets the cap, unless it already asks for no more than that. A non-root
         id has no home directory in a stock image: it gets /tmp, so libraries
         that keep a cache or config there (matplotlib) work."""
-        out = {k: v for k, v in env.items() if k.upper() not in _HOST_ONLY_VARS and isinstance(v, str)}
+        out = {k: v for k, v in scrub_secrets(env).items() if k.upper() not in _HOST_ONLY_VARS and isinstance(v, str)}
         root = str(host_root) if host_root is not None else None
         for k, v in list(out.items()):
             if k == "PYTHONPATH":

@@ -146,7 +146,7 @@ from .config import (
     SCIENTIFIC_PAPER_FORMATS,
     resolve_page_limit,
 )
-from .execution import DockerLimits, ExecutionResult, make_executor, pip_failure_summary
+from .execution import DockerLimits, ExecutionResult, make_executor, pip_failure_summary, scrub_secrets
 from .knowledge import (
     FOUNDATIONAL_MAX_SUGGESTED,
     FOUNDATIONAL_SUGGESTED,
@@ -11676,7 +11676,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             case_list = _equation_tests.cases(rows, located)
             if case_list:
                 _equation_tests.write(self.quest_root / "code", case_list)
-                env = {**os.environ}
+                env = scrub_secrets()
                 raw_dir = self._raw_root() / "equation_tests"
                 raw_dir.mkdir(parents=True, exist_ok=True)
                 env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
@@ -11797,7 +11797,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         (:func:`core.finding_repair.run_environment`), so a module that reads them when it is imported can be tested. Before
         the run a stand-in holds a file the run has not written yet; at the evidence gate (``stand_ins=False``) only real files
         are used."""
-        return {**os.environ, **_finding_repair.run_environment(
+        return {**scrub_secrets(), **_finding_repair.run_environment(
             self.quest_root, _split_run.env_value(self._raw_root(), self.quest_root), stand_ins=stand_ins)}
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
@@ -11922,7 +11922,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not case_list:
             return ""
         _equation_tests.write(self.quest_root / "code", case_list)
-        env = {**(exec_env or os.environ)}
+        env = {**(exec_env or scrub_secrets())}
         raw_dir = self._raw_root() / "equation_tests"
         raw_dir.mkdir(parents=True, exist_ok=True)
         env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
@@ -12107,7 +12107,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         rows = _equation_tests.example_rows(protocol)
         record: dict[str, Any] = {"equations": {r["id"]: {"state": r["state"], "why": r["why"]} for r in rows},
                                   "untested_core": [r["id"] for r in rows if r["state"] == "unprotected"]}
-        env = {**(exec_env or os.environ)}
+        env = {**(exec_env or scrub_secrets())}
         raw_dir = self._raw_root() / "equation_tests"
         raw_dir.mkdir(parents=True, exist_ok=True)
         env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
@@ -15737,7 +15737,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             shutil.rmtree(records_dir, ignore_errors=True)
             boot_dir = write_boot(self.fi_dir, self.config.output.paper_style)
             exec_env = {
-                **os.environ,
+                **scrub_secrets(),
                 "PYTHONPATH": os.pathsep.join(
                     p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p
                 ),
@@ -15753,7 +15753,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             lib_paths = [str(mounts[s.name].container) for s in skills if s.name in mounts
                          and str(getattr(s.kind, "value", s.kind)) == "library"]
         if lib_paths:
-            base_env = exec_env or dict(os.environ)
+            base_env = exec_env or scrub_secrets()
             exec_env = {**base_env, "PYTHONPATH": os.pathsep.join(
                 p for p in (*lib_paths, base_env.get("PYTHONPATH", "")) if p
             )}
@@ -15762,7 +15762,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         from core.example_inputs import ENV_VAR as _INPUT_ENV, examples_dir, list_inputs
 
         if list_inputs(self.quest_root):
-            exec_env = {**(exec_env or os.environ), _INPUT_ENV: str(examples_dir(self.quest_root))}
+            exec_env = {**(exec_env or scrub_secrets()), _INPUT_ENV: str(examples_dir(self.quest_root))}
         # The improve loop runs the simulation in the same environment (its skills' paths, its example inputs).
         self._last_exec_env = exec_env
 
@@ -15892,7 +15892,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "[execute] pilot pass (FI_PILOT=1, timeout=%ds) before the "
                 "full run", pilot_timeout,
             )
-            pilot_env = {**(exec_env or os.environ), "FI_PILOT": "1"}
+            pilot_env = {**(exec_env or scrub_secrets()), "FI_PILOT": "1"}
             try:
                 pilot = await self.executor.execute(
                     [str(py), str(code_path)],
@@ -16581,7 +16581,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         before_big = {d: digest(self.quest_root / d) for d in big}
         # A PDF saved again with nothing changed has the same bytes only with a fixed creation date; without it, a
         # redraw that changed nothing would look like one that did.
-        env: dict[str, str] = {**os.environ, "SOURCE_DATE_EPOCH": "0"}
+        env: dict[str, str] = {**scrub_secrets(), "SOURCE_DATE_EPOCH": "0"}
         try:
             from .plot_style import write_boot
 
@@ -23206,7 +23206,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         py = self.executor.python_path(self.quest_root)
         code_path = self.quest_root / "code" / "experiment.py"
         env = (
-            {**os.environ, ENV_VAR: str(examples_dir(self.quest_root))}
+            {**scrub_secrets(), ENV_VAR: str(examples_dir(self.quest_root))}
             if list_inputs(self.quest_root) else None
         )
         tasks = self.quest_root / _trial_runner.CLUSTER_DIR / _trial_runner.TASKS_NAME
@@ -23214,7 +23214,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if tasks.is_file() and submit.is_file():
             # FI's trials run as a job array: submit.py says whether it is done; the resume then collects the results.
             code_path = submit
-            env = {**(env or os.environ),
+            env = {**(env or scrub_secrets()),
                    _trial_runner.TASKS_ENV: (_trial_runner.CLUSTER_DIR / _trial_runner.TASKS_NAME).as_posix()}
         result = await self.executor.execute(
             [str(py), str(code_path)], cwd=self.quest_root,
@@ -26162,7 +26162,7 @@ def _replicate_env(
     DLL-load step.
     """
     return {
-        **(exec_env or os.environ),
+        **(exec_env or scrub_secrets()),
         "FI_REPLICATE_SEED": str(index * stride),
         "FI_REPLICATE_INDEX": str(index),
     }

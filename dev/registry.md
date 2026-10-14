@@ -468,7 +468,7 @@ same PR that adds, splits or renames one.
 ## Execution / sandboxing
 
 - `core/execution.py` — `Executor` protocol, `VenvExecutor` / `SharedInterpreterExecutor` / `DockerExecutor`,
-  `make_executor`. `DockerLimits` (from `execution.docker_memory_gb` / `docker_cpus` / `docker_max_processes`)
+  `make_executor`. `scrub_secrets` drops key/token/secret/password variables from the environment of every program a model wrote (both executors apply it, `env=None` included). `DockerLimits` (from `execution.docker_memory_gb` / `docker_cpus` / `docker_max_processes`)
   and the container's isolation (`DockerExecutor._create_kwargs`: no network, the limits, `cap_drop=ALL`,
   `no-new-privileges`; limits Docker cannot apply left out), the mounts (`_volumes`: the quest at `/work`, `.fi/` and
   `needs/` read-only over it, `.fi/trials` and `.fi/optimisation` writable for the harness's rows with their run
