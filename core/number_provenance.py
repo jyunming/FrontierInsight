@@ -364,8 +364,11 @@ def _carries_enough_precision(token: str) -> bool:
 
 
 def _is_year(value: float, token: str) -> bool:
+    # A year has no thousands separator: "1,920" is a quantity of 1920 (a standard deviation in the paper this was found
+    # in), and reading it as the year 1920 exempted it from every check.
     return (
-        _decimals(token) == 0
+        "," not in token
+        and _decimals(token) == 0
         and float(value).is_integer()
         and YEAR_LO <= value <= YEAR_HI
     )

@@ -432,6 +432,17 @@ def test_a_year_is_not_a_measurement() -> None:
     assert _tokens(report) == []
 
 
+def test_a_quantity_written_with_a_thousands_separator_is_not_a_year() -> None:
+    """"1,920" is 1920 of something, not the year 1920: it was skipped as a year and so never checked, while the
+    run's own value was 1849. A year is written without a separator."""
+    result = {"cells": {"a": {"spread": 1849.0, "n": 12.0}}, "per_trial": [1900.0 + i * 0.7 for i in range(400)]}
+    wrong = check("The spread fell from 1,920 to 12.0 units.", result_json=result)
+    assert _tokens(wrong) == ["1,920"]
+    right = check("The spread fell from 1,849 to 12.0 units.", result_json=result)
+    assert _tokens(right) == []
+    assert _tokens(check("The model follows Kermack and McKendrick 1927 throughout.", result_json=result)) == []
+
+
 def test_a_version_number_is_not_a_measurement() -> None:
     """"numpy 1.11.4" would otherwise be read as the 3-significant-digit
     measurement 1.11."""
