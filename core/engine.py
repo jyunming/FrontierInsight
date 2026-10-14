@@ -121,6 +121,7 @@ from . import trial_table as _trial_table
 from . import plan_ledger as _ledger
 from . import plan_steps as _plan_steps
 from . import equation_tests as _equation_tests
+from . import code_reach as _code_reach
 from . import code_review as _code_review
 from . import review_pairs as _pairs
 from . import quality_report as _quality_report
@@ -18522,6 +18523,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         shown = _code_findings.shown_open(record)
         if not shown:
             return None
+        # A fault in a function the run never calls changes no reported number (core/code_reach.py): it stays in the record.
+        never_run = _code_reach.never_run_in(self.quest_root)
+        unrun = [i for i in shown if never_run(i.get("file"), i.get("function"))]
+        if unrun:
+            for issue in unrun:
+                saved = (record.get("issues") or {}).get(str(issue.get("id")))
+                if isinstance(saved, dict):
+                    saved["never_run"] = True
+                self._log.warning("[evidence_gate] %s is about %s %s, which the run never calls: it changes no reported "
+                                  "number and does not stop the quest", issue.get("id"), issue.get("file"), issue.get("function"))
+            _code_review.save(self.quest_root, record)
+            shown = [i for i in shown if i not in unrun]
+            if not shown:
+                return None
         # A quantity the reader called missing that the results hold under another name is a difference of names, not a
         # fault that changes a reported number: the results contradict the reader, and the issue no longer stops anything.
         renamed = {str(i.get("id")): keys for i in shown

@@ -51,6 +51,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import code_reach as _code_reach
 from . import oracle_check as _oracle
 from . import review_pairs as _pairs
 
@@ -868,7 +869,8 @@ def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any
                 or v.get("contradicted") or name in seen):
             continue
         seen[name] = {"name": name, "kind": v.get("kind"), "status": v.get("status"), "text": str(v.get("text") or ""),
-                      "note": str(v.get("note") or "")}
+                      "note": str(v.get("note") or ""), "fid": v.get("fid"), "file_rel": v.get("file_rel"),
+                      "function": v.get("function")}
     return list(seen.values())
 
 
@@ -1009,6 +1011,7 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     record = load(quest_root)
     out: dict[str, Any] = {"unread": "", "reread": False, "not_reviewed": [], "not_reviewed_headline": False,
                            "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False,
+                           "never_run": [],
                            "second_version": second_version_sentences(quest_root),
                            "reviewed": bool(record.get("read_version"))}
     if not record:
@@ -1028,6 +1031,11 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     # computed: it is not "not computed".
     still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")
              and not (issues.get(v.get("fid")) or {}).get("reported_as")]
+    # A finding about a function the run never calls cannot change a reported number: it stays in FI's record
+    # (QUALITY.md), not in the paper (core/code_reach.py). A quantity said to be missing is about the whole code.
+    never_run = _code_reach.never_run_in(quest_root)
+    out["never_run"] = [v for v in still if v.get("status") != MISSING and never_run(v.get("file_rel"), v.get("function"))]
+    still = [v for v in still if v not in out["never_run"]]
     logic = [v for v in still if v.get("kind") == "logic"]
     left = [v for v in still if v.get("kind") != "logic"]
     out["missing"] = [v for v in left if v.get("status") == MISSING]

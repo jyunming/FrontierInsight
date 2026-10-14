@@ -192,3 +192,16 @@ def test_a_distinct_quantity_that_begins_with_the_planned_name_stays() -> None:
     # Several candidates with no shortest one: none is taken for the quantity.
     several = {"metric_aa": 1.0, "metric_bb": 2.0, "metric_ci": [1, 2]}
     assert cr.named_in_results("metric", several) == {"metric_ci"}
+
+
+def test_a_finding_a_test_did_not_show_takes_nothing_out(tmp_path: Path) -> None:
+    """A test written to show the reader's finding passed on the code: FI's record contradicts the reader, and the
+    quantity stays in the results (its doubt is still said in the limitations)."""
+    engine = _quest(tmp_path)
+    record = cr.load(engine.quest_root)
+    for n, v in enumerate(record["problems"]):
+        v["fid"] = f"F-{n}"
+    record["issues"] = {v["fid"]: {"id": v["fid"], "demonstrated": False} for v in record["problems"]}
+    cr.save(engine.quest_root, record)
+    _run(engine, _result())
+    assert not (engine.quest_root / "needs" / "RESULT_CHECK.json").exists()

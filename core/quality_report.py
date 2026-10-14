@@ -883,16 +883,18 @@ def _code_metrics(q: _Quest) -> dict[str, Any]:
             "repairs_converged": cr.get("converged") if isinstance(cr.get("converged"), bool) else None,
             "repair_requests": _int(cr.get("repair_calls")), "repair_rounds": _int(cr.get("send_backs")),
             "repairs_stopped": str(cr.get("repairs_stopped") or ""),
-            "issues": _issue_rows(cr), "issue_summary": _issue_summary(cr),
+            "issues": _issue_rows(cr, getattr(q, "root", None)), "issue_summary": _issue_summary(cr),
             "open_changing_per_reading": [_int(r.get("changing", r.get("high"))) for r in readings]}
 
 
-def _issue_rows(cr: dict[str, Any]) -> list[dict[str, Any]]:
+def _issue_rows(cr: dict[str, Any], root: Path | None = None) -> list[dict[str, Any]]:
     """One row per issue of the code reader (a stable id; :mod:`core.code_findings`): what it concerns, whether it can change
     a reported result, whether a failing test showed it, whether and by which model it was repaired, and whether it is
     still open after the last reading."""
     from . import code_findings as _issues
+    from . import code_reach as _code_reach
 
+    never_run = _code_reach.never_run_in(root) if root is not None else (lambda _f, _g: False)
     rows = []
     for issue in _issues.ranked(cr, only_open=False):
         outcome = str(issue.get("outcome") or "")
@@ -907,7 +909,8 @@ def _issue_rows(cr: dict[str, Any]) -> list[dict[str, Any]]:
             "open": still, "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
             "reason": _one(issue.get("reason"), 140), "seen_in": len(readings),
             "reported_as": [str(k) for k in _list(issue.get("reported_as"))],
-            "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {}})
+            "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {},
+            "never_run": bool(issue.get("never_run")) or never_run(issue.get("file"), issue.get("function"))})
     return rows
 
 
@@ -1032,6 +1035,8 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
         repaired = f"yes, by {row['repaired_by']}" if row["repaired"] else ("no" + (f" ({row['reason']})" if row["reason"] else ""))
         if row["plan_problem"]:
             still = "plan problem: the plan contradicts itself, asked of the plan's model"
+        elif row["open"] and row.get("never_run"):
+            still = "yes, but the run never calls this code, so it changes nothing reported; it is kept here, not in the paper"
         elif row["open"] and row.get("at_gate", {}).get("outcome") == "left_out":
             keys = ", ".join(str(k) for k in _list(row["at_gate"].get("keys"))[:3])
             still = f"yes: its test still fails, so FI left {keys} out of the results the paper uses, and the paper says so"

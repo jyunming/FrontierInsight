@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import code_reach as _code_reach
 from . import code_review as _code_review
 from . import degenerate_results as _degenerate
 from . import grid_keys as _grid_keys
@@ -162,10 +163,19 @@ class ResultChecksMixin:
             self._log.warning("[execute] could not read the code reader's findings against the results (%r)", exc)  # type: ignore[attr-defined]
             return []
         found: list[Found] = []
+        issues = _code_review.load(self.quest_root).get("issues") or {}  # type: ignore[attr-defined]
+        never_run = _code_reach.never_run_in(self.quest_root)  # type: ignore[attr-defined]
         for q in differing:
             # Only "computed differently": a quantity called missing that the results hold is one the reader got wrong
             # (:func:`core.code_review.resolve_headline` says so for the headline; the writer's note covers the rest).
             if q["status"] != _code_review.DIFFERENT:
+                continue
+            # Not taken out when FI's own record contradicts the reader: a test written to show the fault passed on the code
+            # (it was not shown), or the function it names is never run (core/code_reach.py). A finding no test was written
+            # for still takes the quantity out: a real paper reported standard deviations under the plan's name for mean
+            # absolute errors, and its reader, never tested, was right.
+            issue = issues.get(q.get("fid")) if isinstance(issues, dict) else None
+            if (isinstance(issue, dict) and issue.get("demonstrated") is False) or never_run(q.get("file_rel"), q.get("function")):
                 continue
             keys = sorted(_code_review.named_in_results(q["name"], result_json))
             if not keys:

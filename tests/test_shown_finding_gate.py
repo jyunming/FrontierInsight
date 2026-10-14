@@ -319,3 +319,16 @@ def test_a_quoted_value_left_out_by_a_test_is_named_for_the_test_not_a_model() -
                                         left_out_why={"dose": result_checks.SHOWN_FAULT_WHY})
     assert len(hits) == 1 and "a test FI ran" in hits[0] and "second model" not in hits[0]
     assert "second model" in record_claims.contradictions("The dose was 60.25 mJ/cm2.", left_out={"dose": [60.25]})[0]
+
+
+@pytest.mark.asyncio
+async def test_a_fault_in_a_function_the_run_never_calls_stops_nothing(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    (engine.quest_root / "code" / "experiment.py").write_text(
+        TYPED_IN + "\n\ndef plot_unused():\n    return 0\n\nprint(dose())\n", encoding="utf-8")
+    _record(engine, _issue(function="plot_unused"))
+    assert await engine._shown_fault_verdict(STATE) is None
+    assert code_review.load(engine.quest_root)["issues"]["F-1"]["never_run"] is True
+    _record(engine, _issue(function="dose"))  # the same fault in the function the run calls still stops
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and verdict["stuck_reason"] == "shown_fault_open"

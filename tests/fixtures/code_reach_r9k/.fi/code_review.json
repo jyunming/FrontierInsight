@@ -1,0 +1,1754 @@
+{
+ "version": "3924b94ffa720044",
+ "reviews_total": 3,
+ "send_backs": 2,
+ "repair_calls": 31,
+ "finding_calls": 43,
+ "test_calls": 12,
+ "readings": [
+  {
+   "n": 1,
+   "version": "c03e3c9c9a7a669c",
+   "open": 9,
+   "high": 4,
+   "changing": 6,
+   "ids": [
+    "F-45eafcdd",
+    "F-4b04dacb",
+    "F-d741c1e6",
+    "F-244ae132",
+    "F-e60502a1",
+    "F-0a34acdc",
+    "F-50a7235f",
+    "F-bdcacb89",
+    "F-d570a785"
+   ]
+  },
+  {
+   "n": 2,
+   "version": "9c99f8b32b96374d",
+   "open": 7,
+   "high": 4,
+   "changing": 4,
+   "ids": [
+    "F-d570a785",
+    "F-669f3fc4",
+    "F-97bdb83a",
+    "F-3bb48d01",
+    "F-854556c1",
+    "F-40cc3a13",
+    "F-a46b6acf"
+   ],
+   "improved": true
+  },
+  {
+   "n": 3,
+   "version": "3924b94ffa720044",
+   "open": 2,
+   "high": 1,
+   "changing": 1,
+   "ids": [
+    "F-560671f3",
+    "F-a3441c2a"
+   ],
+   "improved": true
+  }
+ ],
+ "converged": true,
+ "repaired": false,
+ "read_version": "3924b94ffa720044",
+ "issues": {
+  "F-45eafcdd": {
+   "id": "F-45eafcdd",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "c03e3c9c9a7a669c"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed `bootstrap`, `summarize_method`; a repair of a finding that names no function may change one existing function"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "the result reports empirical_coverage (Probability that a trial-specific nominal 95% Wald interval contains its known true parameter.)"
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 2,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "metric"
+   ],
+   "file": "",
+   "function": "",
+   "quantity": "empiricalcoverage",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the result reports empirical_coverage (Probability that a trial-specific nominal 95% Wald interval contains its known true parameter.)",
+   "why": "The result does not report a metric named empirical_coverage, reporting Ea_95_coverage and lnA_95_coverage separately instead.",
+   "fix": "",
+   "problem_ids": [
+    "R12"
+   ],
+   "statement": "[medium] Where: not stated\n   What is wrong: the plan's metric \"the result reports empirical_coverage (Probability that a trial-specific nominal 95% Wald interval contains its known true parameter.)\" is missing from the code\n   Why it is wrong against the plan: The result does not report a metric named empirical_coverage, reporting Ea_95_coverage and lnA_95_coverage separately instead.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "test": ".fi/finding_tests/F-45eafcdd_1.py",
+   "failure": "test_empirical_coverage_is_reported_and_matches_trial_intervals: summarizing trial-specific intervals raised IndexError('too many indices for array: array is 1-dimensional, but 2 were indexed')",
+   "touched": [
+    "experiment.py"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-4b04dacb": {
+   "id": "F-4b04dacb",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "c03e3c9c9a7a669c"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "the result reports abs_Ea_lnA_correlation (Absolute Pearson correlation of paired recovered Ea and ln A values across successful trials.)"
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "metric"
+   ],
+   "file": "",
+   "function": "",
+   "quantity": "absealnacorrelation",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the result reports abs_Ea_lnA_correlation (Absolute Pearson correlation of paired recovered Ea and ln A values across successful trials.)",
+   "why": "The result does not report abs_Ea_lnA_correlation, reporting Ea_lnA_correlation without taking the absolute value instead.",
+   "fix": "",
+   "problem_ids": [
+    "R14"
+   ],
+   "statement": "[medium] Where: not stated\n   What is wrong: the plan's metric \"the result reports abs_Ea_lnA_correlation (Absolute Pearson correlation of paired recovered Ea and ln A values across successful trials.)\" is missing from the code\n   Why it is wrong against the plan: The result does not report abs_Ea_lnA_correlation, reporting Ea_lnA_correlation without taking the absolute value instead.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "test": ".fi/finding_tests/F-4b04dacb_1.py",
+   "failure": "test_reports_absolute_ea_lna_correlation: The summary must report abs_Ea_lnA_correlation, not only the signed Ea_lnA_correlation.",
+   "touched": [
+    "experiment.py"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-d741c1e6": {
+   "id": "F-d741c1e6",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "c03e3c9c9a7a669c"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_run_trial_returns_ordered_confidence_intervals: run_trial must generate noisy concentrations with its RNG and return Arrhenius confidence intervals, but raised RuntimeError: nonlinear rate fit did not meet declared validity checks"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_run_trial_returns_ordered_confidence_intervals: run_trial must generate noisy concentrations with its RNG and return Arrhenius confidence intervals, but raised RuntimeError: nonlinear rate fit did not meet declared validity checks"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_run_trial_returns_ordered_confidence_intervals: run_trial must generate noisy concentrations with its RNG and return Arrhenius confidence intervals, but raised RuntimeError: nonlinear rate fit did not meet declared validity checks"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_run_trial_returns_ordered_confidence_intervals: run_trial must generate noisy concentrations with its RNG and return Arrhenius confidence intervals, but raised RuntimeError: nonlinear rate fit did not meet declared validity checks"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "generate_noisy_concentrations is called with three arguments instead of the four required by its signature.",
+    "Confidence interval endpoints are accessed under the nonexistent dictionary key intervals_95."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "run_trial",
+   "quantity": "simulatepy",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:33",
+   "text": "generate_noisy_concentrations is called with three arguments instead of the four required by its signature.",
+   "why": "In kinetics_parameter_recovery/model.py:74, generate_noisy_concentrations requires an explicit rng generator argument, so omitting it raises a TypeError.",
+   "fix": "Pass rng as the fourth argument to model.generate_noisy_concentrations.",
+   "problem_ids": [
+    "L1",
+    "L2"
+   ],
+   "statement": "[high] Where: simulate.py:33\n   What is wrong: generate_noisy_concentrations is called with three arguments instead of the four required by its signature.\n   Why it is wrong against the plan: In kinetics_parameter_recovery/model.py:74, generate_noisy_concentrations requires an explicit rng generator argument, so omitting it raises a TypeError.\n   How to fix it: Pass rng as the fourth argument to model.generate_noisy_concentrations.\n\n[high] Where: simulate.py:93\n   What is wrong: Confidence interval endpoints are accessed under the nonexistent dictionary key intervals_95.\n   Why it is wrong against the plan: kinetics_parameter_recovery/model.py:157 returns confidence intervals under Ea_interval_95 and lnA_interval_95 rather than intervals_95, causing a KeyError.\n   How to fix it: Index into Ea_interval_95 and lnA_interval_95 instead of intervals_95.",
+   "test": ".fi/finding_tests/F-d741c1e6_1.py",
+   "failure": "test_run_trial_returns_ordered_confidence_intervals: run_trial must generate noisy concentrations with its RNG and return Arrhenius confidence intervals, but raised TypeError: generate_noisy_concentrations() missing 1 required positional argument: 'rng'",
+   "reason": "no repair passed its test and kept the earlier checks passing (the finding's own test still fails: test_run_trial_returns_ordered_confidence_intervals: run_trial must generate noisy concentrations with its RNG and return Ar)"
+  },
+  "F-244ae132": {
+   "id": "F-244ae132",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "c03e3c9c9a7a669c"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_bootstrap_preserves_paired_ea_lna_rows_for_correlation: Perfectly linearly paired finite Ea and ln(A) values must give a bootstrap correlation interval of [1, 1], after excluding the non-finite pair."
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_bootstrap_preserves_paired_ea_lna_rows_for_correlation: Perfectly linearly paired finite Ea and ln(A) values must give a bootstrap correlation interval of [1, 1], after excluding the non-finite pair."
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_bootstrap_preserves_paired_ea_lna_rows_for_correlation: Perfectly linearly paired finite Ea and ln(A) values must give a bootstrap correlation interval of [1, 1], after excluding the non-finite pair."
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_bootstrap_preserves_paired_ea_lna_rows_for_correlation: Perfectly linearly paired finite Ea and ln(A) values must give a bootstrap correlation interval of [1, 1], after excluding the non-finite pair."
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "Boolean finite indexing flattens two-dimensional bootstrap inputs, causing column indexing in the statistic function to fail."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "bootstrap",
+   "quantity": "ealnacorrelation",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:38",
+   "text": "Boolean finite indexing flattens two-dimensional bootstrap inputs, causing column indexing in the statistic function to fail.",
+   "why": "In bootstrap, filtering np.column_stack([ea, lna]) with values[np.isfinite(values)] reduces the [a value from the plan's checks]D array to 1D, causing x[:, 0] in the correlation statistic lambda to raise an IndexError.",
+   "fix": "Filter rows containing non-finite values along axis 0 to preserve the two-dimensional array structure before resampling rows.",
+   "problem_ids": [
+    "L3"
+   ],
+   "statement": "[high] Where: experiment.py:38\n   What is wrong: Boolean finite indexing flattens two-dimensional bootstrap inputs, causing column indexing in the statistic function to fail.\n   Why it is wrong against the plan: In bootstrap, filtering np.column_stack([ea, lna]) with values[np.isfinite(values)] reduces the [a value from the plan's checks]D array to 1D, causing x[:, 0] in the correlation statistic lambda to raise an IndexError.\n   How to fix it: Filter rows containing non-finite values along axis 0 to preserve the two-dimensional array structure before resampling rows.",
+   "test": ".fi/finding_tests/F-244ae132_1.py",
+   "failure": "test_bootstrap_preserves_paired_ea_lna_rows_for_correlation: Bootstrap must remove non-finite Ea/ln(A) pairs by row while preserving two-dimensional inputs for the correlation statistic; it raised IndexError('too many indices for array: array is 1-dimensional, but 2 were indexed').",
+   "reason": "no repair passed its test and kept the earlier checks passing (the finding's own test still fails: test_bootstrap_preserves_paired_ea_lna_rows_for_correlation: Perfectly linearly paired finite Ea and ln(A) values must give )"
+  },
+  "F-e60502a1": {
+   "id": "F-e60502a1",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "c03e3c9c9a7a669c"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "Rate constant covariance is estimated using the known population noise variance instead of the regression residual scale."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "kinetics_parameter_recovery/model.py",
+   "function": "fit_rate_constant",
+   "quantity": "empiricalcoverage",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "kinetics_parameter_recovery/model.py:110",
+   "text": "Rate constant covariance is estimated using the known population noise variance instead of the regression residual scale.",
+   "why": "The plan method specifies estimating cov(k) from the residual scale and Jacobian, but the code scales the inverse Jacobian information matrix by the population noise variance squared.",
+   "fix": "Multiply the inverted information matrix by the residual sum of squares divided by the residual degrees of freedom rather than the noise variance squared.",
+   "problem_ids": [
+    "L4"
+   ],
+   "statement": "[high] Where: kinetics_parameter_recovery/model.py:110\n   What is wrong: Rate constant covariance is estimated using the known population noise variance instead of the regression residual scale.\n   Why it is wrong against the plan: The plan method specifies estimating cov(k) from the residual scale and Jacobian, but the code scales the inverse Jacobian information matrix by the population noise variance squared.\n   How to fix it: Multiply the inverted information matrix by the residual sum of squares divided by the residual degrees of freedom rather than the noise variance squared.",
+   "test": ".fi/finding_tests/F-e60502a1_1.py",
+   "failure": "test_rate_covariance_uses_residual_scale_not_known_noise_variance: Rate covariance must use the fitted residual scale times inverse Jacobian information, not the known population noise variance.",
+   "touched": [
+    "fit_rate_constant"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-0a34acdc": {
+   "id": "F-0a34acdc",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "c03e3c9c9a7a669c"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "Rate constant fitting rejects zero noise variance, causing check noise_free_arrhenius_recovery to abort."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "kinetics_parameter_recovery/model.py",
+   "function": "fit_rate_constant",
+   "quantity": "eaweightedjmol",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "kinetics_parameter_recovery/model.py:111",
+   "text": "Rate constant fitting rejects zero noise variance, causing check noise_free_arrhenius_recovery to abort.",
+   "why": "The plan check noise_free_arrhenius_recovery prescribes concentration noise fraction 0.0 with prescribed finite log-rate variance, but fit_rate_constant raises a RuntimeError whenever calculated rate variance is non-positive.",
+   "fix": "Allow zero calculated rate variance during rate fitting when the noise level is zero so downstream prescribed variances can be applied.",
+   "problem_ids": [
+    "L5"
+   ],
+   "statement": "[high] Where: kinetics_parameter_recovery/model.py:111\n   What is wrong: Rate constant fitting rejects zero noise variance, causing check noise_free_arrhenius_recovery to abort.\n   Why it is wrong against the plan: The plan check noise_free_arrhenius_recovery prescribes concentration noise fraction 0.0 with prescribed finite log-rate variance, but fit_rate_constant raises a RuntimeError whenever calculated rate variance is non-positive.\n   How to fix it: Allow zero calculated rate variance during rate fitting when the noise level is zero so downstream prescribed variances can be applied.",
+   "test": ".fi/finding_tests/F-0a34acdc_1.py",
+   "failure": "test_fit_rate_constant_accepts_zero_noise_covariance: Zero concentration noise must permit rate fitting so prescribed downstream log-rate variances can be used; fit raised RuntimeError: invalid rate covariance",
+   "touched": [
+    "fit_rate_constant"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-50a7235f": {
+   "id": "F-50a7235f",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "c03e3c9c9a7a669c"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "plan problem",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The plan defines both composite metrics and individual parameter metrics with conflicting naming and absolute-value requirements."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "summarize_method",
+   "quantity": "empiricalcoverage",
+   "severity": "medium",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": true,
+   "where": "experiment.py:61",
+   "text": "The plan defines both composite metrics and individual parameter metrics with conflicting naming and absolute-value requirements.",
+   "why": "The plan metrics table defines empirical_coverage and abs_Ea_lnA_correlation, whereas the headline metric, method text, and dependent variables define separate signed parameter metrics Ea_95_coverage, lnA_95_coverage, and Ea_lnA_correlation.",
+   "fix": "",
+   "problem_ids": [
+    "L6"
+   ],
+   "statement": "[medium] Where: experiment.py:61\n   What is wrong: The plan defines both composite metrics and individual parameter metrics with conflicting naming and absolute-value requirements.\n   Why it is wrong against the plan: The plan metrics table defines empirical_coverage and abs_Ea_lnA_correlation, whereas the headline metric, method text, and dependent variables define separate signed parameter metrics Ea_95_coverage, lnA_95_coverage, and Ea_lnA_correlation.\n   How to fix it: not stated",
+   "reason": "the plan contradicts itself; this is not a fault of the code",
+   "plan_asked": true,
+   "plan_changed": true
+  },
+  "F-bdcacb89": {
+   "id": "F-bdcacb89",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "c03e3c9c9a7a669c"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "The centered slope-intercept covariance is returned as a hardcoded literal constant 0.0."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "kinetics_parameter_recovery/model.py",
+   "function": "fit_arrhenius_line.fit",
+   "quantity": "centeredslopeinterceptcovariance",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "kinetics_parameter_recovery/model.py:161",
+   "text": "The centered slope-intercept covariance is returned as a hardcoded literal constant 0.0.",
+   "why": "The plan requires verifying orthogonality from the weighted linear regression, but fit_arrhenius_line returns literal 0.0 instead of the computed off-diagonal covariance entry.",
+   "fix": "Compute the covariance between centered slope and intercept from the off-diagonal element of the inverted centered information matrix.",
+   "problem_ids": [
+    "L7"
+   ],
+   "statement": "[low] Where: kinetics_parameter_recovery/model.py:161\n   What is wrong: The centered slope-intercept covariance is returned as a hardcoded literal constant 0.0.\n   Why it is wrong against the plan: The plan requires verifying orthogonality from the weighted linear regression, but fit_arrhenius_line returns literal 0.0 instead of the computed off-diagonal covariance entry.\n   How to fix it: Compute the covariance between centered slope and intercept from the off-diagonal element of the inverted centered information matrix.",
+   "test": ".fi/finding_tests/F-bdcacb89_1.py",
+   "failure": "test_centered_slope_intercept_covariance_matches_centered_information_matrix: centered_slope_intercept_covariance is hardcoded instead of reporting the off-diagonal covariance from the inverted centered information matrix.",
+   "touched": [
+    "kinetics_parameter_recovery/model.py"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-d570a785": {
+   "id": "F-d570a785",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "c03e3c9c9a7a669c"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_oracle_centered_covariance_uses_noisy_fits_at_every_temperature: run_oracles raised while checking centered Arrhenius orthogonality: RuntimeError('nonlinear rate fit did not meet declared validity checks')"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_oracle_centered_covariance_uses_noisy_fits_at_every_temperature: run_oracles raised while checking centered Arrhenius orthogonality: RuntimeError('nonlinear rate fit did not meet declared validity checks')"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_oracle_centered_covariance_uses_noisy_fits_at_every_temperature: run_oracles raised while checking centered Arrhenius orthogonality: RuntimeError('nonlinear rate fit did not meet declared validity checks')"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the reply held no function"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "The oracle check hardcodes uniform weights instead of evaluating the specified check case settings.",
+    "The oracle check centered_arrhenius_orthogonality hardcodes uniform weights instead of evaluating the declared case settings."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "kinetics_parameter_recovery/model.py",
+   "function": "run_oracles",
+   "quantity": "abscovslopeinterceptcentered",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "kinetics_parameter_recovery/model.py:276",
+   "text": "The oracle check centered_arrhenius_orthogonality hardcodes uniform weights instead of evaluating the declared case settings.",
+   "why": "The plan check centered_arrhenius_orthogonality specifies evaluating the case with noise and time point settings rather than hardcoding uniform weights.",
+   "fix": "Simulate trajectories and compute delta-method inverse-variance weights using the check's specified noise fraction and time point settings before verifying orthogonality.",
+   "problem_ids": [
+    "L5"
+   ],
+   "statement": "[low] Where: kinetics_parameter_recovery/model.py:276\n   What is wrong: The oracle check centered_arrhenius_orthogonality hardcodes uniform weights instead of evaluating the declared case settings.\n   Why it is wrong against the plan: The plan check centered_arrhenius_orthogonality specifies evaluating the case with noise and time point settings rather than hardcoding uniform weights.\n   How to fix it: Simulate trajectories and compute delta-method inverse-variance weights using the check's specified noise fraction and time point settings before verifying orthogonality.",
+   "test": ".fi/finding_tests/F-d570a785_1.py",
+   "failure": "test_oracle_centered_covariance_uses_noisy_fits_at_every_temperature: run_oracles raised while checking centered Arrhenius orthogonality: RuntimeError('nonlinear rate fit did not meet declared validity checks')",
+   "reason": "no repair passed its test and kept the earlier checks passing (the reply held no function)"
+  },
+  "F-669f3fc4": {
+   "id": "F-669f3fc4",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_run_trial_accepts_its_seeded_rng_and_is_reproducible: run_trial must pass its seeded rng to generate_noisy_concentrations; it raised RuntimeError: nonlinear rate fit did not meet declared validity checks"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_run_trial_accepts_its_seeded_rng_and_is_reproducible: run_trial must pass its seeded rng to generate_noisy_concentrations; it raised RuntimeError: nonlinear rate fit did not meet declared validity checks"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_run_trial_accepts_its_seeded_rng_and_is_reproducible: run_trial must pass its seeded rng to generate_noisy_concentrations; it raised RuntimeError: nonlinear rate fit did not meet declared validity checks"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the reply held no function"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "generate_noisy_concentrations is called with three arguments instead of the four required by its signature."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "logic",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "run_trial",
+   "quantity": "",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:33",
+   "text": "generate_noisy_concentrations is called with three arguments instead of the four required by its signature.",
+   "why": "In kinetics_parameter_recovery/model.py:74, generate_noisy_concentrations requires an explicit rng generator argument, so omitting it raises a TypeError.",
+   "fix": "Pass rng as the fourth argument when calling model.generate_noisy_concentrations.",
+   "problem_ids": [
+    "L1"
+   ],
+   "statement": "[high] Where: simulate.py:33\n   What is wrong: generate_noisy_concentrations is called with three arguments instead of the four required by its signature.\n   Why it is wrong against the plan: In kinetics_parameter_recovery/model.py:74, generate_noisy_concentrations requires an explicit rng generator argument, so omitting it raises a TypeError.\n   How to fix it: Pass rng as the fourth argument when calling model.generate_noisy_concentrations.",
+   "test": ".fi/finding_tests/F-669f3fc4_1.py",
+   "failure": "test_run_trial_accepts_its_seeded_rng_and_is_reproducible: run_trial must pass its seeded rng to generate_noisy_concentrations; it raised TypeError: generate_noisy_concentrations() missing 1 required positional argument: 'rng'",
+   "reason": "no repair passed its test and kept the earlier checks passing (the reply held no function)"
+  },
+  "F-97bdb83a": {
+   "id": "F-97bdb83a",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "Confidence interval endpoints are accessed under the nonexistent dictionary key intervals_95."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "logic",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "run_trial",
+   "quantity": "return",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:93",
+   "text": "Confidence interval endpoints are accessed under the nonexistent dictionary key intervals_95.",
+   "why": "In kinetics_parameter_recovery/model.py:163-164, fit_arrhenius_line returns confidence intervals under keys Ea_interval_95 and lnA_interval_95 rather than intervals_95, causing a KeyError.",
+   "fix": "Access confidence interval endpoints using keys Ea_interval_95 and lnA_interval_95 from the fit result dictionaries.",
+   "problem_ids": [
+    "L2"
+   ],
+   "statement": "[high] Where: simulate.py:93\n   What is wrong: Confidence interval endpoints are accessed under the nonexistent dictionary key intervals_95.\n   Why it is wrong against the plan: In kinetics_parameter_recovery/model.py:163-164, fit_arrhenius_line returns confidence intervals under keys Ea_interval_95 and lnA_interval_95 rather than intervals_95, causing a KeyError.\n   How to fix it: Access confidence interval endpoints using keys Ea_interval_95 and lnA_interval_95 from the fit result dictionaries.",
+   "test": ".fi/finding_tests/F-97bdb83a_1.py",
+   "failure": "test_run_trial_returns_canonical_arrhenius_confidence_intervals: run_trial must return the Ea_interval_95 and lnA_interval_95 endpoints supplied by the Arrhenius fit.",
+   "touched": [
+    "run_trial"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-3bb48d01": {
+   "id": "F-3bb48d01",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it broke checks that passed before: finding:.fi/finding_tests/F-4b04dacb_1.py"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it broke checks that passed before: finding:.fi/finding_tests/F-4b04dacb_1.py"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it broke checks that passed before: finding:.fi/finding_tests/F-4b04dacb_1.py"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "The method summary computes and reports abs_Ea_lnA_correlation using absolute value instead of the signed metric Ea_lnA_correlation."
+   ],
+   "fixed_by": "gemini-3.8-flash-high",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "summarize_method",
+   "quantity": "ealnacorrelation",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:104",
+   "text": "The method summary computes and reports abs_Ea_lnA_correlation using absolute value instead of the signed metric Ea_lnA_correlation.",
+   "why": "The plan requires reporting the signed Pearson correlation under the key Ea_lnA_correlation, but experiment.py takes the absolute value and stores it under abs_Ea_lnA_correlation.",
+   "fix": "Store the signed Pearson correlation under the key Ea_lnA_correlation without taking its absolute value.",
+   "problem_ids": [
+    "L3"
+   ],
+   "statement": "[high] Where: experiment.py:104\n   What is wrong: The method summary computes and reports abs_Ea_lnA_correlation using absolute value instead of the signed metric Ea_lnA_correlation.\n   Why it is wrong against the plan: The plan requires reporting the signed Pearson correlation under the key Ea_lnA_correlation, but experiment.py takes the absolute value and stores it under abs_Ea_lnA_correlation.\n   How to fix it: Store the signed Pearson correlation under the key Ea_lnA_correlation without taking its absolute value.",
+   "test": ".fi/finding_tests/F-3bb48d01_1.py",
+   "failure": "test_summarize_method_reports_signed_ea_lna_correlation: summarize_method must report the signed Pearson correlation under 'Ea_lnA_correlation', not only an absolute-correlation field.",
+   "touched": [
+    "summarize_method"
+   ],
+   "fixed_by_role": "other"
+  },
+  "F-854556c1": {
+   "id": "F-854556c1",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_zero_noise_uses_prescribed_log_rate_variance_before_delta_method: A prescribed positive log-rate variance must allow the noiseless Arrhenius recovery check to run; run_trial raised KeyError: 'intervals_95'"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_zero_noise_uses_prescribed_log_rate_variance_before_delta_method: A prescribed positive log-rate variance must allow the noiseless Arrhenius recovery check to run; run_trial raised KeyError: 'Ea_ci_low'"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_zero_noise_uses_prescribed_log_rate_variance_before_delta_method: A prescribed positive log-rate variance must allow the noiseless Arrhenius recovery check to run; run_trial raised KeyError: 'intervals_95'"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "Delta-method uncertainty propagation is evaluated on zero rate variance before prescribed log-rate variances are applied, aborting noiseless simulation."
+   ],
+   "fixed_by": "gemini-3.8-flash-high",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "run_trial",
+   "quantity": "eaweightedjmol",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:48",
+   "text": "Delta-method uncertainty propagation is evaluated on zero rate variance before prescribed log-rate variances are applied, aborting noiseless simulation.",
+   "why": "For the check noise_free_arrhenius_recovery with zero noise, propagate_log_rate_uncertainty raises a RuntimeError on zero rate variance before prescribed log-rate variances can be assigned.",
+   "fix": "Assign prescribed_var_ln_k directly to var_ln_k when provided rather than evaluating propagate_log_rate_uncertainty on zero rate variance.",
+   "problem_ids": [
+    "L4"
+   ],
+   "statement": "[high] Where: simulate.py:48\n   What is wrong: Delta-method uncertainty propagation is evaluated on zero rate variance before prescribed log-rate variances are applied, aborting noiseless simulation.\n   Why it is wrong against the plan: For the check noise_free_arrhenius_recovery with zero noise, propagate_log_rate_uncertainty raises a RuntimeError on zero rate variance before prescribed log-rate variances can be assigned.\n   How to fix it: Assign prescribed_var_ln_k directly to var_ln_k when provided rather than evaluating propagate_log_rate_uncertainty on zero rate variance.",
+   "test": ".fi/finding_tests/F-854556c1_1.py",
+   "failure": "test_zero_noise_uses_prescribed_log_rate_variance_before_delta_method: A prescribed positive log-rate variance must allow the noiseless Arrhenius recovery check to run; run_trial raised TypeError: generate_noisy_concentrations() missing 1 required positional argument: 'rng'",
+   "touched": [
+    "run_trial",
+    "_extract_ci"
+   ],
+   "fixed_by_role": "other"
+  },
+  "F-40cc3a13": {
+   "id": "F-40cc3a13",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The oracle check delta_method_variance_consistency evaluates variance consistency at only a single temperature instead of testing all temperatures."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "kinetics_parameter_recovery/model.py",
+   "function": "run_oracles",
+   "quantity": "maxabsvarlnkdiscrepancy",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "kinetics_parameter_recovery/model.py:279",
+   "text": "The oracle check delta_method_variance_consistency evaluates variance consistency at only a single temperature instead of testing all temperatures.",
+   "why": "The plan requires checking that variance consistency holds across all temperatures rather than testing only a single temperature.",
+   "fix": "Evaluate the discrepancy between propagated variance and rate variance divided by squared rate across all temperatures and take the maximum absolute difference.",
+   "problem_ids": [
+    "L6"
+   ],
+   "statement": "[low] Where: kinetics_parameter_recovery/model.py:279\n   What is wrong: The oracle check delta_method_variance_consistency evaluates variance consistency at only a single temperature instead of testing all temperatures.\n   Why it is wrong against the plan: The plan requires checking that variance consistency holds across all temperatures rather than testing only a single temperature.\n   How to fix it: Evaluate the discrepancy between propagated variance and rate variance divided by squared rate across all temperatures and take the maximum absolute difference.",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-a46b6acf": {
+   "id": "F-a46b6acf",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "9c99f8b32b96374d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The oracle check arrhenius_centroid_invariant tests noiseless rates with uniform weights instead of evaluating the plan's declared case settings."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "kinetics_parameter_recovery/model.py",
+   "function": "run_oracles",
+   "quantity": "abscentroidresidual",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "kinetics_parameter_recovery/model.py:284",
+   "text": "The oracle check arrhenius_centroid_invariant tests noiseless rates with uniform weights instead of evaluating the plan's declared case settings.",
+   "why": "The plan specifies testing the centroid invariant on data generated with its case settings rather than using noiseless rates and uniform weights.",
+   "fix": "Generate noisy concentrations and obtain log-rate variances using the case settings before fitting the Arrhenius line and evaluating the centroid residual.",
+   "problem_ids": [
+    "L7"
+   ],
+   "statement": "[low] Where: kinetics_parameter_recovery/model.py:284\n   What is wrong: The oracle check arrhenius_centroid_invariant tests noiseless rates with uniform weights instead of evaluating the plan's declared case settings.\n   Why it is wrong against the plan: The plan specifies testing the centroid invariant on data generated with its case settings rather than using noiseless rates and uniform weights.\n   How to fix it: Generate noisy concentrations and obtain log-rate variances using the case settings before fitting the Arrhenius line and evaluating the centroid residual.",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-560671f3": {
+   "id": "F-560671f3",
+   "first_seen": 3,
+   "readings": [
+    {
+     "n": 3,
+     "status": "open",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "open",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The simulation script plots weighted Ea estimate standard deviation into figures/weighted_minus_unweighted.png instead of plotting the difference between weighted and unweighted regressions."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 3,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "main",
+   "quantity": "weightedminusunweightedpng",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:198",
+   "text": "The simulation script plots weighted Ea estimate standard deviation into figures/weighted_minus_unweighted.png instead of plotting the difference between weighted and unweighted regressions.",
+   "why": "The plan requires weighted_minus_unweighted.png to present the paired difference between the weighted and unweighted Arrhenius methods along with a reference line, but simulate.py plots the single-method weighted estimate standard deviation without differences or reference lines.",
+   "fix": "Compute the paired differences between weighted and unweighted Arrhenius regression results and plot them against noise with a reference line at zero.",
+   "problem_ids": [
+    "L1"
+   ],
+   "statement": "[high] Where: simulate.py:198\n   What is wrong: The simulation script plots weighted Ea estimate standard deviation into figures/weighted_minus_unweighted.png instead of plotting the difference between weighted and unweighted regressions.\n   Why it is wrong against the plan: The plan requires weighted_minus_unweighted.png to present the paired difference between the weighted and unweighted Arrhenius methods along with a reference line, but simulate.py plots the single-method weighted estimate standard deviation without differences or reference lines.\n   How to fix it: Compute the paired differences between weighted and unweighted Arrhenius regression results and plot them against noise with a reference line at zero."
+  },
+  "F-a3441c2a": {
+   "id": "F-a3441c2a",
+   "first_seen": 3,
+   "readings": [
+    {
+     "n": 3,
+     "status": "open",
+     "version": "3924b94ffa720044"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "open",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "abs_cov_slope_intercept_centered is measured on a diagonal matrix constructed with np.diag instead of computing the covariance matrix of the centered regression design."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 3,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "run_trial",
+   "quantity": "abscovslopeinterceptcentered",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:85",
+   "text": "abs_cov_slope_intercept_centered is measured on a diagonal matrix constructed with np.diag instead of computing the covariance matrix of the centered regression design.",
+   "why": "Constructing a diagonal matrix with np.diag forces the off-diagonal covariance to be identically zero by definition, so the returned check measure is a trivial constant rather than verifying the orthogonality of the centered design.",
+   "fix": "Compute the covariance matrix by inverting the centered normal equations design matrix and evaluate its off-diagonal entry.",
+   "problem_ids": [
+    "L2"
+   ],
+   "statement": "[low] Where: simulate.py:85\n   What is wrong: abs_cov_slope_intercept_centered is measured on a diagonal matrix constructed with np.diag instead of computing the covariance matrix of the centered regression design.\n   Why it is wrong against the plan: Constructing a diagonal matrix with np.diag forces the off-diagonal covariance to be identically zero by definition, so the returned check measure is a trivial constant rather than verifying the orthogonality of the centered design.\n   How to fix it: Compute the covariance matrix by inverting the centered normal equations design matrix and evaluate its off-diagonal entry."
+  }
+ },
+ "same_model": false,
+ "accepted_tests": [
+  ".fi/finding_tests/F-0a34acdc_1.py",
+  ".fi/finding_tests/F-e60502a1_1.py",
+  ".fi/finding_tests/F-45eafcdd_1.py",
+  ".fi/finding_tests/F-4b04dacb_1.py",
+  ".fi/finding_tests/F-bdcacb89_1.py",
+  ".fi/finding_tests/F-3bb48d01_1.py",
+  ".fi/finding_tests/F-854556c1_1.py",
+  ".fi/finding_tests/F-97bdb83a_1.py"
+ ],
+ "plan_conflicts": [
+  {
+   "id": "F-50a7235f",
+   "text": "The plan defines both composite metrics and individual parameter metrics with conflicting naming and absolute-value requirements.",
+   "why": "The plan metrics table defines empirical_coverage and abs_Ea_lnA_correlation, whereas the headline metric, method text, and dependent variables define separate signed parameter metrics Ea_95_coverage, lnA_95_coverage, and Ea_lnA_correlation."
+  }
+ ],
+ "read_problems": [
+  {
+   "id": "L1",
+   "kind": "logic",
+   "text": "The simulation script plots weighted Ea estimate standard deviation into figures/weighted_minus_unweighted.png instead of plotting the difference between weighted and unweighted regressions.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 198,
+   "note": "The plan requires weighted_minus_unweighted.png to present the paired difference between the weighted and unweighted Arrhenius methods along with a reference line, but simulate.py plots the single-method weighted estimate standard deviation without differences or reference lines.",
+   "fix": "Compute the paired differences between weighted and unweighted Arrhenius regression results and plot them against noise with a reference line at zero.",
+   "severity": "high",
+   "name": "weighted_minus_unweighted.png",
+   "constant": false,
+   "where": "simulate.py:198",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-560671f3",
+   "file_rel": "simulate.py",
+   "function": "main",
+   "quantities": [
+    "weightedminusunweightedpng"
+   ]
+  },
+  {
+   "id": "L2",
+   "kind": "logic",
+   "text": "abs_cov_slope_intercept_centered is measured on a diagonal matrix constructed with np.diag instead of computing the covariance matrix of the centered regression design.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 85,
+   "note": "Constructing a diagonal matrix with np.diag forces the off-diagonal covariance to be identically zero by definition, so the returned check measure is a trivial constant rather than verifying the orthogonality of the centered design.",
+   "fix": "Compute the covariance matrix by inverting the centered normal equations design matrix and evaluate its off-diagonal entry.",
+   "severity": "low",
+   "name": "abs_cov_slope_intercept_centered",
+   "constant": true,
+   "where": "simulate.py:85",
+   "changes_result": false,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-a3441c2a",
+   "file_rel": "simulate.py",
+   "function": "run_trial",
+   "quantities": [
+    "abscovslopeinterceptcentered"
+   ]
+  }
+ ],
+ "requirements": 27,
+ "reviewer": "gemini-3.8-flash-high",
+ "planner": "gpt-5.6-terra",
+ "reported": false,
+ "verdicts": [
+  {
+   "id": "R1",
+   "kind": "dependent variable",
+   "text": "the dependent variable Ea_bias_J_mol is computed and reported in the result",
+   "headline": true,
+   "name": "Ea_bias_J_mol",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 66,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R2",
+   "kind": "dependent variable",
+   "text": "the dependent variable lnA_bias is computed and reported in the result",
+   "headline": false,
+   "name": "lnA_bias",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 70,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R3",
+   "kind": "dependent variable",
+   "text": "the dependent variable Ea_estimate_sd_J_mol is computed and reported in the result",
+   "headline": false,
+   "name": "Ea_estimate_sd_J_mol",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 74,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R4",
+   "kind": "dependent variable",
+   "text": "the dependent variable lnA_estimate_sd is computed and reported in the result",
+   "headline": false,
+   "name": "lnA_estimate_sd",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 78,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R5",
+   "kind": "dependent variable",
+   "text": "the dependent variable Ea_95_coverage is computed and reported in the result",
+   "headline": false,
+   "name": "Ea_95_coverage",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 92,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R6",
+   "kind": "dependent variable",
+   "text": "the dependent variable lnA_95_coverage is computed and reported in the result",
+   "headline": false,
+   "name": "lnA_95_coverage",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 98,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R7",
+   "kind": "dependent variable",
+   "text": "the dependent variable Ea_lnA_correlation is computed and reported in the result",
+   "headline": false,
+   "name": "Ea_lnA_correlation",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 116,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R8",
+   "kind": "metric",
+   "text": "the result reports Ea_bias_J_mol (Mean signed difference Ea_hat - Ea_true across successful trials for one method and grid cell.)",
+   "headline": false,
+   "name": "Ea_bias_J_mol",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 66,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R9",
+   "kind": "metric",
+   "text": "the result reports lnA_bias (Mean signed difference lnA_hat - lnA_true across successful trials for one method and grid cell.)",
+   "headline": false,
+   "name": "lnA_bias",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 70,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R10",
+   "kind": "metric",
+   "text": "the result reports Ea_estimate_sd_J_mol (Sample standard deviation of Ea_hat across successful trials for one method and grid cell.)",
+   "headline": false,
+   "name": "Ea_estimate_sd_J_mol",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 74,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R11",
+   "kind": "metric",
+   "text": "the result reports lnA_estimate_sd (Sample standard deviation of lnA_hat across successful trials for one method and grid cell.)",
+   "headline": false,
+   "name": "lnA_estimate_sd",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 78,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R12",
+   "kind": "metric",
+   "text": "the result reports Ea_95_coverage (Fraction of successful trials whose nominal 95% Wald interval for Ea_hat contains Ea_true.)",
+   "headline": false,
+   "name": "Ea_95_coverage",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 92,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R13",
+   "kind": "metric",
+   "text": "the result reports lnA_95_coverage (Fraction of successful trials whose nominal 95% Wald interval for lnA_hat contains lnA_true.)",
+   "headline": false,
+   "name": "lnA_95_coverage",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 98,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R14",
+   "kind": "metric",
+   "text": "the result reports Ea_lnA_correlation (Signed Pearson correlation between paired Ea_hat and lnA_hat across successful trials for one method and grid cell.)",
+   "headline": false,
+   "name": "Ea_lnA_correlation",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 116,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R15",
+   "kind": "metric",
+   "text": "the result reports solver_failure_fraction (Number of planned trials failing declared numerical validity checks divided by runs_per_setting.)",
+   "headline": false,
+   "name": "solver_failure_fraction",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 214,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R16",
+   "kind": "figure",
+   "text": "the script draws the planned figure ea_calibration.png",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 250,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R17",
+   "kind": "figure",
+   "text": "the script draws the planned figure lna_calibration.png",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 251,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R18",
+   "kind": "figure",
+   "text": "the script draws the planned figure weighted_minus_unweighted.png",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "experiment.py",
+   "line": 252,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R19",
+   "kind": "sweep",
+   "text": "the parameter concentration_noise_sd_fraction_of_c0 is varied over all 6 values of the plan's grid",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "simulate.py",
+   "line": 17,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R20",
+   "kind": "sweep",
+   "text": "the parameter n_time_points is varied over all 5 values of the plan's grid",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "simulate.py",
+   "line": 18,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R21",
+   "kind": "check",
+   "text": "the simulation returns what the measure 'Ea_weighted_J_mol' of the check 'noise_free_arrhenius_recovery' uses",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "simulate.py",
+   "line": 165,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R22",
+   "kind": "check",
+   "text": "the simulation returns what the measure 'k_360_s_inv/k_280_s_inv' of the check 'arrhenius_rate_ratio' uses",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "simulate.py",
+   "line": 133,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R23",
+   "kind": "check",
+   "text": "the simulation returns what the measure 'abs_cov_slope_intercept_centered' of the check 'centered_arrhenius_orthogonality' uses",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "simulate.py",
+   "line": 167,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R24",
+   "kind": "check",
+   "text": "the simulation returns what the measure 'max_abs_var_ln_k_discrepancy' of the check 'delta_method_variance_consistency' uses",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "simulate.py",
+   "line": 166,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R25",
+   "kind": "check",
+   "text": "the simulation returns what the measure 'abs_centroid_residual' of the check 'arrhenius_centroid_invariant' uses",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "simulate.py",
+   "line": 168,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R26",
+   "kind": "equation",
+   "text": "equation E1 of the plan's model is computed in the code, in a function marked '# E1'",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "kinetics_parameter_recovery/model.py",
+   "line": 17,
+   "note": "",
+   "changes_result": false
+  },
+  {
+   "id": "R27",
+   "kind": "equation",
+   "text": "equation E2 of the plan's model is computed in the code, in a function marked '# E2'",
+   "headline": false,
+   "name": "",
+   "status": "implemented",
+   "file": "kinetics_parameter_recovery/model.py",
+   "line": 22,
+   "note": "",
+   "changes_result": false
+  }
+ ],
+ "logic": [
+  {
+   "id": "L1",
+   "kind": "logic",
+   "text": "The simulation script plots weighted Ea estimate standard deviation into figures/weighted_minus_unweighted.png instead of plotting the difference between weighted and unweighted regressions.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 198,
+   "note": "The plan requires weighted_minus_unweighted.png to present the paired difference between the weighted and unweighted Arrhenius methods along with a reference line, but simulate.py plots the single-method weighted estimate standard deviation without differences or reference lines.",
+   "fix": "Compute the paired differences between weighted and unweighted Arrhenius regression results and plot them against noise with a reference line at zero.",
+   "severity": "high",
+   "name": "weighted_minus_unweighted.png",
+   "constant": false,
+   "where": "simulate.py:198",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-560671f3",
+   "file_rel": "simulate.py",
+   "function": "main",
+   "quantities": [
+    "weightedminusunweightedpng"
+   ]
+  },
+  {
+   "id": "L2",
+   "kind": "logic",
+   "text": "abs_cov_slope_intercept_centered is measured on a diagonal matrix constructed with np.diag instead of computing the covariance matrix of the centered regression design.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 85,
+   "note": "Constructing a diagonal matrix with np.diag forces the off-diagonal covariance to be identically zero by definition, so the returned check measure is a trivial constant rather than verifying the orthogonality of the centered design.",
+   "fix": "Compute the covariance matrix by inverting the centered normal equations design matrix and evaluate its off-diagonal entry.",
+   "severity": "low",
+   "name": "abs_cov_slope_intercept_centered",
+   "constant": true,
+   "where": "simulate.py:85",
+   "changes_result": false,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-a3441c2a",
+   "file_rel": "simulate.py",
+   "function": "run_trial",
+   "quantities": [
+    "abscovslopeinterceptcentered"
+   ]
+  }
+ ],
+ "checked": [
+  "Equation E1 in kinetics_parameter_recovery/model.py:17 computes first-order concentration decay c0 * exp(-k * t).",
+  "Equation E2 in kinetics_parameter_recovery/model.py:22 computes Arrhenius rate constant A * exp(-Ea / (R * T)).",
+  "Equation E3 in kinetics_parameter_recovery/model.py:27 implements delta-method log-rate variance var_k / k^2.",
+  "Equation E4 in kinetics_parameter_recovery/model.py:32 implements activation energy estimator -R * Sxy / Sxx.",
+  "Equation E5 in kinetics_parameter_recovery/model.py:37 implements preexponential factor estimator ybar - m * xbar.",
+  "generate_noisy_concentrations in kinetics_parameter_recovery/model.py:47 accepts explicit rng and evaluates time points up to 3/k.",
+  "fit_rate_constant in kinetics_parameter_recovery/model.py:56 bounds k, optimizes with least_squares, polishes with brentq, and verifies score optimality.",
+  "cov(k) in kinetics_parameter_recovery/model.py:101 is estimated from residual scale and Jacobian as required by the method.",
+  "propagate_log_rate_uncertainty in kinetics_parameter_recovery/model.py:109 correctly maps rate variance to log-rate variance via delta method.",
+  "Arrhenius regression in kinetics_parameter_recovery/model.py:118 fits both inverse-variance weighted and unweighted OLS regressions.",
+  "Unweighted Arrhenius covariance in kinetics_parameter_recovery/model.py:152 scales base covariance by residual variance with len(x) - 2 degrees of freedom.",
+  "Wald 95% confidence intervals in kinetics_parameter_recovery/model.py:144 use the two-sided standard normal quantile 1.96.",
+  "Monte Carlo trials in simulate.py:120 derive independent seeds using SeedSequence with BASE_SEED, setting_index, and trial_id.",
+  "Noise parameter grid in simulate.py:17 matches all 6 prescribed noise levels [0.0025, 0.005, 0.01, 0.02, 0.04, 0.08].",
+  "Time points parameter grid in simulate.py:18 matches all 5 prescribed grid counts [5, 8, 12, 20, 32].",
+  "True activation energy EA_TRUE_J_MOL in simulate.py:13 produces exactly a ten-fold rate ratio between 360 K and 280 K.",
+  "simulate.py:46 evaluates prescribed log-rate variance when supplied, avoiding invalid uncertainty propagation during noiseless simulation.",
+  "simulate.py:56 checks delta-method variance consistency across all five temperatures.",
+  "simulate.py:103 evaluates arrhenius centroid invariant residual on actual fitted regression lines.",
+  "experiment.py:116 computes and reports signed Pearson correlation for Ea_lnA_correlation."
+ ],
+ "problems": [
+  {
+   "id": "L1",
+   "kind": "logic",
+   "text": "The simulation script plots weighted Ea estimate standard deviation into figures/weighted_minus_unweighted.png instead of plotting the difference between weighted and unweighted regressions.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 198,
+   "note": "The plan requires weighted_minus_unweighted.png to present the paired difference between the weighted and unweighted Arrhenius methods along with a reference line, but simulate.py plots the single-method weighted estimate standard deviation without differences or reference lines.",
+   "fix": "Compute the paired differences between weighted and unweighted Arrhenius regression results and plot them against noise with a reference line at zero.",
+   "severity": "high",
+   "name": "weighted_minus_unweighted.png",
+   "constant": false,
+   "where": "simulate.py:198",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-560671f3",
+   "file_rel": "simulate.py",
+   "function": "main",
+   "quantities": [
+    "weightedminusunweightedpng"
+   ]
+  },
+  {
+   "id": "L2",
+   "kind": "logic",
+   "text": "abs_cov_slope_intercept_centered is measured on a diagonal matrix constructed with np.diag instead of computing the covariance matrix of the centered regression design.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 85,
+   "note": "Constructing a diagonal matrix with np.diag forces the off-diagonal covariance to be identically zero by definition, so the returned check measure is a trivial constant rather than verifying the orthogonality of the centered design.",
+   "fix": "Compute the covariance matrix by inverting the centered normal equations design matrix and evaluate its off-diagonal entry.",
+   "severity": "low",
+   "name": "abs_cov_slope_intercept_centered",
+   "constant": true,
+   "where": "simulate.py:85",
+   "changes_result": false,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-a3441c2a",
+   "file_rel": "simulate.py",
+   "function": "run_trial",
+   "quantities": [
+    "abscovslopeinterceptcentered"
+   ]
+  }
+ ],
+ "final": true,
+ "repairs_stopped": "this is the version that will run",
+ "final_read": true
+}
