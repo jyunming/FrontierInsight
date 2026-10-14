@@ -836,9 +836,10 @@ class FunctionFiller:
                             + exception_line(err or out or "", 120) + ")")
             return ""
         bad = next((r for r in results if r.get("status") != _eqt.OK), None)
-        if bad and bad.get("status") == _eqt.CONTRACT:
-            # The plan's example names inputs the outline's function does not take, and its parameters are fixed: nothing the
-            # function could change. FI's own mismatch, not the function's.
+        if bad and bad.get("status") in (_eqt.CONTRACT, _eqt.OUTPUTS):
+            # The plan's example names inputs the outline's function does not take, and its parameters are fixed; or it gives
+            # one value where the function returns its outputs by name: nothing the function could change. FI's own
+            # mismatch with the plan, not the function's; the equation tests before the run ask the plan about it.
             self._unchecked(record, spec, f"the plan's worked example does not fit the outline's function ({bad.get('detail')})")
             return ""
         if not bad:

@@ -12148,10 +12148,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.info("[equations] the model's %d tested equation(s) agree with the plan's worked examples",
                                len(results))
                 break
-            if attempt >= _function_steps.REPAIRS:
+            if attempt >= _function_steps.REPAIRS or all(f.get("status") == _equation_tests.OUTPUTS for f in failures):
                 # Code that follows the formula could not meet the plan's example: the example is the plan's own, so the
                 # plan is asked (once per equation) to work it out again from the formula, and the tests run once more,
-                # unchanged. Nothing about the code or the number it gave goes into the request.
+                # unchanged. Nothing about the code or the number it gave goes into the request. A function that returns
+                # its outputs by name where the example gives one value is not repaired first: the example is at fault.
                 if rederived or attempt > _function_steps.REPAIRS:
                     break
                 rederived = await self._rederive_failed_examples(state, protocol, failures)
@@ -12163,7 +12164,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 continue
             for f in failures:
                 eid = str(f.get("id"))
-                if spent.get(eid, 0) >= _function_steps.REPAIRS:
+                if spent.get(eid, 0) >= _function_steps.REPAIRS or f.get("status") == _equation_tests.OUTPUTS:
                     continue
                 if not _function_steps.spend(self.quest_root, _function_steps.MAX_CALLS):
                     self._log.warning("[equations] the most requests the function steps may make in this quest are spent; "
@@ -12428,6 +12429,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 dropped.append(f"{rel} ({'; '.join(changed)})")
                 del files[rel]
         return files, dropped
+
+    def _package_refused(self, state: QuestState, parsed: Any) -> list[str]:
+        """The package files a repair gave back that are not used because they change a parameter list the outline fixed
+        (:meth:`_package_files_kept`), each with why; ``[]`` when there is none."""
+        shown = self._package_shown(state)
+        if not shown or not isinstance(parsed, dict):
+            return []
+        dropped = self._package_files_kept(state, shown[0], parsed)[1]
+        return [d for d in dropped if "the outline fixed" in d]
 
     def _apply_package_repair(self, state: QuestState, parsed: Any, *, node: str) -> list[str]:
         """Write the package files a repair gave back (its JSON ``package_files``); returns the files written."""
@@ -17140,7 +17150,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             }
 
         new_code = parsed.get("code") or ""
-        if not new_code.strip() and repair_simulation and self._package_repair_files(state, parsed):
+        # A package file that changes a parameter list the outline fixed is not used; the repair is still spent and the
+        # history says why, so the next repair sees it (a refused package-only fix is not a repair that gave up).
+        refused = self._package_refused(state, parsed) if repair_simulation else []
+        if not new_code.strip() and repair_simulation and (self._package_repair_files(state, parsed) or refused):
             # The fix is in the model's package alone: simulate.py stays as it is.
             new_code = script_code
         if not new_code.strip():
@@ -17164,11 +17177,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return spent
 
         patch_summary = parsed.get("patch_summary") or "(no summary)"
+        if refused:
+            patch_summary = ("[the package change was not used: " + "; ".join(refused) + "] " + patch_summary)
         history.append({
             "iter": iters + 1,
             "returncode": rc,
             "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
-            "patch_summary": patch_summary[:200],
+            "patch_summary": patch_summary[:400 if refused else 200],
         })
         self._log.info(
             "[execute_reflect] iter=%d patch=%s",

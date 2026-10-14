@@ -3,9 +3,12 @@
 The plan's equation E4 defined `Ea_hat` and `ln_A_hat`. Each time the plan was asked for the worked example it picked a
 different statement of the formula (the fitted line, or `Ea_hat`, or `ln_A_hat`) as "the equation's output as one number",
 the correct code returned a dict, FI's test did `float(value)` on it, and the last failure was a raw `TypeError` for a
-parameter (`covariance`) the example does not give. Now the formula's own text says it has several outputs, the example
-is a mapping from each output's name to its formula, the test reads each output from the return by name, and a
-parameter with no default that the example does not give is a named contract failure.
+parameter (`covariance`) the example does not give. Now the run's own record decides: a function that returns its outputs
+by name (for a formula that defines several names) where the example gives one value is the example's fault (status
+`outputs`, put to the plan, no function repair spent); a plan that gives `expected_formula` as a mapping has each output
+read from the return by name and tested; and a parameter with no default that the example does not give is a named
+contract failure. The formula's text alone never decides that an equation has several outputs (a term defined on the way,
+`s = ...; area = sqrt(s*...)`, looks the same).
 """
 
 from __future__ import annotations
@@ -83,6 +86,15 @@ SIGN_ERROR = '''
 def arrhenius_parameters(alpha, beta, mean_invT, R, covariance=None):
     return {"Ea_hat": -R * beta, "ln_A_hat": alpha + beta * mean_invT}
 '''
+ARRAY = '''
+import numpy as np
+def arrhenius_parameters(alpha, beta, mean_invT, R, covariance=None):
+    return np.array([-R * beta, alpha - beta * mean_invT])
+'''
+SCALAR = '''
+def arrhenius_parameters(alpha, beta, mean_invT, R, covariance=None):
+    return alpha - beta * mean_invT
+'''
 NAMEDTUPLE = '''
 from collections import namedtuple
 Out = namedtuple("Out", "Ea_hat ln_A_hat")
@@ -111,14 +123,20 @@ def _run(tmp_path: Path, source: str, example: Any, formula: str = FORMULA) -> d
     return results[0]
 
 
-def test_the_formula_text_says_it_has_two_outputs_and_a_single_string_example_is_unusable_in_plain_words() -> None:
+def test_a_function_returning_its_outputs_by_name_for_a_one_value_example_puts_the_example_at_fault(tmp_path: Path) -> None:
     assert eqt.outputs(FORMULA) == ["Ea_hat", "ln_A_hat"] and eqt.is_multi_output(FORMULA)
     for example in (V13_EXAMPLE, V10_EXAMPLE):
-        row = eqt.example_rows(_protocol(example))[0]
-        assert row["state"] == "unusable"
-        assert "Ea_hat" in row["why"] and "ln_A_hat" in row["why"] and "mapping" in row["why"]
-        text = eqt.request([row])
-        assert "Ea_hat, ln_A_hat" in text and "several named outputs" in text
+        assert eqt.example_rows(_protocol(example))[0]["state"] == "ok", "the text alone does not reject the example"
+    # The run's code (correct, outputs by name): the example is at fault, and the plan is asked for a value per output.
+    result = _run(tmp_path, DEFAULTED, V13_EXAMPLE)
+    assert result["status"] == eqt.OUTPUTS and eqt.repairable_by_example(result)
+    message = eqt.failure_message({**result, "function": "arrhenius_parameters", "id": "E4"}, FORMULA)
+    assert "by name" in message and "6.0" not in message
+    ask = eqt.rederive_request([{"id": "E4", "formula": FORMULA, "example": V13_EXAMPLE, "why": result["status"]}])
+    assert "mapping from each name the formula defines" in ask and "6.0" not in ask.split("could not be met")[1]
+    # The same return for a formula that defines one name is the code's fault, as before.
+    one = _run(tmp_path, DEFAULTED, V13_EXAMPLE, "ln_A_hat = alpha + Ea_hat*mean(1/T)/R")
+    assert one["status"] == "mismatch" and "not one number" in one["detail"]
 
 
 def test_a_mapping_example_is_computed_per_output_and_must_cover_every_output() -> None:
@@ -141,10 +159,11 @@ def test_a_random_multi_output_equation_is_unusable_and_says_to_split_it() -> No
 
 
 def test_the_runs_function_with_a_required_covariance_is_a_contract_failure_naming_it_not_a_raw_error(tmp_path: Path) -> None:
-    result = _run(tmp_path, R12_FUNCTION, PER_OUTPUT)
-    assert result["status"] == "contract" and "covariance" in result["detail"] and "no default" in result["detail"]
-    assert "TypeError" not in result["detail"]
-    assert eqt.repairable_by_example(result)
+    for example in (PER_OUTPUT, V13_EXAMPLE):
+        result = _run(tmp_path, R12_FUNCTION, example)
+        assert result["status"] == "contract" and "covariance" in result["detail"] and "no default" in result["detail"]
+        assert "TypeError" not in result["detail"]
+        assert eqt.repairable_by_example(result)
 
 
 def test_a_function_that_gives_the_covariance_a_default_passes(tmp_path: Path) -> None:
@@ -152,9 +171,15 @@ def test_a_function_that_gives_the_covariance_a_default_passes(tmp_path: Path) -
     assert _run(tmp_path, NAMEDTUPLE, PER_OUTPUT)["status"] == "ok"  # an attribute counts as a named output
 
 
-def test_a_function_returning_a_tuple_is_told_to_return_the_outputs_by_name(tmp_path: Path) -> None:
-    result = _run(tmp_path, TUPLE, PER_OUTPUT)
-    assert result["status"] == "contract" and "Ea_hat" in result["detail"] and "ln_A_hat" in result["detail"]
+def test_a_function_without_named_outputs_is_a_mismatch_the_function_repair_is_told_about(tmp_path: Path) -> None:
+    # The code's fault, never an "unchecked" contract: a tuple, an array (its `.T` is not an output called T), a number.
+    for source in (TUPLE, ARRAY, SCALAR):
+        result = _run(tmp_path, source, PER_OUTPUT)
+        assert result["status"] == "mismatch" and "Ea_hat" in result["detail"] and "ln_A_hat" in result["detail"], source
+    named_t = {"inputs": {"a": 2.0}, "expected_formula": {"T": "a", "real": "a + 1"}}
+    result = _run(tmp_path, "import numpy as np\ndef f(a):\n    return np.array([a, a + 1.0])\n", named_t,
+                  "T = a; real = a + 1")
+    assert result["status"] == "mismatch" and "no output called T, real" in result["detail"]
 
 
 def test_a_sign_error_in_one_output_is_a_mismatch_naming_that_output_and_never_the_expected_value(tmp_path: Path) -> None:
@@ -197,6 +222,14 @@ def test_single_output_equations_behave_as_before(tmp_path: Path) -> None:
     assert _run(tmp_path, good, example, "c0*exp(-k*t)")["status"] == "ok"
     # a single-output example given as a mapping stays unusable, as before
     assert eqt.example_rows(_protocol({**example, "expected_formula": {"c": "c0"}}, "c = c0"))[0]["state"] == "unusable"
+    # a term defined on the way is not taken for a second output: the one-value example is tested exactly as before
+    heron = "s = (a + b + c)/2; area = sqrt(s*(s-a)*(s-b)*(s-c))"
+    tri = {"inputs": {"a": 3.0, "b": 4.0, "c": 5.0}, "expected_formula": "sqrt(6*3*2*1)"}
+    row = eqt.example_rows(_protocol(tri, heron))[0]
+    assert row["state"] == "ok" and row["expected"] == pytest.approx(6.0)
+    area = "import math\ndef area(a, b, c):\n    s = (a + b + c) / 2\n    return math.sqrt(s*(s-a)*(s-b)*(s-c))\n"
+    assert _run(tmp_path, area, tri, heron)["status"] == "ok"
+    assert _run(tmp_path, area.replace("/ 2", "/ 3"), tri, heron)["status"] == "mismatch"
 
 
 def test_a_required_parameter_the_example_does_not_give_is_the_same_rule_at_outline_time_and_in_the_test(tmp_path: Path) -> None:
@@ -229,10 +262,12 @@ def test_a_required_parameter_the_example_does_not_give_is_the_same_rule_at_outl
     ("y = a if b == c else d", ["y"]),
     ("a <= b; c >= d; e != f", []),
     ("p(t) = a; q(t) = b", []),
-    # a term defined after the statement that uses it is not an output (r3d duv); one used later still is (r12 E4)
-    ("gamma = 2*J1(u)/u; u = 2*pi*r*NA/lam; gamma(0)=1", ["gamma"]),
+    # every name the formula defines, in either order: the text alone never decides there are several outputs
+    ("gamma = 2*J1(u)/u; u = 2*pi*r*NA/lam; gamma(0)=1", ["gamma", "u"]),
     ("Ea_hat=-R*beta; ln_A_hat=alpha+Ea_hat*m/R", ["Ea_hat", "ln_A_hat"]),
+    ("ln_A_hat=alpha+Ea_hat*m/R; Ea_hat=-R*beta", ["ln_A_hat", "Ea_hat"]),
     ("y = x_u + 1; u = 2", ["y", "u"]),
+    (r"\alpha = 2*x", []),
     ("", []),
 ])
 def test_the_detector_is_conservative(formula: str, expected: list[str]) -> None:

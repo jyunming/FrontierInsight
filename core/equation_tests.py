@@ -79,6 +79,9 @@ NUMBERS_NAME = "equation_numbers.json"
 MARK = "EQUATION_TESTS:"
 
 OK, MISMATCH, CONTRACT, ERROR = "ok", "mismatch", "contract", "error"
+#: The function returned its outputs by name (a mapping) for a formula that defines several names, and the plan's
+#: example gives one value: the example is at fault (it must give a formula per output), not the code.
+OUTPUTS = "outputs"
 #: The kinds of check of the protocol that count as another check of an equation declared untestable.
 PROPERTY_KINDS = ("special_case", "invariant", "symmetry", "second_implementation")
 
@@ -100,7 +103,8 @@ EXAMPLE_RULE = (
     "more parameter after the inputs, `rng` (a numpy random generator) or `seed`, draws with it, and FI calls it many "
     "times with fixed seeds and compares the mean (and variance) of the draws with yours, within five standard errors. "
     "When the formula defines several named outputs (`a = ...; b = ...`), the function returns them by name (a dict with "
-    "those keys) and `expected_formula` is a mapping from each output's name to its formula, one for every output.")
+    "those keys) and `expected_formula` is a mapping from each name the formula defines to its formula, one for every "
+    "name.")
 
 
 def _text(value: Any) -> str:
@@ -159,27 +163,27 @@ def _statements(formula: str) -> list[str]:
 
 
 def outputs(formula: str) -> list[str]:
-    """The named outputs a formula defines, in order, read from its text alone. The formula is split into statements on
-    ``;`` and line breaks (outside brackets); a statement that starts with a bare name and a single ``=`` (``Ea = ...``)
-    defines an output of that name. A statement whose left side is anything else (``ln(k) = ...``, ``c(t) = ...``, an
-    inequality, ``x == y``, a clause such as ``where x = 1``) is a relation or a remark, not an output. A formula of
-    one statement, or with no ``=``, names at most one output; an equation is multi-output when this returns two or more
-    names (:func:`is_multi_output`). A name defined twice counts once. A name an earlier statement already uses
-    (``gamma = 2*J1(u)/u; u = ...``) is a definition of a term of that statement, not an output; a name defined first
-    and used by a later statement (``Ea = ...; lnA = alpha + Ea*...``) is still an output."""
+    """The names a formula defines, in the order they are first defined, read from its text alone. The formula is split
+    into statements on ``;`` and line breaks (outside brackets); a statement that starts with a bare name and a single
+    ``=`` (``Ea = ...``) defines that name. A statement whose left side is anything else (``ln(k) = ...``, ``c(t) = ...``,
+    an inequality, ``x == y``, a clause such as ``where x = 1``) is a relation or a remark. A name defined twice counts
+    once.
+
+    The text alone cannot tell an output from a term defined on the way (``s = (a+b+c)/2; area = sqrt(s*...)``), so
+    these names never decide by themselves that an equation has several outputs: the plan says so by giving
+    ``expected_formula`` as a mapping (its keys must be names the formula defines, every one of them), and the function
+    says so by returning its outputs by name (:data:`OUTPUTS`, a record of the run, not a guess)."""
     seen: list[str] = []
-    before = ""  # the text of the statements read so far
     for statement in _statements(formula):
         m = _DEFINES.match(statement)
-        if (m and m.group(1) not in seen
-                and not re.search(rf"(?<![A-Za-z0-9_.]){re.escape(m.group(1))}(?![A-Za-z0-9_])", before)):
+        if m and m.group(1) not in seen:
             seen.append(m.group(1))
-        before += " " + statement
     return seen
 
 
 def is_multi_output(formula: str) -> bool:
-    """Whether the formula defines several named outputs (:func:`outputs`)."""
+    """Whether the formula defines several names (:func:`outputs`): only then may an example be a mapping, or a function
+    that returns its outputs by name be told the example must give one value for each."""
     return len(outputs(formula)) >= 2
 
 
@@ -245,7 +249,7 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for eq in eligible(protocol):
         found = outputs(str(eq.get("formula") or ""))
-        names = found if len(found) >= 2 else []  # several named outputs: the example gives a formula for each
+        names = found if len(found) >= 2 else []  # the names a mapping example must cover, and a by-name return may hold
         row = {"id": _text(eq["id"]), "formula": _text(eq["formula"]), "state": "missing",
                "why": "the plan gave no worked example", "inputs": {}, "expected": None,
                "rel": RELATIVE, "abs": ABSOLUTE_FLOOR, "method": "", "random": is_random(eq), "variance": None,
@@ -275,8 +279,13 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
             row.update(state="unusable", why="`inputs` must be a mapping of names (that are valid parameter names) to numbers")
             continue
         formula = example.get("expected_formula")
-        if names:
-            _multi_output_row(row, example, good, names)
+        if isinstance(formula, dict):  # the plan says the equation has several outputs: one formula for each
+            if names:
+                _multi_output_row(row, example, good, names)
+            else:
+                row.update(state="unusable", why=(
+                    "its `expected_formula` is a mapping, but the formula defines at most one name (`name = ...`); give "
+                    "`expected_formula` as one formula, or write each output in the formula as `name = ...`"))
             continue
         if formula is None or not _text(formula):
             row.update(state="unusable", why=(
@@ -315,13 +324,6 @@ def _multi_output_row(row: dict[str, Any], example: dict[str, Any], good: dict[s
                                          "a random equation is tested one output at a time, so split it into one equation per output")
         return
     formula = example.get("expected_formula")
-    if not isinstance(formula, dict):
-        row.update(state="unusable", why=(
-            f"the formula defines several outputs ({listed}); give `expected_formula` as a mapping from each output's "
-            "name to its formula" if formula is not None and _text(formula) else
-            f"the formula defines several outputs ({listed}), and it gave inputs but no `expected_formula`; give it as a "
-            "mapping from each output's name to its formula"))
-        return
     given = {str(k).strip(): v for k, v in formula.items()}
     absent = [n for n in names if n not in given or given[n] is None or not _text(given[n])]
     extra = [k for k in given if k not in names]
@@ -377,6 +379,8 @@ _COULD_NOT_MEET = {
     CONTRACT: "the function written from the formula cannot take the example's inputs (its parameters are not the "
               "example's input names)",
     ERROR: "the function written from the formula failed when it was called with the example's inputs",
+    OUTPUTS: "the function written from the formula returns its outputs by name, and the example gives one value; give "
+             "`expected_formula` as a mapping from each name the formula defines to its formula",
 }
 
 
@@ -384,7 +388,7 @@ def repairable_by_example(result: dict[str, Any]) -> bool:
     """Whether a failed equation test may be a fault of the worked example (so the plan is asked about it): a wrong number,
     inputs the function cannot take, or an error when called. Not a function that cannot be found or imported."""
     status = result.get("status")
-    if status in (MISMATCH, CONTRACT):
+    if status in (MISMATCH, CONTRACT, OUTPUTS):
         return True
     detail = _text(result.get("detail"))
     return status == ERROR and not re.match(r"(?:ImportError|ModuleNotFoundError|SyntaxError|AttributeError)\b", detail)
@@ -627,19 +631,27 @@ def _unsupplied(params, inputs, random):
             and n not in given]
 
 
+def _by_name(result):
+    """Whether the function returned its outputs by name: a mapping, a namedtuple or a dataclass. A number, an array, a
+    plain tuple or list has no named outputs (an attribute such as an array's ``T`` or a number's ``real`` is not one)."""
+    return (hasattr(result, "keys") and hasattr(result, "__getitem__")) or (
+        isinstance(result, tuple) and hasattr(result, "_fields")) or (
+        hasattr(type(result), "__dataclass_fields__") and not isinstance(result, type))
+
+
 def _output(result, name):
-    """The output called ``name`` of what the function returned: a dict-like's key, else an attribute (a namedtuple, a
-    dataclass); a plain tuple, list or number has none. Raises LookupError when it has no such output."""
-    if hasattr(result, "keys"):
-        try:
-            return result[name]
-        except Exception:  # noqa: BLE001
-            raise LookupError(name)
-    if isinstance(result, (tuple, list, str, bytes)) and not hasattr(result, "_fields"):
+    """The output called ``name`` of what the function returned by name (:func:`_by_name`). Raises LookupError when it has
+    no such output, or reading it fails."""
+    if not _by_name(result):
         raise LookupError(name)
     try:
+        if hasattr(result, "keys"):
+            return result[name]
+        fields = result._fields if isinstance(result, tuple) else type(result).__dataclass_fields__
+        if name not in fields:
+            raise LookupError(name)
         return getattr(result, name)
-    except AttributeError:
+    except Exception:  # noqa: BLE001
         raise LookupError(name)
 
 
@@ -658,14 +670,14 @@ def _run_multi(case, fn):
         except LookupError:
             absent.append(n)
     if absent:
-        return "contract", "return the outputs by name: " + ", ".join(names) + " (a dict with these keys); no output called " + ", ".join(absent), None, None, want
+        return "mismatch", "return the outputs by name: " + ", ".join(names) + " (a dict with these keys); no output called " + ", ".join(absent), None, None, want
     values, tols, bad = {{}}, {{}}, []
     for n in names:
         absolute = case["abs"][n] if isinstance(case["abs"], dict) else case["abs"]
         tols[n] = max(case["rel"] * abs(want[n]), absolute)
         try:
             values[n] = float(got[n])
-        except (TypeError, ValueError):
+        except Exception:  # noqa: BLE001 -- an array of several numbers, a method, a tensor: not one number
             values[n] = None
             bad.append(n)
             continue
@@ -704,7 +716,9 @@ def _run(case):
         return "error", (type(e).__name__ + ": " + str(e))[:300], None, None, want
     try:
         value = float(value)
-    except (TypeError, ValueError):
+    except Exception:  # noqa: BLE001
+        if len(case.get("outputs") or []) >= 2 and _by_name(value):
+            return "outputs", "the function returns its outputs by name and the worked example gives one value", None, None, want
         return "mismatch", "it returned something that is not one number", None, None, want
     tol = max(case["rel"] * abs(want), case["abs"])
     if not math.isfinite(value) or abs(value - want) > tol:
@@ -787,6 +801,9 @@ def failure_message(result: dict[str, Any], formula: str) -> str:
                 "this equation." + (f" ({result.get('detail')})" if result.get("detail") else ""))
     if status == CONTRACT:
         return head + f" FI could not call it: {result.get('detail')}. The parameters are named as the equation's inputs."
+    if status == OUTPUTS:
+        return (head + " It returns its outputs by name, and the plan's worked example gives one value, so the example is "
+                "asked for a value of each output; keep the function returning them by name.")
     return head + f" Calling it with the equation's inputs raised: {result.get('detail')}"
 
 

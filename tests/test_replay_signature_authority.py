@@ -82,3 +82,32 @@ def test_a_whole_script_repair_that_changes_an_outline_signature_is_not_used_and
     # Without an outline nothing is held: the note and the repair are as they were.
     assert "Keep the parameters of these functions" not in engine._package_repair_note(STATE)
     assert engine._package_repair_files(STATE, parsed) == {"spring/model.py": parsed["package_files"]["spring/model.py"].strip("\n") + "\n"}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_package_only_repair_is_a_spent_repair_with_its_reason_not_a_give_up(tmp_path: Path) -> None:
+    import json
+
+    engine = _engine(tmp_path)
+    _plan_md(engine)
+    _write_code(engine, GOOD["quality"])
+    cl.save(engine.quest_root, {"shape": cl.PACKAGE, "package": "spring"})
+    reply = json.dumps({"code": "", "patch_summary": "added scale to quality",
+                        "package_files": {"spring/model.py": GOOD["frequency"] + "\n\n" + DRIFTED_Q}})
+
+    class _Stub:
+        async def chat(self, messages, **kw):  # noqa: ANN001
+            return reply
+
+        async def aclose(self) -> None:
+            return None
+
+    engine._client = _Stub()
+    state = {**WITH_OUTLINE, "code": "x = 1\n", "exec_result": {
+        "returncode": 1, "stdout_tail": "", "stderr_tail": "FI tested the model's equations", "failed_script": "simulate.py"}}
+    patch = await engine._node_execute_reflect(state)  # type: ignore[arg-type]
+    assert not patch.get("exec_give_up_reason"), patch.get("exec_give_up_reason")
+    assert patch["exec_reflect_iter"] == 1
+    summary = patch["exec_reflect_history"][-1]["patch_summary"]
+    assert summary.startswith("[the package change was not used: spring/model.py (`quality` must keep the parameters")
+    assert "scale" not in (engine.quest_root / "code" / "spring" / "model.py").read_text(encoding="utf-8")
