@@ -100,9 +100,15 @@ def test_malformed_records_are_skipped_not_fatal(tmp_path: Path) -> None:
     assert "nan" not in trial_table.markdown(table)
 
 
-def test_the_table_s_unnamed_matches_must_be_rarer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("chance, flagged_in_table", [(0.1, True), (0.01, False)])
+def test_the_table_s_unnamed_matches_must_be_rarer(
+    monkeypatch: pytest.MonkeyPatch, chance: float, flagged_in_table: bool,
+) -> None:
     """A number gets a second chance to match by luck in the table, so an unnamed match there needs a quarter of the
-    usual chance."""
-    import inspect
-
-    assert "max_chance=MAX_CHANCE_UNNAMED / SHIFT_CHANCE_DIVISOR" in inspect.getsource(npv.check)
+    usual chance: at a chance of 0.1 the same unnamed match is accepted from the results and flagged from the table."""
+    monkeypatch.setattr(npv.Traceable, "chance", lambda self, value, dec: chance)
+    text = "Next came 3.457."
+    from_results = npv.check(text, result_json={"zz": {"alpha": 3.457}})
+    from_table = npv.check(text, result_json={"zz": {"beta": 9.1}}, trial_table={"zz": {"alpha": 3.457}})
+    assert not from_results.findings
+    assert bool(from_table.findings) is flagged_in_table
