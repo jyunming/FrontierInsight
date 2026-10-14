@@ -270,3 +270,52 @@ async def test_an_error_inside_the_check_with_a_flagged_fault_stops_the_quest(
     assert verdict and "could not run its test again" in verdict["rationale"]
 
 
+
+
+TWO_RESULTS: dict[str, Any] = {"exec_result": {"returncode": 0}, "result_json": {"dose": 60.0, "contrast": 0.42}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("test", [FAILING, "import module_that_is_not_there\n\n\ndef test_x():\n    assert False\n"])
+async def test_a_fault_in_another_quantity_is_left_out_and_the_paper_says_so(tmp_path: Path, test: str) -> None:
+    """A fault outside the study's main quantity, whose test still fails or no longer runs, takes that quantity out of the
+    results the paper may use; nothing stops. The record of it is the paper's run record and the quality report."""
+    import json
+
+    from core import disclosure, quality_report
+
+    engine = _engine(tmp_path)
+    _record(engine, _issue(quantity="dose"), test=test)
+    assert await engine._shown_fault_verdict(TWO_RESULTS) is None
+    checked = json.loads((engine.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
+    assert checked["removed_quantities"] == ["dose"] and checked["removed_values"] == {"dose": [60.0]}
+    assert "a test FI ran" in checked["removed_why"]["dose"]
+    assert "computes `dose` wrongly" in disclosure.run_record(engine.quest_root)
+    issues = quality_report._issue_rows(code_review.load(engine.quest_root))
+    assert issues[0]["at_gate"]["outcome"] == "left_out"
+
+
+@pytest.mark.asyncio
+async def test_the_same_fault_in_the_main_quantity_still_stops(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue(quantity="dose", headline=True))
+    verdict = await engine._shown_fault_verdict(TWO_RESULTS)
+    assert verdict and verdict["stuck_reason"] == "shown_fault_open"
+    assert not (engine.quest_root / "needs" / "RESULT_CHECK.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_fault_whose_removal_leaves_no_result_still_stops(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue(quantity="dose"))
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and "leaves no result" in verdict["rationale"]
+
+
+def test_a_quoted_value_left_out_by_a_test_is_named_for_the_test_not_a_model() -> None:
+    from core import record_claims, result_checks
+
+    hits = record_claims.contradictions("The dose was 60.25 mJ/cm2.", left_out={"dose": [60.25]},
+                                        left_out_why={"dose": result_checks.SHOWN_FAULT_WHY})
+    assert len(hits) == 1 and "a test FI ran" in hits[0] and "second model" not in hits[0]
+    assert "second model" in record_claims.contradictions("The dose was 60.25 mJ/cm2.", left_out={"dose": [60.25]})[0]

@@ -906,7 +906,8 @@ def _issue_rows(cr: dict[str, Any]) -> list[dict[str, Any]]:
             "repaired": outcome == _issues.FIXED, "repaired_by": str(issue.get("fixed_by") or ""),
             "open": still, "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
             "reason": _one(issue.get("reason"), 140), "seen_in": len(readings),
-            "reported_as": [str(k) for k in _list(issue.get("reported_as"))]})
+            "reported_as": [str(k) for k in _list(issue.get("reported_as"))],
+            "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {}})
     return rows
 
 
@@ -1031,6 +1032,11 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
         repaired = f"yes, by {row['repaired_by']}" if row["repaired"] else ("no" + (f" ({row['reason']})" if row["reason"] else ""))
         if row["plan_problem"]:
             still = "plan problem: the plan contradicts itself, asked of the plan's model"
+        elif row["open"] and row.get("at_gate", {}).get("outcome") == "left_out":
+            keys = ", ".join(str(k) for k in _list(row["at_gate"].get("keys"))[:3])
+            still = f"yes: its test still fails, so FI left {keys} out of the results the paper uses, and the paper says so"
+        elif row["open"] and row.get("at_gate", {}).get("outcome") == "not_computed":
+            still = "yes: the code does not compute it, and the paper says so as a part not done"
         elif row["open"]:
             still = ("yes, and it changes a result" if row["changes_result"] else
                      f"yes, but the results hold it as {', '.join(row['reported_as'][:3])}: a difference of names"

@@ -30,6 +30,9 @@ from . import degenerate_results as _degenerate
 from . import grid_keys as _grid_keys
 from . import reported_settings as _reported
 
+#: Why a quantity a failing test showed wrong is left out, as the must-fix hit for a paper that quotes it says it.
+SHOWN_FAULT_WHY = "a test FI ran on the code that produced the results shows the code computes it wrongly"
+
 #: How many times, in all, the results of one design iteration are sent back for the checks of this module.
 REPAIRS = 2
 _COUNTER = "result_checks.json"
@@ -330,9 +333,13 @@ class ResultChecksMixin:
         if not new:
             return
         keys = sorted({*(str(k) for k in record.get("removed_quantities") or []), *(k for f in new for k in f.keys)})
+        why = record.get("removed_why") if isinstance(record.get("removed_why"), dict) else {}
+        for f in new:
+            for k in f.keys:
+                why.setdefault(k, SHOWN_FAULT_WHY)
         record.update({
             "removed_quantities": keys, "removed_figures": list(record.get("removed_figures") or []),
-            "removed_values": _values_left_out(result_json, set(keys)),
+            "removed_values": _values_left_out(result_json, set(keys)), "removed_why": why,
             "checks": [*checks, *({"kind": f.kind, "note": f.note, "quantity": f.quantity, "keys": f.keys} for f in new)],
             "note": "; ".join(x for x in [str(record.get("note") or ""), *(f.note for f in new)] if x),
             "say": "\n\n".join(x for x in [str(record.get("say") or ""), *(f.say for f in new)] if x)})

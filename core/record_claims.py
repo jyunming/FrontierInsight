@@ -113,9 +113,11 @@ _SECOND_MODEL = ("a second model found the code computes it differently from the
 _TYPED = "the simulation returned a number typed into its code instead of computing it (needs/TYPED_RESULTS_CHECK.json)"
 
 
-def quoted_left_out(paper_md: str, left_out: Any, why: str = _SECOND_MODEL) -> list[str]:
+def quoted_left_out(paper_md: str, left_out: Any, why: str = _SECOND_MODEL, why_of: Any = None) -> list[str]:
     """The must-fix hits for each number of ``paper_md`` that is a value of a quantity FI left out (``left_out``:
-    ``{the key left out of the results: its values}``; ``why``: the reason, in words). One hit per distinct number."""
+    ``{the key left out of the results: its values}``; ``why``: the reason, in words, unless ``why_of`` gives a key its
+    own). One hit per distinct number."""
+    why_of = why_of if isinstance(why_of, dict) else {}
     from .number_provenance import _carries_enough_precision, _decimals, paper_numbers
 
     if not isinstance(left_out, dict) or not left_out:
@@ -138,14 +140,15 @@ def quoted_left_out(paper_md: str, left_out: Any, why: str = _SECOND_MODEL) -> l
                    for w in values):
                 seen.add(token)
                 hits.append(f"{HIT}: the paper quotes {token}, which is a value of `{key}`, a quantity FI left out because "
-                            f"{why}. Take the number out and say in the limitations that the quantity is "
+                            f"{why_of.get(key) or why}. Take the number out and say in the limitations that the quantity is "
                             "left out; do not give it under the plan's name.")
                 break
     return hits
 
 
 def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any = None, oracle: Any = None,
-                   figures_on_disk: set[str] | None = None, left_out: Any = None, left_out_typed: Any = None) -> list[str]:
+                   figures_on_disk: set[str] | None = None, left_out: Any = None, left_out_typed: Any = None,
+                   left_out_why: Any = None) -> list[str]:
     """The must-fix hits for what ``paper_md`` claims against FI's records, each starting ``record_contradiction:`` and
     saying in plain words what the paper says, what the record says and what to do. Empty when nothing is contradicted.
     ``figures_on_disk``: the file names of the figures the run drew (``None``: not known, so no figure is judged)."""
@@ -189,6 +192,6 @@ def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any
                 break
 
     # (d) a value of a quantity FI left out of the results.
-    hits.extend(quoted_left_out(paper_md, left_out))
+    hits.extend(quoted_left_out(paper_md, left_out, why_of=left_out_why))
     hits.extend(quoted_left_out(paper_md, left_out_typed, _TYPED))
     return hits

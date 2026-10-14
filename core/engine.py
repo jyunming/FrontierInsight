@@ -10315,7 +10315,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             hits = _record_claims.contradictions(
                 text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
                 oracle=self._oracle_record_read(), figures_on_disk=figures,
-                left_out=(_read_json_or_none_path(self.quest_root / "needs" / "RESULT_CHECK.json") or {}).get("removed_values"),
+                left_out=(checked := _read_json_or_none_path(self.quest_root / "needs" / "RESULT_CHECK.json") or {}).get(
+                    "removed_values"),
+                left_out_why=checked.get("removed_why"),
                 left_out_typed=(_read_json_or_none_path(self.quest_root / "needs" / "TYPED_RESULTS_CHECK.json") or {}).get(
                     "removed_values"))
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
