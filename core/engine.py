@@ -18524,6 +18524,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not (isinstance(exec_result, dict) and exec_result) or state.get("no_simulation_resolved"):
             return None
         record = _code_review.load(self.quest_root)
+        # What an earlier pass of the gate decided about an issue is decided again on this run's code and results.
+        stale = [i for i in _code_findings.issues_of(record).values() if isinstance(i, dict) and i.pop("at_gate", None)]
+        if stale:
+            _code_review.save(self.quest_root, record)
         shown = _code_findings.shown_open(record)
         if not shown:
             return None
@@ -18563,7 +18567,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                               ", ".join(str(i.get("id")) for i in shown[_code_findings.MAX_SHOWN_RERUNS:])[:200])
         shown = shown[:_code_findings.MAX_SHOWN_RERUNS]
         try:
-            return await self._shown_fault_check(shown, record, state.get("result_json"))
+            design = state.get("design")
+            return await self._shown_fault_check(shown, record, state.get("result_json"),
+                                                 _code_review.headline_names(design, self._protocol_block(state)))
         except Exception as exc:  # noqa: BLE001 - a broken check must not let a flagged fault through
             flagged = [i for i in shown if _code_findings.flagged_now(i)]
             if not flagged:
@@ -18572,7 +18578,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return self._shown_fault_stop(flagged[0], f"FI could not run its test again ({type(exc).__name__}: {exc})")
 
     async def _shown_fault_check(self, shown: list[dict[str, Any]], record: dict[str, Any] | None = None,
-                                 result: Any = None) -> dict[str, Any] | None:
+                                 result: Any = None, headline: list[str] | None = None) -> dict[str, Any] | None:
         verdicts: list[tuple[dict[str, Any], str]] = []
         silent: list[dict[str, Any]] = []
         answered = 0
@@ -18610,26 +18616,34 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             verdicts = [(i, how) for i, how in verdicts if i not in silent]
         if not verdicts:
             return None
-        return self._shown_fault_outcome(verdicts, record or {}, result)
+        return self._shown_fault_outcome(verdicts, record or {}, result, headline or [])
 
     def _shown_fault_outcome(self, verdicts: list[tuple[dict[str, Any], str]], record: dict[str, Any],
-                             result: Any) -> dict[str, Any] | None:
+                             result: Any, headline: list[str] | None = None) -> dict[str, Any] | None:
         """What the faults a failing test showed, and nothing showed gone, do to the quest, from the records alone. A fault
         about the study's main quantity (the plan's first dependent variable or its precision metric) stops it with no
         paper: there is nothing to report. A plan quantity the code does not compute (and the results do not hold under
         another name) is a part not done, which the paper states. A fault in another quantity takes that quantity out of
         the results the paper may use, and the paper states it. A fault whose quantity the results do not hold, or whose
-        removal leaves no result, stops the quest: nothing can be left out, and a wrong number may stand."""
+        removal leaves no result, stops the quest: nothing can be left out, and a wrong number may stand. So does one
+        whose values the results also hold under keys that stay (FI could not tell them apart in the paper), and one that
+        may be about the main quantity by its names or its keys (:func:`core.code_review.about_headline`)."""
+        from . import result_checks as _result_checks
+
         stops: list[tuple[dict[str, Any], str]] = []
         left_out: list[tuple[dict[str, Any], str, list[str]]] = []
         not_done: list[tuple[dict[str, Any], str, list[str]]] = []
         for issue, how in verdicts:
-            if issue.get("headline"):
+            if _code_review.about_headline(record, issue, result, headline or []):
                 stops.append((issue, how))
             elif missing := _code_review.missing_quantities(record, issue):
                 not_done.append((issue, how, missing))
             elif keys := _code_review.keys_of_issue(record, issue, result):
-                left_out.append((issue, how, keys))
+                if _result_checks._values_left_out(result, set(keys)):
+                    left_out.append((issue, how, keys))
+                else:
+                    stops.append((issue, how + "; the results hold its values under other names too, so FI cannot leave "
+                                               "them out"))
             else:
                 stops.append((issue, how + "; FI cannot find which of the results it changes, so it cannot leave them out"))
         if not stops and left_out:

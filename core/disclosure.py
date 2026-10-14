@@ -396,9 +396,11 @@ def _code_faults_sentence(quest_root: Path) -> str:
     issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
     wrong: list[str] = []
     missing: list[str] = []
+    from . import code_findings as _code_findings
+
     for issue in issues.values():
         gate = issue.get("at_gate") if isinstance(issue, dict) else None
-        if not isinstance(gate, dict):
+        if not isinstance(gate, dict) or not _code_findings.flagged_now(issue):
             continue
         if gate.get("outcome") == "left_out" and str(gate.get("quantity") or "").strip():
             name = str(gate["quantity"]).strip()

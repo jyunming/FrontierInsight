@@ -332,3 +332,37 @@ async def test_a_fault_in_a_function_the_run_never_calls_stops_nothing(tmp_path:
     _record(engine, _issue(function="dose"))  # the same fault in the function the run calls still stops
     verdict = await engine._shown_fault_verdict(STATE)
     assert verdict and verdict["stuck_reason"] == "shown_fault_open"
+
+
+def test_a_fault_may_be_about_the_main_quantity_by_its_name_or_its_keys() -> None:
+    result = {"total_yield": 3.2, "yield_ci": [3.0, 3.4], "runtime": 1.0}
+    issue = {"id": "F-1", "quantity": "yield"}
+    assert code_review.about_headline({}, issue, result, ["total_yield"])  # one name holds the other
+    assert code_review.about_headline({}, {"id": "F-2", "quantity": "totalyield"}, result, ["total_yield"])
+    assert not code_review.about_headline({}, {"id": "F-3", "quantity": "runtime"}, result, ["total_yield"])
+    assert code_review.about_headline({}, {"id": "F-4", "headline": True}, result, [])
+
+
+@pytest.mark.asyncio
+async def test_a_fault_whose_values_other_keys_also_hold_still_stops(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue(quantity="dose"))
+    verdict = await engine._shown_fault_verdict(
+        {"exec_result": {"returncode": 0}, "result_json": {"dose": 60.0, "dose_raw": 60.0, "contrast": 0.42}})
+    assert verdict and "under other names too" in verdict["rationale"]
+
+
+@pytest.mark.asyncio
+async def test_a_left_out_quantity_is_not_said_once_it_is_no_longer_flagged(tmp_path: Path) -> None:
+    from core import disclosure
+
+    engine = _engine(tmp_path)
+    _record(engine, _issue(quantity="dose"))
+    assert await engine._shown_fault_verdict(TWO_RESULTS) is None
+    assert "computes `dose` wrongly" in disclosure.run_record(engine.quest_root)
+    record = code_review.load(engine.quest_root)
+    record["issues"]["F-1"]["outcome"] = cf.FIXED  # a later repair fixed it
+    code_review.save(engine.quest_root, record)
+    assert "dose" not in disclosure.run_record(engine.quest_root)
+    assert await engine._shown_fault_verdict(TWO_RESULTS) is None  # the gate again: nothing shown, the old mark is gone
+    assert "at_gate" not in code_review.load(engine.quest_root)["issues"]["F-1"]

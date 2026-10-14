@@ -108,11 +108,22 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
     done: set[tuple[str, str]] = set()
     work: list[tuple[_Module, list[ast.AST]]] = []
 
-    def reach(m: _Module | None, name: str) -> None:
-        if m is None or name not in m.functions or (m.rel, name) in done:
-            return
-        done.add((m.rel, name))
-        work.append((m, m.functions[name]))
+    def reach(m: _Module | None, name: str, hops: int = 0) -> bool:
+        """Mark what ``name`` in module ``m`` is: its own function, or what it imports under that name (a re-export in a
+        package's ``__init__.py`` is followed to the module that defines it). ``False`` when ``m`` holds no such name."""
+        if m is None or hops > 20:
+            return False
+        if name in m.functions:
+            if (m.rel, name) not in done:
+                done.add((m.rel, name))
+                work.append((m, m.functions[name]))
+            return True
+        if name in m.imports:
+            module, attr = m.imports[name]
+            if attr is None or f"{module}.{attr}" in by_name:
+                return True  # a module, not a function
+            return reach(by_name.get(module), attr, hops + 1)
+        return any(reach(by_name.get(module), name, hops + 1) for module in m.star)
 
     def everywhere(name: str) -> None:
         for m in modules.values():
@@ -124,8 +135,7 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
     for script in {*scripts, *([harness] if harness else [])}:
         if script in modules:
             for entry in HARNESS_ENTRIES:
-                if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == entry for n in modules[script].tree.body):
-                    reach(modules[script], entry)
+                reach(modules[script], entry)  # defined there, or imported into it
 
     while work:
         m, nodes = work.pop()
@@ -142,23 +152,15 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
                             return None
                         everywhere(name.value)
                 elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                    if node.id in m.functions:
-                        reach(m, node.id)
-                    elif node.id in m.imports:
-                        module, name = m.imports[node.id]
-                        if name is not None:
-                            reach(by_name.get(module), name)
-                    else:
-                        for module in m.star:
-                            reach(by_name.get(module), node.id)
+                    reach(m, node.id)
                 elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
                     owner = node.value
                     if isinstance(owner, ast.Name) and owner.id in m.imports and owner.id not in m.functions:
                         module, name = m.imports[owner.id]
                         target = by_name.get(module if name is None else f"{module}.{name}" if module else name)
-                        if target is not None:
-                            reach(target, node.attr)
+                        if target is not None and reach(target, node.attr):
                             continue
+                    # Any other object, or a module that does not hold the name itself: any function of that name.
                     everywhere(node.attr)
     return done
 

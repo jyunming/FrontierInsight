@@ -576,7 +576,7 @@ same PR that adds, splits or renames one.
   `changes_result` and `plan_conflict`) / `merge_logic` / `reply_said_nothing`, `problems`, `files_for` (the file a finding is
   repaired in) / `findings_text` / `equations_view` / `parse_files` / `repair_problem` (what a changed file must keep),
   `may_read` / `may_repair` (the quest-wide `MAX_FINDING_CALLS`, no oscillation) / `note_reading` (folds each reading into the issues
-  of `core/code_findings.py`; a round converges while the open issues that change a result drop),
+  of `core/code_findings.py`; a round converges while it makes a fault a failing test showed pass its test: `round_fixed`),
   `not_computed` / `headline_missing` / `headline_constant` / `write_note` (what the paper says),
   `constant_in` / `resolve_logic` (the run's results decide a "constant" finding; only a claim they confirm stops), `.fi/code_review.json`. Called by
   `Engine._code_review_gate` (reads, `_repair_review_findings`) in `_node_execute` before the equation gate (`final=False`) and just before the run (`final=True`); the

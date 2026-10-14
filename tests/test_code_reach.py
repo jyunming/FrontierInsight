@@ -75,3 +75,22 @@ def test_a_function_passed_on_as_a_value_or_called_on_its_module_is_reached(tmp_
 def test_a_file_that_does_not_parse_makes_everything_reached(tmp_path: Path) -> None:
     code = _code(tmp_path, {"experiment.py": "def main(:\n", "helpers.py": "def unused():\n    return 1\n"})
     assert code_reach.reached(code, scripts=["experiment.py"]) is None
+
+
+def test_a_function_a_package_re_exports_is_reached(tmp_path: Path) -> None:
+    code = _code(tmp_path, {
+        "experiment.py": "import pkg\nfrom pkg import other\n\nprint(pkg.compute_metric(), other())\n",
+        "pkg/__init__.py": "from .sub import compute_metric\nfrom .more import *\n",
+        "pkg/sub.py": "def compute_metric():\n    return 1\n\ndef unused():\n    return 2\n",
+        "pkg/more.py": "def other():\n    return 3\n"})
+    done = code_reach.reached(code, scripts=["experiment.py"])
+    assert done is not None
+    assert {("pkg/sub.py", "compute_metric"), ("pkg/more.py", "other")} <= done
+    assert ("pkg/sub.py", "unused") not in done
+
+
+def test_a_harness_entry_imported_into_the_simulation_is_reached(tmp_path: Path) -> None:
+    code = _code(tmp_path, {"experiment.py": "print(1)\n", "simulate.py": "from sim_core import run_trial\n",
+                            "sim_core.py": "def run_trial(cell, trial_id, seed):\n    return step()\n\ndef step():\n    return 1\n"})
+    done = code_reach.reached(code, scripts=["experiment.py"], harness="simulate.py")
+    assert done is not None and {("sim_core.py", "run_trial"), ("sim_core.py", "step")} <= done

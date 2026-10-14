@@ -809,6 +809,29 @@ def quantity_names(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
     return names
 
 
+def headline_names(design: Any, protocol: Any) -> list[str]:
+    """The names of the plan's main quantity: its first dependent variable and the metric its precision target is for."""
+    reqs = requirements(design if isinstance(design, dict) else None, protocol if isinstance(protocol, dict) else None)
+    return [str(r["name"]) for r in reqs if r.get("headline") and str(r.get("name") or "").strip()]
+
+
+def about_headline(record: dict[str, Any], issue: dict[str, Any], result: Any, headline: list[str]) -> bool:
+    """Whether an issue may be about the study's main quantity: the reading says so, or one of its quantity names and a
+    headline name hold one another (``yield`` and ``total_yield``), or the keys of the results it names are among the
+    headline's. When in doubt it is: a fault there leaves nothing to report."""
+    if issue.get("headline"):
+        return True
+    wanted = [n for n in (_norm(h) for h in headline) if len(n) >= 4]
+    if not wanted:
+        return False
+    for name in quantity_names(record, issue):
+        n = _norm(name)
+        if len(n) >= 4 and any(n in w or w in n for w in wanted):
+            return True
+    mine = set(keys_of_issue(record, issue, result))
+    return bool(mine) and any(mine & named_in_results(h, result) for h in headline)
+
+
 def keys_of_issue(record: dict[str, Any], issue: dict[str, Any], result: Any) -> list[str]:
     """The keys of the run's results that hold the quantities an issue is about (:func:`named_in_results` for each of
     :func:`quantity_names`). ``[]`` when the results hold none of them."""
