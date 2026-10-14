@@ -441,6 +441,10 @@ class RunChecksMixin:
                                                            "Make run_trial compute one trial (one random draw of the setting) "
                                                            "on its own; keep any mean over trials in run_cell, which may "
                                                            "call run_trial, never the other way round.")
+        from . import optimise as _optimise
+
+        if isinstance(runner, _optimise.OptimisationRunner):
+            return await self._size_the_scan(state, runner, python, env)
         if (not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs  # type: ignore[attr-defined]
                 or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0):  # type: ignore[attr-defined]
             return None
@@ -505,6 +509,47 @@ class RunChecksMixin:
             _estimate.write_record(self.quest_root, {**base, "fits": False, "reduced": reduced})  # type: ignore[attr-defined]
             await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
         return None
+
+    async def _size_the_scan(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
+        """The coarse scan of a search for the best design runs every setting of the plan's grid, so its size is counted
+        (the product of the axes' lengths, nothing listed) and its time added up BEFORE anything lists or runs the settings: from the
+        plan's own estimate of one evaluation, or, when the plan gives none, from one real evaluation of the baseline. Over
+        ``execution.timeout_s``: the quest's plain stop, as for a measurement (FI does not run a smaller scan than the plan's).
+        ``None`` to go on."""
+        from . import optimisation_plan as _optimisation_plan
+        from . import optimise as _optimise
+
+        if self.config.execution.background_jobs or _frozen.load(self.quest_root) is not None:  # type: ignore[attr-defined]
+            return None
+        raw = _optimise.block_of(self._protocol_block(state))  # type: ignore[attr-defined]
+        block, _why = _optimisation_plan.normalize(raw) if raw is not None else (None, "")
+        if block is None:
+            return None  # the run reports a block it cannot read
+        scan = _optimisation_plan.evaluations(block)[1]
+        if scan <= 1:
+            return None
+        deterministic = "run_trial" not in _trial_runner.entries(runner.simulate)
+        runs = 1 if deterministic else max(1, int(block.get("runs_per_evaluation") or 1))
+        limit_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
+        each = (block.get("evaluation_budget") or {}).get("seconds_per_evaluation")
+        at_least = False
+        if isinstance(each, (int, float)) and not isinstance(each, bool) and each > 0:
+            per_setting = float(each) * runs
+        else:
+            baseline = _optimise.complete_case(self._protocol_block(state), {})  # type: ignore[attr-defined]
+            probe, _ = await _estimate._time_one(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                baseline, runs=runs, deterministic=deterministic, timeout_s=int(max(5, limit_s)), env=env,
+                thresholds=(self._protocol_block(state) or {}).get("thresholds"))  # type: ignore[attr-defined]
+            if probe is None:
+                return None  # a baseline that cannot be timed fails in the real run, where it is repaired
+            per_setting, at_least = probe.seconds, probe.at_least
+        est = _estimate.Estimate(seconds=per_setting * scan, at_least=at_least, complete=True, cells=scan, trials=scan * runs)
+        if not _estimate.known_too_long(est, limit_s):
+            return None
+        text = self._too_long_text(est, limit_s, cut=False)
+        self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
+        return self._stop_too_long(text)
 
     async def _pilot_gate(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]],
                           probes: list[_estimate.Probe], thresholds: dict[str, Any], limit_s: float,
@@ -752,11 +797,11 @@ class RunChecksMixin:
                 "to": {"grid": grid, "runs_per_setting": fewer}}
 
     @staticmethod
-    def _too_long_text(est: _estimate.Estimate, limit_s: float) -> str:
-        return (f"the experiment would take {'at least ' if est.at_least else 'about '}"
+    def _too_long_text(est: _estimate.Estimate, limit_s: float, cut: bool = True) -> str:
+        return (f"the experiment's {est.cells:,} settings would take {'at least ' if est.at_least else 'about '}"
                 f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
-                f"{_estimate.plain_duration(limit_s)} allowed; FI does not run a smaller study than the plan's settings, and "
-                "they cannot fit even with the fewest runs per setting the plan allows")
+                f"{_estimate.plain_duration(limit_s)} allowed; FI does not run a smaller study than the plan's settings"
+                + (", and they cannot fit even with the fewest runs per setting the plan allows" if cut else ""))
 
     def _sizing_failed(self, why: str, text: str | None = None) -> dict[str, Any]:
         """A failed run for the existing repair of the simulation: it failed while the experiment was timed, at the setting

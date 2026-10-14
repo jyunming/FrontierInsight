@@ -10,6 +10,7 @@ import copy
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -360,7 +361,7 @@ async def test_a_run_that_cannot_fit_at_the_fewest_runs_stops_plainly_and_a_resu
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and model.asked == []
     text = patch["exec_result"]["too_long"]
-    assert re.fullmatch(r"the experiment would take about .+, more than the 6 seconds allowed; FI does not run a smaller study "
+    assert re.fullmatch(r"the experiment.s \d+ settings would take about .+, more than the 6 seconds allowed; FI does not run a smaller study "
                         r"than the plan's settings, and they cannot fit even with the fewest runs per setting the plan allows",
                         text), text
     assert patch["exec_give_up_reason"] == text and patch["result_json"] == {} and patch["exec_result"]["returncode"] == 1
@@ -577,3 +578,76 @@ def test_the_runs_that_fit_need_a_fewest_the_plan_itself_states() -> None:
     assert run_estimate.runs_that_fit(est, 900.0, 1600, False, {"min_runs_per_setting": 100}) == 720
     assert run_estimate.runs_that_fit(est, 900.0, 1600, False, {"min_runs_per_setting": 1537}) is None
     assert run_estimate.runs_that_fit(est, 900.0, 1600, True, {"min_runs_per_setting": 1}) is None
+
+
+# ---- the coarse scan of a search is counted before it is listed ---------------------------------------------------------
+
+_SCAN_BLOCK: dict[str, Any] = {
+    "objective": {"quantity": "f", "direction": "minimise", "unit": "J"},
+    "design_variables": [{"name": "x", "low": -5.0, "high": 5.0, "kind": "continuous"}],
+    "fixed": {f"axis{i}": 0 for i in range(13)}, "baseline": {"values": {"x": 0.0}, "source": "the design in use"},
+    "numerical_settings": {"mesh": {"search": 0.5}},
+    "evaluation_budget": {"starts": 2, "per_start": 10},
+    "grid": {f"axis{i}": list(range(n)) for i, n in enumerate((5, 33, 10, 5, 6, 6, 3, 4, 5, 3, 18, 10, 2))},
+}
+
+
+async def _search_engine(tmp_path: Path, block: dict[str, Any]) -> tuple[Engine, Any]:
+    from core import optimise
+
+    eng = _plan_engine(tmp_path, [])
+    eng.config.execution.timeout_s = 3600
+    code = eng.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text("def run_cell(cell):\n    return {'f': cell['x'] ** 2}\n", encoding="utf-8")
+    (code / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    eng.executor = _Counting()  # type: ignore[assignment]
+    protocol = {"optimisation": block, "thresholds": {}}
+    eng._protocol_block = lambda state: protocol  # type: ignore[method-assign]
+    runner = optimise.OptimisationRunner(
+        eng.executor, quest_root=eng.quest_root, protocol=lambda: protocol, simulate=code / "simulate.py",
+        analysis=code / "experiment.py", log=eng._log)
+    return eng, runner
+
+
+def _nothing_is_listed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("the settings were listed before the run-size check stopped the run")
+
+    monkeypatch.setattr(trial_runner, "cells", boom)
+    monkeypatch.setattr("core.optimise_search.grid_cells", boom)
+
+
+@pytest.mark.asyncio
+async def test_a_scan_of_billions_of_settings_stops_before_any_is_listed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["evaluation_budget"]["seconds_per_evaluation"] = 20
+    eng, runner = await _search_engine(tmp_path, block)
+    _nothing_is_listed(monkeypatch)
+    started = time.monotonic()
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert time.monotonic() - started < 5
+    assert patch is not None and patch["exec_result"]["returncode"] == 1
+    text = patch["exec_result"]["too_long"]
+    assert re.fullmatch(r"the experiment's 19,245,600,000 settings would take about .+, more than the 1 h allowed; "
+                        r"FI does not run a smaller study than the plan's settings", text), text
+    assert eng.executor.calls == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_scan_with_no_stated_time_is_timed_on_one_real_evaluation_and_stops_before_listing(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, runner = await _search_engine(tmp_path, copy.deepcopy(_SCAN_BLOCK))
+    _nothing_is_listed(monkeypatch)
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and "19,245,600,000 settings" in patch["exec_result"]["too_long"]
+    assert eng.executor.calls >= 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_small_scan_that_fits_goes_on(tmp_path: Path) -> None:
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    block["evaluation_budget"]["seconds_per_evaluation"] = 20
+    eng, runner = await _search_engine(tmp_path, block)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
