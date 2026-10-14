@@ -22981,6 +22981,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             tree = await AsyncProcessTree.start(
                 str(py), "-m", "pip", "freeze",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=scrub_secrets(),  # the quest's packages load here (.pth files): no FI keys
             )
             proc = tree.proc
             aborted = False
