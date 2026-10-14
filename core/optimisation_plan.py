@@ -33,6 +33,8 @@ import math
 import re
 from typing import Any
 
+from . import optimise_search as _optimise_search
+
 STUDY_TYPES = {
     "measure": "measure how a result changes over settings chosen in advance",
     "find_best_design": "find the best design",
@@ -853,8 +855,9 @@ def improvement_rule(block: dict[str, Any]) -> tuple[str, str]:
     return "better than the baseline by more than the numerical error of the two designs", "rule"
 
 
-def missing_parts(design: Any) -> list[str]:
-    """What a ``find_best_design`` design lacks before a search could start, in plain words (empty when nothing)."""
+def missing_parts(design: Any, limit_s: float | None = None) -> list[str]:
+    """What a ``find_best_design`` design lacks before a search could start, in plain words (empty when nothing).
+    ``limit_s``: the time one run may take (``execution.timeout_s``), for the coarse scan's time (:func:`scan_problem`)."""
     if study_type_of(design) != "find_best_design":
         return []
     if not has_block(design):
@@ -864,7 +867,81 @@ def missing_parts(design: Any) -> list[str]:
     out = []
     if not isinstance(block.get("evaluation_budget"), dict):
         out.append("no evaluation budget (`evaluation_budget`: how many starting points, and how many evaluations each)")
+    if scan := scan_problem(design, limit_s):
+        out.append(scan)
     return out
+
+
+def scan_problem(design: Any, limit_s: float | None = None) -> str:
+    """Why the coarse scan of a plan's search cannot run, in plain words with the plan's own arithmetic, or ``""`` when it
+    fits (or the block cannot be read: that is another problem). The scan runs every setting of the grid (each axis times
+    every other); it cannot run when it is more settings than FI lists (:data:`core.optimise_search.MAX_LISTED_SETTINGS`)
+    or when the settings, at the plan's own time for one evaluation (times ``runs_per_evaluation``), take longer than one
+    run may (``limit_s``). Pure arithmetic on the plan, known when the plan is written; the check at the run step, which
+    times one real evaluation, stays."""
+    block, _why = normalize(design["protocol"]["optimisation"]) if has_block(design) else (None, None)
+    if block is None or not (isinstance(block.get("grid"), dict) and block["grid"]):
+        return ""
+    try:
+        axes = {k: v for k, v in _optimise_search.scan_grid(block).items() if len(v) > 1}
+    except (KeyError, TypeError, ValueError):
+        return ""
+    total = 1
+    for values in axes.values():
+        total *= len(values)
+    if total <= 1:
+        return ""
+    limit = _optimise_search.MAX_LISTED_SETTINGS
+    seconds = (block.get("evaluation_budget") or {}).get("seconds_per_evaluation")
+    runs = int(block.get("runs_per_evaluation") or 1)
+    needed = total * runs * float(seconds) if _number(seconds) else None
+    too_many = total > limit
+    too_long = bool(limit_s and needed is not None and needed > limit_s)
+    if not (too_many or too_long):
+        return ""
+    held = set(cell_of_names(block))
+    listing = ", ".join(f"`{k}` {len(v)} value{'s' if len(v) != 1 else ''}"
+                        + (" (a condition the plan holds fixed)" if k in held else "") for k, v in axes.items())
+    sentence = (f"the coarse scan cannot run: it is {total:,} settings, every combination of the {len(axes)} settings of "
+                f"`protocol.optimisation.grid` that have more than one value (each multiplies every other): {listing}")
+    if too_many:
+        sentence += f"; FI does not list or run more than {limit:,}"
+    if too_long:
+        sentence += (f"; at the plan's own {_fmt(float(seconds))} s for one evaluation"
+                     + (f" times {runs} runs" if runs > 1 else "")
+                     + f" that is about {_span(needed)}, and one run may take {_span(limit_s)}"
+                     if needed is not None and limit_s else "")
+    return sentence
+
+
+def _span(seconds: float) -> str:
+    """A time in the unit a person reads it in."""
+    if seconds >= 7200:
+        return f"{_fmt(round(seconds / 3600, 1))} h"
+    return f"{_fmt(round(seconds / 60, 1))} min" if seconds >= 120 else f"{_fmt(round(seconds))} s"
+
+
+def cell_of_names(block: dict[str, Any]) -> list[str]:
+    """The conditions a search holds fixed (``fixed``), by name."""
+    fixed = block.get("fixed")
+    return [str(k) for k in fixed] if isinstance(fixed, dict) else []
+
+
+def scan_request(topic: str, problems: list[str]) -> str:
+    """The request FI makes of the plan's model when the coarse scan of its search cannot run: the plan's own arithmetic
+    (``problems``, from :func:`scan_problem`), the rule behind it, and what to rewrite. FI chooses nothing for the plan."""
+    return (
+        "This study is a search for the best design, and the coarse scan in the plan cannot run as written, so the search "
+        "would stop before it starts. The topic: “" + " ".join(str(topic or "").split())[:600] + "”.\n"
+        "What cannot run:\n" + "\n".join(f"- {p}" for p in problems) + "\n\n"
+        "How the scan counts:\n"
+        "- Every setting in `protocol.optimisation.grid` multiplies every other one: the scan is every combination.\n"
+        "- A condition the plan holds fixed (`fixed`) that is also in the scan is measured at each of its values, but only "
+        "its held value can start the search, so it makes the scan larger without helping the search.\n"
+        "- A setting that matters for only some of the settings compared (for example a parameter of just one of the "
+        "alternatives) multiplies all the others when it is a setting of the scan.\n"
+        "Rewrite `protocol.optimisation.grid` so the scan fits: fewer settings in it, or fewer values for each. Keep "
+        "everything else in the block as it is.")
 
 
 #: The one plain request a person can make to turn a search for the best design into a measurement over the settings the
@@ -879,7 +956,7 @@ _PLAIN_PARTS = {
 }
 
 
-def plain_gaps(design: Any, why: str | None = None) -> list[str]:
+def plain_gaps(design: Any, why: str | None = None, limit_s: float | None = None) -> list[str]:
     """What a search for the best design still lacks, in the words a scientist uses (no field names): the parts of the
     ``optimisation`` block that are absent, and the part ``why`` (the reading of the block, ``normalize``'s reason) names."""
     block = design["protocol"]["optimisation"] if has_block(design) else None
@@ -899,6 +976,8 @@ def plain_gaps(design: Any, why: str | None = None) -> list[str]:
     plain = _PLAIN_PARTS.get(named.group(1) if named else "")
     if plain and plain not in gaps:
         gaps.append(plain)
+    if scan_problem(design, limit_s):
+        gaps.append("a first scan of the settings small enough to run")
     if why and not gaps:
         gaps.append("a part of the search description that could not be read")
     return gaps

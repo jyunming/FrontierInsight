@@ -5546,13 +5546,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # Read back through the check, since a design drafted at this step has not been through it.
         _block, block_why = (_optim.normalize(design["protocol"]["optimisation"]) if _optim.has_block(design)
                              else (None, None))
-        missing = _optim.missing_parts(design) if not asked else [
+        # A coarse scan that cannot run (too many settings, or too long at the plan's own time for one) is a part of the
+        # search the plan must fix, here, minutes after it was written; the run step still times one real evaluation.
+        missing = _optim.missing_parts(design, self._scan_limit_s()) if not asked else [
             "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
         if block_why:
             entry = _plan.offending_entry(design.get("protocol"), block_why)
             missing.append(f"its optimisation block cannot be used ({block_why})"
                            + (f"; the entry as written: {entry}" if entry else ""))
         return True, missing, block_why
+
+    def _scan_limit_s(self) -> float:
+        """The time one run may take (``execution.timeout_s``), which the coarse scan of a search must fit."""
+        return float(self.config.execution.timeout_s)
 
     def _plan_model_name(self) -> str:
         """The model the plan step's requests go to (for the record of what FI asked it, so another model is asked afresh)."""
@@ -5640,18 +5646,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if not (wanted and missing):
                 return []
             # The plain words for the card, and the reader's exact reason for run.log (what the ask quotes to the model).
-            return [*_optim.plain_gaps(now, why), *([f"the block cannot be read: {why}"] if why else [])]
+            return [*_optim.plain_gaps(now, why, self._scan_limit_s()), *([f"the block cannot be read: {why}"] if why else [])]
 
         def request(now: Any, text: str) -> str:
             _wanted, missing, _why = self._search_problems(state, now)
+            topic = state.get("topic") or self.config.topic
+            scan = [m for m in missing if m.startswith("the coarse scan cannot run")]
+            if scan and len(scan) == len(missing):
+                return _optim.scan_request(topic, scan)  # the block is complete: only the scan is to be rewritten
             left_out = [m.group(0).lstrip("- ").strip() for m in re.finditer(
                 r"^.*the optimisation block was left out.*$", text, re.MULTILINE)][:3]
-            return _optim.ask_request(state.get("topic") or self.config.topic, missing, left_out)
+            return _optim.ask_request(topic, missing, left_out)
 
+        # A scan that cannot run is the only thing wrong: the plan is asked once to rewrite it (a rewrite that still does not
+        # fit is not asked for again; the honest stop that follows says why, at design, not hours into the run).
+        _wanted, now_missing, _why = self._search_problems(state, design)
+        scan_only = bool(now_missing) and all(m.startswith("the coarse scan cannot run") for m in now_missing)
         return await self._ask_plan_to_complete(
             design, plan_sha, lacks=lacks, request=request, keep=self._keep_only_the_search, file=_SEARCH_ASKED,
             what="search for the best design", short="the search",
-            note="the search for the best design, written by the plan's model")
+            note="the search for the best design, written by the plan's model", ask_limit=1 if scan_only else None)
 
     def _move_misplaced_parts(self) -> list[str]:
         """A protocol part the plan's model wrote beside ``protocol`` (at the top level of the design block, as the search
@@ -6938,6 +6952,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             unreadable = {named.group(1)} if named else set()
             if not isinstance(old_block.get("evaluation_budget"), dict):
                 unreadable.add("evaluation_budget")
+            if _optim.scan_problem(old, self._scan_limit_s()):
+                unreadable.add("grid")  # a scan that cannot run is what the plan was asked to rewrite
             if "" in unreadable:
                 unreadable = set(old_block)  # the block as a whole could not be read: nothing of it is kept
             merged = dict(block)
@@ -7050,8 +7066,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                   "which describes the same search", "; ".join(missing))
                 return with_block(planned)
         model = str(self._model_for_node("design") or self.config.provider.model or "")
-        while self._drafted_search_asked(iteration) < _SEARCH_ASKS:
-            count = self._drafted_search_asked(iteration) + 1
+        # A scan that cannot run, with the rest of the block complete, is asked once (as at the plan step).
+        asks = 1 if all(m.startswith("the coarse scan cannot run") for m in missing) else _SEARCH_ASKS
+        while self._drafted_search_asked(iteration) < asks:
+            count =self._drafted_search_asked(iteration) + 1
             try:
                 self.fi_dir.mkdir(parents=True, exist_ok=True)
                 (self.fi_dir / _DRAFTED_SEARCH_ASKED).write_text(json.dumps(
@@ -7060,12 +7078,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.warning("[design] FI could not write down that it was asking for the search block, so it did "
                                   "not ask: %r", e)
                 return design
-            gaps = _optim.plain_gaps(design, why)
+            gaps = _optim.plain_gaps(design, why, self._scan_limit_s())
             self._log.warning("[design] the redesign is a search for the best design and lacks %s; FI asked the design "
                               "step's model to write it (%d of %d)", "; ".join(gaps), count, _SEARCH_ASKS)
             self._progress("Asking the model to complete the search for the best design")
             current = design["protocol"].get("optimisation") if isinstance(design.get("protocol"), dict) else None
-            ask = (_optim.ask_request(state.get("topic") or self.config.topic, missing)
+            scan_only = all(m.startswith("the coarse scan cannot run") for m in missing)
+            ask = ((_optim.scan_request(state.get("topic") or self.config.topic, missing) if scan_only
+                    else _optim.ask_request(state.get("topic") or self.config.topic, missing))
                    + "\n\nThe block drafted so far (keep what is usable in it, and write what is missing or cannot be "
                    "read):\n" + json.dumps(current, ensure_ascii=False, default=str)[:4000]
                    + "\n\nAnswer with the `optimisation` block alone, as one JSON object.")
@@ -7104,7 +7124,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         drafted = self._drafted_search_record()[0]
         asked = tried_plan or drafted
         said = "; ".join(_one_line(m, 500) for m in missing[:3])
-        lacks = "; ".join(_optim.plain_gaps(design, block_why)) or "a search description FI can read"
+        lacks = "; ".join(_optim.plain_gaps(design, block_why, self._scan_limit_s())) or "a search description FI can read"
         text = (f"the plan is a search for the best design, but FI could not make a search of it: it still lacks {lacks}"
                 + (f" ({_one_line(block_why, 300)})" if block_why else ""))
         tried = [
