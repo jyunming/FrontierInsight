@@ -876,9 +876,10 @@ def scan_problem(design: Any, limit_s: float | None = None) -> str:
     """Why the coarse scan of a plan's search cannot run, in plain words with the plan's own arithmetic, or ``""`` when it
     fits (or the block cannot be read: that is another problem). The scan runs every setting of the grid (each axis times
     every other); it cannot run when it is more settings than FI lists (:data:`core.optimise_search.MAX_LISTED_SETTINGS`)
-    or when the settings, at the plan's own time for one evaluation (times ``runs_per_evaluation``), take longer than one
-    run may (``limit_s``). Pure arithmetic on the plan, known when the plan is written; the check at the run step, which
-    times one real evaluation, stays."""
+    or when the settings, at the plan's own time for one evaluation, take longer than one run may (``limit_s``). One run
+    per setting is counted here (a deterministic simulation runs each setting once; whether it is one is known only when
+    the code exists), so this is never stricter than the check at the run step, which times one real evaluation, counts
+    the runs, and stays."""
     block, _why = normalize(design["protocol"]["optimisation"]) if has_block(design) else (None, None)
     if block is None or not (isinstance(block.get("grid"), dict) and block["grid"]):
         return ""
@@ -893,8 +894,7 @@ def scan_problem(design: Any, limit_s: float | None = None) -> str:
         return ""
     limit = _optimise_search.MAX_LISTED_SETTINGS
     seconds = (block.get("evaluation_budget") or {}).get("seconds_per_evaluation")
-    runs = int(block.get("runs_per_evaluation") or 1)
-    needed = total * runs * float(seconds) if _number(seconds) else None
+    needed = total * float(seconds) if _number(seconds) else None
     too_many = total > limit
     too_long = bool(limit_s and needed is not None and needed > limit_s)
     if not (too_many or too_long):
@@ -908,7 +908,6 @@ def scan_problem(design: Any, limit_s: float | None = None) -> str:
         sentence += f"; FI does not list or run more than {limit:,}"
     if too_long:
         sentence += (f"; at the plan's own {_fmt(float(seconds))} s for one evaluation"
-                     + (f" times {runs} runs" if runs > 1 else "")
                      + f" that is about {_span(needed)}, and one run may take {_span(limit_s)}"
                      if needed is not None and limit_s else "")
     return sentence

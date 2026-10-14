@@ -152,3 +152,11 @@ async def test_a_scan_that_fits_is_not_asked_anything(tmp_path: Path) -> None:
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert model.requests == 0
     assert eng._search_cannot_start_stop({"topic": TOPIC, "iteration": 0}, patch["design"]) is None
+
+
+def test_the_plans_runs_per_evaluation_never_make_the_plan_time_check_stricter_than_the_run() -> None:
+    # 50 settings at 2 s is 100 s, under a 150 s limit; three runs each would be 300 s, but whether the simulation is
+    # deterministic (one run per setting) is known only when the code exists, so the run's own timed check decides.
+    draft = _draft({"source_family": FAMILIES, "conventional_sigma": GRID["conventional_sigma"]})
+    draft["protocol"]["optimisation"]["runs_per_evaluation"] = 3
+    assert op.scan_problem(draft, 150.0) == ""

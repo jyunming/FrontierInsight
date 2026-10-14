@@ -7069,7 +7069,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A scan that cannot run, with the rest of the block complete, is asked once (as at the plan step).
         asks = 1 if all(m.startswith("the coarse scan cannot run") for m in missing) else _SEARCH_ASKS
         while self._drafted_search_asked(iteration) < asks:
-            count =self._drafted_search_asked(iteration) + 1
+            count = self._drafted_search_asked(iteration) + 1
             try:
                 self.fi_dir.mkdir(parents=True, exist_ok=True)
                 (self.fi_dir / _DRAFTED_SEARCH_ASKED).write_text(json.dumps(
@@ -7080,7 +7080,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return design
             gaps = _optim.plain_gaps(design, why, self._scan_limit_s())
             self._log.warning("[design] the redesign is a search for the best design and lacks %s; FI asked the design "
-                              "step's model to write it (%d of %d)", "; ".join(gaps), count, _SEARCH_ASKS)
+                              "step's model to write it (%d of %d)", "; ".join(gaps), count, asks)
             self._progress("Asking the model to complete the search for the best design")
             current = design["protocol"].get("optimisation") if isinstance(design.get("protocol"), dict) else None
             scan_only = all(m.startswith("the coarse scan cannot run") for m in missing)
