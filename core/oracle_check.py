@@ -42,7 +42,13 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 from typing import Any
+
+# The smallest difference a check can ask for: floating-point arithmetic cannot give a computed value more exactly than a
+# few dozen units in its last place, so a tolerance below that (a plan's 0 on a computed p-value failed correct code on a
+# measured 1.1e-16) is read as "exact to machine precision". A count that is off by 1 still fails.
+_ROUNDING = 64 * sys.float_info.epsilon
 
 _LINE_RE = re.compile(r"^\s*ORACLE_JSON:\s*(\{.*\})\s*$", re.MULTILINE)
 
@@ -127,16 +133,16 @@ def _num(value: Any) -> float | None:
 
 def limit_of(oracle: dict[str, Any]) -> tuple[float | None, float | None, str]:
     """``(expected, limit, mode)`` an oracle is judged by: ``limit`` is the largest difference from ``expected`` that counts as
-    agreeing (``None`` when the oracle cannot be judged: no numeric expected or tolerance, or a relative tolerance around 0)."""
+    agreeing (``None`` when the oracle cannot be judged: no numeric expected or tolerance, or a relative tolerance around 0).
+    The limit is never below the rounding of numbers of the expected value's size (or of 1), see ``_ROUNDING``."""
     expected, tolerance = _num(oracle.get("expected")), _num(oracle.get("tolerance"))
     mode = "relative" if str(oracle.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
     if expected is None or tolerance is None or tolerance < 0:
         return None, None, mode
-    if mode == "relative":
-        if expected == 0:
-            return expected, None, mode
-        return expected, tolerance * abs(expected), mode
-    return expected, tolerance, mode
+    if mode == "relative" and expected == 0:
+        return expected, None, mode
+    limit = tolerance * abs(expected) if mode == "relative" else tolerance
+    return expected, max(limit, _ROUNDING * max(1.0, abs(expected))), mode
 
 
 def case_of(oracle: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
