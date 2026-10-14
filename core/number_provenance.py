@@ -1204,6 +1204,7 @@ def check(
     n_seeds: int = 0,
     optimisation: Any = None,
     run_facts: Any = None,
+    trial_table: Any = None,
 ) -> ProvenanceReport:
     """Flag every number in the paper that nothing in this run accounts for.
 
@@ -1222,6 +1223,12 @@ def check(
         comparison_stats=comparison_stats, config=config, design=design,
         oracle_checks=oracle_checks, optimisation=optimisation, run_facts=run_facts,
     )
+    # FI's own table of what every trial gave, per setting (core/trial_table.py): the mean, SD and interval of each value
+    # over the trials, which the paper may quote and RESULT_JSON need not hold. A pool of its own, read only when the
+    # results account for nothing: added to the results, its hundreds of numbers would make every match there likelier
+    # to be luck, and correct numbers the results do account for would be flagged.
+    table_kept, table_stats = _trace_values(trial_table or {}, "trials")
+    table = Traceable(dict(table_kept), table_stats) if table_kept or table_stats else None
     report.traceable_values = len(traceable)
     # The experiment recorded nothing: it crashed, or its last RESULT_JSON is
     # empty. A paper written over no results is a real problem and not this
@@ -1260,6 +1267,17 @@ def check(
         if _a_list_the_run_holds(token, traceable):
             continue
         if _interval_of_a_result(token, beside, traceable):
+            continue
+        if table is not None and (
+            any(
+                _is_accounted_for(
+                    table, cand, dec, lambda: _naming_words(flat_text, token, context), shifted=bool(how),
+                )
+                for reading in readings
+                for cand, dec, how in _variants(reading, token)
+            )
+            or _interval_of_a_result(token, beside, table)
+        ):
             continue
         report.untraceable += 1
         if value in seen:

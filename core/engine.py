@@ -117,6 +117,7 @@ from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 from . import oracle_review as _review
 from . import topic_requirements as _topic_req
+from . import trial_table as _trial_table
 from . import plan_ledger as _ledger
 from . import plan_steps as _plan_steps
 from . import equation_tests as _equation_tests
@@ -18766,6 +18767,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
         if numbers_note := self._analysis_numbers_note(state):
             evidence_note = f"{evidence_note}\n\n{numbers_note}".strip()
+        try:
+            table_note = _trial_table.write_note(_trial_table.write(self.quest_root))
+        except OSError as e:  # the table is a help to the writer, never a reason to stop
+            self._log.warning("[write] FI's table of the trials could not be written (%s)", e)
+            table_note = ""
+        if table_note:
+            evidence_note = f"{evidence_note}\n\n{table_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
@@ -20526,6 +20534,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             optimisation=(_best_report.records(self.quest_root)
                           if _optimise.block_of(self._protocol_block(state)) is not None else None),
             run_facts={"duration_s": (state.get("exec_result") or {}).get("duration_s")},
+            trial_table=_trial_table.traceable(_trial_table.rows(self.quest_root)),
         )
 
     def _analysis_numbers_note(self, state: QuestState) -> str:
