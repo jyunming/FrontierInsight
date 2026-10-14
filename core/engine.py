@@ -13611,14 +13611,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     or not state.get("result_json"))
 
     def _experiment_gave_no_result(self, state: QuestState) -> bool:
-        """A simulation ran (its record is there) and produced no result. A quest with no simulation, or one that has
-        not run an experiment at all, is not this case."""
+        """A simulation ran (its record is there) and produced no result at all. A quest with no simulation, one that has
+        not run an experiment at all, or a run that failed after it wrote some results (a time limit part way through)
+        is not this case: what it wrote is checked as before."""
         exec_result = state.get("exec_result")
         if not (isinstance(exec_result, dict) and exec_result):
             return False
         if state.get("no_simulation_resolved") or state.get("survey_mode_resolved"):
             return False
-        return self._run_has_no_result(state)
+        return not state.get("result_json")
 
     def _improve_skip(self, state: QuestState) -> str | None:
         """Why the improve loop does not run after this run, or ``None`` when it may."""

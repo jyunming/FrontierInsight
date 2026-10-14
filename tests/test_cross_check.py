@@ -245,6 +245,18 @@ async def test_cross_check_still_searches_when_the_run_has_results(tmp_path: Pat
     search_mock.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_a_run_that_failed_after_writing_some_results_is_still_checked(tmp_path: Path) -> None:
+    """A run stopped part way (a time limit, a later setting failing) has results: they are checked as before."""
+    eng = Engine(_mk_cfg(tmp_path))
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value="{}")})()
+    search_mock = AsyncMock(return_value=[])
+    eng.knowledge.asearch = search_mock  # type: ignore[method-assign]
+    state = {**_FAILED_RUN, "exec_result": {"returncode": 1, "timed_out": True}, "result_json": {"x": 1.0}}
+    await eng._node_cross_check(state)
+    search_mock.assert_awaited_once()
+
+
 # --- CoVe verification pass ------------------------------------------------
 
 
