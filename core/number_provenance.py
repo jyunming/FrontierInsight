@@ -157,7 +157,6 @@ import math
 import re
 from array import array
 from dataclasses import dataclass, field
-from itertools import islice
 from typing import Any, Callable, Iterator
 
 from core.numeric_oracle import MIN_MAGNITUDE, _MINUS_SIGN, _TEX_THOUSANDS, extract_paper_numbers, flatten_numbers, roundings
@@ -1119,6 +1118,49 @@ def _naming_words(text: str, token: str, context: str) -> frozenset[str]:
     return frozenset(words)
 
 
+# A value with its interval beside it: ``0.918 (367/400; 0.886 to 0.941)``, ``0.813 for OLS (0.771-0.848)``,
+# ``0.918 [0.886, 0.941]``, ``0.918 (95% CI 0.886-0.941)``. At most three words between the value and the bracket, and
+# the bracket must close right after the upper bound, so the pair is the interval.
+_NUM_TOKEN = r"(?<![\w.])(-?[0-9]+(?:\.[0-9]+)?)"
+_INTERVAL_BESIDE = re.compile(
+    _NUM_TOKEN + r"\s*%?(?:\s+[A-Za-z]+){0,3}\s*[(\[][^()\[\]]{0,60}?" + _NUM_TOKEN
+    + r"\s*%?\s*(?:to|\u2013|\u2014|-|,|;)\s*" + _NUM_TOKEN + r"\s*%?\s*[)\]]",
+    re.I,
+)
+
+
+def _intervals_beside(text: str) -> dict[str, list[tuple[str, str, str]]]:
+    """Each interval endpoint the paper prints beside a value, by its token: ``{"0.886": [("0.918", "0.886",
+    "0.941")]}``. Only a pair that holds the value between its ends is taken for its interval."""
+    out: dict[str, list[tuple[str, str, str]]] = {}
+    for m in _INTERVAL_BESIDE.finditer(text):
+        value, lower, upper = m.group(1), m.group(2), m.group(3)
+        try:
+            if not float(lower) <= float(value) <= float(upper):
+                continue
+        except ValueError:
+            continue
+        for end in (lower, upper):
+            out.setdefault(end, []).append((value, lower, upper))
+    return out
+
+
+def _interval_of_a_result(token: str, beside: dict[str, list[tuple[str, str, str]]], traceable: Traceable) -> bool:
+    """Is ``token`` an end of the interval printed beside a value, where one result holds the value and both ends:
+    ``….coverage.estimate`` 0.9175 and ``….coverage.wilson_95_ci[0]``/``[1]`` 0.886/0.941? A run holding thousands of
+    numbers matches a 3-digit endpoint by luck, so the endpoint alone is not enough; the value and both ends under one
+    result are."""
+    for value, lower, upper in beside.get(token, ()):
+        ends = [traceable.paths_at(float(t), _written_precision(t)) for t in (lower, upper)]
+        if not all(ends):
+            continue
+        for path in traceable.paths_at(float(value), _written_precision(value)):
+            parent = path.rsplit(".", 1)[0] + "." if "." in path else ""
+            if parent and all(any(p.startswith(parent) for p in paths) for paths in ends):
+                return True
+    return False
+
+
 def _is_accounted_for(
     traceable: Traceable, cand: float, dec: int, named: Callable[[], frozenset[str]], *, shifted: bool = False,
 ) -> bool:
@@ -1186,6 +1228,7 @@ def check(
 
     seen: set[float] = set()
     flat_text = normalise(_TEX_THOUSANDS.sub(",", paper_text)).replace(_MINUS_SIGN, "-")
+    beside = _intervals_beside(flat_text)
     for value, token, context in paper_numbers(paper_text):
         if not _carries_enough_precision(token) or _is_year(value, token):
             continue
@@ -1209,6 +1252,8 @@ def check(
         if _derivable(value, token, context, traceable):
             continue
         if _a_list_the_run_holds(token, traceable):
+            continue
+        if _interval_of_a_result(token, beside, traceable):
             continue
         report.untraceable += 1
         if value in seen:
