@@ -433,7 +433,7 @@ def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
     trials, settings = _int(p.get("trials")), _int(p.get("settings"))
     read = f"{trials} trial(s) at {settings} setting(s) were read before the full run"
     if p["outcome"] == "passed":
-        said = f"{read}; nothing was wrong" + (f" once the simulation was repaired" if repairs else "")
+        said = f"{read}; nothing was wrong" + (" once the simulation was repaired" if repairs else "")
     elif p["outcome"] == "stopped":
         said = f"{read}; they showed the simulation does not measure what the protocol names, and its repairs did not remove it"
     else:
@@ -905,7 +905,8 @@ def _issue_rows(cr: dict[str, Any]) -> list[dict[str, Any]]:
             "demonstrated": issue.get("demonstrated") if isinstance(issue.get("demonstrated"), bool) else None,
             "repaired": outcome == _issues.FIXED, "repaired_by": str(issue.get("fixed_by") or ""),
             "open": still, "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
-            "reason": _one(issue.get("reason"), 140), "seen_in": len(readings)})
+            "reason": _one(issue.get("reason"), 140), "seen_in": len(readings),
+            "reported_as": [str(k) for k in _list(issue.get("reported_as"))]})
     return rows
 
 
@@ -1031,7 +1032,9 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
         if row["plan_problem"]:
             still = "plan problem: the plan contradicts itself, asked of the plan's model"
         elif row["open"]:
-            still = "yes, and it changes a result" if row["changes_result"] else "yes, but it changes nothing reported"
+            still = ("yes, and it changes a result" if row["changes_result"] else
+                     f"yes, but the results hold it as {', '.join(row['reported_as'][:3])}: a difference of names"
+                     if row.get("reported_as") else "yes, but it changes nothing reported")
         else:
             still = "no"
         lines.append(f"| {_cell(row['id'])} | {_cell(row['where'] or '-')} | {_cell(row['what'])} | "

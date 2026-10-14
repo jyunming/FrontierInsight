@@ -18516,9 +18516,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         exec_result = state.get("exec_result")
         if not (isinstance(exec_result, dict) and exec_result) or state.get("no_simulation_resolved"):
             return None
-        shown = _code_findings.shown_open(_code_review.load(self.quest_root))
+        record = _code_review.load(self.quest_root)
+        shown = _code_findings.shown_open(record)
         if not shown:
             return None
+        # A quantity the reader called missing that the results hold under another name is a difference of names, not a
+        # fault that changes a reported number: the results contradict the reader, and the issue no longer stops anything.
+        renamed = {str(i.get("id")): keys for i in shown
+                   if (keys := _code_review.reported_under_another_name(record, i, state.get("result_json")))}
+        if renamed:
+            for fid, keys in renamed.items():
+                issue = (record.get("issues") or {}).get(fid)
+                if isinstance(issue, dict):
+                    issue["changes_result"] = False
+                    issue["reported_as"] = keys
+                self._log.warning("[evidence_gate] %s calls a quantity missing that the results hold as %s: a difference "
+                                  "of names, not a wrong number; it does not stop the quest", fid, ", ".join(keys)[:200])
+            _code_review.save(self.quest_root, record)
+            shown = [i for i in shown if str(i.get("id")) not in renamed]
+            if not shown:
+                return None
         if len(shown) > _code_findings.MAX_SHOWN_RERUNS:
             self._log.warning("[evidence_gate] %d shown issue(s) beyond the first %d are not run again: %s", len(shown)
                               - _code_findings.MAX_SHOWN_RERUNS, _code_findings.MAX_SHOWN_RERUNS,

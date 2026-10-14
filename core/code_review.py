@@ -748,6 +748,29 @@ def named_in_results(name: str, result: Any) -> set[str]:
     return found
 
 
+def reported_under_another_name(record: dict[str, Any], issue: dict[str, Any], result: Any) -> list[str]:
+    """The keys under which the run's results hold what an issue calls missing, when that is all the issue says: every
+    requirement it stands for in the latest reading is a quantity of the plan (a dependent variable, a metric) the reader
+    called missing, and the results hold each one (:func:`named_in_results`: the name itself, or a longer key such as
+    ``k_relative_bias_by_temp`` for ``k_relative_bias``). The reader is then contradicted by the results: the number is
+    reported, under another name. ``[]`` otherwise -- a quantity said to be computed differently, a problem of logic, a
+    figure, a check, an issue the latest reading does not list, or a quantity the results do not hold.
+
+    A real run stopped without a paper on such an issue: its test asserted the plan's key in a dictionary that held the
+    same per-temperature values under ``k_relative_bias_by_temp``."""
+    fid = issue.get("id")
+    reqs = [v for v in record.get("read_problems") or [] if isinstance(v, dict) and fid and v.get("fid") == fid]
+    if not reqs or any(v.get("kind") not in QUANTITY_KINDS or v.get("status") != MISSING for v in reqs):
+        return []
+    keys: set[str] = set()
+    for v in reqs:
+        found = named_in_results(str(v.get("name") or ""), result)
+        if not found:
+            return []
+        keys |= found
+    return sorted(keys)
+
+
 def absent_from_results(names: list[str], result: Any) -> list[str]:
     """Of the plan's quantities ``names``, those the run's results hold no number for under any key that contains the name
     (case, punctuation and underscores ignored). Containment, not equality: an analysis that writes ``variant_metric_c``
@@ -964,8 +987,11 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     elif record.get("version") == now and record.get("not_reviewed"):
         out["not_reviewed"] = [str(x) for x in record["not_reviewed"]]
         out["not_reviewed_headline"] = bool(record.get("not_reviewed_headline"))
-    still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")]
     issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    # A quantity the results hold under another name (reported_under_another_name, recorded at the evidence gate) is
+    # computed: it is not "not computed".
+    still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")
+             and not (issues.get(v.get("fid")) or {}).get("reported_as")]
     logic = [v for v in still if v.get("kind") == "logic"]
     left = [v for v in still if v.get("kind") != "logic"]
     out["missing"] = [v for v in left if v.get("status") == MISSING]

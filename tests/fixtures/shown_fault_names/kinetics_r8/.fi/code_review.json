@@ -1,0 +1,977 @@
+{
+ "version": "dc4afa106312baf4",
+ "reviews_total": 5,
+ "send_backs": 1,
+ "repair_calls": 21,
+ "finding_calls": 29,
+ "test_calls": 8,
+ "readings": [
+  {
+   "n": 1,
+   "version": "cdf0edbace366c28",
+   "open": 7,
+   "high": 3,
+   "changing": 6,
+   "ids": [
+    "F-b5e6edb8",
+    "F-fe5d51ce",
+    "F-650ad5f3",
+    "F-6810b6c4",
+    "F-ff8e4e00",
+    "F-3af8cc05",
+    "F-6f91b612"
+   ]
+  },
+  {
+   "n": 2,
+   "version": "c24811756fbd565d",
+   "open": 9,
+   "high": 3,
+   "changing": 7,
+   "ids": [
+    "F-b5e6edb8",
+    "F-fe5d51ce",
+    "F-650ad5f3",
+    "F-ff8e4e00",
+    "F-3af8cc05",
+    "F-6f91b612",
+    "F-794b8782",
+    "F-c9356581",
+    "F-850df3b7"
+   ],
+   "improved": false
+  },
+  {
+   "n": 3,
+   "version": "640decd3b3f6427f",
+   "open": 5,
+   "high": 1,
+   "changing": 4,
+   "ids": [
+    "F-b5e6edb8",
+    "F-fe5d51ce",
+    "F-650ad5f3",
+    "F-3af8cc05",
+    "F-176c17c5"
+   ]
+  }
+ ],
+ "converged": false,
+ "repaired": false,
+ "read_version": "640decd3b3f6427f",
+ "issues": {
+  "F-b5e6edb8": {
+   "id": "F-b5e6edb8",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "cdf0edbace366c28"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed the module: Expr(value=Call(func=Name(id='print', ctx=Load()), args=[Bin; the module: added If(test=Compare(left=Name(id='__name__', ctx=Load()), ops=[E, which the finding does not speak of"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_summarize_cell_reports_k_relative_bias_under_the_planned_name: experiment could not be imported: 'FI_TRIALS'"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed the module: Expr(value=Call(func=Name(id='print', ctx=Load()), args=[Bin; the module: added If(test=Compare(left=Name(id='__name__', ctx=Load()), ops=[E, which the finding does not speak of"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_summarize_cell_reports_k_relative_bias_under_the_planned_name: experiment could not be imported: 'FI_TRIALS'"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "the dependent variable k_relative_bias is computed and reported in the result",
+    "the result reports k_relative_bias (Mean((k_hat-k_true)/k_true) across successful trials at each temperature.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 3,
+   "kind": "quantity",
+   "kinds": [
+    "dependent variable",
+    "metric"
+   ],
+   "file": "",
+   "function": "",
+   "quantity": "krelativebias",
+   "severity": "high",
+   "changes_result": true,
+   "headline": true,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the dependent variable k_relative_bias is computed and reported in the result",
+   "why": "The dependent variable k_relative_bias is omitted from the cell summary dictionary, which only reports k_relative_bias_by_temp.",
+   "fix": "",
+   "problem_ids": [
+    "R1",
+    "R16"
+   ],
+   "statement": "[high] Where: not stated\n   What is wrong: the plan's dependent variable \"the dependent variable k_relative_bias is computed and reported in the result\" is missing from the code\n   Why it is wrong against the plan: The dependent variable k_relative_bias is omitted from the cell summary dictionary, which only reports k_relative_bias_by_temp.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says\n\n[medium] Where: not stated\n   What is wrong: the plan's metric \"the result reports k_relative_bias (Mean((k_hat-k_true)/k_true) across successful trials at each temperature.)\" is missing from the code\n   Why it is wrong against the plan: The metric k_relative_bias is omitted from the results summary, reporting only k_relative_bias_by_temp.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "test": ".fi/finding_tests/F-b5e6edb8_1.py",
+   "failure": "test_summarize_cell_reports_k_relative_bias_under_the_planned_name: experiment could not be imported: 'FI_TRIALS'",
+   "reason": "no repair passed its test and kept the earlier checks passing (the finding's own test still fails: test_summarize_cell_reports_k_relative_bias_under_the_planned_name: experiment could not be imported: 'FI_TRIALS')"
+  },
+  "F-fe5d51ce": {
+   "id": "F-fe5d51ce",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "cdf0edbace366c28"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed the module: Expr(value=Call(func=Name(id='print', ctx=Load()), args=[Bin; the module: added If(test=Compare(left=Name(id='__name__', ctx=Load()), ops=[E, which the finding does not speak of"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_summary_reports_overall_k_95_coverage: Could not summarize rate-constant coverage: 'FI_TRIALS'"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed the module: Expr(value=Call(func=Name(id='print', ctx=Load()), args=[Bin; the module: added If(test=Compare(left=Name(id='__name__', ctx=Load()), ops=[E, which the finding does not speak of"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the reply held no whole file"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "the dependent variable k_95_coverage is computed and reported in the result",
+    "the result reports k_95_coverage (Probability that the covariance-based Wald 95% interval for k contains k_true.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 3,
+   "kind": "quantity",
+   "kinds": [
+    "dependent variable",
+    "metric"
+   ],
+   "file": "",
+   "function": "",
+   "quantity": "k95coverage",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the dependent variable k_95_coverage is computed and reported in the result",
+   "why": "The dependent variable k_95_coverage is omitted from the cell summary dictionary, which only reports k_95_coverage_by_temp.",
+   "fix": "",
+   "problem_ids": [
+    "R11",
+    "R17"
+   ],
+   "statement": "[medium] Where: not stated\n   What is wrong: the plan's dependent variable \"the dependent variable k_95_coverage is computed and reported in the result\" is missing from the code\n   Why it is wrong against the plan: The dependent variable k_95_coverage is omitted from the cell summary dictionary, which only reports k_95_coverage_by_temp.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says\n\n[medium] Where: not stated\n   What is wrong: the plan's metric \"the result reports k_95_coverage (Probability that the covariance-based Wald 95% interval for k contains k_true.)\" is missing from the code\n   Why it is wrong against the plan: The metric k_95_coverage is omitted from the results summary, reporting only k_95_coverage_by_temp.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "test": ".fi/finding_tests/F-fe5d51ce_1.py",
+   "failure": "test_summary_reports_overall_k_95_coverage: Could not summarize rate-constant coverage: 'FI_TRIALS'",
+   "reason": "no repair passed its test and kept the earlier checks passing (the reply held no whole file)"
+  },
+  "F-650ad5f3": {
+   "id": "F-650ad5f3",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "cdf0edbace366c28"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed the module: Expr(value=Call(func=Name(id='print', ctx=Load()), args=[Bin; the module: added If(test=Compare(left=Name(id='__name__', ctx=Load()), ops=[E, which the finding does not speak of"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed the module: Expr(value=Call(func=Name(id='print', ctx=Load()), args=[Bin; the module: added If(test=Compare(left=Constant(value='FI_TRIALS'), ops=[In()], which the finding does not speak of"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed the module: Expr(value=Call(func=Name(id='print', ctx=Load()), args=[Bin; the module: added If(test=Compare(left=Name(id='__name__', ctx=Load()), ops=[E, which the finding does not speak of"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the reply held no whole file"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "the result reports Ea_lnA_correlation (Correlation from each trial's Arrhenius covariance matrix.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 3,
+   "kind": "quantity",
+   "kinds": [
+    "metric"
+   ],
+   "file": "",
+   "function": "",
+   "quantity": "ealnacorrelation",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the result reports Ea_lnA_correlation (Correlation from each trial's Arrhenius covariance matrix.)",
+   "why": "The metric Ea_lnA_correlation is not reported under that identifier in the results summary, which instead reports Ea_lnA_reported_correlation.",
+   "fix": "",
+   "problem_ids": [
+    "R26"
+   ],
+   "statement": "[medium] Where: not stated\n   What is wrong: the plan's metric \"the result reports Ea_lnA_correlation (Correlation from each trial's Arrhenius covariance matrix.)\" is missing from the code\n   Why it is wrong against the plan: The metric Ea_lnA_correlation is not reported under that identifier in the results summary, which instead reports Ea_lnA_reported_correlation.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "test": ".fi/finding_tests/F-650ad5f3_1.py",
+   "failure": "test_arrhenius_covariance_correlation_is_reported_under_plan_metric_name: summarizing the Arrhenius covariance correlations raised KeyError('FI_TRIALS')",
+   "reason": "no repair passed its test and kept the earlier checks passing (the reply held no whole file)"
+  },
+  "F-6810b6c4": {
+   "id": "F-6810b6c4",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "cdf0edbace366c28"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "weighted_slope is computed using unweighted centering xc = x - np.mean(x) in a formula that assumes weighted centering."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_oracle_case",
+   "quantity": "absweightedslopepolyfitslope",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:64",
+   "text": "weighted_slope is computed using unweighted centering xc = x - np.mean(x) in a formula that assumes weighted centering.",
+   "why": "When weights are non-uniform, the weighted slope only simplifies to the ratio of sums if inverse temperature is centered by its weighted mean or if the full bivariate normal equations are solved.",
+   "fix": "Center inverse temperature by its weighted mean using np.average with variance weights or solve the bivariate normal equations.",
+   "problem_ids": [
+    "L1"
+   ],
+   "statement": "[high] Where: simulate.py:64\n   What is wrong: weighted_slope is computed using unweighted centering xc = x - np.mean(x) in a formula that assumes weighted centering.\n   Why it is wrong against the plan: When weights are non-uniform, the weighted slope only simplifies to the ratio of sums if inverse temperature is centered by its weighted mean or if the full bivariate normal equations are solved.\n   How to fix it: Center inverse temperature by its weighted mean using np.average with variance weights or solve the bivariate normal equations.",
+   "test": ".fi/finding_tests/F-6810b6c4_1.py",
+   "failure": "test_oracle_weighted_slope_matches_weighted_least_squares: weighted slope oracle should return a weighted least-squares slope, but raised AssertionError('weighted_slope must use the variance-weighted inverse-temperature mean when weights are non-uniform')",
+   "touched": [
+    "_oracle_case"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-ff8e4e00": {
+   "id": "F-ff8e4e00",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "cdf0edbace366c28"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": false,
+   "outcome": "not demonstrated",
+   "repairs": [],
+   "tests": 1,
+   "wordings": [
+    "run_trial raises a RuntimeError when evaluated on noiseless concentration data because first-stage covariance and Arrhenius standard error vanish."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "run_trial",
+   "quantity": "eahatjmol",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:113",
+   "text": "run_trial raises a RuntimeError when evaluated on noiseless concentration data because first-stage covariance and Arrhenius standard error vanish.",
+   "why": "The check noiseless_ea_recovery uses zero additive noise which yields zero residual sum of squares and zero covariance, failing the positive-variance assertions at lines 113 and 137.",
+   "fix": "Handle zero-noise checks or permit non-negative variance when evaluating noiseless inputs.",
+   "problem_ids": [
+    "L1"
+   ],
+   "statement": "[high] Where: simulate.py:113\n   What is wrong: run_trial raises a RuntimeError when evaluated on noiseless concentration data because first-stage covariance and Arrhenius standard error vanish.\n   Why it is wrong against the plan: The check noiseless_ea_recovery uses zero additive noise which yields zero residual sum of squares and zero covariance, failing the positive-variance assertions at lines 113 and 137.\n   How to fix it: Handle zero-noise checks or permit non-negative variance when evaluating noiseless inputs.",
+   "reason": "the test written for this finding passes on the current code"
+  },
+  "F-3af8cc05": {
+   "id": "F-3af8cc05",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "cdf0edbace366c28"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_empirical_ealna_correlation_has_percentile_bootstrap_interval: summarize_cell raised FileNotFoundError: [Errno 2] No such file or directory: '12'"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_empirical_ealna_correlation_has_percentile_bootstrap_interval: summarize_cell raised FileNotFoundError: [Errno 2] No such file or directory: '12'"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_empirical_ealna_correlation_has_percentile_bootstrap_interval: summarize_cell raised FileNotFoundError: [Errno 2] No such file or directory: '12'"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_empirical_ealna_correlation_has_percentile_bootstrap_interval: summarize_cell raised FileNotFoundError: [Errno 2] No such file or directory: '12'"
+    }
+   ],
+   "tests": 2,
+   "wordings": [
+    "The bootstrap 95% confidence interval for Ea_lnA_empirical_correlation is hardcoded as null values.",
+    "The bootstrap 95 percent confidence interval for Ea_lnA_empirical_correlation is hardcoded as null rather than computed from bootstrap resamples."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 2,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 3,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "summarize_cell",
+   "quantity": "ealnaempiricalcorrelation",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:98",
+   "text": "The bootstrap 95 percent confidence interval for Ea_lnA_empirical_correlation is hardcoded as null rather than computed from bootstrap resamples.",
+   "why": "The plan's CI method specifies using nonparametric percentile bootstrap 95 percent intervals with 2000 resamples for empirical statistics, but the code skips resampling for empirical correlation.",
+   "fix": "Compute the bootstrap confidence interval across resampled pairs of parameter estimates using the bootstrap function.",
+   "problem_ids": [
+    "L1"
+   ],
+   "statement": "[medium] Where: experiment.py:98\n   What is wrong: The bootstrap 95 percent confidence interval for Ea_lnA_empirical_correlation is hardcoded as null rather than computed from bootstrap resamples.\n   Why it is wrong against the plan: The plan's CI method specifies using nonparametric percentile bootstrap 95 percent intervals with 2000 resamples for empirical statistics, but the code skips resampling for empirical correlation.\n   How to fix it: Compute the bootstrap confidence interval across resampled pairs of parameter estimates using the bootstrap function.",
+   "test": ".fi/finding_tests/F-3af8cc05_2.py",
+   "failure": "test_empirical_ealna_correlation_has_percentile_bootstrap_interval: summarize_cell raised FileNotFoundError: [Errno 2] No such file or directory: '12'",
+   "reason": "no repair passed its test and kept the earlier checks passing (the finding's own test still fails: test_empirical_ealna_correlation_has_percentile_bootstrap_interval: summarize_cell raised FileNotFoundError: [Errno 2] No su)"
+  },
+  "F-6f91b612": {
+   "id": "F-6f91b612",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "cdf0edbace366c28"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the reply does not define the function the finding is about (aggregate_trials)"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_experiment_delegates_trial_summarization_to_model_aggregate_trials: Could not import experiment module: 'FI_TRIALS'"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the reply does not define the function the finding is about (aggregate_trials)"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_experiment_delegates_trial_summarization_to_model_aggregate_trials: Could not import experiment module: 'FI_TRIALS'"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "The aggregate_trials function is defined in the model package but is never called by the experiment scripts."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "logic",
+   "kinds": [
+    "logic"
+   ],
+   "file": "kinetics_parameter_recovery/model.py",
+   "function": "aggregate_trials",
+   "quantity": "",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "kinetics_parameter_recovery/model.py:170",
+   "text": "The aggregate_trials function is defined in the model package but is never called by the experiment scripts.",
+   "why": "Trial summarization is re-implemented locally in summarize_cell in experiment.py, leaving the model package function as unused dead code.",
+   "fix": "Use aggregate_trials in experiment.py or remove the redundant definition from model.py.",
+   "problem_ids": [
+    "L8"
+   ],
+   "statement": "[low] Where: kinetics_parameter_recovery/model.py:170\n   What is wrong: The aggregate_trials function is defined in the model package but is never called by the experiment scripts.\n   Why it is wrong against the plan: Trial summarization is re-implemented locally in summarize_cell in experiment.py, leaving the model package function as unused dead code.\n   How to fix it: Use aggregate_trials in experiment.py or remove the redundant definition from model.py.",
+   "test": ".fi/finding_tests/F-6f91b612_1.py",
+   "failure": "test_experiment_delegates_trial_summarization_to_model_aggregate_trials: Could not import experiment module: 'FI_TRIALS'",
+   "reason": "no repair passed its test and kept the earlier checks passing (the finding's own test still fails: test_experiment_delegates_trial_summarization_to_model_aggregate_trials: Could not import experiment module: 'FI_TRIALS')"
+  },
+  "F-794b8782": {
+   "id": "F-794b8782",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the dependent variable k_relative_bias is computed and reported in the result",
+    "the result reports k_relative_bias (Mean((k_hat-k_true)/k_true) across successful trials at each temperature.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "summarize_cell",
+   "quantity": "krelativebias",
+   "severity": "high",
+   "changes_result": true,
+   "headline": true,
+   "plan_conflict": false,
+   "where": "experiment.py:111",
+   "text": "the dependent variable k_relative_bias is computed and reported in the result",
+   "why": "The dependent variable k_relative_bias is missing from the result dictionary, which only reports k_relative_bias_by_temp.",
+   "fix": "Compute and report k_relative_bias in the summary dictionary.",
+   "problem_ids": [
+    "L2",
+    "L3"
+   ],
+   "statement": "[high] Where: experiment.py:111\n   What is wrong: the dependent variable k_relative_bias is computed and reported in the result\n   Why it is wrong against the plan: The dependent variable k_relative_bias is missing from the result dictionary, which only reports k_relative_bias_by_temp.\n   How to fix it: Compute and report k_relative_bias in the summary dictionary.\n\n[medium] Where: experiment.py:111\n   What is wrong: the result reports k_relative_bias (Mean((k_hat-k_true)/k_true) across successful trials at each temperature.)\n   Why it is wrong against the plan: The metric k_relative_bias is missing from the result, which instead reports k_relative_bias_by_temp.\n   How to fix it: Include k_relative_bias in the reported results."
+  },
+  "F-c9356581": {
+   "id": "F-c9356581",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the dependent variable k_95_coverage is computed and reported in the result",
+    "the result reports k_95_coverage (Probability that the covariance-based Wald 95% interval for k contains k_true.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "summarize_cell",
+   "quantity": "k95coverage",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:112",
+   "text": "the dependent variable k_95_coverage is computed and reported in the result",
+   "why": "The dependent variable k_95_coverage is missing from the result dictionary, which only reports k_95_coverage_by_temp.",
+   "fix": "Compute and report k_95_coverage in the summary dictionary.",
+   "problem_ids": [
+    "L4",
+    "L5"
+   ],
+   "statement": "[medium] Where: experiment.py:112\n   What is wrong: the dependent variable k_95_coverage is computed and reported in the result\n   Why it is wrong against the plan: The dependent variable k_95_coverage is missing from the result dictionary, which only reports k_95_coverage_by_temp.\n   How to fix it: Compute and report k_95_coverage in the summary dictionary.\n\n[medium] Where: experiment.py:112\n   What is wrong: the result reports k_95_coverage (Probability that the covariance-based Wald 95% interval for k contains k_true.)\n   Why it is wrong against the plan: The metric k_95_coverage is missing from the result, which instead reports k_95_coverage_by_temp.\n   How to fix it: Include k_95_coverage in the reported results."
+  },
+  "F-850df3b7": {
+   "id": "F-850df3b7",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "c24811756fbd565d"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the result reports Ea_lnA_correlation (Correlation from each trial's Arrhenius covariance matrix.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "summarize_cell",
+   "quantity": "ealnacorrelation",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:99",
+   "text": "the result reports Ea_lnA_correlation (Correlation from each trial's Arrhenius covariance matrix.)",
+   "why": "The metric Ea_lnA_correlation is missing from the result, which instead reports Ea_lnA_reported_correlation.",
+   "fix": "Report the metric under the planned name Ea_lnA_correlation.",
+   "problem_ids": [
+    "L6"
+   ],
+   "statement": "[medium] Where: experiment.py:99\n   What is wrong: the result reports Ea_lnA_correlation (Correlation from each trial's Arrhenius covariance matrix.)\n   Why it is wrong against the plan: The metric Ea_lnA_correlation is missing from the result, which instead reports Ea_lnA_reported_correlation.\n   How to fix it: Report the metric under the planned name Ea_lnA_correlation."
+  },
+  "F-176c17c5": {
+   "id": "F-176c17c5",
+   "first_seen": 3,
+   "readings": [
+    {
+     "n": 3,
+     "status": "open",
+     "version": "640decd3b3f6427f"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "open",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "Inverse temperature is centred by the unweighted arithmetic mean rather than the variance-weighted mean when fitting the weighted Arrhenius model."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 3,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "kinetics_parameter_recovery/model.py",
+   "function": "fit_arrhenius",
+   "quantity": "arrheniusfitmethod",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "kinetics_parameter_recovery/model.py:128",
+   "text": "Inverse temperature is centred by the unweighted arithmetic mean rather than the variance-weighted mean when fitting the weighted Arrhenius model.",
+   "why": "The plan and check weighted_line_closed_form specify centering inverse temperature using weights in weighted regression so that the design columns are orthogonal under the weighted inner product, but the function always uses np.mean(x).",
+   "fix": "Compute xbar as the weighted average of inverse temperatures using the inverse delta-method variance weights before forming the design matrix in the weighted branch.",
+   "problem_ids": [
+    "L2"
+   ],
+   "statement": "[low] Where: kinetics_parameter_recovery/model.py:128\n   What is wrong: Inverse temperature is centred by the unweighted arithmetic mean rather than the variance-weighted mean when fitting the weighted Arrhenius model.\n   Why it is wrong against the plan: The plan and check weighted_line_closed_form specify centering inverse temperature using weights in weighted regression so that the design columns are orthogonal under the weighted inner product, but the function always uses np.mean(x).\n   How to fix it: Compute xbar as the weighted average of inverse temperatures using the inverse delta-method variance weights before forming the design matrix in the weighted branch."
+  }
+ },
+ "same_model": false,
+ "accepted_tests": [
+  ".fi/finding_tests/F-6810b6c4_1.py"
+ ],
+ "read_problems": [
+  {
+   "id": "R1",
+   "kind": "dependent variable",
+   "text": "the dependent variable k_relative_bias is computed and reported in the result",
+   "headline": true,
+   "name": "k_relative_bias",
+   "status": "missing",
+   "file": "",
+   "line": null,
+   "note": "The dependent variable k_relative_bias is omitted from the cell summary dictionary, which only reports k_relative_bias_by_temp.",
+   "changes_result": true,
+   "fid": "F-b5e6edb8",
+   "file_rel": "",
+   "function": "",
+   "quantities": [
+    "krelativebias"
+   ]
+  },
+  {
+   "id": "R11",
+   "kind": "dependent variable",
+   "text": "the dependent variable k_95_coverage is computed and reported in the result",
+   "headline": false,
+   "name": "k_95_coverage",
+   "status": "missing",
+   "file": "",
+   "line": null,
+   "note": "The dependent variable k_95_coverage is omitted from the cell summary dictionary, which only reports k_95_coverage_by_temp.",
+   "changes_result": true,
+   "fid": "F-fe5d51ce",
+   "file_rel": "",
+   "function": "",
+   "quantities": [
+    "k95coverage"
+   ]
+  },
+  {
+   "id": "R16",
+   "kind": "metric",
+   "text": "the result reports k_relative_bias (Mean((k_hat-k_true)/k_true) across successful trials at each temperature.)",
+   "headline": false,
+   "name": "k_relative_bias",
+   "status": "missing",
+   "file": "",
+   "line": null,
+   "note": "The metric k_relative_bias is omitted from the results summary, reporting only k_relative_bias_by_temp.",
+   "changes_result": true,
+   "fid": "F-b5e6edb8",
+   "file_rel": "",
+   "function": "",
+   "quantities": [
+    "krelativebias"
+   ]
+  },
+  {
+   "id": "R17",
+   "kind": "metric",
+   "text": "the result reports k_95_coverage (Probability that the covariance-based Wald 95% interval for k contains k_true.)",
+   "headline": false,
+   "name": "k_95_coverage",
+   "status": "missing",
+   "file": "",
+   "line": null,
+   "note": "The metric k_95_coverage is omitted from the results summary, reporting only k_95_coverage_by_temp.",
+   "changes_result": true,
+   "fid": "F-fe5d51ce",
+   "file_rel": "",
+   "function": "",
+   "quantities": [
+    "k95coverage"
+   ]
+  },
+  {
+   "id": "R26",
+   "kind": "metric",
+   "text": "the result reports Ea_lnA_correlation (Correlation from each trial's Arrhenius covariance matrix.)",
+   "headline": false,
+   "name": "Ea_lnA_correlation",
+   "status": "missing",
+   "file": "",
+   "line": null,
+   "note": "The metric Ea_lnA_correlation is not reported under that identifier in the results summary, which instead reports Ea_lnA_reported_correlation.",
+   "changes_result": true,
+   "fid": "F-650ad5f3",
+   "file_rel": "",
+   "function": "",
+   "quantities": [
+    "ealnacorrelation"
+   ]
+  },
+  {
+   "id": "L1",
+   "kind": "logic",
+   "text": "The bootstrap 95 percent confidence interval for Ea_lnA_empirical_correlation is hardcoded as null rather than computed from bootstrap resamples.",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 98,
+   "note": "The plan's CI method specifies using nonparametric percentile bootstrap 95 percent intervals with 2000 resamples for empirical statistics, but the code skips resampling for empirical correlation.",
+   "fix": "Compute the bootstrap confidence interval across resampled pairs of parameter estimates using the bootstrap function.",
+   "severity": "medium",
+   "name": "Ea_lnA_empirical_correlation",
+   "constant": false,
+   "where": "experiment.py:98",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-3af8cc05",
+   "file_rel": "experiment.py",
+   "function": "summarize_cell",
+   "quantities": [
+    "ealnaempiricalcorrelation"
+   ]
+  },
+  {
+   "id": "L2",
+   "kind": "logic",
+   "text": "Inverse temperature is centred by the unweighted arithmetic mean rather than the variance-weighted mean when fitting the weighted Arrhenius model.",
+   "status": "different",
+   "file": "model.py",
+   "line": 128,
+   "note": "The plan and check weighted_line_closed_form specify centering inverse temperature using weights in weighted regression so that the design columns are orthogonal under the weighted inner product, but the function always uses np.mean(x).",
+   "fix": "Compute xbar as the weighted average of inverse temperatures using the inverse delta-method variance weights before forming the design matrix in the weighted branch.",
+   "severity": "low",
+   "name": "arrhenius_fit_method",
+   "constant": false,
+   "where": "kinetics_parameter_recovery/model.py:128",
+   "changes_result": false,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-176c17c5",
+   "file_rel": "kinetics_parameter_recovery/model.py",
+   "function": "fit_arrhenius",
+   "quantities": [
+    "arrheniusfitmethod"
+   ]
+  }
+ ],
+ "requirements": 43,
+ "error": "the call failed, twice (antigravity: Your previous response was cut off because it exceeded the output token limit\nPlease continue from where yo)",
+ "reviewer": "gemini-3.8-flash-high",
+ "planner": "gpt-5.6-terra",
+ "reported": false,
+ "final_read": false
+}
