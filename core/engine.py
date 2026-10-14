@@ -14345,7 +14345,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 arith.pop("confirmed_by", None)  # confirmed afresh by this look, or not at all
             # With a slip in the plan's working, the recheck never sees that working (it could repeat the misread step).
             shown = _oracle_triage.blind(oracle) if slip is not None else oracle
-            entry, called = await self._recompute_expected(state, shown, value)
+            computed = _oracle_triage.formula_value(oracle, protocol) if slip is None else None
+            if computed is not None:
+                # FI computed the expected value itself from the plan's formula: a model's arithmetic cannot dispute it.
+                entry, called = _oracle_triage.formula_entry(oracle, computed, value), False
+                self._log.info("[oracle] the expected value of %r is FI's own computation from the plan's formula (%s); no "
+                               "model is asked to work it out again", name, _oracle.fmt_digits(computed))
+            else:
+                entry, called = await self._recompute_expected(state, shown, value)
             if slip is not None and called and not _oracle_triage.shows_working(shown):
                 # Blind to the plan's working AND answered now (a kept answer is a file anyone could write): only
                 # such a recheck can confirm the plan's arithmetic.
@@ -15305,8 +15312,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if _strip_outer_fence(text).lstrip().startswith("{"):
             parsed = _parse_json_lenient(text, node="implement_oracle") or {}
         self._oracle_patch_summary = " ".join(str(parsed.get("patch_summary") or "").split())[:300]
-        newly_disputed = False
+        newly_disputed = fi_value_disputed = False
+        protocol_now = self._protocol_block(state)
         for proposal in _oracle.proposals(parsed.get("oracle_change"), oracles):
+            own = next((o for o in oracles if str(o.get("name") or "").strip() == proposal["name"]), None)
+            if own is not None and _oracle_triage.formula_value(own, protocol_now if isinstance(protocol_now, dict) else None) is not None:
+                # FI computed this check's expected value from the plan's own formula: the repair may not change it (only
+                # the formula itself can be questioned, through the plan), and a repair written against it is not used.
+                self._log.warning("[oracle] the repair proposes expected %s for '%s', whose expected value FI computed from "
+                                  "the plan's own formula; the proposal is not taken", proposal["expected"], proposal["name"])
+                fi_value_disputed = True
+                continue
             self._oracle_proposals[proposal["name"]] = proposal
             if proposal["name"].strip().lower() not in {str(n).strip().lower() for n in passing or []}:
                 self._oracle_disputed.add(proposal["name"])
@@ -15320,6 +15336,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "[oracle] kept %s as it was: a repair that says a check is wrong is not used to rewrite the script", path.name,
             )
             return None, False, "set_aside_disputed"
+        if fi_value_disputed:
+            # Written against an expected value FI computed itself: a spent repair, its code not used (the check still fails).
+            self._log.info("[oracle] kept %s as it was: the repair was written against a value FI computed from the plan's "
+                           "own formula", path.name)
+            return None, False, "disputed_fi_value"
         new_code = parsed.get("code")
         if not (isinstance(new_code, str) and new_code.strip()):
             if (path.name == _split_run.SIMULATE_NAME and self._package_repair_files(state, parsed)

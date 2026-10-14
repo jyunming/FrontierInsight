@@ -1089,3 +1089,21 @@ async def test_a_plan_with_no_protocol_that_cannot_be_given_a_check_goes_on_and_
     artifacts = await engine.run()
     assert artifacts.paper_md is not None
     assert "no known-answer check could be judged" in json.dumps(evidence.read(engine.quest_root) or {})
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_disputes_a_value_fi_computed_from_the_plan_s_formula_is_not_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check's expected value is FI's own computation from the plan's formula: a repair proposing another value is
+    neither recorded as a dispute nor used (its code was written against a wrong value), and the check stays failing."""
+    calls: list[str] = []
+    computed = {**ORACLE, "expected_formula": "0.5 + 0.5"}
+    protocol = {**_PROTOCOL, "oracles": [computed]}
+    monkeypatch.setattr("core.engine.LLMClient.chat", _disputing_fake(calls, protocol))
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=2))
+    await engine.run()
+    assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == _FAILING
+    record = _record(engine)
+    assert record.get("disputed", []) == [] and not record.get("proposed_changes")
+    assert {a.get("repair") for a in record["attempts"] if a.get("repair")} == {"disputed_fi_value"}

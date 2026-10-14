@@ -216,6 +216,47 @@ def recompute_entry(oracle: dict[str, Any], verdict: str, recomputed: float | No
             "tried": tried, "cause": cause}
 
 
+def formula_value(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> float | None:
+    """The check's expected value as FI computes it itself from the plan's ``expected_formula`` (the check's case and the
+    plan's fixed settings), when that agrees with the ``expected`` the check uses (within the check's own tolerance) and
+    the formula can be read only one way; ``None`` otherwise. Such a value is the plan's own working, computed exactly:
+    a model's recomputation of it is no evidence against it (one real quest's repairs proposed 0.10355153507545575 four
+    times where FI's 0.1035560611 was right), so only the formula itself can be questioned, through the plan."""
+    expected, limit, _mode = _oracle.limit_of(oracle)
+    if expected is None or limit is None or not correctable(oracle):
+        return None
+    try:
+        float(str(oracle.get("expected_formula")).strip())
+        return None  # a number restated is not a working FI computed
+    except ValueError:
+        pass
+    try:
+        value, _why, _unset, used = _forms._formula_result(oracle, _forms.fixed_settings(protocol))
+    except Exception:  # noqa: BLE001 -- a formula FI cannot compute decides nothing
+        return None
+    if value is None or not math.isfinite(value) or ambiguous(used or str(oracle.get("expected_formula") or "")):
+        return None
+    if abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
+        return None
+    return value
+
+
+def formula_entry(oracle: dict[str, Any], computed: float, value: float | None) -> dict[str, Any]:
+    """The triage record of a failing check whose expected value FI computed itself from the plan's formula: it holds up,
+    so the simulation is the likely cause; no model is asked to work it out again."""
+    name = str(oracle.get("name") or "").strip()
+    expected, _limit, _mode = _oracle.limit_of(oracle)
+    formula = " ".join(str(oracle.get("expected_formula") or "").split())[:200]
+    tried = (f"FI computed the expected value of `{name}` itself from the plan's formula ({formula}): {_fmt(computed)}, as "
+             f"the check says ({_fmt(expected)}; measured {_fmt(value)}). No model was asked to work it out again.")
+    return {"check": name, "kind": "formula", "verdict": "agrees", "points_to": "script", "recomputed": computed,
+            "expected": expected, "measured": value, "how": formula, "model": "FI's own calculator", "same_model": False,
+            "tried": tried,
+            "cause": {"text": f"The expected value of `{name}` holds up, so the simulation is the likely cause: FI computed it "
+                              "from the plan's own formula.",
+                      "evidence": f"FI's value {_fmt(computed)}, the check's {_fmt(expected)}; formula: {formula}."}}
+
+
 def recompute_proposal(oracle: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
     """A disputed expected value as a proposal, in the shape :func:`core.oracle_check.proposals` gives (the card's
     one-step "accept" reads it): the recomputed value with the check's own tolerance. Never the measured value."""

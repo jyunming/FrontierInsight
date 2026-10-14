@@ -51,6 +51,7 @@ NAME = "known-answer check"
 _REPAIR_SAID = {
     "applied": "changed the script",
     "set_aside_disputed": "said the check itself is wrong; its code was not used",
+    "disputed_fi_value": "said a check FI computed from the plan's own formula is wrong; its code was not used",
     "not_usable": "gave no usable script; nothing was changed",
     "no_code": "changed nothing",
     "call_failed": "the model did not answer; nothing was changed",

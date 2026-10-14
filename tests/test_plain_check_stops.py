@@ -937,3 +937,40 @@ async def test_which_function_a_check_runs_is_decided_per_check_not_once_for_all
                                       timeout=10, case_env={})
     assert [t for n, t in seen if n == "b_inv"] and all(t >= 1 for n, t in seen if n == "b_inv"), seen
     assert not [1 for n, t in seen if n == "a_mean" and t >= 1], "a mean built from trials is not re-run with more seeds"
+
+
+# --- FI's own formula value is not disputed by a model's arithmetic ----------------------------------------------------
+# A real quest (suite r6t first_order_kinetics): four repairs proposed 0.10355153507545575 for a check whose expected value
+# FI had computed from the plan's own formula (0.1035560611, right); the check was "disputed" and the result exploratory.
+
+SMALL_ANGLE = {"name": "small_angle_period", "kind": "special_case", "check": "T at 1 degree", "expected": 2.0060666807,
+               "expected_formula": "2*pi*sqrt(1/9.81)", "tolerance": 1e-6, "tolerance_mode": "absolute",
+               "case": {"amplitude_deg": 1}, "measure": "T"}
+
+
+def test_fi_s_own_formula_value_is_known_only_when_it_is_a_working_that_agrees() -> None:
+    assert abs(oracle_triage.formula_value(SMALL_ANGLE, None) - 2.0060666807) < 1e-9
+    assert oracle_triage.formula_value({**SMALL_ANGLE, "expected": 2.1}, None) is None  # the plan's number disagrees
+    assert oracle_triage.formula_value({**SMALL_ANGLE, "expected_formula": "2.0060666807"}, None) is None  # a restated number
+    assert oracle_triage.formula_value({**SMALL_ANGLE, "expected_formula": "2*pi*sqrt(L/9.81)"}, None) is None  # L unset
+    assert oracle_triage.formula_value({**SMALL_ANGLE, "expected_formula": None}, None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_failing_check_fi_computed_itself_is_not_worked_out_again_by_a_model(tmp_path: Path) -> None:
+    eng = Engine(Config(topic="pendulum", title="own", provider=ProviderConfig(name="openai"),
+                        engine=EngineConfig(max_iterations=1, review_loop=False),
+                        execution=ExecutionConfig(sandbox="venv"), knowledge=KnowledgeConfig(enabled=False),
+                        output=OutputConfig(output_dir=tmp_path / "out")))
+    eng._oracle_proposals, eng._oracle_disputed, eng._oracle_set_aside, eng._oracle_noisy = {}, set(), {}, set()
+    eng._recompute_expected = AsyncMock(side_effect=AssertionError("no model is asked"))  # type: ignore[method-assign]
+    seed = eng.quest_root / "code" / "simulate.py"
+    seed.parent.mkdir(parents=True, exist_ok=True)
+    seed.write_text("x = 1\n", encoding="utf-8")
+    record: dict[str, Any] = {"judged": [_judged("small_angle_period", 2.0061)]}
+    calls, _runs = await eng._look_at_failing_checks({}, None, seed, [SMALL_ANGLE], [SMALL_ANGLE], record, set(),
+                                                     protocol={}, timeout=10, case_env={})
+    assert calls == 0
+    assert "small_angle_period" not in eng._oracle_disputed and "small_angle_period" not in eng._oracle_proposals
+    (entry,) = [t for t in record["triage"] if t["check"] == "small_angle_period"]
+    assert entry["kind"] == "formula" and entry["verdict"] == "agrees" and entry["points_to"] == "script"
