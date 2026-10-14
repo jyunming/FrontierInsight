@@ -160,7 +160,7 @@ from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, Callable, Iterator
 
-from core.numeric_oracle import MIN_MAGNITUDE, _MINUS_SIGN, extract_paper_numbers, flatten_numbers
+from core.numeric_oracle import MIN_MAGNITUDE, _MINUS_SIGN, extract_paper_numbers, flatten_numbers, roundings
 from core.stat_claims import normalise
 
 # A number must carry this many significant digits before its value says
@@ -374,6 +374,11 @@ def _is_year(value: float, token: str) -> bool:
     )
 
 
+# LaTeX writes a thousands separator as ``24{,}122`` so that math mode does not put a space after the comma. It is the
+# same separator as ``24,122``, and left as it is the number reads as two: 24 and 122.
+_TEX_THOUSANDS = re.compile(r"(?<=\d)\{,\}(?=\d{3}(?!\d))")
+
+
 def paper_numbers(paper_text: str) -> list[tuple[float, str, str]]:
     """``(value, token, context)`` for every number the paper *claims*.
 
@@ -390,7 +395,7 @@ def paper_numbers(paper_text: str) -> list[tuple[float, str, str]]:
     minus sign is folded before the range dash is looked for, so a U+2212
     between two numbers is a range or a subtraction exactly as ``-`` is.
     """
-    text = normalise(paper_text).replace(_MINUS_SIGN, "-")
+    text = normalise(_TEX_THOUSANDS.sub(",", paper_text)).replace(_MINUS_SIGN, "-")
     text = _RANGE_DASH.sub(" to ", _VERSION.sub(" ", text))
     text = _COMMA_RUN.sub(_spaced_if_a_list, text)
     # An underscore is a word character, so the tokenizer no longer starts a
@@ -456,7 +461,7 @@ def _derivable(value: float, token: str, context: str, traceable: Traceable) -> 
         for b, _b_token in operands[i:]:
             for cand in (a + b, a - b, b - a, a * b):
                 try:
-                    if round(cand, dec) == round(value, dec):
+                    if round(value, dec) in roundings(cand, dec):
                         return True
                 except (ValueError, OverflowError):
                     continue
@@ -464,7 +469,7 @@ def _derivable(value: float, token: str, context: str, traceable: Traceable) -> 
                 if not den:
                     continue
                 try:
-                    if round(num / den, dec) == round(value, dec):
+                    if round(value, dec) in roundings(num / den, dec):
                         return True
                 except (ZeroDivisionError, OverflowError, ValueError):
                     continue
@@ -497,9 +502,14 @@ _STOP_WORDS = (
 _COMMON_STOP = frozenset(w[:4] for w in _STOP_WORDS)
 _PATH_STOP = _COMMON_STOP | frozenset(w[:4] for w in (
     "replicates config design oracle figure comparisons optimisation stratum len records cells settings setting seeds "
-    "seed over key keys"
+    "seed over key keys estimate"
 ).split())
 _WORD = re.compile(r"[a-z]{3,}")
+# An abbreviation is the one two-letter word that names something (SD, CI, SE): in a sentence it is written in capitals,
+# in a result's name it is a lowercase snake_case part (`Ea_estimate_sd_J_mol`). Any other two-letter word is a
+# connective ("of", "in", "is") and names nothing.
+_ABBREVIATION_IN_TEXT = re.compile(r"(?<![A-Za-z])[A-Z]{2}(?![A-Za-z])")
+_ABBREVIATION_IN_NAME = re.compile(r"(?<![a-z])[a-z]{2}(?![a-z])")
 _GROUP_TAG = re.compile(r"\{[^}]*\}")
 _INDEX_OR_STAT = re.compile(r"\[\d*\]|\.@\w+$")
 
@@ -514,10 +524,14 @@ def _leaf_name(path: str) -> str:
     return path.rsplit(".", 1)[-1] if "." in path else path
 
 
-def _name_stems(text: str, stop: frozenset[str]) -> frozenset[str]:
+def _name_stems(text: str, stop: frozenset[str], *, of_a_name: bool = False) -> frozenset[str]:
     """The first four letters of each word in ``text`` that names something, so ``coverage`` and ``covered`` meet.
-    The stop list is applied to the stem, so ``means`` is stopped with ``mean``."""
+    The stop list is applied to the stem, so ``means`` is stopped with ``mean``. An abbreviation of two letters is
+    kept (see ``_ABBREVIATION_IN_TEXT``); ``of_a_name`` says ``text`` is a result's name, not a sentence."""
     stems = {w[:4] for w in _WORD.findall(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text).lower())}
+    stems.update(
+        (_ABBREVIATION_IN_NAME.findall(text) if of_a_name else [w.lower() for w in _ABBREVIATION_IN_TEXT.findall(text)])
+    )
     return frozenset(stems - stop)
 
 
@@ -554,7 +568,8 @@ class Traceable:
             table = {}
             for path, value in self.values.items():
                 try:
-                    table.setdefault(round(value, dec), path)
+                    for key in roundings(value, dec):
+                        table.setdefault(key, path)
                 except (ValueError, OverflowError):
                     continue
             self._by_dec[dec] = table
@@ -602,7 +617,8 @@ class Traceable:
             table = {}
             for path, value in self._all.items():
                 try:
-                    table.setdefault(round(value, dec), []).append(path)
+                    for key in roundings(value, dec):
+                        table.setdefault(key, []).append(path)
                 except (ValueError, OverflowError):
                     continue
             self._lists_by_dec[dec] = table
@@ -671,12 +687,13 @@ class Traceable:
         got = self._words_of.get(path)
         if got is None:
             tags = " ".join(_GROUP_TAG.findall(path))
-            got = _name_stems(_leaf_name(path) + " " + tags, _PATH_STOP)
-            if not got and ".@" in path:
-                # ``trials.error.@mean``: "error" names nothing, so the statistic is named by what it is of
+            got = _name_stems(_leaf_name(path) + " " + tags, _PATH_STOP, of_a_name=True)
+            if not got:
+                # ``trials.error.@mean`` or ``ols.Ea_sd.estimate``: the leaf names nothing, so the quantity is named by
+                # what it is of
                 bare = _GROUP_TAG.sub("", _INDEX_OR_STAT.sub("", path))
                 for segment in reversed(bare.split(".")[:-1]):
-                    got = _name_stems(segment, _PATH_STOP)
+                    got = _name_stems(segment, _PATH_STOP, of_a_name=True)
                     if got:
                         break
             self._words_of[path] = got
@@ -1166,7 +1183,7 @@ def check(
         return report
 
     seen: set[float] = set()
-    flat_text = normalise(paper_text).replace(_MINUS_SIGN, "-")
+    flat_text = normalise(_TEX_THOUSANDS.sub(",", paper_text)).replace(_MINUS_SIGN, "-")
     for value, token, context in paper_numbers(paper_text):
         if not _carries_enough_precision(token) or _is_year(value, token):
             continue

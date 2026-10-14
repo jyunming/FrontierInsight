@@ -159,6 +159,7 @@ horizons, seeds, step counts) are excluded by name, since a tolerance of
 
 from __future__ import annotations
 
+import decimal
 import math
 import re
 from dataclasses import dataclass, field
@@ -688,12 +689,35 @@ def _digit_bag(v: float) -> str:
     return "".join(sorted(s)) if s else ""
 
 
+_ROUNDING_CONTEXT = decimal.Context(prec=80)
+
+
+def roundings(value: float, decimals: int) -> tuple[float, ...]:
+    """Every standard rounding of ``value`` to ``decimals`` places: the one code prints (``round`` / ``f"{x:.3f}"``,
+    which rounds the binary float), and, on the decimal the value reads as (``repr``), half-up (what people do) and
+    half-even. They differ only at a tie: 0.8125 is 0.812 half-even and 0.813 half-up, and 0.9175, stored as
+    0.91749999..., prints as 0.917 and reads as 0.918. A paper that writes any of them has rounded the value; the
+    interval they cover is still half a unit of the last place, ends included, and nothing else is accepted."""
+    first = round(value, decimals)
+    out = [first]
+    try:
+        exact = decimal.Decimal(repr(float(value)))
+        unit = decimal.Decimal(1).scaleb(-decimals)
+        for mode in (decimal.ROUND_HALF_UP, decimal.ROUND_HALF_EVEN):
+            r = float(exact.quantize(unit, rounding=mode, context=_ROUNDING_CONTEXT))
+            if r not in out:
+                out.append(r)
+    except (decimal.InvalidOperation, ValueError, OverflowError):
+        pass  # nan, inf, or too many digits to quantize: only the float rounding exists
+    return tuple(out)
+
+
 def _rounds_to(paper: float, actual: float, token: str) -> bool:
     """True when `actual`, rounded to the paper's own precision, is `paper`."""
     t = token.replace(",", "")
     decimals = len(t.split(".", 1)[1]) if "." in t else 0
     try:
-        return round(actual, decimals) == round(paper, decimals)
+        return round(paper, decimals) in roundings(actual, decimals)
     except (ValueError, OverflowError):
         return False
 

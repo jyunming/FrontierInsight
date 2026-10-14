@@ -31,7 +31,7 @@ def _flagged(paper: str, results: dict, **kw) -> list[tuple[str, float]]:
         ("It fell to 2.12 nm.", 2.1259),  # truncated: 2.1259 rounds to 2.13
         ("It rose to 0.795.", 0.7938),  # one above 0.794
         ("The delta was 0.0019 here.", 0.00198056),  # truncated: rounds to 0.0020
-        ("- LogisticRegression (baseline): ROC AUC = 0.9120.", 0.91205),  # rounds to 0.9121
+        ("- LogisticRegression (baseline): ROC AUC = 0.9120.", 0.91206),  # rounds to 0.9121 (0.91205 is a tie, and 0.9120 is its half-even rounding)
         ("the MEEF is measured at 2.00 at best focus", 2.0053),  # rounds to 2.01
     ],
 )
@@ -189,3 +189,20 @@ def test_the_rule_is_documented() -> None:
     assert "last-digit" in (repo / "docs" / "capabilities-reference.md").read_text(encoding="utf-8")
     assert "last-digit" in (repo / "docs" / "features.md").read_text(encoding="utf-8")
     assert no.MIN_SLIP_DECIMALS == 2
+
+
+@pytest.mark.parametrize(
+    "paper,result",
+    [
+        ("It was 0.813 here.", 0.8125),  # a tie, half-up
+        ("It was 0.812 here.", 0.8125),  # a tie, half-even
+        ("It was 0.918 here.", 0.9175),  # stored below the tie in binary, read as a tie
+        ("It was 0.917 here.", 0.9175),  # what code prints
+    ],
+)
+def test_a_tie_rounded_either_way_is_not_a_slip(paper, result) -> None:
+    assert _flagged(paper, {"m": result}) == []
+
+
+def test_a_tie_rounded_neither_way_is_still_a_slip() -> None:
+    assert [k for k, _ in _flagged("It was 0.811 here.", {"m": 0.8125})] == ["near_miss"]

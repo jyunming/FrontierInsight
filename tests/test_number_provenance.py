@@ -1082,3 +1082,51 @@ def test_two_hundred_thousand_records_are_pooled_correctly() -> None:
     assert not report.skipped and report.ok and report.paper_numbers == 2 and report.traceable_values < 1000
     fabricated = check(f"The b arm averaged {b_mean + 0.0009:.4f}, the rate 0.7391.", result_json=run)
     assert not fabricated.skipped and _tokens(fabricated) == [f"{b_mean + 0.0009:.4f}"]
+
+
+# --- rounding a value that sits exactly on a tie, a short name, a LaTeX separator -----------------------------------
+
+_TIES = {"cells": {"a": {"coverage": {"estimate": 0.8125}}, "b": {"coverage": {"estimate": 0.9175}}}}
+
+
+@pytest.mark.parametrize("written", ["0.813", "0.812", "0.8125"])
+def test_a_tie_is_rounded_either_way(written: str) -> None:
+    """325/400 = 0.8125 is 0.813 rounded half-up (as people do) and 0.812 half-even; both are roundings of it."""
+    assert _tokens(check(f"OLS coverage was {written}.", result_json=_TIES)) == []
+
+
+@pytest.mark.parametrize("written", ["0.918", "0.917", "0.9175"])
+def test_a_tie_stored_just_below_in_binary_is_rounded_either_way(written: str) -> None:
+    """0.9175 is stored as 0.91749999...: code prints 0.917, a person reads a tie and writes 0.918."""
+    assert _tokens(check(f"Weighted coverage was {written}.", result_json=_TIES)) == []
+
+
+@pytest.mark.parametrize("written", ["0.811", "0.814", "0.815", "0.916", "0.919"])
+def test_a_number_beyond_half_a_unit_of_its_last_place_is_still_flagged(written: str) -> None:
+    assert _tokens(check(f"Coverage was {written}.", result_json=_TIES)) == [written]
+
+
+def test_a_derived_tie_is_rounded_either_way() -> None:
+    run = {"hits": 325.0, "trials": 400.0}
+    assert _tokens(check("325/400 = 0.813 coverage.", result_json=run)) == []
+    assert _tokens(check("325/400 = 0.812 coverage.", result_json=run)) == []
+    assert _tokens(check("325/400 = 0.815 coverage.", result_json=run)) == ["0.815"]
+
+
+def test_a_two_letter_abbreviation_in_capitals_names_a_quantity() -> None:
+    """709 is 709.449 rounded to the unit; in a run holding a crowd of 3-digit integers it is also a number a match
+    would reach by luck, so the words decide. "SD" is the only word that says it is the spread; it is two letters."""
+    crowd = {f"filler_{i}": float(101 + 3 * i) for i in range(220)}  # none is 709, 220 of the 900 numbers 1xx..9xx
+    run = {"filler": crowd, "ols": {"Ea_estimate_sd_J_mol": {"estimate": 709.449}}, "start": {"Ea_sd": {"estimate": 1849.0}}}
+    ok = check("At 8% noise the OLS SD declined from 1,849 to 709 units.", result_json=run)
+    assert _tokens(ok) == []
+    # without the name it is luck, and a wrong number is still flagged
+    assert _tokens(check("At 8% noise the OLS spread declined from 1,849 to 709 units.", result_json=run)) == ["709"]
+    assert _tokens(check("At 8% noise the OLS SD declined from 1,849 to 712 units.", result_json=run)) == ["712"]
+    assert _tokens(check("At 8% noise the OLS SD declined from 1,920 to 709 units.", result_json=run)) == ["1,920"]
+
+
+def test_a_latex_thousands_separator_is_one_number() -> None:
+    run = {"truth": {"Ea_true": 24122.394677383}, "other": 1.5}
+    assert _tokens(check(r"The target was \(E_a=24{,}122.394677\ \mathrm{J}\).", result_json=run)) == []
+    assert _tokens(check(r"The target was \(E_a=24{,}199.394677\ \mathrm{J}\).", result_json=run)) == ["24,199.394677"]
