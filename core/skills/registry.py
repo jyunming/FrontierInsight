@@ -412,7 +412,10 @@ def run_selftest(skill: Skill, *, timeout_s: int | None = None) -> tuple[bool, s
             script_count * (PER_SCRIPT_PROBE_TIMEOUT_S + 5) + 20,
         )
 
-    env = dict(os.environ)
+    # A skill's selftest is code FI did not write (a skill may come from anyone): it runs without FI's API keys.
+    from ..execution import scrub_secrets  # noqa: PLC0415
+
+    env = scrub_secrets()
     # The skill directory on the path so selftest.py can import skill.py
     # beside it without the skill needing to be an installed package.
     env["PYTHONPATH"] = os.pathsep.join(

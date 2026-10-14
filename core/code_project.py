@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import experiment_deps as _experiment_deps
+from .execution import scrub_secrets
 from .proc_tree import ProcessTree as _ProcessTree
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
@@ -637,7 +638,8 @@ def pin(python: Path | str, deps: list[str]) -> list[str]:
     )
     try:
         done = subprocess.run([str(python), "-c", script, json.dumps(sorted(set(names.values())))],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                              env=scrub_secrets())
         versions = json.loads(done.stdout.strip().splitlines()[-1]) if done.returncode == 0 else {}
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         return list(deps)
@@ -917,9 +919,10 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
             wanted = [ln for ln in (code_dir / REQUIREMENTS).read_text(encoding="utf-8").split("\n") if ln.strip()]
             step = "installing requirements.txt"
             if wanted:
+                # Packages' install hooks and run.py are code FI did not write: they run without FI's API keys.
                 done = subprocess.run([str(py), "-m", "pip", "install", "-q", "-r", str(code_dir / REQUIREMENTS)],
                                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                      timeout=install_timeout_s)
+                                      timeout=install_timeout_s, env=scrub_secrets())
                 if done.returncode != 0:
                     result["reason"] = f"installing requirements.txt failed: {(done.stderr or '').strip()[-300:]}"
             if not result["reason"]:
@@ -927,7 +930,7 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
                 # A tree, not just the child: run.py starts a worker process per cell, and a timeout must stop them all.
                 with _ProcessTree(
                     [str(py), str(code_dir / RUN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                    encoding="utf-8", errors="replace", cwd=code_dir,
+                    encoding="utf-8", errors="replace", cwd=code_dir, env=scrub_secrets(),
                 ) as tree:
                     err = ""
                     try:

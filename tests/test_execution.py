@@ -512,9 +512,11 @@ def test_scrub_secrets_drops_secret_names_and_keeps_ordinary_ones() -> None:
     from core.execution import scrub_secrets
 
     secret = ["FAKE_SERVICE_API_KEY", "openai_api_key", "GITHUB_TOKEN", "HF_TOKEN", "AWS_SECRET_ACCESS_KEY",
-              "AWS_ACCESS_KEY_ID", "DB_PASSWORD", "DB_PASSWD", "MY_CREDENTIALS", "SERVICEAPIKEY", "OLLAMA_API_KEY"]
+              "AWS_ACCESS_KEY_ID", "DB_PASSWORD", "DB_PASSWD", "MY_CREDENTIALS", "SERVICEAPIKEY", "OLLAMA_API_KEY",
+              "AZURE_OPENAI_KEY", "COHERE_KEY", "GITHUB_PAT", "GH_PAT", "HTTP_AUTHORIZATION", "AUTH"]
     ordinary = ["PATH", "PYTHONPATH", "HOME", "USERPROFILE", "TEMP", "SYSTEMROOT", "HTTPS_PROXY", "PIP_INDEX_URL",
-                "CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS", "FI_TRIALS", "FI_RAW_DIR", "TOKENIZERS_PARALLELISM"]
+                "CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS", "FI_TRIALS", "FI_RAW_DIR", "TOKENIZERS_PARALLELISM",
+                "PYTHONHASHSEED", "PATHEXT", "SSH_AUTH_SOCK", "KEYBOARD_LAYOUT"]
     src = {k: "dummy" for k in secret + ordinary}
     out = scrub_secrets(src)
     assert not set(secret) & set(out)

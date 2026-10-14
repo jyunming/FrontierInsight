@@ -292,6 +292,17 @@ def test_verify_says_it_ran_in_a_clean_environment(tmp_path):
     assert not (root / ".fi" / "project_check").exists()
 
 
+def test_verify_runs_the_project_without_fis_api_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_SERVICE_API_KEY", "dummy")
+    root = _quest(tmp_path, two=False)
+    (root / "code" / "experiment.py").write_text(
+        "import os\nif 'FAKE_SERVICE_API_KEY' in os.environ:\n    raise SystemExit('the key reached the project')\n",
+        encoding="utf-8")
+    code_project.refresh(root, deps=[], protocol=None)
+    result = code_project.verify(root)
+    assert result["ok"] is True, result
+
+
 def test_verify_warns_in_plain_words_when_it_does_not_run(tmp_path):
     root = _quest(tmp_path, two=False)
     (root / "code" / "experiment.py").write_text("raise SystemExit('boom in the script')\n", encoding="utf-8")

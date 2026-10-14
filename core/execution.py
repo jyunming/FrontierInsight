@@ -43,7 +43,8 @@ _log = logging.getLogger("frontier_insight.execution")
 # providers); a program a model wrote must not inherit them, so every executor drops these before it starts one.
 # Matched case-insensitively against the whole name: a key/token/password/secret/credential word anywhere in it.
 _SECRET_NAME = re.compile(
-    r"API_?KEY|ACCESS_?KEY|SECRET|PRIVATE_?KEY|CREDENTIAL|PASSW(?:OR)?D|(?:^|_)TOKEN$|^AUTH(?:ORIZATION)?$",
+    r"API_?KEY|ACCESS_?KEY|SECRET|PRIVATE_?KEY|CREDENTIAL|PASSW(?:OR)?D|(?:^|_)(?:TOKEN|PAT|KEY)$"
+    r"|(?:^|_)AUTH(?:ORIZATION)?$",
     re.IGNORECASE,
 )
 
@@ -52,8 +53,10 @@ def scrub_secrets(env: "Mapping[str, str] | None" = None) -> dict[str, str]:
     """A copy of ``env`` (default: FI's own ``os.environ``) without the secret-looking variables.
 
     Dropped: a name containing ``API_KEY`` / ``APIKEY``, ``ACCESS_KEY``, ``SECRET``, ``PRIVATE_KEY``, ``CREDENTIAL``,
-    ``PASSWORD`` / ``PASSWD``, or ending in ``_TOKEN`` (``OPENAI_API_KEY``, ``GITHUB_TOKEN``, ``HF_TOKEN``,
-    ``AWS_SECRET_ACCESS_KEY``, ``AWS_ACCESS_KEY_ID``). Everything else (PATH, PYTHONPATH, HOME, TEMP, proxy settings,
+    ``PASSWORD`` / ``PASSWD``, or ending in ``_TOKEN``, ``_PAT``, ``_KEY`` or ``_AUTH`` / ``_AUTHORIZATION``
+    (``OPENAI_API_KEY``, ``GITHUB_TOKEN``, ``GITHUB_PAT``, ``AZURE_OPENAI_KEY``, ``HF_TOKEN``, ``AWS_SECRET_ACCESS_KEY``,
+    ``AWS_ACCESS_KEY_ID``). A proxy or package-index URL keeps any login written into it: packages could not be
+    installed behind such a proxy without it. Everything else (PATH, PYTHONPATH, HOME, TEMP, proxy settings,
     ``PIP_*``, ``CUDA_*``, ``FI_*``) stays. ``VenvExecutor`` and ``DockerExecutor`` apply this to whatever environment
     they are given, and to ``os.environ`` when given none, so code a model wrote never sees FI's keys."""
     base = os.environ if env is None else env
