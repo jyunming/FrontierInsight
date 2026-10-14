@@ -25442,7 +25442,9 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
     try:
         run = _disclosure.run_record(quest_root, topic=str(state.get("topic") or ""),
                                      duration_s=(state.get("exec_result") or {}).get("duration_s"))
-    except Exception:  # noqa: BLE001 -- evidence FI cannot read is left out
+    except Exception as e:  # noqa: BLE001 -- evidence FI cannot read is left out
+        logging.getLogger("frontier_insight.engine").warning(
+            "[claim_check] FI's record of the run could not be read (%s: %s)", type(e).__name__, str(e)[:200])
         run = ""
     if run:
         parts.append("WHAT FI RECORDED ABOUT THIS RUN (FI's own records; the paper's limitations hold the same text):\n"

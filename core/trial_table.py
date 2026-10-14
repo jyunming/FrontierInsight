@@ -35,7 +35,9 @@ def _record(quest_root: Path) -> list[dict[str, Any]]:
     except (OSError, ValueError):
         return []
     cells = data.get("cells") if isinstance(data, dict) else None
-    return [c for c in cells or [] if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
+    if not isinstance(cells, list):
+        return []
+    return [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
 
 
 def _values(metric: Any) -> list[float]:
@@ -56,7 +58,8 @@ def rows(quest_root: Path) -> list[dict[str, Any]]:
     cells = _record(quest_root)
     by_metric: dict[str, list[tuple[str, list[float]]]] = {}
     for c in cells:
-        label = str(c.get("key") or ", ".join(f"{k}={v}" for k, v in (c.get("cell") or {}).items()) or "the one setting")
+        setting = c.get("cell") if isinstance(c.get("cell"), dict) else {}
+        label = str(c.get("key") or ", ".join(f"{k}={v}" for k, v in setting.items()) or "the one setting")
         for name, metric in c["metrics"].items():
             by_metric.setdefault(str(name), []).append((label, _values(metric)))
     out: list[dict[str, Any]] = []
