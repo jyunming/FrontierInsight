@@ -457,9 +457,38 @@ try:
 
             return "none" if str(value).lower() == "none" else to_hex(value)
 
+        def _fi_missing(line):
+            # The x values at which the line has no y value (None or NaN): matplotlib
+            # draws nothing there, and _fi_points drops them, so without this the
+            # record could not tell a setting never plotted from one with no value.
+            try:
+                import warnings
+
+                xs, ys = list(line.get_xdata()), list(line.get_ydata())
+                if len(xs) != len(ys) or len(xs) > 20000:
+                    return []
+                out = []
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    for x, y in zip(xs, ys):
+                        try:
+                            fx = float(x)
+                        except (TypeError, ValueError):
+                            continue
+                        try:
+                            fy = float(y)
+                        except (TypeError, ValueError):
+                            fy = float("nan")
+                        if _fi_math.isfinite(fx) and not _fi_math.isfinite(fy):
+                            out.append(fx)
+                return out[:50]
+            except Exception:
+                return []
+
         def _fi_line(ax, line, names):
             x, y = _fi_points(line)
             return {
+                "missing_x": _fi_missing(line),
                 "label": names.get(id(line)) or str(line.get_label() or ""),
                 "kind": _fi_kind(ax, line), "x": x, "y": y,
                 "color": _fi_colour(line.get_color()), "linestyle": line.get_linestyle(),

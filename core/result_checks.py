@@ -103,7 +103,47 @@ class ResultChecksMixin:
             found.extend(self._degenerate_findings(state, result_json, cells))
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
             self._log.warning("[execute] could not check the run's results for empty figures and constants (%r)", exc)  # type: ignore[attr-defined]
+        try:
+            found.extend(self._no_figures_findings(state))
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[execute] could not check whether the planned figures were drawn (%r)", exc)  # type: ignore[attr-defined]
         return found
+
+    def _saved_figures(self) -> list[str]:
+        from . import engine as _e
+
+        folder = self.quest_root / "figures"  # type: ignore[attr-defined]
+        return sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _e._FIGURE_SUFFIXES) if folder.is_dir() else []
+
+    def _no_figures_findings(self, state: Any) -> list[Found]:
+        """The plan has figures and the run, which finished, saved none: nothing was drawn, so the paper has no figure. Sent back
+        like any other fault (the analysis draws them from the saved results), and what stays is said in the limitations."""
+        planned = (state.get("design") or {}).get("figures_planned")
+        names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
+        if not names or self._saved_figures():
+            return []
+        listed = ", ".join(f"`{n}`" for n in names[:6])
+        directive = (f"FI looked at what the run produced: the plan has figures ({listed}) and the run saved none. Draw each from "
+                     "the saved results and save it to the figures folder. If there is nothing valid to draw because the results "
+                     "are not valid, find out why and fix that first. Change nothing else.")
+        note = f"the plan has figures ({listed}) and the run saved none"
+        say = (f"{note[0].upper()}{note[1:]}, so the paper has no figure. Do not describe, cite or caption a figure, and do not "
+               "write \"as shown in Figure N\": say plainly, in the limitations, that no figure was drawn.")
+        return [Found("no_figures", ANALYSIS, directive, note, say)]
+
+    def _figure_gap_findings(self, dropped: set[str]) -> list[Found]:
+        """Where a figure that stays has no point at a setting (:func:`core.degenerate_results.figure_gaps`): not repaired and
+        nothing is left out, the writer is told which settings the figure does not show."""
+        try:
+            gaps = [g for g in _degenerate.figure_gaps(self.fi_dir / "figure_records", self._saved_figures())  # type: ignore[attr-defined]
+                    if g.figure not in dropped]
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[execute] could not check the figures for settings they do not show (%r)", exc)  # type: ignore[attr-defined]
+            return []
+        if not gaps:
+            return []
+        return [Found("figure_gaps", ANALYSIS, "", "a figure has no point at some settings (" + "; ".join(g.says() for g in gaps[:3]) + ")",
+                      _degenerate.gap_note(gaps))]
 
     def _code_reader_findings(self, result_json: Any) -> list[Found]:
         """The quantities the plan names that the code computes differently (a second model's finding on the version that ran,
@@ -210,7 +250,7 @@ class ResultChecksMixin:
         self._result_marked = []
         found = self._result_findings(state, result_json) if getattr(self, "_trial_mode", False) else []
         # What a second model found the code computes otherwise cannot be repaired here (its repairs were spent before the run).
-        standing = self._code_reader_findings(result_json)
+        standing = [*self._code_reader_findings(result_json), *self._figure_gap_findings(set())]
         if not found and not standing:
             if self._result_marked:
                 self._write_marked(record_path)
@@ -230,6 +270,9 @@ class ResultChecksMixin:
             result = _e.ExecutionResult(1, kept, (result.stderr or "") + "\n[FI] " + why, result.duration_s, result.timed_out)
             self._clear_stale_figures()  # type: ignore[attr-defined]
             return result, to_fix
+        if found:  # a figure that is taken out has no gap to report
+            standing = [*self._code_reader_findings(result_json),
+                        *self._figure_gap_findings({n for f in found for n in f.figures})]
         self._leave_out_results([*found, *standing], record_path, result_json)
         return result, failed_script
 
@@ -250,7 +293,7 @@ class ResultChecksMixin:
         except OSError as exc:
             self._log.warning("[execute] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
         self._log.warning(  # type: ignore[attr-defined]
-            "[execute] %s. The paper does not use them and says so in its limitations.", record["note"])
+            "[execute] %s. The paper is told and says so in its limitations.", record["note"])
 
     def _marked_say(self) -> list[str]:
         marked = getattr(self, "_result_marked", None) or []
