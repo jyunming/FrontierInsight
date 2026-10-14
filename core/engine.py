@@ -19115,23 +19115,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             )
         )) or "(no references)"
         analysis = state.get("analysis") or {}
-        # The findings and the supported claims go in whole and first — they
-        # are what an "experiment" basis is checked against — and the run's
-        # results then fill whatever is left of the budget.
-        evidence_block, dropped = _claim_distilled_block(analysis, _CLAIM_EVIDENCE_CHARS)
-        if dropped:
-            self._log.warning(
-                "[claim_check] %d finding(s)/supported claim(s) did not fit the "
-                "%d-character evidence budget and were left out",
-                dropped, _CLAIM_EVIDENCE_CHARS,
-            )
-        evidence_block += _claim_results_block(
+        # The evidence is the run's own results, never the analysis step's prose: a number the model wrote there that
+        # the run does not hold (one real paper said 1,920 where the run's value was 1849.0) would "support" the same
+        # number in the paper, which is circular. The analysis text only ranks which result branches to keep.
+        ranking = "\n".join(
+            str(x) for key in ("key_findings", "claims_supported") for x in (analysis.get(key) or [])
+        )
+        evidence_block = _claim_results_block(
             state.get("result_json") or {},
-            # The claims are the paper's: the branches that hold the numbers it writes are the ones to keep. Ranked by
-            # the findings alone, a real run's per-setting values the paper quoted were left out, and 6 true
-            # sentences were called unsupported.
-            query=evidence_block + "\n" + paper_text,
-            budget=_CLAIM_EVIDENCE_CHARS - len(evidence_block),
+            # The claims are the paper's: the branches that hold the numbers it writes are the ones to keep.
+            query=paper_text + "\n" + ranking,
+            budget=_CLAIM_EVIDENCE_CHARS,
         )
         # The paper reports means over the seeds with their intervals, which
         # seed 0's RESULT_JSON holds neither of. They follow the results, one
@@ -25371,27 +25365,6 @@ def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: 
     return block
 
 
-def _claim_distilled_block(analysis: dict[str, Any], budget: int) -> tuple[str, int]:
-    """The analysis's own key findings and the claims it says the run
-    supports, every item WHOLE, as much as ``budget`` holds. Returns the block
-    and how many items did not fit.
-
-    These are what an "experiment" basis is checked against — they carry the
-    run's numbers at the precision the paper writes them — so an item is
-    either shown entire or not at all. Cutting the serialised evidence at a
-    character count severed a finding mid-sentence and silently dropped the
-    ones after it."""
-    kept: dict[str, list[Any]] = {"key_findings": [], "claims_supported": []}
-    dropped = 0
-    for key in ("key_findings", "claims_supported"):
-        for item in (analysis.get(key) or []):
-            kept[key].append(item)
-            if len(json.dumps(kept, indent=2)) > budget:
-                kept[key].pop()
-                dropped += 1
-    return json.dumps(kept, indent=2), dropped
-
-
 def _summarise_long_arrays(obj: Any, *, max_items: int = _CLAIM_ARRAY_MAX_ITEMS) -> Any:
     """``obj`` with every all-numeric array longer than ``max_items`` replaced
     by its length and range, so the results a claim can be checked against are
@@ -25453,7 +25426,7 @@ def _claim_results_block(result_json: Any, *, query: str, budget: int) -> str:
     # and the note must not itself crowd out the results.
     missed = ", ".join(left_out[:3]) + (
         f" and {len(left_out) - 3} more" if len(left_out) > 3 else "")
-    note = f", the branches most related to the findings ({missed} did not fit)" if left_out else ""
+    note = f", the branches most related to the paper ({missed} did not fit)" if left_out else ""
     return f"{head}{note}:\n{body}"[:budget]
 
 

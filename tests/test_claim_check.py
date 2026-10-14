@@ -968,30 +968,19 @@ def _capture(eng: Engine) -> list[str]:
     return seen
 
 
-def test_every_key_finding_reaches_the_check(tmp_path: Path) -> None:
-    """The finding that proves a claim is often the last one the analysis
-    wrote. Nothing may be dropped for its position, and no finding may be cut
-    in half."""
-    findings = [*_sweep_findings(), VALIDATION_FINDING]
-    # The state the old cut could not show: the findings alone exceed 4,000.
-    assert len(json.dumps(findings, indent=2)) > 4000
+def test_the_analysis_prose_is_not_evidence_for_the_paper(tmp_path: Path) -> None:
+    """A real paper said "OLS SD 1,920" where the run's value was 1849.0. The analysis step's own prose carried the same
+    wrong number, and as evidence it made the paper's number check itself. Only the run's results are evidence."""
     eng = _engine(tmp_path)
     seen = _capture(eng)
-    state = {"topic": "t", "paper_md": _paper(tmp_path),
-             "analysis": {"key_findings": findings,
-                          "claims_supported": [{"claim": "The Gillespie implementation is "
-                                                "consistent with the exact finite-state CTMC "
-                                                "at N=100.", "evidence": "All nine exact "
-                                                "threshold probabilities were inside their "
-                                                "Wilson intervals."}]},
-             "literature": []}
+    state = {"topic": "t", "paper_md": _paper(tmp_path, "# Paper\n\nThe OLS SD was 1,920 J/mol.\n"),
+             "analysis": {"key_findings": ["The OLS SD was 1,920 J/mol."],
+                          "claims_supported": [{"claim": "OLS SD is 1,920", "evidence": "1920 J/mol"}]},
+             "result_json": {"ols": {"sd": 1849.0}}, "literature": []}
     asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
     block = _evidence_block(seen[0])
-    assert VALIDATION_FINDING in block
-    for finding in findings:
-        assert finding in block
-    # The claim the analysis says the run supports reaches it too.
-    assert "All nine exact threshold probabilities were inside" in block
+    assert "1849" in block
+    assert "1,920" not in block and "1920" not in block
 
 
 def test_the_results_branch_the_findings_name_reaches_the_check(tmp_path: Path) -> None:
@@ -1023,24 +1012,6 @@ def test_the_results_branch_the_findings_name_reaches_the_check(tmp_path: Path) 
     assert "[101 values, 0 to 0.1]" in block
 
 
-def test_a_finding_is_shown_whole_or_not_at_all() -> None:
-    """Under a budget too small for everything, an item is left out rather
-    than severed — the old cut ended one finding mid-sentence."""
-    from core.engine import _claim_distilled_block
-
-    findings = _sweep_findings(6)
-    block, dropped = _claim_distilled_block({"key_findings": findings}, 1200)
-    assert dropped
-    assert len(block) <= 1200
-    kept = [f for f in findings if f in block]
-    assert kept, "at least one finding should fit"
-    assert len(kept) == len(findings) - dropped
-    # No partial item: every finding in the block is there in full.
-    for finding in findings:
-        head = finding[:60]
-        assert head not in block or finding in block
-
-
 def test_a_long_numeric_array_is_summarised_not_printed() -> None:
     from core.engine import _summarise_long_arrays
 
@@ -1067,19 +1038,16 @@ def test_the_results_are_shown_whole_when_they_fit() -> None:
 
 
 def test_the_evidence_block_stays_within_its_budget() -> None:
-    from core.engine import _claim_distilled_block, _claim_results_block
+    from core.engine import _claim_results_block
 
-    findings = _sweep_findings(40)
     budget = 6000
-    distilled, _ = _claim_distilled_block({"key_findings": findings}, budget)
     results = _claim_results_block(
         {str(i): {"x": list(range(20))} for i in range(400)},
-        query=distilled, budget=budget - len(distilled),
+        query="x", budget=budget,
     )
     # A sweep of hundreds of branches: none of them fits whole, and naming
     # every one of them in the heading would itself overrun the budget.
-    assert len(distilled) <= budget
-    assert len(distilled) + len(results) <= budget
+    assert len(results) <= budget
 
 
 def test_the_check_sees_how_the_study_was_run_and_the_results_the_paper_quotes(tmp_path: Path) -> None:
