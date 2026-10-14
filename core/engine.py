@@ -13602,6 +13602,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return (self._split_on(state) and simulate.is_file()
                 and bool(_trial_runner.entries(simulate) & {"run_trial", "run_cell"}))
 
+    @staticmethod
+    def _run_has_no_result(state: QuestState) -> bool:
+        """The run gave up, exited with an error, or printed no result (the one test the improve loop and the
+        literature cross-check share)."""
+        result = state.get("exec_result") or {}
+        return bool(state.get("exec_give_up_reason") or result.get("returncode", 1) != 0
+                    or not state.get("result_json"))
+
+    def _experiment_gave_no_result(self, state: QuestState) -> bool:
+        """A simulation ran (its record is there) and produced no result. A quest with no simulation, or one that has
+        not run an experiment at all, is not this case."""
+        exec_result = state.get("exec_result")
+        if not (isinstance(exec_result, dict) and exec_result):
+            return False
+        if state.get("no_simulation_resolved") or state.get("survey_mode_resolved"):
+            return False
+        return self._run_has_no_result(state)
+
     def _improve_skip(self, state: QuestState) -> str | None:
         """Why the improve loop does not run after this run, or ``None`` when it may."""
         limit = int(self.config.engine.improve_rounds or 0)
@@ -13615,8 +13633,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return "the simulation runs as a background job"
         if _optim.has_block(state.get("design")) or _optimise.block_of(self._protocol_block(state)) is not None:
             return "this study is a search for the best design, whose runs FI's search makes itself"
-        result = state.get("exec_result") or {}
-        if state.get("exec_give_up_reason") or result.get("returncode", 1) != 0 or not state.get("result_json"):
+        if self._run_has_no_result(state):
             return "the run did not produce a result"
         if not self._improve_trial_mode(state):
             return ("FI does not run the simulation's trials itself (one script, or a simulation without run_trial / "
@@ -17741,9 +17758,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return {"cross_check": []}
 
         out: list[dict[str, Any]] = []
+        no_result = self._experiment_gave_no_result(state)
+        if no_result:
+            # The "findings" of a run with no results are its error text: no paper can support or refute that. The
+            # entries stay (the route after this step reads them), each saying plainly that nothing was checked.
+            self._log.info("[cross_check] the experiment produced no results, so there is nothing to check against "
+                           "the literature; no search made")
         for finding in findings[:10]:  # cap to avoid runaway LLM cost
             text = str(finding).strip()
             if not text:
+                continue
+            if no_result:
+                out.append({
+                    "finding": text, "supporting": [], "conflicting": [], "neutral": [],
+                    "summary": "(not checked: the experiment produced no results)",
+                    "candidates": [],
+                })
                 continue
             self._log.info("[cross_check] searching for: %s", text[:80])
             try:

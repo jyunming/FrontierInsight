@@ -201,6 +201,50 @@ async def test_cross_check_does_not_bump_when_publishing(tmp_path: Path) -> None
     assert "iteration" not in patch
 
 
+_FAILED_RUN = {
+    "exec_result": {"returncode": 1, "stdout_tail": "Traceback ..."},
+    "result_json": {},
+    "analysis": {
+        "key_findings": ["The execution failed before generating any simulated observations."],
+        "next_step": "re_experiment",
+    },
+    "iteration": 0,
+}
+
+
+@pytest.mark.asyncio
+async def test_cross_check_makes_no_search_or_model_call_when_the_run_has_no_results(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path, max_iter=2))
+    chat_mock = AsyncMock(return_value="{}")
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+    search_mock = AsyncMock(return_value=[])
+    eng.knowledge.asearch = search_mock  # type: ignore[method-assign]
+
+    patch = await eng._node_cross_check(dict(_FAILED_RUN))
+
+    search_mock.assert_not_awaited()
+    chat_mock.assert_not_awaited()
+    assert len(patch["cross_check"]) == 1
+    assert "no results" in patch["cross_check"][0]["summary"]
+    # The route that follows is the same as for any checked finding: back to design, one iteration used.
+    assert patch["iteration"] == 1
+    assert eng._route_after_cross_check({**_FAILED_RUN, **patch}) == "redesign"
+
+
+@pytest.mark.asyncio
+async def test_cross_check_still_searches_when_the_run_has_results(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path))
+    chat_mock = AsyncMock(return_value="{}")
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+    search_mock = AsyncMock(return_value=[])
+    eng.knowledge.asearch = search_mock  # type: ignore[method-assign]
+
+    state = {**_FAILED_RUN, "exec_result": {"returncode": 0}, "result_json": {"x": 1.0}}
+    await eng._node_cross_check(state)
+
+    search_mock.assert_awaited_once()
+
+
 # --- CoVe verification pass ------------------------------------------------
 
 
