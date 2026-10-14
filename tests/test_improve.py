@@ -713,3 +713,17 @@ async def test_a_quest_improves_its_simulation_runs_the_kept_version_in_full_and
     from core import attempt_records as ar
 
     assert [c["node"] for c in ar.read(engine.fi_dir, ar.MODEL_CALLS)].count("improve") == 1
+
+
+def test_a_check_whose_code_was_flagged_makes_no_version_better_or_worse() -> None:
+    """A check a second model flagged (its value may be faked: one real check compared a coarse and a fine grid set to the
+    same value by one formula) is not compared, so a faked value cannot make a version look better."""
+    from core import improve
+
+    row = {"name": "grid", "counts": True, "direction": "lower", "tolerance": 0.0}
+    before = [{**row, "value": 0.5, "met": False}]
+    after = [{**row, "value": 0.0, "met": False, "flagged": True}]
+    comparison = improve.compare(before, after)
+    assert comparison[0]["change"] == "not compared"
+    assert improve.verdict(comparison) == {"better": [], "worse": [], "broken": False, "best": False}
+    assert improve.compare(before, [{**row, "value": 0.0, "met": True}])[0]["change"] == "better"

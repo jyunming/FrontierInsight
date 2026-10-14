@@ -401,7 +401,7 @@ def evaluate(items: list[dict[str, Any]], *, judged: list[dict[str, Any]], serie
         row = {"name": c["name"], "value": value,
                "met": False if flagged and measured_by == "FI" else meets(c, value), "counts": measured_by == "FI",
                "measured_by": measured_by, "direction": c["direction"], "target": c.get("target"),
-               "tolerance": c["tolerance"]}
+               "tolerance": c["tolerance"], **({"flagged": True} if flagged else {})}
         if why:
             row["why"] = why
         out.append(row)

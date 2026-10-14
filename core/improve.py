@@ -707,7 +707,8 @@ def _badness(row: dict[str, Any], value: float) -> float:
 def compare(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Each criterion FI counts, compared on its own between two versions: ``change`` is ``better`` or ``worse`` (by more
     than the criterion's own tolerance), ``same``, ``gained`` (measured now, not before), ``lost`` (measured before, not
-    now) or ``unmeasured``."""
+    now), ``unmeasured``, or ``not compared``: a check whose code a second model flagged in either version (its value may
+    be faked, so it can make neither version look better or worse)."""
     b = {r["name"]: r for r in before if isinstance(r, dict) and r.get("counts")}
     a = {r["name"]: r for r in after if isinstance(r, dict)}
     out: list[dict[str, Any]] = []
@@ -717,7 +718,9 @@ def compare(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[d
         vb = _num(rb.get("value")) if rb else None
         va = _num(ra.get("value")) if ra.get("counts") else None
         tol = abs(_num(row.get("tolerance")) or 0.0)
-        if vb is None and va is None:
+        if rb.get("flagged") or ra.get("flagged"):
+            change = "not compared"
+        elif vb is None and va is None:
             change = "unmeasured"
         elif vb is None:
             # Measured now and not before: better only when it meets its bar; otherwise nothing to compare it with.
