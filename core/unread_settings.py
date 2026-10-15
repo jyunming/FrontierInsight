@@ -29,11 +29,15 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-from .grid_keys import ENTRIES, _const_str
+from .grid_keys import ENTRIES
 
 _Fn = ast.FunctionDef | ast.AsyncFunctionDef
 #: Calls on the setting that read one literal name.
 _HOLDER_GETS = frozenset({"get", "pop", "setdefault"})
+
+
+def _const_str(node: ast.AST | None) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
 
 def _local_modules(files: dict[str, str]) -> set[str]:

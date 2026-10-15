@@ -16142,11 +16142,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # The oracles the plan's protocol declares are answered before anything is run for real (or a quest
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
         # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
-        await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # A setting of the grid the simulation never reads would only run the same simulation once per value: it leaves the
-        # grid before the checks read the code against it and before the run is timed (core/run_checks.py).
+        # grid first, so every check after it (and the timing of the run) reads the plan as FI changed it (core/run_checks.py).
         if split and self._trial_mode and not searching:
             self._drop_unread_settings(state, simulate_path)
+        await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
         # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
         stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
