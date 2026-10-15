@@ -75,6 +75,23 @@ def test_replay_the_unread_setting_leaves_the_grid_before_the_run(tmp_path: Path
     assert len(_plan.history(eng.quest_root)) == versions
 
 
+def test_the_state_handed_on_carries_the_smaller_grid_and_a_resume_catches_up(tmp_path: Path) -> None:
+    eng = _quest(tmp_path, "s1_kinetics")
+    design = _plan.load_design(eng.quest_root)[0]
+    state = {"topic": "t", "iteration": 0, "design": design}
+    eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
+    assert eng._unread_dropped is True  # _node_execute puts state["design"] in its patch
+    # A resume after the step stopped: plan.md has the smaller grid, the saved state still the plan's 125 settings.
+    stale = {"topic": "t", "iteration": 0, "design": design}
+    assert "temperature_K" in stale["design"]["protocol"]["grid"]
+    eng._drop_unread_settings(stale, eng.quest_root / "code" / "simulate.py")
+    assert eng._unread_dropped is True and "temperature_K" not in stale["design"]["protocol"]["grid"]
+    assert run_estimate.cell_count(stale["design"]["protocol"]["grid"]) == 25
+    # Nothing left to take out: nothing to hand on.
+    eng._drop_unread_settings(stale, eng.quest_root / "code" / "simulate.py")
+    assert eng._unread_dropped is False
+
+
 def test_a_frozen_protocol_or_a_redesign_is_left_alone(tmp_path: Path) -> None:
     eng = _quest(tmp_path, "s1_kinetics")
     state = {"topic": "t", "iteration": 1, "design": _plan.load_design(eng.quest_root)[0]}

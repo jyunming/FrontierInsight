@@ -16169,6 +16169,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
         # A setting of the grid the simulation never reads would only run the same simulation once per value: it leaves the
         # grid first, so every check after it (and the timing of the run) reads the plan as FI changed it (core/run_checks.py).
+        self._unread_dropped = False
         if split and self._trial_mode and not searching:
             self._drop_unread_settings(state, simulate_path)
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
@@ -16814,6 +16815,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
         patch["figure_data_repairs"] = figure_repairs
+        if getattr(self, "_unread_dropped", False):
+            patch["design"] = state["design"]  # a setting the simulation never reads, taken out of the grid (core/run_checks.py)
         if (sized_design := self._design_after_sizing(state)) is not None:
             patch["design"] = sized_design  # the plan's smaller run (core/run_estimate.py)
         if figure_rewrote and code_path.is_file():

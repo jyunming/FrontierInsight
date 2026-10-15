@@ -432,6 +432,10 @@ class RunChecksMixin:
         from . import grid_keys as _grid_keys
         from . import unread_settings as _unread
 
+        # What was taken out before (a resume after a stop) is taken out of the state's design too: the step's patch carries
+        # it (``_unread_dropped``), so the later steps and a resume read the same settings as plan.md.
+        self._unread_dropped = self._without_dropped(
+            state, (_read_json(self.fi_dir / UNREAD_SETTINGS_RECORD).get("dropped") or {}))  # type: ignore[attr-defined]
         if _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
             return
         protocol = self._draft_protocol(state) or {}  # type: ignore[attr-defined]
@@ -479,11 +483,22 @@ class RunChecksMixin:
             return
         self._log.warning("[execute] %s", note)  # type: ignore[attr-defined]
         print(f"[FI] {note}")
+        # The rest of this step, and the state it hands on, read the same settings as plan.md.
+        self._unread_dropped = self._without_dropped(state, unread) or self._unread_dropped
+
+    @staticmethod
+    def _without_dropped(state: Any, dropped: Any) -> bool:
+        """Take the settings in ``dropped`` out of ``state["design"]``'s grid; whether anything was taken out."""
         design = state.get("design")
-        if isinstance(design, dict) and isinstance(design.get("protocol"), dict):
-            # The rest of this step reads the same settings as plan.md.
-            state["design"] = {**design, "protocol": {**{k: v for k, v in design["protocol"].items() if k != "grid"},
-                                                      **({"grid": kept} if kept else {})}}
+        if not dropped or not isinstance(design, dict) or not isinstance(design.get("protocol"), dict):
+            return False
+        grid = design["protocol"].get("grid")
+        if not isinstance(grid, dict) or not any(k in grid for k in dropped):
+            return False
+        kept = {k: v for k, v in grid.items() if k not in dropped}
+        state["design"] = {**design, "protocol": {**{k: v for k, v in design["protocol"].items() if k != "grid"},
+                                                  **({"grid": kept} if kept else {})}}
+        return True
 
     # ---- the run fits the time it is allowed ---------------------------------------------------------------------------
 
