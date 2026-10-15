@@ -90,6 +90,26 @@ def test_an_optional_setting_with_a_fallback_that_is_like_none_of_the_studys_pas
         ("simulate.py", ("size_px",))]
 
 
+@pytest.mark.parametrize("src", [
+    "def run_trial(cell, i, seed):\n    noise = lambda: cell['rate_hz']\n    return {'y': noise()}\n",
+    "def run_trial(cell, i, seed):\n    def model(x):\n        return x * cell['rate_hz']\n    return {'y': model(1)}\n",
+    "def run_trial(cell, i, seed):\n    sol = solve_ivp(lambda t, y: -cell['rate_hz'] * y, (0, 1), [1.0])\n"
+    "    return {'y': sol}\n",
+    "def run_trial(cell, i, seed):\n    c = cell\n    def model(x):\n        def inner():\n"
+    "            return c.get('rate_hz')\n        return inner()\n    return {'y': model(1)}\n",
+])
+def test_a_setting_read_inside_a_lambda_or_a_closure_is_a_read(src: str) -> None:
+    assert [r.keys for r in gk.reads(src, "simulate.py")] == [("rate_hz",)]
+    assert _names({"simulate.py": src}) == [("simulate.py", ("rate_hz",))]
+
+
+def test_a_nested_function_that_rebinds_the_name_does_not_read_a_setting() -> None:
+    src = ("def run_trial(cell, i, seed):\n    c = cell\n    def model(c):\n        return c['rate_hz']\n"
+           "    def other():\n        c = {'rate_hz': 1}\n        return c['rate_hz']\n"
+           "    f = lambda c: c['rate_hz']\n    return {'y': model({}) + other() + f({}) + c['rate']}\n")
+    assert [r.keys for r in gk.reads(src, "simulate.py")] == [("rate",)]
+
+
 def test_a_dict_that_is_not_a_setting_is_not_read_as_one() -> None:
     src = ('def run_cell(cell):\n    table = {"a": 1}\n    other = dict(table)\n'
            '    return {"y": table["a"] + other.get("b", 0) + cell["rate"]}\n')
