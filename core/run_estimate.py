@@ -441,7 +441,8 @@ def observations(probes: list[Probe]) -> list[tuple[dict[str, Any], dict[str, fl
     for p in probes:
         for t in p.trials:
             per_run, per_level = _in_run.split(t)
-            out.append((dict(p.cell), dict(per_run)))
+            if per_run or not per_level:  # a run that gives numbers per value only has nothing per run
+                out.append((dict(p.cell), dict(per_run)))
             for lk, named in per_level.items():
                 out.append(({**p.cell, **_in_run.parse_level_key(lk)}, dict(named)))
     return out
@@ -640,7 +641,8 @@ async def pilot(
     suspects = undefined_metrics(obs, [n for n in kinds if any(n in v for _c, v in obs)])
     tried_all, unsure = "", set()
     if suspects:
-        todo, whole = confirm_cells(grid, [c for c, _v in obs])
+        inside = set(in_each_run or ())
+        todo, whole = confirm_cells(grid, [{k: v for k, v in c.items() if k not in inside} for c, _v in obs])
         started = time.monotonic()
         reached = True
         for cell in todo:

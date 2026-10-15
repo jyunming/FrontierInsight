@@ -216,7 +216,7 @@ def test_the_paper_says_what_each_run_compared_on_the_same_random_numbers(tmp_pa
     (tmp_path / "code" / "study.json").write_text(json.dumps(
         {"base_seed": 7, "paired": False, "in_each_run": {"procedure": ["none", "bh"]}}), encoding="utf-8")
     said = disclosure._seed_sentence(tmp_path, None)
-    assert "base seed 7" in said and "`procedure` (none, bh)" in said and "same random numbers" in said
+    assert "base seed 7" in said and "`procedure` (none, bh)" in said and "same simulated data" in said
     (tmp_path / "code" / "study.json").write_text(json.dumps({"base_seed": 7, "paired": False}), encoding="utf-8")
     assert "Within each run" not in disclosure._seed_sentence(tmp_path, None)
 

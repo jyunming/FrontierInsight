@@ -104,7 +104,7 @@ def test_design_prompt_says_the_topics_runtime_is_a_wish_and_fis_limit_is_enforc
     cfg = _cfg(tmp_path)
     eng = Engine(cfg)
     note = eng._time_note({"topic": "CPU only; under 60 seconds of runtime."})
-    assert "limit FI enforces on one run" in note and "researcher's wish" in note and "60 s" in note
-    assert "not enforced" in eng._time_note({"topic": "SIR final outbreak size"})
+    assert "limit FI enforces on one run" in note and "at most 60 s" in note and "does not enforce" in note
+    assert "does not enforce" in eng._time_note({"topic": "SIR final outbreak size"})
     text = (Path(__file__).resolve().parent.parent / "agents" / "design.md").read_text(encoding="utf-8")
     assert "$timeout_s\n\n$time_note" in text

@@ -207,7 +207,9 @@ def observed_flat_sweep(cells: list[Any]) -> Observed | None:
                 for name, v in named.items():
                     if _is_number(v):
                         per_level.setdefault(lk, {}).setdefault(str(name), []).append(float(v))
-        (value if getattr(c, "level", None) else run).append((cell, own))
+        if own or getattr(c, "level", None) or not per_level:
+            # a run that gives numbers per value only has nothing per run to judge over the settings
+            (value if getattr(c, "level", None) else run).append((cell, own))
         for lk, columns in per_level.items():
             value.append(({**cell, **(levels.get(lk) or _in_run.parse_level_key(lk))}, columns))
     seen = [o for o in (_observed_in(g) for g in (run, value) if g) if o is not None]

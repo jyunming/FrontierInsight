@@ -11997,10 +11997,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         stated = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
                   for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
         limit = _disclosure._topic_limit([c for c in stated if isinstance(c, str)], str(state.get("topic") or ""))
-        asked = (f"The topic asks for a runtime of {_disclosure._plain_seconds(limit)}, so" if limit is not None
-                 else "If the topic asks for a runtime,")
-        return (f"This is the limit FI enforces on one run. {asked} aim for it as the researcher's wish; it is not "
-                "enforced, and a plan is not refused for exceeding it.")
+        asked = (f"The topic asks for a run of at most {_disclosure._plain_seconds(limit)}" if limit is not None
+                 else "If the topic asks for a shorter run")
+        return (f"This is the limit FI enforces on one run. {asked}: plan to stay within the shorter of the two where "
+                "the study allows. FI does not enforce the topic's figure and does not refuse a plan over it; the paper "
+                "reports how long the run took.")
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
                           env: dict[str, str] | None = None) -> tuple[int, str, str]:

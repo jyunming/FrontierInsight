@@ -661,22 +661,46 @@ AMBIGUOUS_WHY = ("it can be read two ways: write it so it can only be read one w
 #: The characters a worked sum can be written with; a run of them to the left of an ``=`` is where its expression is.
 _SUM_CHARS = re.compile(r"[0-9A-Za-z_.+\-*/() ]+$")
 #: A number written right after an ``=`` (and not the start of a longer expression).
-_STATED = re.compile(r"\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(?![\w.]|\s*[-+*/^(])")
+_STATED = re.compile(r"\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(?![\w.%]|,\d|\s*[-+*/^(%])")
+#: How far back from an ``=`` a sum is looked for: a sum is short, the prose before it need not be read.
+_SUM_REACH = 200
+#: A number or a sum that is a range or a date (``10-20``, ``2024-10-15``), not a subtraction.
+_RANGE = re.compile(r"^\d+(?:-\d+)+$")
+
+
+def _unit_written(text: str) -> float:
+    """How far a stated number may be from the sum it gives, by how it is written: one unit of the last decimal written
+    (``3.4486`` 1e-4, ``2.9e3`` 100: a decimal may be cut off), half a unit of a whole number (``22026`` 0.5, ``2900`` 50:
+    rounded to the nearest; trailing zeros of a whole number are not counted as digits)."""
+    mantissa, _, exponent = text.lower().lstrip("+-").partition("e")
+    scale = 10.0 ** int(exponent) if exponent else 1.0
+    if "." in mantissa:
+        return 10.0 ** -len(mantissa.split(".", 1)[1]) * scale
+    zeros = len(mantissa) - len(mantissa.rstrip("0"))
+    return 0.5 * 10.0 ** zeros * scale if mantissa.strip("0") else 0.5 * scale
 
 
 def stated_arithmetic(text: Any) -> list[dict[str, Any]]:
     """The sums ``text`` (a reference, a derivation) works out, ``<expression of numbers, constants and the formula's
     functions> = <number>``, that FI can compute itself and that come out as another number than the one stated:
-    ``{"expression", "stated", "value"}``. The stated number may differ from the value by half a unit of its last written
-    digit (and a tiny floor); an expression that holds a name (a variable, a word) is not a sum and is never read."""
+    ``{"expression", "stated", "value"}``. The stated number may differ from the value by one unit of its last written
+    digit (a rounded or a cut-off result); a stated 0 is a claim of exactly zero. Only what is plainly a sum is read: an
+    expression that holds a name (a variable, a word) or a function FI could read two ways (a bare ``log``), one written
+    with ``^`` or a thousands separator, a percent, a range or a date is never judged."""
+    from . import oracle_triage as _triage
+
     out: list[dict[str, Any]] = []
     text = str(text or "")
     for m in re.finditer(r"(?<![<>=!])=(?![=>])", text):
         right = _STATED.match(text[m.end():])
-        left = _SUM_CHARS.search(text[:m.start()])
+        before = text[max(0, m.start() - _SUM_REACH):m.start()]
+        left = _SUM_CHARS.search(before)
         if right is None or left is None:
             continue
         run = left.group(0)
+        ahead = before[:left.start()].rstrip()
+        if ahead.endswith("^") or (ahead.endswith(",") and run[:1].isdigit()):
+            continue  # a power (10^3) or a thousands separator (1,000) the formula language does not read
         stated = float(right.group(1))
         # The longest piece of the run that is a sum on its own, starting where a word or the run begins.
         starts = [0] + [i + 1 for i, c in enumerate(run) if c == " "]
@@ -684,17 +708,18 @@ def stated_arithmetic(text: Any) -> list[dict[str, Any]]:
             piece = run[i:].strip()
             if not piece or re.search(r"[-+*/^(]\s*$", run[:i]) or (i and piece[0] in "+-*/"):
                 continue
-            if not re.search(r"[-+*/]|\w\(", piece) or names(piece):
+            if not re.search(r"[-+*/]|\w\(", piece) or names(piece) or _RANGE.match(piece) or _triage.ambiguous(piece):
                 continue
             result = evaluate(piece, {})
             if result.value is None:
                 continue
-            precision = written_precision(stated)
             # A number written to four digits or more is known only to them, and the sum carries that to its result
             # (2.006 * 1.654 is not good to more than the digits of 2.006 and 1.654).
             carried = sum(p[1] / abs(float(c)) for c in re.findall(r"(?<![\w.])\d+\.\d*(?:[eE][-+]?\d+)?|(?<![\w.])\.\d+", piece)
                           if float(c) != 0 and (p := written_precision(float(c))) and p[0] >= 4)
-            slack = max(precision[1] if precision else 0.0, 1e-9 * abs(stated), 1e-12) + carried * abs(result.value)
+            operands = [abs(float(c)) for c in re.findall(r"\d+\.?\d*(?:[eE][-+]?\d+)?|\.\d+", piece)] or [1.0]
+            unit = 1e-9 * max(operands) if stated == 0 else _unit_written(right.group(1))
+            slack = max(unit, 1e-9 * abs(stated), 1e-12) + carried * abs(result.value)
             if abs(result.value - stated) > slack:
                 out.append({"expression": piece, "stated": right.group(1), "value": result.value})
             break

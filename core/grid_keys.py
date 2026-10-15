@@ -46,8 +46,10 @@ SETTING_NAMES = frozenset({"cell", "setting", "settings"})
 #: The trial contract's entry points: their first parameter is the setting.
 ENTRIES = ("run_cell", "run_trial")
 #: The fields of the per-cell record FI writes for the analysis (``raw/trials.json``): not settings.
-RECORD_FIELDS = frozenset({"cell", "key", "planned", "ok", "failed", "metrics", "trials", "rows", "values", "level",
-                           "compared_in_each_run"})
+RECORD_FIELDS = frozenset({"cell", "key", "planned", "ok", "failed", "metrics", "trials", "rows", "values"})
+#: The fields FI adds to the record of a study that compares values inside each run (core/in_run.py): names only such a
+#: study has.
+IN_RUN_RECORD_FIELDS = frozenset({"level", "compared_in_each_run"})
 _GET = frozenset({"get", "pop", "setdefault"})
 
 
@@ -354,8 +356,9 @@ def supplied_names(protocol: dict[str, Any] | None, design: dict[str, Any] | Non
 
     protocol = protocol if isinstance(protocol, dict) else {}
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-    axes = [str(k) for k in grid] + [str(k) for k in _in_run.of(protocol) or {} if str(k) not in grid]
-    allowed = set(axes)
+    inside = _in_run.of(protocol) or {}
+    axes = [str(k) for k in grid] + [str(k) for k in inside if str(k) not in grid]
+    allowed = set(axes) | (set(IN_RUN_RECORD_FIELDS) if inside else set())
     allowed.update(_forms.fixed_settings_of_design({**(design or {}), "protocol": protocol}))
     _case_keys(protocol, allowed)
     return axes, allowed

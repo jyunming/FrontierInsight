@@ -1177,9 +1177,13 @@ async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, mo
         # The setting as the study gave it (with every value each run compares), so the numbers compare one for one.
         again, why = None, ""
         for _attempt in range(2):  # a new venv's first start can fail before it reaches the code (see the execute step)
-            again, why = await _run_case(executor, python, quest_root, module, cell={**cell["cell"], **inside},
-                                         timeout_s=timeout_s, env=env, thresholds=thresholds, trial=0, oracle=None,
-                                         per_trial=False, levels=levels, seed_key=cell_key(cell["cell"]))
+            if not inside:
+                again, why = await run_case(executor, python, quest_root, module, cell=dict(cell["cell"]),
+                                            timeout_s=timeout_s, env=env, thresholds=thresholds, trial=0)
+            else:
+                again, why = await _run_case(executor, python, quest_root, module, cell={**cell["cell"], **inside},
+                                             timeout_s=timeout_s, env=env, thresholds=thresholds, trial=0, oracle=None,
+                                             per_trial=False, levels=levels, seed_key=cell_key(cell["cell"]))
             if again is not None or "did not report" not in why:
                 break
         if again is None:

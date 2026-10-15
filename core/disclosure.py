@@ -335,10 +335,10 @@ def _inside_sentence(study: Any) -> str:
     inside = study.get("in_each_run") if isinstance(study, dict) else None
     if not isinstance(inside, dict) or not inside:
         return ""
-    said = "; ".join(f"`{name}` ({', '.join(str(v) for v in values)})" for name, values in inside.items()
-                     if isinstance(values, list))
-    return (f" Within each run, every value of {said} was applied to the same random numbers, so those values are "
-            "compared on the same data (paired), not on independent draws.") if said else ""
+    said = " and of ".join(f"`{name}` ({', '.join(str(v) for v in values)})" for name, values in inside.items()
+                           if isinstance(values, list))
+    return (f" Within each run, every value of {said} was used on the same simulated data, so differences between those "
+            "values do not come from different random draws.") if said else ""
 
 
 def _seed_sentence(quest_root: Path, rows: Any) -> str:
