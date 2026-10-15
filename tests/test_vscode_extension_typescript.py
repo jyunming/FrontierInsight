@@ -402,9 +402,9 @@ def test_interview_yaml_norway_problem_clarify_mode_off_parses_as_string(
 @pytest.mark.parametrize(
     "paper_format",
     [
-        # All nine venues PaperFormat in core/config.py declares. The
+        # All ten venues PaperFormat in core/config.py declares. The
         # interview must produce a YAML that Pydantic accepts for each.
-        "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+        "generic", "article", "neurips", "iclr", "ieee_access", "nature_mi",
         "essay", "report", "policy_brief", "whitepaper",
     ],
 )
