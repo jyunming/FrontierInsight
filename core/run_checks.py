@@ -40,6 +40,8 @@ from . import typed_results as _typed
 #: How many times, in all, a simulation that returns typed-in numbers is sent back.
 TYPED_RESULT_REPAIRS = 2
 TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
+#: In ``.fi/``: the settings FI took out of the grid because the simulation never reads them.
+UNREAD_SETTINGS_RECORD = "unread_settings.json"
 NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
 
@@ -406,7 +408,79 @@ class RunChecksMixin:
         if isinstance(reduced, dict) and reduced.get("note"):
             parts.append(f"{reduced['note']} Say this in the paper with the numbers (it is among FI's facts about this run, "
                          "given below), and write no result for what was left out.")
+        unread = _read_json(self.fi_dir / UNREAD_SETTINGS_RECORD)  # type: ignore[attr-defined]
+        if isinstance(unread.get("note"), str) and unread["note"].strip():
+            names = ", ".join(f"`{k}`" for k in unread.get("dropped") or {})
+            parts.append(f"{unread['note']} Do not describe {names} as a setting the study varied or compared across "
+                         "settings.")
         return "\n\n".join(parts)
+
+    # ---- a setting of the grid the simulation never reads ----------------------------------------------------------------
+
+    def _drop_unread_settings(self, state: Any, simulate: Path) -> None:
+        """Before the run is timed and the protocol frozen: a setting of ``protocol.grid`` (two values or more) that the
+        simulation never reads (:func:`core.unread_settings.unread_axes`) is taken out of the grid in plan.md, said in
+        run.log and plan.md, and kept for the writer (``.fi/unread_settings.json``). Each of its values would only run the
+        same simulation again with other seeds: a real plan kept five temperatures as a setting that run_trial never read,
+        and ran 125 settings where 25 were the study. Nothing is removed unless the reading is certain (not when the setting
+        is handed to code FI cannot read, read by a computed name ...: the grid is kept and run.log says why), after the
+        freeze, or for a redesign (its protocol is not plan.md's). No model is asked."""
+        from . import engine as _e
+        from . import grid_keys as _grid_keys
+        from . import unread_settings as _unread
+
+        if _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
+            return
+        protocol = self._draft_protocol(state) or {}  # type: ignore[attr-defined]
+        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        if len(grid) < 1:
+            return
+        code_dir = simulate.parent
+        files = {rel: text for rel, text in _grid_keys.code_files(code_dir).items()
+                 if rel not in (_split_run.ANALYSIS_NAME, "run.py", _trial_runner.SUBMIT_NAME)}
+        unread, why = _unread.unread_axes(files, protocol)
+        if not unread:
+            if why:
+                self._log.info("[execute] FI could not tell whether the simulation reads every setting of the grid (%s); "  # type: ignore[attr-defined]
+                               "the grid is kept as the plan wrote it", why)
+            return
+        kept = {k: v for k, v in grid.items() if k not in unread}
+        before, after = _estimate.cell_count(grid), _estimate.cell_count(kept)
+        path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
+        listed = "; ".join(f"`{k}` ({len(grid[k])} values: {', '.join(str(v) for v in grid[k][:6])}"
+                           f"{', ...' if len(grid[k]) > 6 else ''})" for k in unread)
+        note = (f"The plan listed {listed} as {'a setting' if len(unread) == 1 else 'settings'} to sweep, but the simulation "
+                f"never reads {'it' if len(unread) == 1 else 'them'}: each value would only have run the same simulation "
+                f"again. FI took {'it' if len(unread) == 1 else 'them'} out of the settings before the run, so the study "
+                f"runs {after:,} setting(s), not {before:,}.")
+        try:
+            text = path.read_text(encoding="utf-8")
+            edited = _plan.edit_design_block(text, lambda d: {**d, "protocol": {
+                **{k: v for k, v in (d.get("protocol") or {}).items() if k != "grid"},
+                **({"grid": {k: v for k, v in ((d.get("protocol") or {}).get("grid") or {}).items() if k not in unread}}
+                   if kept else {})}})
+            if edited is None or _plan.parse(edited).design is None:
+                self._log.warning("[execute] %s FI could not change plan.md, so the grid is kept as written", note)  # type: ignore[attr-defined]
+                return
+            edited = _plan.add_to_section(_plan.refresh_model_section(edited), _e._PART_HEADING, ["", f"- {note}"])
+            _plan.note_edit(self.quest_root, text)  # type: ignore[attr-defined]
+            path.write_text(edited, encoding="utf-8")
+            _plan.record_version(self.quest_root, edited, by="engine",  # type: ignore[attr-defined]
+                                 note="a setting the simulation never reads, taken out of the grid by FI")
+            self.fi_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
+            (self.fi_dir / UNREAD_SETTINGS_RECORD).write_text(json.dumps(  # type: ignore[attr-defined]
+                {"dropped": {k: grid[k] for k in unread}, "settings_before": before, "settings_after": after,
+                 "note": note, "at": time.time()}, indent=1, default=str) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[execute] FI could not take the unread setting(s) out of plan.md: %r", e)  # type: ignore[attr-defined]
+            return
+        self._log.warning("[execute] %s", note)  # type: ignore[attr-defined]
+        print(f"[FI] {note}")
+        design = state.get("design")
+        if isinstance(design, dict) and isinstance(design.get("protocol"), dict):
+            # The rest of this step reads the same settings as plan.md.
+            state["design"] = {**design, "protocol": {**{k: v for k, v in design["protocol"].items() if k != "grid"},
+                                                      **({"grid": kept} if kept else {})}}
 
     # ---- the run fits the time it is allowed ---------------------------------------------------------------------------
 
