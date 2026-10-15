@@ -1,0 +1,80 @@
+[
+ {
+  "name": "bh_superset_of_bonferroni",
+  "value": 0.0,
+  "expected": 0.0,
+  "tolerance": 0.0,
+  "mode": "absolute",
+  "limit": 1.4210854715202004e-14,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "bh_matches_scipy",
+  "value": 0.0,
+  "expected": 0.0,
+  "tolerance": 0.0,
+  "mode": "absolute",
+  "limit": 1.4210854715202004e-14,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "bonferroni_power_exact",
+  "value": 0.1634375,
+  "expected": 0.1634,
+  "tolerance": 0.01,
+  "mode": "absolute",
+  "limit": 0.01,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "uncorrected_fwer_null",
+  "value": 0.63725,
+  "expected": 0.6415,
+  "tolerance": 0.03,
+  "mode": "absolute",
+  "limit": 0.03,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "bh_fwer_all_null",
+  "value": 0.047,
+  "expected": 0.05,
+  "tolerance": 0.015,
+  "mode": "absolute",
+  "limit": 0.015,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "bh_fdr_upper_bound",
+  "value": 0.018823529411764704,
+  "expected": 0.0,
+  "tolerance": 0.01,
+  "mode": "absolute",
+  "limit": 0.01,
+  "passed_by_engine": false,
+  "script_said": null,
+  "measured_by": "engine",
+  "disputed_expected": 0.0
+ },
+ {
+  "name": "null_p_uniform",
+  "value": 0.49993429637407905,
+  "expected": 0.5,
+  "tolerance": 0.005,
+  "mode": "absolute",
+  "limit": 0.005,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ }
+]
