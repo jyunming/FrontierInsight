@@ -5432,6 +5432,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         guided, _why = _plan.load_design(self.quest_root)
         if isinstance(guided, dict):
             normalized = guided
+            if from_checks and isinstance(guided.get("protocol"), dict):
+                no_criteria = not _criteria.countable(guided["protocol"])  # as the checks were left
         protocol = normalized.get("protocol")
         await self._settle_plan_sources(state, protocol=protocol if isinstance(protocol, dict) else None,
                                         no_criteria=no_criteria and ask)
