@@ -45,7 +45,8 @@ def _engine(tmp_path: Path) -> Engine:
 
 
 def _issue(fid: str = "F-1", **over: Any) -> dict[str, Any]:
-    base = {"id": fid, "changes_result": True, "demonstrated": True, "outcome": cf.GAVE_UP, "plan_conflict": False,
+    base = {"id": fid, "changes_result": True, "demonstrated": True, "failure_kind": cf.ASSERTION, "outcome": cf.GAVE_UP,
+            "plan_conflict": False,
             "readings": [{"n": 1, "status": "open"}], "severity": "high", "first_seen": 1, "file": "experiment.py",
             "function": "main", "text": "dose_to_size is set to a typed-in value", "test": f".fi/finding_tests/{fid}_1.py"}
     return {**base, **over}
@@ -117,21 +118,40 @@ async def test_an_issue_that_is_not_shown_open_and_result_changing_is_never_run(
     "import experiment\n\n\ndef test_x():\n    assert experiment.compute_dose() != 60.0\n",
     "import module_that_is_not_there\n\n\ndef test_x():\n    assert False\n",
 ])
-async def test_a_test_that_no_longer_runs_on_the_final_code_still_stops_the_quest(tmp_path: Path, test: str) -> None:
+async def test_a_test_that_no_longer_runs_on_the_final_code_shows_nothing_and_stops_nothing(tmp_path: Path, test: str) -> None:
+    # only a failing assertion about values shows a fault; an error in the test shows nothing (r14b stopped on a figure
+    # test that raised AttributeError once experiment.py was rewritten)
     engine = _engine(tmp_path)
     _record(engine, _issue(), test=test)
-    verdict = await engine._shown_fault_verdict(STATE)
-    assert verdict and verdict["stuck_reason"] == "shown_fault_open"
-    assert "no longer runs" in verdict["rationale"] and "typed-in value" in verdict["rationale"]
+    assert await engine._shown_fault_verdict(STATE) is None
+    error = code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]
+    assert error["place"] == "test" and error["at"].startswith("F-1_1.py:")
+
+
+WRAPPED = ("import experiment\n\n\ndef test_x():\n    try:\n        experiment.dose(1)\n    except Exception as exc:\n"
+           "        assert False, f'dose raised: {exc}'\n")
+CRASHES = "def dose():\n    return {}['missing']\n"
 
 
 @pytest.mark.asyncio
-async def test_a_missing_test_file_still_stops_the_quest(tmp_path: Path) -> None:
+async def test_an_exception_turned_into_an_assertion_shows_nothing_and_a_crash_in_the_code_is_placed(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue(), test=WRAPPED)
+    assert await engine._shown_fault_verdict(STATE) is None
+    error = code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]
+    assert error["kind"] == "wrapped" and error["place"] == "test"
+    (engine.quest_root / "code" / "experiment.py").write_text(CRASHES, encoding="utf-8")
+    _record(engine, _issue(), test="import experiment\n\n\ndef test_x():\n    assert experiment.dose() != 60.0\n")
+    assert await engine._shown_fault_verdict(STATE) is None
+    error = code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]
+    assert error["kind"] == "exception" and error["place"] == "program" and error["at"] == "code/experiment.py:2"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_test_file_stops_nothing(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     _record(engine, _issue(), test=None)
-    verdict = await engine._shown_fault_verdict(STATE)
-    assert verdict and verdict["stuck_reason"] == "shown_fault_open"
-    assert "no longer on disk" in verdict["rationale"]
+    assert await engine._shown_fault_verdict(STATE) is None
 
 
 @pytest.mark.asyncio
@@ -150,7 +170,7 @@ async def test_a_test_runner_that_gives_no_answer_stops_nothing_and_says_so(
         assert await engine._shown_fault_verdict(STATE) is None
     finally:
         engine._log.removeHandler(sink)
-    assert any("cannot run a test at all" in m for m in sink.messages)
+    assert any("gave no answer" in m for m in sink.messages)
 
 
 @pytest.mark.asyncio
@@ -215,25 +235,24 @@ HANG = "import time\n\n\ndef test_x():\n    time.sleep(60)\n"
 
 
 @pytest.mark.asyncio
-async def test_a_flagged_fault_whose_test_hangs_stops_the_quest_and_does_not_hide_another(
+async def test_a_test_that_hangs_shows_nothing_and_does_not_hide_another_that_fails(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cf, "SHOWN_TEST_TIMEOUT_S", 5)
     engine = _engine(tmp_path)
     _record(engine, _issue("F-1", first_seen=1), _issue("F-2", first_seen=2))
     (engine.quest_root / ".fi" / "finding_tests" / "F-1_1.py").write_text(HANG, encoding="utf-8")
-    (engine.quest_root / ".fi" / "finding_tests" / "F-2_1.py").write_text(PASSING, encoding="utf-8")
     verdict = await engine._shown_fault_verdict(STATE)
-    assert verdict and "gave no answer" in verdict["rationale"]
+    assert verdict and "still fails" in verdict["rationale"]
+    (engine.quest_root / ".fi" / "finding_tests" / "F-2_1.py").write_text(PASSING, encoding="utf-8")
+    assert await engine._shown_fault_verdict(STATE) is None
 
 
 @pytest.mark.asyncio
-async def test_a_sole_flagged_fault_whose_test_hangs_stops_the_quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_sole_fault_whose_test_hangs_stops_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cf, "SHOWN_TEST_TIMEOUT_S", 5)
     engine = _engine(tmp_path)
     _record(engine, _issue(), test=HANG)
-    verdict = await engine._shown_fault_verdict(STATE)
-    assert verdict and "gave no answer" in verdict["rationale"]
-    assert not (engine.quest_root / ".fi" / "finding_tests" / "_probe_runs.py").exists()
+    assert await engine._shown_fault_verdict(STATE) is None
 
 
 @pytest.mark.asyncio
@@ -276,10 +295,10 @@ TWO_RESULTS: dict[str, Any] = {"exec_result": {"returncode": 0}, "result_json": 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("test", [FAILING, "import module_that_is_not_there\n\n\ndef test_x():\n    assert False\n"])
+@pytest.mark.parametrize("test", [FAILING])
 async def test_a_fault_in_another_quantity_is_left_out_and_the_paper_says_so(tmp_path: Path, test: str) -> None:
-    """A fault outside the study's main quantity, whose test still fails or no longer runs, takes that quantity out of the
-    results the paper may use; nothing stops. The record of it is the paper's run record and the quality report."""
+    """A fault outside the study's main quantity, whose test still fails, takes that quantity out of the results the paper
+    may use; nothing stops. The record of it is the paper's run record and the quality report."""
     import json
 
     from core import disclosure, quality_report

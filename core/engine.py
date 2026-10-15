@@ -11813,9 +11813,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return await self._chat(prompt, node=node)
 
         async def run_tests(paths: list[str]) -> dict[str, Any]:
-            _rc, out, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", paths)], timeout_s=180,
-                                                    env=self._finding_test_env())
-            return _finding_repair.parse_runs(out, paths)
+            out: dict[str, Any] = {}
+            for path in paths:  # each test in its own process: one test cannot change what another sees
+                _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [path])],
+                                                         timeout_s=180, env=self._finding_test_env())
+                out.update(_finding_repair.parse_runs(text, [path]))
+            return out
 
         async def snapshot() -> dict[str, str]:
             return await self._finding_snapshot(state, protocol, record)
@@ -11877,11 +11880,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 for r in _equation_tests.parse_results(text) or []:
                     out[f"equation:{r.get('id')}"] = "pass" if r.get("status") == _equation_tests.OK else "fail"
         accepted = [p for p in record.get("accepted_tests") or [] if isinstance(p, str)]
-        if accepted:
-            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", accepted)], timeout_s=300,
+        for path in accepted:  # each test in its own process: one test cannot change what another sees
+            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [path])], timeout_s=300,
                                                      env=self._finding_test_env())
-            for path, run in _finding_repair.parse_runs(text, accepted).items():
-                out[f"finding:{path}"] = run.status
+            for got, run in _finding_repair.parse_runs(text, [path]).items():
+                out[f"finding:{got}"] = run.status
         return out
 
     def _finding_static_counts(self, state: QuestState, protocol: Any) -> dict[str, int]:
@@ -15770,6 +15773,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # One small test per equation of the model, from the plan's own worked example, before anything else runs: a
         # function that computes another equation than the plan's is found here, not after the study.
         await self._code_review_gate(state)
+        # A finding's test that crashed inside the code showed a crash, not the finding: the crash repair takes it.
+        if (crashed := await self._review_crash_run(state)) is not None:
+            return crashed, None, False
         failed_equations = await self._equation_gate(state, py, exec_env)
         if failed_equations is not None:
             return failed_equations, None, False
@@ -18759,10 +18765,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         The code may have changed since the last reading (a repair of the run, a rewrite), and a reader's word alone never
         stops a quest, so the test written for each such fault (at most ``MAX_SHOWN_RERUNS``) is run again on the code as
         it is now, each in its own process with its own time limit; a test that does not pass is run once more (a flaky
-        test does not stop a quest). The fault counts as gone only when its test passes: a test that still fails, no
-        longer runs on the code (a live run delivered a typed-in headline number whose test had come to error on the
-        rewritten code), gives no answer, or is gone from disk stops the quest. When the environment cannot run even a test
-        that does nothing, the silent tests stop nothing, with a warning; an error inside this check stops the quest.
+        test does not stop a quest). Only a test's own assertion about values shows a fault, when it is first shown and
+        here (core/finding_repair.py): a test that still fails by its assertion counts; one that errors (in the code or in
+        the test), gives no answer or is gone from disk shows nothing and stops nothing, and the record keeps where it
+        errored (``gate_error``). An error inside this check itself stops the quest.
         Repaired and no-longer-flagged faults are not run again (see ``code_findings.shown_open``). Deterministic given the
         files on disk, so a re-entry of the node gives the same answer."""
         exec_result = state.get("exec_result")
@@ -18825,14 +18831,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     async def _shown_fault_check(self, shown: list[dict[str, Any]], record: dict[str, Any] | None = None,
                                  result: Any = None, headline: list[str] | None = None) -> dict[str, Any] | None:
         verdicts: list[tuple[dict[str, Any], str]] = []
-        silent: list[dict[str, Any]] = []
-        answered = 0
+        errored = False
         for issue in shown:
-            flagged = _code_findings.flagged_now(issue)
             rel = str(issue.get("test") or "")
             if not (rel and (self.quest_root / rel).is_file()):
-                if flagged:
-                    verdicts.append((issue, f"its test is no longer on disk ({rel or 'no test recorded'})"))
+                # Only a failing assertion on the code that ran shows the fault (core/code_findings.py): no test, no stop.
+                self._log.warning("[evidence_gate] the test that showed %s is no longer on disk (%s): nothing shows the "
+                                  "fault now, and it does not stop the quest", issue.get("id"), rel or "no test recorded")
                 continue
             runs = [await self._rerun_finding_test(rel)]
             if runs[0] is None or runs[0].status != "pass":
@@ -18842,23 +18847,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             given = [r for r in runs if r is not None]
             run = next((r for status in ("pass", "fail", "error") for r in given if r.status == status), None)
             if run is None:
-                silent.append(issue)
-                if flagged:
-                    verdicts.append((issue, "its test gave no answer on it (it ran past its time or ended the process)"))
+                self._log.warning("[evidence_gate] the test of %s gave no answer on the code that ran (it ran past its time "
+                                  "or ended the process): it shows nothing and does not stop the quest", issue.get("id"))
                 continue
-            answered += 1
             if run.status == "pass":
                 self._log.info("[evidence_gate] the test that showed %s passes on the code that ran", issue.get("id"))
             elif run.status == "fail":
                 verdicts.append((issue, "its test still fails on it"))
-            elif flagged:
-                verdicts.append((issue, "its test no longer runs on it, so nothing shows the fault was removed ("
-                                 + _one_line(run.detail or "", 120) + ")"))
-        if silent and not answered and not await self._finding_tests_can_run():
-            # no test answered, and a test that does nothing gives no answer either: the environment, not the code
-            self._log.warning("[evidence_gate] the environment cannot run a test at all, so the tests of %s gave no answer;"
-                              " they cannot stop the quest", ", ".join(str(i.get("id")) for i in silent))
-            verdicts = [(i, how) for i, how in verdicts if i not in silent]
+            else:
+                # An error shows nothing, in the code or in the test (core/finding_repair.py): recorded, never a stop.
+                saved = ((record or {}).get("issues") or {}).get(str(issue.get("id")))
+                if isinstance(saved, dict):
+                    saved["gate_error"] = {"kind": run.kind, "place": run.place, "at": run.at,
+                                           "detail": _one_line(run.detail or "", 300)}
+                    errored = True
+                self._log.warning("[evidence_gate] the test of %s errors on the code that ran (%s%s): an error shows "
+                                  "nothing, so it does not stop the quest", issue.get("id"), _one_line(run.detail or "", 160),
+                                  ", inside the code" if run.crash_in_program else "")
+        if errored and record:
+            _code_review.save(self.quest_root, record)
         if not verdicts:
             return None
         return self._shown_fault_outcome(verdicts, record or {}, result, headline or [])
@@ -18919,19 +18926,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 [((_code_review.quantity_names(record, i) or k)[0], k, h) for i, h, k in left_out],
                 [(n, h) for _i, h, names in not_done for n in names], result)
         return None
-
-    async def _finding_tests_can_run(self) -> bool:
-        """Whether the quest's environment runs a finding test at all: a test file that does nothing, run the same way."""
-        probe = self.quest_root / ".fi" / "finding_tests" / "_probe_runs.py"
-        try:
-            probe.parent.mkdir(parents=True, exist_ok=True)
-            probe.write_text("def test_runs():\n    pass\n", encoding="utf-8")
-            run = await self._rerun_finding_test(probe.relative_to(self.quest_root).as_posix())
-        except OSError:
-            return False
-        finally:
-            probe.unlink(missing_ok=True)
-        return run is not None and run.status == "pass"
 
     async def _rerun_finding_test(self, rel: str) -> Any:
         """One finding test run on the code as it is, in its own process: its ``TestRun``, or ``None`` when the process

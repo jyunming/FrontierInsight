@@ -55,35 +55,69 @@ MARK = "FINDING_TESTS:"
 _FENCE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 #: Run in the quest's environment: imports each test file with ``code/`` on the path and calls its ``test_*`` functions.
-#: An ``AssertionError`` is a failure; anything else (including a file that does not import) is an error.
+#: Only an ``AssertionError`` raised by the test's own check of values is a failure (``kind: assertion``, with the line of
+#: the check). Anything else is an error that shows nothing, with the place it was raised (``place``: ``program`` when the
+#: deepest frame in the quest's files is under ``code/``, ``test`` when it is the test file) and its ``file:line``: an
+#: exception (``kind: exception``), an exception the test caught and turned into an assertion (``wrapped``; it is judged by
+#: the exception it caught), and an assertion the program's own code raised (``program_assert``).
 HARNESS = '''
 import importlib.util, json, os, sys, traceback
-sys.path.insert(0, os.path.abspath({code!r}))
+code_dir = os.path.abspath({code!r})
+sys.path.insert(0, code_dir)
+
+def where(e, path):
+    place, at, line = "library", "", ""
+    for f in traceback.extract_tb(e.__traceback__):
+        fn = os.path.abspath(f.filename)
+        if fn == path:
+            place, at, line = "test", os.path.basename(fn) + ":" + str(f.lineno), f.line or ""
+        elif fn.startswith(code_dir + os.sep):
+            place, at, line = "program", "code/" + os.path.relpath(fn, code_dir).replace(os.sep, "/") + ":" + str(f.lineno), f.line or ""
+    return place, at, line[:200]
+
+def said(e):
+    return (type(e).__name__ + ": " + str(e))[:300]
+
+def judged(name, e, path):
+    if isinstance(e, AssertionError):
+        caught = e.__cause__ or e.__context__
+        if caught is not None and not isinstance(caught, AssertionError):
+            place, at, line = where(caught, path)
+            return {{"test": name, "status": "error", "kind": "wrapped", "place": place, "at": at, "line": line,
+                     "detail": said(caught) + " (the test turned it into an assertion)"}}
+        place, at, line = where(e, path)
+        if place != "program":
+            return {{"test": name, "status": "fail", "kind": "assertion", "place": place, "at": at, "line": line,
+                     "detail": str(e)[:300]}}
+        return {{"test": name, "status": "error", "kind": "program_assert", "place": place, "at": at, "line": line,
+                 "detail": said(e)}}
+    place, at, line = where(e, path)
+    return {{"test": name, "status": "error", "kind": "exception", "place": place, "at": at, "line": line,
+             "detail": said(e)}}
+
 out = {{}}
-for path in {paths!r}:
+for given in {paths!r}:
+    path = os.path.abspath(given)
     results = []
     try:
         spec = importlib.util.spec_from_file_location("finding_test_" + str(len(out)), path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     except BaseException as e:
-        results.append({{"test": "(import)", "status": "error", "detail": (type(e).__name__ + ": " + str(e))[:300]}})
+        results.append(judged("(import)", e, path))
     else:
         names = sorted(n for n in dir(mod) if n.startswith("test_") and callable(getattr(mod, n)))
         if not names:
-            results.append({{"test": "(none)", "status": "error", "detail": "the file defines no test_* function"}})
+            results.append({{"test": "(none)", "status": "error", "kind": "exception", "place": "test",
+                             "detail": "the file defines no test_* function"}})
         for n in names:
             try:
                 getattr(mod, n)()
-            except AssertionError as e:
-                results.append({{"test": n, "status": "fail", "detail": str(e)[:300]}})
             except BaseException as e:
-                tb = traceback.extract_tb(e.__traceback__)
-                where = (" at line " + str(tb[-1].lineno)) if tb else ""
-                results.append({{"test": n, "status": "error", "detail": (type(e).__name__ + ": " + str(e))[:300] + where}})
+                results.append(judged(n, e, path))
             else:
                 results.append({{"test": n, "status": "pass", "detail": ""}})
-    out[path] = results
+    out[given] = results
 print({mark!r} + json.dumps(out))
 '''
 
@@ -158,11 +192,23 @@ def harness_source(code_dir: str, paths: list[str]) -> str:
 
 @dataclass
 class TestRun:
-    """What running one test file gave: ``pass`` (every test passed), ``fail`` (an assertion failed, nothing else went
-    wrong) or ``error`` (it could not be run: it did not import, raised something else, or printed nothing)."""
+    """What running one test file gave: ``pass`` (every test passed), ``fail`` (a test's own check of values failed by an
+    assertion, nothing else went wrong) or ``error`` (it could not be run: it did not import, raised something else, turned
+    an exception into an assertion, or printed nothing). ``kind`` is the harness's (``assertion``, ``exception``,
+    ``wrapped``, ``program_assert``), ``place`` where it was raised (``program``: the quest's code; ``test``: the test file),
+    ``at`` its ``file:line`` and ``line`` that line's text (for a failure: the assertion that failed)."""
 
     status: str
     detail: str = ""
+    kind: str = ""
+    place: str = ""
+    at: str = ""
+    line: str = ""
+
+    @property
+    def crash_in_program(self) -> bool:
+        """An error raised inside the quest's own code (not the test's): a crash, for the crash repair."""
+        return self.status == "error" and self.place == "program"
 
 
 def parse_runs(stdout: str, paths: list[str]) -> dict[str, TestRun]:
@@ -184,12 +230,15 @@ def parse_runs(stdout: str, paths: list[str]) -> dict[str, TestRun]:
             continue
         errors = [r for r in rows if isinstance(r, dict) and r.get("status") == "error"]
         fails = [r for r in rows if isinstance(r, dict) and r.get("status") == "fail"]
-        if errors:
-            out[path] = TestRun("error", f"{errors[0].get('test')}: {errors[0].get('detail')}")
-        elif fails:
-            out[path] = TestRun("fail", f"{fails[0].get('test')}: {fails[0].get('detail') or 'the assertion failed'}")
-        else:
+        first = errors[0] if errors else fails[0] if fails else None
+        if first is None:
             out[path] = TestRun("pass")
+            continue
+        at = str(first.get("at") or "")
+        detail = (f"{first.get('test')}: {first.get('detail') or 'the assertion failed'}"
+                  + (f" (at {at})" if at and errors else ""))
+        out[path] = TestRun("error" if errors else "fail", detail, str(first.get("kind") or ""),
+                            str(first.get("place") or ""), at, str(first.get("line") or ""))
     return out
 
 
@@ -812,13 +861,28 @@ async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
         if first.status == "fail":
             second = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
             if second.status == "fail":
-                issue.update(demonstrated=True, test=path, failure=first.detail[:300])
+                # Only a test's own assertion about values shows a fault; what failed is kept, for the gate after the run.
+                issue.update(demonstrated=True, test=path, failure=first.detail[:300], failure_kind=_issues.ASSERTION,
+                             assertion=first.line[:200], assertion_at=first.at)
                 env.save()
                 return True
             detail = "the test did not fail on a second run, so it is not deterministic: fix the seeds and make it assert one thing"
             last = detail
             continue
-        detail = f"the test could not show anything: {first.detail}. It must FAIL BY AN ASSERTION on the current code."
+        # An error shows nothing. Where it was raised is kept; a crash inside the code itself goes to the crash repair,
+        # and a test that errors in its own code is not kept (another is asked for, within the bound).
+        issue["errors"] = [*(issue.get("errors") or [])[-2:],
+                           {"test": path, "kind": first.kind, "place": first.place, "at": first.at,
+                            "detail": first.detail[:300]}]
+        if first.crash_in_program:
+            issue.update(demonstrated=False, outcome=_issues.NOT_DEMONSTRATED,
+                         crash={"at": first.at, "detail": first.detail[:300], "test": path},
+                         reason=f"its test crashed inside the code at {first.at or 'an unknown line'}: a crash, not a "
+                                "shown fault; it goes to the crash repair")
+            env.save()
+            return False
+        detail = (f"the test could not show anything: {first.detail}. It must FAIL BY AN ASSERTION about the values the "
+                  "code computes, on the current code; an exception in the test itself shows nothing.")
         last = first.detail
     issue.update(demonstrated=False, outcome=_issues.NOT_DEMONSTRATED, reason=f"no test showed it ({last[:160]})")
     env.save()
@@ -975,7 +1039,7 @@ async def repair_issues(env: Env) -> list[str]:
         if not rel or not (env.code / rel).is_file():
             issue.update(demonstrated=False, outcome=_issues.NOT_DEMONSTRATED, reason="the file it concerns is not in the code")
             continue
-        if issue.get("demonstrated") is not True:
+        if not _issues.shown_by_assertion(issue):
             if not await demonstrate(env, issue, rel):
                 continue
         await repair_issue(env, issue, rel)

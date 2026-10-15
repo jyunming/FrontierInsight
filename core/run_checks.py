@@ -42,6 +42,8 @@ TYPED_RESULT_REPAIRS = 2
 TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
 NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
+#: How many crashes inside the code, shown by a finding's test during the code review, go to the crash repair in a quest.
+REVIEW_CRASHES = 2
 
 #: FI's own behaviour checks (core/probes.py) are RECORD ONLY for now: a core check that does not hold is written down (the
 #: record, needs/PROBES.json, QUALITY.md, a sentence in the paper's limitations) and nothing else happens. Turning on
@@ -837,6 +839,51 @@ class RunChecksMixin:
             "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
             "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
         }
+
+    async def _review_crash_run(self, state: Any) -> dict[str, Any] | None:
+        """A test written for a reader's finding that crashed inside the code (not in the test) showed a crash, not the
+        finding: it goes to the crash repair like a failed run, with the place and the call that crashed, while a repair is
+        left and at most :data:`REVIEW_CRASHES` times a quest. The test is run again first: a crash a later repair removed
+        is not sent. ``None`` when there is nothing to send."""
+        from . import code_findings as _code_findings
+        from . import code_review as _code_review
+        from . import finding_repair as _finding_repair
+
+        record = _code_review.load(self.quest_root)  # type: ignore[attr-defined]
+        if not record or int(record.get("crashes_sent") or 0) >= REVIEW_CRASHES:
+            return None
+        if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+            return None
+        for issue in _code_findings.issues_of(record).values():
+            crash = issue.get("crash") if isinstance(issue, dict) else None
+            if not isinstance(crash, dict) or crash.get("sent"):
+                continue
+            crash["sent"] = True
+            rel = str(crash.get("test") or "")
+            _rc, text, _err = await self._run_in_env(  # type: ignore[attr-defined]
+                ["-c", _finding_repair.harness_source("code", [rel])], timeout_s=180, env=self._finding_test_env())  # type: ignore[attr-defined]
+            now = _finding_repair.parse_runs(text, [rel]).get(rel)
+            if now is None or not now.crash_in_program:
+                crash["gone"] = True
+                _code_review.save(self.quest_root, record)  # type: ignore[attr-defined]
+                continue
+            record["crashes_sent"] = int(record.get("crashes_sent") or 0) + 1
+            _code_review.save(self.quest_root, record)  # type: ignore[attr-defined]
+            try:
+                test_text = (self.quest_root / rel).read_text(encoding="utf-8")  # type: ignore[attr-defined]
+            except OSError:
+                test_text = ""
+            at = now.at or str(crash.get("at") or "")
+            self._log.warning("[code_review] a test of finding %s crashed inside the code at %s (%s); sending the code to "  # type: ignore[attr-defined]
+                              "the crash repair", issue.get("id"), at, _one(now.detail))
+            message = (f"FI called the code the way the test below does, and it crashed inside the code at {at}: "
+                       f"{now.detail}\n\nThe call (a test written to check a reader's finding about the code):\n```python\n"
+                       f"{test_text[:1500]}\n```\n\nRepair the code so that this call runs to the end and returns its values. "
+                       "Keep everything else as it is.")
+            script = ("experiment.py" if at.startswith("code/experiment.py") or not self._split_on(state)  # type: ignore[attr-defined]
+                      else _split_run.SIMULATE_NAME)
+            return self._code_review_failed_run(message, script=script)  # type: ignore[attr-defined]
+        return None
 
     def _trial_checks_stop(self, state: Any) -> dict[str, Any] | None:
         """When no repair of a fault FI's checks of the trials found is coming (they are spent, or the repair gave up): failed
