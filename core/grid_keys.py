@@ -46,7 +46,8 @@ SETTING_NAMES = frozenset({"cell", "setting", "settings"})
 #: The trial contract's entry points: their first parameter is the setting.
 ENTRIES = ("run_cell", "run_trial")
 #: The fields of the per-cell record FI writes for the analysis (``raw/trials.json``): not settings.
-RECORD_FIELDS = frozenset({"cell", "key", "planned", "ok", "failed", "metrics", "trials", "rows", "values"})
+RECORD_FIELDS = frozenset({"cell", "key", "planned", "ok", "failed", "metrics", "trials", "rows", "values", "level",
+                           "compared_in_each_run"})
 _GET = frozenset({"get", "pop", "setdefault"})
 
 
@@ -346,13 +347,14 @@ def _case_keys(value: Any, into: set[str]) -> None:
 
 
 def supplied_names(protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> tuple[list[str], set[str]]:
-    """``(the grid's axes, every name a setting may have)``: the axes, the settings the plan fixes, and the keys of the
-    cases its checks run at."""
+    """``(the study's axes, every name a setting may have)``: the axes (the grid's, and what each run compares inside it,
+    which every run's cell carries as a list), the settings the plan fixes, and the keys of the cases its checks run at."""
+    from . import in_run as _in_run
     from . import oracle_forms as _forms
 
     protocol = protocol if isinstance(protocol, dict) else {}
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-    axes = [str(k) for k in grid]
+    axes = [str(k) for k in grid] + [str(k) for k in _in_run.of(protocol) or {} if str(k) not in grid]
     allowed = set(axes)
     allowed.update(_forms.fixed_settings_of_design({**(design or {}), "protocol": protocol}))
     _case_keys(protocol, allowed)

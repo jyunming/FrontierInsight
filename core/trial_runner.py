@@ -906,7 +906,8 @@ def _file_hashes(quest_root: Path) -> dict[str, str]:
 def _save_run(quest_root: Path, key: str, run: TrialRun) -> None:
     record = {"key": key, "files": _file_hashes(quest_root), "cells": [
         {"key": c.key, "cell": c.cell, "planned": c.planned, "rows": c.rows, "returncode": c.returncode,
-         "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error} for c in run.cells]}
+         "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error, "levels": c.levels}
+        for c in run.cells]}
     try:
         (Path(quest_root) / RUN_RECORD).write_text(json.dumps(record, allow_nan=True, default=str), encoding="utf-8")
     except OSError:

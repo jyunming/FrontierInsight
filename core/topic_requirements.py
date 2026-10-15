@@ -472,8 +472,10 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False) -> 
 
 def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) -> dict[str, Any] | None:
     """``old`` (a design block as written) with only what was asked taken from ``new``: settings of ``protocol.grid`` that
-    are new, or that a gap names; metrics and equations whose id is new; design variables of a search that are new. Every
-    check, threshold, tolerance and the rest are ``old``'s. ``None`` when nothing was taken."""
+    are new, or that a gap names; what each run compares inside it (``protocol.in_each_run``) the same way, and a factor
+    ``old`` compares inside each run stays there, whichever of the two places the answer wrote it in; metrics and equations
+    whose id is new; design variables of a search that are new. Every check, threshold, tolerance and the rest are
+    ``old``'s. ``None`` when nothing was taken."""
     if not isinstance(old, dict) or not isinstance(new, dict):
         return None
     o = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
@@ -503,6 +505,21 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
         if scan:
             protocol["optimisation"] = {**o["optimisation"], "grid": scan, **({"fixed": held} if held else {})}
         new_grid = {}
+    old_inside = o.get("in_each_run") if isinstance(o.get("in_each_run"), dict) else {}
+    new_inside = n.get("in_each_run") if isinstance(n.get("in_each_run"), dict) else {}
+    have_grid = o.get("grid") if isinstance(o.get("grid"), dict) else {}
+    # A factor each run compares inside it is never a setting of the grid as well: the answer's values for it are read
+    # as its list, and one the plan already sweeps as a setting stays a setting.
+    asked_inside = {**{a: v for a, v in new_grid.items() if a in old_inside},
+                    **{a: v for a, v in new_inside.items() if a not in have_grid}}
+    new_grid = {a: v for a, v in new_grid.items() if a not in old_inside}
+    if asked_inside:
+        inside = dict(old_inside)
+        for axis, values in asked_inside.items():
+            if (axis not in inside or axis in named) and isinstance(values, list) and inside.get(axis) != values:
+                inside[axis] = values
+                taken = True
+        protocol["in_each_run"] = inside
     if new_grid:
         grid = dict(o.get("grid") if isinstance(o.get("grid"), dict) else {})
         for axis, values in new_grid.items():

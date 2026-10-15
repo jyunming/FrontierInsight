@@ -231,3 +231,34 @@ def test_a_collapsed_axis_is_found_in_a_table_of_the_records_per_value() -> None
     rows = [{"m": 20, "T": 300, "z": float(i)} for i in range(6)]
     found = reported_settings.problems(cells, [("", {"table": rows})])
     assert any(f.axis == "T" and f.collapsed for f in found)
+
+
+def test_the_code_check_lets_the_code_read_what_each_run_compares_and_flags_a_name_it_does_not_have() -> None:
+    from core import grid_keys
+    protocol = {"grid": {"m": [10, 20]}, "in_each_run": INSIDE}
+    ok = {"simulate.py": "def run_trial(cell, trial_id, seed):\n    procs = cell['procedure']\n    return {'x': cell['m']}\n",
+          "experiment.py": "def f(entry):\n    return entry['cell']['procedure'], entry['level']\n"}
+    assert grid_keys.problems(ok, protocol) == []
+    wrong = {"simulate.py": "def run_trial(cell, trial_id, seed):\n    return {'x': cell['procedures']}\n"}
+    assert grid_keys.problems(wrong, protocol)
+    only_inside = {"grid": {}, "in_each_run": INSIDE}
+    assert grid_keys.problems(wrong, only_inside)
+
+
+def test_a_saved_run_keeps_the_values_each_run_compared(tmp_path: Path) -> None:
+    root, run = _run(tmp_path)
+    again = trial_runner._load_run(root, "k")
+    assert again is not None
+    assert [c.key for c in again.record_cells()] == [c.key for c in run.record_cells()]
+
+
+def test_the_topic_check_writes_a_factor_compared_inside_each_run_back_to_its_list_never_to_the_grid() -> None:
+    old = {"protocol": {"grid": {"m": [10, 20]}, "in_each_run": {"T": [300, 350]}, "metrics": []}}
+    asked = [{"axis": "T"}]
+    in_grid = topic_requirements.merge(old, {"protocol": {"grid": {"m": [10, 20], "T": [300, 350, 400]}}}, asked)
+    assert in_grid is not None
+    assert in_grid["protocol"]["in_each_run"] == {"T": [300, 350, 400]} and "T" not in in_grid["protocol"]["grid"]
+    in_list = topic_requirements.merge(old, {"protocol": {"in_each_run": {"T": [300, 400]}}}, asked)
+    assert in_list is not None and in_list["protocol"]["in_each_run"] == {"T": [300, 400]}
+    plain = {"protocol": {"grid": {"m": [10]}, "metrics": []}}
+    assert "in_each_run" not in (topic_requirements.merge(plain, {"protocol": {"grid": {"m": [10], "n": [1, 2]}}}, []) or {})["protocol"]
