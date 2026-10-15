@@ -602,7 +602,7 @@ a character the text font lacks (Cyrillic, ⊤, ⩽, ★, a box-drawing line)
 is set in another installed font that has it, and code is set in a
 monospace font that has all of its characters. Without XeLaTeX,
 pdflatex sets the characters LaTeX has an exact form for (⅓ as a
-fraction). FI never prints a `?` or a look-alike instead: a character
+fraction). FI never prints a `?` or drops a character: a character
 no installed font has, or a right-to-left or Indic script, makes the
 paper through the browser fallback below, and its first page says
 "Not typeset". `.fi/paper_render.json` and `QUALITY.md` say whether
