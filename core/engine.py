@@ -15994,6 +15994,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
                 deterministic="run_trial" not in trial_entries, simulate=simulate_path, analysis=code_path,
                 log=self._log, leave_out=self._left_out_quantities,
+                # FI's checks of the trials (core/trial_checks.py) send a fault back only while a repair is left.
+                repairs_left=lambda: (int(state.get("exec_reflect_iter", 0) or 0)
+                                      < self.config.engine.exec_reflect_max_iterations
+                                      and not state.get("exec_give_up_reason")),
                 submit=(self.quest_root / "code" / _trial_runner.SUBMIT_NAME
                         if self.config.execution.background_jobs else None),
             )
@@ -16679,6 +16683,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 # Set when the run was sent back because the simulation's numbers did not depend on what it was given
                 # (core/flat_output.py): the honest stop after the repairs says so in those words.
                 "flat_output": (str(getattr(runner, "flat", None) or "") if result.returncode != 0 else ""),
+                # A fault FI's checks of the trials found (core/trial_checks.py): the stop once the repairs are spent.
+                "trial_checks": (dict(getattr(runner, "trial_fault", None) or {}) if result.returncode != 0 else {}),
                 "numeric_warnings": self._scan_numeric_warnings(state, result.stderr, result_json),
             },
             "figures": figures,
@@ -17099,6 +17105,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         check finds the difference and the run stops there, with the reason. On the trial contract FI's trials are
         reused (the simulation is unchanged); the older contract, or a record changed on disk, runs them again.
         ``None`` when the failure was not a run-manifest difference."""
+        stop = self._trial_checks_stop(state)  # a fault FI's checks of the trials found stands: the quest stops (no paper)
+        if stop is not None:
+            return stop
         if self.config.engine.run_manifest_check != "block" or not int(state.get("run_manifest_failures") or 0):
             return None
         self._log.warning(

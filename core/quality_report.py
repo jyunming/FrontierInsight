@@ -173,6 +173,7 @@ class _Quest:
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
         self.probes = _dict(_json(fi / "probes.json"))
+        self.trial_checks = _dict(_json(fi / "trial_checks.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.pause = _dict(_json(fi / "pause.json"))
@@ -462,6 +463,41 @@ def _probes_summary(q: _Quest) -> dict[str, Any] | None:
                              for k, v in rows.items() if v.get("verdict") == "broken"],
             "not_understood": len(_list(q.probes.get("dropped"))),
             "for_current_code": exact}
+
+
+def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
+    """FI's own checks of what the trials gave (core/trial_checks.py): the settings with failed trials, those left out, each
+    reported interval or standard error judged against the true values, and what could not be checked. ``None`` when the
+    checks did not run (no trials of FI's own)."""
+    rec = q.trial_checks
+    if not rec:
+        return None
+    fails = [f for f in _list(rec.get("failures")) if isinstance(f, dict)]
+    left = [str(k) for k in _list(rec.get("left_out_settings"))]
+    cal = _dict(rec.get("calibration"))
+    quantities = [x for x in _list(cal.get("quantities")) if isinstance(x, dict)]
+    lines = []
+    if fails:
+        lines.append(f"{len(fails)} of {_int(rec.get('settings'))} setting(s) had failed trials"
+                     + (f"; {len(left)} left out of the results because most of their trials failed ({', '.join(left[:6])})"
+                        if left else ""))
+        lines += [f"{f.get('key') or 'the one setting'}: {f.get('failed')} of {f.get('planned')} failed"
+                  + (f" ({_one(_list(f.get('reasons'))[0][0], 160)})" if _list(f.get("reasons"))
+                     and isinstance(_list(f.get("reasons"))[0], list) else "") for f in fails[:8]]
+    else:
+        lines.append(f"no trial failed in the {_int(rec.get('settings'))} setting(s)")
+    for x in quantities:
+        state = ("grossly wrong (a fault)" if x.get("fault") else
+                 f"below the level in {_int(x.get('below'))} setting(s): reported, not a fault" if _int(x.get("below"))
+                 else "as it should be")
+        lines.append(f"{_one(x.get('says'), 300)} - {state}")
+    not_checked = [str(n) for n in _list(cal.get("not_checked"))]
+    if not cal.get("checked"):
+        lines.append("calibration not checked: " + _one("; ".join(not_checked), 400))
+    elif not_checked:
+        lines += [f"not checked: {_one(n, 200)}" for n in not_checked[:4]]
+    return {"action": str(rec.get("action") or ""), "left_out": left, "checked": bool(cal.get("checked")),
+            "faults": sum(1 for x in quantities if x.get("fault")), "lines": lines}
 
 
 def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
@@ -1025,6 +1061,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
         "behaviour_checks": _probes_summary(q),
+        "trial_checks": _trial_checks_summary(q),
         "citations": _citations(q),
         "left_out_of_paper": _left_out_of_paper(q),
         "paper_records": _paper_records(q),
@@ -1197,6 +1234,12 @@ def render(report: dict[str, Any]) -> str:
                   "Nothing was sent back or stopped because of them."
                   + ("" if checks.get("for_current_code", True) else " (These were run on an earlier version of the code.)")]
         lines += [f"- ({b['strength']}) {b['says']}" for b in checks["broken_items"]]
+    trials = report.get("trial_checks")
+    if trials:
+        lines += ["", "## FI's checks of the trials", "",
+                  "FI counted the failed trials of each setting and measured the intervals and standard errors the "
+                  "simulation reports against the true values it was given:"]
+        lines += [f"- {line}" for line in trials["lines"]]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")
     if f:

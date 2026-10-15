@@ -203,7 +203,7 @@ class SettingFailures:
         return self.planned > 0 and self.fraction > STATE_FRACTION
 
     def says(self) -> str:
-        why = "; ".join(f"{n}x {r}" for r, n in self.reasons[:3])
+        why = "; ".join(f"{n}x {r if len(r) <= 200 else r[:197] + '...'}" for r, n in self.reasons[:3])
         return (f"{self.key or 'the one setting'}: {self.failed} of {self.planned} trials failed ({self.fraction:.0%})"
                 + (f" - {why}" if why else ""))
 
@@ -614,6 +614,80 @@ def calibration_directive(faults: list[Quantity]) -> str:
             "a wrong critical value) and fix it. Do not change the true values, the settings or the number of trials.")
 
 
+# ---- what FI does with them --------------------------------------------------------------------------------------------
+
+OK, REPAIR, STOP, LEAVE_OUT = "ok", "repair", "stop", "leave_out"
+
+
+def of_settings(cell: dict[str, Any], keys: set[str]) -> bool:
+    """Whether a summary record belongs to one of the settings ``keys``: the setting itself, or a record of a value its runs
+    compared inside them (keyed ``<setting>,<value>``)."""
+    key = str(cell.get("key") or "")
+    return key in keys or bool(cell.get("level")) and any(key.startswith(k + ",") for k in keys if k)
+
+
+@dataclass
+class Verdict:
+    """What FI does after the two checks of a run's trials: ``action`` is :data:`OK` (go on), :data:`REPAIR` (send the
+    simulation back with ``directive``), :data:`STOP` (the repairs are spent and a fault stands: the quest stops, ``say`` /
+    ``tried`` are its plain record) or :data:`LEAVE_OUT` (the repairs are spent and only some settings are faulty: their
+    numbers are left out of what the analysis is given, ``left_out``)."""
+
+    fails: list[SettingFailures]
+    calibration: Calibration
+    action: str = OK
+    left_out: list[str] = field(default_factory=list)
+    directive: str = ""
+    say: str = ""
+    tried: list[str] = field(default_factory=list)
+    #: The fault is failed trials in some settings only (no calibration fault): once the repairs are spent those settings
+    #: are left out, never a stop.
+    partial: bool = False
+
+    def record(self) -> dict[str, Any]:
+        return {**summary(self.fails, self.calibration), "action": self.action, "left_out_settings": list(self.left_out),
+                **({"say": self.say} if self.say else {})}
+
+
+def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, thresholds: dict[str, Any] | None = None,
+          reasons: dict[str, Counter] | None = None, *, repairs_left: bool) -> Verdict:
+    """Both checks on a run's per-setting summary, and what follows from them. A setting where most trials failed is judged
+    by the failure check alone (its numbers rest on the trials that survived), so the calibration reads the other settings.
+    While a repair is left, any fault is sent back; once they are spent, a calibration fault or a failure in every setting
+    stops the quest, and failures in some settings leave those settings out."""
+    fails = failures(cells, reasons)
+    bad = [f for f in fails if f.fault]
+    run = [f for f in fails if f.planned]
+    every = bool(bad) and len(bad) == len(run)
+    keys = {f.key for f in bad}
+    cal = calibration([c for c in cells if not of_settings(c, keys)], protocol, thresholds)
+    out = Verdict(fails, cal)
+    if not bad and not cal.faults:
+        return out
+    if cal.faults or every or repairs_left:
+        parts = ([failures_directive(bad)] if bad else []) + ([calibration_directive(cal.faults)] if cal.faults else [])
+        out.directive = "\n\n".join(parts)
+        out.action = REPAIR if repairs_left else STOP
+        # Only some settings fail and nothing else is wrong: once the repairs are spent, those settings are left out.
+        out.partial = not cal.faults and not every
+        if cal.faults:
+            q = cal.faults[0]
+            out.say = ("FI measured the intervals and standard errors the simulation reports against the true values it "
+                       f"was given, and they are grossly wrong ({q.says()})")
+            out.tried = ["ran every trial of the study and measured the reported intervals and standard errors against "
+                         "the true values the simulation was given, per setting",
+                         *[q.says() for q in cal.faults[:2]]]
+        else:
+            many = "every setting" if every else f"{len(bad)} of {len(run)} settings"
+            out.say = f"in {many} more than half of the trials failed ({bad[0].says()})"
+            out.tried = ["ran every trial of the study and counted the failed trials of each setting",
+                         *[f.says() for f in bad[:2]]]
+        return out
+    out.action = LEAVE_OUT
+    out.left_out = [f.key for f in bad]
+    return out
+
+
 # ---- the record --------------------------------------------------------------------------------------------------------
 
 
@@ -633,6 +707,14 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
             "checked": cal.checked,
         },
     }
+
+
+def left_out_settings(quest_root: Path | str) -> list[dict[str, Any]]:
+    """The settings whose numbers the last run left out (most of their trials failed and the repairs were spent), each with
+    its failed and planned counts, from the record."""
+    rec = read_record(quest_root)
+    keys = set(rec.get("left_out_settings") or [])
+    return [f for f in rec.get("failures") or [] if isinstance(f, dict) and f.get("key") in keys]
 
 
 def write_record(quest_root: Path | str, record: dict[str, Any]) -> None:

@@ -63,6 +63,7 @@ _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_
 
 NOT_DONE, LEFT_OUT, NOT_COMPUTED, PRECISION = "not_done", "left_out", "not_computed", "precision"
 SECOND_VERSION, UNTESTED, CODE_FINDING, FAILED_TRIALS = "second_version", "untested", "code_finding", "failed_trials"
+SETTING_LEFT_OUT = "setting_left_out"
 _KIND_WORDS = {
     NOT_DONE: "a part of the topic the study did not do",
     LEFT_OUT: "a quantity left out of the results because a test showed the code computes it wrongly",
@@ -72,9 +73,13 @@ _KIND_WORDS = {
     UNTESTED: "an equation not tested against a worked example before the run",
     CODE_FINDING: "an open problem in the code that can change a reported result",
     FAILED_TRIALS: "trials that failed",
+    SETTING_LEFT_OUT: "a setting left out of the results because most of its trials failed",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
-              SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials"}
+              SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
+              SETTING_LEFT_OUT: "setting-left-out"}
+#: More settings left out than this are placed as one item.
+_MAX_SETTING_ITEMS = 6
 
 
 @dataclass(frozen=True)
@@ -282,7 +287,29 @@ def required_items(quest_root: Path | str) -> list[Item]:
         if failed:
             add(FAILED_TRIALS, "failed trials", _sentence(f"{failed:,} of {len(statuses):,} trials failed; their results are "
                                                           "not in the reported numbers"), key="all")
+    _left_out_setting_items(root, add)
     return items
+
+
+def _left_out_setting_items(root: Path, add: Any) -> None:
+    """The settings FI's check of the trials left out (most of their trials failed and the repairs were spent;
+    core/trial_checks.py), each by its setting; more than :data:`_MAX_SETTING_ITEMS` are one item."""
+    from . import trial_checks as _trial_checks
+
+    left = _trial_checks.left_out_settings(root)
+
+    def said(f: dict[str, Any]) -> str:
+        reason = next((_one(r[0])[:160] for r in f.get("reasons") or [] if isinstance(r, list) and r), "")
+        return f"{f.get('failed')} of {f.get('planned')} trials failed" + (f" ({reason})" if reason else "")
+
+    if len(left) > _MAX_SETTING_ITEMS:
+        add(SETTING_LEFT_OUT, "settings left out",
+            _sentence(f"{len(left)} settings are left out of the results because most of their trials failed: "
+                      + "; ".join(f"{f['key']}: {said(f)}" for f in left[:12])), key="all")
+        return
+    for f in left:
+        add(SETTING_LEFT_OUT, str(f["key"]) or "the one setting",
+            _sentence(f"The setting {f['key']} is left out of the results: {said(f)}"), key=f["key"])
 
 
 # ---- the run time ---------------------------------------------------------------------------------------------------

@@ -654,7 +654,7 @@ class TrialsRunner:
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, deterministic: bool,
                  simulate: Path, analysis: Path, log: Any = None, submit: Path | None = None,
-                 leave_out: Any = None) -> None:
+                 leave_out: Any = None, repairs_left: Any = None) -> None:
         self.executor = executor
         self.quest_root = Path(quest_root)
         self._protocol = protocol
@@ -674,6 +674,14 @@ class TrialsRunner:
         #: Quantities the analysis must not be given (the simulation typed their value into its code, core/typed_results.py):
         #: a function returning their names, or ``None``. The ledger keeps every value the simulation returned.
         self._leave_out = leave_out
+        #: Whether the quest has a repair of the simulation left (a function, or a bool): FI's checks of the trials
+        #: (core/trial_checks.py) send a fault back while one is left, and leave out or stop once they are spent.
+        self._repairs_left = repairs_left
+        #: What FI's checks of the trials found when they sent the run back or stop it (``{"action", "say", "tried"}``),
+        #: else ``None``; the engine keeps it in ``exec_result['trial_checks']``.
+        self.trial_fault: dict[str, Any] | None = None
+        #: The settings whose numbers the analysis is not given (most of their trials failed, the repairs were spent).
+        self.left_out_settings: list[str] = []
         self._plan_seen: list[dict[str, Any]] | None = None
         self._plan_started = 0.0
 
@@ -705,11 +713,15 @@ class TrialsRunner:
         """The per-cell summary the analysis reads: FI's own, or (when quantities are left out) a copy of it without them,
         beside it. FI's summary and the ledger are not changed."""
         names = {str(n) for n in (self._leave_out() if callable(self._leave_out) else self._leave_out or ())}
-        if not names:
+        settings = set(self.left_out_settings)
+        if not names and not settings:
             return summary
+        from . import trial_checks as _checks
+
         try:
             data = json.loads(summary.read_text(encoding="utf-8"))
-            for cell in data.get("cells") or []:
+            data["cells"] = [c for c in data.get("cells") or [] if not _checks.of_settings(c, settings)]
+            for cell in data["cells"]:
                 cell["metrics"] = {k: v for k, v in (cell.get("metrics") or {}).items() if k not in names}
             copy = summary.with_name("trials.analysis.json")
             copy.write_text(json.dumps(data, indent=1, allow_nan=True), encoding="utf-8")
@@ -724,6 +736,7 @@ class TrialsRunner:
             return await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
         started = time.monotonic()
         self.flat = None
+        self.trial_fault, self.left_out_settings = None, []
         base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
@@ -839,6 +852,9 @@ class TrialsRunner:
                 self.log.warning("[execute] the simulation does not use the settings it is given: %s", flat)
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr()}\nFI's run gave a result that is not usable: {flat}".strip())
+        sent = self._check_trials(run, protocol, started)
+        if sent is not None:
+            return sent
         # Relative to the quest folder the analysis runs in: the same path inside a container (/work) as on the host.
         summary_path = self._without_left_out(run.summary_path)
         analysis_env = {**(env or {}), RESULTS_ENV: summary_path.relative_to(self.quest_root).as_posix(),
@@ -849,6 +865,55 @@ class TrialsRunner:
             returncode=result.returncode, stdout=result.stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr() + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
         )
+
+
+    def _check_trials(self, run: TrialRun, protocol: dict[str, Any], started: float) -> Any:
+        """FI's two checks of what the trials gave (core/trial_checks.py): the failed trials of each setting, and the reported
+        intervals and standard errors against the true values. A fault is sent back like a failed run of the simulation (the
+        directive at the end of its stderr) while a repair is left; once they are spent, a fault in some settings leaves
+        them out of what the analysis reads, and any other fault is a failed run the engine stops on. ``None`` to go on."""
+        from core.execution import ExecutionResult
+
+        from . import trial_checks as _checks
+
+        try:
+            data = json.loads(run.summary_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        cells = [c for c in data.get("cells") or [] if isinstance(c, dict)]
+        thresholds = data.get("thresholds") if isinstance(data.get("thresholds"), dict) else {}
+        reasons = _checks.reasons_of_run(run.cells, self.quest_root) or _checks.ledger_reasons(self.quest_root)
+        left = self._repairs_left() if callable(self._repairs_left) else bool(self._repairs_left)
+        verdict = _checks.judge(cells, protocol, thresholds or None, reasons, repairs_left=bool(left))
+        _checks.write_record(self.quest_root, verdict.record())
+        stated = [f for f in verdict.fails if f.stated and not f.fault]
+        if self.log is not None:
+            for f in stated:
+                self.log.info("[execute] %s (recorded; the paper states it)", f.says())
+            for q in verdict.calibration.quantities:
+                if not q.fault and q.below:
+                    self.log.info("[execute] %s; below the level in %d setting(s): reported, not a fault", q.says(), q.below)
+            if not verdict.calibration.checked:
+                self.log.info("[execute] calibration not checked: %s", "; ".join(verdict.calibration.not_checked)[:400])
+        if verdict.action == _checks.LEAVE_OUT:
+            self.left_out_settings = list(verdict.left_out)
+            if self.log is not None:
+                self.log.warning("[execute] in %d setting(s) more than half of the trials failed and the repairs are spent: "
+                                 "their numbers are left out of the results and the paper says so (%s)",
+                                 len(verdict.left_out), ", ".join(verdict.left_out[:6]))
+            return None
+        if verdict.action == _checks.OK:
+            return None
+        self.failed_script = self.simulate.name
+        self.trial_fault = {"action": verdict.action, "say": verdict.say, "tried": list(verdict.tried),
+                            "partial": verdict.partial}
+        if self.log is not None:
+            self.log.warning("[execute] FI's checks of the trials found a fault; %s:\n%s",
+                             "sending the simulation back to be repaired" if verdict.action == _checks.REPAIR
+                             else "the repairs are spent, the quest stops", verdict.directive[:1500])
+        directive = verdict.directive if len(verdict.directive) <= 1800 else verdict.directive[:1797] + "..."
+        return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
+                               stderr=f"{run.stderr()[-4000:]}\n{directive}".strip())
 
 
 def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | None) -> None:

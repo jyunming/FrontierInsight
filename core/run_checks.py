@@ -838,6 +838,29 @@ class RunChecksMixin:
             "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
         }
 
+    def _trial_checks_stop(self, state: Any) -> dict[str, Any] | None:
+        """When no repair of a fault FI's checks of the trials found is coming (they are spent, or the repair gave up): failed
+        trials in some settings only run the study once more with the repairs counted as spent, so those settings are left
+        out (FI's trials are reused, the simulation being unchanged); any other fault stops the quest with its plain record
+        (``cannot_repair``, no paper). ``None`` when the run was not sent back by those checks (core/trial_checks.py)."""
+        result = state.get("exec_result") or {}
+        fault = result.get("trial_checks") if isinstance(result, dict) else None
+        if not isinstance(fault, dict) or not fault.get("say") or result.get("returncode", 0) == 0:
+            return None
+        if fault.get("partial"):
+            self._log.warning(  # type: ignore[attr-defined]
+                "[execute_reflect] no repair of the settings where most trials failed is coming: the study is read once "
+                "more and those settings are left out")
+            return {"exec_patch_pending": True, "exec_give_up_reason": "",
+                    "exec_reflect_iter": max(int(state.get("exec_reflect_iter") or 0),
+                                             int(self.config.engine.exec_reflect_max_iterations))}  # type: ignore[attr-defined]
+        repairs = int(state.get("exec_reflect_iter") or 0)
+        return self._stop_before_run(
+            str(fault["say"]), "cannot_repair",
+            tried=[*[str(t) for t in fault.get("tried") or []],
+                   f"sent the simulation back to be repaired with these numbers ({repairs} repair"
+                   f"{'s' if repairs != 1 else ''}); the fault stood"])
+
     def _stop_too_long(self, text: str) -> dict[str, Any]:
         """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""
         return self._stop_before_run(text, "too_long")
