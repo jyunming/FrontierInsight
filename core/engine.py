@@ -120,6 +120,7 @@ from . import oracle_forms as _forms
 from . import oracle_review as _review
 from . import topic_requirements as _topic_req
 from . import trial_table as _trial_table
+from . import results_by_setting as _results_by_setting
 from . import plan_ledger as _ledger
 from . import plan_steps as _plan_steps
 from . import equation_tests as _equation_tests
@@ -19099,7 +19100,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if numbers_note := self._analysis_numbers_note(state):
             evidence_note = f"{evidence_note}\n\n{numbers_note}".strip()
         try:
-            table_note = _trial_table.write_note(_trial_table.write(self.quest_root))
+            trial_rows = _trial_table.write(self.quest_root)
+            try:  # every setting with its reference value (core/results_by_setting.py), for a table too long to give
+                by_setting = _results_by_setting.write(self.quest_root, self._protocol_block(state), self._judged_checks())
+            except Exception as e:  # noqa: BLE001 -- the same: a help, never a reason to stop
+                self._log.warning("[write] FI's table of every setting could not be written (%s)", e)
+                by_setting = None
+            table_note = _results_by_setting.writer_note(trial_rows, by_setting)
         except Exception as e:  # noqa: BLE001 -- the table is a help to the writer, never a reason to stop
             self._log.warning("[write] FI's table of the trials could not be written (%s)", e)
             table_note = ""
@@ -20875,6 +20882,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             config_dump: Any = self.config.model_dump(mode="json")
         except Exception:  # noqa: BLE001 - the config is a convenience here
             config_dump = None
+        try:  # FI's per-setting numbers, named by setting, and its own reference values (core/results_by_setting.py)
+            per_setting = _results_by_setting.provenance_inputs(
+                *_results_by_setting.from_quest(self.quest_root, self._protocol_block(state), self._judged_checks()))
+        except Exception as e:  # noqa: BLE001 - fall back to the trial table alone
+            self._log.warning("[number_provenance] FI's table of every setting could not be read (%s)", e)
+            per_setting = {"trial_table": _trial_table.traceable(_trial_table.rows(self.quest_root))}
         return number_provenance.check(
             text,
             result_json=state.get("result_json") or {},
@@ -20893,7 +20906,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "duration_s": _paper_facts.measured_run_time(
                     self.quest_root, (state.get("exec_result") or {}).get("duration_s"))[0]}.items()
                        if isinstance(v, (int, float)) and not isinstance(v, bool)},
-            trial_table=_trial_table.traceable(_trial_table.rows(self.quest_root)),
+            **per_setting,
         )
 
     def _analysis_numbers_note(self, state: QuestState) -> str:

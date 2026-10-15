@@ -156,6 +156,7 @@ from __future__ import annotations
 import math
 import re
 from array import array
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
@@ -1211,6 +1212,185 @@ def _is_accounted_for(
     return any(traceable.words_of(path) & words for path in paths)
 
 
+# --- a number of FI's per-setting table, named by the setting and the quantity -------------------------------------
+
+#: The statistics :func:`core.trial_table.traceable` gives each value of each setting.
+_TABLE_STATS = ("n", "mean", "sd", "ci_lower", "ci_upper")
+#: A paragraph longer than this says too much to name one number; the text this far either side is read instead.
+_PARAGRAPH_MAX = 2500
+_PARAGRAPH_FALLBACK = 400
+_CONTEXT_NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?![\w])")
+_SMALL_WORD = re.compile(r"(?<![a-z])[a-z]{2}(?![a-z])")
+
+
+def _stems_of_text(text: str) -> frozenset[str]:
+    """:func:`_name_stems` of ``text``, with a two-letter abbreviation written in lowercase too (``pp`` in "gap in
+    pp"), so a value's name part such as ``_pp`` or ``_bh`` can be found in prose and table headers."""
+    small = {w for w in _SMALL_WORD.findall(text.lower()) if w not in _TWO_LETTER_WORDS}
+    return frozenset(_name_stems(text, _COMMON_STOP) | small)
+
+
+def _numbers_of(text: str) -> list[float]:
+    out: list[float] = []
+    for m in _CONTEXT_NUMBER.finditer(text):
+        try:
+            out.append(float(m.group(0)))
+        except ValueError:
+            continue
+    return out
+
+
+def _names_value(numbers: list[float], value: float) -> bool:
+    return any(math.isclose(n, value, rel_tol=1e-9, abs_tol=1e-12) for n in numbers)
+
+
+def _table_cells(line: str) -> list[str]:
+    cells = line.strip().split("|")
+    if cells and not cells[0].strip():
+        cells = cells[1:]
+    if cells and not cells[-1].strip():
+        cells = cells[:-1]
+    return cells
+
+
+def _caption_above(lines: list[str], first: int) -> str:
+    """The caption of a table whose header is line ``first``: the paragraph right above it (a ``Table 1.`` line)."""
+    i = first - 1
+    while i >= 0 and not lines[i].strip():
+        i -= 1
+    end = i + 1
+    while i >= 0 and lines[i].strip() and not lines[i].lstrip().startswith("|"):
+        i -= 1
+    caption = " ".join(lines[i + 1:end])
+    return caption if re.match(r"\s*(?:\*\*|_)?\s*Table\b", caption, re.I) else ""
+
+
+@dataclass(frozen=True)
+class _Place:
+    """Where a number stands. In a Markdown table: ``label`` is its column's header (with the row's first cell when that
+    is not a number), ``names`` the label with the table's caption, ``row`` the row's other cells in order and
+    ``column`` its column's header. In prose: ``label`` is ``None``, ``names`` is its paragraph and ``sentence`` its
+    sentence."""
+
+    label: str | None
+    names: str
+    row: tuple[str, ...] = ()
+    column: str = ""
+    sentence: str = ""
+
+    def numbers(self, settings: int) -> list[float]:
+        """The numbers that may state the setting: in a table, the row's first ``settings`` cells (where a table puts
+        its settings, left of what was measured: the other cells hold measured values that can equal a setting by
+        chance) and the column's header; in prose, the sentence (a paragraph names many settings; the quantity may be
+        named a sentence earlier, the setting of this number is named beside it)."""
+        if self.label is None:
+            return _numbers_of(self.sentence)
+        return _numbers_of(" ".join((*self.row[:settings], self.column)))
+
+
+def _setting_contexts(text: str, token: str) -> list[_Place]:
+    """Where ``token`` stands (:class:`_Place`), at most four places."""
+    out: list[_Place] = []
+    lines = text.split("\n")
+    starts: list[int] = []
+    pos = 0
+    for line in lines:
+        starts.append(pos)
+        pos += len(line) + 1
+    for m in re.finditer(r"(?<![\d.])" + re.escape(token) + r"(?!\d)", text):
+        row = bisect_right(starts, m.start()) - 1
+        line = lines[row]
+        if line.lstrip().startswith("|"):
+            first = row
+            while first > 0 and lines[first - 1].lstrip().startswith("|"):
+                first -= 1
+            if first == row or first + 1 == row:
+                continue  # the number is in the header or the rule under it, not a cell of the table
+            header = _table_cells(lines[first])
+            cells = _table_cells(line)
+            offset = m.start() - starts[row] - (line.find("|") + 1)
+            col, run = 0, 0
+            for i, cell in enumerate(cells):
+                if run <= offset < run + len(cell) + 1:
+                    col = i
+                    break
+                run += len(cell) + 1
+            caption = _caption_above(lines, first)
+            column = header[col] if col < len(header) else ""
+            lead = cells[0] if cells and col != 0 and not _numbers_of(cells[0]) else ""
+            label = f"{column} {lead}".strip()
+            others = tuple(c for i, c in enumerate(cells) if i != col)
+            out.append(_Place(label, f"{label} {caption}", others, column))
+        else:
+            lo = 0
+            for b in _BLANK_LINE.finditer(text, 0, m.start()):
+                lo = b.end()
+            nxt = _BLANK_LINE.search(text, m.end())
+            hi = nxt.start() if nxt else len(text)
+            if hi - lo > _PARAGRAPH_MAX:
+                lo, hi = max(lo, m.start() - _PARAGRAPH_FALLBACK), min(hi, m.end() + _PARAGRAPH_FALLBACK)
+            out.append(_Place(None, text[lo:hi], sentence=_sentence_around(text, m.start(), m.end())))
+        if len(out) >= 4:
+            break
+    return out
+
+
+def _trial_path(path: str, labels: list[str]) -> tuple[str, str] | None:
+    """``(setting label, value name)`` of a path of FI's per-setting table (``trials.m=20,pi1=0.2.fdr_bh.mean``)."""
+    for label in labels:
+        head = f"trials.{label}."
+        if path.startswith(head):
+            rest = path[len(head):]
+            value, _, stat = rest.rpartition(".")
+            if value and stat in _TABLE_STATS:
+                return label, value
+    return None
+
+
+def _named_by_setting(
+    table: Traceable, cand: float, dec: int, contexts: Callable[[], list[_Place]],
+    settings: dict[str, dict[str, Any]], labels: list[str],
+) -> bool:
+    """Is ``cand`` a number of FI's per-setting table whose setting and quantity the paper names where it prints it?
+
+    A table of many settings holds many numbers of every size, so an unnamed match there is luck as often as not (0.177 is
+    one of them, matched by a chance of 0.22); and "At pi1 = 0.2 it was 0.177, 0.198 and 0.199 for m = 20, 200, 2000"
+    names neither the quantity nor, in that sentence, the method. The paragraph does, and a table row does through its
+    header. So a match counts when every numeric setting of the matching row (``settings`` holds only the axes that
+    take more than one value) is written as a number in that place, and every word of the value's name is too: in a
+    table, the settings in the row's first cells or the column's header, and the column's header (or the row's first
+    cell) naming nothing but that value, the caption completing its name; in prose, the quantity in the paragraph and
+    the setting in the sentence. The luck limit on an unnamed match is not changed by this."""
+    paths = table.paths_at(cand, dec)
+    if not paths:
+        return False
+    places: list[_Place] | None = None
+    for path in paths:
+        hit = _trial_path(path, labels)
+        if hit is None:
+            continue
+        label, value = hit
+        setting = settings.get(label) or {}
+        axes = {k: float(v) for k, v in setting.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        wanted = _name_stems(value, _PATH_STOP, of_a_name=True)
+        if not wanted:
+            continue
+        axis_words = frozenset().union(*(_stems_of_text(str(k)) for k in setting)) if setting else frozenset()
+        if places is None:
+            places = contexts()
+        for place in places:
+            if place.label is not None:
+                said = _stems_of_text(place.label) - axis_words
+                if not said or not said <= wanted:
+                    continue  # the column is headed by something else (or by nothing that names a value)
+            if not wanted <= _stems_of_text(place.names):
+                continue
+            found = place.numbers(len(axes))
+            if all(_names_value(found, v) for v in axes.values()):
+                return True
+    return False
+
+
 def check(
     paper_text: str,
     *,
@@ -1227,11 +1407,20 @@ def check(
     optimisation: Any = None,
     run_facts: Any = None,
     trial_table: Any = None,
+    trial_settings: dict[str, dict[str, Any]] | None = None,
+    references: dict[str, float] | None = None,
 ) -> ProvenanceReport:
     """Flag every number in the paper that nothing in this run accounts for.
 
     The aggregates are passed in rather than recomputed so this module stays
     free of ``core.engine`` and can be tested without one.
+
+    ``trial_settings``: each setting label of ``trial_table`` with the settings that tell it apart (its axes that take
+    more than one value, :func:`core.trial_table.settings`), so a table number is also accounted for where the paper
+    names its setting and its quantity (:func:`_named_by_setting`). ``references``: the reference values FI computed
+    itself from the frozen plan's formulas (:mod:`core.reference_values`), a pool of their own, matched exactly at the
+    paper's precision: they are FI's own numbers, so a match is not luck, and kept apart they make no match in the
+    results likelier.
     """
     report = ProvenanceReport()
     if not paper_text.strip():
@@ -1251,6 +1440,10 @@ def check(
     # to be luck, and correct numbers the results do account for would be flagged.
     table_kept, table_stats = _trace_values(trial_table or {}, "trials")
     table = Traceable(dict(table_kept), table_stats) if table_kept or table_stats else None
+    settings = {str(k): dict(v) for k, v in (trial_settings or {}).items() if isinstance(v, dict)}
+    labels = sorted(settings, key=len, reverse=True)  # a longer label first: `m=20,pi1=0.2` is not `m=20`
+    reference_pool = Traceable({f"reference.{k}": float(v) for k, v in (references or {}).items()
+                                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)})
     report.traceable_values = len(traceable)
     # The experiment recorded nothing: it crashed, or its last RESULT_JSON is
     # empty. A paper written over no results is a real problem and not this
@@ -1290,6 +1483,15 @@ def check(
             continue
         if _interval_of_a_result(token, beside, traceable):
             continue
+        # A reference value FI computed itself, as written or as a percentage (never its complement: 1 - 0.04 is no
+        # reference value of anything).
+        if len(reference_pool) and any(
+            reference_pool.paths_at(cand, dec)
+            for reading in readings
+            for cand, dec, how in _variants(reading, token)
+            if "complement" not in how
+        ):
+            continue
         # A number gets a second chance to match by luck here, so an unnamed match must be that much rarer.
         if table is not None and (
             any(
@@ -1303,6 +1505,20 @@ def check(
             or _interval_of_a_result(token, beside, table)
         ):
             continue
+        # The same number of the table, named where it stands by its setting and its quantity (unshifted only).
+        if table is not None and settings:
+            places: list[_Place] | None = None
+
+            def where(token: str = token) -> list[_Place]:
+                nonlocal places
+                if places is None:
+                    places = _setting_contexts(flat_text, token)
+                return places
+
+            if any(_named_by_setting(table, cand, dec, where, settings, labels)
+                   for reading in readings
+                   for cand, dec, how in _variants(reading, token) if not how):
+                continue
         report.untraceable += 1
         if value in seen:
             continue
