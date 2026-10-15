@@ -273,6 +273,77 @@ def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
     return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
+def params_kept(old: ast.FunctionDef | ast.AsyncFunctionDef, new: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Why a repaired function's parameters are not allowed (``""`` when they are): every parameter it had stays, by the
+    same name, kind and place, so every call that worked still works; a parameter may be added only after them and only
+    with a default value (a positional one at the end, or a keyword-only one), and ``*args`` / ``**kwargs`` may be added."""
+    a, b = old.args, new.args
+    want = _steps._param_names(old)
+
+    def says() -> str:
+        return (f"must keep its parameters ({', '.join(want)}), adding only parameters with a default value after them; "
+                f"the reply has ({', '.join(_steps._param_names(new))})")
+
+    old_pos, new_pos = [x.arg for x in [*a.posonlyargs, *a.args]], [x.arg for x in [*b.posonlyargs, *b.args]]
+    if new_pos[:len(old_pos)] != old_pos or len(b.posonlyargs) != len(a.posonlyargs):
+        return says()
+    added = len(new_pos) - len(old_pos)
+    # defaults belong to the last positional parameters: each added one needs one, and the old ones keep theirs
+    if added and len(b.defaults) < added + len(a.defaults):
+        return says()
+    if (a.vararg and (not b.vararg or b.vararg.arg != a.vararg.arg)) or (a.kwarg and (not b.kwarg or b.kwarg.arg != a.kwarg.arg)):
+        return says()
+    old_kw = {x.arg for x in a.kwonlyargs}
+    for x, default in zip(b.kwonlyargs, b.kw_defaults):
+        if x.arg not in old_kw and default is None:
+            return says()
+    if not old_kw <= {x.arg for x in b.kwonlyargs}:
+        return says()
+    return ""
+
+
+def direct_callers(code: Path, rel: str, name: str) -> dict[str, set[str]]:
+    """``{file under code/: the top-level functions in it that call `name` directly}`` (``name(...)`` or ``module.name(...)``),
+    in every Python file of ``code/`` but its tests; ``name`` itself is not its own caller."""
+    out: dict[str, set[str]] = {}
+    for path in sorted(code.rglob("*.py")):
+        other = path.relative_to(code).as_posix()
+        if any(part in ("tests", "__pycache__") for part in path.relative_to(code).parts[:-1]):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for fname, fn in _top_functions(tree).items():
+            if other == rel and fname == name:
+                continue
+            for node in ast.walk(fn):
+                func = node.func if isinstance(node, ast.Call) else None
+                if (isinstance(func, ast.Name) and func.id == name) or (isinstance(func, ast.Attribute) and func.attr == name):
+                    out.setdefault(other, set()).add(fname)
+                    break
+    return out
+
+
+def file_blocks(reply: str) -> tuple[str, dict[str, str]]:
+    """The reply's first fenced block that holds a ``def`` and is not marked for another file (``""`` when none), and
+    ``{file named by its first line # file: <path>: the rest of that block}`` for the blocks so marked."""
+    from .code_review import _FILE_LINE
+
+    main, marked = "", {}
+    for m in _FENCE.finditer(reply or ""):
+        lines = m.group(1).strip("\n").splitlines()
+        first = next((i for i, line in enumerate(lines) if line.strip()), None)
+        marker = _FILE_LINE.match(lines[first]) if first is not None else None
+        if marker:
+            name = marker.group(1).replace("\\", "/").strip("/")
+            name = name[len("code/"):] if name.startswith("code/") else name
+            marked[name] = (marked[name] + "\n\n" if name in marked else "") + "\n".join(lines[first + 1:])
+        elif not main and "def " in m.group(1):
+            main = m.group(1)
+    return main, marked
+
+
 def splice(source: str, reply: str, scope: set[str] | None = None,
            ignored: list[str] | None = None) -> tuple[str | None, list[str], str]:
     """``(the file with the reply's functions put in, the names it replaced, why not)``. The first fenced block of the
@@ -307,9 +378,9 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
     if len(replaced) > MAX_FUNCTIONS:
         return None, [], f"the reply replaces {len(replaced)} functions; change only the ones the finding is about"
     for name in replaced:
-        want, got = _steps._param_names(old_funcs[name]), _steps._param_names(new_funcs[name])
-        if want != got:
-            return None, [], (f"`{name}` must keep its parameters ({', '.join(want)}); the reply has ({', '.join(got)})")
+        why = params_kept(old_funcs[name], new_funcs[name])
+        if why:
+            return None, [], f"`{name}` {why}"
     lines = source.splitlines(keepends=True)
     block_lines = block.splitlines(keepends=True)
     if block_lines and not block_lines[-1].endswith("\n"):
@@ -408,6 +479,35 @@ def _frame(tree: ast.Module) -> list[tuple[str, str]]:
 
     walk(tree.body, "")
     return out
+
+
+def without_main_guard(old: str, new: str) -> tuple[str, str]:
+    """When ``new`` moves module-level statements of ``old`` under an ``if __name__ == "__main__":`` block ``old`` did not
+    have (so importing the file no longer runs them; a module that ran its study when a test imported it), the two texts
+    to compare without that move: ``old`` without the moved statements, ``new`` without the block. A statement counts as
+    moved when it is in the block, or in a function ``new`` adds, as it was. Otherwise both are given back as they are."""
+    from .code_layout import _is_main_guard
+
+    try:
+        before, after = ast.parse(old), ast.parse(new)
+    except SyntaxError:
+        return old, new
+    guards = [n for n in after.body if _is_main_guard(n)]
+    if any(_is_main_guard(n) for n in before.body) or len(guards) != 1:
+        return old, new
+    had = set(_top_functions(before))
+    inside = {ast.dump(s) for s in ast.walk(guards[0]) if isinstance(s, ast.stmt)}
+    for fn in after.body:
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name not in had:
+            inside |= {ast.dump(s) for s in ast.walk(fn) if isinstance(s, ast.stmt) and s is not fn}
+    stays = {ast.dump(n) for n in after.body if n is not guards[0]}
+    moved = [n for n in before.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+             and ast.dump(n) not in stays and ast.dump(n) in inside]
+    if not moved:
+        return old, new
+    before.body = [n for n in before.body if n not in moved]
+    after.body = [n for n in after.body if n is not guards[0]]
+    return ast.unparse(before), ast.unparse(after)
 
 
 def frame_changes(old: str, new: str) -> list[str]:
@@ -775,6 +875,9 @@ class Env:
     other: str = ""  # the name of the other model; empty when there is none
     code_model: str = ""
     on_accept: Callable[[str, str, str, dict[str, Any]], None] | None = None
+    #: FI's small run of the simulation on the code as it is: ``""`` when it ran, else why not (a repair that breaks it is
+    #: not kept); ``None`` when there is none to make.
+    small_run: Callable[[], Awaitable[str]] | None = None
     changed: list[str] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)
     baseline_static: dict[str, int] = field(default_factory=dict)
@@ -897,39 +1000,84 @@ def module_names(code: Path, package: str) -> str:
     return ", ".join(names) or "(none)"
 
 
+def _callers_block(env: Env, callers: dict[str, set[str]]) -> str:
+    """The functions that call the one being repaired, shown so a repair that adds a parameter can pass it on."""
+    parts = []
+    for other, names in sorted(callers.items()):
+        source = _read(env.code / other)
+        for name in sorted(names):
+            parts.append(f"### {other} (the function `{name}`, which calls it)\n```python\n{function_source(source, name)}\n```")
+    return "\n\n".join(parts[:4])
+
+
 async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: str) -> tuple[bool, str]:
-    """One repair request and its checks. ``(accepted, why not)``; a rejected change is undone."""
+    """One repair request and its checks. ``(accepted, why not)``; a rejected change is undone, in every file it touched.
+
+    A repair of one function may add parameters after its own (each with a default value) and change the functions that
+    call it directly, in any file of the code, to pass them on (:func:`params_kept`, :func:`direct_callers`); a repair of a
+    whole file may move statements that run when the file is imported under an ``if __name__ == "__main__":`` block
+    (:func:`without_main_guard`). It is accepted only when the finding's own test passes, every check that passed before
+    still passes, no static check finds more faults, and FI's small run of the simulation still runs (``env.small_run``)."""
     path = env.code / rel
     old = _read(path)
     scope = scope_function(issue, old)
     test = issue.get("test") or ""
     failure = issue.get("failure") or ""
+    callers = direct_callers(env.code, rel, scope) if scope else {}
+    shown = _callers_block(env, callers)
     code_block = (f"### {rel} (the function `{scope}`)\n```python\n{function_source(old, scope)}\n```\n\nThe rest of {rel} "
                   f"offers (do not change these unless the finding is about them):\n{signatures(old, scope)}"
+                  + (f"\n\nIt is called by:\n\n{shown}" if shown else "")
                   if scope else f"### {rel}\n```python\n{old.rstrip()}\n```")
     how = ("Reply with ONE fenced Python block holding the corrected function(s), each whole, with the same names and "
-           "parameters (you may add small helper functions and import lines)." if scope else
-           f"Reply with ONE fenced Python block whose first line is `# file: {rel}` and that holds the whole corrected file.")
+           "parameters (you may add small helper functions and import lines). If the fix needs a value the function is not "
+           "given, add it as a parameter AFTER the existing ones, with a default value, and change each function that "
+           "calls it (shown above) to pass it: that function whole, in its own fenced block whose first line is "
+           "`# file: <its path>`." if scope else
+           f"Reply with ONE fenced Python block whose first line is `# file: {rel}` and that holds the whole corrected file. "
+           "If importing the file runs the study, you may put what runs it under `if __name__ == \"__main__\":`.")
     prompt = env.prompts["code_review_repair"].substitute(
         topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
         test=_read(env.root / test) if test else "(none)", failure=failure or "(none)", code=code_block,
         package=env.package or "(none)", how=how, problem=detail or "(none: this is the first try)")
     reply = await _ask(env, prompt, who, "repair")
     dotted = str(issue.get("function") or "")
+    edits: dict[str, tuple[str, str]] = {}  # file -> (old text, new text)
     if scope:
+        main, marked = file_blocks(reply)
+        mine_too = callers.get(rel, set())
         skipped: list[str] = []
-        new, names, why = splice(old, reply, {scope}, skipped)
+        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *mine_too}, skipped)
         if skipped:
             env.log.warning("[code_review] %s: the reply also defined %s, which the finding is not about; not used",
                             issue.get("id"), ", ".join(f"`{n}`" for n in skipped))
+        if new is not None and scope not in names:
+            new, why = None, f"the reply does not define the function the finding is about ({scope})"
+        for other, text in marked.items():
+            if new is None or other == rel:
+                continue
+            target = next((c for c in callers if c == other or Path(c).name == Path(other).name), None)
+            if target is None:
+                env.log.warning("[code_review] %s: the reply also changed %s, which does not call `%s`; not used",
+                                issue.get("id"), other, scope)
+                continue
+            before = _read(env.code / target)
+            changed, done, why_not = splice(before, f"```python\n{text}\n```", set(callers[target]), [])
+            if changed is None:
+                new, why = None, f"its change to {target}: {why_not}"
+            elif changed != before:
+                edits[target] = (before, changed)
+                names = [*names, *(f"{target}:{n}" for n in done)]
     else:
         from . import code_review as _review
 
         new = _review.parse_files(reply, [rel]).get(rel)
         names, why = [rel], "" if new else "the reply held no whole file"
+        # moving what runs on import under a main guard is not a change of the module the finding must speak of
+        was, now = without_main_guard(old, new) if new else (old, new)
         if new and dotted and not dotted.startswith("<"):
             changed = other_functions_changed(old, new, dotted)
-            outside = frame_changes(old, new)
+            outside = frame_changes(was, now)
             if changed:
                 new, why = None, ("it changed " + ", ".join(f"`{n}`" for n in changed[:4])
                                   + f", which the finding is not about (only `{dotted}` may change)")
@@ -942,7 +1090,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             # statement only when a name it binds is one the finding speaks of, or when it is an entry of the finding's
             # own quantity (a result dict built in one module-level statement). Anything wider is not this finding's.
             changed = other_functions_changed(old, new, "")
-            altered = unspoken_frame_changes(old, new, issue)
+            altered = unspoken_frame_changes(was, now, issue)
             if len(changed) > 1:
                 new, why = None, ("it changed " + ", ".join(f"`{n}`" for n in changed[:4])
                                   + "; a repair of a finding that names no function may change one existing function")
@@ -951,12 +1099,21 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                                   + ", which the finding does not speak of")
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"
-    if new == old:
+    if new != old:
+        edits[rel] = (old, new)
+    if not edits:
         return False, "the reply changed nothing"
-    problem = env.keeps(old, new, rel)
-    if problem:
-        return False, problem
-    path.write_text(new, encoding="utf-8")
+    for target, (before, after_text) in edits.items():
+        problem = env.keeps(before, after_text, target)
+        if problem:
+            return False, problem if target == rel else f"its change to {target}: {problem}"
+
+    def put_back() -> None:
+        for target, (before, _a) in edits.items():
+            (env.code / target).write_text(before, encoding="utf-8")
+
+    for target, (_b, after_text) in edits.items():
+        (env.code / target).write_text(after_text, encoding="utf-8")
     try:
         mine = (await env.run_tests([test])).get(test) or TestRun("error", "not run")
         if mine.status != "pass":
@@ -968,20 +1125,26 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         more = worse_static(env.baseline_static, env.static())
         if more:
             raise _Rejected("it added faults to the static checks: " + ", ".join(more))
+        if env.small_run is not None:
+            stopped = await env.small_run()
+            if stopped:
+                raise _Rejected("FI's small run of the simulation no longer runs: " + stopped)
     except _Rejected as e:
-        path.write_text(old, encoding="utf-8")
+        put_back()
         return False, str(e)
     except BaseException:
-        path.write_text(old, encoding="utf-8")
+        put_back()
         raise
     if env.on_accept is not None:
-        env.on_accept(rel, old, new, issue)
+        for target, (before, after_text) in edits.items():
+            env.on_accept(target, before, after_text, issue)
     env.baseline = {**after, f"finding:{test}": "pass"}
     env.baseline_static = env.static()
     if test not in _accepted(env.record):
         _accepted(env.record).append(test)
-    if rel not in env.changed:
-        env.changed.append(rel)
+    for target in edits:
+        if target not in env.changed:
+            env.changed.append(target)
     issue["touched"] = names
     return True, ""
 
