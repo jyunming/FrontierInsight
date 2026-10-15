@@ -643,7 +643,9 @@ same PR that adds, splits or renames one.
   a one-script quest (`split_analysis: false`) is a gap for having no run manifest.
 - `core/job_watch.py` — background jobs (HPC / a cluster) that outlive one `execute` call; `--watch`.
 - `core/example_inputs.py` — staging a user's own example files into a quest.
-- `core/plot_style.py` — the shared matplotlib house style every generated figure uses.
+- `core/plot_style.py` — the shared matplotlib house style every generated figure uses (`fi_rcparams(style, target="slide" | "paper")`), and the `sitecustomize` bootstrap that applies it and, on each `savefig`, writes the figure record and the paper copy (`_PAPER_SOURCE`: `figures/paper/<stem>.pdf` + `.png` at `paper_figure_size`, body-sized text, no title, legends moved, labels wrapped, every change undone; the `paper` key of the record). `PAPER_DIRNAME` is the one name of that folder.
+  The engine keeps the copies with their figures: `_clear_stale_figures`, `_read_primary_figures` / `_restore_primary_figures` (`_paper_copies`), the layout-redraw backup (`_put_back_paper_copies`).
+- `core/figure_labels.py` — axis labels that show a code name (`Ea_hat`, `pi1`), from the figure records and the plan's names; `core/plan.py::plan_labels` / `plan_names` read the plan's reader-facing `label`s (metrics) and `protocol.labels`. `core/engine.py::_figure_label_findings` adds them to `_figure_overlap_findings` (the one redraw), and `_figure_overlap_directive` allows renaming those labels.
 
 ## Skills
 
@@ -669,6 +671,7 @@ same PR that adds, splits or renames one.
 ## Outputs
 
 - `generation/paper.py`, `poster.py`, `slides.py`, `speech.py` — the four output generators.
+- `generation/_paper_figures.py` — `prefer_paper_figures`: the LaTeX source of `paper.pdf` points each figure at its paper copy (`figures/paper/<stem>.pdf`, at its share of the line width); one-column papers only.
 - `generation/_visual_check.py` — screenshot + measurement (+ optional AI check) of every rendered output.
 - `generation/_pdf_measure.py`, `_pdf_engine.py`, `_pandoc.py`, `_html_pdf.py`, `_office_pdf.py` — PDF rendering and
   measurement plumbing shared across generators.
