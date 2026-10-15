@@ -301,12 +301,18 @@ async def test_a_paper_repair_that_checks_worse_puts_the_first_pdf_back(tmp_path
     ])
     pdf = tmp_path / "paper.pdf"
     pdf.write_text("pdf first", encoding="utf-8")
+    record = tmp_path / ".fi" / "paper_render.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text('{"pages": 6}', encoding="utf-8")
 
     async def repair(text: str) -> None:
         pdf.write_text("pdf taller", encoding="utf-8")
+        record.write_text('{"pages": 5}', encoding="utf-8")
 
     report = await vc.check_and_redo(_limit(2), "paper", pdf, tmp_path, repair)
     assert pdf.read_text(encoding="utf-8") == "pdf first"
+    # The record of how paper.pdf was made goes back with it.
+    assert record.read_text(encoding="utf-8") == '{"pages": 6}'
     assert [(a["attempt"], a["kept"]) for a in report["attempts"]] == [(0, True), (1, False)]
 
 
