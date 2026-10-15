@@ -130,6 +130,11 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
     for name, values in grid.items():
         if isinstance(values, list) and len(values) > 1:
             add("sweep", f"the parameter {_text(name, 60)} is varied over all {len(values)} values of the plan's grid")
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    for name, values in inside.items():
+        if isinstance(values, list) and len(values) > 1:
+            add("sweep", f"every run uses all {len(values)} values of {_text(name, 60)} it is given in its cell, on the same "
+                "random numbers")
     for o in _oracle.declared(protocol):
         measure = _text(o.get("measure"), 160)
         if measure:

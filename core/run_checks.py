@@ -78,12 +78,13 @@ class RunChecksMixin:
     # ---- a reported result is computed --------------------------------------------------------------------------------
 
     def _typed_result_exempt(self, state: Any) -> set[str]:
-        """Names the plan fixes (its fixed settings, the grid's settings, the thresholds): echoed back, not results."""
+        """Names the plan fixes (its fixed settings, the grid's settings, what each run compares, the thresholds): echoed back,
+        not results."""
         protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
         design = state.get("design") if isinstance(state.get("design"), dict) else {}
         names = set(_forms.fixed_settings_of_design({**design, "protocol": protocol}))
         grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-        names |= {str(k) for k in grid}
+        names |= {str(k) for k in grid} | {str(k) for k in _in_run.of(protocol) or {}}
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
         return names | {str(k) for k in thresholds}
 
