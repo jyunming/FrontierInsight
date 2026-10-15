@@ -70,13 +70,108 @@ def _text_pt(key: str) -> float:
     return round(_TEXT_PT[key] * FONT_SCALE, 2)
 
 
+# The paper figure profile. The slide profile above draws text large on the
+# canvas the script picks, and a figure 14 in wide shrunk into a 6.3 in column
+# printed its text at about twice the body size, under a caption that looked
+# tiny beside it. A paper figure is drawn at the width it prints at, so a point
+# on the canvas is a point on the page: the bootstrap saves a second copy of
+# every figure under figures/paper/ (a vector PDF and a PNG), with the canvas
+# set to one of two widths of a one-column page, text at the body's size, no
+# title inside the plot (the caption carries it) and a constrained layout in
+# place of a tight crop (a tight crop changes the size after the fact).
+PAPER_DIRNAME = "paper"
+#: Width of the text block of a one-column article page, in inches.
+PAPER_FULL_WIDTH_IN = 6.3
+#: Half of it, less a gap: a single panel prints at this width.
+PAPER_HALF_WIDTH_IN = 3.1
+#: Text sizes of a paper figure, in points as printed.
+PAPER_TICK_PT = 8.0
+PAPER_LEGEND_PT = 8.0
+PAPER_LABEL_PT = 9.0
+PAPER_TITLE_PT = 9.0
+#: Height of a row of panels, in inches: at least this much, so 8 pt ticks and
+#: a 9 pt label leave room for the data, and at most this much for one row, so
+#: a figure with its caption shares a page with text (the paper template caps a
+#: figure at a third of the text height).
+PAPER_ROW_MIN_IN = 2.0
+PAPER_ROW_MAX_IN = 2.9
+#: A single panel at least this many times as wide as it is tall (a time series)
+#: prints at the full width.
+PAPER_WIDE_ASPECT = 2.0
+PAPER_DPI = 300
+
+
+def paper_profile() -> dict[str, object]:
+    """The paper figure profile as plain values, for the bootstrap to embed."""
+    return {
+        "dirname": PAPER_DIRNAME,
+        "full_in": PAPER_FULL_WIDTH_IN, "half_in": PAPER_HALF_WIDTH_IN,
+        "tick_pt": PAPER_TICK_PT, "legend_pt": PAPER_LEGEND_PT,
+        "label_pt": PAPER_LABEL_PT, "title_pt": PAPER_TITLE_PT,
+        # Any other text (an annotation, a colorbar's tick text set by hand) is
+        # scaled as the ticks are and kept between these sizes.
+        "other_scale": round(PAPER_TICK_PT / HOUSE_TICK_PT, 4), "other_min_pt": 7.0, "other_max_pt": 9.0,
+        # Lines and markers drawn for a slide are heavy on a page: scaled down, never up.
+        "line_scale": 0.6, "line_min_pt": 0.6, "marker_scale": 0.65, "marker_min_pt": 1.5,
+        "row_min_in": PAPER_ROW_MIN_IN, "row_max_in": PAPER_ROW_MAX_IN,
+        "wide_aspect": PAPER_WIDE_ASPECT, "dpi": PAPER_DPI,
+    }
+
+
+def paper_figure_size(drawn_in, rows=1, cols=1, profile=None):
+    """``(width, height, "full" | "half")`` in inches of the paper copy of a figure the script drew at ``drawn_in``
+    with ``rows`` x ``cols`` panels: two or more panels side by side, or one wide panel, take the full width, one panel
+    half of it; the height keeps the drawn aspect within the profile's row heights. The bootstrap embeds this very
+    function (its source), so the rule is written once; it therefore uses nothing but its arguments."""
+    p = profile or paper_profile()
+    w0, h0 = (float(v) for v in drawn_in)
+    full = cols >= 2 or (w0 > 0 and h0 > 0 and w0 / h0 >= p["wide_aspect"])
+    width = p["full_in"] if full else p["half_in"]
+    height = width * h0 / w0 if w0 > 0 and h0 > 0 else width * 0.62
+    rows = max(1, int(rows))
+    height = min(max(height, rows * p["row_min_in"]), rows * p["row_max_in"])
+    return width, round(height, 4), "full" if full else "half"
+
+
 def figure_facecolor(paper_style: str) -> str:
     """Backdrop for figures, keyed to the paper they'll be embedded in."""
     return PAPER_CREAM if str(paper_style).lower() == "briefing" else "white"
 
 
-def fi_rcparams(paper_style: str) -> dict[str, object]:
-    """The house rcParams. ``paper_style`` only changes the face colors."""
+def fi_rcparams(paper_style: str, target: str = "slide") -> dict[str, object]:
+    """The house rcParams. ``paper_style`` only changes the face colors.
+
+    ``target="slide"`` (the default) is the profile every experiment draws in: large text, for slides and posters.
+    ``target="paper"`` is the paper figure profile: the canvas at the page's text width, text at the body's size,
+    a constrained layout and no tight crop, text kept as text in a PDF."""
+    rc = _slide_rcparams(paper_style)
+    if target == "paper":
+        rc.update({
+            "figure.figsize": [PAPER_FULL_WIDTH_IN, round(PAPER_FULL_WIDTH_IN * 0.4, 2)],
+            "figure.constrained_layout.use": True,
+            "savefig.bbox": "standard",
+            "savefig.dpi": PAPER_DPI,
+            "savefig.pad_inches": 0.02,
+            "pdf.fonttype": 42,
+            "font.size": PAPER_LABEL_PT,
+            "axes.titlesize": PAPER_TITLE_PT,
+            "axes.titlepad": 4,
+            "axes.labelsize": PAPER_LABEL_PT,
+            "axes.labelpad": 3,
+            "xtick.labelsize": PAPER_TICK_PT,
+            "ytick.labelsize": PAPER_TICK_PT,
+            "xtick.major.pad": 3,
+            "ytick.major.pad": 3,
+            "legend.fontsize": PAPER_LEGEND_PT,
+            "axes.linewidth": 0.6,
+            "grid.linewidth": 0.5,
+            "lines.linewidth": 1.2,
+            "lines.markersize": 4,
+        })
+    return rc
+
+
+def _slide_rcparams(paper_style: str) -> dict[str, object]:
     face = figure_facecolor(paper_style)
     return {
         # figure / output
@@ -139,7 +234,7 @@ def fi_rcparams(paper_style: str) -> dict[str, object]:
     }
 
 
-def apply_style(paper_style: str = "briefing") -> None:
+def apply_style(paper_style: str = "briefing", target: str = "slide") -> None:
     """Apply the house style to the live matplotlib in THIS process: register
     the teal colormap and push the rcParams. Imports matplotlib lazily and
     never imports pyplot, so it won't lock a GUI backend before the caller
@@ -157,7 +252,7 @@ def apply_style(paper_style: str = "briefing") -> None:
             matplotlib.cm.register_cmap(name=FI_TEAL_CMAP_NAME, cmap=cmap)
         except Exception:
             pass
-    matplotlib.rcParams.update(fi_rcparams(paper_style))
+    matplotlib.rcParams.update(fi_rcparams(paper_style, target))
     # prop_cycle needs a cycler object, so it can't live in the JSON rc dict.
     matplotlib.rcParams["axes.prop_cycle"] = cycler(color=FI_COLOR_CYCLE)
 
@@ -193,7 +288,7 @@ try:
     matplotlib.rcParams["axes.prop_cycle"] = cycler(color={cycle})
 except Exception:
     pass
-''' + _RECORDER_SOURCE
+''' + _RECORDER_SOURCE.replace("@@PAPER_SOURCE@@", _boot_paper_source())
 
 
 # Name of the dir, under <quest>/.fi/, where the bootstrap records what each
@@ -222,7 +317,9 @@ try:
     import os as _fi_os
 
     _fi_records = _fi_os.environ.get("FI_FIGURE_RECORDS")
-    if _fi_records:
+    # The paper copy of each figure is made with or without the records;
+    # FI_PAPER_FIGURES=0 turns it off.
+    if _fi_records or _fi_os.environ.get("FI_PAPER_FIGURES", "1") != "0":
         import json as _fi_json
         import math as _fi_math
         import time as _fi_time
@@ -637,6 +734,25 @@ try:
                 return 0.0, int(hit.sum())
             return 0.0, 0
 
+        def _fi_legend_hits(ax, legend, renderer):
+            # (the length in pixels of the lines, the number of the points) of ax drawn
+            # under its legend, measured on the drawn canvas.
+            lb = legend.get_window_extent(renderer)
+            inset = _FI_LEGEND_INSET
+            if lb.width <= 2 * inset or lb.height <= 2 * inset:
+                return 0.0, 0
+            inner = (lb.x0 + inset, lb.y0 + inset, lb.x1 - inset, lb.y1 - inset)
+            axes_box = ax.get_window_extent(renderer)
+            line_px, points = 0.0, 0
+            for artist in list(ax.get_lines()) + list(ax.collections):
+                try:
+                    length, count = _fi_under(ax, artist, inner, axes_box)
+                except Exception:
+                    continue
+                line_px += length
+                points += count
+            return line_px, points
+
         def _fi_layout(fig):
             # Text drawn over text, and a legend drawn over the data, measured on the
             # canvas the figure was saved from. None when it could not be measured.
@@ -660,20 +776,7 @@ try:
                     legend = ax.get_legend()
                     if legend is None or not legend.get_visible():
                         continue
-                    lb = legend.get_window_extent(renderer)
-                    inset = _FI_LEGEND_INSET
-                    if lb.width <= 2 * inset or lb.height <= 2 * inset:
-                        continue
-                    inner = (lb.x0 + inset, lb.y0 + inset, lb.x1 - inset, lb.y1 - inset)
-                    axes_box = ax.get_window_extent(renderer)
-                    line_px, points = 0.0, 0
-                    for artist in list(ax.get_lines()) + list(ax.collections):
-                        try:
-                            length, count = _fi_under(ax, artist, inner, axes_box)
-                        except Exception:
-                            continue
-                        line_px += length
-                        points += count
+                    line_px, points = _fi_legend_hits(ax, legend, renderer)
                     if line_px > 0 or points > 0:
                         found.append({"check": "legend_over_data",
                                       "axes_title": " ".join(t.get_text() for t in _fi_titles(ax)),
@@ -685,31 +788,50 @@ try:
 
         _fi_savefig = _FiFigure.savefig
 
+@@PAPER_SOURCE@@
+
         def _fi_recording_savefig(self, fname, *args, **kwargs):
             started = _fi_time.perf_counter()
             result = _fi_savefig(self, fname, *args, **kwargs)
             saved_in = _fi_time.perf_counter() - started
-            try:
-                name = _fi_os.path.basename(_fi_os.fspath(fname))
-                record = {"file": name, "axes": [_fi_axes(ax) for ax in self.get_axes()]}
-                # A failure here leaves the key out: a record without "tick_pt" was
-                # not measured, one with null draws no tick labels.
+            record = plot = name = None
+            if _fi_records:
                 try:
-                    record["tick_pt"] = _fi_tick_pt(self)
+                    name = _fi_os.path.basename(_fi_os.fspath(fname))
+                    record = {"file": name, "axes": [_fi_axes(ax) for ax in self.get_axes()]}
+                    # A failure here leaves the key out: a record without "tick_pt" was
+                    # not measured, one with null draws no tick labels.
+                    try:
+                        record["tick_pt"] = _fi_tick_pt(self)
+                    except Exception:
+                        pass
+                    # Measuring draws the figure once more, so a figure that was slow to
+                    # save is not measured.
+                    layout = _fi_layout(self) if saved_in < 10 else None
+                    if layout is not None:
+                        record["layout"] = layout
+                    # Each seed's lines, for the engine to redraw a figure as the
+                    # mean over the seeds. A redrawn figure is no seed's. Read before
+                    # the paper copy, from the figure as the script drew it.
+                    if not _fi_os.environ.get("FI_REPLOT"):
+                        plot = _fi_plot_data(self, name)
                 except Exception:
-                    pass
-                # Measuring draws the figure once more, so a figure that was slow to
-                # save is not measured.
-                layout = _fi_layout(self) if saved_in < 10 else None
-                if layout is not None:
-                    record["layout"] = layout
+                    record = None
+            # The paper copy (figures/paper/<stem>.pdf and .png): drawn from the same
+            # figure, which is then put back as the script left it. Never raises.
+            paper_dir = _fi_paper_dir(fname)
+            if paper_dir is not None:
+                info = _fi_paper_copy(self, fname, paper_dir) if saved_in < 10 else {"skipped": "slow to save"}
+                if record is not None:
+                    record["paper"] = info
+            if record is None:
+                return result
+            try:
                 _fi_os.makedirs(_fi_records, exist_ok=True)
                 stem = _fi_os.path.join(_fi_records, _fi_os.path.splitext(name)[0])
                 with open(stem + ".json", "w", encoding="utf-8") as handle:
                     _fi_json.dump(record, handle)
-                # Each seed's lines, for the engine to redraw a figure as the
-                # mean over the seeds. A redrawn figure is no seed's.
-                if not _fi_os.environ.get("FI_REPLOT"):
+                if plot is not None:
                     # Keyed on WHICH replicate this is, not on what it seeds
                     # with. The two used to be the same small integer; the
                     # seeds now stride far apart to keep the replicates' random
@@ -717,7 +839,7 @@ try:
                     # files up by ordinal (0, 1, 2 ...).
                     seed = "".join(c for c in _fi_os.environ.get("FI_REPLICATE_INDEX", "") if c.isdigit()) or "0"
                     with open(stem + ".seed" + seed + ".json", "w", encoding="utf-8") as handle:
-                        _fi_json.dump(_fi_plot_data(self, name), handle)
+                        _fi_json.dump(plot, handle)
             except Exception:
                 pass
             return result
@@ -726,6 +848,505 @@ try:
 except Exception:
     pass
 '''
+
+
+# The paper copy, inserted into the recorder above (at @@PAPER_SOURCE@@, inside
+# its guarded block). A paper figure is the script's own figure drawn again under
+# the paper profile, never a redraw from numbers: what it plots is what the
+# script plotted. Every change is undone after the copy is saved, so a script that
+# saves the same figure again (a PNG, then a PDF) saves it as it drew it.
+_PAPER_SOURCE = '''\
+        import matplotlib as _fi_mpl
+        from matplotlib.text import Text as _FiText
+
+        _FI_PAPER = @@PAPER_PROFILE@@
+
+@@PAPER_SIZE@@
+
+        def _fi_paper_dir(fname):
+            # The paper copy goes beside the figure, in figures/paper/, only for a
+            # figure saved into a folder called "figures": FI's figure folder.
+            if _fi_os.environ.get("FI_PAPER_FIGURES", "1") == "0":
+                return None
+            try:
+                path = _fi_os.fspath(fname)
+            except TypeError:
+                return None
+            if isinstance(path, bytes):
+                path = _fi_os.fsdecode(path)
+            parent = _fi_os.path.dirname(_fi_os.path.abspath(path))
+            if _fi_os.path.basename(parent).lower() != "figures":
+                return None
+            return _fi_os.path.join(parent, _FI_PAPER["dirname"])
+
+        def _fi_panels(fig):
+            # What a reader sees as panels: every visible Axes but a colorbar's.
+            return [ax for ax in fig.get_axes() if ax.get_visible() and getattr(ax, "_colorbar", None) is None]
+
+        def _fi_grid(panels):
+            rows = cols = 1
+            for ax in panels:
+                try:
+                    spec = ax.get_subplotspec()
+                except Exception:
+                    spec = None
+                if spec is None:
+                    continue
+                r, c = spec.get_gridspec().get_geometry()
+                rows, cols = max(rows, int(r)), max(cols, int(c))
+            return rows, cols
+
+        def _fi_place(ax):
+            try:
+                spec = ax.get_subplotspec()
+                if spec is not None:
+                    return (spec.rowspan.start, spec.rowspan.stop, spec.colspan.start, spec.colspan.stop)
+            except Exception:
+                pass
+            return tuple(round(float(v), 3) for v in ax.get_position().bounds)
+
+        def _fi_draw(fig):
+            try:
+                fig.canvas.draw()
+                return fig.canvas.get_renderer()
+            except Exception:
+                fig.draw_without_rendering()
+                return fig._get_renderer()
+
+        def _fi_size_of(undo, text, size):
+            old = text.get_fontsize()
+            if abs(float(old) - float(size)) < 1e-9:
+                return
+            text.set_fontsize(size)
+            undo.append(lambda t=text, o=old: t.set_fontsize(o))
+
+        def _fi_all_titles(ax):
+            return [t for t in (ax.title, getattr(ax, "_left_title", None), getattr(ax, "_right_title", None))
+                    if t is not None]
+
+        def _fi_legends(fig):
+            out = [ax.get_legend() for ax in fig.get_axes()]
+            return [leg for leg in out + list(getattr(fig, "legends", [])) if leg is not None]
+
+        def _fi_paper_text(fig, undo):
+            p = _FI_PAPER
+            for ax in fig.get_axes():
+                for name, axis in (("x", ax.xaxis), ("y", ax.yaxis)):
+                    olds = {}
+                    for which, kw in (("major", getattr(axis, "_major_tick_kw", {})),
+                                      ("minor", getattr(axis, "_minor_tick_kw", {}))):
+                        olds[which] = kw.get("labelsize", _fi_mpl.rcParams[name + "tick.labelsize"])
+                    ax.tick_params(axis=name, which="both", labelsize=p["tick_pt"])
+
+                    def back(ax=ax, name=name, olds=olds):
+                        for which, old in olds.items():
+                            ax.tick_params(axis=name, which=which, labelsize=old)
+                    undo.append(back)
+                    _fi_size_of(undo, axis.label, p["label_pt"])
+                    _fi_size_of(undo, axis.get_offset_text(), p["tick_pt"])
+                for text in ax.texts:
+                    _fi_size_of(undo, text, min(max(float(text.get_fontsize()) * p["other_scale"], p["other_min_pt"]),
+                                                p["other_max_pt"]))
+            for leg in _fi_legends(fig):
+                for text in leg.get_texts():
+                    _fi_size_of(undo, text, p["legend_pt"])
+                _fi_size_of(undo, leg.get_title(), p["legend_pt"])
+            for key in ("_supxlabel", "_supylabel"):
+                text = getattr(fig, key, None)
+                if text is not None:
+                    _fi_size_of(undo, text, p["label_pt"])
+            skip = {id(getattr(fig, k, None)) for k in ("_suptitle", "_supxlabel", "_supylabel")}
+            for text in fig.texts:
+                if id(text) not in skip:
+                    _fi_size_of(undo, text, min(max(float(text.get_fontsize()) * p["other_scale"], p["other_min_pt"]),
+                                                p["other_max_pt"]))
+
+        def _fi_scaled(value, scale, low):
+            # Thinner, never thicker, and not below the floor unless it already was.
+            value = float(value)
+            return value if value <= low else max(low, value * scale)
+
+        def _fi_paper_lines(fig, undo):
+            p = _FI_PAPER
+            lines = [line for ax in fig.get_axes() for line in ax.get_lines()]
+            for leg in _fi_legends(fig):
+                lines += [h for h in (getattr(leg, "legend_handles", None) or getattr(leg, "legendHandles", None) or [])
+                          if hasattr(h, "get_markersize")]
+            for line in lines:
+                lw, ms = line.get_linewidth(), line.get_markersize()
+                line.set_linewidth(_fi_scaled(lw, p["line_scale"], p["line_min_pt"]))
+                line.set_markersize(_fi_scaled(ms, p["marker_scale"], p["marker_min_pt"]))
+                undo.append(lambda l=line, a=lw, b=ms: (l.set_linewidth(a), l.set_markersize(b)))
+            for ax in fig.get_axes():
+                for coll in ax.collections:
+                    try:
+                        widths = [float(w) for w in coll.get_linewidths()]
+                        coll.set_linewidths([_fi_scaled(w, p["line_scale"], p["line_min_pt"]) for w in widths])
+                        undo.append(lambda c=coll, w=widths: c.set_linewidths(w))
+                    except Exception:
+                        pass
+                    if isinstance(coll, _FiPathCollection) and hasattr(coll, "get_sizes"):
+                        try:
+                            sizes = _fi_np.asarray(coll.get_sizes(), dtype=float).copy()
+                            if len(sizes):
+                                coll.set_sizes(sizes * p["marker_scale"] ** 2)
+                                undo.append(lambda c=coll, s=sizes: c.set_sizes(s))
+                        except Exception:
+                            pass
+
+        def _fi_set_loc(leg, loc):
+            try:
+                leg.set_loc(loc)
+            except AttributeError:
+                leg._loc = {"best": 0, "upper center": 9}[loc]
+
+        def _fi_below(fig, ax, renderer):
+            # Where, in axes coordinates, a legend set under the axes starts: under its
+            # x tick labels and x label, 3 pt down.
+            box = ax.get_window_extent(renderer)
+            bottom = box.y0
+            try:
+                bottom = min(bottom, ax.xaxis.get_tightbbox(renderer).y0)
+            except Exception:
+                pass
+            return (bottom - 3 * fig.dpi / 72 - box.y0) / max(box.height, 1.0)
+
+        def _fi_entries(fig, legends):
+            # Each label of these legends once, with the artist it labels (the legend's
+            # own drawing of it when no Axes lists that label), in the legends' order.
+            known = {}
+            for ax in fig.get_axes():
+                for handle, label in zip(*ax.get_legend_handles_labels()):
+                    known.setdefault(label, handle)
+            entries = {}
+            for leg in legends:
+                proxies = list(getattr(leg, "legend_handles", None) or getattr(leg, "legendHandles", None) or [])
+                for i, text in enumerate(leg.get_texts()):
+                    label = text.get_text()
+                    handle = known.get(label, proxies[i] if i < len(proxies) else None)
+                    if handle is not None and label not in entries:
+                        entries[label] = handle
+            return entries
+
+        def _fi_fitted_legend(make, n, room, renderer, columns):
+            # The legend make(ncol) with the most columns (up to `columns`) whose width fits
+            # `room` pixels; one column when none fits. Earlier tries are removed.
+            new = None
+            for ncol in range(max(1, min(n, columns)), 0, -1):
+                if new is not None:
+                    new.remove()
+                new = make(ncol)
+                if new.get_window_extent(renderer).width <= room:
+                    break
+            return new
+
+        def _fi_titled(new, title):
+            if title:
+                new.get_title().set_fontsize(_FI_PAPER["legend_pt"])
+            return new
+
+        def _fi_figure_legend(fig, legends, loc, renderer, undo):
+            # One legend for the figure at `loc` ("outside lower center", ...), in place of
+            # `legends`; a constrained layout makes room for it.
+            entries = _fi_entries(fig, legends)
+            if not entries:
+                return None
+            labels, handles = list(entries), list(entries.values())
+            title = next((leg.get_title().get_text() for leg in legends if leg.get_title().get_text()), "")
+            columns = 6 if loc.endswith("center") else 1
+
+            def make(ncol):
+                return _fi_titled(fig.legend(handles, labels, loc=loc, ncol=ncol, frameon=False,
+                                             fontsize=_FI_PAPER["legend_pt"], title=title or None), title)
+            new = _fi_fitted_legend(make, len(labels), fig.bbox.width * 0.98, renderer, columns)
+            for leg in legends:
+                leg.set_visible(False)
+                undo.append(lambda leg=leg: leg.set_visible(True))
+            undo.append(lambda new=new: new.remove())
+            return new
+
+        def _fi_outside_figure_legends(fig, undo, renderer):
+            # A figure legend placed off the canvas (bbox_to_anchor below it, kept by a
+            # tight crop) is set "outside" the panels instead.
+            moved, below = [], []
+            fb = fig.bbox
+            for leg in list(getattr(fig, "legends", [])):
+                if not leg.get_visible():
+                    continue
+                box = leg.get_window_extent(renderer)
+                if box.y0 < fb.y0 - 1:
+                    loc = "outside lower center"
+                elif box.y1 > fb.y1 + 1:
+                    loc = "outside upper center"
+                elif box.x1 > fb.x1 + 1:
+                    loc = "outside right upper"
+                elif box.x0 < fb.x0 - 1:
+                    loc = "outside left upper"
+                else:
+                    continue
+                new = _fi_figure_legend(fig, [leg], loc, renderer, undo)
+                if new is None:
+                    continue
+                moved.append({"panel": "figure", "to": loc})
+                if loc == "outside lower center":
+                    below.append(new)
+            return moved, below
+
+        def _fi_move_legends(fig, panels, undo, renderer, several):
+            # A legend over the data: first where matplotlib finds the emptiest corner;
+            # then, if that is over the data too, under the plot: one legend for the
+            # figure under its panels when there are several, else under the axes.
+            moved, below, still = [], [], []
+            for index, ax in enumerate(panels):
+                leg = ax.get_legend()
+                if leg is None or not leg.get_visible() or sum(_fi_legend_hits(ax, leg, renderer)) <= 0:
+                    continue
+                old_loc, old_anchor = leg._loc, getattr(leg, "_bbox_to_anchor", None)
+
+                def back(leg=leg, loc=old_loc, anchor=old_anchor):
+                    leg._loc = loc
+                    leg._bbox_to_anchor = anchor
+                undo.append(back)
+                _fi_set_loc(leg, "best")
+                leg.set_bbox_to_anchor(None)
+                renderer = _fi_draw(fig)
+                if sum(_fi_legend_hits(ax, leg, renderer)) <= 0:
+                    moved.append({"panel": index, "to": "best"})
+                else:
+                    still.append((index, ax, leg))
+            if still and several:
+                new = _fi_figure_legend(fig, [leg for _, _, leg in still], "outside lower center", renderer, undo)
+                if new is not None:
+                    moved += [{"panel": index, "to": "below the panels"} for index, _, _ in still]
+                    below.append(new)
+                    return moved, below, renderer
+            for index, ax, leg in still:
+                entries = _fi_entries(fig, [leg])
+                if not entries:
+                    continue
+                labels, handles = list(entries), list(entries.values())
+                title = leg.get_title().get_text()
+
+                def make(ncol, ax=ax, labels=labels, handles=handles, title=title):
+                    return _fi_titled(ax.legend(handles, labels, loc="upper center", ncol=ncol, frameon=False,
+                                                fontsize=_FI_PAPER["legend_pt"], title=title or None), title)
+                undo.append(lambda ax=ax, leg=leg: setattr(ax, "legend_", leg))
+                new = _fi_fitted_legend(make, len(labels), ax.get_window_extent(renderer).width, renderer, 6)
+                new.set_bbox_to_anchor((0.5, _fi_below(fig, ax, renderer)), transform=ax.transAxes)
+                moved.append({"panel": index, "to": "below the axes"})
+                below.append(new)
+            return moved, below, renderer
+
+        def _fi_wrap(text, lines):
+            # The label on `lines` lines of about equal length, broken at spaces outside
+            # $...$ math; unchanged when it is one word.
+            words, word, math = [], "", False
+            for ch in text:
+                if ch == "$":
+                    math = not math
+                if ch == " " and not math:
+                    if word:
+                        words.append(word)
+                    word = ""
+                else:
+                    word += ch
+            if word:
+                words.append(word)
+            if len(words) < 2:
+                return text
+            target = len(text) / lines
+            out, line = [], ""
+            for word in words:
+                if line and len(line) + 1 + len(word) > target and len(out) < lines - 1:
+                    out.append(line)
+                    line = word
+                else:
+                    line = line + " " + word if line else word
+            out.append(line)
+            return "\\n".join(out)
+
+        def _fi_wrap_labels(fig, panels, undo, renderer):
+            # An axis label longer than its axis, or cut by the canvas edge, is set on two
+            # (or three) lines.
+            wrapped = []
+            fb = fig.bbox
+            for ax in panels:
+                box = ax.get_window_extent(renderer)
+                for label, along_x in ((ax.xaxis.label, True), (ax.yaxis.label, False)):
+                    text = label.get_text()
+                    if not label.get_visible() or not text.strip() or "\\n" in text:
+                        continue
+                    ext = label.get_window_extent(renderer)
+                    length, room = (ext.width, box.width) if along_x else (ext.height, box.height)
+                    cut = ext.x0 < fb.x0 - 0.5 or ext.x1 > fb.x1 + 0.5 or ext.y0 < fb.y0 - 0.5 or ext.y1 > fb.y1 + 0.5
+                    if length <= 1.1 * room and not cut:
+                        continue
+                    new = _fi_wrap(text, 2 if length <= 2 * room else 3)
+                    if new == text:
+                        continue
+                    label.set_text(new)
+                    undo.append(lambda t=label, o=text: t.set_text(o))
+                    wrapped.append(text)
+            return wrapped
+
+        def _fi_paper_copy(fig, fname, paper_dir):
+            p = _FI_PAPER
+            undo = []
+            info = {}
+            stem = _fi_os.path.splitext(_fi_os.path.basename(_fi_os.fsdecode(_fi_os.fspath(fname))))[0]
+            outputs = [_fi_os.path.join(paper_dir, stem + ext) for ext in (".pdf", ".png")]
+            try:
+                panels = _fi_panels(fig)
+                rows, cols = _fi_grid(panels)
+                drawn = [float(v) for v in fig.get_size_inches()]
+                width, height, rule = _fi_paper_figure_size(drawn, rows, cols, p)
+                info.update({"file": p["dirname"] + "/" + stem + ".pdf", "png": p["dirname"] + "/" + stem + ".png",
+                             "drawn_in": [round(v, 3) for v in drawn], "width": rule})
+                # The layout: constrained, with the axes' places put back afterwards.
+                places = [(ax, ax.get_position(original=True).frozen(), ax.get_position(original=False).frozen())
+                          for ax in fig.get_axes()]
+                old_engine = fig.get_layout_engine()
+
+                def back_layout(places=places, engine=old_engine):
+                    fig._layout_engine = engine
+                    for ax, original, active in places:
+                        ax._set_position(original, which="original")
+                        ax._set_position(active, which="active")
+                undo.append(back_layout)
+                fit = "constrained"
+                try:
+                    fig.set_layout_engine("constrained")
+                except Exception:
+                    fit = "tight"
+                undo.append(lambda size=list(drawn): fig.set_size_inches(*size))
+                fig.set_size_inches(width, height)
+                # No title inside the plot: the caption carries it. A one-panel figure
+                # loses its title. In a figure of several panels the panels' titles name
+                # them and stay, all of them, when each fits over its panel; else all go.
+                dropped, kept = [], []
+                sup = getattr(fig, "_suptitle", None)
+                if sup is not None and sup.get_visible() and sup.get_text().strip():
+                    info["suptitle_dropped"] = sup.get_text()
+                    sup.set_visible(False)
+                    undo.append(lambda t=sup: t.set_visible(True))
+                several = len({_fi_place(ax) for ax in panels}) > 1
+                titles = [t for ax in panels for t in _fi_all_titles(ax) if t.get_visible() and t.get_text().strip()]
+
+                def drop(texts):
+                    for text in texts:
+                        dropped.append(text.get_text())
+                        old = text.get_text()
+                        text.set_text("")
+                        undo.append(lambda t=text, o=old: t.set_text(o))
+                if several:
+                    for text in titles:
+                        _fi_size_of(undo, text, p["title_pt"])
+                else:
+                    drop(titles)
+                _fi_paper_text(fig, undo)
+                _fi_paper_lines(fig, undo)
+                renderer = _fi_draw(fig)
+                if several and titles:
+                    room = {id(t): ax.get_window_extent(renderer).width for ax in panels for t in _fi_all_titles(ax)}
+                    if all(t.get_window_extent(renderer).width <= room.get(id(t), 0) for t in titles):
+                        kept = [t.get_text() for t in titles]
+                    else:
+                        drop(titles)
+                        renderer = _fi_draw(fig)
+                wrapped = _fi_wrap_labels(fig, panels, undo, renderer)
+                if wrapped:
+                    renderer = _fi_draw(fig)
+                moved, below = _fi_outside_figure_legends(fig, undo, renderer)
+                if moved:
+                    renderer = _fi_draw(fig)
+                more, under, renderer = _fi_move_legends(fig, panels, undo, renderer, several)
+                moved += more
+                below += under
+                if below:
+                    # A legend set under the plot takes room of its own: the canvas grows by
+                    # it, so the panels keep their height.
+                    renderer = _fi_draw(fig)
+                    extra = max(leg.get_window_extent(renderer).height for leg in below) / fig.dpi + 0.05
+                    height = min(height + extra, rows * p["row_max_in"] + 1.0)
+                    fig.set_size_inches(width, height)
+                    renderer = _fi_draw(fig)
+                    for _ in range(2):
+                        for leg in below:
+                            if leg.axes is not None:
+                                leg.set_bbox_to_anchor((0.5, _fi_below(fig, leg.axes, renderer)),
+                                                       transform=leg.axes.transAxes)
+                        renderer = _fi_draw(fig)
+                more_wrapped = _fi_wrap_labels(fig, panels, undo, renderer)
+                if more_wrapped:
+                    wrapped += more_wrapped
+                    renderer = _fi_draw(fig)
+                # Anything still off the canvas (text placed outside the axes by hand) is
+                # kept by a tight crop; the canvas is first narrowed by what sticks out,
+                # so the saved width stays the paper width.
+                tight = False
+                box = fig.get_tightbbox(renderer)
+                over = max(0.0, -box.x0) + max(0.0, box.x1 - width)
+                if fit == "tight" or over > 0.02 or box.y0 < -0.02 or box.y1 > height + 0.02:
+                    tight = True
+                    if over > 0.02:
+                        fig.set_size_inches(max(width - over, width * 0.5), height)
+                        renderer = _fi_draw(fig)
+                        box = fig.get_tightbbox(renderer)
+                    fit = fit + ", cropped"
+                pad = 0.02
+                saved = ([box.width + 2 * pad, box.height + 2 * pad] if tight
+                         else [float(v) for v in fig.get_size_inches()])
+                layout = []
+                for index, ax in enumerate(panels):
+                    leg = ax.get_legend()
+                    if leg is not None and leg.get_visible():
+                        line_px, points = _fi_legend_hits(ax, leg, renderer)
+                        if line_px > 0 or points > 0:
+                            layout.append({"check": "legend_over_data", "panel": index,
+                                           "legend": [t.get_text() for t in leg.get_texts()],
+                                           "line_px": round(line_px, 1), "points": points})
+                ticks = _fi_tick_pt(fig)
+                labels = [float(t.get_fontsize()) for ax in panels for t in (ax.xaxis.label, ax.yaxis.label)
+                          if t.get_visible() and t.get_text().strip()]
+                _fi_os.makedirs(paper_dir, exist_ok=True)
+                kw = {"bbox_inches": "tight" if tight else None, "pad_inches": pad}
+                with _fi_mpl.rc_context({"pdf.fonttype": 42, "savefig.bbox": "standard"}):
+                    _fi_savefig(fig, outputs[0], format="pdf", **kw)
+                    _fi_savefig(fig, outputs[1], format="png", dpi=p["dpi"], **kw)
+                info.update({
+                    "width_in": round(saved[0], 3), "height_in": round(saved[1], 3), "fit": fit,
+                    "tick_pt": ticks, "label_pt": min(labels) if labels else None,
+                    "titles_dropped": dropped, "titles_kept": kept, "labels_wrapped": wrapped,
+                    "legend_moved": moved, "layout": layout,
+                })
+            except Exception as exc:
+                for path in outputs:
+                    try:
+                        _fi_os.remove(path)
+                    except OSError:
+                        pass
+                info = {"error": repr(exc)[:300]}
+            finally:
+                for step in reversed(undo):
+                    try:
+                        step()
+                    except Exception:
+                        pass
+                fig.stale = True
+            return info
+'''
+
+
+def _boot_paper_source() -> str:
+    """The paper copy's part of the bootstrap: the profile's values and the size rule, written once in this module."""
+    import inspect
+    import textwrap
+
+    size_rule = inspect.getsource(paper_figure_size).replace("def paper_figure_size(", "def _fi_paper_figure_size(", 1)
+    size_rule = size_rule.replace("p = profile or paper_profile()", "p = profile", 1)
+    return (_PAPER_SOURCE
+            .replace("@@PAPER_PROFILE@@", repr(paper_profile()))
+            .replace("@@PAPER_SIZE@@", textwrap.indent(size_rule, " " * 8)))
 
 
 def write_boot(fi_dir: Path, paper_style: str = "briefing") -> Path:
