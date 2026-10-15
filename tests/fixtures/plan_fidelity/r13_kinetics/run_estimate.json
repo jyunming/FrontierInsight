@@ -1,0 +1,13 @@
+{
+ "key": "c57a825a1206520c8813b02ef1e850b2cbf944fb18ec27be0ba64f7e145ee3ea|900",
+ "estimate_s": 1235.118331734265,
+ "limit_s": 900.0,
+ "says": "FI estimates the experiment takes about 21 minutes; the limit is 15 minutes",
+ "reduced": null,
+ "at": 1792041663.7198982,
+ "timed": 7,
+ "cells": 125,
+ "trials": 50000,
+ "fits": false,
+ "stopped": "the experiment's 125 settings would take about 21 minutes, more than the 15 minutes allowed; FI does not run a smaller study than the plan's settings, and they cannot fit even with the fewest runs per setting the plan allows"
+}

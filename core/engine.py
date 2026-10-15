@@ -4958,7 +4958,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not isinstance(req, dict) or req.get("error"):
             return ""
         try:
-            return _topic_req.checklist_block(req)
+            return _topic_req.checklist_block(req, topic=state.get("topic") or self.config.topic)
         except Exception as e:  # noqa: BLE001 -- a block that cannot be built leaves the prompt as it was
             self._log.warning("[plan] the list of what the topic asks for could not be built: %r", e)
             return ""
@@ -6331,7 +6331,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         gaps, unjudged = await self._topic_gaps(req, design)
         text = path.read_text(encoding="utf-8")
         lines = _topic_req.plan_lines(req, gaps, reviewer=str(req.get("reviewer") or ""), same_model=req.get("same_model"),
-                                      unjudged=unjudged)
+                                      unjudged=unjudged, topic=str(state.get("topic") or self.config.topic or ""))
         asked, calls = self._search_record(sha, _TOPIC_ASKED)
         if asked:
             lines += ["", "- FI asked the plan's model to add what was missing" + (
@@ -6675,7 +6675,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return {}
         for part, problems in (("simplifications", p_sims), ("definitions", p_defs), ("steps", p_steps)):
             if problems:
-                found[part] = "; ".join(problems)[:1200]
+                found[part] = "; ".join(problems)[:1200].rstrip()
         return found
 
     def _ledger_uncovered(self, design: Any) -> list[str]:
@@ -6703,7 +6703,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         found = self._ledger_problems(protocol, passages)
         uncovered = self._ledger_uncovered(design)
         if uncovered:
-            found["simplifications"] = "; ".join(filter(None, [found.get("simplifications"), *uncovered]))[:1600]
+            # Cut at its limit without a trailing blank: plan.md holds the line without one, and a resume looks for it there
+            # (one cut right after a blank was written again at every resume, changing plan.md and restarting its counts).
+            found["simplifications"] = "; ".join(filter(None, [found.get("simplifications"), *uncovered]))[:1600].rstrip()
         return found
 
     @staticmethod
