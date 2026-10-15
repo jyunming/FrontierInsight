@@ -21047,7 +21047,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if not record.get("typeset", True):
                 self._log.warning(
                     "[page_limit] LaTeX could not typeset the draft (%s); its pages are counted on the "
-                    "browser render, which can differ from the typeset paper by a page",
+                    "browser render instead",
                     record.get("reason") or "no reason given",
                 )
             doc = measure_pdf(pdf)
