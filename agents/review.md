@@ -64,6 +64,6 @@ $claim_grounding_block
 $figure_check_block$foundational_check_block$user_feedback_block$code_findings_block
 
 ## Paper draft
-(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's own records: how often the design was revised and how many runs were made. It is not the writer's text and no revision can change it, so never ask for it to be edited or removed; you may weigh what it says. The same holds for a block between `<!-- fi:run-record:... -->` and `<!-- /fi:run-record -->` (FI's record of the run's seeds, run time, trial counts, reduced size and what was not done or not tested), and for a block between `<!-- fi:code-findings:... -->` and `<!-- /fi:code-findings -->`: FI's record of what a second reading of the code left open, listed under "Open points in the code" in the Inputs above when there is one.)
+(The paper states the seed the code used, the measured run time and the parts of the topic the study did not do in its own words; FI checks each of those statements against its own records after you, so do not judge them from memory. How the design was revised, how many runs were made, FI's record of the run and what a second reading of the code left open are in FI's quality report, not in the paper; the open points in the code are listed under "Open points in the code" in the Inputs above when there are any. A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI and no revision can change it, so never ask for it to be edited or removed.)
 
 $paper_md

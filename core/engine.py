@@ -90,6 +90,7 @@ from . import attempt_memory as _memory
 from . import phased as _phased
 from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure
+from . import paper_facts as _paper_facts
 from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
@@ -19104,6 +19105,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             table_note = ""
         if table_note:
             evidence_note = f"{evidence_note}\n\n{table_note}".strip()
+        record_note = self._paper_record_section(state)
+        if record_note:
+            evidence_note = f"{evidence_note}\n\n{record_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
@@ -19175,6 +19179,39 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 f"the provider and resume the quest."
             )
         return markdown
+
+    def _paper_record_section(self, state: QuestState) -> str:
+        """FI's facts about the run and the items the limitations must name, for the writer (core/paper_facts.py). The
+        precision record is kept first: it is one of the items. A record FI cannot read leaves its part out."""
+        try:
+            _disclosure.write_precision_record(self.quest_root, self._precision_shortfalls(state))
+        except Exception as e:  # noqa: BLE001 -- the rest of the record is still given
+            self._log.warning("[write] the record of the precision reached could not be kept (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+        try:
+            return _paper_facts.writer_section(
+                self.quest_root, topic=str(self.config.topic or ""),
+                fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+        except Exception as e:  # noqa: BLE001 -- a record FI cannot read is left out, never a reason to stop
+            self._log.warning("[write] FI's record of the run could not be given to the writer (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            return ""
+
+    def _paper_record_hits(self, paper_md: str, state: QuestState) -> list[str]:
+        """Must-fix hits for what the paper states about the run against FI's records (core/paper_facts.py): a run time or a
+        limit claim the measurement contradicts, and a part the study did not do that the paper does not name. Text-only: the
+        paper is written again, the design is not touched and the quest is not stopped. What is still missing when the
+        rounds are used up is kept in ``.fi/paper_record_check.json`` (the quality report prints it) and said in the run log."""
+        hits = _paper_facts.check(paper_md, self.quest_root, topic=str(self.config.topic or ""),
+                                  fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+        _paper_facts.keep_check(self.quest_root, hits, paper_md)
+        for hit in hits:
+            self._log.warning("[record_check] %s", hit)
+        left = int(self.config.engine.max_iterations) - int(state.get("iteration", 0) or 0) - 1
+        if hits and left <= 0:
+            self._log.warning("[record_check] %d point(s) of FI's record are still wrong or missing in the paper and no review "
+                              "round is left to rewrite it; they are in .fi/paper_record_check.json and QUALITY.md", len(hits))
+        return hits
 
     async def _check_code_project(self) -> None:
         """Run ``code/`` as a person would (clean environment, only requirements.txt) once per version of the code and
@@ -19298,31 +19335,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
         if _phased.enabled(self.config):
             markdown = _phased.mark_paper(markdown, _phased.load(self.quest_root))
-        # How often the design changed and how many runs were made, from the records: the engine's words, never the
-        # model's (core/disclosure.py).
-        markdown = _disclosure.mark_paper(markdown, _disclosure.paragraph(
-            self.quest_root, no_simulation=bool(state.get("no_simulation_resolved")),
-            survey=bool(state.get("survey_mode_resolved"))))
+        # The design history, the run record and the code's open findings are not in the paper: the writer states what the
+        # study did not do from FI's record section (core/paper_facts.py), the review checks it, and the quality report
+        # (QUALITY.md) holds the records themselves. A block an earlier draft carried was taken out above.
         # A search for the best design: the engine's "Best design found" section, from FI's own records.
         markdown = self._mark_best_design(state, markdown)
-        # What FI recorded about the run (seeds, run time against the topic's limit, counts, a reduced size, the topic's
-        # requirements not done, equations not tested), in the limitations: FI's words from its records, never asked of
-        # the writer (core/disclosure.py:run_record). Before the code findings, which go after it.
-        try:
-            _disclosure.write_precision_record(self.quest_root, self._precision_shortfalls(state))
-        except Exception as e:  # noqa: BLE001 -- the rest of the run record is still written
-            self._log.warning("[write] the record of the precision reached could not be kept (%s: %s)",
-                              type(e).__name__, str(e)[:200])
-        try:
-            markdown = _disclosure.mark_run_record(markdown, _disclosure.run_record(
-                self.quest_root, topic=str(self.config.topic or ""),
-                duration_s=(state.get("exec_result") or {}).get("duration_s")))
-        except Exception as e:  # noqa: BLE001 -- a record FI cannot read is left out, never a reason to stop
-            self._log.warning("[write] FI's record of the run could not be written into the paper (%s: %s)",
-                              type(e).__name__, str(e)[:200])
-        # What the second model's reading of the code left unresolved, in the limitations: the engine's words from its
-        # record, so the paper states it whatever the writer did with the note (core/code_review.py, core/disclosure.py).
-        markdown = _disclosure.mark_findings(markdown, _code_review.findings_block(self.quest_root, self.quest_root / "code"))
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -20872,7 +20889,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             n_seeds=len(replicates),
             optimisation=(_best_report.records(self.quest_root)
                           if _optimise.block_of(self._protocol_block(state)) is not None else None),
-            run_facts={k: v for k, v in {"duration_s": (state.get("exec_result") or {}).get("duration_s")}.items()
+            run_facts={k: v for k, v in {
+                "duration_s": _paper_facts.measured_run_time(
+                    self.quest_root, (state.get("exec_result") or {}).get("duration_s"))[0]}.items()
                        if isinstance(v, (int, float)) and not isinstance(v, bool)},
             trial_table=_trial_table.traceable(_trial_table.rows(self.quest_root)),
         )
@@ -21346,7 +21365,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         An objection is a hit that names no problem FI checks in the text (circular evaluation, a single-point evaluation,
         a name the reviewer made up) or, for a revise verdict, the reviewer's own reason (``blocking``): no check of FI's
         confirms it, so the design is not changed for it. When the paper is written again after this review, they go into
-        FI's record (``.fi/review_objections.json``), which the paper's limitations state (core/disclosure.py:run_record).
+        FI's record (``.fi/review_objections.json``), which the quality report prints (core/disclosure.py:run_record).
         One the record already holds is in ``review["objections_repeated"]`` and is not counted: a rewrite cannot answer
         it. Best-effort: a record FI cannot read or write counts every hit, as before."""
         hits = [h for h in review.get("must_flag_hits") or [] if _hit_name(h) != _PAGE_LIMIT_HIT]
@@ -21551,6 +21570,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # Forced: a claim FI's own records contradict (core/record_claims.py).
             record_hits = self._record_contradiction_hits(paper_md, state)
             review["must_flag_hits"] += record_hits
+            # Forced, and text-only: what the paper states about the run against FI's records (core/paper_facts.py).
+            review["must_flag_hits"] += self._paper_record_hits(paper_md, state)
             # Forced as well: nothing checked this draft's citations.
             review["must_flag_hits"] += _citations_unchecked(state)
             # And a draft over the page limit.
@@ -21752,6 +21773,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         record_hits = self._record_contradiction_hits(paper_md, state)
         if record_hits:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *record_hits]
+        stated_hits = self._paper_record_hits(paper_md, state)
+        if stated_hits:
+            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *stated_hits]
         unchecked = _citations_unchecked(state)
         if unchecked:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *unchecked]
@@ -25826,17 +25850,18 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
     record = _claim_fi_record_block(quest_root)
     if record:
         parts.append(record)
-    # The same run record FI writes into the paper's limitations (core/disclosure.py:run_record): a sentence of the paper
-    # that states a seed or the run time is grounded in it, as the block itself is.
+    # FI's run record (core/disclosure.py:run_record; printed in QUALITY.md, not in the paper): a sentence of the paper
+    # that states a seed or the run time is grounded in it, with the measured run time (core/run_facts.py).
     try:
-        run = _disclosure.run_record(quest_root, topic=str(state.get("topic") or ""),
-                                     duration_s=(state.get("exec_result") or {}).get("duration_s"))
+        run = _disclosure.run_record(
+            quest_root, topic=str(state.get("topic") or ""),
+            duration_s=_paper_facts.measured_run_time(quest_root, (state.get("exec_result") or {}).get("duration_s"))[0])
     except Exception as e:  # noqa: BLE001 -- evidence FI cannot read is left out
         logging.getLogger("frontier_insight.engine").warning(
             "[claim_check] FI's record of the run could not be read (%s: %s)", type(e).__name__, str(e)[:200])
         run = ""
     if run:
-        parts.append("WHAT FI RECORDED ABOUT THIS RUN (FI's own records; the paper's limitations hold the same text):\n"
+        parts.append("WHAT FI RECORDED ABOUT THIS RUN (FI's own records, measured or read by FI; the writer is given the same facts):\n"
                      + run.replace("**What FI recorded about this run.** ", ""))
     code = _claim_code_block(quest_root / "code")
     if code:
@@ -28278,6 +28303,9 @@ _TEXT_ONLY_HITS = frozenset({
     "user_feedback_unaddressed",
     # A claim FI's own records contradict (core/record_claims.py): the paper is written again with it named.
     "record_contradiction",
+    # What the paper states about the run against FI's records (a run time, a limit claim, a part the study did not do that
+    # the paper leaves unnamed; core/paper_facts.py): the paper is written again, the design is not touched.
+    "paper_record_mismatch",
 })
 _UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
 # How many times a paper that claims what FI's own records contradict is written again before the quest ends with no paper.

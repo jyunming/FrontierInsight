@@ -1,38 +1,29 @@
-"""What the paper says about how its result was reached: how often the design was revised, and how many runs were made.
+"""FI's text about how a result was reached: how often the design was revised, how many runs were made, the run record and
+the checks' strip helpers.
 
 The records are kept as the quest runs: ``needs/DESIGN_HISTORY.json`` (each version of the design; a later one is
 ``post_hoc``, and ``after_results`` says whether the experiment had run, or the data had been analysed, by then) and
 ``.fi/attempts.jsonl`` (one ``run`` line per complete run of the experiment, all its seeds together, with its outcome).
-A reader of the finished paper cannot see either, and a study whose design was revised after its first results looks
-the same as one whose design was fixed in advance, so the engine writes one paragraph into the paper's methods from
-those records (:func:`paragraph`, :func:`mark_paper`). When the study was confirmed more than once (a version changed
-after its confirmation is a new one, confirmed on its own: ``.fi/confirmations.jsonl``, ``core/confirmations.py``),
-the paragraph also says how many versions were confirmed and how many of those confirmations did not hold (failed ones
-included). The model never writes it: whatever the writer put between the
-markers, or under the paragraph's lead words, is removed, and the engine's paragraph is put in after the writer has
-finished.
+:func:`paragraph`, :func:`run_record` and ``core/code_review.py:findings_block`` build plain-words text from those records.
 
-The paragraph is built from a closed set of phrases and whole-number counts only (never a raw reason from the record),
-so the number checks (``core/numeric_oracle.py``, ``core/stat_claims.py``, ``core/number_provenance.py``), which hold
-every number in the paper to the run's results, can leave it out: these counts are about the quest, not results.
-:func:`strip_for_checks` removes it only when every word of it is the engine's grammar (:data:`_CONTENT`); a block
-between the markers that says anything else (a result-like number, a sentence the engine never writes) is left in and
-checked like the rest of the paper.
+**None of the three blocks is written into the paper any more.** They used to be (between ``<!-- fi:attempts -->``,
+``<!-- fi:run-record:<checksum> -->`` and ``<!-- fi:code-findings:<checksum> -->`` markers), and in graded papers they carried
+false facts (a run time that was the analysis' rather than the experiment's, a base seed the code never used, reviewer quotes
+about text no longer in the paper) and states a reader cannot use. The text is printed in the quality report
+(``core/quality_report.py``), and the paper states what it did not do in the writer's own words, which FI checks against its
+records (``core/paper_facts.py``). :func:`mark_paper`, :func:`mark_run_record` and :func:`mark_findings` are kept to build an
+old-style paper (tests) and are not called by the engine.
+
+What stays: :func:`without_block` takes every such block, marker and lead-word paragraph out of a draft (the write node calls
+it on what the writer returns), so an old paper from a resume or a refine is cleaned and the blocks do not come back;
+:func:`strip_for_checks` leaves an old block out of the number checks (``core/numeric_oracle.py``,
+``core/stat_claims.py``, ``core/number_provenance.py``) only while every word of it is the engine's grammar
+(:data:`_CONTENT`) or, for the other two, while a checksum of its text in the opening marker still matches.
 
 :func:`unconfirmed_gap` is what the evidence ladder (``core/evidence.py``) reads: a design revised after the experiment
 had run, with no confirm run on data or seeds exploration never saw after the last revision (``core/phased.py``),
 keeps the result below ``publication_ready``. It reads whether the confirm run happened (``.fi/phased.json``), not
 whether ``engine.phased`` is set.
-
-The same module holds the second engine-written block, the paper's open code findings (:func:`mark_findings`, its text
-built by ``core/code_review.py``: what a second model's reading of the code left unresolved, put into the limitations
-after the writer has finished, so the paper states it whatever the writer did with the prompt's note). It is between
-``<!-- fi:code-findings:<checksum> -->`` markers. Its words are the findings' own texts, which carry numbers (a
-tolerance, a size, a count), so the grammar check above cannot recognise it. Instead the opening marker carries a
-checksum of the block's text, and :func:`strip_for_checks` leaves the block out of the number checks only while the text
-still matches it: a block that was edited, or one a writer typed with a guessed checksum, is checked like the rest of
-the paper. (The engine removes every block between these markers from a draft before it puts its own in, so a writer's
-block never survives to the checks in the first place.)
 """
 
 from __future__ import annotations

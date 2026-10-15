@@ -47,7 +47,7 @@ $literature_block
 $passages_block
 
 ## The draft
-(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's records. Never edit it or its markers: any change to it is undone. The same holds for blocks between `<!-- fi:run-record:... -->` and `<!-- /fi:run-record -->`, and between `<!-- fi:code-findings:... -->` and `<!-- /fi:code-findings -->`.)
+(A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI from its records. Never edit it or its markers: any change to it is undone. The seed, the run time and the parts of the topic the study did not do are the paper's own sentences: keep them as they are unless a passage above names them, and then state them as FI's record says.)
 
 <draft>
 $paper_block

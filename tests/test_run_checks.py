@@ -349,7 +349,7 @@ async def test_a_run_that_is_too_long_has_its_runs_lowered_by_fi_without_asking_
     log = _log(eng)
     assert "FI made the experiment smaller" in log and "the checks, thresholds and tolerances are unchanged" in log
     assert re.search(r"FI estimates the experiment takes about .+; the limit is 8 seconds", log)
-    assert "limitations" in eng._run_checks_note()
+    assert "FI's facts about this run" in eng._run_checks_note()
     assert run_estimate.read_record(eng.quest_root)["fits"] is True
     assert not (eng.quest_root / "raw").exists()
 

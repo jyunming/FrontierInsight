@@ -34,7 +34,7 @@ ends in the honest stop after the run; every other open finding is said in the p
   read, and the record says whether it was (``final_read``), the open findings per reading and whether the repairs
   converged. A version that a repair of the run itself (a crash, a result the protocol's contract refuses) changed after
   that reading is read again before its results are used, within :data:`RUN_REPAIR_READS` more readings.
-* What is still open afterwards is said in the paper's limitations (:func:`write_note`). A high-severity finding about
+* What is still open afterwards is said in the paper's limitations, by the writer (:func:`write_note`) and checked by FI. A high-severity finding about
   a headline quantity (the first dependent variable, the metric the precision target is for) that is still open in the
   final version ends in the honest stop (``stuck_no_findings``, no paper) after the run, unless the run's own results
   contradict it (a quantity the reviewer calls missing that the results hold, one it calls constant that they show
@@ -1149,9 +1149,11 @@ def _where(v: dict[str, Any], *, line: bool) -> str:
 
 def write_note(quest_root: Path, code_dir: Path) -> str:
     """For the write prompt: what the code does not compute and what is still flagged, to be said plainly in the
-    limitations. ``""`` when nothing. Every kind of finding is named (none is dropped because another is present); a long
-    list is cut for the prompt's size and says how many more there are. The paper itself carries the same facts in a block
-    the engine writes (:func:`findings_block`), whatever the writer does with this note."""
+    limitations. ``""`` when nothing. A requirement not met, a plan that contradicts itself and what is still flagged are
+    named; a long list is cut for the prompt's size and says how many more there are. What the writer is not told, because a
+    reader of the paper cannot use it: that no second model read the code, that it was changed after it was read, which
+    requirements it did not check, that the repairs stopped, and the second version of a function that could not be
+    settled. Those are in the quality report (:func:`findings_block`), and the claim check and the review still read them."""
     f = open_findings(quest_root, code_dir)
     notes: list[str] = []
     missing, different = f["missing"], f["different"]
@@ -1161,17 +1163,6 @@ def write_note(quest_root: Path, code_dir: Path) -> str:
         notes.append("A second model compared the code with what the plan requires, and the code was sent back to be "
                      f"repaired; these requirements are still not met: {names}. Say so plainly (in the limitations): a "
                      "quantity listed as not computed was not computed, and do not write a value, a figure or a claim for it.")
-    if f["unread"]:
-        notes.append("The code that produced these results was not compared with the plan by another model "
-                     f"({f['unread']}): say so plainly in the limitations.")
-    elif f["reread"]:
-        notes.append("The code was read against the plan by a second model, but it was changed afterwards and the final "
-                     "version was not read again by another model: say so in the limitations.")
-    elif f["not_reviewed"]:
-        names = _listed(f["not_reviewed"], NOTE_CAP)
-        notes.append("A second model was asked to compare the code with the plan, and did not check these requirements: "
-                     f"{names}. Say plainly (in the limitations) that they were not checked against the code by another model"
-                     + (", the study's main quantity among them." if f["not_reviewed_headline"] else "."))
     if f["conflicts"]:
         listed = _listed([f"{v['text']}" + (f" ({v['note']})" if v.get("note") else "") for v in f["conflicts"]], NOTE_CAP)
         notes.append("A second model found that the PLAN contradicts itself: two of its parts define one thing differently "
@@ -1188,14 +1179,6 @@ def write_note(quest_root: Path, code_dir: Path) -> str:
                      f"repaired; it still flags: {listed}. The run's results cannot settle this, and the reader can be wrong: "
                      "say plainly in the limitations that a second model flagged these and they were not resolved, and do "
                      "not present the quantities they concern as established.")
-    if f["stopped"]:
-        notes.append("The repairs of the second model's findings were stopped because a round did not reduce the open "
-                     "findings that change a result; what is open is listed here as it stands.")
-    if f["second_version"]:
-        notes.append("FI had a second, independently written version of key functions of the model compared with the first "
-                     f"on many inputs, and for these it could not settle which is right: {_listed(f['second_version'], NOTE_CAP)}. "
-                     "Say plainly in the limitations that the number or figure that rests on such a function was not "
-                     "confirmed by an independent version, and do not present it as established.")
     return " ".join(notes)
 
 
@@ -1212,12 +1195,12 @@ def _plain_text(text: Any) -> str:
 
 
 def findings_block(quest_root: Path, code_dir: Path) -> str:
-    """The paragraph the ENGINE puts into the paper's limitations: what the second model's reading of the code left
-    unresolved on the version that ran, in plain words, from the same record the writer's note (:func:`write_note`) is built
-    from. ``""`` when nothing is open (no record, or every requirement met and no problem flagged). The writer never writes
-    it: whatever it put between the block's markers is removed and this goes in after it has finished
-    (``core/disclosure.py:mark_findings``), so the paper states the open findings even when the writer left them out of its
-    own limitations.
+    """The paragraph of what the second model's reading of the code left unresolved on the version that ran, in plain words,
+    from the same record the writer's note (:func:`write_note`) is built from. ``""`` when nothing is open (no record, or
+    every requirement met and no problem flagged). It is no longer put into the paper (graded papers carried states a reader
+    cannot use): the quality report prints it (``core/quality_report.py``), and the review and the claim check read it.
+    ``core/disclosure.py:mark_findings`` still puts such a block into a paper, and ``disclosure.without_block`` takes one out
+    of an old paper.
 
     Its findings are the reader's own sentences, which carry numbers (a tolerance, a size). The number checks
     (``core/numeric_oracle.py``, ``core/number_provenance.py``, ``core/stat_claims.py``) hold every number in the paper to the
@@ -1285,8 +1268,8 @@ def findings_block(quest_root: Path, code_dir: Path) -> str:
 
 def review_block(quest_root: Path, code_dir: Path) -> str:
     """For the paper's reviewer: the same open points as :func:`findings_block`, with how to weigh them (``""`` when none
-    are open). The reviewer reads the paper, in which the engine's block states them, and this tells it what they mean for
-    its judgement."""
+    are open). The paper does not carry them (the quality report does); this tells the reviewer what they mean for its
+    judgement."""
     text = findings_block(quest_root, code_dir)
     if not text:
         return ""
@@ -1294,9 +1277,9 @@ def review_block(quest_root: Path, code_dir: Path) -> str:
             f"{text}\n\n"
             "A claim, a figure or a number in the paper that rests on a quantity named here must not be presented as "
             "established: treat it as a problem to report (a weakness, and a required fix when the paper states it as fact). "
-            "A quantity listed as not computed must not have a value anywhere in the paper. The block above is the engine's "
-            "own text from its records, also printed in the paper's limitations; it is not the writer's and cannot be "
-            "edited, so do not ask for it to be changed.")
+            "A quantity listed as not computed must not have a value anywhere in the paper. The list above is FI's own record, "
+            "kept in the quality report and not in the paper; do not ask for it to be pasted into the paper. The paper must "
+            "name a quantity that is not computed in its limitations.")
 
 
 def plain_lines(record: dict[str, Any]) -> str:

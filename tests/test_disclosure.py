@@ -352,7 +352,11 @@ DRAFT = (
 )
 
 
-def test_the_writer_cannot_change_the_paragraph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_paper_has_no_paragraph_and_the_quality_report_holds_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The design history and the run count are not in the paper any more (graded papers carried false facts in the
+    blocks FI wrote); what the writer put between the markers is taken out, and the quality report keeps the paragraph."""
+    from core import quality_report
+
     _history(tmp_path, "review verdict=revise (results were seen)", "analyze.next_step=re_experiment")
     _runs(tmp_path, "process_error", "inconclusive", "inconclusive")
     calls: list[str] = []
@@ -367,19 +371,20 @@ def test_the_writer_cannot_change_the_paragraph(tmp_path: Path, monkeypatch: pyt
     paper = Path(out["paper_md"]).read_text(encoding="utf-8")
     expected = disclosure.paragraph(tmp_path)
     assert calls, "the writer was asked"
-    assert paper.count(disclosure.BEGIN) == 1 and paper.count(disclosure.END) == 1
-    assert f"{disclosure.BEGIN}\n{expected}\n{disclosure.END}" in paper, paper
-    assert "revised 2 times" in expected and "run 3 times" in expected
+    assert disclosure.BEGIN not in paper and disclosure.END not in paper and "How this result was reached" not in paper
     assert "was not revised" not in paper and "run once" not in paper
-    assert paper.index("SIR model.") < paper.index(disclosure.BEGIN) < paper.index("## Results")
+    assert "revised 2 times" in expected and "run 3 times" in expected
+    assert quality_report.build(tmp_path, running=False)["paper_records"]["how_reached"] == expected.replace(
+        disclosure.LEAD + " ", "")
+    assert paper.index("SIR model.") < paper.index("## Results")
 
 
-def test_an_edit_of_the_paragraph_in_a_revise_is_undone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_passage_edit_in_a_revise_leaves_the_paper_without_the_paragraph(tmp_path: Path,
+                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     _history(tmp_path, "review verdict=revise (results were seen)")
     _runs(tmp_path, "inconclusive", "inconclusive")
     claim = "Extinction is certain below R0 = 1.2."
     draft = DRAFT.replace("It is small.", f"It is small. {claim}")
-    expected = disclosure.paragraph(tmp_path)
     replies = [draft]
 
     async def fake_chat(self: Any, messages: Any, **kw: Any) -> str:
@@ -390,10 +395,8 @@ def test_an_edit_of_the_paragraph_in_a_revise_is_undone(tmp_path: Path, monkeypa
     state: dict[str, Any] = {"topic": "t", "title": "t", "iteration": 0}
     out1 = asyncio.run(eng._node_write(state))  # type: ignore[arg-type]
     first = Path(out1["paper_md"]).read_text(encoding="utf-8")
-    assert expected in first
-    # The passage editor is asked to fix the claim and also rewrites the engine's count.
-    replies.append(json.dumps([{"find": claim, "replace": "Extinction is likely at low R0."},
-                               {"find": "run 2 times", "replace": "run 1 time"}]))
+    assert disclosure.BEGIN not in first
+    replies.append(json.dumps([{"find": claim, "replace": "Extinction is likely at low R0."}]))
     revise = {**state, "paper_md": out1["paper_md"], "paper_basis": out1["paper_basis"], "iteration": 1,
               "review": {"verdict": "revise", "must_flag_hits": ["unsupported_claim"]},
               "claim_grounding": {"claims": [{"claim": claim, "basis": "unsupported", "evidence": "no"}],
@@ -401,13 +404,26 @@ def test_an_edit_of_the_paragraph_in_a_revise_is_undone(tmp_path: Path, monkeypa
     out2 = asyncio.run(eng._node_write(revise))  # type: ignore[arg-type]
     after = Path(out2["paper_md"]).read_text(encoding="utf-8")
     assert "Extinction is likely at low R0." in after, "the passage edit was applied"
-    assert f"{disclosure.BEGIN}\n{expected}\n{disclosure.END}" in after and after.count(disclosure.BEGIN) == 1
-    assert "run 1 time" not in after
+    assert disclosure.BEGIN not in after and "run 2 times" not in after
 
 
-def test_the_paper_states_the_open_code_findings_whatever_the_writer_wrote(tmp_path: Path,
-                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
-    from core import code_review
+def test_an_old_paper_with_the_blocks_is_cleaned_and_they_do_not_come_back(tmp_path: Path) -> None:
+    """A resumed or refined quest may carry the three blocks of an earlier version: they are taken out and not put back."""
+    old = disclosure.mark_findings(
+        disclosure.mark_run_record(disclosure.mark_paper(PAPER, "**How this result was reached.** x"),
+                                   "**What FI recorded about this run.** Base seed 0."),
+        "**Open points in the code that produced these results.** None.")
+    assert "fi:attempts" in old and "fi:run-record:" in old and "fi:code-findings:" in old
+    cleaned = disclosure.without_block(old)
+    for marker in ("fi:attempts", "fi:run-record", "fi:code-findings", "How this result was reached",
+                   "What FI recorded", "Open points in the code"):
+        assert marker not in cleaned, marker
+    assert disclosure.without_block(cleaned) == cleaned
+
+
+def test_the_open_code_findings_are_in_the_quality_report_not_the_paper(tmp_path: Path,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import code_review, quality_report
 
     code = tmp_path / "code"
     code.mkdir()
@@ -432,14 +448,14 @@ def test_the_paper_states_the_open_code_findings_whatever_the_writer_wrote(tmp_p
     out = asyncio.run(eng._node_write({"topic": "t", "title": "t", "iteration": 0}))  # type: ignore[arg-type]
     paper = Path(out["paper_md"]).read_text(encoding="utf-8")
     assert "All quantities were computed" not in paper
-    assert paper.count("fi:code-findings:") == 1 and paper.count(disclosure.FINDINGS_END) == 1
-    assert expected in paper
-    assert paper.index("The model is simple.") < paper.index("<!-- fi:code-findings:"), paper
-    # The number checks do not read the block, and the paper's own numbers are still read.
-    assert "0.125" in expected
-    assert "0.125" not in [n[1] for n in numeric_oracle.extract_paper_numbers(paper)]
-    assert "0.125" in [n[1] for n in numeric_oracle.extract_paper_numbers(paper.replace("<!-- fi:code-findings:", "<!-- x:"))],         "a block that is not the engine's is read like the rest of the paper"
+    assert "fi:code-findings" not in paper and "Open points in the code" not in paper and "roughness_a" not in paper
+    report = quality_report.build(tmp_path, running=False)
+    held = report["paper_records"]["code_findings"]
+    assert "roughness_a" in held and "dropped when every repeat agrees" in held
+    assert "## What FI recorded that the paper does not carry" in quality_report.render(report)
+    # The paper's own numbers are read; the number checks have nothing of FI's to leave out.
     assert "0.583" in [n[1] for n in numeric_oracle.extract_paper_numbers(paper)]
+    assert "0.125" not in [n[1] for n in numeric_oracle.extract_paper_numbers(paper)]
 
 
 # ---- the evidence ladder --------------------------------------------------------------------------------------------

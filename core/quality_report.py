@@ -937,6 +937,36 @@ def _left_out_of_paper(q: _Quest) -> list[dict[str, Any]]:
     return out
 
 
+def _paper_records(q: _Quest) -> dict[str, Any]:
+    """What FI recorded about the run that the paper itself does not carry (``core/paper_facts.py``): how the result was
+    reached (design revisions, runs), the run record (seed, measured run time, trial counts, a reduced size, the topic's
+    requirements not done, reviewer objections), the open points in the code, and what FI's check of the paper against these
+    records found the last time it ran. Each part is empty when its record says nothing."""
+    from . import code_review as _cr
+    from . import disclosure as _d
+    from . import paper_facts as _pf
+
+    root = q.root
+    engine = _dict(q.config.get("engine"))
+    topic = str(q.config.get("topic") or "")
+    out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "paper_check": {}}
+    try:
+        out["how_reached"] = _d.paragraph(root, no_simulation=bool(engine.get("no_simulation"))).replace(_d.LEAD + " ", "")
+        wall, least = _pf.measured_run_time(root, None)
+        out["run_record"] = _d.run_record(root, topic=topic, duration_s=wall).replace(_d._RECORD_LEAD + " ", "")
+        if wall is None and least is not None:
+            out["run_record"] += (f" FI did not record how long the whole experiment took; the trials alone took at least "
+                                  f"{_d._plain_seconds(least)}.")
+        out["code_findings"] = _cr.findings_block(root, root / "code").replace(
+            "**Open points in the code that produced these results.** ", "")
+        kept = _pf.kept_check(root)
+        out["paper_check"] = {"hits": [str(h) for h in _list(kept.get("hits"))],
+                              "unmet_items": [_dict(i) for i in _list(kept.get("unmet_items"))]}
+    except Exception:  # noqa: BLE001 -- a record that cannot be read leaves its part out
+        pass
+    return out
+
+
 def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, Any]:
     """The report of one quest, from its records. Never raises for a missing or old-format record.
 
@@ -991,6 +1021,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "behaviour_checks": _probes_summary(q),
         "citations": _citations(q),
         "left_out_of_paper": _left_out_of_paper(q),
+        "paper_records": _paper_records(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
                      "left_out": totals["left_out"],
@@ -1070,6 +1101,33 @@ def _citations_line(c: dict[str, Any]) -> str:
             + (f", {n.get('unchecked')} could not be checked" if n.get("unchecked") else "") + "." + who)
 
 
+def _paper_record_lines(records: dict[str, Any]) -> list[str]:
+    """The section of what FI recorded about the run that the paper does not carry, and what its check of the paper found."""
+    labels = (("how_reached", "How this result was reached"), ("run_record", "What FI recorded about the run"),
+              ("code_findings", "Open points in the code that produced the results"))
+    parts = [(title, records.get(key)) for key, title in labels if records.get(key)]
+    check = records.get("paper_check") or {}
+    unmet = [i for i in check.get("unmet_items") or [] if isinstance(i, dict)]
+    hits = [h for h in check.get("hits") or [] if h]
+    if not parts and not unmet and not hits:
+        return []
+    lines = ["", "## What FI recorded that the paper does not carry", "",
+             "These are FI's records of the run. The paper itself states the seed, the measured run time and the parts the "
+             "study did not do in its own words, and FI checks those statements against these records; the records are kept "
+             "here, not pasted into the paper.", ""]
+    for title, text in parts:
+        lines += [f"### {title}", "", str(text).strip(), ""]
+    if unmet or hits:
+        lines += ["### Where the paper still disagrees with these records", "",
+                  "FI sent the paper back to be rewritten for these and the review rounds ended before they were settled:", ""]
+        lines += [f"- Not named in the paper: \"{_cell(str(i.get('name')))}\" ({_cell(str(i.get('text') or i.get('kind') or ''))})"
+                  for i in unmet]
+        named = {str(i.get("name")) for i in unmet}
+        lines += [f"- {_cell(_one(h, 300))}" for h in hits if not any(f'"{n}"' in h for n in named)]
+        lines.append("")
+    return lines
+
+
 def render(report: dict[str, Any]) -> str:
     """QUALITY.md: plain words for a scientist."""
     o = report["outcome"]
@@ -1146,8 +1204,9 @@ def render(report: dict[str, Any]) -> str:
             lines.append(f"- [{r['label']}] {_one(r.get('sentence'), 90)} -- {what}")
     if report.get("left_out_of_paper"):
         lines += ["", "## Left out of the paper", "",
-                  "These quantities are not in the paper's results, and the paper says so:", ""]
+                  "These quantities are not in the paper's results; FI checks that the paper says so:", ""]
         lines += [f"- `{_cell(x['quantity'])}`: {_cell(x['why'])}" for x in report["left_out_of_paper"]]
+    lines += _paper_record_lines(report.get("paper_records") or {})
     lines += ["", "## What to try", ""]
     if report["suggestions"]:
         lines += [f"- {s['text']} (from {s['source']})" for s in report["suggestions"]]
