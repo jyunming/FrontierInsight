@@ -1,0 +1,45 @@
+{
+  "ledger_left": [
+    "`protocol.simplifications` is incomplete: the topic asks for chance of any false discovery (when pi1 = 0), which the plan neither includes nor names in `simplifications`; the topic asks for reference pi0 * 0.05 for Benjamini-Hochberg, which the plan neither includes nor names in `simplifications`"
+  ],
+  "unsourced_definitions": [
+    "bh_reference_fdr",
+    "fdr_uncertainty_95",
+    "fwer_any_false_discovery",
+    "fwer_uncertainty_95",
+    "pi0",
+    "power_diff_bh_minus_bonferroni",
+    "power_uncertainty_95"
+  ],
+  "judge_calls": 3,
+  "judged": {
+    "e9aef415a8549c68e3f7": {
+      "Q3": "missing",
+      "Q4": "covered",
+      "Q5": "missing"
+    },
+    "78f424499cfcc1d0aa7a": {
+      "Q3": "missing",
+      "Q4": "covered",
+      "Q5": "covered"
+    },
+    "a8c08929a5ea838f221c": {
+      "Q3": "covered",
+      "Q4": "covered",
+      "Q5": "covered"
+    }
+  },
+  "ever_missing": [
+    "uncertainty over repeats",
+    "reference pi0 * 0.05 for Benjamini-Hochberg"
+  ],
+  "mapped": {
+    "power": "power"
+  },
+  "overruled": [],
+  "plan_done": true,
+  "left": [],
+  "unjudged": [],
+  "asked": 2,
+  "checked_at_design": true
+}

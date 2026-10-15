@@ -90,6 +90,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from core.disclosure import recorded_seeds, strip_for_checks
+from core.run_facts import seed_verdict
 from core.numeric_oracle import flatten_numbers
 
 # A replicated run needs at least this many seeds before its spread means
@@ -711,6 +712,9 @@ class SeedRecords:
     base_seed: int | None = None
     trial_seeds: frozenset[int] = frozenset()
     code_seeds: tuple[tuple[str, int], ...] = ()
+    #: Whether the seed FI gives each trial reaches the simulation (``core/run_facts.py:seed_verdict``): ``False`` when
+    #: ``run_trial`` never uses its seed, so the base seed and the trial seeds in the records are not the code's seeds.
+    fi_seed_reaches: bool | None = None
 
 
 def seed_records(quest_root: Path) -> SeedRecords:
@@ -730,7 +734,11 @@ def seed_records(quest_root: Path) -> SeedRecords:
         for no, line in enumerate(lines, 1):
             for m in _CODE_SEED.finditer(line.split("#", 1)[0]):
                 code.append((f"{rel.as_posix()}:{no}", int(m.group(1) or m.group(2))))
-    return SeedRecords(base_seed=base, trial_seeds=trials, code_seeds=tuple(code))
+    verdict = seed_verdict(root)
+    have = set(code)
+    code += [(lit["where"], lit["value"]) for lit in verdict["code_seeds"] if (lit["where"], lit["value"]) not in have]
+    return SeedRecords(base_seed=base, trial_seeds=trials, code_seeds=tuple(code),
+                       fi_seed_reaches=verdict["fi_seed_reaches"])
 
 
 def _check_seeds(sents: list[str], seeds: SeedRecords | None, values: dict[str, float]) -> list[StatFinding]:
@@ -739,14 +747,35 @@ def _check_seeds(sents: list[str], seeds: SeedRecords | None, values: dict[str, 
     Silent unless FI holds the run's real seeds: a "base seed N" is checked only against a study record's base seed,
     and a "seed N" only when FI's ledger holds every trial's seed. A seed is accepted when it is the base seed, a
     trial seed, a seed written in the code or a result named for a seed."""
-    if seeds is None or (seeds.base_seed is None and not seeds.trial_seeds):
+    if seeds is None or (seeds.base_seed is None and not seeds.trial_seeds and seeds.fi_seed_reaches is not False):
         return []
     where: dict[int, str] = {}
     for loc, value in seeds.code_seeds:
         where.setdefault(value, loc)
-    recorded = set(seeds.trial_seeds) | set(where)
-    if seeds.base_seed is not None:
+    ignored = seeds.fi_seed_reaches is False  # the code never uses FI's seeds: only the seeds written in it are the run's
+    recorded = set(where) if ignored else set(seeds.trial_seeds) | set(where)
+    if seeds.base_seed is not None and not ignored:
         recorded.add(seeds.base_seed)
+    if ignored:
+        written = ", ".join(f"{v} ({loc})" for v, loc in list(where.items())[:3]) or "none that FI found"
+        out_ignored: list[StatFinding] = []
+        said: set[tuple[str, int]] = set()
+        for s in sents:
+            for m in list(_BASE_SEED.finditer(s)) + list(_ONE_SEED.finditer(s)):
+                n = int(m.group(1))
+                if n in recorded or (s, n) in said:
+                    continue
+                said.add((s, n))
+                out_ignored.append(StatFinding(
+                    kind="seed_not_recorded",
+                    message=(
+                        f"the paper gives seed {n} as the run's seed, but the code never uses the seed FI gives each trial "
+                        f"(run_trial does not read it), so FI's base seed and trial seeds are not the run's seeds. The seeds "
+                        f"written in the code are: {written}. State the seed the code used."
+                    ),
+                    context=_ctx(s, m.start()),
+                ))
+        return out_ignored
     recorded |= {int(v) for path, v in values.items() if "seed" in path.lower() and float(v).is_integer()}
 
     def _elsewhere(n: int) -> str:

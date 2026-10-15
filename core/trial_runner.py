@@ -776,6 +776,7 @@ class TrialsRunner:
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
             )
             _save_run(self.quest_root, key, run)
+            _keep_run_time(self.quest_root, key, run, None)  # the queue's waiting time is not a run time FI measured
             if self.log is not None:
                 self.log.info("[execute] the cluster job is done: FI read every setting's results and wrote the ledger")
         else:
@@ -790,6 +791,7 @@ class TrialsRunner:
                             "protocol as `grid` (one list per parameter: numbers, or names such as [euler, rk4]); no change "
                             "to simulate.py is needed."),
                 )
+            ran_from = time.monotonic()
             run = await run_trials(
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
@@ -798,6 +800,9 @@ class TrialsRunner:
             )
             self._plan_seen = None
             _save_run(self.quest_root, key, run)
+            # How long the experiment took is the time of THIS run of the trials; the analysis run again on stored trials
+            # (the branch above) is not the experiment and leaves the record as it is (core/run_facts.py).
+            _keep_run_time(self.quest_root, key, run, time.monotonic() - ran_from)
         self.last = run
         if self.log is not None:
             self.log.info("[execute] FI ran %d trial(s) in %d cell(s): %d ok, %d failed (ledger: %s)",
@@ -844,6 +849,16 @@ class TrialsRunner:
             returncode=result.returncode, stdout=result.stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr() + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
         )
+
+
+def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | None) -> None:
+    """Keep the wall time of a run of the trials, how many it ran, and the sum of the per-trial times in ``.fi/run_facts.json``."""
+    from . import run_facts
+
+    rows = [r for c in run.cells for r in c.rows]
+    times = [r["duration_s"] for r in rows if isinstance(r.get("duration_s"), (int, float)) and not isinstance(r["duration_s"], bool)]
+    run_facts.record_trials(quest_root, key=key, wall_s=wall_s, trials=len(rows), cells=len(run.cells),
+                            trial_sum_s=sum(times) if times else None)
 
 
 def _note_job(quest_root: Path, record: dict[str, Any], job: dict[str, Any]) -> None:

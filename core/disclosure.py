@@ -342,6 +342,16 @@ def _inside_sentence(study: Any) -> str:
 
 
 def _seed_sentence(quest_root: Path, rows: Any) -> str:
+    from . import run_facts as _run_facts
+
+    verdict = _run_facts.seed_verdict(quest_root)
+    if verdict["fi_seed_reaches"] is False:
+        used: dict[int, list[str]] = {}
+        for lit in verdict["code_seeds"]:
+            used.setdefault(lit["value"], []).append(lit["where"])
+        written = "; ".join(f"{v} ({', '.join(w[:3])})" for v, w in list(used.items())[:4])
+        return (f"The seed FI gives each trial does not reach the simulation ({verdict['why']}); its generators are seeded "
+                f"from numbers written in the code: {written or 'FI found no seed number in the code'}.")
     study = _read_json(Path(quest_root) / "code" / "study.json")
     base = _whole(study.get("base_seed")) if isinstance(study, dict) else None
     if base is None:
@@ -370,13 +380,19 @@ def _settings_seed_sentence(study: dict[str, Any], base: int, rows: Any) -> str:
     return f"Each trial's random seed is derived from base seed {base}."
 
 
-def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> str:
-    if isinstance(duration_s, bool) or not isinstance(duration_s, (int, float)) or not 0 <= duration_s < float("inf"):
-        return ""
+def topic_limit(quest_root: Path, topic: str) -> float | None:
+    """The one run-time limit (in seconds) the topic states, from the topic's constraints (``.fi/topic_requirements.json``)
+    or its text; ``None`` when it states none or several different ones."""
     required = _read_json(Path(quest_root) / ".fi" / "topic_requirements.json")
     constraints = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
                    for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
-    limit = _topic_limit([c for c in constraints if isinstance(c, str)], topic or "")
+    return _topic_limit([c for c in constraints if isinstance(c, str)], topic or "")
+
+
+def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> str:
+    if isinstance(duration_s, bool) or not isinstance(duration_s, (int, float)) or not 0 <= duration_s < float("inf"):
+        return ""
+    limit = topic_limit(quest_root, topic)
     ran = f"The experiment ran for {_plain_seconds(float(duration_s))}"
     if limit is None:
         return f"{ran}; FI did not check it against a limit in the topic."

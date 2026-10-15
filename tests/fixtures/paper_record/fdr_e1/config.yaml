@@ -1,0 +1,94 @@
+topic: |
+  TOPIC. When many hypotheses are tested at once, how do Bonferroni correction and the Benjamini-Hochberg procedure compare in false discoveries and in power?
+
+  CONTEXT. Testing thousands of hypotheses at a 5 percent level produces many false positives. Bonferroni controls the chance of any false positive; Benjamini-Hochberg controls the expected share of false positives among the positives found (the false discovery rate).
+  SCOPE. Simulate m tests (m in {20, 200, 2000}) in which a fraction pi1 in {0.0, 0.05, 0.2} of the effects are real, using one-sided z-tests in which each real effect shifts the test statistic by 2.5. Compare uncorrected, Bonferroni and Benjamini-Hochberg at a nominal 5 percent: report the realised false discovery rate (draw the reference pi0 * 0.05 for Benjamini-Hochberg) and the power, with uncertainty over repeats. When pi1 = 0 there are no real effects, so power is undefined; report only the chance of any false discovery.
+
+  GOALS.
+    - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
+    - Two or three figures that answer the question directly, each with the reference or theory value drawn.
+    - A short paper of at most 4 pages. Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it.
+  CONSTRAINTS.
+    - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
+    - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.
+title: fdr-bonferroni-vs-bh
+result_use: research
+provider:
+  name: codex_cli
+  model: gpt-5.6-terra
+  node_cli_timeout_s:
+    plan: 1800
+    plan_revise: 1800
+    design: 1800
+    implement: 1800
+    implement_outline: 1800
+    implement_seed: 1800
+    implement_protocol: 1800
+    implement_oracle: 1800
+    implement_figures: 1800
+    execute_reflect: 1800
+    improve: 1800
+    oracle_review: 1800
+    design_review: 1800
+    code_review: 1800
+  node_providers:
+    citation_check:
+      name: claude_cli
+      model: claude-sonnet-5-5
+    implement:
+      name: codex_cli
+      model: gpt-5.6-terra
+    implement_outline:
+      name: codex_cli
+      model: gpt-5.6-terra
+    implement_seed:
+      name: codex_cli
+      model: gpt-5.6-terra
+    implement_protocol:
+      name: codex_cli
+      model: gpt-5.6-terra
+    implement_oracle:
+      name: codex_cli
+      model: gpt-5.6-terra
+    implement_figures:
+      name: codex_cli
+      model: gpt-5.6-terra
+    execute_reflect:
+      name: codex_cli
+      model: gpt-5.6-terra
+    improve:
+      name: codex_cli
+      model: gpt-5.6-terra
+    oracle_review:
+      name: claude_cli
+      model: claude-sonnet-5-5
+    design_review:
+      name: claude_cli
+      model: claude-sonnet-5-5
+    code_review:
+      name: claude_cli
+      model: claude-sonnet-5-5
+engine:
+  run_manifest_check: warn  # E1: the only change
+  framework: langgraph
+  max_iterations: 2
+  review_loop: true
+execution:
+  sandbox: venv
+  timeout_s: 900
+  python_version: '3.11'
+knowledge:
+  enabled: true
+  top_k: 5
+  write_back_quests: false
+pauses:
+  papers: false
+  review: 'off'
+output:
+  kinds:
+  - paper_md
+  - paper_pdf
+  - slides
+  - poster
+  paper_format: generic
+  output_dir: C:/fi_compare/exp/E1/out
