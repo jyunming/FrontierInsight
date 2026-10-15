@@ -30,7 +30,7 @@ import string
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from core.config import Config
+from core.config import Config, resolve_page_limit
 from core.plot_style import HOUSE_TICK_PT, RECORDS_DIRNAME
 from core.provider import (
     PROXY_PROVIDERS,
@@ -152,6 +152,14 @@ async def _check(
     base = _BASE_KIND.get(kind, kind)
     if base == "slides":
         measured = slides_report(doc, figures=_figure_sources(quest_root))
+    elif base == "paper":
+        # Pages over the page limit (References included) and a PDF a browser made when
+        # LaTeX was expected are measured too; the briefing style is meant to come from
+        # the browser.
+        measured = paper_report(
+            doc, page_limit=resolve_page_limit(config),
+            expect_latex=getattr(config.output, "paper_style", "latex") != "briefing",
+        )
     else:
         measured = _REPORTS[base](doc)
     result: dict[str, Any] = {
