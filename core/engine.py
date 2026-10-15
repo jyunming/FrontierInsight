@@ -2740,10 +2740,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         code (→ retry execute) or accepted the failure / success
         (→ proceed to analyze)."""
         result = state.get("exec_result") or {}
-        if result.get("topic_unmet"):
-            # Decided before anything ran: the plan never covered what the topic asks. There is nothing to improve, analyse
-            # or cross-check, and a redesign now would be recorded as a change made after results were seen. The gate states
-            # the stop (no paper) from the record, and the quest ends there.
+        if any(result.get(k) for k in _STOPPED_BEFORE_THE_STUDY):
+            # Decided before anything ran (the plan never covered the topic, the study would not fit the time allowed, FI's
+            # repairs ended with a problem standing ...): there is nothing to improve, analyse or cross-check, and a
+            # redesign now would be recorded as a change made after results were seen. The gate states the stop (no
+            # paper) from the record, and the quest ends there.
             return "stuck"
         rc = result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
@@ -2837,8 +2838,65 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if next_step == "broaden_lit":
             return "broaden_lit"
         if next_step == "re_experiment":
-            return "redesign"
+            missed = self._precision_missed(state)
+            if missed:
+                self._log.info("[cross_check] the analysis asks to run the experiment again, and FI's record agrees: the "
+                               "plan's precision target was not reached (%s), and a run large enough for it fits the time "
+                               "allowed", ", ".join(missed[:4]))
+                return "redesign"
+            # The model's reasons were nearly always a run that failed or left settings out: a fault of the code, which
+            # the evidence check sends back from its own record, never a reason to redesign after results were seen. A
+            # precision target missed that a larger run cannot reach in time is said in the paper's limitations
+            # (core/disclosure.py:run_record).
+            self._log.info("[cross_check] the analysis asks to run the experiment again (%s), but FI's record shows no "
+                           "precision target missed that a larger run could reach in the time allowed; the evidence "
+                           "check decides from the record",
+                           _one_line(str(analysis.get("next_step_reason") or analysis.get("summary") or "no reason given"), 160))
         return "write"
+
+    def _precision_shortfalls(self, state: QuestState) -> list[dict[str, Any]]:
+        """The pooled probabilities whose interval is wider than the plan's precision target in this run (the record
+        ``_annotate_precision`` writes), each ``{"name", "half_width", "target", "trials"}``; empty when the plan sets
+        none, the run has no repeats, or all were reached. A mean carries no such record and is never listed."""
+        try:
+            replicates = state.get("result_json_replicates") or []
+            if not (len(replicates) > 1 or (replicates and state.get("result_json_trials"))):
+                return []
+            aggregate = _aggregate_result_json_replicates(
+                replicates, assertions=_replicate_assertions(state), kinds=_replicate_metric_kinds(state))
+            self._annotate_precision(state, aggregate)
+            return [{"name": k, "half_width": float(v["ci_half_width"]), "target": float(v["target_half_width"]),
+                     "trials": v.get("n_trials")}
+                    for k, v in aggregate.items() if isinstance(v, dict) and v.get("precision_reached") is False]
+        except Exception as e:  # noqa: BLE001 -- a record that cannot be read never sends a quest back
+            self._log.warning("[precision] the precision record could not be read (%r)", e)
+            return []
+
+    def _precision_missed(self, state: QuestState) -> list[str]:
+        """The probabilities whose precision target this run missed and a larger run could reach in the time allowed:
+        the trials scale with the square of the interval's width, so the run is ``(half_width / target) ** 2`` times
+        longer, and FI's own estimate of this run (``.fi/run_estimate.json``, which already carries its safety margin)
+        times that must fit the time the study is allowed. No estimate, a run FI already had to make smaller, or one
+        that would not fit: empty (the paper says the target was missed)."""
+        from . import run_estimate as _estimate
+
+        missed = self._precision_shortfalls(state)
+        if not missed:
+            return []
+        record = _estimate.read_record(self.quest_root)
+        estimate_s, limit_s = record.get("estimate_s"), record.get("limit_s")
+        if record.get("reduced") or not record.get("fits") or not all(
+                isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0 for x in (estimate_s, limit_s)):
+            self._log.info("[cross_check] the precision target was not reached (%s); FI has no estimate showing a larger "
+                           "run fits the time allowed", ", ".join(m["name"] for m in missed[:4]))
+            return []
+        scale = max((m["half_width"] / m["target"]) ** 2 for m in missed)
+        if float(estimate_s) * scale > float(limit_s):  # type: ignore[arg-type]
+            self._log.info("[cross_check] the precision target was not reached (%s); a run large enough for it would take "
+                           "about %.0f s, over the %.0f s allowed", ", ".join(m["name"] for m in missed[:4]),
+                           float(estimate_s) * scale, float(limit_s))  # type: ignore[arg-type]
+            return []
+        return [m["name"] for m in missed]
 
     def _route_after_evidence_gate(self, state: QuestState) -> str:
         """The evidence_gate node already decided write vs broaden (it
@@ -18805,12 +18863,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         the rule. The writer got no note, and the papers went out on no experiment. Now the quest goes back to design
         once while an iteration is left; after that the verdict is ``insufficient`` and the evidence note says why."""
         exec_result = state.get("exec_result")
-        if isinstance(exec_result, dict) and exec_result.get("topic_unmet"):
+        stopped = next((k for k in _STOPPED_BEFORE_THE_STUDY if isinstance(exec_result, dict) and exec_result.get(k)), "")
+        if stopped:
             # Stopped before anything ran (the execute step's record of it): the gate states that, whatever the code or the
             # results hold, so the reason the quest reports is the one that stopped it.
-            why = str(exec_result["topic_unmet"])
+            why = str(exec_result[stopped])  # type: ignore[index]
             self._log.warning("[evidence_gate] %s; stopping without a paper", why)
-            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True, "stuck_reason": "topic_unmet"}
+            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True, "stuck_reason": stopped}
         if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
                 _missing_headline :=_code_review.resolve_headline(
                     self.quest_root, self.quest_root / "code", state.get("result_json"))):
@@ -18849,12 +18908,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             or self.config.engine.analyze_local_first
         ):
             return None
-        stopped = next((k for k in _STOPPED_BEFORE_THE_STUDY if exec_result.get(k)), "")
-        too_long = str(exec_result.get(stopped) or "") if stopped else ""
-        if too_long:  # stopped before the study (it would not fit the time allowed, a text of it was not checked, or FI's repairs ended with a problem standing): no second try
-            self._log.warning("[evidence_gate] %s; there is nothing measured to write up", too_long)
-            return {"verdict": "insufficient", "rationale": too_long, "gaps": [too_long], "stuck": True,
-                    "stuck_reason": stopped}
         flat = str(exec_result.get("flat_output") or "")
         why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
                if result else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
@@ -19166,6 +19219,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # requirements not done, equations not tested), in the limitations: FI's words from its records, never asked of
         # the writer (core/disclosure.py:run_record). Before the code findings, which go after it.
         try:
+            _disclosure.write_precision_record(self.quest_root, self._precision_shortfalls(state))
             markdown = _disclosure.mark_run_record(markdown, _disclosure.run_record(
                 self.quest_root, topic=str(self.config.topic or ""),
                 duration_s=(state.get("exec_result") or {}).get("duration_s")))

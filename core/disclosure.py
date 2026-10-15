@@ -428,6 +428,38 @@ def _names(names: list[str]) -> str:
     return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
 
 
+#: The probabilities whose pooled 95% interval was wider than the plan's precision target, as the writing step found them
+#: in the run it writes up (``Engine._precision_shortfalls``): ``[{"name", "half_width", "target", "trials"}]``.
+PRECISION_RECORD = Path(".fi") / "precision_missed.json"
+
+
+def write_precision_record(quest_root: Path, missed: list[dict[str, Any]]) -> None:
+    """Keep ``missed`` for the paper's limitations and the claim check (both read it); no record when none was missed."""
+    path = Path(quest_root) / PRECISION_RECORD
+    if missed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(missed, indent=1) + "\n", encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _precision_sentence(missed: Any) -> str:
+    """The plan's precision target and the quantities that missed it, with the half-width each reached."""
+    rows = [m for m in missed if isinstance(m, dict) and m.get("name")] if isinstance(missed, list) else []
+    try:
+        target = float(rows[0]["target"]) if rows else None
+        said = [f"{m['name']} (±{float(m['half_width']):.3g}"
+                + (f" from {int(m['trials']):,} trials)" if isinstance(m.get("trials"), (int, float)) else ")")
+                for m in rows[:_SHOWN]]
+    except (KeyError, TypeError, ValueError):
+        return ""
+    if not rows or target is None:
+        return ""
+    more = f" and {len(rows) - _SHOWN} more" if len(rows) > _SHOWN else ""
+    return (f"The plan's precision target (a 95% interval of ±{target:g}) was not reached for "
+            f"{', '.join(said)}{more}.")
+
+
 def _untested_sentence(notes: list[str]) -> str:
     """The equations FI did not test before the run, by id, in one short sentence (the paper has little room; the reasons
     are in the quality report, from the same record). A note whose id cannot be read is kept as written."""
@@ -476,6 +508,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     untested = _items(tests.get("not_tested")) if isinstance(tests, dict) else []
     if untested:
         parts.append(_untested_sentence(untested))
+    parts.append(_precision_sentence(_read_json(quest_root / PRECISION_RECORD)))
     parts = [p for p in parts if p]
     return f"{_RECORD_LEAD} " + " ".join(parts) if parts else ""
 

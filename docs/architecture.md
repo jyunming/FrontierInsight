@@ -105,7 +105,7 @@ Conditional edges visible in the graph:
 | Edge | Trigger | Bound by |
 |---|---|---|
 | `execute_reflect → execute` | Script crashed (rc != 0 or no `RESULT_JSON`) | `engine.exec_reflect_max_iterations` (default 3) |
-| `cross_check → design` | `analyze.next_step == "re_experiment"` | `engine.max_iterations` (default 2) |
+| `cross_check → design` | `analyze.next_step == "re_experiment"`, and FI's own record agrees: the plan's precision target for a probability was missed and a run large enough for it fits the time allowed (FI's run-time estimate times the square of the width ratio). Otherwise the evidence check decides from the record, and a missed target is stated in the paper's limitations | `engine.max_iterations` (default 2) |
 | `cross_check → literature` | `analyze.next_step == "broaden_lit"` — re-enters the literature node so a second retrieval fetches fresh evidence (the design's hypothesis is folded into the query); new docs merge into the existing list with DOI / URL / content-prefix dedup. | `engine.max_iterations` (default 2) |
 | `review → design` | `review.verdict == "revise"` | `engine.max_iterations` (default 2) |
 | `review → write` | every problem the review found is in the text (an unbacked claim, a caption that does not match its figure); the experiment stands | the same `engine.max_iterations` (a draft over the page limit is shortened up to a few times outside it) |

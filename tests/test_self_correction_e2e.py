@@ -188,9 +188,12 @@ async def test_full_dag_with_analyze_re_experiment_reroute(
     """Analyze returns `next_step="re_experiment"` on iteration 0, then
     `publish` on iteration 1. The graph re-runs design→implement→
     execute on iteration 1 before reaching write. Bounded by
-    max_iterations (set to 2 in the fixture)."""
+    max_iterations (set to 2 in the fixture). The redesign is followed because FI's own record agrees (the plan's
+    precision target was missed); without that record the request goes to the evidence check
+    (tests/test_cross_check.py)."""
 
     state_flags = {"analyze_calls": 0, "design_calls": 0}
+    monkeypatch.setattr("core.engine.Engine._precision_missed", lambda self, state: ["outbreak_probability"])
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
