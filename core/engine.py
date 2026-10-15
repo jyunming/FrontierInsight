@@ -11479,9 +11479,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         ex = self.config.execution
         package = str((record or {}).get("package") or "") or _code_layout.package_name(
             str(self.config.title or self.config.topic or ""))
+        # The topic's own request for one script wins over FI's default package (core/code_layout.py::one_file_sentence).
+        required = _disclosure._read_json(self.quest_root / ".fi" / "topic_requirements.json")
+        constraints = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
+                       for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
+        one_file = _code_layout.one_file_sentence(str(state.get("topic") or self.config.topic or ""), constraints)
         decision = _code_layout.decide(protocol if isinstance(protocol, dict) else None, enabled=ex.code_package,
                                        max_extra_lines=ex.code_package_max_extra_lines,
-                                       max_extra_calls=ex.code_package_max_extra_calls, package=package)
+                                       max_extra_calls=ex.code_package_max_extra_calls, package=package,
+                                       one_file=one_file)
         # A quest laid out as a package stays one: a later redesign that adds equations does not switch it back to two
         # scripts (``code_package: false`` still does, and a plan written again decides again). Two scripts are decided
         # again each time, so raising the limit, as plan.md says, takes effect on a resume.

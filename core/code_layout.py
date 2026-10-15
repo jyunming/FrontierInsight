@@ -121,17 +121,43 @@ def estimate(protocol: dict[str, Any] | None) -> dict[str, int]:
     }
 
 
+_ONE_FILE = re.compile(r"\b(?:one|a\s+single|single|1)\s+(?:python\s+|py\s+)?(?:script|file|source\s+file|program)\b",
+                       re.IGNORECASE)
+_NOT_ONE = re.compile(r"\b(?:more\s+than|at\s+least|per|each|every|not)\s*$", re.IGNORECASE)
+
+
+def one_file_sentence(topic: str, constraints: list[str] | None = None) -> str:
+    """The topic's own sentence asking for the code in one script ("One Python script using numpy ..."), or ``""``. The
+    topic's constraints are read first, then its text; "more than one script", "one file per setting" are not such a
+    request."""
+    from .topic_requirements import _sentences
+
+    for source in [*(c for c in constraints or [] if isinstance(c, str)), *_sentences(str(topic or ""))]:
+        for match in _ONE_FILE.finditer(source):
+            after = source[match.end():match.end() + 12].lower()
+            if _NOT_ONE.search(source[:match.start()]) or re.match(r"\s*(?:per|for each|each)\b", after):
+                continue
+            return " ".join(source.split())
+    return ""
+
+
 def decide(protocol: dict[str, Any] | None, *, enabled: bool, max_extra_lines: int, max_extra_calls: int,
-           package: str) -> dict[str, Any]:
+           package: str, one_file: str = "") -> dict[str, Any]:
     """The shape of this quest's code: ``package`` (the default) or ``single`` (two scripts alone), with the estimate and,
     for ``single``, why, in plain words. The line limit decides at plan time; the request limit is a budget spent while
-    the code is written (once it is spent, the quest keeps the code it has and says so)."""
+    the code is written (once it is spent, the quest keeps the code it has and says so). ``one_file``: the topic's own
+    sentence asking for one script (:func:`one_file_sentence`); the topic's request wins over FI's default package."""
     cost = estimate(protocol)
     decision: dict[str, Any] = {"shape": PACKAGE, "package": package, "estimate": cost,
                                 "limits": {"extra_lines": int(max_extra_lines), "extra_calls": int(max_extra_calls)},
                                 "reason": ""}
     if not enabled:
         decision.update(shape=SINGLE, reason="execution.code_package is off")
+        return decision
+    if one_file:
+        decision.update(shape=SINGLE, topic=one_file, reason=(
+            f"the topic asks for “{one_file}”, so FI does not add a package, tests or an equation list; it keeps the "
+            "fewest files it runs: the simulation (simulate.py) and the analysis (experiment.py)"))
         return decision
     if cost["extra_lines"] > max_extra_lines:
         decision.update(shape=SINGLE, reason=(
@@ -197,7 +223,7 @@ def plan_lines(decision: dict[str, Any] | None) -> list[str]:
             f"{decision.get('reason') or 'it is off'}.",
             "",
         ]
-        if "limit" in str(decision.get("reason") or ""):
+        if not decision.get("topic") and "limit" in str(decision.get("reason") or ""):
             lines += [f"A small research tool would cost {what}. Raise the limit to get it.", ""]
     return lines
 
