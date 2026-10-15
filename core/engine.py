@@ -3403,7 +3403,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         #    the human-feedback node so the user gets a final say.
         # 3. Otherwise fall through to the legacy verdict-driven routing.
         review = state.get("review") or {}
-        must_flag = review.get("must_flag_hits") or []
+        # An objection to the design that the paper's limitations already state (FI's record of it) is not raised again:
+        # a rewrite cannot answer it, and the design is not changed for it.
+        repeated = set(review.get("objections_repeated") or [])
+        must_flag = [h for h in review.get("must_flag_hits") or [] if _objection_key(h) not in repeated]
         # The draft is over the page limit and nothing else is to be fixed:
         # write it again, shorter. These rewrites have their own cap (the
         # review stops forcing them after ``_PAGE_LIMIT_REWRITES``), so the
@@ -3462,18 +3465,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     must_flag,
                 )
                 return "rewrite"
+            # An objection to the design (circular evaluation, a single-point evaluation, a name the reviewer made up)
+            # that no check of FI's confirms: the paper is written again with it stated in the limitations (FI's record,
+            # core/disclosure.py:run_record), and the design is not changed for it. A redesign for it used to cost a
+            # whole round and recorded the new design as one made after the results were seen.
             self._log.info(
-                "[route] must_flag_hits=%s — forcing revise even if review_loop=False",
-                must_flag,
+                "[route] must_flag_hits=%s include objections to the design that no check of FI's confirms — writing "
+                "the paper again with them stated in its limitations; the design is not changed", must_flag,
             )
-            return "revise"
+            return "rewrite"
         if self.config.pauses.review == "ask":
             return "human_feedback"
         if not self.config.engine.review_loop:
             return "done"
         verdict = review.get("verdict", "accept")
         if verdict == "revise" and state.get("iteration", 0) < self.config.engine.max_iterations:
-            return "revise"
+            # The reviewer's own judgement, with no check of FI's behind it: the paper is written again with the review
+            # in hand and the reviewer's reason stated in the limitations; the design is not changed for it.
+            self._log.info("[route] the review asks for a revision that no check of FI's confirms — writing the paper "
+                           "again with the reviewer's reason stated in its limitations; the design is not changed")
+            return "rewrite"
         return "done"
 
     def _route_after_citation_check(self, state: QuestState) -> str:
@@ -7980,6 +7991,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return {}
         iteration = state.get("iteration", 0)
         self._log.info("[design] iteration=%d", iteration)
+        _disclosure.clear_objections(self.quest_root)  # a reviewer's objections were to the design this one replaces
         design: dict[str, Any] | None = None
         objections: Any = None
         plan_sha = ""
@@ -21245,6 +21257,39 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             payload={"review_models_collapsed": True, "quest_id": self.quest_id, "actual": actual},
         )
 
+    def _note_design_objections(self, state: QuestState, review: dict[str, Any]) -> list[Any]:
+        """The review's must-fix hits that count (a page-limit hit aside, and an objection the paper already states),
+        and FI's record of the reviewer's objections to the design.
+
+        An objection is a hit that names no problem FI checks in the text (circular evaluation, a single-point evaluation,
+        a name the reviewer made up) or, for a revise verdict, the reviewer's own reason (``blocking``): no check of FI's
+        confirms it, so the design is not changed for it. When the paper is written again after this review, they go into
+        FI's record (``.fi/review_objections.json``), which the paper's limitations state (core/disclosure.py:run_record).
+        One the record already holds is in ``review["objections_repeated"]`` and is not counted: a rewrite cannot answer
+        it. Best-effort: a record FI cannot read or write counts every hit, as before."""
+        hits = [h for h in review.get("must_flag_hits") or [] if _hit_name(h) != _PAGE_LIMIT_HIT]
+        objections = [h for h in hits if _hit_name(h) not in _TEXT_ONLY_HITS]
+        try:
+            stated = _disclosure.stated_objections(self.quest_root)
+            repeated = sorted({_objection_key(h) for h in objections} & stated)
+            if repeated:
+                review["objections_repeated"] = repeated
+                self._log.info("[review] objections the paper's limitations already state, not counted again: %s",
+                               ", ".join(repeated))
+            counted = [h for h in hits if _objection_key(h) not in set(repeated)]
+            new = [_objection_key(h) for h in objections if _objection_key(h) not in stated]
+            said = str(review.get("blocking") or "").strip() if review.get("verdict") == "revise" else ""
+            if said and not counted and (self.config.pauses.review == "ask" or not self.config.engine.review_loop):
+                said = ""  # a person decides, or nothing is rewritten: the reason is not an objection the paper states
+            rerun = (_review_sends_the_experiment_back(review, state)
+                     and int(state.get("code_reexecutes") or 0) + 1 <= _CODE_REEXECUTES)
+            if (new or said) and not rerun and int(state.get("iteration", 0) or 0) + 1 < self.config.engine.max_iterations:
+                _disclosure.add_objections(self.quest_root, new, said)
+            return counted
+        except Exception as e:  # noqa: BLE001 -- FI's record is a help, never a reason to stop
+            self._log.warning("[review] the record of the reviewer's objections could not be kept (%r)", e)
+            return hits
+
     def _pause_for_review_unavailable(self, paper_path: Any, why: list[str]) -> None:
         """Stop because the review could not be asked for (a usage limit, a provider that is down), and ask again on
         resume. Never an accept: a failed call used to be recorded as ``accept, score 3``, which is what the person was
@@ -21369,6 +21414,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             review["must_flag_hits"] = _without_reviewer_page_limit_hits(
                 [str(h).strip() for h in mfh if str(h).strip()], self._log,
             )
+            review["must_flag_hits"] += _unsupported_claim_hit(state, review["must_flag_hits"])
             # Arithmetic, not judgement: compare the paper's numbers against
             # the ones the run actually produced. Every other gate here ends
             # in a model reading text, so a mis-transcription (2.14 computed,
@@ -21445,7 +21491,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # iteration and the loop could run unbounded. A hit over the page
             # limit consumes none: its rewrites have their own counter, capped
             # at ``_PAGE_LIMIT_REWRITES``.
-            other_hits = [h for h in review["must_flag_hits"] if _hit_name(h) != _PAGE_LIMIT_HIT]
+            other_hits = self._note_design_objections(state, review)
             if review.get("verdict") == "revise" or other_hits:
                 update["iteration"] = state.get("iteration", 0) + 1
                 self._log.info(
@@ -21577,6 +21623,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         review["must_flag_hits"] = _without_reviewer_page_limit_hits(
             review.get("must_flag_hits") or [], self._log,
         )
+        review["must_flag_hits"] += _unsupported_claim_hit(state, review["must_flag_hits"])
         rationale = mod_parsed.get("rationale")
         if isinstance(rationale, str) and rationale.strip():
             review["rationale"] = rationale.strip()
@@ -21644,9 +21691,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # without consuming iteration budget — the loop could spin. A hit
         # over the page limit bumps nothing: its rewrites have their own
         # counter, capped at ``_PAGE_LIMIT_REWRITES``.
-        other_hits = [
-            h for h in (review.get("must_flag_hits") or []) if _hit_name(h) != _PAGE_LIMIT_HIT
-        ]
+        other_hits = self._note_design_objections(state, review)
         if review.get("verdict") == "revise" or other_hits:
             update["iteration"] = state.get("iteration", 0) + 1
             self._log.info(
@@ -28267,6 +28312,21 @@ def _hit_name(hit: Any) -> str:
     return m.group(1).lower().removesuffix("s") if m else ""
 
 
+def _objection_key(hit: Any) -> str:
+    """How FI's record names an objection: its identifier, or its first words when it starts with none."""
+    return _hit_name(hit) or _one_line(str(hit), 80)
+
+
+def _unsupported_claim_hit(state: QuestState, hits: list[Any]) -> list[str]:
+    """``unsupported_claim`` when the claim check found claims nothing backs and the reviewer did not name it: FI's own
+    record, so it does not depend on the reviewer copying it."""
+    unsupported = _review_items((state.get("claim_grounding") or {}).get("unsupported"))
+    if not unsupported or any(_hit_name(h) == "unsupported_claim" for h in hits):
+        return []
+    return [f"unsupported_claim: the claim check found {len(unsupported)} claim(s) that neither this study's results "
+            "nor a cited source backs"]
+
+
 def _hits_need_only_a_rewrite(hits: list[Any]) -> bool:
     """True when every must-flag hit names a problem with the paper's text, so
     the review sends the quest back to ``write`` instead of ``design``."""
@@ -28524,6 +28584,14 @@ def _format_review_for_writer(state: QuestState, *, refine_round: bool = False) 
         items = _review_items(review.get(key))
         if items:
             lines += [f"{heading}:", *(f"  - {item}" for item in items)]
+    objections = [h for h in _review_items(review.get("must_flag_hits")) if _hit_name(h) not in _TEXT_ONLY_HITS]
+    blocking = str(review.get("blocking") or "").strip() if review.get("verdict") == "revise" else ""
+    if objections or blocking:
+        lines += [
+            "Objections to the design that no check of FI's confirms (the study is not changed for them, and FI states "
+            "them in the limitations itself; never write that the study answers them):",
+            *(f"  - {item}" for item in [*objections, *([blocking] if blocking else [])]),
+        ]
     unsupported = _review_items((state.get("claim_grounding") or {}).get("unsupported"))
     if unsupported:
         lines += [

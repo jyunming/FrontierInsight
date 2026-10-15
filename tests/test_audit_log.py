@@ -190,6 +190,7 @@ async def test_a_quest_leaves_a_trace_of_its_nodes_checks_routes_and_the_reasons
 ) -> None:
     prompts: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _with_rationale(_fake(prompts, second_design={})))
+    monkeypatch.setattr("core.engine.Engine._precision_missed", lambda self, state: ["score"])
     engine = Engine(_cfg(tmp_path))
     artifacts = await engine.run()
     assert artifacts.paper_md is not None
@@ -197,15 +198,13 @@ async def test_a_quest_leaves_a_trace_of_its_nodes_checks_routes_and_the_reasons
     assert al.verify(engine.audit.path).ok, al.verify(engine.audit.path).line()
     assert events[0]["kind"] == "quest_started" and events[0]["resumed"] is False
 
-    # Every node that started finished, in order, and the review asked for one revision.
+    # Every node that started finished, in order, and the analysis asked for one more run, which FI's record agreed with.
     started = [e["node"] for e in events if e["kind"] == "node_started"]
     done = [e["node"] for e in events if e["kind"] == "node_completed"]
     assert started == done and started[:3] == ["clarify", "ideate", "literature"] and started.count("design") == 2
     assert all(e["duration_s"] >= 0 for e in events if e["kind"] == "node_completed")
     routes = [(e["node"], e["chosen"]) for e in events if e["kind"] == "route_decision"]
-    assert ("review", "revise") in routes and routes[-2:] == [("review", "done"), ("citation_check", "done")]
-    first_review = next(e for e in events if e["kind"] == "route_decision" and e["node"] == "review")
-    assert first_review["facts"]["verdict"] == "revise"
+    assert ("cross_check", "redesign") in routes and routes[-2:] == [("review", "done"), ("citation_check", "done")]
 
     # Each check's verdict is written with the record that holds it, and only deterministic events carry checks.
     checks = {e["check"]: e for e in events if e["kind"] == "check_result"}
@@ -219,7 +218,7 @@ async def test_a_quest_leaves_a_trace_of_its_nodes_checks_routes_and_the_reasons
     assert claims and all(e["provenance"] == al.MODEL_CLAIM and "check" not in e for e in claims)
     topics = {(e["topic"], e["claim"]) for e in claims}
     assert ("assumption", "trials are independent") in topics and ("alternative", "Wilson pooled") in topics
-    assert any(t == "review_weakness" and c == "the grid is too thin" for t, c in topics)
+    assert ("next_step", "the grid is too thin") in topics
     assert any(t.startswith("design_self_critique") and "precision target" in c for t, c in topics)
     # The methodology audit does not see the rationale, so an amendment that does not repeat it is still an amendment.
     assert checks["design_self_critique"]["status"] == "ok", checks["design_self_critique"]

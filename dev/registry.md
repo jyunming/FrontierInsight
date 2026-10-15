@@ -294,6 +294,12 @@ same PR that adds, splits or renames one.
   `Engine._precision_shortfalls`). `Engine._precision_missed` (the same shortfalls, kept only when FI's run-time
   estimate `.fi/run_estimate.json` shows a run large enough for them fits the time allowed) is the only reason
   `_route_after_cross_check` follows the analysis's `re_experiment` to the design.
+  `OBJECTIONS_RECORD` (`.fi/review_objections.json`: `add_objections`, `stated_objections`, `clear_objections`) holds
+  a reviewer's objections to the design that no check of FI's confirms; `run_record` states them. The review node's
+  `Engine._note_design_objections` keeps them when a rewrite follows and marks a repeated one
+  (`review["objections_repeated"]`, left out by `_route_after_review`); `_node_design` clears the record;
+  `_unsupported_claim_hit` adds `unsupported_claim` from the claim check's own record; `_route_after_review` sends a
+  revise verdict or a design objection to `write` (`rewrite`), never to `design`.
 - `core/audit_log.py` — the hash-chained, redacted per-quest trace (`STAGE_PROGRESS`/`_ProgressOnly` for the curated
   console/web view live in `core/engine.py`, next to `_quest_logger`).
 - `core/record_anchor.py` — FI's note of how far it wrote the trace and the `.fi/` record files

@@ -443,6 +443,52 @@ def write_precision_record(quest_root: Path, missed: list[dict[str, Any]]) -> No
         path.unlink(missing_ok=True)
 
 
+#: A reviewer's objections to the design that no check of FI's confirms, kept by the review step when the paper is
+#: written again after it (``Engine._note_design_objections``), cleared when a new design is made:
+#: ``[{"names": [...], "said": str}]``.
+OBJECTIONS_RECORD = Path(".fi") / "review_objections.json"
+
+
+def _objection_rows(quest_root: Path) -> list[dict[str, Any]]:
+    rows = _read_json(Path(quest_root) / OBJECTIONS_RECORD)
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def stated_objections(quest_root: Path) -> set[str]:
+    """The objections the record holds, by name."""
+    return {str(n) for r in _objection_rows(quest_root) for n in r.get("names") or [] if str(n).strip()}
+
+
+def add_objections(quest_root: Path, names: list[str], said: str) -> None:
+    """Add one review's objections (``names``, and the reviewer's own reason ``said``) to the record."""
+    rows = _objection_rows(quest_root) + [{"names": [str(n) for n in names], "said": str(said or "").strip()}]
+    path = Path(quest_root) / OBJECTIONS_RECORD
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
+
+
+def clear_objections(quest_root: Path) -> None:
+    (Path(quest_root) / OBJECTIONS_RECORD).unlink(missing_ok=True)
+
+
+def _objections_sentence(rows: Any) -> str:
+    """The reviewer's objections, each in the reviewer's own words when it gave a reason, else by its name."""
+    said: list[str] = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        reason = " ".join(str(r.get("said") or "").split()).rstrip(".")
+        names = [str(n).replace("_", " ") for n in r.get("names") or [] if str(n).strip()]
+        if reason:
+            said.append(f"\"{reason}\"")
+        said += names if not reason else []
+    if not said:
+        return ""
+    more = f" and {len(said) - _SHOWN} more" if len(said) > _SHOWN else ""
+    return ("A reviewer objected to the design in ways FI's records neither confirm nor rule out, and the study was not "
+            f"changed for them: {'; '.join(said[:_SHOWN])}{more}.")
+
+
 def _precision_sentence(missed: Any) -> str:
     """The plan's precision target and the quantities that missed it, with the half-width each reached."""
     rows = [m for m in missed if isinstance(m, dict) and m.get("name")] if isinstance(missed, list) else []
@@ -509,6 +555,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     if untested:
         parts.append(_untested_sentence(untested))
     parts.append(_precision_sentence(_read_json(quest_root / PRECISION_RECORD)))
+    parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts = [p for p in parts if p]
     return f"{_RECORD_LEAD} " + " ".join(parts) if parts else ""
 

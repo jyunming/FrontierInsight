@@ -366,10 +366,11 @@ async def test_a_run_that_cannot_fit_at_the_fewest_runs_stops_plainly_and_a_resu
                         text), text
     assert patch["exec_give_up_reason"] == text and patch["result_json"] == {} and patch["exec_result"]["returncode"] == 1
     assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == 40
-    # The repair step does not try to fix a script, the gate stops without a second design, and the stop says it plainly.
+    # The repair step does not try to fix a script, the quest goes from the run step straight to the stop (no analysis,
+    # no second design), and the stop says it plainly.
     assert await eng._node_execute_reflect({"exec_result": patch["exec_result"],
                                             "exec_give_up_reason": text}) == {}
-    assert eng._route_after_execute_reflect({"exec_result": patch["exec_result"], "exec_give_up_reason": text}) == "proceed"
+    assert eng._route_after_execute_reflect({"exec_result": patch["exec_result"], "exec_give_up_reason": text}) == "stuck"
     verdict = eng._no_results_verdict({"exec_result": patch["exec_result"], "result_json": {},
                                        "exec_give_up_reason": text, "iteration": 0})
     assert verdict is not None and verdict["stuck"] is True and verdict["stuck_reason"] == "too_long"
