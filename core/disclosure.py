@@ -330,11 +330,26 @@ def _seeds_paired(trials: dict[tuple[str, int], tuple[str, int | None]]) -> bool
     return None
 
 
+def _inside_sentence(study: Any) -> str:
+    """What each run compared on its own random numbers (``in_each_run`` of ``code/study.json``), or ``""``."""
+    inside = study.get("in_each_run") if isinstance(study, dict) else None
+    if not isinstance(inside, dict) or not inside:
+        return ""
+    said = "; ".join(f"`{name}` ({', '.join(str(v) for v in values)})" for name, values in inside.items()
+                     if isinstance(values, list))
+    return (f" Within each run, every value of {said} was applied to the same random numbers, so those values are "
+            "compared on the same data (paired), not on independent draws.") if said else ""
+
+
 def _seed_sentence(quest_root: Path, rows: Any) -> str:
     study = _read_json(Path(quest_root) / "code" / "study.json")
     base = _whole(study.get("base_seed")) if isinstance(study, dict) else None
     if base is None:
         return ""
+    return _settings_seed_sentence(study, base, rows) + _inside_sentence(study)
+
+
+def _settings_seed_sentence(study: dict[str, Any], base: int, rows: Any) -> str:
     stated = study.get("paired") if isinstance(study.get("paired"), bool) else None
     shown = _seeds_paired(rows[1]) if rows else None
     if shown is not None and shown != stated:

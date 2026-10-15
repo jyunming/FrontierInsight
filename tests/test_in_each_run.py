@@ -208,3 +208,26 @@ def test_a_formula_reads_a_number_per_value_only_inside_min_max_or_sum() -> None
     assert oracle_forms.evaluate("sum(k_hat) * c", values).value == 26.0
     elsewhere = oracle_forms.evaluate("k_hat * c", values)
     assert elsewhere.value is None and "one number per value" in elsewhere.problem
+
+
+def test_the_paper_says_what_each_run_compared_on_the_same_random_numbers(tmp_path: Path) -> None:
+    from core import disclosure
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "study.json").write_text(json.dumps(
+        {"base_seed": 7, "paired": False, "in_each_run": {"procedure": ["none", "bh"]}}), encoding="utf-8")
+    said = disclosure._seed_sentence(tmp_path, None)
+    assert "base seed 7" in said and "`procedure` (none, bh)" in said and "same random numbers" in said
+    (tmp_path / "code" / "study.json").write_text(json.dumps({"base_seed": 7, "paired": False}), encoding="utf-8")
+    assert "Within each run" not in disclosure._seed_sentence(tmp_path, None)
+
+
+def test_a_collapsed_axis_is_found_in_a_table_of_the_records_per_value() -> None:
+    from core import reported_settings
+    cells = []
+    for m in (20, 200):
+        cells.append({"cell": {"m": m}, "metrics": {"fdr_gap": [0.1 * m]}})
+        for t in (300, 350, 400):
+            cells.append({"cell": {"m": m, "T": t}, "metrics": {"k": [m + t / 7]}})
+    rows = [{"m": 20, "T": 300, "z": float(i)} for i in range(6)]
+    found = reported_settings.problems(cells, [("", {"table": rows})])
+    assert any(f.axis == "T" and f.collapsed for f in found)
