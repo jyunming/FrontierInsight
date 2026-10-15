@@ -100,10 +100,11 @@ async def test_design_gets_the_skill_summary_not_the_full_skill_text(
     assert "FULL_SENTINEL" not in prompts["design"]
 
 
-def test_design_prompt_says_the_topics_runtime_is_a_wish_and_fis_limit_is_enforced():
-    from string import Template
-
+def test_design_prompt_says_the_topics_runtime_is_a_wish_and_fis_limit_is_enforced(tmp_path):
+    cfg = _cfg(tmp_path)
+    eng = Engine(cfg)
+    note = eng._time_note({"topic": "CPU only; under 60 seconds of runtime."})
+    assert "limit FI enforces on one run" in note and "researcher's wish" in note and "60 s" in note
+    assert "not enforced" in eng._time_note({"topic": "SIR final outbreak size"})
     text = (Path(__file__).resolve().parent.parent / "agents" / "design.md").read_text(encoding="utf-8")
-    assert "$timeout_s\n\nThis is the limit FI enforces on one run." in text
-    assert "aim for it as the researcher's wish; it is not enforced" in text
-    Template(text)  # still a valid template
+    assert "$timeout_s\n\n$time_note" in text

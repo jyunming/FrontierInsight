@@ -4927,6 +4927,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
+            time_note=self._time_note(state),
             clarify_block=_format_clarify(state),
             skills_block=(
                 self._skills_summary_block(state)
@@ -11988,6 +11989,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         are used."""
         return {**scrub_secrets(), **_finding_repair.run_environment(
             self.quest_root, _split_run.env_value(self._raw_root(), self.quest_root), stand_ins=stand_ins)}
+
+    def _time_note(self, state: QuestState) -> str:
+        """What the plan is told about the topic's own runtime request next to FI's enforced limit (read the way the
+        paper's run record reads it, :func:`core.disclosure._topic_limit`); it never becomes a limit."""
+        required = _disclosure._read_json(self.quest_root / ".fi" / "topic_requirements.json")
+        stated = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
+                  for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
+        limit = _disclosure._topic_limit([c for c in stated if isinstance(c, str)], str(state.get("topic") or ""))
+        asked = (f"The topic asks for a runtime of {_disclosure._plain_seconds(limit)}, so" if limit is not None
+                 else "If the topic asks for a runtime,")
+        return (f"This is the limit FI enforces on one run. {asked} aim for it as the researcher's wish; it is not "
+                "enforced, and a plan is not refused for exceeding it.")
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
                           env: dict[str, str] | None = None) -> tuple[int, str, str]:
