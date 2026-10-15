@@ -730,6 +730,8 @@ def compare(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[d
         else:
             db, da = _badness(row, vb), _badness(row, va)
             change = "better" if da < db - tol else "worse" if da > db + tol else "same"
+            if rb.get("met") is True and ra.get("met") is False:
+                change = "worse"  # it no longer meets its bar, however small the step that took it there
         out.append({"name": name, "before": vb, "after": va, "tolerance": tol, "change": change,
                     "met": ra.get("met") if ra else None})
     return out

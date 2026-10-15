@@ -217,28 +217,44 @@ def recompute_entry(oracle: dict[str, Any], verdict: str, recomputed: float | No
 
 
 def formula_value(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> float | None:
-    """The check's expected value as FI computes it itself from the plan's ``expected_formula`` (the check's case and the
-    plan's fixed settings), when that agrees with the ``expected`` the check uses (within the check's own tolerance) and
-    the formula can be read only one way; ``None`` otherwise. Such a value is the plan's own working, computed exactly:
-    a model's recomputation of it is no evidence against it (one real quest's repairs proposed 0.10355153507545575 four
-    times where FI's 0.1035560611 was right), so only the formula itself can be questioned, through the plan."""
+    """The check's expected value as FI computes it itself from the plan's ``expected_formula``, when that agrees with the
+    ``expected`` the check uses (within the check's own tolerance) and FI is sure of its reading; ``None`` otherwise.
+    Such a value is the plan's own working, computed exactly: a model's recomputation of it is no evidence against it
+    (one real quest's repairs proposed 0.10355153507545575 four times where FI's 0.1035560611 was right), so only the
+    formula itself can be questioned, through the plan.
+
+    Sure means: a real working (an operation, a function or a name, not a number restated, in brackets or not); every
+    name a setting of the check's own ``case`` (a plan's fixed setting may not be what this check's run uses: a formula
+    written with ``L`` for a case that sets ``length`` agrees with the plan's number and is still wrong); one reading only
+    (:func:`ambiguous`), and no angle named in degrees without its conversion (the calculator reads radians).
+    ``protocol`` is not used for the names, by that rule; it is kept for the callers."""
+    import ast
+
     expected, limit, _mode = _oracle.limit_of(oracle)
     if expected is None or limit is None or not correctable(oracle):
         return None
     try:
-        float(str(oracle.get("expected_formula")).strip())
-        return None  # a number restated is not a working FI computed
-    except ValueError:
-        pass
-    try:
-        value, _why, _unset, used = _forms._formula_result(oracle, _forms.fixed_settings(protocol))
-    except Exception:  # noqa: BLE001 -- a formula FI cannot compute decides nothing
-        return None
-    if value is None or not math.isfinite(value) or ambiguous(used or str(oracle.get("expected_formula") or "")):
-        return None
-    if abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
+        value, _why, _unset, used = _forms._formula_result(oracle, None)
+        text = used or str(oracle.get("expected_formula") or "")
+        if value is None or not math.isfinite(value) or ambiguous(text) or _degrees_unconverted(text):
+            return None
+        tree, _ = _forms._tree(text, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
+        if tree is None or not any(isinstance(n, (ast.BinOp, ast.Call, ast.Name)) for n in ast.walk(tree)):
+            return None  # a number restated is not a working FI computed
+        if abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
+            return None
+    except Exception:  # noqa: BLE001 -- a formula FI cannot compute (or compare) decides nothing
         return None
     return value
+
+
+def _degrees_unconverted(text: str) -> bool:
+    """Whether a trig call's argument names degrees (``deg``, ``°``) without converting them (``pi``, ``180``)."""
+    for m in _TRIG.finditer(text):
+        argument = _call_argument(text, m.end())
+        if _re.search(r"deg|°", argument, _re.IGNORECASE) and not _re.search(r"pi|π|180", argument, _re.IGNORECASE):
+            return True
+    return False
 
 
 def formula_entry(oracle: dict[str, Any], computed: float, value: float | None) -> dict[str, Any]:

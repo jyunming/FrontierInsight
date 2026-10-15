@@ -727,3 +727,11 @@ def test_a_check_whose_code_was_flagged_makes_no_version_better_or_worse() -> No
     assert comparison[0]["change"] == "not compared"
     assert improve.verdict(comparison) == {"better": [], "worse": [], "broken": False, "best": False}
     assert improve.compare(before, [{**row, "value": 0.0, "met": True}])[0]["change"] == "better"
+
+
+def test_a_criterion_that_stops_meeting_its_bar_is_worse_however_small_the_step() -> None:
+    before = [{"name": "rk4 error", "value": 0.049, "counts": True, "met": True, "direction": "lower", "target": 0.05,
+               "tolerance": 0.05}]
+    after = [{**before[0], "value": 0.052, "met": False}]
+    (row,) = improve.compare(before, after)
+    assert row["change"] == "worse" and improve.verdict([row])["best"] is False

@@ -5339,6 +5339,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # against known answers that FI runs; only a draft with none of those gets one search of the literature for
         # how such studies are checked, and one more question to the model.
         no_criteria = False
+        from_checks: list[str] = []  # the names of the criteria FI made from the plan's own checks
         fi_runs = self._split_on({**state, "design": normalized})
         if self._runs_code(state) and isinstance(normalized.get("protocol"), dict) and not fi_runs:
             self._log.warning("[criteria] this quest runs its experiment as one script, so FI runs none of its checks "
@@ -5347,6 +5348,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 normalized["protocol"]):
             drafted = _criteria.declared(normalized["protocol"])
             proposed = _criteria.from_checks(normalized["protocol"])
+            from_checks = [c["name"] for c in proposed]
             if proposed:
                 criteria_notes = [
                     "The plan named no criterion FI can measure itself for judging whether the code got better, so FI "
@@ -5425,6 +5427,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                            taken="held the plan for the person" if ask else "went on with the plan")
         # The checks against known answers, each in its kind's numeric form, before the person reads the plan.
         await self._guide_oracles(state)
+        if from_checks:
+            self._criteria_follow_checks(from_checks)
         guided, _why = _plan.load_design(self.quest_root)
         if isinstance(guided, dict):
             normalized = guided
@@ -5435,6 +5439,44 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if ask:
             self._pause_for_plan(no_criteria=no_criteria)
         return {"design_objections": objections} if isinstance(objections, list) else {}
+
+    def _criteria_follow_checks(self, made: list[str]) -> None:
+        """The criteria FI made from the plan's own checks (``made``, their names), made again from the checks as FI's look
+        at them left them (a check renamed, its tolerance changed or its case taken away), before the person reads the
+        plan and before anything is frozen. Other criteria are kept as they are. Best-effort."""
+        try:
+            path = _plan.plan_path(self.quest_root)
+            text = path.read_text(encoding="utf-8")
+            design = _plan.parse(text).design
+            protocol = design.get("protocol") if isinstance(design, dict) else None
+            if not isinstance(protocol, dict):
+                return
+            now = _criteria.declared(protocol)
+            again = _criteria.from_checks(protocol)
+            others = [c for c in now if c["name"] not in made and c["name"] not in {a["name"] for a in again}]
+            wanted = (again + others)[:_criteria.MAX]
+            if wanted == now:
+                return
+
+            def change(block: dict[str, Any]) -> dict[str, Any]:
+                proto = dict(block.get("protocol") or {})
+                if wanted:
+                    proto["criteria"] = wanted
+                else:
+                    proto.pop("criteria", None)
+                return {**block, "protocol": proto}
+
+            edited = _plan.edit_design_block(text, change)
+            if edited is None or _plan.parse(edited).design is None:
+                return
+            edited = _plan.refresh_model_section(edited)
+            path.write_text(edited, encoding="utf-8")
+            _plan.record_version(self.quest_root, edited, by="engine",
+                                 note="the criteria made from the plan's own checks follow the checks as FI left them")
+            self._log.info("[criteria] the criteria made from the plan's own checks were made again from the checks as "
+                           "FI left them: %s", ", ".join(c["name"] for c in again) or "none")
+        except Exception as e:  # noqa: BLE001 -- the criteria made first stay; a check they name that is gone is said after a run
+            self._log.warning("[criteria] the criteria could not be made again from the checks (%r)", e)
 
     async def _propose_criteria(self, state: QuestState, protocol: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
         """The plan named no criterion: search the literature once for how studies like this one are checked, then ask

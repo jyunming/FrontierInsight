@@ -367,3 +367,20 @@ async def test_a_quest_run_through_the_graph_records_its_criteria_after_the_run(
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     assert "[criteria] run 1: none of the checks of correctness was measured by FI itself" in log
     assert "measured by the script itself so not counted" in log
+
+
+def test_criteria_made_from_the_checks_follow_the_checks_as_fis_look_at_them_left_them(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    engine.quest_root.mkdir(parents=True, exist_ok=True)
+    made = cr.from_checks(PROTOCOL)
+    # FI's look at the checks tightened the tolerance after the criteria were made; a criterion the plan wrote stays.
+    tighter = {**CASE_ORACLE, "tolerance": 1e-7}
+    protocol = {**PROTOCOL, "oracles": [tighter, SCRIPT_ORACLE],
+                "criteria": [*made, {"name": "trials", "trials": "y_end", "direction": "target", "target": 0.5,
+                                     "tolerance": 0.1}]}
+    text = plan.render(engine.config.topic, {}, {"hypothesis": "h", "protocol": protocol})
+    plan.plan_path(engine.quest_root).write_text(text, encoding="utf-8")
+    engine._criteria_follow_checks([c["name"] for c in made])
+    criteria = plan.parse(plan.plan_path(engine.quest_root).read_text(encoding="utf-8")).design["protocol"]["criteria"]
+    assert criteria[0]["name"] == "rk4 error" and criteria[0]["target"] == 1e-7 and criteria[0]["tolerance"] == 1e-7
+    assert [c["name"] for c in criteria] == ["rk4 error", "trials"]

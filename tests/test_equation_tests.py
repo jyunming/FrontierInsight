@@ -266,3 +266,14 @@ def test_an_example_that_contradicts_its_own_equation_is_not_used_and_goes_to_th
     # Within the test's own tolerance it agrees: correct code would pass it.
     near = _one(ARRHENIUS, {"inputs": ARRHENIUS_INPUTS, "expected_formula": "A * exp(-Ea / (R * T)) * (1 + 1e-7)"})
     assert near["state"] == "ok" and near["equation_agrees"] is True
+
+
+def test_a_left_side_argument_the_right_side_does_not_use_is_not_read() -> None:
+    inputs = {**ARRHENIUS_INPUTS, "T_amb": 298.0}
+    assert eqt.equation_value("k(T) = A * exp(-Ea / (R * T_amb))", inputs) is None
+
+
+def test_an_output_near_zero_that_differs_only_by_round_off_is_not_called_contradicting() -> None:
+    # Held to its size the test would fail; beyond round-off it does not differ: FI does not judge.
+    row = _one("y = a - b", {"inputs": {"a": 1.0, "b": 1.0 - 1e-15}, "expected_formula": "1e-15"})
+    assert row["state"] == "ok" and "equation_agrees" not in row

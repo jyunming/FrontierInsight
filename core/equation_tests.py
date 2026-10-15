@@ -315,8 +315,14 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
         own = equation_value(row["formula"], row["inputs"])
         if own is not None:
             row["equation_value"] = own
-            row["equation_agrees"] = abs(own - float(value)) <= max(rel * abs(float(value)), abs_tol)
-            if not row["equation_agrees"]:
+            gap = abs(own - float(value))
+            # Agrees: code computing the equation would pass the test. Disagrees: beyond the test's bar and round-off
+            # too (an output near 0 is held to its size by the test, but two ways of working it out may differ there).
+            if gap <= max(rel * abs(float(value)), abs_tol):
+                row["equation_agrees"] = True
+            elif gap > max(rel * abs(float(value)), ABSOLUTE_FLOOR):
+                row["equation_agrees"] = False
+            if row.get("equation_agrees") is False:
                 # Code that follows the equation would fail this example: the example, not the code, is wrong.
                 row.update(state="unusable", why=(
                     f"its `expected_formula` gives {float(value):.10g} for its inputs, but the equation as written gives "
@@ -324,7 +330,7 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     return rows
 
 
-_DEFINITION = re.compile(r"^\s*[A-Za-z_]\w*\s*(?:\([^()=]*\))?\s*=(?![=<>])(.*)$", re.S)
+_DEFINITION = re.compile(r"^\s*[A-Za-z_]\w*\s*(\([^()=]*\))?\s*=(?![=<>])(.*)$", re.S)
 
 
 def equation_value(formula: str, inputs: dict[str, float]) -> float | None:
@@ -342,8 +348,12 @@ def equation_value(formula: str, inputs: dict[str, float]) -> float | None:
     m = _DEFINITION.match(statements[0])
     if m is None:
         return None
-    right = m.group(1).strip()
+    right = m.group(2).strip()
     if not right or re.search(r"[=<>~]", right) or _triage.ambiguous(right):
+        return None
+    # `f(T) = ...`: each argument the left side names must be used on the right, or the text says two things.
+    used = set(_forms.names(right, {**_forms.FUNCTIONS, **_forms.PROSE_FUNCTIONS}))
+    if m.group(1) and any(a.strip() and a.strip() not in used for a in m.group(1).strip("()").split(",")):
         return None
     return _forms.evaluate(right, inputs, special=_forms.PROSE_FUNCTIONS).value
 

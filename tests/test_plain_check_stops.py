@@ -974,3 +974,16 @@ async def test_a_failing_check_fi_computed_itself_is_not_worked_out_again_by_a_m
     assert "small_angle_period" not in eng._oracle_disputed and "small_angle_period" not in eng._oracle_proposals
     (entry,) = [t for t in record["triage"] if t["check"] == "small_angle_period"]
     assert entry["kind"] == "formula" and entry["verdict"] == "agrees" and entry["points_to"] == "script"
+
+
+@pytest.mark.parametrize(("change", "why"), [
+    ({"expected_formula": "(2.0060666807)"}, "a number restated in brackets is not a working"),
+    ({"expected_formula": "2*pi*sqrt(L/9.81)", "case": {"length": 1.0}}, "a name the check's own case does not set"),
+    ({"expected_formula": "sin(angle_deg)", "expected": -0.9880316240928618, "case": {"angle_deg": 30}},
+     "an angle named in degrees that the calculator would read as radians"),
+    ({"expected": -1.5e308, "expected_formula": "1.5e308*1", "tolerance": 1.0}, "a difference too large for a float"),
+])
+def test_fi_s_own_value_is_only_one_fi_is_sure_of(change: dict[str, Any], why: str) -> None:
+    oracle = {**SMALL_ANGLE, **change}
+    protocol = {"fixed": {"L": 1.0}}  # a plan's fixed setting is not the check's own case
+    assert oracle_triage.formula_value(oracle, protocol) is None, why
