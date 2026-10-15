@@ -551,6 +551,9 @@ def test_a_missed_precision_sends_the_quest_back_only_when_a_larger_run_fits(tmp
     assert eng._precision_missed(state) == []  # FI already had to make it smaller
     estimate(estimate_s=10.0, limit_s=300.0, fits=True, cells=4, trials=400)
     assert eng._precision_missed(state) == []  # the estimate of another design's run (FI times only the first)
+    estimate(estimate_s=100.0, limit_s=300.0, fits=True)
+    unread = {**state, "design": {"protocol": {**state["design"]["protocol"], "runs_per_setting": "many"}}}
+    assert eng._precision_missed(unread) == []  # a size that cannot be read is no estimate of this run, not a crash
     assert "a run large enough for it would take" in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
 
 

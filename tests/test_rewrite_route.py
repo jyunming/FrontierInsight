@@ -92,6 +92,8 @@ def test_two_objections_written_as_prose_are_two_and_each_is_said_as_written(tmp
     assert _objection_key("[methodologist] circular_evaluation: the test set is the training set") == "circular_evaluation"
     assert _objection_key("pseudo_units") == "pseudo_unit" and _objection_key("`single_point_eval`") == "single_point_eval"
     assert _objection_key("The baseline is weak") != _objection_key("The sample is too small")
+    assert _objection_key("Baseline: weak") != _objection_key("Baseline: missing")
+    assert _objection_key("[high] Overfitting") == "overfitting"
     eng = _engine(tmp_path, max_iterations=3)
     eng._note_design_objections({"iteration": 0}, {"verdict": "accept", "must_flag_hits": ["The baseline is weak"]})  # type: ignore[arg-type]
     second = {"verdict": "accept", "must_flag_hits": ["The sample is too small"]}

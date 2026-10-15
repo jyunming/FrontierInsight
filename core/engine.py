@@ -2888,8 +2888,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         say = (lambda *a: None) if quiet else self._log.info
         record = _estimate.read_record(self.quest_root)
         estimate_s, limit_s = record.get("estimate_s"), record.get("limit_s")
-        grid, runs, _thresholds = self._grid_and_runs(state)
-        cells = _estimate.cell_count(grid)
+        try:
+            grid, runs, _thresholds = self._grid_and_runs(state)
+            cells = _estimate.cell_count(grid)
+        except Exception:  # noqa: BLE001 -- a plan whose size cannot be read has no estimate of this run
+            cells, runs = -1, 0
         if record.get("reduced") or not record.get("fits") or not all(
                 isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0 for x in (estimate_s, limit_s)) \
                 or record.get("cells") != cells or record.get("trials") not in (cells, cells * runs):
@@ -28329,12 +28332,13 @@ def _hit_name(hit: Any) -> str:
     return m.group(1).lower().removesuffix("s") if m else ""
 
 
-_IDENTIFIER_HIT = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?[`'\"]?([A-Za-z]+_[A-Za-z_]+|[A-Za-z]+(?=[`'\"]?\s*(?::|$)))")
+_IDENTIFIER_HIT = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?[`'\"]?([A-Za-z]+_[A-Za-z_]+|[A-Za-z]+(?=[`'\"]?\s*$))")
 
 
 def _objection_key(hit: Any) -> str:
-    """How FI's record names an objection: its identifier (``circular_evaluation``, ``circular_evaluation: ...``, a single
-    word), or else its whole text in lower case, so two objections written as prose are never taken for one."""
+    """How FI's record names an objection: its identifier (``circular_evaluation``, ``circular_evaluation: ...``, a hit
+    that is one word), or else its whole text in lower case, so two objections written as prose ("Baseline: weak",
+    "Baseline: missing") are never taken for one."""
     if _IDENTIFIER_HIT.match(str(hit)):
         return _hit_name(hit)
     text = re.sub(r"^\s*\[[^\]]*\]\s*", "", str(hit))
