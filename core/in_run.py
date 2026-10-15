@@ -249,7 +249,19 @@ def parse_level_key(text):
     for part in str(text).split(","):
         name, _, raw = part.partition("=")
         try:
-            out[name.strip()] = float(raw)
+            number = float(raw)
+            out[name.strip()] = number if math.isfinite(number) else raw.strip()  # "nan" and "inf" are names
         except ValueError:
             out[name.strip()] = raw.strip()
     return out
+
+
+def groups(cells):
+    """The records of ``raw/trials.json`` (each ``{"cell", "metrics", ...}``, a value's own record carrying its ``level``)
+    as the groups a check judges a metric over: a number per run lives only in the records of the grid's settings and a
+    number per value only in the records of a value, so each is judged over the records that hold it. A study that compares
+    nothing inside its runs is one group, as it always was."""
+    per_value = [c for c in cells if c.get("level")]
+    if not per_value:
+        return [list(cells)]
+    return [g for g in ([c for c in cells if not c.get("level")], per_value) if g]

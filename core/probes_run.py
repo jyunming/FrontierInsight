@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from . import gate_receipt as _receipt
+from . import in_run as _in_run
 from . import probes as _probes
 from . import trial_runner as _tr
 
@@ -58,12 +59,29 @@ class CellResult:
     seconds: float
     reason: str = ""
     seeds: list[int | None] = field(default_factory=list)
+    #: With values compared inside each run (``protocol.in_each_run``): per value (its key, :func:`core.in_run.level_key`) the
+    #: numbers per value, per seed as ``rows`` are; the process was one, so its cost is counted once, in ``seconds``.
+    level_rows: dict[str, list[dict[str, float] | None]] = field(default_factory=dict)
+    levels: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def values_of(self, metric: str) -> list[float | None]:
         return [None if r is None or metric not in r else r[metric] for r in self.rows]
 
     def has(self, metric: str) -> bool:
-        return any(r is not None and metric in r for r in self.rows)
+        return any(r is not None and metric in r for r in self.rows) or bool(self.levels_with(metric))
+
+    def levels_with(self, metric: str) -> list[str]:
+        """The keys of the values this cell returned ``metric`` for, in the order the run was given them."""
+        return [lk for lk, rows in self.level_rows.items() if any(r is not None and metric in r for r in rows)]
+
+    def level_values_of(self, lk: str, metric: str) -> list[float | None]:
+        return [None if r is None or metric not in r else r[metric] for r in self.level_rows.get(lk, [])]
+
+    def views(self) -> list[tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, float] | None]]]:
+        """``(cell, level, rows)``: the cell with its numbers per run, then one view per value with the value as an extra
+        dimension of the cell and its numbers per value (the way ``raw/trials.json`` records them)."""
+        return [(self.cell, None, self.rows)] + [({**self.cell, **self.levels[lk]}, self.levels[lk], rows)
+                                                 for lk, rows in self.level_rows.items()]
 
 
 # ------------------------------------------------------------------------------------------------------- record on disk
@@ -85,9 +103,12 @@ def code_sha(quest_root: Path) -> str:
         return ""
 
 
-def plan_sha(relations: list[_probes.Relation], grid: dict[str, list[Any]], seeds: int, deterministic: bool) -> str:
-    payload = json.dumps({"relations": [r.to_dict() for r in relations], "grid": grid, "seeds": seeds,
-                          "deterministic": deterministic}, sort_keys=True, default=str)
+def plan_sha(relations: list[_probes.Relation], grid: dict[str, list[Any]], seeds: int, deterministic: bool,
+             inside: dict[str, list[Any]] | None = None) -> str:
+    plan = {"relations": [r.to_dict() for r in relations], "grid": grid, "seeds": seeds, "deterministic": deterministic}
+    if inside:
+        plan["in_each_run"] = inside
+    payload = json.dumps(plan, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -130,8 +151,11 @@ def _entries(quest_root: Path) -> set[str]:
 
 async def _run_cell(executor: Any, python: Path | str, quest_root: Path, entry: str, cell: dict[str, Any],
                     seeds: list[int | None], *, timeout_s: int, env: dict[str, str] | None,
-                    thresholds: dict[str, Any] | None) -> CellResult:
-    """One process of the quest's Python: the harness calls the entry once per seed on the cell and writes the rows."""
+                    thresholds: dict[str, Any] | None, inside: dict[str, list[Any]] | None = None) -> CellResult:
+    """One process of the quest's Python: the harness calls the entry once per seed on the cell and writes the rows. With
+    values compared inside each run (``inside``), the run is given every one of them whole in its cell, as in the study,
+    and may return a number per value."""
+    levels = _in_run.level_cells(inside)
     root = Path(quest_root)
     work = root / _WORK
     work.mkdir(parents=True, exist_ok=True)
@@ -141,7 +165,7 @@ async def _run_cell(executor: Any, python: Path | str, quest_root: Path, entry: 
     spec, out = work / "spec.json", work / "out.jsonl"
     out.unlink(missing_ok=True)
     spec.write_text(json.dumps({
-        "module": _SIMULATE.as_posix(), "entry": entry, "cell": cell, "nonce": nonce,
+        "module": _SIMULATE.as_posix(), "entry": entry, "cell": {**cell, **(inside or {})}, "levels": levels, "nonce": nonce,
         "thresholds": dict(thresholds or {}),
         "trials": [{"trial": i, "seed": s} for i, s in enumerate(seeds)],
     }, default=str), encoding="utf-8")
@@ -160,25 +184,33 @@ async def _run_cell(executor: Any, python: Path | str, quest_root: Path, entry: 
             return CellResult(cell, [None] * len(seeds), seconds, f"the simulation could not be loaded: {r['load_error']}", seeds)
     by_trial = {r.get("trial"): r for r in mine}
     got: list[dict[str, float] | None] = []
+    by_level: dict[str, list[dict[str, float] | None]] = {_in_run.level_key(lv): [] for lv in levels}
     reason = ""
     for i in range(len(seeds)):
         r = by_trial.get(i)
         if r is not None and r.get("status") == "ok":
-            got.append({str(k): float(v) for k, v in (r.get("values") or {}).items()})
+            per_run, per_level = _in_run.split(r.get("values") or {})
+            got.append({str(k): float(v) for k, v in per_run.items()})
+            for lk, rows in by_level.items():
+                rows.append({str(k): float(v) for k, v in per_level.get(lk, {}).items()})
         else:
             got.append(None)
+            for rows in by_level.values():
+                rows.append(None)
             if not reason:
                 reason = (str(r.get("reason")) if r is not None and r.get("reason") else
                           "it ran out of time" if getattr(result, "timed_out", False) else
                           f"it did not report (exit code {getattr(result, 'returncode', '?')})")
-    return CellResult(cell, got, seconds, reason, seeds)
+    return CellResult(cell, got, seconds, reason, seeds, by_level, {_in_run.level_key(lv): lv for lv in levels})
 
 
 class _Runner:
     """Runs and remembers cells (one process each), and keeps the clock against the budget."""
 
     def __init__(self, executor: Any, python: Path | str, root: Path, entry: str, deterministic: bool, *,
-                 budget_s: float, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None) -> None:
+                 budget_s: float, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+                 inside: dict[str, list[Any]] | None = None) -> None:
+        self.inside = inside
         self.executor, self.python, self.root, self.entry = executor, python, root, entry
         self.deterministic, self.budget_s, self.timeout_s, self.env, self.thresholds = deterministic, budget_s, timeout_s, env, thresholds
         self.cache: dict[tuple[str, int, int], CellResult] = {}
@@ -202,7 +234,7 @@ class _Runner:
         left = max(5, int(self.budget_s - self.spent)) if self.dearest else self.timeout_s
         res = await _run_cell(self.executor, self.python, self.root, self.entry, cell,
                               _seed_list(n, base, self.deterministic), timeout_s=min(self.timeout_s, left),
-                              env=self.env, thresholds=self.thresholds)
+                              env=self.env, thresholds=self.thresholds, inside=self.inside)
         self.spent += res.seconds
         self.dearest = max(self.dearest, res.seconds)
         self.cache[k] = res
@@ -242,10 +274,34 @@ def _verdict_for(rel: _probes.Relation, results: list[CellResult], plan: _probes
         why = (f"the simulation failed at {_probes._fmt_cell(failed.cell)}: {failed.reason}" if failed is not None
                else f"the simulation does not return `{name}`")
         return _probes.Verdict(rel.id, "unconfirmed", {}, f"Could not check this: {why}.")
-    obs = [_probes.Observation(r.cell, r.values_of(name)) for r in results]
+    # a number per run is judged as it always was; a number per value is judged for each value on its own, the value held
+    # fixed and the setting varied as the relation says
+    parts: list[tuple[str, Any]] = []
+    seen: list[str] = []
+    for res in results:
+        seen += [lk for lk in res.levels_with(name) if lk not in seen]
+    if not seen or any(any(r is not None and name in r for r in res.rows) for res in results):
+        parts.append(("", lambda res: res.values_of(name)))
+    parts += [(lk, lambda res, lk=lk: res.level_values_of(lk, name)) for lk in seen]
+    judged = [(lk, _verdict_one(rel, results, pick)) for lk, pick in parts]
+    if len(judged) == 1 and not judged[0][0]:
+        return judged[0][1]
+    shown = {lk or "per run": x.numbers for lk, x in judged}
+    for want in ("broken", "unconfirmed"):
+        hit = [(lk, v) for lk, v in judged if v.verdict == want]
+        if hit:
+            lk, v = hit[0]
+            more = f" ({len(hit) - 1} more of the {len(judged)} values compared the same)" if len(hit) > 1 else ""
+            return _probes.Verdict(rel.id, want, shown, (f"At {lk}: " if lk else "") + v.says + more)
+    return _probes.Verdict(rel.id, "held", shown, judged[0][1].says
+                           + (f" The same held for each of the {len(judged)} values compared inside each run." if len(judged) > 1 else ""))
+
+
+def _verdict_one(rel: _probes.Relation, results: list[CellResult], pick: Any) -> _probes.Verdict:
+    obs = [_probes.Observation(r.cell, pick(r)) for r in results]
     v = _probes.judge(rel, obs)
     if v.verdict == "unconfirmed":
-        failed = next((r for r in results if r.reason and any(x is None for x in r.values_of(name))), None)
+        failed = next((r for r in results if r.reason and any(x is None for x in pick(r))), None)
         if failed is not None:
             return _probes.Verdict(rel.id, "unconfirmed", v.numbers,
                                    f"Could not check this: the simulation failed at {_probes._fmt_cell(failed.cell)}: {failed.reason}.")
@@ -346,7 +402,8 @@ def stored_cells(quest_root: Path) -> list[dict[str, Any]]:
     for c in data.get("cells") or []:
         if isinstance(c, dict) and isinstance(c.get("metrics"), dict) and c["metrics"]:  # a setting that never finished has none
             out.append({"cell": c.get("cell"), "metrics": {str(k): list(v.get("values") or []) if isinstance(v, dict) else list(v)
-                                                           for k, v in c["metrics"].items()}})
+                                                           for k, v in c["metrics"].items()},
+                        **({"level": c["level"]} if isinstance(c.get("level"), dict) and c["level"] else {})})
     return out
 
 
@@ -373,7 +430,8 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
     entry, deterministic = _entry_of(_entries(root))
     sha = code_sha(root)
     thresholds = protocol.get("thresholds") if isinstance(protocol, dict) and isinstance(protocol.get("thresholds"), dict) else None
-    psha = plan_sha(relations, grid, seeds, deterministic)
+    inside = _in_run.of(protocol)
+    psha = plan_sha(relations, grid, seeds, deterministic, inside)
     kept = load(root) or {}
     same_plan = kept.get("plan_sha") == psha
     results: dict[str, dict[str, Any]] = {k: dict(v) for k, v in (kept.get("results") or {}).items()} if same_plan else {}
@@ -394,7 +452,7 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
     if not pending and not want_sat:
         return record
     runner = _Runner(executor, python, root, entry, deterministic, budget_s=budget_s, timeout_s=timeout_s, env=env,
-                     thresholds=thresholds)
+                     thresholds=thresholds, inside=inside)
     order = sorted(pending, key=lambda r: (r.strength != "core", relations.index(r)))
     try:
         plan = _probes.plan_runs(order, grid, seeds, deterministic)
@@ -478,13 +536,15 @@ async def _saturation(runner: _Runner, root: Path, protocol: dict[str, Any] | No
         for (ckey, b, nn), res in runner.cache.items():
             if b != base_seed:
                 continue
-            ok = [r for r in res.rows if r is not None]
-            if ok:
-                out.append({"cell": res.cell, "metrics": {k: [r[k] for r in ok if k in r] for k in ok[0]}})
+            for cell, level, rows in res.views():
+                ok = [r for r in rows if r is not None]
+                if ok and (level is None or ok[0]):
+                    out.append({"cell": cell, "metrics": {k: [r[k] for r in ok if k in r] for k in ok[0]},
+                                **({"level": level} if level else {})})
         return out
 
     cells = collect()
-    if sweep and len(cells) < _probes.SATURATION_MIN_CELLS and grid:
+    if sweep and len([c for c in cells if not c.get("level")]) < _probes.SATURATION_MIN_CELLS and grid:
         base = _probes._base(grid)
         extra = [base]
         for s, vals in grid.items():

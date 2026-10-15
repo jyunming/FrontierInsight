@@ -780,9 +780,17 @@ def saturation(cells: list[dict[str, Any]], exempt: Iterable[str] = (), headline
     cell sits at exactly 0 (or at exactly 1; a 0/1 indicator needs :data:`INDICATOR_MIN_VALUES` draws (at the top bound, in every setting: 8 of 8 is a good coverage, not a fault); a check value or flag sitting at its bound by design is only ``unconfirmed``), or when everything
     the run returns is one constant over a sweep of at least :data:`SATURATION_MIN_CELLS` cells; it is ``unconfirmed``
     when it alone is constant over such a sweep while something else moves (it may be a fixed control). Names in ``exempt`` (see :func:`exempt_names`) may be
-    constant or pinned by design, but never NaN."""
+    constant or pinned by design, but never NaN. With values compared inside each run (:mod:`core.in_run`) a cell that holds a
+    number per value carries its ``level``; a number per run is judged over the cells of the settings and a number per value
+    over the cells of the values, each over the cells that hold it."""
+    from . import in_run as _in_run
+
     skip = set(exempt)
     protect = set(headline)   # reported / headline quantities: never excused as a check value or a flag
+    return [v for group in _in_run.groups(cells) for v in _saturation_in(group, skip, protect)]
+
+
+def _saturation_in(cells: list[dict[str, Any]], skip: set[str], protect: set[str]) -> list[Verdict]:
     names = sorted(set.intersection(*[set((c.get("metrics") or {}).keys()) for c in cells])) if cells else []
     out: list[Verdict] = []
     means: dict[str, list[float]] = {}

@@ -19,6 +19,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from . import in_run as _in_run
 from . import optimisation_plan as _plan
 
 #: Two numbers are "the same" when they differ by less than this fraction of their own size: numerical noise, not a
@@ -184,18 +185,44 @@ def observed_flat_sweep(cells: list[Any]) -> Observed | None:
     """The observation behind :func:`flat_sweep`: ``cells`` are :class:`core.trial_runner.CellRun` objects (``cell`` and
     ``rows``, each row with ``status`` and ``values``). ``None`` for a study with one setting, one that varies nothing, or
     one in which some quantity does change from one setting to the next (or whose numbers cannot be told apart by their
-    size)."""
-    by_cell: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
+    size). A run that compared values inside it (:mod:`core.in_run`) holds numbers per run and numbers per value: the first
+    are judged over the settings, the others over the settings and values (a cell with a truthy ``level`` is a value's own
+    record), each over the cells that hold them, and the observation is made only when every one of them holds."""
+    run: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
+    value: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
     for c in cells:
-        columns: dict[str, list[float]] = {}
         ok = [r for r in getattr(c, "rows", []) if r.get("status") == "ok"]
         if not ok:
             continue
+        cell = dict(getattr(c, "cell", {}) or {})
+        levels = {_in_run.level_key(lv): lv for lv in getattr(c, "levels", None) or []}
+        own: dict[str, list[float]] = {}
+        per_level: dict[str, dict[str, list[float]]] = {}
         for r in ok:
-            for name, value in (r.get("values") or {}).items():
-                if _is_number(value):
-                    columns.setdefault(str(name), []).append(float(value))
-        by_cell.append((dict(getattr(c, "cell", {}) or {}), columns))
+            per_run, by_level = _in_run.split(r.get("values") or {})
+            for name, v in per_run.items():
+                if _is_number(v):
+                    own.setdefault(str(name), []).append(float(v))
+            for lk, named in by_level.items():
+                for name, v in named.items():
+                    if _is_number(v):
+                        per_level.setdefault(lk, {}).setdefault(str(name), []).append(float(v))
+        (value if getattr(c, "level", None) else run).append((cell, own))
+        for lk, columns in per_level.items():
+            value.append(({**cell, **(levels.get(lk) or _in_run.parse_level_key(lk))}, columns))
+    seen = [o for o in (_observed_in(g) for g in (run, value) if g) if o is not None]
+    groups = [g for g in (run, value) if g]
+    if not groups or len(seen) < len(groups):
+        return None
+    if len(seen) == 1:
+        return seen[0]
+    names = sorted({n for o in seen for n in o.names})
+    return Observed(names, {k: v for o in seen for k, v in o.values.items()},
+                    list(dict.fromkeys(a for o in seen for a in o.varied)), seen[0].count)
+
+
+def _observed_in(by_cell: list[tuple[dict[str, Any], dict[str, list[float]]]]) -> Observed | None:
+    """:func:`observed_flat_sweep` over the cells of one group."""
     if len(by_cell) < 2:
         return None
     axes = sorted({a for cell, _ in by_cell for a in cell})

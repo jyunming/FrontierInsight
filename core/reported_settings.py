@@ -98,7 +98,8 @@ def cells_of(record: Any) -> list[dict[str, Any]]:
             values = [float(v) for v in (m.get("values") if isinstance(m, dict) else m or []) if _is_number(v)]
             if values:
                 metrics[str(name)] = values
-        out.append({"cell": entry["cell"], "metrics": metrics})
+        out.append({"cell": entry["cell"], "metrics": metrics,
+                    **({"level": entry["level"]} if isinstance(entry.get("level"), dict) and entry["level"] else {})})
     return out
 
 

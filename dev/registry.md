@@ -418,7 +418,7 @@ same PR that adds, splits or renames one.
 - `core/in_run.py` — what each run compares inside it (`protocol.in_each_run`: the conditions one fit spans, the methods
   applied to the same simulated data): `level_cells`, `read_returned` (a number per run, or one per value as a mapping or
   a list in the order given), `split` / `flat` / `summary_cells` (a value's numbers as a record of its own, keyed
-  `m=20,procedure=bh`), `for_case` (an oracle case reads the value it names, or the list). Standard library only: its
+  `m=20,procedure=bh`), `for_case` (an oracle case reads the value it names, or the list). `groups` splits `raw/trials.json` records into the numbers per run and the numbers per value, so the stuck, constant and flat-output checks and FI's behaviour probes (`probes_run.CellResult.views`: one view per value, judged per value) judge each number over the records that hold it. Standard library only: its
   text is carried by the trial harness and by `code/run.py`, so the three readers agree. `run_manifest.metric_grid` counts
   a number per value over the grid and those values, a number per run over the grid.
 - `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,

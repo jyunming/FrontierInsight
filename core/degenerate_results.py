@@ -252,8 +252,24 @@ def keys_in(value: Any) -> set[str]:
 
 def quantity_problems(cells: list[dict[str, Any]], reported: set[str], exempt: set[str] | frozenset[str] = frozenset()
                       ) -> list[QuantityProblem]:
-    """The constant and the stuck quantities among those the analysis reported (``reported``: the keys it printed or wrote)."""
+    """The constant and the stuck quantities among those the analysis reported (``reported``: the keys it printed or wrote).
+    A number per run is judged over the settings and a number per value over the settings and values, each over the records
+    that hold it (:func:`core.in_run.groups`)."""
+    from . import in_run as _in_run
+
+    return [q for group in _in_run.groups(cells) for q in _quantity_problems_in(group, reported, exempt)]
+
+
+def _quantity_problems_in(cells: list[dict[str, Any]], reported: set[str], exempt: set[str] | frozenset[str]
+                          ) -> list[QuantityProblem]:
     varying = _rs._varying(cells)
+    seen: dict[str, set[str]] = {}
+    for c in cells:   # the values compared inside each run vary a record too, numbers or not (a procedure)
+        for k, v in (c.get("level") or {}).items():
+            seen.setdefault(str(k), set()).add(str(v))
+    for k, vs in seen.items():
+        if len(vs) > 1:
+            varying.setdefault(k, sorted(vs))  # type: ignore[arg-type]
     if len(cells) < MIN_CELLS or not varying:
         return []
     means = {n: v for n, v in _means(cells).items() if all(math.isfinite(x) for x in v)}

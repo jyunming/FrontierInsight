@@ -53,7 +53,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from . import in_run as _in_run
 from . import trial_runner as _tr
@@ -382,10 +382,14 @@ async def _time_one(
         seconds = max(0.0, wall - sum(durations)) + durations[0] + (int(runs) - 1) * durations[1]
     spread: dict[str, float] = {}
     if n == 2:
-        for name in set(done[0].get("values") or {}) & set(done[1].get("values") or {}):
-            a, b = done[0]["values"][name], done[1]["values"][name]
-            if all(isinstance(v, (int, float)) and math.isfinite(v) for v in (a, b)):
-                spread[str(name)] = abs(float(a) - float(b)) / math.sqrt(2.0)  # the sample standard deviation of two numbers
+        # a number per value spreads as the widest of its values does: the precision is wanted at every one of them
+        first, second = (_in_run.flat("", dict(done[i].get("values") or {})) for i in (0, 1))
+        later = {(k, name): v for k, name, v in second}
+        for k, name, a in first:
+            b = later.get((k, name))
+            if b is not None and all(isinstance(v, (int, float)) and math.isfinite(v) for v in (a, b)):
+                sd = abs(float(a) - float(b)) / math.sqrt(2.0)  # the sample standard deviation of two numbers
+                spread[str(name)] = max(spread.get(str(name), 0.0), sd)
     return Probe(None, None, cell, max(seconds, 1e-6), spread=spread,
                  trials=[dict(r.get("values") or {}) for r in done]), ""
 
@@ -453,8 +457,11 @@ def _settings_text(obs: list[tuple[dict[str, Any], dict[str, float]]], limit: in
     return shown + (f"; and {len(seen) - limit} more" if len(seen) > limit else "")
 
 
-def _setting_count(obs: list[tuple[dict[str, Any], dict[str, float]]]) -> int:
-    return len({_tr.cell_key(c) for c, _v in obs})
+def _setting_count(obs: list[tuple[dict[str, Any], dict[str, float]]], inside: Iterable[str] = ()) -> int:
+    """How many settings the observations were made at; ``inside``: the names of what each run compares inside it, which
+    are values of a run and not settings (left out of the count)."""
+    skip = set(inside)
+    return len({_tr.cell_key({k: v for k, v in c.items() if k not in skip}) for c, _v in obs})
 
 
 def undefined_metrics(obs: list[tuple[dict[str, Any], dict[str, float]]], ids: list[str]) -> list[str]:
@@ -500,8 +507,9 @@ def _say_undefined(name: str, obs: list[tuple[dict[str, Any], dict[str, float]]]
 def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: dict[str, str], *,
                    exempt: set[str] | frozenset[str] = frozenset(), tried_all: str = "",
                    unsure: set[str] | frozenset[str] = frozenset(), axes: set[str] | frozenset[str] = frozenset(),
-                   source: str | None = None) -> Pilot:
-    """What the pilot trials show. ``kinds``: the protocol's metrics (``{id: kind}``); only those the trials returned are read.
+                   source: str | None = None, inside: Iterable[str] = ()) -> Pilot:
+    """What the pilot trials show. ``inside``: the names of what each run compares inside it (``protocol.in_each_run``), whose
+    values are not settings. ``kinds``: the protocol's metrics (``{id: kind}``); only those the trials returned are read.
     ``tried_all``: a clause saying that every combination of the small settings was tried (when it was); ``unsure``: metrics
     that looked undefined but whose subsets were not all tried (nothing is claimed about them). ``exempt``: names the plan
     expects to stay put. ``source``: the text of the simulation, for the evidence a value that never changed needs (see the
@@ -510,7 +518,7 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
     output that is the same everywhere."""
     from . import flat_output as _flat
 
-    pilot = Pilot(trials=len(obs), settings=_setting_count(obs))
+    pilot = Pilot(trials=len(obs), settings=_setting_count(obs, inside))
     returned = sorted({n for _c, v in obs for n in v})
     pilot.checked = [n for n in kinds if n in returned]
     if not obs:
@@ -560,7 +568,8 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
                 "is sampled does not do"))
     by_cell: dict[str, Any] = {}
     for cell, values in obs:
-        run = by_cell.setdefault(_tr.cell_key(cell), type("PilotCell", (), {"cell": dict(cell), "rows": []})())
+        run = by_cell.setdefault(_tr.cell_key(cell), type("PilotCell", (), {
+            "cell": dict(cell), "rows": [], "level": any(k in cell for k in inside)})())
         run.rows.append({"status": "ok", "values": values})
     flat = _flat.flat_sweep(list(by_cell.values()), source=source, expected=set(exempt))
     if flat:
@@ -648,10 +657,11 @@ async def pilot(
             obs.extend(observations([Probe(None, None, dict(cell), 0.0, trials=[values])]))
         if whole and reached:
             tried_all = (f"; FI also tried every value of every setting and every combination of the settings that take few "
-                         f"values ({_setting_count(obs)} settings in all)")
+                         f"values ({_setting_count(obs, tuple(in_each_run or ()))} settings in all)")
         else:
             unsure = set(suspects)
-    return pilot_problems(obs, kinds, exempt=exempt, tried_all=tried_all, unsure=unsure, axes=axes, source=source)
+    return pilot_problems(obs, kinds, exempt=exempt, tried_all=tried_all, unsure=unsure, axes=axes, source=source,
+                          inside=tuple(in_each_run or ()))
 
 
 # ---- the record: so a resume neither times nor asks again -------------------------------------------------------------
