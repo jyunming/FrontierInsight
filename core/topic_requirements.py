@@ -750,6 +750,11 @@ def write_note(quest_root: Any) -> str:
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
+    inside_left = str((record.get("in_each_run_left") if isinstance(record, dict) else "") or "").strip()
+    if inside_left:
+        parts.append(f"The plan meant to compare some values inside each run, and could not: {inside_left}. Say plainly in "
+                     "the limitations that this comparison inside each run was planned and not done, and write no result "
+                     "for it.")
     ledger_left = [str(g).strip() for g in (record.get("ledger_left") if isinstance(record, dict) else None) or []
                    if str(g).strip()]
     if ledger_left:

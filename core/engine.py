@@ -6617,7 +6617,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 continue
             if new_protocol.get(part) is None:
                 continue
-            fixed, why = _plan.normalize_protocol({**merged, part: new_protocol[part]})
+            moved: list[str] = []
+            if part == "in_each_run" and isinstance(new_protocol[part], dict) and isinstance(merged.get("grid"), dict):
+                # A factor every run goes through together is not also a setting run on its own: it leaves the grid (the
+                # request says so), or each run would be repeated once per value.
+                moved = [str(k) for k in new_protocol[part] if str(k) in merged["grid"]]
+            if moved:
+                kept_grid = {k: v for k, v in merged["grid"].items() if k not in moved}
+                candidate = {**{k: v for k, v in merged.items() if k != "grid"}, **({"grid": kept_grid} if kept_grid else {}),
+                             part: new_protocol[part]}
+            else:
+                candidate = {**merged, part: new_protocol[part]}
+            fixed, why = _plan.normalize_protocol(candidate)
             if fixed is None or part not in fixed:
                 self._log.warning("[plan] the plan's model wrote `protocol.%s` again but it still cannot be read: %s", part, why)
                 entry = _plan.offending_entry({part: new_protocol[part]}, why)
@@ -6631,6 +6642,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     reasons.append(f"`protocol.{part}` as you wrote it is not complete: {problems}")
                     continue
             merged[part] = fixed[part]
+            if moved:
+                if fixed.get("grid"):
+                    merged["grid"] = fixed["grid"]
+                else:
+                    merged.pop("grid", None)
+                self._log.warning("[plan] %s now go%s through every run together (`protocol.in_each_run`), so FI took "
+                                  "%s out of the settings run one by one (`protocol.grid`)", ", ".join(moved),
+                                  "es" if len(moved) == 1 else "", "it" if len(moved) == 1 else "them")
             taken.append(part)
         if not taken:
             if reasons:  # the reader's exact reason goes back to the model with the next request
@@ -6792,7 +6811,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 design, plan_sha, lacks=lacks, request=request, keep=keep, file=_PART_ASKED,
                 what="settings the experiment needs", short="the protocol",
                 note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts,
-                ask_limit=1 if all(p in _LEDGER_PARTS for p in asked) else None)
+                # What each run compares inside it is asked again once, like the ledger parts: what is still unusable is
+                # said in the paper, never a stop.
+                ask_limit=1 if all(p in _LEDGER_PARTS or p == "in_each_run" for p in asked) else None)
             if ledger_asked:  # what the answer left is the problem it was asked about: not asked about again
                 after = unread(design)
                 self._ledger_seen_write(iteration, {**seen, **{p: digest(after[p]) for p in ledger_asked if p in after},
@@ -6812,6 +6833,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     lines.append(f"FI asked the plan's model to write `protocol.{part}` again, and it is "
                                  + (f"still not readable ({'; the quest stops' if part == 'grid' else 'the experiment goes on without it'})"
                                     if part in left else "now in the plan") + ".")
+            # What each run was meant to compare inside it and could not be used, even when asked again, is a requirement of
+            # the study not done: kept for the writer (core/topic_requirements.py::write_note), so the paper says it.
+            inside_left = ""
+            if "in_each_run" in left and "in_each_run" in {*asked, *before}:
+                why = left["in_each_run"].split("; " + _plan.ASK_MARK)[0].strip().rstrip(".")
+                inside_left = (f"{why}, even when FI asked the plan's model to write it again once. So no run compares "
+                               "those values inside it and nothing is recorded per value of them")
+            if inside_left != str(self._topic_covered_read().get("in_each_run_left") or ""):
+                self._topic_covered_write(in_each_run_left=inside_left)
+                if inside_left:
+                    self._log.warning("[plan] %s; the paper says so", inside_left)
             # What is still wrong with the ledger parts is said under *What the topic asks for*, and kept for the writer.
             gaps = [f"`protocol.{part}` is incomplete: {why}" for part, why in left.items() if part in _LEDGER_PARTS]
             self._note_the_ledger_for_the_writer(design, gaps)
