@@ -594,13 +594,28 @@ style. Set `html_pdf_fallback: false` to force the strict LaTeX-only
 path — then a missing engine skips the PDF (or, with `require_pdf:
 true`, aborts) exactly as before.
 
+### Symbols, accents and other scripts
+
+When XeLaTeX is installed (MiKTeX and TeX Live ship it), FI compiles
+every paper with it, so each character in `paper.md` prints as itself:
+a character the text font lacks (Cyrillic, ⊤, ⩽, ★, a box-drawing line)
+is set in another installed font that has it, and code is set in a
+monospace font that has all of its characters. Without XeLaTeX,
+pdflatex sets the characters LaTeX has an exact form for (⅓ as a
+fraction). FI never prints a `?` or a look-alike instead: a character
+no installed font has, or a right-to-left or Indic script, makes the
+paper through the browser fallback below, and its first page says
+"Not typeset". `.fi/paper_render.json` and `QUALITY.md` say whether
+the paper is typeset and list every character set in another form or
+font.
+
 ### Chinese, Japanese and Korean text
 
 pdflatex stops at the first Chinese, Japanese or Korean character,
-whether it is in the title, the body or the author line. When
-`paper.md` or the author line has such text, FI compiles the paper
-with **XeLaTeX** and the `xeCJK` package in an installed CJK font. The
-template and its layout stay the same.
+whether it is in the title, the body or the author line. Such text
+also needs an installed CJK font: FI compiles the paper with
+**XeLaTeX** and the `xeCJK` package in that font. The template and its
+layout stay the same.
 
 - **Font:** the first one installed of Noto Sans CJK / Source Han Sans,
   then the system font for the language. That is Microsoft JhengHei
