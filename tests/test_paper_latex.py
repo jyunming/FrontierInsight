@@ -115,20 +115,54 @@ def test_latin_letters_and_other_scripts_are_left_alone() -> None:
 # A heading's own number
 
 
-@pytest.mark.parametrize("heading, expected", [
-    ("## 1. Introduction", "## Introduction"),
-    ("### 3.3 Coverage", "### Coverage"),
-    ("### 3.3. Coverage", "### Coverage"),
-    ("## 2 Methods", "## Methods"),
-    ("#### 2.1.4. Detail", "#### Detail"),
-    ("## Abstract", "## Abstract"),
-    ("## 2024 outlook", "## 2024 outlook"),
-    ("## 10 years later", "## 10 years later"),
-    ("## 3.5% growth", "## 3.5% growth"),
-    ("## 3.5 million units", "## 3.5 million units"),
+def _doc(*headings: str) -> str:
+    return "# A Title\n\n" + "\n\nText.\n\n".join(headings) + "\n"
+
+
+@pytest.mark.parametrize("headings, expected", [
+    # The document's own numbering comes off, in every form the writer uses.
+    (["## 1. Introduction", "## 2. Methods"], ["## Introduction", "## Methods"]),
+    (["## 1 Introduction", "## 2 Methods"], ["## Introduction", "## Methods"]),
+    (["## 1) Introduction", "## 2) Methods"], ["## Introduction", "## Methods"]),
+    (["## 1: Introduction", "## 2: Methods"], ["## Introduction", "## Methods"]),
+    (["## I. Introduction", "## II. Methods", "## III. Results"], ["## Introduction", "## Methods", "## Results"]),
+    (["## 1. Intro", "## 2. Body", "## 3. Results", "### 3.1 Setup", "### 3.2. Coverage", "#### 3.2.1 Detail"],
+     ["## Intro", "## Body", "## Results", "### Setup", "### Coverage", "#### Detail"]),
+    (["## Abstract", "## 1. Introduction"], ["## Abstract", "## Introduction"]),
+    # A count that is part of the title is not a section number: it does not continue the
+    # document's numbering.
+    (["## 3 Body Problem Dynamics"], ["## 3 Body Problem Dynamics"]),
+    (["## 10 Years Later"], ["## 10 Years Later"]),
+    (["## 3 Key Findings"], ["## 3 Key Findings"]),
+    (["## 2.5 Million Cells"], ["## 2.5 Million Cells"]),
+    (["## 2 Sample Tests Compared"], ["## 2 Sample Tests Compared"]),
+    (["## 1. Introduction", "## 3 Body Problem", "## 2. Methods"], ["## Introduction", "## 3 Body Problem", "## Methods"]),
+    (["## 2024 outlook"], ["## 2024 outlook"]),
+    (["## 3.5% growth"], ["## 3.5% growth"]),
+    (["## 4 × 4 grids"], ["## 4 × 4 grids"]),
+    # A subsection number belongs to its section.
+    (["## 1. Intro", "### 2.1 Stray"], ["## Intro", "### 2.1 Stray"]),
+    # Below the levels LaTeX numbers, the writer's number is the only one and stays.
+    (["## 1. A", "### 1.1 B", "#### 1.1.1 C", "##### 1.1.1.1 D"], ["## A", "### B", "#### C", "##### 1.1.1.1 D"]),
 ])
-def test_a_headings_own_number_comes_off(heading: str, expected: str) -> None:
-    assert strip_heading_numbers(heading) == expected
+def test_a_headings_own_section_number_comes_off(headings: list[str], expected: list[str]) -> None:
+    assert strip_heading_numbers(_doc(*headings)) == _doc(*expected)
+
+
+def test_the_title_is_never_touched() -> None:
+    assert strip_heading_numbers("# 3 Body Problem Dynamics\n\n## 1. Introduction\n") == (
+        "# 3 Body Problem Dynamics\n\n## Introduction\n"
+    )
+
+
+def test_where_nothing_numbers_headings_the_writers_number_stays() -> None:
+    text = _doc("## 1. Introduction", "### 1.1 Aim")
+    assert strip_heading_numbers(text, numbered_depth=0) == text
+    # The browser's LaTeX-like theme numbers two levels; its briefing theme none.
+    from generation._html_pdf import _numbered_depth, theme_css_path
+
+    assert _numbered_depth(theme_css_path("latexlike")) == 2
+    assert _numbered_depth(theme_css_path("briefing")) == 0
 
 
 def test_numbers_in_code_and_in_text_stay() -> None:
@@ -139,7 +173,10 @@ def test_numbers_in_code_and_in_text_stay() -> None:
 def test_the_pdf_source_has_no_doubled_number(tmp_path: Path) -> None:
     _need_latex()
     md = tmp_path / "paper.md"
-    md.write_text("# T\n\n## Abstract\n\nA.\n\n## 1. Introduction\n\nText.\n\n### 1.1 Aim\n\nMore.\n", encoding="utf-8")
+    md.write_text(
+        "# T\n\n## Abstract\n\nA.\n\n## 1. Introduction\n\nText.\n\n### 1.1 Aim\n\nMore.\n\n"
+        "#### 1.1.1 Deep\n\nDeeper.\n", encoding="utf-8",
+    )
     out = tmp_path / "out"
     out.mkdir()
     pdf, skip = PaperGenerator(_config(tmp_path))._compile_pdf(md, out)
@@ -150,6 +187,8 @@ def test_the_pdf_source_has_no_doubled_number(tmp_path: Path) -> None:
 
     text = " ".join(line.text for page in measure_pdf(pdf).pages for line in page.lines)
     assert re.search(r"\b1 Introduction\b", text) and "1 1." not in text and "1.1 1.1" not in text
+    # A level-4 heading is numbered by the template too (secnumdepth 3), once.
+    assert "1.1.1 Deep" in text and "1.1.1 1.1.1" not in text
 
 
 # ---------------------------------------------------------------------------

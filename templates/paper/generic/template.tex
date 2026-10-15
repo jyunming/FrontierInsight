@@ -24,9 +24,10 @@ $if(fi-tight)$
 $else$
 \usepackage[margin=1in]{geometry}
 $endif$
-% Sections and subsections are numbered, deeper levels are not. The writer's own
-% heading numbers are taken off by generation/_headings.py, so a section is numbered once.
-\setcounter{secnumdepth}{2}
+% Sections, subsections and subsubsections are numbered (LaTeX's own depth). The writer's
+% own section numbers at those levels are taken off by generation/_headings.py, so a
+% section is numbered once.
+\setcounter{secnumdepth}{3}
 \usepackage{graphicx}
 % Required for pandoc-rendered markdown tables (pandoc emits \begin{longtable}).
 \usepackage{longtable}

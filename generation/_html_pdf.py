@@ -160,6 +160,16 @@ def _split_title(md_text: str) -> tuple[str, str]:
     return title, body
 
 
+def _numbered_depth(css_path: Path) -> int:
+    """How many heading levels the theme numbers with CSS counters: two for the
+    LaTeX-like theme (sections and subsections), none for the briefing theme."""
+    try:
+        css = css_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    return 2 if "counter(sub)" in css else 1 if "counter(sec)" in css else 0
+
+
 def render_paper_html_pdf(
     paper_md: Path,
     out_pdf: Path,
@@ -184,8 +194,9 @@ def render_paper_html_pdf(
 
     ``not_typeset`` is the reason LaTeX did not make this paper (when it is the
     fallback for it): the first page then says, in a visible line, that the
-    paper is not typeset. Sections are numbered once, by the theme: a number the
-    writer typed at the start of a heading comes off."""
+    paper is not typeset. Sections are numbered once: where the theme numbers a
+    heading, a section number the writer typed at its start comes off; where it
+    does not (the briefing theme), the writer's number stays."""
     log = log or logging.getLogger("frontier_insight.paper")
     browser_name, browser_path = browser
     css_path = css_path or _CSS_PATH
@@ -201,8 +212,9 @@ def render_paper_html_pdf(
     # A table right under its caption line would print as raw pipes.
     from generation._tables import blank_line_before_tables
 
-    title, body = _split_title(strip_heading_numbers(blank_line_before_tables(
-        blank_lines_around_figures(numbers_off_figure_captions(md_text)))))
+    prepared = blank_line_before_tables(blank_lines_around_figures(numbers_off_figure_captions(md_text)))
+    # A section number the writer typed comes off only where the theme numbers headings.
+    title, body = _split_title(strip_heading_numbers(prepared, numbered_depth=_numbered_depth(css_path)))
     # The keywords line under the abstract becomes a block the themes style.
     keywords, body = keywords_block(body)
 
