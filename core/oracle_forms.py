@@ -114,10 +114,13 @@ def _ndtri(p: float) -> float:
 
 
 def _erfinv(y: float) -> float:
-    """The inverse error function, SciPy's ``scipy.special.erfinv(y)``, for -1 < y < 1."""
+    """The inverse error function, SciPy's ``scipy.special.erfinv(y)``, for -1 < y < 1. Odd by construction, and worked
+    out from the tail ``(1 - |y|) / 2``, which is exact in floats (``(y + 1) / 2`` near y = 1 is not)."""
     if not -1.0 < y < 1.0:
         raise ValueError("erfinv(y) needs -1 < y < 1")
-    return _ndtri((y + 1.0) / 2.0) / math.sqrt(2.0)
+    if y == 0.0:
+        return 0.0
+    return math.copysign(-_ndtri((1.0 - abs(y)) / 2.0) / math.sqrt(2.0), y)
 
 
 #: Functions only FI's own working-out of a derivation may use (core/oracle_triage.py::calculate), never a check's

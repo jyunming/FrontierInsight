@@ -200,7 +200,11 @@ def test_fdr_table_nine_settings_a_bound_never_agrees() -> None:
     bh = _table(built, "fdr_bh")
     assert len(bh.rows) == 9
     verdicts = {row[-1] for row in bh.rows}
-    assert "agrees" not in verdicts and verdicts <= {"within bound", "above bound", "above bound, within uncertainty"}
+    assert "agrees" not in verdicts and verdicts <= {"within bound", "within bound, within uncertainty", "above bound",
+                                                     "above bound, within uncertainty"}
+    # below the bound the verdict depends on the interval: at m = 20, pi1 = 0 it reaches past 0.05
+    row = next(r for r in bh.rows if r[:2] == ["20", "0.0"])
+    assert row[3] == "0.0493 ± 0.0071" and row[-1] == "within bound, within uncertainty"
     row = next(r for r in bh.rows if r[:2] == ["200", "0.2"])
     assert row[-2] == "≤ 0.04" and row[3] == "0.0415 ± 0.0014" and row[-1] == "above bound"
     power = _table(built, "power_bonferroni")
@@ -229,7 +233,7 @@ def test_kin_temperature_is_never_read_so_125_cells_are_25_settings() -> None:
     built = _build("kin_s1", P.kin_protocol())
     assert len(built.distinct.settings) == 25
     assert all(s.metrics["Ea_hat"]["n"] == 2000 and len(s.cells) == 5 for s in built.distinct.settings)
-    assert any("never reads `temperature_K` and `t_max_over_k`" in n for n in built.notes)
+    assert any("found no read of `temperature_K` and `t_max_over_k`" in n for n in built.notes)
     assert any("`Ea_sd`, `corr_Ea_lnA`" in n for n in built.notes)
 
 
@@ -315,7 +319,7 @@ def test_cells_whose_means_disagree_are_not_pooled_although_the_axis_is_unread()
     b = _cell({"s": 1, "t": 2}, [5.0, 5.1, 4.9, 5.0] * 25)
     found = rbs.distinct([a, b], {"grid": {"s": [1], "t": [1, 2]}}, ["t"])
     assert len(found.settings) == 2 and any("were not pooled" in n for n in found.notes)
-    c = _cell({"s": 1, "t": 2}, [1.05, 0.95, 1.0, 1.0] * 25)
+    c = _cell({"s": 1, "t": 2}, [1.1, 0.9, 1.0, 1.0] * 25)  # the same mean and spread, other trials
     found = rbs.distinct([a, c], {"grid": {"s": [1], "t": [1, 2]}}, ["t"])
     assert len(found.settings) == 1 and found.settings[0].metrics["y"]["n"] == 200
 
@@ -372,7 +376,8 @@ def test_value_plus_minus_half_width(mean: float, lower: Any, upper: Any, text: 
     ("value", 0.95, 0.948, 0.937, 0.958, "agrees"),
     ("value", 0.95, 0.924, 0.912, 0.936, "differs"),
     ("value", 1.0, 1.0, 0.99904, 1.0 - 1e-15, "agrees"),
-    ("bound", 0.04, 0.0393, 0.035, 0.044, "within bound"),
+    ("bound", 0.04, 0.0393, 0.035, 0.044, "within bound, within uncertainty"),
+    ("bound", 0.04, 0.0393, 0.035, 0.0399, "within bound"),
     ("bound", 0.04, 0.0415, 0.0401, 0.0429, "above bound"),
     ("bound", 0.04, 0.0413, 0.0376, 0.0450, "above bound, within uncertainty"),
     ("lower_bound", 0.5, 0.45, 0.40, 0.49, "below bound"),
@@ -456,15 +461,26 @@ def test_a_planted_number_is_still_flagged(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_a_column_headed_by_another_quantity_does_not_name_the_value() -> None:
     text = ("**Table 1.** Realised FDR and power.\n\n| m | π1 | BH FDR | Bonf. power |\n|---|---|---|---|\n"
-            "| 20 | 0.05 | 0.38375 | 0.1 |\n")
-    places = npv._setting_contexts(text, "0.38375")
+            "| 20 | 0.05 | 0.384 | 0.1 |\n")
+    places = npv._setting_contexts(text, "0.384")
     assert len(places) == 1 and places[0].label == "BH FDR"
-    table = npv.Traceable({"trials.m=20,pi1=0.05.power_bonferroni.mean": 0.38375})
-    settings = {"m=20,pi1=0.05": {"m": 20, "pi1": 0.05}}
-    assert not npv._named_by_setting(table, 0.38375, 5, lambda: places, settings, list(settings))
-    right = text.replace("| BH FDR | Bonf. power |", "| Bonf. power | BH FDR |")
-    places = npv._setting_contexts(right, "0.38375")
-    assert npv._named_by_setting(table, 0.38375, 5, lambda: places, settings, list(settings))
+    # a table of many three-decimal numbers, so that no match is accepted as too rare to be luck
+    table: dict[str, Any] = {}
+    settings: dict[str, Any] = {}
+    for i, m in enumerate(range(20, 8020, 20)):
+        for j, p in enumerate((0.05, 0.2)):
+            mean = 0.1 + ((2 * i + j) * 7 % 890) / 1000
+            if round(mean, 3) != 0.384:
+                table[f"m={m},pi1={p}.fdr_bh"] = {"mean": mean}
+            settings[f"m={m},pi1={p}"] = {"m": m, "pi1": p}
+    table["m=20,pi1=0.05.power_bonferroni"] = {"mean": 0.38375}
+
+    def flagged(paper: str) -> set[str]:
+        return {f.token for f in npv.check(paper, result_json={"x": 1.5}, trial_table=table,
+                                           trial_settings=settings).findings}
+
+    assert "0.384" in flagged(text)
+    assert "0.384" not in flagged(text.replace("| BH FDR | Bonf. power |", "| Bonf. power | BH FDR |"))
 
 
 # --- the engine: what the writer gets, and the provenance check's pools ------------------------------------------------
@@ -510,10 +526,296 @@ def test_the_writer_gets_every_setting_when_the_trial_table_is_too_long(tmp_path
                  "reference_values.json"):
         assert (tmp_path / "paper" / name).is_file(), name
     prompt = next(p for p in seen if "FI's tables of every setting" in p)
-    assert "2 distinct settings" in prompt and "never reads `t`" in prompt and "| 120 |" in prompt
+    assert "2 distinct settings" in prompt and "found no read of `t`" in prompt and "| 120 |" in prompt
     assert "FI's table of what every trial gave" not in prompt
     # the provenance check reads the pooled setting, named by its setting, and the reference values
     state = {"result_json": {"x": 1.5}}
-    report = eng._provenance_report("At s = 1 the mean of y was 0.2200 against 0.2000; at s = 2, 0.4200 against "
-                                    "0.4000. Not 0.2371.", state)  # type: ignore[arg-type]
+    report = eng._provenance_report("At s = 1 the mean of y was 0.2200 against the reference 0.2000; at s = 2, 0.4200 "
+                                    "against the reference 0.4000. Not 0.2371.", state)  # type: ignore[arg-type]
     assert not report.skipped and {f.token for f in report.findings} == {"0.2371"}
+
+
+# --- review of the branch: each probe of C:\fi_compare\reviews\scratch_ref as a test -----------------------------------
+
+LIST_SENTENCE = "At π1 = 0.2 it was 0.177, 0.198 and 0.199 for m = 20, 200, 2000"
+
+
+def _fdr_paper() -> str:
+    return (P.FIXTURES / "fdr_s1" / "paper.md").read_text(encoding="utf-8")
+
+
+def _in_results(paper: str, paragraph: str) -> str:
+    """``paper`` with ``paragraph`` at the end of its Results (text added after the reference list is not read by the
+    check at all, so a probe appended there tests nothing)."""
+    assert "\n## Discussion" in paper
+    return paper.replace("\n## Discussion", f"\n{paragraph}\n\n## Discussion", 1)
+
+
+@pytest.mark.parametrize("edit, wrong", [
+    # a permuted list: the m = 2000 value given for m = 20 and the reverse
+    (lambda p: p.replace(LIST_SENTENCE, "At π1 = 0.2 it was 0.199, 0.198 and 0.177 for m = 20, 200, 2000"),
+     {"0.177", "0.199"}),
+    # two settings swapped
+    (lambda p: _in_results(p, "Uncorrected FDR at π1 = 0.2 was 0.198 at m = 20 and 0.177 at m = 200."),
+     {"0.177", "0.198"}),
+    # a stray number: "20 repeats" is not m = 20
+    (lambda p: _in_results(p, "With 20 repeats per figure point, the uncorrected FDR at m = 200, π1 = 0.2 was 0.177."),
+     {"0.177"}),
+    # alpha = 0.05 is not pi1 = 0.05 (uncorrected FDR at m = 200, pi1 = 0.05 is 0.533; the sentence names no pi1, and
+    # the paragraph names the quantity)
+    (lambda p: _in_results(p, "Uncorrected testing raised the FDR. At α = 0.05 it was 0.533 at m = 200."), {"0.533"}),
+])
+def test_a_number_is_named_only_beside_its_own_setting(monkeypatch: pytest.MonkeyPatch, edit: Any,
+                                                       wrong: set[str]) -> None:
+    paper = _fdr_paper()
+    assert LIST_SENTENCE in paper and "0.533" not in paper
+    flagged = _flagged(edit(paper), monkeypatch, new=True)
+    assert wrong <= flagged, flagged
+
+
+@pytest.mark.parametrize("sentence", [
+    "Uncorrected FDR at π1 = 0.2 was 0.177 at m = 20 and 0.198 at m = 200.",
+    "With 20 repeats per figure point, the uncorrected FDR at m = 20, π1 = 0.2 was 0.177.",
+    "Uncorrected testing raised the FDR. At π1 = 0.05 it was 0.533 at m = 200.",
+    "Uncorrected testing gave an FDR of 0.533 at $m = 200$, $\\pi_1 = 0.05$.",
+])
+def test_the_same_numbers_beside_their_own_settings_are_accounted_for(monkeypatch: pytest.MonkeyPatch,
+                                                                     sentence: str) -> None:
+    flagged = _flagged(_in_results(_fdr_paper(), sentence), monkeypatch, new=True)
+    assert not {"0.177", "0.198", "0.533"} & flagged, flagged
+    # the same sentence beside another setting is read, and flagged
+    if "0.533" in sentence:
+        wrong = sentence.replace("m = 200", "m = 2000")
+        assert "0.533" in _flagged(_in_results(_fdr_paper(), wrong), monkeypatch, new=True)
+
+
+FDR_AXES = [{"m": m, "pi1": p} for m in (20, 200, 2000) for p in (0.0, 0.05, 0.2)]
+SOLVER_AXES = [{"m": m, "solver": s} for m in (20, 40) for s in ("euler", "rk4")]
+ABSTRACT = ("BH power at π1 = 0.2 stayed near 0.47–0.50, so BH's power advantage grew from 0.9 percentage points "
+            "(m = 20, π1 = 0.05) to 40.6 points (m = 2000, π1 = 0.2).")
+LINE_36 = ("Several cells lie slightly above it, such as 0.058 at m = 200, π1 = 0 (interval 0.051–0.066) and 0.0415 "
+           "against 0.04 at m = 200, π1 = 0.2 (interval 0.040–0.043).")
+LINE_34 = ("At π1 = 0 its FDR was 0.653 (95% Wilson interval 0.638–0.667) at m = 20 against an exact 0.642, and 1.0 at "
+           "m = 200 and 2000.")
+
+
+@pytest.mark.parametrize("axes, sentence, token, named", [
+    (FDR_AXES, "At π1 = 0.2 it was 0.199, 0.198 and 0.177 for m = 20, 200, 2000", "0.177", {"pi1": 0.2, "m": 2000}),
+    (FDR_AXES, "At π1 = 0.2 it was 0.177, 0.198 and 0.199 for m = 20, 200, 2000", "0.177", {"pi1": 0.2, "m": 20}),
+    (FDR_AXES, "Uncorrected FDR at π1 = 0.2 was 0.198 at m = 20 and 0.177 at m = 200.", "0.198", {"pi1": 0.2, "m": 20}),
+    (FDR_AXES, "Uncorrected FDR at π1 = 0.2 was 0.198 at m = 20 and 0.177 at m = 200.", "0.177", {"pi1": 0.2, "m": 200}),
+    (FDR_AXES, "With 20 repeats per figure point, the uncorrected FDR at m = 200, π1 = 0.2 was 0.177.", "0.177",
+     {"m": 200, "pi1": 0.2}),
+    (FDR_AXES, "At α = 0.05 it was 0.533 at m = 200.", "0.533", {"m": 200}),
+    (FDR_AXES, LINE_36, "0.0415", {"m": 200, "pi1": 0.2}),
+    (FDR_AXES, "At π1 = 0.05 BH power was 0.393, 0.267 and 0.234, still well above Bonferroni except at m = 20.",
+     "0.234", {"pi1": 0.05}),
+    (FDR_AXES, ABSTRACT, "40.6", {"m": 2000, "pi1": 0.2}),
+    (FDR_AXES, ABSTRACT, "0.9", {"m": 20, "pi1": 0.05}),
+    (FDR_AXES, LINE_34, "0.653", {"pi1": 0.0, "m": 20}),
+    # "0.642, and 1.0" reads as one list, named "at m = 20" on one side and "at m = 200 and 2000" on the other: m
+    # is left unnamed, never given the wrong value
+    (FDR_AXES, LINE_34, "0.642", {"pi1": 0.0}),
+    (FDR_AXES, "At $m = 200$, $\\pi_1 = 0.05$ it was 0.533.", "0.533", {"m": 200, "pi1": 0.05}),
+    (SOLVER_AXES, "For RK4 at m = 20 it was 0.396.", "0.396", {"solver": "rk4", "m": 20}),
+    (SOLVER_AXES, "At m = 20 it was 0.396 for Euler and 0.512 for RK4.", "0.512", {"m": 20, "solver": "rk4"}),
+])
+def test_the_settings_named_beside_a_number(axes: list[dict[str, Any]], sentence: str, token: str,
+                                            named: dict[str, Any]) -> None:
+    flat = npv.normalise(sentence)
+    at = re.search(r"(?<![\d.])" + re.escape(token) + r"(?!\d)", flat)
+    assert at is not None
+    rows = npv._named_beside(flat, npv._axes_of(axes), at.start())
+    assert rows is not None and len(rows) == 1
+    assert rows[0] == named
+
+
+def test_one_number_for_several_settings() -> None:
+    flat = "At π1 = 0 the uncorrected FDR was 1.0 at m = 200 and 2000."
+    rows = npv._named_beside(flat, npv._axes_of(FDR_AXES), flat.index("1.0 at"))
+    assert rows == [{"pi1": 0.0, "m": 200}, {"pi1": 0.0, "m": 2000}]
+
+
+def _solver_study() -> tuple[dict[str, Any], dict[str, Any], dict[tuple[int, str], float]]:
+    """80 settings, m x solver (a text axis): a value per setting, every one of them distinct."""
+    import random
+
+    rng = random.Random(7)
+    table: dict[str, Any] = {}
+    settings: dict[str, Any] = {}
+    means: dict[tuple[int, str], float] = {}
+    pool = rng.sample([k for k in range(100, 1000) if k not in (396, 512)], 80)
+    for i, m in enumerate(range(20, 820, 20)):
+        for j, solver in enumerate(("euler", "rk4")):
+            mean = pool[2 * i + j] / 1000
+            if (m, solver) == (20, "euler"):
+                mean = 0.396
+            if (m, solver) == (20, "rk4"):
+                mean = 0.512
+            label = f"m={m},solver={solver}"
+            table[f"{label}.energy_drift"] = {"n": 400, "mean": mean, "sd": 0.1, "ci_lower": mean - 0.0098,
+                                              "ci_upper": mean + 0.0098}
+            settings[label] = {"m": m, "solver": solver}
+            means[(m, solver)] = mean
+    assert len(set(means.values())) == 80
+    return table, settings, means
+
+
+@pytest.mark.parametrize("text, flagged", [
+    ("We compared the energy drift of the two solvers across m. For RK4 at m = 20 it was 0.396.", {"0.396"}),
+    ("We compared the energy drift of the two solvers across m. For Euler at m = 20 it was 0.396.", set()),
+    ("We compared the energy drift of the two solvers. At m = 20 it was 0.396 for Euler and 0.512 for RK4.", set()),
+    ("We compared the energy drift of the two solvers. At m = 20 it was 0.512 for Euler and 0.396 for RK4.",
+     {"0.396", "0.512"}),
+    ("**Table 1.** Energy drift.\n\n| m | solver | energy drift |\n|---|---|---|\n| 20 | rk4 | 0.396 |\n", {"0.396"}),
+    ("**Table 1.** Energy drift.\n\n| m | solver | energy drift |\n|---|---|---|\n| 20 | euler | 0.396 |\n", set()),
+])
+def test_a_text_valued_setting_must_be_named_too(monkeypatch: pytest.MonkeyPatch, text: str, flagged: set[str]) -> None:
+    monkeypatch.setattr(npv, "MAX_FINDINGS", 1000)
+    table, settings, _ = _solver_study()
+    report = npv.check(text, result_json={"dt": 0.01}, trial_table=table, trial_settings=settings)
+    assert {f.token for f in report.findings} == flagged
+
+
+# P0-3: a setting read inside a lambda or a closure is read
+
+@pytest.mark.parametrize("source", [
+    "import numpy as np\ndef run_trial(cell, i, seed):\n    noise = lambda: cell['sigma']\n"
+    "    return {'y': np.random.default_rng(seed).normal(0, noise(), cell['n']).mean()}\n",
+    "def run_trial(cell, i, seed):\n    def model(x):\n        return x * cell['sigma']\n    return {'y': model(cell['n'])}\n",
+    "from scipy.integrate import solve_ivp\ndef run_trial(cell, i, seed):\n"
+    "    sol = solve_ivp(lambda t, y: -cell['sigma'] * y, (0, cell['n']), [1.0])\n    return {'y': sol.y[0, -1]}\n",
+    "def run_trial(cell, i, seed):\n    c = cell\n    def model(x):\n        return x * c['sigma']\n"
+    "    return {'y': model(c['n'])}\n",
+])
+def test_a_setting_read_in_a_lambda_or_closure_is_read(source: str) -> None:
+    assert rbs.unread_axes({"grid": {"sigma": [0.01, 0.1], "n": [5, 50]}}, {"simulate.py": source}) == ([], "")
+
+
+def test_code_fi_cannot_parse_makes_every_axis_read() -> None:
+    unread, why = rbs.unread_axes({"grid": {"s": [1, 2], "t": [1, 2]}},
+                                  {"simulate.py": "def run_trial(cell, i, seed):\n    return {'y': cell['s']}\n",
+                                   "model.py": "def f(:\n"})
+    assert unread == [] and "model.py" in why
+
+
+def test_a_study_file_called_run_py_in_a_package_is_the_studys_code() -> None:
+    files = {"run.py": "def run_trial(cell, i, seed):\n    return {'y': cell['t']}\n",  # FI's runner: skipped
+             "pkg/run.py": "def run_trial(cell, i, seed):\n    return {'y': cell['s']}\n"}
+    assert rbs.unread_axes({"grid": {"s": [1, 2], "t": [1, 2]}}, files) == (["t"], "")
+
+
+def test_cells_whose_spread_differs_are_not_pooled() -> None:
+    """The probe: sigma changes only the spread, the means agree; an unread sigma must not pool the cells."""
+    import random
+
+    rng = random.Random(1)
+    cells = []
+    for sigma in (0.01, 0.1):
+        for n in (5, 50):
+            vals = [rng.gauss(1.0, sigma) for _ in range(400)]
+            cells.append({"cell": {"sigma": sigma, "n": n}, "key": f"sigma={sigma},n={n}",
+                          "metrics": {"y": trial_table.summary(vals)}})
+    found = rbs.distinct(cells, {"grid": {"sigma": [0.01, 0.1], "n": [5, 50]}}, ["sigma"])
+    assert len(found.settings) == 4
+    assert {round(s.metrics["y"]["sd"], 2) for s in found.settings} == {0.01, 0.1}
+    assert any("were not pooled" in n and "spread" in n for n in found.notes)
+
+
+def test_cells_whose_failures_differ_are_not_pooled() -> None:
+    values = [1.0, 1.1, 0.9, 1.0] * 85
+    a = {**_cell({"s": 1, "t": 1}, values), "planned": 400, "ok": 340, "failed": 60}
+    b = {**_cell({"s": 1, "t": 2}, values), "planned": 400, "ok": 400, "failed": 0}
+    found = rbs.distinct([a, b], {"grid": {"s": [1], "t": [1, 2]}}, ["t"])
+    assert len(found.settings) == 2 and any("failed" in n for n in found.notes)
+    c = {**_cell({"s": 1, "t": 2}, values[1:] + values[:1]), "planned": 400, "ok": 338, "failed": 62}
+    assert len(rbs.distinct([a, c], {"grid": {"s": [1], "t": [1, 2]}}, ["t"]).settings) == 1
+
+
+# P1-1: a reference value is accounted for only where the paper states it as a reference
+
+ROW_20 = "| 20 | 0.2 | 0.041 | 0.040 | 0.041 | 0.378 | 0.503 | 12.6 (12.0–13.1) |"
+POWER_SENTENCE = "Bonferroni power falling with m, from 0.378 to 0.163 to 0.060 at π1 = 0.2"
+
+
+@pytest.mark.parametrize("edit", [
+    lambda p: p.replace(ROW_20, ROW_20.replace("0.378", "0.3794")),  # the table cell of the measured power
+    lambda p: p.replace(POWER_SENTENCE, POWER_SENTENCE.replace("0.378", "0.3794")),  # the sentence of the measured
+])
+def test_a_reference_presented_as_the_measured_result_is_flagged(monkeypatch: pytest.MonkeyPatch, edit: Any) -> None:
+    paper = _fdr_paper()
+    assert ROW_20 in paper and POWER_SENTENCE in paper and "0.3794" not in paper
+    assert "0.3794" in _flagged(edit(paper), monkeypatch, new=True)  # measured 0.3779, the exact reference 0.3794
+
+
+@pytest.mark.parametrize("sentence, flagged", [
+    ("The measured Bonferroni any-false-discovery rate at m = 200, π1 = 0 was 0.04878.", True),
+    ("Matching the exact formula, the Bonferroni any-false-discovery rate at m = 200, π1 = 0 was 0.04878.", True),
+    ("The exact Bonferroni any-false-discovery rate at m = 200, π1 = 0 is 0.04878.", False),
+    ("The exact Bonferroni any-false-discovery rate at m = 20, π1 = 0 is 0.04878.", True),  # it is m = 200's
+])
+def test_a_reference_is_accounted_for_where_it_is_stated_as_one(monkeypatch: pytest.MonkeyPatch, sentence: str,
+                                                               flagged: bool) -> None:
+    """1 - (1 - 0.05/200)**190 = 0.04878 is FI's reference of the Bonferroni any-false-discovery rate at m = 200,
+    pi1 = 0; the run measured 0.055 there."""
+    assert ("0.04878" in _flagged(_in_results(_fdr_paper(), sentence), monkeypatch, new=True)) is flagged
+
+
+def test_the_reference_pool_accepts_no_number_by_luck(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe's 5 x 5 x 5 plan: 125 references. A number equal to one of them is accounted for where the sentence
+    states it as the reference, and nowhere else."""
+    monkeypatch.setattr(npv, "MAX_FINDINGS", 1000)
+    protocol = {"grid": {"alpha": [0.01, 0.02, 0.05, 0.1, 0.2], "delta": [0.5, 1.0, 1.5, 2.0, 2.5],
+                         "m": [10, 20, 50, 100, 200]},
+                "metrics": [{"id": "power", "estimand": "p", "kind": "proportion", "unit": "a run",
+                             "reference": {"formula": "1 - ndtr(ndtri(1 - alpha/m) - delta)"}}]}
+    pool = rv.pool(rv.compute(protocol, rv.grid_settings(protocol)))
+    tokens = sorted({f"{v:.3f}" for v in pool.values() if 0.1 < v < 0.999})
+    assert len(tokens) > 20
+    plain = "\n\n".join(f"In run {i} the power was {t}." for i, t in enumerate(tokens))
+    report = npv.check(plain, result_json={"x": 1.5}, references=pool)
+    assert {f.token for f in report.findings} == set(tokens)
+    stated = "\n\n".join(f"In case {i} the exact power is {t}." for i, t in enumerate(tokens))
+    assert not npv.check(stated, result_json={"x": 1.5}, references=pool).findings
+    after = "\n\n".join(f"In case {i} the power was {t}, as the exact formula gives." for i, t in enumerate(tokens))
+    assert {f.token for f in npv.check(after, result_json={"x": 1.5}, references=pool).findings} == set(tokens)
+
+
+# P1-3: no verdict the interval is too wide to give
+
+@pytest.mark.parametrize("kind, ref, mean, lower, upper, n, verdict", [
+    ("value", 0.95, 0.5, -4.6, 5.6, 2, "too few trials to judge"),  # the probe: n = 2, values 0.1 and 0.9
+    ("bound", 0.05, 0.0, 0.0, 0.5615, 3, "too few trials to judge"),  # the probe: three trials all 0 (Wilson)
+    ("value", 0.95, 0.9, 0.55, 1.0, 50, "too few trials to judge"),  # half-width over a quarter of the reference
+    ("value", 0.95, 0.5, 0.45, 0.55, 5, "differs"),  # an interval that excludes the reference still says so
+    ("bound", 0.04, 0.0393, 0.035, 0.044, 4000, "within bound, within uncertainty"),
+    ("bound", 0.04, 0.030, 0.028, 0.032, 4000, "within bound"),
+    ("lower_bound", 0.5, 0.55, 0.45, 0.65, 100, "within bound, within uncertainty"),
+    ("lower_bound", 0.5, 0.60, 0.55, 0.65, 100, "within bound"),
+    ("value", 0.0, 0.01, -0.05, 0.07, 100, "agrees"),  # a reference of 0: only the count of trials can be too small
+])
+def test_verdicts_need_enough_trials(kind: str, ref: float, mean: float, lower: float, upper: float, n: int,
+                                     verdict: str) -> None:
+    assert rbs.comparison(kind, ref, mean, lower, upper, n) == verdict
+
+
+# P2
+
+def test_erfinv_is_odd_and_accurate_near_one() -> None:
+    erfinv = oracle_forms.SPECIAL_FUNCTIONS["erfinv"]
+    for y in (1e-9, 0.3, 0.9, 1 - 2.0 ** -30, 1 - 2.0 ** -40):
+        assert erfinv(-y) == -erfinv(y)
+    x = erfinv(1 - 2.0 ** -40)
+    assert abs(math.erfc(x) / 2.0 ** -40 - 1) < 1e-9
+
+
+@pytest.mark.parametrize("formula, thresholds", [
+    ("0.17748 + 0*m", {}),  # an expression that evaluates to the measured mean
+    ("p_seen", {"p_seen": 0.17748}),  # a threshold holding the number read off the run
+])
+def test_a_reference_that_evaluates_to_the_measured_value_is_dropped(formula: str, thresholds: dict[str, Any]) -> None:
+    protocol = P.load("fdr_s1", "protocol.json")
+    protocol = {**protocol, "thresholds": {**protocol["thresholds"], **thresholds}}
+    copied = P.with_references(protocol, {"fdr_uncorrected": {"formula": formula, "when": {"m": 20, "pi1": 0.2}}})
+    table = _table(_build("fdr_s1", copied), "fdr_uncorrected")
+    assert "reference" not in table.columns and "read off the run" in table.caption

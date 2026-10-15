@@ -7,17 +7,21 @@ the analysis. This module builds, from FI's own records and with no model in bet
 * **The distinct settings.** A grid cell is not always a distinct setting: a grid axis the simulation never reads
   (a quest's ``temperature_K``: each run fits all five temperatures, so the axis only copied every setting five times)
   gives cells that differ in nothing the simulation sees. :func:`unread_axes` reads the code with ``ast``
-  (:func:`core.grid_keys.reads`; FI's own runner, ``run.py``, is not the study's code) and returns the grid axes nothing
-  reads; when the code uses a setting in a way that cannot be followed (passes it whole to an unknown function,
-  spreads it with ``**``, reads it with a computed key) every axis counts as read. :func:`distinct` pools the cells
-  that differ only in unread axes -- only when their means also agree within the pooled uncertainty (a read the
-  reading missed shows up there), and counting cells that gave the very same trials (the same seeds) once.
+  (:func:`core.grid_keys.reads`, which follows a read inside a closure or a lambda; FI's own runner, ``code/run.py``,
+  is not the study's code) and returns the grid axes it found no read of. Only when the reading is sure: when the code
+  uses a setting in a way that cannot be followed (passes it whole to an unknown function, spreads it with ``**``,
+  reads it with a computed key) or a file does not parse, every axis counts as read. :func:`distinct` pools the cells
+  that differ only in unread axes -- only when their means, their spread and their shares of failed runs also agree
+  within the pooled uncertainty (a read the reading missed shows up there), and counting cells that gave the very same
+  trials (the same seeds) once.
 * **One table per quantity** (:func:`tables`): a row per distinct setting, its settings, ``n``, the mean +/- the half-width
   of its 95% interval (Wilson for a 0/1 value, else t, as core/trial_table.py), the SD, the reference FI computed from
-  the frozen plan (core/reference_values.py) and the comparison: ``agrees`` (the reference is inside the interval) or
-  ``differs``; for a limit, ``within bound``, ``above bound`` or ``above bound, within uncertainty`` -- a bound is never
-  said to agree. A quantity is a value of a declared metric the trials return (its reference names the value); a
-  metric computed from several values (an SD, a correlation) is not a value of the trials and is named in a note.
+  the frozen plan (core/reference_values.py) and the comparison (:func:`comparison`): ``agrees`` (the reference is
+  inside the interval) or ``differs``; for a limit, ``within bound``, ``within bound, within uncertainty`` (the
+  interval reaches the limit), ``above bound`` or ``above bound, within uncertainty`` -- a bound is never said to
+  agree; and ``too few trials to judge`` instead of an agreement when the interval is too wide to tell. A quantity is
+  a value of a declared metric the trials return (its reference names the value); a metric computed from several
+  values (an SD, a correlation) is not a value of the trials and is named in a note.
 * **Renderings** (pure functions): :func:`markdown` for the checks and the writer, :func:`latex` (booktabs) for the
   PDF, :func:`csv_text` for every row, :func:`reference_section` / :func:`reference_section_latex` for the paragraph
   of reference values in Methods.
@@ -45,7 +49,8 @@ from . import trial_table as _trial_table
 #: A cell whose mean is further than this many standard errors from the pooled mean is not pooled with the others: the
 #: reading of the code said the axis is not read, the numbers say it matters.
 POOL_Z = 5.0
-#: FI's own scripts in code/: they run the study, they are not the study's code.
+#: FI's own scripts at the top of code/: they run the study, they are not the study's code (a file of the same name in a
+#: package of the study is).
 _FI_SCRIPTS = frozenset({"run.py", "fi_search.py"})
 _HARMLESS_CALLS = frozenset({"print", "repr", "str", "isinstance", "len", "id", "type", "bool", "sorted"})
 
@@ -111,15 +116,20 @@ def opaque_uses(source: str, script: str) -> list[str]:
 
 def unread_axes(protocol: dict[str, Any] | None, files: dict[str, str],
                 also_read: set[str] | None = None) -> tuple[list[str], str]:
-    """``(the grid axes no code reads, why every axis counts as read when it is empty)``. ``files``: the study's code
-    (:func:`core.grid_keys.code_files`); FI's own scripts are skipped. ``also_read``: names that count as read anyway
-    (an axis a reference formula uses)."""
+    """``(the grid axes FI found no read of, why every axis counts as read when it is empty)``. ``files``: the study's
+    code (:func:`core.grid_keys.code_files`); FI's own scripts at the top of code/ are skipped. ``also_read``: names that
+    count as read anyway (an axis a reference formula uses)."""
     axes = list(_refs.grid_axes(protocol))
     if not axes:
         return [], "the plan has no grid"
-    study = {k: v for k, v in files.items() if Path(k).name not in _FI_SCRIPTS}
+    study = {k: v for k, v in files.items() if Path(k).as_posix() not in _FI_SCRIPTS}
     if not study:
         return [], "there is no code to read"
+    for script, text in study.items():
+        try:
+            ast.parse(text)
+        except (SyntaxError, ValueError):
+            return [], f"FI could not read {script}"
     opaque = [where for script, text in study.items() for where in opaque_uses(text, script)]
     if opaque:
         return [], f"the code uses a setting in a way FI cannot follow ({', '.join(opaque[:3])})"
@@ -153,6 +163,10 @@ def pooled(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _differs(items: list[dict[str, Any]], whole: dict[str, Any]) -> bool:
+    """Whether cells' summaries of one value differ by more than chance: a mean further than :data:`POOL_Z` standard
+    errors from the pooled mean, or (for a value that is not 0/1, whose spread its mean fixes) an SD further than
+    :data:`POOL_Z` standard errors of an SD from the cells' pooled SD (an axis such as a noise level changes the spread
+    and not the mean)."""
     for s in items:
         se = whole["sd"] / math.sqrt(s["n"])
         if se == 0:
@@ -160,7 +174,30 @@ def _differs(items: list[dict[str, Any]], whole: dict[str, Any]) -> bool:
                 return True
         elif abs(s["mean"] - whole["mean"]) / se > POOL_Z:
             return True
+    spread = [s for s in items if s["n"] > 1 and not s.get("binary")]
+    dof = sum(s["n"] - 1 for s in spread)
+    if len(spread) > 1 and dof > 0:
+        within = math.sqrt(sum((s["n"] - 1) * s["sd"] ** 2 for s in spread) / dof)
+        for s in spread:
+            if within == 0:
+                if s["sd"] != 0:
+                    return True
+            elif abs(s["sd"] - within) / (within / math.sqrt(2 * (s["n"] - 1))) > POOL_Z:
+                return True
     return False
+
+
+def _failures_differ(members: list[dict[str, Any]]) -> bool:
+    """Whether the cells' shares of failed runs differ by more than :data:`POOL_Z` standard errors of the pooled share
+    (cells whose records give no counts are not compared)."""
+    counted = [(int(c["failed"]), int(c["planned"])) for c in members
+               if isinstance(c.get("failed"), int) and isinstance(c.get("planned"), int) and c["planned"] > 0]
+    if len(counted) < 2:
+        return False
+    share = sum(f for f, _ in counted) / sum(p for _, p in counted)
+    if share in (0.0, 1.0):
+        return False
+    return any(abs(f / p - share) / math.sqrt(share * (1 - share) / p) > POOL_Z for f, p in counted)
 
 
 def _label(setting: dict[str, Any]) -> str:
@@ -206,9 +243,9 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
     for members in groups.values():
         setting = {k: v for k, v in (members[0].get("cell") or {}).items() if k not in unread_set}
         merged: dict[str, dict[str, Any]] = {}
-        apart = False
+        apart = len(members) > 1 and _failures_differ(members)
         dropped = 0
-        for name in values:
+        for name in values if not apart else ():
             seen: dict[str, dict[str, Any]] = {}
             for c in members:
                 s = c["metrics"].get(name)
@@ -232,14 +269,15 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
         out.append(Setting(setting, _label(setting), [c["key"] for c in members], merged, dropped))
     if unread:
         axes = " and ".join(f"`{a}`" for a in unread)
-        notes.append(f"The simulation's code never reads {axes}, so grid cells that differ only there are one setting "
-                     "here: their trials are pooled and n counts them all.")
+        notes.append(f"FI found no read of {axes} in the simulation's code, so grid cells that differ only there are one "
+                     "setting here: their trials are pooled and n counts them all.")
     if copied:
         notes.append("Some pooled cells gave exactly the same trials as another cell (the same random seeds); each such "
                      "set of trials is counted once.")
     if kept_apart:
-        notes.append(f"{len(kept_apart)} setting(s) were not pooled although the code does not read the axis, because "
-                     f"their cells' means differ by more than {POOL_Z:g} standard errors: {', '.join(kept_apart[:3])}.")
+        notes.append(f"{len(kept_apart)} setting(s) were not pooled although FI found no read of the axis, because "
+                     f"their cells' means, spread or failed runs differ by more than {POOL_Z:g} standard errors: "
+                     f"{', '.join(kept_apart[:3])}.")
     return Distinct(out, list(unread), notes, values)
 
 
@@ -286,20 +324,45 @@ def format_pm(mean: float, lower: float | None, upper: float | None) -> str:
     return f"{round(mean, -place):.{decimals}f} ± {half_r:.{decimals}f}"
 
 
-def comparison(kind: str, ref: float | None, mean: float, lower: float | None, upper: float | None) -> str:
-    """The plain verdict of a mean and its 95% interval against a reference."""
+#: A mean is not said to agree with its reference, or to be within a bound, from fewer trials than this ...
+MIN_TRIALS_TO_JUDGE = 10
+#: ... or when its 95% interval reaches further than this share of the reference either side of the mean (a reference
+#: of 0 has no scale: there only the count of trials applies).
+MAX_HALF_WIDTH_SHARE = 0.25
+TOO_FEW = "too few trials to judge"
+
+
+def comparison(kind: str, ref: float | None, mean: float, lower: float | None, upper: float | None,
+               n: int | None = None) -> str:
+    """The plain verdict of a mean and its 95% interval (Wilson for a 0/1 value) from ``n`` trials against a reference.
+
+    ``agrees`` / ``differs`` for a value; for a limit (``bound``: at most, ``lower_bound``: at least) ``within bound``
+    when the whole interval is on the right side of it, ``within bound, within uncertainty`` when the mean is and the
+    interval reaches past it, and ``above bound`` / ``below bound`` (with ``, within uncertainty`` when the interval
+    reaches back). An agreement, or a mean within a bound, from too few trials or with too wide an interval is
+    :data:`TOO_FEW` instead: the interval cannot tell it from a disagreement."""
     if ref is None:
         return "no reference"
     if lower is None or upper is None:
         return "not judged (no interval)"
+    too_wide = (n is not None and n < MIN_TRIALS_TO_JUDGE) or (
+        ref != 0 and max(mean - lower, upper - mean) > MAX_HALF_WIDTH_SHARE * abs(ref))
     # Rounding: a Wilson interval of 4000 successes in 4000 ends a hair under 1, and 1 - 0.95**2000 is 1 in floats.
     slack = 1e-12 * max(1.0, abs(ref))
     lower, upper = lower - slack, upper + slack
     if kind == "bound":
-        return "within bound" if mean <= ref else ("above bound" if lower > ref else "above bound, within uncertainty")
+        if mean > ref:
+            return "above bound" if lower > ref else "above bound, within uncertainty"
+        return TOO_FEW if too_wide else ("within bound" if upper - 2 * slack <= ref else
+                                         "within bound, within uncertainty")
     if kind == "lower_bound":
-        return "within bound" if mean >= ref else ("below bound" if upper < ref else "below bound, within uncertainty")
-    return "agrees" if lower <= ref <= upper else "differs"
+        if mean < ref:
+            return "below bound" if upper < ref else "below bound, within uncertainty"
+        return TOO_FEW if too_wide else ("within bound" if lower + 2 * slack >= ref else
+                                         "within bound, within uncertainty")
+    if lower <= ref <= upper:
+        return TOO_FEW if too_wide else "agrees"
+    return "differs"
 
 
 def _ref_text(kind: str, ref: float | None) -> str:
@@ -395,11 +458,12 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
             for s, summary, lower, upper, _ in stats:
                 r = at.get((metric, json.dumps(s.setting, default=str)))
                 if r and r.get("reference") is not None and summary and summary.get("n") and lower is not None:
-                    covered.append((summary["mean"], max(summary["mean"] - lower, upper - summary["mean"])))
-            if _refs.copies_measured(raw if isinstance(raw, dict) else {}, covered):
+                    covered.append((summary["mean"], max(summary["mean"] - lower, upper - summary["mean"]),
+                                    float(r["reference"])))
+            if _refs.copies_measured(raw if isinstance(raw, dict) else {}, covered, _refs.inputs(protocol)):
                 status = "no reference"
-                why_none = ("its reference is a bare number that matches the measured means more closely than they are "
-                            "known, so it was read off the run, not worked out")
+                why_none = ("its reference gives the measured means more closely than they are known, so it was read "
+                            "off the run, not worked out")
                 q.update(status=status, why=why_none)
                 computed["by_setting"] = [r for r in computed["by_setting"] if r["metric"] != metric]
         binary = all((summary or {}).get("binary", True) for _, summary, *_ in stats if summary and summary.get("n"))
@@ -418,7 +482,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                 cells += [str(summary["n"]), format_pm(mean, lower, upper)]
                 if not binary:
                     cells.append(_sig(summary["sd"]))
-                verdict = comparison(kind, ref, mean, lower, upper)
+                verdict = comparison(kind, ref, mean, lower, upper, int(summary["n"]))
             else:
                 cells += ["0", "no value"]
                 if not binary:
@@ -442,7 +506,10 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                         f"before the run; {ref_q.get('checked', {}).get('why') or 'not cross-checked'}.")
             caption += (" `agrees`: the reference lies inside the interval (about 1 setting in 20 differs by chance "
                         "alone)." if kind == "value" else
-                        " A bound is a limit, not a value: `within bound` means the mean does not pass it.")
+                        " A bound is a limit, not a value: `within bound` means the whole interval stays on its side, "
+                        "`within bound, within uncertainty` that the mean does and the interval reaches past it.")
+            caption += (f" `{TOO_FEW}`: fewer than {MIN_TRIALS_TO_JUDGE} trials, or an interval wider than "
+                        f"{MAX_HALF_WIDTH_SHARE:.0%} of the reference either side.")
         else:
             caption += f" No reference: {why_none}."
         tables.append(Table(label=f"fi-results-{re.sub(r'[^A-Za-z0-9]+', '-', value).strip('-').lower()}",

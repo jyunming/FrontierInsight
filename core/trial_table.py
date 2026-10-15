@@ -68,15 +68,20 @@ def summary(values: list[float]) -> dict[str, Any]:
 
 def summaries(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Each record of ``raw/trials.json`` as ``{"cell", "key", "level", "metrics": {name: summary}}`` (see
-    :func:`summary`), in the record's order. A record with no metrics (the per-value records a study that compares
-    values inside each run writes with nothing in them) is kept, with an empty ``metrics``."""
+    :func:`summary`), in the record's order, with the record's counts of runs (``planned``, ``ok``, ``failed``) when it
+    has them. A record with no metrics (the per-value records a study that compares values inside each run writes with
+    nothing in them) is kept, with an empty ``metrics``."""
     out: list[dict[str, Any]] = []
     for c in cells:
         cell, level = c.get("cell"), c.get("level")
         setting: dict[str, Any] = dict(cell) if isinstance(cell, dict) else {}
         label = str(c.get("key") or ", ".join(f"{k}={v}" for k, v in setting.items()) or "the one setting")
-        out.append({"cell": setting, "key": label, "level": dict(level) if isinstance(level, dict) and level else None,
-                    "metrics": {str(name): summary(_values(metric)) for name, metric in c["metrics"].items()}})
+        entry: dict[str, Any] = {
+            "cell": setting, "key": label, "level": dict(level) if isinstance(level, dict) and level else None,
+            "metrics": {str(name): summary(_values(metric)) for name, metric in c["metrics"].items()}}
+        entry.update({k: c[k] for k in ("planned", "ok", "failed")
+                      if isinstance(c.get(k), int) and not isinstance(c.get(k), bool)})
+        out.append(entry)
     return out
 
 

@@ -155,6 +155,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from array import array
 from bisect import bisect_right
 from dataclasses import dataclass, field
@@ -1088,6 +1089,12 @@ _BLANK_LINE = re.compile(r"\n[ \t]*\n")
 def _sentence_around(text: str, start: int, end: int) -> str:
     """The sentence of ``text`` holding ``[start, end)``. A table row is one line; elsewhere a sentence ends at a full
     stop followed by a capital or at a blank line, so a paragraph soft-wrapped over several lines is read whole."""
+    lo, hi = _sentence_span(text, start, end)
+    return text[lo:hi]
+
+
+def _sentence_span(text: str, start: int, end: int) -> tuple[int, int]:
+    """Where :func:`_sentence_around` is in ``text``."""
     line_lo = text.rfind("\n", 0, start) + 1
     line_hi = text.find("\n", end)
     line_hi = len(text) if line_hi < 0 else line_hi
@@ -1107,10 +1114,9 @@ def _sentence_around(text: str, start: int, end: int) -> str:
                 stop = m.start()
                 break
         hi = stop
-    sentence = text[lo:hi]
-    if len(sentence) <= _SENTENCE_MAX:
-        return sentence
-    return text[max(0, start - _NAMING_FALLBACK): end + _NAMING_FALLBACK]
+    if hi - lo <= _SENTENCE_MAX:
+        return lo, hi
+    return max(0, start - _NAMING_FALLBACK), min(len(text), end + _NAMING_FALLBACK)
 
 
 def _naming_words(text: str, token: str, context: str) -> frozenset[str]:
@@ -1240,10 +1246,6 @@ def _numbers_of(text: str) -> list[float]:
     return out
 
 
-def _names_value(numbers: list[float], value: float) -> bool:
-    return any(math.isclose(n, value, rel_tol=1e-9, abs_tol=1e-12) for n in numbers)
-
-
 def _table_cells(line: str) -> list[str]:
     cells = line.strip().split("|")
     if cells and not cells[0].strip():
@@ -1267,29 +1269,32 @@ def _caption_above(lines: list[str], first: int) -> str:
 
 @dataclass(frozen=True)
 class _Place:
-    """Where a number stands. In a Markdown table: ``label`` is its column's header (with the row's first cell when that
-    is not a number), ``names`` the label with the table's caption, ``row`` the row's other cells in order and
-    ``column`` its column's header. In prose: ``label`` is ``None``, ``names`` is its paragraph and ``sentence`` its
-    sentence."""
+    """Where a number stands. In prose: ``label`` is ``None``, ``names`` its paragraph, ``sentence`` its sentence and
+    ``at`` where the number starts in the sentence. In a Markdown table: ``label`` is its column's header (with the
+    row's first cell when that is not a number), ``names`` the label with the table's caption, ``sentence`` the row's
+    line, ``header`` and ``cells`` the table's header and the row's cells, ``col`` the number's column and ``caption``
+    the table's caption."""
 
     label: str | None
     names: str
-    row: tuple[str, ...] = ()
-    column: str = ""
     sentence: str = ""
+    at: int = -1
+    header: tuple[str, ...] = ()
+    cells: tuple[str, ...] = ()
+    col: int = -1
+    caption: str = ""
 
-    def numbers(self, settings: int) -> list[float]:
-        """The numbers that may state the setting: in a table, the row's first ``settings`` cells (where a table puts
-        its settings, left of what was measured: the other cells hold measured values that can equal a setting by
-        chance) and the column's header; in prose, the sentence (a paragraph names many settings; the quantity may be
-        named a sentence earlier, the setting of this number is named beside it)."""
-        if self.label is None:
-            return _numbers_of(self.sentence)
-        return _numbers_of(" ".join((*self.row[:settings], self.column)))
+    @property
+    def column(self) -> str:
+        return self.header[self.col] if 0 <= self.col < len(self.header) else ""
+
+
+#: At most this many places of one number are read.
+_MAX_PLACES = 12
 
 
 def _setting_contexts(text: str, token: str) -> list[_Place]:
-    """Where ``token`` stands (:class:`_Place`), at most four places."""
+    """Every place ``token`` stands in ``text`` (:class:`_Place`), at most :data:`_MAX_PLACES`."""
     out: list[_Place] = []
     lines = text.split("\n")
     starts: list[int] = []
@@ -1319,8 +1324,7 @@ def _setting_contexts(text: str, token: str) -> list[_Place]:
             column = header[col] if col < len(header) else ""
             lead = cells[0] if cells and col != 0 and not _numbers_of(cells[0]) else ""
             label = f"{column} {lead}".strip()
-            others = tuple(c for i, c in enumerate(cells) if i != col)
-            out.append(_Place(label, f"{label} {caption}", others, column))
+            out.append(_Place(label, f"{label} {caption}", line, -1, tuple(header), tuple(cells), col, caption))
         else:
             lo = 0
             for b in _BLANK_LINE.finditer(text, 0, m.start()):
@@ -1329,66 +1333,565 @@ def _setting_contexts(text: str, token: str) -> list[_Place]:
             hi = nxt.start() if nxt else len(text)
             if hi - lo > _PARAGRAPH_MAX:
                 lo, hi = max(lo, m.start() - _PARAGRAPH_FALLBACK), min(hi, m.end() + _PARAGRAPH_FALLBACK)
-            out.append(_Place(None, text[lo:hi], sentence=_sentence_around(text, m.start(), m.end())))
-        if len(out) >= 4:
+            s_lo, s_hi = _sentence_span(text, m.start(), m.end())
+            out.append(_Place(None, text[lo:hi], text[s_lo:s_hi], m.start() - s_lo))
+        if len(out) >= _MAX_PLACES:
             break
     return out
 
 
-def _trial_path(path: str, labels: list[str]) -> tuple[str, str] | None:
-    """``(setting label, value name)`` of a path of FI's per-setting table (``trials.m=20,pi1=0.2.fdr_bh.mean``)."""
+def _trial_path(path: str, labels: list[str]) -> tuple[str, str, str] | None:
+    """``(setting label, value name, statistic)`` of a path of FI's per-setting table
+    (``trials.m=20,pi1=0.2.fdr_bh.mean``)."""
     for label in labels:
         head = f"trials.{label}."
         if path.startswith(head):
             rest = path[len(head):]
             value, _, stat = rest.rpartition(".")
             if value and stat in _TABLE_STATS:
-                return label, value
+                return label, value, stat
     return None
 
 
-def _named_by_setting(
-    table: Traceable, cand: float, dec: int, contexts: Callable[[], list[_Place]],
-    settings: dict[str, dict[str, Any]], labels: list[str],
-) -> bool:
-    """Is ``cand`` a number of FI's per-setting table whose setting and quantity the paper names where it prints it?
+# --- the settings a place names: "axis = value", a column headed by the axis, a text value by its name ---------------
 
-    A table of many settings holds many numbers of every size, so an unnamed match there is luck as often as not (0.177 is
-    one of them, matched by a chance of 0.22); and "At pi1 = 0.2 it was 0.177, 0.198 and 0.199 for m = 20, 200, 2000"
-    names neither the quantity nor, in that sentence, the method. The paragraph does, and a table row does through its
-    header. So a match counts when every numeric setting of the matching row (``settings`` holds only the axes that
-    take more than one value) is written as a number in that place, and every word of the value's name is too: in a
-    table, the settings in the row's first cells or the column's header, and the column's header (or the row's first
-    cell) naming nothing but that value, the caption completing its name; in prose, the quantity in the paragraph and
-    the setting in the sentence. The luck limit on an unnamed match is not changed by this."""
-    paths = table.paths_at(cand, dec)
-    if not paths:
+
+class _Unknown:
+    """A setting value the paper writes that is none of the study's: it equals nothing."""
+
+    def __repr__(self) -> str:
+        return "<not a value of the study>"
+
+
+_NOT_A_VALUE = _Unknown()
+
+
+def _canon(name: str) -> str:
+    """A setting's name as compared: ``π₁``, ``\\pi_1``, ``pi_{1}``, ``π1`` and ``pi1`` are one name; so are ``n_points``
+    and ``n points``."""
+    out: list[str] = []
+    for ch in unicodedata.normalize("NFKC", name):
+        if "Ͱ" <= ch <= "Ͽ":
+            parts = unicodedata.name(ch, "").split()
+            if "LETTER" in parts and parts.index("LETTER") + 1 < len(parts):
+                ch = parts[-1]
+            elif "SYMBOL" in parts and parts.index("SYMBOL") > 0:
+                ch = parts[parts.index("SYMBOL") - 1]
+        out.append(ch)
+    return re.sub(r"[^a-z0-9]", "", "".join(out).lower()).replace("lamda", "lambda")
+
+
+def _same(a: Any, b: Any) -> bool:
+    """Whether two setting values are the same value."""
+    if isinstance(a, _Unknown) or isinstance(b, _Unknown):
         return False
-    places: list[_Place] | None = None
-    for path in paths:
-        hit = _trial_path(path, labels)
-        if hit is None:
+    if isinstance(a, str) or isinstance(b, str):
+        return isinstance(a, str) and isinstance(b, str) and a.strip().lower() == b.strip().lower()
+    try:
+        return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12)
+    except (TypeError, ValueError):
+        return False
+
+
+def _rounds_to(value: float, written: float, dec: int) -> bool:
+    """Whether ``value`` printed at ``dec`` decimals (rounded, or truncated) is ``written``."""
+    try:
+        key = round(written, dec)
+        if key in roundings(value, dec):
+            return True
+        return dec >= 0 and math.floor(value * 10.0 ** dec) / 10.0 ** dec == key
+    except (ValueError, OverflowError):
+        return False
+
+
+@dataclass(frozen=True)
+class _Axes:
+    """The axes FI's per-setting numbers vary over: each name a paper may write for one (``by_name``: the axis's own
+    name, and the first word of a name such as ``n_points`` when no other axis begins with it), its values, which take
+    text values (a method, a solver), and a pattern for each text value."""
+
+    by_name: dict[str, str]
+    values: dict[str, tuple[Any, ...]]
+    text: frozenset[str]
+    patterns: tuple[tuple[str, Any, "re.Pattern[str]"], ...]
+
+
+def _axes_of(settings: list[dict[str, Any]]) -> _Axes:
+    values: dict[str, list[Any]] = {}
+    for s in settings:
+        for k, v in s.items():
+            seen = values.setdefault(str(k), [])
+            if not any(_same(v, w) for w in seen) and not (isinstance(v, str) and v in seen):
+                seen.append(v)
+    text = frozenset(a for a, vs in values.items() if any(isinstance(v, str) for v in vs))
+    by_name = {_canon(a): a for a in values}
+    heads: dict[str, list[str]] = {}
+    for a in values:
+        if "_" in a.strip("_"):
+            heads.setdefault(_canon(a.strip("_").split("_")[0]), []).append(a)
+    for head, owners in heads.items():
+        if head and len(owners) == 1 and head not in by_name:
+            by_name[head] = owners[0]
+    patterns: list[tuple[str, Any, re.Pattern[str]]] = []
+    for a in text:
+        for v in values[a]:
+            words = [re.escape(w) for w in re.split(r"[\s_\-]+", str(v).strip()) if w]
+            if isinstance(v, str) and words:
+                patterns.append((a, v, re.compile(r"(?<![A-Za-z0-9])" + r"[\s_\-]+".join(words) + r"(?![A-Za-z0-9])",
+                                                  re.I)))
+    patterns.sort(key=lambda p: -len(str(p[1])))
+    return _Axes(by_name, {a: tuple(vs) for a, vs in values.items()}, text, tuple(patterns))
+
+
+def _text_value(axes: _Axes, axis: str, text: str) -> Any:
+    for a, value, pattern in axes.patterns:
+        if a == axis and pattern.fullmatch(text.strip()):
+            return value
+    return _NOT_A_VALUE
+
+
+def _resolve(axes: _Axes, axis: str, token: str, percent: bool) -> Any:
+    """The value of ``axis`` a paper's ``token`` names: the value it equals, else the one value it rounds to (``310.5``
+    for 310.49); with a percent sign, as a fraction too. :data:`_NOT_A_VALUE` when it names none or several."""
+    plain = token.replace(",", "")
+    try:
+        written = float(plain)
+    except ValueError:
+        return _NOT_A_VALUE
+    dec = _written_precision(plain)
+    numeric = [v for v in axes.values.get(axis, ()) if not isinstance(v, str)]
+    readings = [(written, dec)] + ([(written / 100.0, max(dec, 0) + 2)] if percent else [])
+    for x, _ in readings:
+        for v in numeric:
+            if _same(v, x):
+                return v
+    for x, d in readings:
+        hits = [v for v in numeric if _rounds_to(float(v), x, d)]
+        if len(hits) == 1:
+            return hits[0]
+    return _NOT_A_VALUE
+
+
+_NAME_BEFORE_EQUALS = re.compile(r"(?<![\w\\{}])(\\?[^\W\d_][\w\\{}]*)\s*=\s*")
+_SETTING_NUMBER = re.compile(r"(-?(?:\d{1,3}(?:,\d{3})+(?!\d)|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?)(\s*%)?(?!\w)")
+_LIST_SEP = re.compile(r"\s*,\s*(?:and\s+|or\s+)?|\s+(?:and|or)\s+")
+_TEXT_WORD = re.compile(r"[A-Za-z][\w\-]*")
+_HEADER_NOTE = re.compile(r"\([^)]*\)|[*`$]")
+
+
+def _bindings(text: str, axes: _Axes) -> list[tuple[str, Any, int, int]]:
+    """``(axis, value, start, end)`` of each setting ``text`` names, in order: ``axis = value`` (``m = 20, 200 and 2000``
+    names three: a value after the first counts only when it is one of the axis's values, so ``m = 200, 0.177`` names
+    one), and a text value by its name (``RK4``). A number that merely equals a setting (the 20 of "20 repeats", the
+    0.05 of "α = 0.05") names nothing."""
+    out: list[tuple[str, Any, int, int]] = []
+    for m in _NAME_BEFORE_EQUALS.finditer(text):
+        axis = axes.by_name.get(_canon(m.group(1)))
+        if axis is None:
             continue
-        label, value = hit
-        setting = settings.get(label) or {}
-        axes = {k: float(v) for k, v in setting.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
-        wanted = _name_stems(value, _PATH_STOP, of_a_name=True)
-        if not wanted:
+        if axis in axes.text:
+            word = _TEXT_WORD.match(text, m.end())
+            if word:
+                out.append((axis, _text_value(axes, axis, word.group(0)), m.start(1), word.end()))
             continue
-        axis_words = frozenset().union(*(_stems_of_text(str(k)) for k in setting)) if setting else frozenset()
-        if places is None:
-            places = contexts()
-        for place in places:
-            if place.label is not None:
-                said = _stems_of_text(place.label) - axis_words
-                if not said or not said <= wanted:
-                    continue  # the column is headed by something else (or by nothing that names a value)
-            if not wanted <= _stems_of_text(place.names):
+        pos, first = m.end(), True
+        while True:
+            v = _SETTING_NUMBER.match(text, pos)
+            if v is None:
+                break
+            value = _resolve(axes, axis, v.group(1), bool(v.group(2)))
+            if not first and isinstance(value, _Unknown):
+                break
+            out.append((axis, value, m.start(1) if first else v.start(), v.end()))
+            first = False
+            sep = _LIST_SEP.match(text, v.end())
+            if sep is None:
+                break
+            pos = sep.end()
+    taken = [(a, b) for *_, a, b in out]
+    for axis, value, pattern in axes.patterns:
+        for t in pattern.finditer(text):
+            if not any(t.start() < b and a < t.end() for a, b in taken):
+                out.append((axis, value, t.start(), t.end()))
+                taken.append((t.start(), t.end()))
+    return sorted(out, key=lambda b: b[2])
+
+
+@dataclass
+class _Pool:
+    """Numbers FI computed per setting: ``traceable`` for the lookup, ``of`` each path's ``(setting label, quantity,
+    statistic)``, ``settings`` each label's settings, ``by_quantity`` the numbers of each ``(quantity, statistic)``."""
+
+    traceable: Traceable
+    of: dict[str, tuple[str, str, str]]
+    settings: dict[str, dict[str, Any]]
+    by_quantity: dict[tuple[str, str], list[tuple[str, float]]]
+
+    def at(self, setting: dict[str, Any], quantity: str, stat: str) -> list[float]:
+        """The numbers of ``quantity``'s ``stat`` at each label whose settings ``setting`` all gives."""
+        return [number for label, number in self.by_quantity.get((quantity, stat), ())
+                if all(a in setting and _same(setting[a], v) for a, v in (self.settings.get(label) or {}).items())]
+
+
+def _pool(traceable: Traceable, of: dict[str, tuple[str, str, str]], settings: dict[str, dict[str, Any]]) -> _Pool:
+    by_quantity: dict[tuple[str, str], list[tuple[str, float]]] = {}
+    numbers = {**traceable.values, **traceable.derived}
+    for path, (label, quantity, stat) in of.items():
+        if path in numbers:
+            by_quantity.setdefault((quantity, stat), []).append((label, numbers[path]))
+    return _Pool(traceable, of, settings, by_quantity)
+
+
+def _label_setting(label: str) -> dict[str, Any]:
+    """``{"m": 20.0, "pi1": 0.2}`` of ``m=20,pi1=0.2`` (a reference's setting, core/reference_values.py :func:`pool`)."""
+    out: dict[str, Any] = {}
+    for part in label.split(","):
+        k, eq, v = part.partition("=")
+        if eq and k.strip():
+            try:
+                out[k.strip()] = float(v)
+            except ValueError:
+                out[k.strip()] = v.strip()
+    return out
+
+
+#: Settings named together: ``m = 200, π1 = 0``, ``(m = 20, π1 = 0.05)``, ``m = 200 and 2000``, ``Euler and RK4``.
+_JOINED = re.compile(r"\s*(?:,|,?\s*(?:and|or))?\s*")
+_PAREN = re.compile(r"\([^()]*\)")
+_GAP_WORD = re.compile(r"[^\W\d_]+")
+_GAP_SKIP = frozenset({"the", "a", "an", "of"})
+#: A setting is named next to a number when at most this many words (another number counts as one; "the", "a", "an",
+#: "of" and a bracket count as none) stand between them: "0.177 at m = 20", "at m = 200, π1 = 0.2 was 0.177", "0.0415
+#: against 0.04 at m = 200".
+_NEXT_TO = 4
+
+
+@dataclass
+class _Cluster:
+    """Settings named together, and the settings each of its rows stands for (``m = 20, 200, 2000``: three rows)."""
+
+    start: int
+    end: int
+    values: dict[str, list[Any]]
+    in_brackets: bool = False
+
+    def rows(self) -> list[dict[str, Any]] | None:
+        longest = max(len(v) for v in self.values.values())
+        if any(len(v) not in (1, longest) for v in self.values.values()):
+            return None
+        return [{a: vs[i] if len(vs) == longest else vs[0] for a, vs in self.values.items()} for i in range(longest)]
+
+
+def _gap_words(text: str) -> int | None:
+    """The words standing between a setting and a number, or ``None`` when a clause ends between them (a ``;``, an
+    "and" / "or", a comma other than one comma alone: "at s = 2, 0.4200")."""
+    inner = _PAREN.sub(" ", text)
+    numbers = len(_CONTEXT_NUMBER.findall(inner))
+    inner = _CONTEXT_NUMBER.sub(" ", inner)
+    if ";" in inner or ("," in inner and inner.strip() != ","):
+        return None
+    words = [w.lower() for w in _GAP_WORD.findall(inner)]
+    if any(w in ("and", "or") for w in words):
+        return None
+    return numbers + sum(1 for w in words if w not in _GAP_SKIP)
+
+
+def _merge(rows: list[dict[str, Any]], more: list[dict[str, Any]], unnamed: set[str]) -> list[dict[str, Any]]:
+    """``rows`` with ``more`` named beside them: one row with many, many with one, or as many with as many in order. An
+    axis two of them name differently is ``unnamed``."""
+    if len(more) == 1:
+        pairs = [(r, more[0]) for r in rows]
+    elif len(rows) == 1:
+        pairs = [(rows[0], m) for m in more]
+    elif len(rows) == len(more):
+        pairs = list(zip(rows, more))
+    else:
+        return rows
+    out = []
+    for r, m in pairs:
+        unnamed.update(a for a in m if a in r and not _same(r[a], m[a]))
+        out.append({**r, **m})
+    return out
+
+
+def _named_beside(sentence: str, axes: _Axes, at: int) -> list[dict[str, Any]] | None:
+    """The settings the sentence names for the number at ``at`` (one row, or one per setting it stands for), ``None``
+    when the number is not one the sentence lists.
+
+    A setting is named next to its number (:data:`_NEXT_TO`): on either side, with no clause ending between (a setting
+    in brackets only after its number: "40.6 points (m = 2000, π1 = 0.2)"); a list of numbers takes a list of settings in
+    order ("0.177, 0.198 and 0.199 for m = 20, 200, 2000"); and a setting named before the sentence's first number, and
+    nowhere else in it, holds for the whole sentence ("At π1 = 0.05 BH power was 0.393, 0.267 and 0.234")."""
+    found = _bindings(sentence, axes)
+    clusters: list[_Cluster] = []
+    for axis, value, a, b in found:
+        if clusters and _JOINED.fullmatch(sentence[clusters[-1].end:a]):
+            clusters[-1].values.setdefault(axis, []).append(value)
+            clusters[-1].end = b
+        else:
+            clusters.append(_Cluster(a, b, {axis: [value]}))
+    for c in clusters:
+        c.in_brackets = sentence[:c.start].rstrip().endswith("(") and sentence[c.end:].lstrip().startswith(")")
+    spans = [(a, b) for *_, a, b in found]
+    numbers = [m for m in _CONTEXT_NUMBER.finditer(sentence) if not any(a <= m.start() < b for a, b in spans)]
+    groups: list[list[re.Match[str]]] = []
+    for m in numbers:
+        if groups and _LIST_SEP.fullmatch(sentence[groups[-1][-1].end():m.start()]):
+            groups[-1].append(m)
+        else:
+            groups.append([m])
+    group = next((g for g in groups if any(m.start() == at for m in g)), None)
+    if group is None:
+        return None
+    first_number = numbers[0].start() if numbers else len(sentence)
+
+    def gap(lo: int, hi: int) -> int | None:
+        text = "".join(ch if not any(c.start <= i < c.end for c in clusters) else " "
+                       for i, ch in enumerate(sentence[lo:hi], lo))
+        return _gap_words(text)
+
+    attached: list[_Cluster] = []
+    for side in (1, -1):
+        near = [c for c in clusters if (c.start >= group[-1].end() if side > 0 else c.end <= group[0].start())]
+        for c in (near if side > 0 else reversed(near)):
+            if side < 0 and c.in_brackets:
+                continue  # a setting in brackets belongs to the number before it
+            words = gap(group[-1].end(), c.start) if side > 0 else gap(c.end, group[0].start())
+            if words is None or words > _NEXT_TO:
+                break
+            attached.append(c)
+    unnamed: set[str] = set()
+    rows: list[dict[str, Any]] = [{}]
+    for c in sorted(attached, key=lambda c: c.start):
+        more = c.rows()
+        if more:
+            rows = _merge(rows, more, unnamed)
+    elsewhere = [c for c in clusters if c.start >= first_number]
+    for c in clusters:
+        more = c.rows()
+        if c.end <= first_number and more and len(more) == 1 and c not in attached \
+                and not any(a in o.values for o in elsewhere for a in c.values):
+            rows = [{**more[0], **r} for r in rows]
+    rows = [{a: v for a, v in r.items() if a not in unnamed} for r in rows]
+    if len(rows) == len(group) > 1:
+        return [rows[[m.start() for m in group].index(at)]]
+    if len(rows) > 1 and len(group) > 1:
+        shared = {a: v for a, v in rows[0].items() if all(a in r and _same(r[a], v) for r in rows)}
+        return [shared]
+    return rows
+
+
+def _prose_fits(place: _Place, pool: _Pool, axes: _Axes, label: str, quantity: str, stat: str, *, every: bool) -> bool:
+    """Whether the settings ``place``'s sentence names beside its number (:func:`_named_beside`) are ``label``'s (and,
+    with ``every``, name each of them). A number standing for several settings ("1.0 at m = 200 and 2000") must be the
+    number of each of them."""
+    own = pool.settings.get(label) or {}
+    rows = _named_beside(place.sentence, axes, place.at)
+    if rows is None:
+        return not every
+    mine = [r for r in rows if all(_same(v, own[a]) for a, v in r.items() if a in own)]
+    if not mine:
+        return False
+    if len(rows) > 1:
+        token = next((m.group(0) for m in _CONTEXT_NUMBER.finditer(place.sentence) if m.start() == place.at), "")
+        if not token:
+            return False
+        x, dec = float(token), _written_precision(token)
+        if not all(any(_rounds_to(v, x, dec) for v in pool.at({**own, **r}, quantity, stat)) for r in rows):
+            return False
+    return not every or any(all(a in r for a in own) for r in mine)
+
+
+def _table_fits(place: _Place, pool: _Pool, axes: _Axes, label: str, *, every: bool) -> bool:
+    """Whether the settings ``place``'s table row names (:func:`_table_named`) are ``label``'s (and, with ``every``, name
+    each of them)."""
+    own = pool.settings.get(label) or {}
+    named = _table_named(place, axes)
+    if every and any(a not in named for a in own):
+        return False
+    return all(_same(v, own[a]) for a, vs in named.items() if a in own for v in vs)
+
+
+def _table_named(place: _Place, axes: _Axes) -> dict[str, list[Any]]:
+    """The settings a table row names for its number: a column headed by an axis, an ``axis = value`` in another cell
+    of the row or in the number's column header, or in the caption an axis named nowhere in the row, with one value."""
+    named: dict[str, list[Any]] = {}
+    for i, head in enumerate(place.header):
+        axis = axes.by_name.get(_canon(_HEADER_NOTE.sub("", head)))
+        if axis is None or i == place.col or i >= len(place.cells):
+            continue
+        cell = place.cells[i].strip()
+        if axis in axes.text:
+            value = _text_value(axes, axis, cell)
+        else:
+            v = _SETTING_NUMBER.match(cell)
+            value = _resolve(axes, axis, v.group(1), bool(v.group(2))) if v else _NOT_A_VALUE
+        named.setdefault(axis, []).append(value)
+    for text in (*(c for i, c in enumerate(place.cells) if i != place.col), place.column):
+        for axis, value, *_ in _bindings(text, axes):
+            named.setdefault(axis, []).append(value)
+    said: dict[str, list[Any]] = {}
+    for axis, value, *_ in _bindings(place.caption, axes):
+        said.setdefault(axis, []).append(value)
+    for axis, values in said.items():
+        if axis not in named and len(values) == 1:
+            named[axis] = values
+    return named
+
+
+def _fits(place: _Place, pool: _Pool, axes: _Axes, label: str, quantity: str, stat: str, *, every: bool) -> bool:
+    if place.label is None:
+        return _prose_fits(place, pool, axes, label, quantity, stat, every=every)
+    return _table_fits(place, pool, axes, label, every=every)
+
+
+def _names_a_setting(place: _Place, axes: _Axes) -> bool:
+    """Whether ``place`` names any setting for its number (a sentence that names none, "the 0.0415 seen in the table",
+    says nothing for or against one)."""
+    if place.label is None:
+        return any(_named_beside(place.sentence, axes, place.at) or ())
+    return bool(_table_named(place, axes))
+
+
+def _names_quantity(place: _Place, quantity: str, setting: dict[str, Any]) -> bool:
+    """Whether ``place`` names ``quantity``: in a table, the column's header (or the row's first cell) names nothing
+    but it and the caption completes its name; in prose, the paragraph names it."""
+    wanted = _name_stems(quantity, _PATH_STOP, of_a_name=True)
+    if not wanted:
+        return False
+    if place.label is not None:
+        settings_words = frozenset().union(*(_stems_of_text(str(k)) for k in setting),
+                                           *(_stems_of_text(v) for v in setting.values() if isinstance(v, str)))
+        said = _stems_of_text(place.label) - settings_words
+        if not said or not said <= wanted:
+            return False  # the column is headed by something else (or by nothing that names a value)
+    return wanted <= _stems_of_text(place.names)
+
+
+#: Words that state a value as a reference, not as what was measured.
+_REFERENCE_WORD = re.compile(r"\b(?:referen\w*|exact\w*|theor\w*|expected|expectation|nominal\w*|bound\w*|predict\w*"
+                             r"|analytic\w*|closed[- ]form|formula\w*)\b", re.I)
+_MEASURED_WORD = re.compile(r"\b(?:measur\w*|observ\w*|simulat\w*|reali[sz]\w*|estimat\w*|empiric\w*)\b", re.I)
+#: A reference word governs a number at most this many words after it, besides the quantity's own name and its
+#: settings ("the exact values 0.379, 0.163 and 0.060", "the exact Bonferroni FWER at m = 200 is 0.04878").
+_REFERENCE_REACH = 3
+_NUMBER_LIST = re.compile(r"(?:(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?!\w)%?\s*(?:,\s*(?:and\s+|or\s+)?|\s+and\s+|"
+                          r"\s+or\s+)?)+")
+
+
+def _stated_as_reference(place: _Place, measured: frozenset[str], quantity: frozenset[str], axes: _Axes) -> bool:
+    """Whether ``place`` states its number as a reference value of the quantity whose name's words are ``quantity``:
+    in prose, a reference word stands before it in the same clause, at most :data:`_REFERENCE_REACH` other words before
+    it and no word of a measurement between ("in agreement with the exact values 0.379, 0.163 and 0.060"; not "it was
+    0.3794, as the exact formula gives", nor "matching the exact formula, power was 0.3794"); in a table, its column's
+    header names a reference, or the caption does and the column's header names none of the measured quantities
+    (``measured``)."""
+    if place.label is None:
+        before = place.sentence[:max(place.at, 0)]
+        last = None
+        for last in _REFERENCE_WORD.finditer(before):
+            pass
+        if last is None:
+            return False
+        between = before[last.end():]
+        for *_, a, b in sorted(_bindings(between, axes), key=lambda x: -x[2]):
+            between = between[:a] + "\x00" + between[b:]
+        between = _NUMBER_LIST.sub(" ", re.sub(r"\x00(?:\s*(?:,|,?\s*and|,?\s*or)?\s*\x00)*", " ", between))
+        if _MEASURED_WORD.search(between) or re.search(r"[,;:]", between):
+            return False
+        words = [w for w in re.findall(r"[^\W\d_]+", between)
+                 if w.lower() not in ("and", "or") and not (_name_stems(w, _COMMON_STOP) <= quantity)]
+        return len(words) <= _REFERENCE_REACH
+    if _REFERENCE_WORD.search(place.column):
+        return True
+    return bool(_REFERENCE_WORD.search(place.caption)) and not (_stems_of_text(place.column) & measured)
+
+
+def _place_holds(
+    place: _Place, cand: float, dec: int, how: str, table: _Pool | None, references: _Pool | None, axes: _Axes,
+    measured: frozenset[str],
+) -> bool:
+    """Whether ``place`` accounts for ``cand`` as one of FI's per-setting numbers.
+
+    A number of FI's per-setting table: never where the settings the place names are another setting's. Where they are
+    not, as before (the sentence names the quantity, or the run holds so few values like it that a match is not luck),
+    or, unshifted, where the place names its setting in full and its quantity (a table row through its header).
+
+    A reference value FI computed: only where the place states it as a reference (:func:`_stated_as_reference`), names
+    its quantity and names no other setting; never as its complement. A reference presented as the measured result is
+    not accounted for by it."""
+    if table is not None:
+        words: frozenset[str] | None = None
+        for path in table.traceable.paths_at(cand, dec):
+            hit = table.of.get(path)
+            if hit is not None and not _fits(place, table, axes, *hit, every=False):
                 continue
-            found = place.numbers(len(axes))
-            if all(_names_value(found, v) for v in axes.values()):
+            limit = MAX_CHANCE_UNNAMED / SHIFT_CHANCE_DIVISOR / (SHIFT_CHANCE_DIVISOR if how else 1)
+            if table.traceable.chance(cand, dec) <= limit:
+                return True
+            if words is None:
+                words = _name_stems(place.sentence, _COMMON_STOP)
+            if table.traceable.words_of(path) & words:
+                return True
+            if hit is not None and not how and _fits(place, table, axes, *hit, every=True) \
+                    and _names_quantity(place, hit[1], table.settings.get(hit[0]) or {}):
+                return True
+    if references is not None and "complement" not in how:
+        for path in references.traceable.paths_at(cand, dec):
+            hit = references.of.get(path)
+            if hit is None:
+                continue
+            wanted = _name_stems(hit[1], _PATH_STOP, of_a_name=True)
+            if wanted <= _stems_of_text(place.names) and _stated_as_reference(place, measured, wanted, axes) \
+                    and _fits(place, references, axes, *hit, every=False):
                 return True
     return False
+
+
+@dataclass
+class _PerSetting:
+    """FI's own per-setting numbers for :func:`check`: its table of the trials and its reference values, with the axes
+    their settings vary over and the words of every measured quantity."""
+
+    table: _Pool | None
+    references: _Pool | None
+    axes: _Axes
+    measured: frozenset[str]
+
+    @classmethod
+    def of(cls, table: Traceable | None, settings: dict[str, dict[str, Any]],
+           references: Traceable) -> "_PerSetting":
+        labels = sorted(settings, key=len, reverse=True)  # a longer label first: `m=20,pi1=0.2` is not `m=20`
+        table_pool = None
+        if table is not None:
+            of = {p: hit for p in table.all_paths() if (hit := _trial_path(p, labels)) is not None}
+            table_pool = _pool(table, of, settings)
+        reference_pool = None
+        ref_settings: dict[str, dict[str, Any]] = {}
+        if len(references):
+            of = {}
+            for path in references.all_paths():
+                metric, _, label = path[len("reference."):].partition(".")
+                ref_settings[label] = _label_setting(label)
+                of[path] = (label, metric, "reference")
+            reference_pool = _pool(references, of, ref_settings)
+        measured = frozenset().union(*(_name_stems(q, _PATH_STOP, of_a_name=True)
+                                       for _, q, _ in (table_pool.of.values() if table_pool else ())))
+        return cls(table_pool, reference_pool, _axes_of([*settings.values(), *ref_settings.values()]), measured)
+
+    def accounts_for(self, places: list[_Place], token: str, readings: tuple[float, ...]) -> bool:
+        """Whether a place the paper prints ``token`` accounts for it (:func:`_place_holds`) and every place that names a
+        setting for it does: a number printed right in one place and beside another setting in the next is wrong in the
+        second, while "the 0.0415 seen in the table", naming no setting, is the same number again."""
+        candidates = [(cand, dec, how) for reading in readings for cand, dec, how in _variants(reading, token)]
+        held = False
+        for place in places:
+            if any(_place_holds(place, cand, dec, how, self.table, self.references, self.axes, self.measured)
+                   for cand, dec, how in candidates):
+                held = True
+            elif _names_a_setting(place, self.axes):
+                return False
+        return held
 
 
 def check(
@@ -1416,11 +1919,12 @@ def check(
     free of ``core.engine`` and can be tested without one.
 
     ``trial_settings``: each setting label of ``trial_table`` with the settings that tell it apart (its axes that take
-    more than one value, :func:`core.trial_table.settings`), so a table number is also accounted for where the paper
-    names its setting and its quantity (:func:`_named_by_setting`). ``references``: the reference values FI computed
-    itself from the frozen plan's formulas (:mod:`core.reference_values`), a pool of their own, matched exactly at the
-    paper's precision: they are FI's own numbers, so a match is not luck, and kept apart they make no match in the
-    results likelier.
+    more than one value, :func:`core.trial_table.settings`). A table number is never accounted for where the paper
+    prints it beside another setting ("m = 200" for the number of m = 20, a permuted list), and it is also accounted for
+    where the paper names its setting in full and its quantity. ``references``: the reference values FI computed itself
+    from the frozen plan's formulas (:mod:`core.reference_values`), a pool of their own, accounting for a number only
+    where the paper states it as a reference ("the exact value 0.379"), never for one presented as what was measured.
+    Both are read place by place: every place the paper prints the number must account for it (:func:`_place_holds`).
     """
     report = ProvenanceReport()
     if not paper_text.strip():
@@ -1441,9 +1945,9 @@ def check(
     table_kept, table_stats = _trace_values(trial_table or {}, "trials")
     table = Traceable(dict(table_kept), table_stats) if table_kept or table_stats else None
     settings = {str(k): dict(v) for k, v in (trial_settings or {}).items() if isinstance(v, dict)}
-    labels = sorted(settings, key=len, reverse=True)  # a longer label first: `m=20,pi1=0.2` is not `m=20`
     reference_pool = Traceable({f"reference.{k}": float(v) for k, v in (references or {}).items()
                                 if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)})
+    per_setting = _PerSetting.of(table, settings, reference_pool) if table is not None or len(reference_pool) else None
     report.traceable_values = len(traceable)
     # The experiment recorded nothing: it crashed, or its last RESULT_JSON is
     # empty. A paper written over no results is a real problem and not this
@@ -1483,41 +1987,23 @@ def check(
             continue
         if _interval_of_a_result(token, beside, traceable):
             continue
-        # A reference value FI computed itself, as written or as a percentage (never its complement: 1 - 0.04 is no
-        # reference value of anything).
-        if len(reference_pool) and any(
-            reference_pool.paths_at(cand, dec)
-            for reading in readings
-            for cand, dec, how in _variants(reading, token)
-            if "complement" not in how
-        ):
+        if table is not None and _interval_of_a_result(token, beside, table):
             continue
-        # A number gets a second chance to match by luck here, so an unnamed match must be that much rarer.
-        if table is not None and (
-            any(
+        # FI's per-setting numbers and reference values, read place by place (:func:`_place_holds`). A number gets a
+        # second chance to match by luck here, so an unnamed match must be that much rarer.
+        if per_setting is not None:
+            places = _setting_contexts(flat_text, token)
+            if places:
+                if per_setting.accounts_for(places, token, readings):
+                    continue
+            elif table is not None and any(  # the tokenizer rewrote the text around it: only its short context is left
                 _is_accounted_for(
-                    table, cand, dec, lambda: _naming_words(flat_text, token, context), shifted=bool(how),
+                    table, cand, dec, lambda: _name_stems(context, _COMMON_STOP), shifted=bool(how),
                     max_chance=MAX_CHANCE_UNNAMED / SHIFT_CHANCE_DIVISOR,
                 )
                 for reading in readings
                 for cand, dec, how in _variants(reading, token)
-            )
-            or _interval_of_a_result(token, beside, table)
-        ):
-            continue
-        # The same number of the table, named where it stands by its setting and its quantity (unshifted only).
-        if table is not None and settings:
-            places: list[_Place] | None = None
-
-            def where(token: str = token) -> list[_Place]:
-                nonlocal places
-                if places is None:
-                    places = _setting_contexts(flat_text, token)
-                return places
-
-            if any(_named_by_setting(table, cand, dec, where, settings, labels)
-                   for reading in readings
-                   for cand, dec, how in _variants(reading, token) if not how):
+            ):
                 continue
         report.untraceable += 1
         if value in seen:

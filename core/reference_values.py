@@ -26,7 +26,8 @@ formula, and FI computes it per setting:
 * **What it gives.** :func:`compute`: per setting, the reference or "no reference" with the reason, and per quantity
   whether a check FI ran confirms it: a check that passed and agrees at its case ("agrees with the known-answer check"),
   none ("not cross-checked"), or one that did not pass (no confirmation). :func:`copies_measured` drops a reference that
-  is a bare number matching the measured means more closely than their uncertainty allows: a value copied from the run.
+  evaluates to the measured means more closely than their uncertainty allows, to the precision its own numbers are
+  written to (a bare number, an expression of one, a plan's number holding one): a value copied from the run.
 
 The comparison itself (``agrees`` / ``differs`` / ``within bound``), and the tables, are core/results_by_setting.py.
 No model is called here; FI stays domain-general: the formulas are the plan's, the arithmetic is FI's.
@@ -333,25 +334,46 @@ def without_bad_reference(protocol: dict[str, Any], why: str | None) -> tuple[di
             f"the reference value of `{ident}` was left out of the plan ({reason}); that quantity reads \"no reference\"")
 
 
-def copies_measured(ref: dict[str, Any], measured: list[tuple[float, float | None]]) -> bool:
-    """Whether a reference that is one bare number reproduces the measured means more closely than they are known: in
-    more than half of the settings it covers (``measured``: ``(mean, 95% half-width)`` of each), the mean rounds to the
-    number as written, and the number is written finer than a tenth of the half-width. Such a number was read off the
-    run, not worked out. A formula of the settings, or a short number such as a nominal 0.95, is never caught."""
+_LITERAL = re.compile(r"(?<![\w.])(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def _finest(formula: str, given: dict[str, float]) -> float | None:
+    """The finest relative precision a reference's numbers are written to: its decimal literals and the decimal values
+    of the plan's names it uses (``0.17748`` is written to 5e-6 / 0.17748). Whole numbers count as exact. ``None``
+    when it writes none."""
+    used = _forms.names(formula, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
+    texts = _LITERAL.findall(formula) + [repr(float(v)) for k, v in given.items()
+                                         if k in used and isinstance(v, (int, float)) and math.isfinite(v)
+                                         and not float(v).is_integer()]
+    shares: list[float] = []
+    for text in texts:
+        try:
+            number = Decimal(text)
+        except (InvalidOperation, ValueError):
+            continue
+        exponent = number.as_tuple().exponent
+        if number.is_finite() and number != 0 and isinstance(exponent, int):
+            shares.append(0.5 * 10.0 ** exponent / abs(float(number)))
+    return min(shares) if shares else None
+
+
+def copies_measured(ref: dict[str, Any], measured: list[tuple[float, float | None, float]],
+                    given: dict[str, float] | None = None) -> bool:
+    """Whether a reference reproduces the measured means more closely than they are known, so it was read off the run,
+    not worked out: in more than half of the settings it covers (``measured``: ``(mean, 95% half-width, the reference
+    FI computed there)`` of each), the mean is the reference to the precision the reference's numbers are written to
+    (:func:`_finest`), and that precision is finer than a tenth of the half-width. A bare number (``0.1775``), an
+    expression of one (``0.17748 + 0*m``) and a plan's number holding one (``p_seen`` = 0.17748) are all caught; a
+    formula of the settings whose numbers are short (``1 - (1 - 0.05/m)**m``), or a nominal 0.95, is not."""
     text = str(ref.get("formula") or "").strip()
-    try:
-        literal = Decimal(text)
-    except (InvalidOperation, ValueError):
+    share = _finest(text, given or {}) if text else None
+    if share is None or not measured:
         return False
-    if not literal.is_finite() or not measured:
-        return False
-    exponent = literal.as_tuple().exponent
-    if not isinstance(exponent, int):
-        return False
-    half_unit = 0.5 * 10.0 ** exponent
-    value = float(literal)
-    hits = sum(1 for mean, half in measured
-               if half is not None and half > 0 and half_unit < half / 10 and abs(mean - value) <= half_unit)
+    hits = 0
+    for mean, half, value in measured:
+        tol = share * abs(value)
+        if half is not None and half > 0 and tol < half / 10 and abs(mean - value) <= tol:
+            hits += 1
     return hits * 2 > len(measured)
 
 
