@@ -26593,7 +26593,7 @@ def _default_clarify_questions(topic: str) -> dict[str, Any]:
             "default": "journal-length",
         },
         "paper_venue": {
-            "question": "Which paper template should we use? (generic / neurips / iclr / ieee_access / nature_mi)",
+            "question": "Which paper template should we use? (generic / article / neurips / iclr / ieee_access / nature_mi)",
             "default": "generic",
         },
         "topic_shape": {
