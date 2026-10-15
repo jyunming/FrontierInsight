@@ -273,9 +273,16 @@ def _config(tmp_path: Path, topic: str = "t", **output: Any) -> Config:
 def _fake_toolchain(monkeypatch) -> list[list[str]]:  # noqa: ANN001
     monkeypatch.setattr(paper_mod, "find_pandoc", lambda _root: "/fake/pandoc")
     monkeypatch.setattr(PaperGenerator, "_find_pdf_engine", lambda self: ("pdflatex", "/fake/pdflatex"))
+    # The host's own XeLaTeX would otherwise be used (and its fonts looked up).
+    monkeypatch.setattr(PaperGenerator, "_find_unicode_engine", lambda self, engine: None)
     commands: list[list[str]] = []
+    real_run = paper_mod.subprocess.run
 
     def fake_run(cmd, **_kw):  # noqa: ANN001
+        if isinstance(cmd, str) or not cmd or cmd[0] != "/fake/pandoc":
+            # Not the paper's pandoc: the first import of the PDF reader asks
+            # Windows for its version (``ver``) through the same subprocess.run.
+            return real_run(cmd, **_kw)
         commands.append(list(cmd))
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -632,9 +639,11 @@ def test_a_draft_is_measured_from_a_render_in_the_quest_fi_folder(tmp_path: Path
     assert seen["out_dir"] == tmp_path / ".fi" / "page_check"
     assert seen["paper_md"] == tmp_path / "paper" / "paper.md"
     assert seen["figures"] == ["a.png"]
-    # The draft is rendered as paper.pdf will be: LaTeX only, in the venue the
-    # final render uses, and with the same page limit.
-    assert seen["config"].output.html_pdf_fallback is False
+    # The draft is rendered as paper.pdf will be: LaTeX, in the venue the final
+    # render uses, and with the same page limit; when LaTeX fails, the browser
+    # render still gives a page count, so the limit is never left unchecked.
+    assert seen["config"].output.paper_style == "latex"
+    assert seen["config"].output.html_pdf_fallback is True
     assert seen["config"].output.paper_format == "ieee_access"
     assert resolve_page_limit(seen["config"]) == 4
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted({*before, ".fi"})
@@ -665,6 +674,24 @@ def test_a_draft_that_does_not_render_is_skipped_with_one_warning(tmp_path: Path
     for _ in range(2):
         assert asyncio.run(eng._measure_draft_pages(tmp_path / "paper" / "paper.md", {})) is None
     assert len(warnings) == 1 and "no LaTeX engine found" in warnings[0]
+
+
+def test_a_draft_latex_cannot_typeset_is_counted_on_the_browser_render_and_says_so(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    eng = _engine(tmp_path)
+
+    def browser_only(self, paper_md, out_dir, *, extra_lines=0):  # noqa: ANN001, ARG001
+        self.last_render = {"engine": "edge", "typeset": False, "rc": 0,
+                            "reason": "xelatex stopped: Missing character U+2C6F"}
+        return _blank_pdf(Path(out_dir) / "paper.pdf", 5), None
+
+    monkeypatch.setattr(PaperGenerator, "_compile_pdf", browser_only)
+    warnings = _quiet_log(eng)
+    result = asyncio.run(eng._measure_draft_pages(tmp_path / "paper" / "paper.md", {}))
+    assert result is not None and result["pages"] == 5
+    assert len(warnings) == 1
+    assert "could not typeset" in warnings[0] and "U+2C6F" in warnings[0] and "browser render" in warnings[0]
 
 
 @pytest.mark.slow
