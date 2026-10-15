@@ -34,8 +34,10 @@ judges with them:
   of the trials it was judged on still fails, but it is not decided by them: it is not taken as a fault of the
   simulation to repair, and the paper does not say the method may be broken.
 
-A check whose trials all give the same number is deterministic and judged as before, on trial 0's number. Nothing here
-makes a check pass that is outside both its tolerance and its Monte Carlo error.
+A check on trials that return the same numbers every time is deterministic and judged as before, on trial 0's number.
+A random simulation whose check quantity did not move in the first batch (a rare outcome that has not happened yet) is
+sized from the spread a proportion at the expected value has (:func:`trials_for_constant`), never judged on trial 0.
+Nothing here makes a check pass that is outside both its tolerance and its Monte Carlo error.
 """
 
 from __future__ import annotations
@@ -215,6 +217,42 @@ def trials_for(summary: dict[str, Any], limit: float | None, *, most: int = MAX_
         return n
     wanted = n * (se / (TARGET_SHARE * limit)) ** 2
     return max(n, min(int(most), int(math.ceil(wanted))))
+
+
+def returned_varies(rows: list[dict[str, Any]]) -> bool:
+    """Whether any number the trials returned differs between them: the simulation is random. (A check's own quantity
+    can still be the same in every trial of a first batch: a rare outcome that did not happen yet.)"""
+    first = next((r for r in rows if isinstance(r, dict)), None)
+    if first is None:
+        return False
+    for key, v in first.items():
+        if not _number(v):
+            continue
+        for r in rows[1:]:
+            other = r.get(key) if isinstance(r, dict) else None
+            if _number(other) and not math.isclose(float(v), float(other), rel_tol=1e-12, abs_tol=1e-15):
+                return True
+    return False
+
+
+def trials_for_constant(rows: list[dict[str, Any]], measure: str, expected: float | None, limit: float | None, *,
+                        most: int = MAX_TRIALS) -> int:
+    """How many trials in all a check needs whose quantity was the same in every trial of a random simulation (a rare
+    outcome that has not happened yet: 20 trials of an event with probability 0.05 are all 0 more than a third of the
+    time). For a quantity that stayed at 0 or 1 (a 0/1 outcome, or a count of a rare one), the spread a proportion has at
+    the expected value (the rule of three's 3/n when the expected value is not a probability), sized as
+    :func:`trials_for` sizes any other; for anything else, as many as the check's time allows (``most``)."""
+    n = len(rows)
+    summary = summarise(rows, measure)
+    if summary is None or limit is None or limit <= 0:
+        return n
+    centre = summary.get("inner_mean")
+    if centre not in (0.0, 1.0):
+        return max(n, int(most))
+    rule_of_three = min(0.5, 3.0 / max(n, 1))
+    p = expected if expected is not None and 0.0 < expected < 1.0 else rule_of_three
+    sd = math.sqrt(p * (1.0 - p))
+    return max(n, min(int(most), int(math.ceil((sd / (TARGET_SHARE * limit)) ** 2))))
 
 
 def limit_used(limit: float | None, mc: dict[str, Any] | None) -> tuple[float | None, str]:

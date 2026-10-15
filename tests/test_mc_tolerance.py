@@ -173,8 +173,9 @@ def test_the_wrong_tail_of_the_p_value_is_invisible_to_the_bound_and_caught_by_t
     _c, _p, right, _f = _measure(_quest(tmp_path / "right"), [power], most_trials=SAME_TRIALS)
     _c, _p, wrong, found = _measure(_quest(tmp_path / "wrong", model=planted), [power], most_trials=SAME_TRIALS)
     assert right[0]["passed_by_engine"] is True and right[0]["mc"]["trials"] == SAME_TRIALS
-    # No real effect is ever rejected: the power is 0 in every trial, so it is judged as a number that does not vary.
-    assert wrong[0]["passed_by_engine"] is False and found and wrong[0]["value"] == 0.0 and "mc" not in wrong[0]
+    # No real effect is ever rejected: the power is 0 in every trial (FI runs more, as for a rare outcome) and fails.
+    assert wrong[0]["passed_by_engine"] is False and found and wrong[0]["value"] == 0.0
+    assert wrong[0]["mc"]["trials"] == SAME_TRIALS and not wrong[0]["within_error"]
 
 
 EQUALS_PI0_Q = {"name": "bh_fdr_equals_pi0_q", "kind": "special_case",
@@ -258,6 +259,35 @@ def test_too_few_trials_to_know_their_spread_never_widen_the_tolerance(tmp_path:
     record = judged[0]["mc"]
     assert record["trials"] == 5 and record["precision"] == "few_trials"
     assert record["limit_used"] == 0.001
+
+
+RARE = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    rng = random.Random(seed)
+    return {"event": 1.0 if rng.random() < P else 0.0, "noise": rng.random()}
+'''
+RARE_CHECK = {"name": "rare_event_rate", "kind": "special_case", "check": "the rate of a rare event", "expected": 0.02,
+              "tolerance": 0.01, "case": {"n": 1}, "measure": "event",
+              "reference": "derivation: the event has probability 0.02 by construction"}
+
+
+@pytest.mark.parametrize("p, passes", [(0.02, True), (0.04, False)])
+def test_a_rare_event_that_did_not_happen_in_the_first_batch_is_not_judged_on_trial_0(
+        tmp_path: Path, p: float, passes: bool) -> None:
+    """20 trials of an event with probability 0.02 are all 0 two times in three. The simulation is random (another number
+    it returns differs), so the check is sized from what a proportion at its expected value spreads and judged on the
+    mean; a rate twice the expected one still fails."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(f"P = {p}\n" + RARE, encoding="utf-8")
+    rows = [{"event": 0.0, "noise": x / 20} for x in range(20)]
+    assert mc.returned_varies(rows) and mc.trials_for_constant(rows, "event", 0.02, 0.01) > 3000
+    checks, problems, judged, found = _measure(root, [RARE_CHECK], mean_names=frozenset(), in_each_run=None)
+    (j,) = judged
+    assert j["mc"]["trials"] > 1000 and j["passed_by_engine"] is passes, j
+    assert bool(found) is not passes and (passes or not j["within_error"])
 
 
 def test_a_check_whose_trials_all_agree_is_judged_as_before(tmp_path: Path) -> None:

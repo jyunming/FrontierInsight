@@ -1361,16 +1361,30 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     summary = _mc.summarise(rows, measure)
     if summary is None:
         return None
-    if summary["varies"] is False:
+    if len(rows) >= 2 and not _mc.returned_varies(rows):
         return (*_check_from(name, measure, first), False)  # deterministic: trial 0's number, as before
-    wanted = _mc.trials_for(summary, limit, most=most)
-    left = timeout_s - (time.monotonic() - started)
-    if wanted > len(rows) and left >= 1:
-        more, _why, more_failed, _ran = await run_case_trials(
+    expected = _oracle.limit_of(oracle)[0]
+    # A random simulation whose check quantity was the same in every first trial (a rare outcome that has not happened
+    # yet) is sized from what a proportion at the expected value spreads, not judged on trial 0.
+    wanted = (_mc.trials_for(summary, limit, most=most) if summary["varies"] or len(rows) < 2
+              else _mc.trials_for_constant(rows, measure, expected, limit, most=most))
+    for _pass in range(3):  # the spread read from a first batch is rough: sized again (at most twice) from all trials
+        left = timeout_s - (time.monotonic() - started)
+        if wanted <= len(rows) or left < 1:
+            break
+        more, _why, more_failed, more_ran = await run_case_trials(
             executor, python, quest_root, module, cell=case, trials=list(range(ran, ran + wanted - len(rows))),
             timeout_s=max(1, int(left)), env=env, thresholds=thresholds, in_each_run=in_each_run, budget_s=0.9 * left)
-        rows, failed = rows + more, failed + more_failed
+        rows, failed, ran = rows + more, failed + more_failed, ran + more_ran
         summary = _mc.summarise(rows, measure) or summary
+        if not more or not summary["varies"]:
+            break
+        used, _how = _mc.limit_used(limit, summary)
+        if used is None or limit is None or used <= limit:
+            break
+        wanted = max(len(rows) + 1, _mc.trials_for(summary, limit, most=most))
+        if len(rows) >= most:
+            break
     record = _mc.record(summary, limit, read_as="mean", planned_trials=wanted)
     if failed:
         record["failed_trials"] = len(failed)
