@@ -162,7 +162,7 @@ same PR that adds, splits or renames one.
   correctness, each from a declared oracle or FI's trial record; never a headline metric or the
   script's results). `normalize` (strict, called by `plan.normalize_protocol`) / `repair` (a draft, called by
   `plan.repair_protocol`), `describe` / `plan_notes` / `countable` (the plan's *How we will judge whether the code got better* section,
-  rendered by `plan._criteria_lines`), `evaluate` / `se_rate` / `meets` (the values after a run), `record` / `history`
+  rendered by `plan._criteria_lines`), `evaluate` / `se_rate` / `meets` (the values after a run; `check_bar`: a bar of exact agreement with a check is met where the check agrees), `record` / `history`
   (`.fi/criteria_history.jsonl`) and `summary_line`. `receipts.design_core` leaves the criteria out of what the
   methodology audit vouches for; `Engine._hold_design_to_frozen` leaves an amendment's unusable criteria out. `criteria.from_checks` (the plan's own checks FI runs, no model) and, only when
   it gives none, `Engine._propose_criteria` (one search, one more question, `agents/plan_criteria.md`) run in `_node_plan` when the draft names none; `Engine._record_criteria` runs at the end of

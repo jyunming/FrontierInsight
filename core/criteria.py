@@ -22,7 +22,11 @@ Each has a ``direction`` (``lower`` or ``higher`` is better, or ``target``: clos
 ``target`` (for ``lower`` the most it may be, for ``higher`` the least, for ``target`` the value aimed at) and its own
 ``tolerance``: for ``target``, how close counts as met; for every criterion, the change a later version may show before
 it counts as worse. A number the script measured itself (an oracle with no case, answered by the script's own
-``oracle()``) is shown and never counted.
+``oracle()``) is shown and never counted. A ``lower`` or ``higher`` bar of exact agreement with the check it rests on
+(an error of ``0``, or the check's own expected value) is met where the check itself agrees (:func:`check_bar`): the
+check's tolerance is the plan's own statement of what counts as agreeing, and a plan's "exactly 0" read a rounding
+difference of 1.1e-16 as not met, run after run, while the check had passed it (the improve step chased it). A bar the
+plan set short of exact (an error of at most ``1e-5`` where the check accepts ``0.05``) is a goal, and stands.
 
 The criteria live inside the protocol, so they are frozen with it, covered by its hash and changed only by an amendment
 (:mod:`core.frozen_protocol`). After every run the engine computes each one and appends a row to
@@ -258,6 +262,26 @@ def from_checks(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     return out
 
 
+def check_bar(criterion: dict[str, Any], expected: Any, limit: Any) -> float | None:
+    """The bar a criterion resting on a check is met at when its own ``lower`` or ``higher`` bar is exact agreement with
+    the check (its error ``0``, or its value the check's ``expected`` value): the edge of the agreement the check allows,
+    ``limit``, in the criterion's direction. ``None`` when the criterion's own bar stands (no check, another direction, a
+    bar short of exact, which is a goal, or a check with no limit). Never stricter than the criterion's own bar."""
+    direction, target, limit = criterion.get("direction"), _num(criterion.get("target")), _num(limit)
+    if not criterion.get("oracle") or direction not in ("lower", "higher") or target is None or limit is None:
+        return None
+    if criterion.get("use") == "value":
+        expected = _num(expected)
+        if expected is None or target != expected:
+            return None
+        edge = expected + limit if direction == "lower" else expected - limit
+    else:
+        if direction != "lower" or target != 0:
+            return None
+        edge = limit
+    return edge if (edge > target if direction == "lower" else edge < target) else None
+
+
 def _oracle_of(protocol: dict[str, Any] | None, name: str) -> dict[str, Any] | None:
     from . import oracle_check
 
@@ -289,7 +313,17 @@ def describe(criterion: dict[str, Any], protocol: dict[str, Any] | None = None) 
         bar = f"closest to {_fmt(target)} is best; met within {_fmt(tol)} of {_fmt(target)}"
     else:
         bar = DIRECTIONS[direction]
-        if target is not None:
+        oracle = _oracle_of(protocol, criterion.get("oracle", "")) if criterion.get("oracle") else None
+        expected, limit = (None, None)
+        if oracle is not None:
+            from . import oracle_check
+
+            expected, limit, _mode = oracle_check.limit_of(oracle)
+        edge = check_bar(criterion, expected, limit)
+        if edge is not None:
+            bar += (f"; met where the check itself agrees (at {_fmt(edge)} or "
+                    f"{'below' if direction == 'lower' else 'above'}: the check accepts within {_fmt(limit)})")
+        elif target is not None:
             bar += f"; met at {_fmt(target)} or {'below' if direction == 'lower' else 'above'}"
         else:
             bar += "; no bar is set, only whether it gets better or worse"
@@ -398,9 +432,11 @@ def evaluate(items: list[dict[str, Any]], *, judged: list[dict[str, Any]], serie
         measured_by: str | None = None
         flagged = False
         why = ""
+        edge: float | None = None
         if c.get("oracle"):
             j = by_name.get(c["oracle"])
             v, e = (_num(j.get("value")), _num(j.get("expected"))) if j else (None, None)
+            edge = check_bar(c, e, j.get("limit")) if j else None
             if v is None:
                 why = why_missing.get("oracle") or f"the check {c['oracle']!r} gave no number this run"
             else:
@@ -424,10 +460,12 @@ def evaluate(items: list[dict[str, Any]], *, judged: list[dict[str, Any]], serie
             else:
                 why = "" if value is not None else why_missing["trials"]
             measured_by = "FI" if value is not None else None
+        judged_at = {**c, "target": edge} if edge is not None else c  # the check's own agreement (check_bar)
         row = {"name": c["name"], "value": value,
-               "met": False if flagged and measured_by == "FI" else meets(c, value), "counts": measured_by == "FI",
+               "met": False if flagged and measured_by == "FI" else meets(judged_at, value), "counts": measured_by == "FI",
                "measured_by": measured_by, "direction": c["direction"], "target": c.get("target"),
-               "tolerance": c["tolerance"], **({"flagged": True} if flagged else {})}
+               "tolerance": c["tolerance"], **({"flagged": True} if flagged else {}),
+               **({"met_at": edge} if edge is not None else {})}
         if why:
             row["why"] = why
         out.append(row)
