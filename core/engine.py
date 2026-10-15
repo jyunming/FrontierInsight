@@ -5335,8 +5335,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._log.warning("[plan] the drafted design is not usable (%s); the design step will draft it again", why)
             return {}
         study_notes = self._settle_study_type(state, design, normalized)
-        # How the code will be judged (core/criteria.py): a draft that names no criterion gets one search of the
-        # literature for how such studies are checked, and one more question to the model.
+        # How the code will be judged (core/criteria.py): a draft that names no criterion is judged by its own checks
+        # against known answers that FI runs; only a draft with none of those gets one search of the literature for
+        # how such studies are checked, and one more question to the model.
         no_criteria = False
         fi_runs = self._split_on({**state, "design": normalized})
         if self._runs_code(state) and isinstance(normalized.get("protocol"), dict) and not fi_runs:
@@ -5345,7 +5346,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         elif self._runs_code(state) and isinstance(normalized.get("protocol"), dict) and not _criteria.countable(
                 normalized["protocol"]):
             drafted = _criteria.declared(normalized["protocol"])
-            proposed, criteria_notes = await self._propose_criteria(state, normalized["protocol"])
+            proposed = _criteria.from_checks(normalized["protocol"])
+            if proposed:
+                criteria_notes = [
+                    "The plan named no criterion FI can measure itself for judging whether the code got better, so FI "
+                    "uses the plan's own checks against known answers that it runs: "
+                    + ", ".join(f"“{c['name']}”" for c in proposed)
+                    + " (how far each lands from the value it expects; met within the check's own tolerance)."]
+                self._log.info("[criteria] the plan names no criterion FI can measure itself; FI judges the code by the "
+                               "plan's own checks it runs (%s), without asking the model",
+                               ", ".join(c["name"] for c in proposed))
+            else:
+                proposed, criteria_notes = await self._propose_criteria(state, normalized["protocol"])
             repaired_notes += criteria_notes
             if proposed:
                 # What the model proposed comes first, then what the draft had (none FI could measure itself), up to five.

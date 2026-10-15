@@ -160,8 +160,8 @@ same PR that adds, splits or renames one.
   `plan.repair_protocol`), `describe` / `plan_notes` / `countable` (the plan's *How we will judge whether the code got better* section,
   rendered by `plan._criteria_lines`), `evaluate` / `se_rate` / `meets` (the values after a run), `record` / `history`
   (`.fi/criteria_history.jsonl`) and `summary_line`. `receipts.design_core` leaves the criteria out of what the
-  methodology audit vouches for; `Engine._hold_design_to_frozen` leaves an amendment's unusable criteria out. `Engine._propose_criteria` (one search, one more question,
-  `agents/plan_criteria.md`) runs in `_node_plan` when the draft names none; `Engine._record_criteria` runs at the end of
+  methodology audit vouches for; `Engine._hold_design_to_frozen` leaves an amendment's unusable criteria out. `criteria.from_checks` (the plan's own checks FI runs, no model) and, only when
+  it gives none, `Engine._propose_criteria` (one search, one more question, `agents/plan_criteria.md`) run in `_node_plan` when the draft names none; `Engine._record_criteria` runs at the end of
   every `_node_execute` (oracle values from `oracle_check.last_judged`, trial values through
   `trial_runner.recorded_series`, the commit through `code_project.head`; a run that exited 0 with results also stores
   `result_digest`, one hash per result via `improve.headline_digest`, and fills code/CHANGELOG.md's waiting "Did the

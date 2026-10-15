@@ -232,6 +232,32 @@ def declared(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     return repair(items, protocol)[0] if items not in (None, "", []) else []
 
 
+def from_checks(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Criteria made from the plan's own checks against known answers, without asking a model: one per check FI runs
+    itself (a ``case`` and a ``measure``) that can be judged, in the order the plan declares them, at most :data:`MAX`.
+    Each is how far the check lands from the value it expects (``use: error``), lower is better, met within the check's
+    own tolerance (``target``), and a change smaller than that tolerance counts as no change: within it two versions are
+    equally right by the plan's own standard. A check a written criterion could not name (one about a headline number)
+    is left out the same way."""
+    from . import oracle_check
+
+    out: list[dict[str, Any]] = []
+    for oracle in oracle_check.declared(protocol):
+        if len(out) >= MAX:
+            break
+        if oracle_check.case_of(oracle) is None:
+            continue
+        _expected, limit, _mode = oracle_check.limit_of(oracle)
+        if limit is None:
+            continue
+        name = str(oracle["name"]).strip()
+        item, _why = _one({"name": name, "oracle": name, "use": "error", "direction": "lower", "target": limit,
+                           "tolerance": limit}, len(out) + 1, protocol)
+        if item is not None and all(c["name"].lower() != name.lower() for c in out):
+            out.append(item)
+    return out
+
+
 def _oracle_of(protocol: dict[str, Any] | None, name: str) -> dict[str, Any] | None:
     from . import oracle_check
 
