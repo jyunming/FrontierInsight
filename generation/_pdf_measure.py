@@ -462,11 +462,22 @@ _RAW_MATH_RE = re.compile(
 )
 
 
-def _raw_math_findings(page: Page, *, region: str = "page") -> list[dict]:
+# In a paper, a $...$ span counts only when it holds math markup (a command, a script, a
+# brace or an equals sign): a code listing's ``$HOME/$USER`` or R's ``df$a + df$b`` is
+# not math left as text.
+_RAW_MATH_PAPER_RE = re.compile(
+    r"(?<!\\)\$(?=\S)[^$]*?[\\^_{=][^$]*?[^\s\\]\$(?!\d)"
+    r"|" + _RAW_MATH_RE.pattern.split("|", 1)[1]
+)
+
+
+def _raw_math_findings(page: Page, *, region: str = "page", paper: bool = False) -> list[dict]:
     """One finding per page whose text layer shows LaTeX math as text. The
     pptx printed every `$h = 0.5$` of the validation deck, and only the
-    model's look at the screenshots noticed."""
-    shown = [line for line in page.lines if line.visible and _RAW_MATH_RE.search(line.text)]
+    model's look at the screenshots noticed. ``paper`` reads a dollar span as math
+    only when it holds math markup."""
+    pattern = _RAW_MATH_PAPER_RE if paper else _RAW_MATH_RE
+    shown = [line for line in page.lines if line.visible and pattern.search(line.text)]
     if not shown:
         return []
     count = f"{len(shown)} lines show" if len(shown) > 1 else "A line shows"
@@ -1078,20 +1089,51 @@ def _column_gap_findings(page: Page, *, region: str = "page") -> list[dict]:
 
 # A producer that is a browser's print path, not a typesetting engine.
 _BROWSER_PRODUCERS = re.compile(r"skia|chrom|headless|edge|webkit|wkhtml|weasy|prince|qt ", re.IGNORECASE)
-# "1 1. Introduction", "3.3 3.3 Coverage": the writer's own number printed after the template's.
-_DOUBLED_NUMBER_RE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\1\.?\s+\S")
+# "1 1. Introduction", "3.3 3.3 Coverage": the writer's own number printed after the
+# template's, then a word ("4 4 × 4 grids" is a heading about 4 × 4 grids, not a doubled number).
+_DOUBLED_NUMBER_RE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\1[.):]?\s+[^\W\d_]")
 _LINE_NUMBER_RE = re.compile(r"^\d{1,4}$")
 
 
 def _line_number_ids(page: Page) -> set[int]:
     """The ``id`` of every line that is a line number in the margin (a review-mode
-    style numbers each line): digits only, at least six of them down one edge. They
-    are not text that ran into the margin."""
+    style numbers each line): digits only, at least six of them down one edge, outside
+    the text block. They are not text that ran into the margin. A column of whole
+    numbers inside the text block is a table's column and stays text."""
     numbers = [line for line in page.lines if line.visible and _LINE_NUMBER_RE.match(line.text)]
     columns: dict[int, list[Line]] = {}
     for line in numbers:
         columns.setdefault(round(line.box[0] / 4), []).append(line)
-    return {id(line) for column in columns.values() if len(column) >= 6 for line in column}
+    text = [line for line in page.lines if line.visible >= 20]
+    edges = _shared_edges(text)
+    found: set[int] = set()
+    for column in columns.values():
+        if len(column) < 6:
+            continue
+        if edges is not None and not (
+            max(line.box[2] for line in column) <= edges[0] + 1.0
+            or min(line.box[0] for line in column) >= edges[1] - 1.0
+        ):
+            continue
+        found.update(id(line) for line in column)
+    return found
+
+
+def _head_line_ids(doc: Document) -> set[int]:
+    """The ``id`` of every running-header line: the same text (page numbers aside) at
+    the same height near the top of at least two pages, as the whitepaper and policy
+    brief templates print the paper's title. It is not the first row of the page's text."""
+    near_top: list[tuple[tuple[str, int], Line]] = []
+    pages_with: Counter[tuple[str, int]] = Counter()
+    for page in doc.pages:
+        keys = set()
+        for line in page.lines:
+            if line.visible and line.box[1] > 0.88 * page.height:
+                key = (re.sub(r"\d+", "#", line.text.strip()), round(line.box[1] / 2))
+                near_top.append((key, line))
+                keys.add(key)
+        pages_with.update(keys)
+    return {id(line) for key, line in near_top if pages_with[key] >= 2}
 
 
 def _foot_line_ids(doc: Document) -> set[int]:
@@ -1179,13 +1221,20 @@ def _bottom_overflow_findings(doc: Document, body_pt: float | None) -> list[dict
 
 def _doubled_number_findings(doc: Document, body_pt: float | None) -> list[dict]:
     """A heading that prints its number twice: the template numbers sections and the
-    writer typed the number too (``1 1. Introduction``)."""
+    writer typed the number too (``1 1. Introduction``, ``3.3 3.3 Coverage``). The text
+    pattern decides; a heading's size or weight only confirms a single-part number,
+    because a browser's subsection heading is barely larger than the text and its font
+    may not report bold. A short line with no closing period reads as a heading too."""
     found = []
     for page in doc.pages:
         for line in page.lines:
-            if not line.visible or not _DOUBLED_NUMBER_RE.match(line.text):
+            m = _DOUBLED_NUMBER_RE.match(line.text) if line.visible else None
+            if m is None:
                 continue
-            if line.bold or (body_pt is not None and line.size > 1.05 * body_pt):
+            multi_part = "." in m.group(1)
+            heading_like = line.words <= 10 and not line.text.rstrip().endswith((".", ",", ";"))
+            larger = body_pt is not None and line.size > 1.05 * body_pt
+            if line.bold or larger or multi_part or heading_like:
                 found.append(_finding(
                     "doubled_number", page.number, "heading",
                     f"A heading prints its number twice: \"{line.text[:60]}\".",
@@ -1196,10 +1245,15 @@ def _doubled_number_findings(doc: Document, body_pt: float | None) -> list[dict]
 
 def _raw_table_findings(page: Page) -> list[dict]:
     """Table rows printed as text with their ``|`` bars: pandoc ends a table at a blank
-    line and prints the rest as a paragraph (three of the six rows of a stored table)."""
+    line and prints the rest as a paragraph (three of the six rows of a stored table).
+    A row has three bars or more (``| a | b |``); a displayed ``|x̂ − x| ≤ 0.1`` has two
+    and is not one."""
     raw = [
         line for line in page.lines
-        if line.visible and (line.text.lstrip().startswith("|") or line.text.count(" | ") >= 4)
+        if line.visible and (
+            (line.text.lstrip().startswith("|") and line.text.count("|") >= 3)
+            or line.text.count(" | ") >= 4
+        )
     ]
     if len(raw) < 3:
         return []
@@ -1210,10 +1264,12 @@ def _raw_table_findings(page: Page) -> list[dict]:
     )]
 
 
-def _bands(page: Page, skip: set[int]) -> list[tuple[float, float, str]]:
-    """The text rows of a page, top to bottom, as ``(top, bottom, text)``: the lines that
-    sit on one row (the cells of a table row, a figure's panel titles) joined left to
-    right. ``skip`` holds the ``id`` of lines that are not text (footers, line numbers)."""
+def _bands(page: Page, skip: set[int]) -> list[tuple[float, float, str, int, float]]:
+    """The text rows of a page, top to bottom, as ``(top, bottom, text, pieces, width)``:
+    the lines that sit on one row (the cells of a table row, a figure's panel titles)
+    joined left to right, how many there are (a wide gap starts a new line, so the cells
+    of a wide table row are several) and how wide the row is. ``skip`` holds the ``id`` of
+    lines that are not text (footers, running headers, line numbers)."""
     bands: list[list[Line]] = []
     for line in sorted((l for l in page.lines if l.visible and id(l) not in skip), key=lambda item: -item.box[3]):
         for band in bands:
@@ -1226,42 +1282,59 @@ def _bands(page: Page, skip: set[int]) -> list[tuple[float, float, str]]:
             bands.append([line])
     return [
         (max(l.box[3] for l in band), min(l.box[1] for l in band),
-         " ".join(l.text for l in sorted(band, key=lambda item: item.box[0])))
+         " ".join(l.text for l in sorted(band, key=lambda item: item.box[0])),
+         len(band),
+         max(l.box[2] for l in band) - min(l.box[0] for l in band))
         for band in bands
     ]
 
 
+def _is_prose_band(band: tuple[float, float, str, int, float], measure: float) -> bool:
+    """A row that is a line of running text, not a table row: one piece, six words or
+    more, at least 60% as wide as the widest row on its page."""
+    return band[3] == 1 and len(band[2].split()) >= 6 and band[4] >= 0.6 * measure
+
+
 def _orphan_table_row_findings(doc: Document, body_pt: float | None) -> list[dict]:
     """The last row of a table alone on the next page. A table that runs over a page
-    repeats its header row at the top of the next one (pandoc's tables do), so a page that
-    opens with a row of text seen on an earlier page, with at most one row under it before
-    a gap, holds one row of a table (the header and one row). A table whose header is not
-    repeated is not found."""
+    repeats its header at the top of the next one (pandoc's tables do), so a page that
+    opens with rows of text seen on an earlier page (the header, which may wrap over
+    several rows) and then at most one table row before a gap holds one row of a table.
+    A line of prose (one piece of six words or more across most of the page) ends the
+    table, and a page that opens with a line of prose seen before (a repeated sentence)
+    is not one. A table row is a text row of several cells; the further text rows of a
+    cell that wraps (one short piece) belong to it. A running
+    header (the same line at the top of every page) is not the start of the page's text.
+    A table whose header is not repeated is not found."""
     found = []
-    foot_ids = _foot_line_ids(doc)
-    seen: set[str] = set()
+    skip_doc = _foot_line_ids(doc) | _head_line_ids(doc)
+    seen: set[str] = set()       # rows of three words or more, which can open a page
+    seen_all: set[str] = set()   # every row, for the header's further rows
     step = 1.2 * (body_pt or 10.0) + 2.0     # the space between two rows of one table
     for page in doc.pages:
-        skip = foot_ids | _line_number_ids(page)
-        bands = _bands(page, skip)
-        if page.number > 1 and bands:
-            top_text = bands[0][2]
-            if len(top_text.split()) >= 3 and top_text in seen:
-                after = 0
-                for above, below in zip(bands, bands[1:]):
-                    if above[1] - below[0] < step:
-                        after += 1
-                    else:
-                        break
-                if after <= 1:
-                    last = bands[min(after, len(bands) - 1)][2]
-                    found.append(_finding(
-                        "orphan_table_row", page.number, "table",
-                        f"The page opens with the header of a table that began on the page before and "
-                        f"{'one row' if after else 'no row'} of it, starting with \"{last[:60]}\".",
-                        "medium", rows=after,
-                    ))
-        seen.update(text for _top, _bottom, text in bands if len(text.split()) >= 3)
+        bands = _bands(page, skip_doc | _line_number_ids(page))
+        measure = max((band[4] for band in bands), default=0.0)
+        if (page.number > 1 and bands and not _is_prose_band(bands[0], measure)
+                and len(bands[0][2].split()) >= 3 and bands[0][2] in seen):
+            head = 1
+            while head < len(bands) and bands[head][2] in seen_all and bands[head - 1][1] - bands[head][0] < step:
+                head += 1
+            body = []
+            for above, below in zip(bands[head - 1:], bands[head:]):
+                if above[1] - below[0] >= step or _is_prose_band(below, measure):
+                    break
+                body.append(below)
+            rows = [band for band in body if band[3] >= 2]
+            if len(rows) <= 1:
+                last = rows[0][2] if rows else bands[head - 1][2]
+                found.append(_finding(
+                    "orphan_table_row", page.number, "table",
+                    f"The page opens with the header of a table that began on the page before and "
+                    f"{'one row' if rows else 'no row'} of it, starting with \"{last[:60]}\".",
+                    "medium", rows=len(rows),
+                ))
+        seen.update(band[2] for band in bands if len(band[2].split()) >= 3)
+        seen_all.update(band[2] for band in bands)
     return found
 
 
@@ -1327,7 +1400,7 @@ def paper_report(
         findings += _overflow_findings(page)
         findings += _text_overlap_findings(page)
         findings += _column_gap_findings(page)
-        findings += _raw_math_findings(page)
+        findings += _raw_math_findings(page, paper=True)
         findings += _figure_over_text_findings(page)
         findings += _raw_table_findings(page)
         number_ids = _line_number_ids(page)

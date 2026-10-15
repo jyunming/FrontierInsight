@@ -12,6 +12,7 @@ does. The review-mode line numbers down its margin are not text that ran into it
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,7 @@ import pytest
 pytest.importorskip("pypdfium2")
 
 from generation import _pdf_measure as pm
-from generation._pdf_engine import find_pdf_engine
+
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "tests" / "fixtures" / "paper_latex"
@@ -49,10 +50,10 @@ def _filler(paragraphs: int) -> str:
 
 
 def _build(tmp_path: Path, name: str, body: str) -> Path:
-    """A PDF made by pdflatex from ``body``; skips without LaTeX."""
-    if find_pdf_engine(REPO) is None or subprocess.run(
-        ["pdflatex", "--version"], capture_output=True, creationflags=_NO_WINDOW,
-    ).returncode != 0:
+    """A PDF made by pdflatex from ``body``; skips without pdflatex (a host with only
+    tectonic or XeLaTeX skips too, rather than failing to start it)."""
+    pdflatex = shutil.which("pdflatex")
+    if pdflatex is None:
         pytest.skip("needs pdflatex")
     from PIL import Image
 
@@ -60,7 +61,7 @@ def _build(tmp_path: Path, name: str, body: str) -> Path:
     tex = tmp_path / f"{name}.tex"
     tex.write_text(HEAD + body + "\n\\end{document}\n", encoding="utf-8")
     run = subprocess.run(
-        ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", tex.name],
+        [pdflatex, "-interaction=nonstopmode", "-halt-on-error", tex.name],
         cwd=tmp_path, capture_output=True, creationflags=_NO_WINDOW,
     )
     assert run.returncode == 0, run.stdout[-600:]
@@ -235,3 +236,94 @@ def test_the_pdf_of_a_paper_with_margin_line_numbers_has_them_ignored_by_the_edg
     numbers = pm._line_number_ids(page)
     assert len(numbers) >= 50
     assert all(pm._LINE_NUMBER_RE.match(line.text) for line in page.lines if id(line) in numbers)
+
+
+# ---------------------------------------------------------------------------
+# What a reviewer of these checks found they reported wrongly, one case each
+
+
+def _line(text: str, x0: float, y0: float, *, x1: float | None = None, size: float = 10.0, bold: bool = False) -> pm.Line:
+    return pm.Line(text=text, size=size, bold=bold, box=(x0, y0, x1 if x1 is not None else x0 + 6.0 * len(text), y0 + size))
+
+
+def _page(lines: list, number: int = 1) -> pm.Page:
+    return pm.Page(number=number, width=612.0, height=792.0, lines=lines, images=[], rules=[])
+
+
+def _prose(count: int, top: float = 700.0) -> list:
+    return [_line(SENTENCE[:80], 72.0, top - 14.0 * k, x1=540.0) for k in range(count)]
+
+
+def test_a_displayed_absolute_value_is_not_a_table_row() -> None:
+    lines = _prose(4) + [
+        _line("|x̂ − x| ≤ 0.1 for every setting", 200.0, 600.0),
+        _line("|ŷ − y| ≤ 0.2 at the largest noise", 200.0, 580.0),
+        _line("|z| < 3 in all runs", 200.0, 560.0),
+    ]
+    assert pm._raw_table_findings(_page(lines)) == []
+
+
+def test_shell_and_r_dollars_in_a_listing_are_not_math_left_as_text() -> None:
+    lines = [
+        _line("cp $HOME/data.csv $USER/out", 72.0, 600.0),
+        _line("total <- df$a + df$b", 72.0, 580.0),
+    ]
+    assert pm._raw_math_findings(_page(lines), paper=True) == []
+    # ... while a dollar span with math markup in it still is.
+    found = pm._raw_math_findings(_page([_line("The fit gives $E_a = 50$ kJ", 72.0, 600.0)]), paper=True)
+    assert found and found[0]["check"] == "raw_markup"
+
+
+def test_a_table_column_of_whole_numbers_inside_the_text_block_is_not_line_numbers() -> None:
+    rows = [_line(str(10 * (k + 1)), 300.0, 500.0 - 14.0 * k) for k in range(8)]
+    page = _page(_prose(12) + rows)
+    assert pm._line_number_ids(page) == set()
+    # The same numbers down the left margin, outside the text block, are line numbers.
+    margin = [_line(str(k + 1), 40.0, 700.0 - 14.0 * k) for k in range(8)]
+    page = _page(_prose(12) + margin)
+    assert pm._line_number_ids(page) == {id(line) for line in margin}
+
+
+def test_a_sentence_that_repeats_a_count_is_not_a_doubled_heading_number() -> None:
+    doc = pm.Document(pages=[_page(_prose(6) + [
+        _line("4 4 × 4 grids were run at each noise level, as the plan set out.", 72.0, 500.0, x1=540.0),
+        _line("2 2 runs failed.", 72.0, 486.0),
+    ])])
+    assert pm._doubled_number_findings(doc, 10.0) == []
+    doc = pm.Document(pages=[_page(_prose(6) + [_line("2 2. Methods", 72.0, 500.0, size=12.0, bold=True)])])
+    assert len(pm._doubled_number_findings(doc, 10.0)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Stored papers a browser drew (pandoc's HTML route): s1 kinetics and s1 fdr
+
+
+S1_KINETICS = FIXTURES / "s1_kinetics_browser.pdf"
+S1_FDR = FIXTURES / "s1_fdr_browser.pdf"
+
+
+def test_the_stored_browser_kinetics_paper_shows_its_doubled_numbers_and_its_producer() -> None:
+    report = pm.paper_report(pm.measure_pdf(S1_KINETICS))
+    doubled = [f["problem"] for f in report["findings"] if f["check"] == "doubled_number"]
+    assert len(doubled) == 9, doubled
+    assert any('"3.3 3.3 Coverage' in p for p in doubled), doubled
+    assert "producer_is_fallback" in _kinds(report)
+
+
+def test_the_stored_browser_fdr_paper_shows_the_table_row_alone_on_page_3() -> None:
+    report = pm.paper_report(pm.measure_pdf(S1_FDR))
+    found = [f for f in report["findings"] if f["check"] == "orphan_table_row"]
+    assert [(f["page"], f["rows"]) for f in found] == [(3, 1)], found
+
+
+def test_a_running_header_on_every_page_is_not_a_table_header() -> None:
+    # The whitepaper and policy brief templates print the title at the top of every page.
+    def page(number: int, words: str) -> pm.Page:
+        header = _line("Error control in multiple testing", 72.0, 740.0, size=8.0)
+        body = [_line(f"{words} {k} " + SENTENCE[:70], 72.0, 700.0 - 14.0 * k, x1=540.0) for k in range(10)]
+        return _page([header] + body, number=number)
+
+    doc = pm.Document(pages=[page(1, "First"), page(2, "Second"), page(3, "Third")])
+    heads = pm._head_line_ids(doc)
+    assert len(heads) == 3
+    assert pm._orphan_table_row_findings(doc, 10.0) == []
