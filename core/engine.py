@@ -15244,9 +15244,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             for f in formula_asks:
                 reason = {"missing": "it gave none", "unusable": f"its formula could not be computed: {f.get('why')}",
                           "differs": "its formula and its expected value disagree",
-                          "ambiguous": "its formula can be read two ways"}[f["state"]]
-                self._log.info("[oracle] asking the plan for the expected value of %r as a formula FI can compute (%s)",
-                               f["name"], reason)
+                          "ambiguous": "its formula can be read two ways",
+                          "arithmetic": f"it states {f.get('expression')} = {f.get('stated')}, which comes to "
+                                        f"{f.get('value'):.10g}" if f["state"] == "arithmetic" else ""}[f["state"]]
+                self._log.info("[oracle] asking the plan about the expected value of %r (%s)", f["name"], reason)
             # Recorded before the request: it is made at most once, even if this run stops while it is out.
             self._oracle_review_write({**progress, "asked": True})
             before = self._planned_oracles()
@@ -15346,6 +15347,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         left = []
         for f in _forms.formula_findings(protocol if isinstance(protocol, dict) else None,
                                          _forms.fixed_settings_of_design(design)):
+            if f["state"] == "arithmetic":
+                self._log.warning("[oracle] the plan still states %s = %s for %r, which FI computes as %.10g",
+                                  f["expression"], f["stated"], f["name"], f["value"])
+                left.append(f"The plan states {f['expression']} = {f['stated']} for {f['name']!r}, which FI computes "
+                            f"as {f['value']:.10g}; read the check before trusting it.")
             if f["state"] in ("missing", "unusable", "ambiguous"):
                 why = ("the plan gave no formula for it" if f["state"] == "missing"
                        else f"its formula can be read two ways, so FI did not use it: {f.get('formula')}"

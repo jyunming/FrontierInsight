@@ -98,3 +98,12 @@ async def test_design_gets_the_skill_summary_not_the_full_skill_text(
     await eng._node_design(_state())
     assert "SUMMARY_SENTINEL" in prompts["design"]
     assert "FULL_SENTINEL" not in prompts["design"]
+
+
+def test_design_prompt_says_the_topics_runtime_is_a_wish_and_fis_limit_is_enforced():
+    from string import Template
+
+    text = (Path(__file__).resolve().parent.parent / "agents" / "design.md").read_text(encoding="utf-8")
+    assert "$timeout_s\n\nThis is the limit FI enforces on one run." in text
+    assert "aim for it as the researcher's wish; it is not enforced" in text
+    Template(text)  # still a valid template

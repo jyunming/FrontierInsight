@@ -106,6 +106,8 @@ $study_mode_directive
 ## Wall-time limit (seconds)
 $timeout_s
 
+This is the limit FI enforces on one run. If the topic itself asks for a shorter runtime, aim for it as the researcher's wish; it is not enforced, and a plan is not refused for exceeding it.
+
 ## Skills available (library = importable code; tool = external software)
 $skills_block
 

@@ -658,6 +658,49 @@ AMBIGUOUS_WHY = ("it can be read two ways: write it so it can only be read one w
                  "ln named, ellipk(k**2))")
 
 
+#: The characters a worked sum can be written with; a run of them to the left of an ``=`` is where its expression is.
+_SUM_CHARS = re.compile(r"[0-9A-Za-z_.+\-*/() ]+$")
+#: A number written right after an ``=`` (and not the start of a longer expression).
+_STATED = re.compile(r"\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(?![\w.]|\s*[-+*/^(])")
+
+
+def stated_arithmetic(text: Any) -> list[dict[str, Any]]:
+    """The sums ``text`` (a reference, a derivation) works out, ``<expression of numbers, constants and the formula's
+    functions> = <number>``, that FI can compute itself and that come out as another number than the one stated:
+    ``{"expression", "stated", "value"}``. The stated number may differ from the value by half a unit of its last written
+    digit (and a tiny floor); an expression that holds a name (a variable, a word) is not a sum and is never read."""
+    out: list[dict[str, Any]] = []
+    text = str(text or "")
+    for m in re.finditer(r"(?<![<>=!])=(?![=>])", text):
+        right = _STATED.match(text[m.end():])
+        left = _SUM_CHARS.search(text[:m.start()])
+        if right is None or left is None:
+            continue
+        run = left.group(0)
+        stated = float(right.group(1))
+        # The longest piece of the run that is a sum on its own, starting where a word or the run begins.
+        starts = [0] + [i + 1 for i, c in enumerate(run) if c == " "]
+        for i in starts:
+            piece = run[i:].strip()
+            if not piece or re.search(r"[-+*/^(]\s*$", run[:i]) or (i and piece[0] in "+-*/"):
+                continue
+            if not re.search(r"[-+*/]|\w\(", piece) or names(piece):
+                continue
+            result = evaluate(piece, {})
+            if result.value is None:
+                continue
+            precision = written_precision(stated)
+            # A number written to four digits or more is known only to them, and the sum carries that to its result
+            # (2.006 * 1.654 is not good to more than the digits of 2.006 and 1.654).
+            carried = sum(p[1] / abs(float(c)) for c in re.findall(r"(?<![\w.])\d+\.\d*(?:[eE][-+]?\d+)?|(?<![\w.])\.\d+", piece)
+                          if float(c) != 0 and (p := written_precision(float(c))) and p[0] >= 4)
+            slack = max(precision[1] if precision else 0.0, 1e-9 * abs(stated), 1e-12) + carried * abs(result.value)
+            if abs(result.value - stated) > slack:
+                out.append({"expression": piece, "stated": right.group(1), "value": result.value})
+            break
+    return out
+
+
 def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | None = None) -> list[dict[str, Any]]:
     """What FI's own computation of each check's expected value found, for the checks FI may correct that can be judged
     (a number ``expected`` and a ``tolerance``): ``{"name", "state", ...}`` with ``state`` ``agrees``, ``missing``,
@@ -672,6 +715,13 @@ def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | 
 
     found: list[dict[str, Any]] = []
     for oracle in _oracle.declared(protocol):
+        # A sum the plan works out in its own words (a reference, a derivation) is computed too: the plan's own hand
+        # arithmetic can be wrong where its `expected_formula` is right (a stated 3.4486 where the sum gives 3.4519).
+        for key, value in oracle.items():
+            if key in ("measure", "expected_formula") or not isinstance(value, str):
+                continue
+            for sw in stated_arithmetic(value):
+                found.append({"name": str(oracle["name"]).strip(), "state": "arithmetic", **sw})
         expected, limit, _mode = _oracle.limit_of(oracle)
         if expected is None or limit is None or not _triage.correctable(oracle):
             continue
@@ -768,6 +818,10 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True, fixed:
             lines.append(f"- {f['name']!r}: its `expected_formula` `{f['formula']}` {f['why']}; FI reads it as "
                          f"{_digits(f['value'])} while `expected` says {_digits(f['expected'])}. Give it in a form that "
                          "can only be read one way, and the corrected `expected` if the formula is right.")
+        elif f["state"] == "arithmetic":
+            lines.append(f"- {f['name']!r}: it states `{f['expression']} = {f['stated']}`, but FI computes "
+                         f"{f['expression']} as {_digits(f['value'])}. Correct the number wherever the check uses it "
+                         "(its reference, `measure`, `expected`, `expected_formula`), or the expression if that is wrong.")
         elif f["state"] == "differs":
             lines.append(f"- {f['name']!r}: FI computed your `expected_formula` `{f['formula']}`: it gives "
                          f"{_digits(f['value'])}, but `expected` says {_digits(f['expected'])}. Give the corrected "
