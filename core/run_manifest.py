@@ -978,7 +978,9 @@ def _value_count_findings(
     per-setting list the analysis prints is then held to its own setting's trials as well (:func:`_listed_counts`)."""
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     runs = _num(protocol.get("runs_per_setting"))
-    if result_json is None or not grid or runs is None:
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    # A study whose only factor is what each run compares inside it (one fit over five temperatures) has no grid: one setting.
+    if result_json is None or not (grid or inside) or runs is None:
         return []
     # The baseline is trials the manifest itself says SUCCEEDED, not the protocol's raw runs_per_setting x cells: a
     # design with a genuine, declared failure rate (failed_trials, a failure_policy) legitimately has fewer real values
@@ -1147,7 +1149,8 @@ def differences(
     analysis lists more under than the trials of that setting returned. Computed from the counts :func:`problems` compares,
     never from its sentences. Empty when FI holds no record or the analysis lists no more than was measured."""
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-    if not recorded or result_json is None or not grid or not isinstance(manifest, dict):
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    if not recorded or result_json is None or not (grid or inside) or not isinstance(manifest, dict):
         return []
     out: list[dict[str, Any]] = []
     for spec in protocol.get("metrics") or []:
@@ -1159,7 +1162,7 @@ def differences(
             continue
         defined, undefined = counts
         listed_defined, listed_undefined, excesses, _ad, _au = _listed_counts_detailed(
-            result_json, metric, grid, (defined, undefined), recorded_by_cell)
+            result_json, metric, metric_grid(protocol, metric, recorded_by_cell), (defined, undefined), recorded_by_cell)
         measured = defined + undefined
         if (listed_defined > defined or listed_undefined > undefined or listed_defined + listed_undefined > measured
                 or excesses):

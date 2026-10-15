@@ -112,6 +112,10 @@ def read_returned(value, levels, entry):
             bad.append(name)
             continue
         keys = [level_key(level) for level in levels]
+        if isinstance(v, (list, tuple)) and len(levels[0]) > 1:
+            return None, ("{}() returned `{}` as a list, and a list is only read when one thing is compared inside the "
+                          "run; with several, return a mapping keyed like {} (one number for each of the {} "
+                          "combinations)".format(entry, name, "`" + keys[0] + "`", len(levels)))
         if isinstance(v, (list, tuple)) and len(levels[0]) == 1:
             if len(v) != len(levels) or not all(_number(x) for x in v):
                 return None, ("{}() returned `{}` as a list of {} item(s): a value per level of what each run compares "

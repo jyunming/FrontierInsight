@@ -278,6 +278,10 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
             fixed_values, why = _grid_values(factor, values, part="in_each_run")
             if why:
                 return None, why
+            seen_values = [json.dumps(float(v) if _number(v) else v) for v in fixed_values or []]
+            if len(set(seen_values)) < len(seen_values):
+                return None, (f"`protocol.in_each_run.{factor}` lists the same value twice: each value is compared "
+                              "once, so list every value one time")
             if len(fixed_values or []) < 2:
                 return None, (f"`protocol.in_each_run.{factor}` has one value: a single value is not compared; it is "
                               "a fixed setting of the run")
@@ -313,6 +317,12 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         if fixed_metrics is None:
             return None, why
         out["metrics"] = fixed_metrics
+        subset = [str(m.get("id")) for m in fixed_metrics if isinstance(m, dict) and m.get("given")]
+        if subset and out.get("in_each_run"):
+            return None, (f"`protocol.metrics` gives a mean over a subset of the trials (`given`) for {', '.join(subset)}, "
+                          "and `protocol.in_each_run` records a number per value inside each run: the two cannot be "
+                          "combined. Make what each run compares a setting of `protocol.grid` (each value run on its "
+                          "own), or drop `given` and report the mean over every run")
     oracles = out.get("oracles")
     if oracles is not None:
         if isinstance(oracles, (str, dict)):
