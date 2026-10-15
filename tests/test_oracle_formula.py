@@ -284,3 +284,53 @@ def test_after_an_approximate_sign_a_small_gap_is_never_a_slip() -> None:
     value = tri.calculate("(2/pi)*ellipk(sin(pi/8)**2)")
     assert tri.arithmetic_slip(base + f"{value * 1.0005:.5f}", value * 1.0005, 0.001 * exact) is None
     assert tri.arithmetic_slip(base + f"{value * 1.004:.5f}", value * 1.004) is None
+
+
+# --- the special functions of FI's own expected-value working ----------------------------------------------------------
+# A real plan (suite r7, deep-ultraviolet lithography) wrote its expected value with the Bessel function J1, which FI
+# could not compute, so the check rested on the plan's own number.
+
+COHERENCE_ZERO = {"name": "mutual_coherence_first_zero", "kind": "special_case",
+                  "check": "Evaluate the circular-source mutual coherence at the first zero of J1.", "expected": 0.0,
+                  "expected_formula": "2*J1(2*pi*sigma*NA*d_m/lambda_m)/(2*pi*sigma*NA*d_m/lambda_m)",
+                  "tolerance": 1e-10, "tolerance_mode": "absolute",
+                  "case": {"sigma": 0.15915494309189535, "NA": 1.5, "d_m": 5.108941293610016, "lambda_m": 2.0},
+                  "measure": "mutual_coherence"}
+
+
+@pytest.mark.parametrize(("formula", "value"), [
+    ("j0(1)", 0.7651976865579666), ("j1(1)", 0.44005058574493355), ("J0(2.404825557695773)", 0.0),
+    ("j1(-2)", -0.5767248077568734), ("j0(1000)", 0.02478668615242017), ("j0(0)", 1.0),
+    ("erf(1)", 0.8427007929497149), ("0.5*erfc(1.96/sqrt(2))", 0.024997895148220428), ("gamma(5)", 24.0),
+    ("gamma(0.5)**2", 3.141592653589793), ("lgamma(100)", 359.1342053695754),
+])
+def test_the_special_functions_match_scipys(formula: str, value: float) -> None:
+    got = of.evaluate(formula, {}, special=True).value
+    assert got is not None and abs(got - value) <= 1e-14 * max(1.0, abs(value)), (formula, got)
+
+
+def test_a_bessel_function_far_out_or_a_pole_is_not_a_number() -> None:
+    assert of.evaluate("j0(20000)", {}, special=True).value is None
+    assert of.evaluate("gamma(0)", {}, special=True).value is None
+
+
+def test_the_r7_bessel_check_is_computed_by_fi_and_agrees() -> None:
+    value, why = of.formula_value(COHERENCE_ZERO)
+    assert why == "" and value is not None and abs(value) < 1e-15
+    assert [f["state"] for f in of.formula_findings(_protocol(dict(COHERENCE_ZERO)))] == ["agrees"]
+
+
+def test_a_setting_named_like_a_special_function_is_a_setting() -> None:
+    # A damping rate `gamma` or a current `j0` in a check's case is read as that setting; called, it is the function.
+    assert of.evaluate("gamma*2 + gamma(3)", {"gamma": 0.25}, special=True).value == 2.5
+    assert of.evaluate("j0", {}, special=True).missing == ["j0"]
+    assert of.evaluate("sqrt*2", {"sqrt": 1.0}, special=True).unreadable  # an ordinary function never is
+
+
+def test_only_fis_own_expected_formula_uses_the_special_functions() -> None:
+    # A check's own formula is built from what the simulation returns, never through these.
+    assert of.evaluate("erf(x)", {"x": 1.0}).unreadable
+    # Prose (a derivation, a paper's formula) can mean the author's own gamma(T) or j0(x): never read as these.
+    assert tri.calculate("gamma(2)") is None and tri.calculate("j0(1)") is None and tri.calculate("erf(1)") is None
+    assert tri.calculate("ellipk(0.5)") is not None
+    assert tri.arithmetic_slip("derivation: gamma(2) = 0.3", 0.3) is None

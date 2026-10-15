@@ -113,7 +113,8 @@ same PR that adds, splits or renames one.
   `Engine._revise_checks_only`, which keeps only the changes to `protocol.oracles` and the criteria reading them.
   `core/rerun_from.py` moves both markers aside with the plan (and the test-run one with the design).
   `expected_formula` (a check's expected value as one formula FI computes itself, with `evaluate(..., special=True)`
-  on the check's numeric `case` settings): `formula_value` / `formula_findings` (only checks `oracle_triage.correctable`
+  on the check's numeric `case` settings; `SPECIAL_FUNCTIONS`: `ellipk`, `erf`, `erfc`, `gamma`, `lgamma`, `j0`/`J0`,
+  `j1`/`J1`, no SciPy; prose derivations use only `PROSE_FUNCTIONS`, via `oracle_triage.calculate`): `formula_value` / `formula_findings` (only checks `oracle_triage.correctable`
   allows and that can be judged), `formula_request` (the part of the SAME one request about the checks),
   `apply_formulas` (a formula that still disagrees by more than the check's own tolerance sets `expected`; the
   tolerance, mode, case and measure are never touched), `EXPECTED_FORMULA_LANGUAGE` (generated from the

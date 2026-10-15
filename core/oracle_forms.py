@@ -81,9 +81,30 @@ def _ellipk(m: float) -> float:
     return math.pi / (2 * a)
 
 
+def _bessel(n: int) -> Callable[[float], float]:
+    """The Bessel function of the first kind ``J_n`` (SciPy's ``scipy.special.j0``/``j1``, not the spherical ones):
+    ``(1/2pi) * integral over a full period of cos(n*t - x*sin(t))``, by the trapezoid rule, which is exact to rounding
+    for a smooth periodic integrand once there are more points than ``|x|`` (here ``4|x| + 64``; no SciPy needed)."""
+    def j(x: float) -> float:
+        if abs(x) > 1e4:
+            raise ValueError(f"j{n}(x) is computed here for |x| <= 1e4")
+        points = int(4 * abs(x)) + 64
+        return math.fsum(math.cos(n * t - x * math.sin(t))
+                         for t in (2 * math.pi * k / points for k in range(points))) / points
+    return j
+
+
 #: Functions only FI's own working-out of a derivation may use (core/oracle_triage.py::calculate), never a check's
 #: formula: a plan writes its expected value with them, a simulation's returned names are never passed through them.
-SPECIAL_FUNCTIONS: dict[str, Callable[..., float]] = {"ellipk": _ellipk}
+#: General mathematics, no field's own formulas.
+SPECIAL_FUNCTIONS: dict[str, Callable[..., float]] = {
+    "ellipk": _ellipk, "erf": math.erf, "erfc": math.erfc, "gamma": math.gamma, "lgamma": math.lgamma,
+    "j0": _bessel(0), "j1": _bessel(1), "J0": _bessel(0), "J1": _bessel(1),
+}
+#: The special functions a working written in prose (a check's derivation, a paper's formula) is worked out with. Only
+#: ``expected_formula`` is written in a language FI states (:data:`EXPECTED_FORMULA_LANGUAGE`); in prose ``gamma(T)`` or
+#: ``j0(x)`` can be the author's own function, so the others are never read there.
+PROSE_FUNCTIONS: dict[str, Callable[..., float]] = {"ellipk": _ellipk}
 
 _BINARY: dict[type, Callable[[float, float], float]] = {
     ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
@@ -139,7 +160,8 @@ def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None) -
         if isinstance(node, ast.Name):
             if id(node) in calls and node.id not in functions:
                 return None, f"it calls {node.id}(), which is not one of {FUNCTION_LIST}"
-            if id(node) not in calls and node.id in functions:
+            # A special function's name not called is a setting of that name (a damping rate `gamma`, a current `j0`).
+            if id(node) not in calls and node.id in FUNCTIONS:
                 return None, f"it uses the function {node.id} without calling it"
             continue
         if isinstance(node, ast.Constant):
@@ -189,11 +211,13 @@ class Evaluated:
     problem: str = ""
 
 
-def evaluate(text: Any, values: dict[str, Any], *, special: bool = False) -> Evaluated:
+def evaluate(text: Any, values: dict[str, Any], *,
+             special: bool | dict[str, Callable[..., float]] = False) -> Evaluated:
     """``text`` computed from ``values`` (what the simulation returned). Never runs code: the parsed tree is walked
     here, and each constant is a float, so no exponent can grow an integer without bound. ``special``: FI's own
-    working-out of a derivation, which may also call :data:`SPECIAL_FUNCTIONS`."""
-    functions = {**FUNCTIONS, **SPECIAL_FUNCTIONS} if special else FUNCTIONS
+    working-out of an expected value, which may also call :data:`SPECIAL_FUNCTIONS` (``True``) or the ones given."""
+    extra = special if isinstance(special, dict) else SPECIAL_FUNCTIONS if special else {}
+    functions = {**FUNCTIONS, **extra}
     tree, why = _tree(text, functions)
     if tree is None:
         return Evaluated(unreadable=why)
@@ -488,9 +512,10 @@ def request(requests: list[str], *, last: bool = True) -> str:
 #: How an ``expected_formula`` is written, generated from the calculator's own function tables so the two cannot drift.
 EXPECTED_FORMULA_LANGUAGE = (
     "the expected value as one formula FI can compute itself: numbers, + - * / ** %, parentheses, pi, the functions "
-    f"{FUNCTION_LIST}, and {', '.join(f'{n}(m)' for n in sorted(SPECIAL_FUNCTIONS))} with m = k**2 (SciPy's "
-    "convention, so ellipk(sin(a/2)**2) for amplitude a), and the settings of the check's `case` by name; angles in "
-    "radians (30 degrees is 30*pi/180)"
+    f"{FUNCTION_LIST}, the special functions erf(x), erfc(x), gamma(x), lgamma(x) (the log of |gamma(x)|), j0(x) and "
+    "j1(x) (also J0(x), J1(x): the Bessel functions of the first kind, not the spherical ones) and ellipk(m) with m = k**2 (all "
+    "as SciPy names them, so ellipk(sin(a/2)**2) for amplitude a), and the settings of the check's `case` by name; "
+    "angles in radians (30 degrees is 30*pi/180)"
 )
 
 

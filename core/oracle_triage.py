@@ -513,7 +513,7 @@ def calculate(text: str) -> float | None:
         return None
     text = _DEGREES.sub(lambda m: f"({m.group(1)}*pi/180)", text)
     text = text.replace("^", "**").replace("×", "*").replace("·", "*").replace("−", "-").replace("π", "pi")
-    return _forms.evaluate(text, {}, special=True).value
+    return _forms.evaluate(text, {}, special=_forms.PROSE_FUNCTIONS).value
 
 
 def _digits(number: str) -> int:
