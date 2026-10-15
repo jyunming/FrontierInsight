@@ -1058,6 +1058,15 @@ class PaperGenerator:
             # stays as the writer and the engine left it.
             if page_limit is not None:
                 sanitized_md = small_source_lists(sanitized_md)
+            # Each figure's paper copy (figures/paper/<stem>.pdf: drawn at the text width with body-sized text, as
+            # vector) in place of its PNG; paper.md and the HTML render keep the PNGs.
+            from generation._paper_figures import prefer_paper_figures
+
+            sanitized_md, n_paper_figures = prefer_paper_figures(
+                sanitized_md, out_dir, two_column=self.config.output.paper_format in TWO_COLUMN_FORMATS,
+            )
+            if n_paper_figures:
+                _log.info("paper.pdf: %d figure(s) set from their paper copies (figures/paper/*.pdf)", n_paper_figures)
             sanitized_path = out_dir / "paper_pdf_source.md"
             sanitized_path.write_text(sanitized_md, encoding="utf-8")
             pandoc_input = sanitized_path
