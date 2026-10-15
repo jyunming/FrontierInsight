@@ -21,6 +21,7 @@ import logging
 import re
 import shutil
 import subprocess
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from core.engine import QuestArtifacts, build_further_reading, cited_references,
 from generation._pandoc import BLANK_LINE_RE, MARKDOWN_READER, MATH_SPAN_RE, find_pandoc
 from generation import _cjk
 from generation._figure_captions import blank_lines_around_figures, numbers_off_figure_captions
+from generation._headings import strip_heading_numbers
 from generation._keywords import extract_keywords
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 
@@ -210,6 +212,59 @@ _LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
     " ": " ",  # narrow no-break space
 }
 
+def _script(kind: str, text: str) -> str:
+    return "\\ensuremath{" + kind + "{" + text + "}}"
+
+
+def _math(command: str) -> str:
+    return "\\ensuremath{" + command + "}"
+
+
+# More glyphs a model writes (written as code points so no editor can alter them).
+# A subscript parenthesis (U+208D) and a macron (U+0304, below) each stopped the
+# PDF of a real paper. A glyph in no map at all is replaced at the end of
+# :func:`_sanitize_unicode_for_latex`, never left for pdflatex to stop on.
+_MORE_GLYPHS: dict[str, str] = {
+    "₌": _script("_", "="), "₍": _script("_", "("), "₎": _script("_", ")"),
+    # Subscript letters (U+2090-U+209C, U+1D62-U+1D6A, U+2C7C) and superscript letters.
+    **{chr(code): _script("_", letter) for code, letter in (
+        (0x2090, "a"), (0x2091, "e"), (0x2092, "o"), (0x2093, "x"), (0x2095, "h"), (0x2096, "k"),
+        (0x2097, "l"), (0x2098, "m"), (0x2099, "n"), (0x209A, "p"), (0x209B, "s"), (0x209C, "t"),
+        (0x1D62, "i"), (0x1D63, "r"), (0x1D64, "u"), (0x1D65, "v"), (0x2C7C, "j"),
+    )},
+    **{chr(code): _script("^", letter) for code, letter in (
+        (0x1D43, "a"), (0x1D47, "b"), (0x1D9C, "c"), (0x1D48, "d"), (0x1D49, "e"), (0x1D4F, "k"),
+        (0x1D50, "m"), (0x1D56, "p"), (0x1D57, "t"), (0x02E3, "x"), (0x2071, "i"),
+    )},
+    # Greek variants and letter-like symbols.
+    "ϕ": _math("\\phi"), "ϑ": _math("\\vartheta"), "ϵ": _math("\\varepsilon"),
+    "ϱ": _math("\\varrho"), "ς": _math("\\varsigma"), "ϖ": _math("\\varpi"),
+    "ℓ": _math("\\ell"), "ℏ": _math("\\hbar"), "ℵ": _math("\\aleph"),
+    # Operators, relations, arrows, brackets.
+    "∗": _math("\\ast"), "∙": _math("\\bullet"), "∣": _math("\\mid"),
+    "∕": "/", "⁄": "/", "∶": ":", "≔": ":=",
+    "↑": _math("\\uparrow"), "↓": _math("\\downarrow"),
+    "↗": _math("\\nearrow"), "↘": _math("\\searrow"),
+    "⟶": _math("\\longrightarrow"), "⟹": _math("\\Longrightarrow"),
+    "≜": _math("\\triangleq"), "≲": _math("\\lesssim"), "≳": _math("\\gtrsim"),
+    "≺": _math("\\prec"), "≻": _math("\\succ"), "⊥": _math("\\perp"),
+    "∠": _math("\\angle"), "∮": _math("\\oint"), "∏": _math("\\prod"),
+    "⌈": _math("\\lceil"), "⌉": _math("\\rceil"),
+    "⌊": _math("\\lfloor"), "⌋": _math("\\rfloor"),
+    "‖": _math("\\|"), "✓": _math("\\checkmark"), "✔": _math("\\checkmark"),
+    "✗": "x", "✘": "x", "□": _math("\\square"), "■": _math("\\blacksquare"),
+    "★": "*", "☆": "*",
+    "℃": _math("^{\\circ}") + "C", "℉": _math("^{\\circ}") + "F",
+    # Dashes, hyphens, quotes and spaces of other widths.
+    "―": "---", "‑": "-", "‐": "-", "‒": "--", "‚": ",", "„": ",,",
+    " ": " ", " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
+    " ": " ", " ": " ", " ": " ", " ": " ", " ": " ", "　": " ",
+    "‎": "", "‏": "", "‪": "", "‫": "", "‬": "", "⁠": "",
+    "️": "", "︎": "",   # variation selectors that follow an emoji or a symbol
+}
+for _glyph, _latex in _MORE_GLYPHS.items():
+    _LATEX_UNICODE_REPLACEMENTS.setdefault(_glyph, _latex)
+
 # Pre-compile a translator for str.translate — that path is faster
 # than a chained str.replace and Python's translate handles multi-
 # char destination strings transparently.
@@ -260,18 +315,89 @@ def _script_glyph_runs_as_one_script(math: str) -> str:
     return _SCRIPT_GLYPH_RUN_RE.sub(merged, math)
 
 
+# A combining mark after a letter (``x`` + U+0304 is "x-bar"): pdflatex stops on
+# the mark, and Unicode has no single character for most such letters.
+_COMBINING_RE = re.compile(r"(\w)([\u0300-\u036f\u20d0-\u20ff]+)")
+_COMBINING_ACCENTS: dict[int, str] = {
+    0x0300: "\\grave", 0x0301: "\\acute", 0x0302: "\\hat", 0x0303: "\\tilde", 0x0304: "\\bar",
+    0x0305: "\\overline", 0x0306: "\\breve", 0x0307: "\\dot", 0x0308: "\\ddot", 0x030a: "\\mathring",
+    0x030c: "\\check", 0x20d7: "\\vec", 0x20db: "\\dddot",
+}
+_MARK_RE = re.compile(r"[\u0300-\u036f\u20d0-\u20ff]")
+# Where a glyph the maps do not know is still not safe for pdflatex's utf8
+# input: Greek, the symbol blocks (punctuation, scripts, arrows, math, technical,
+# shapes, dingbats), mathematical alphanumerics, emoji and private use. Latin
+# letters (U+00A0-U+017F) are set up by inputenc, and a language written in its
+# own script (Cyrillic, CJK, ...) goes to XeLaTeX, so neither is touched.
+_UNSAFE_RANGES: tuple[tuple[int, int], ...] = (
+    (0x0370, 0x03ff), (0x2000, 0x2bff), (0x2e00, 0x2e7f), (0x1d400, 0x1d7ff),
+    (0x1f000, 0x1ffff), (0xe000, 0xf8ff), (0xfff0, 0xffff),
+)
+# Inside those ranges inputenc does set these up (and the maps above leave them).
+_KNOWN_TO_INPUTENC = frozenset({0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2020, 0x2021,
+                                0x2022, 0x2026, 0x2030, 0x20ac, 0x2116, 0x2122})
+_PICTOGRAPH_RANGES: tuple[tuple[int, int], ...] = ((0x1f000, 0x1ffff), (0x2600, 0x27bf), (0xe000, 0xf8ff))
+
+
+def _accented_letter(match: "re.Match[str]") -> str:
+    """``x`` + a combining macron as ``\\ensuremath{\\bar{x}}``; a letter Unicode
+    has one character for (``e`` + acute) as that character. A mark with no
+    LaTeX accent here is dropped, the letter kept."""
+    base, marks = match.group(1), match.group(2)
+    composed = unicodedata.normalize("NFC", base + marks)
+    # An accent of a word (cafe + acute, n + tilde) is the accented letter; a hat, bar,
+    # dot or tilde on a variable is a statistician's accent and stays math.
+    prose = marks[0] in "̧̨̀́̈" or (marks[0] == "̃" and base in "nNaAoO")
+    if prose and len(composed) == 1 and 0xa0 <= ord(composed) <= 0x17f:
+        return composed
+    inner = _LATEX_UNICODE_REPLACEMENTS.get(base, base)
+    wrapped = re.fullmatch(r"\\ensuremath\{(.*)\}", inner)
+    if wrapped:
+        inner = wrapped.group(1)
+    elif not base.isascii() or not base.isalnum():
+        return base
+    for mark in marks:
+        accent = _COMBINING_ACCENTS.get(ord(mark))
+        if accent:
+            inner = f"{accent}{{{inner}}}"
+    return "\\ensuremath{" + inner + "}" if inner != base else base
+
+
+def _replace_unsettable(markdown: str) -> tuple[str, list[str]]:
+    """Every glyph left that pdflatex cannot set (see ``_UNSAFE_RANGES``, a mark
+    with no letter before it) becomes its plain-letter form when it has one
+    (``𝑥`` as ``x``), nothing when it is a pictograph or a stray mark, and a ``?``
+    otherwise. Returns the text and the glyphs it replaced, as ``U+XXXX``."""
+    replaced: list[str] = []
+
+    def one(ch: str) -> str:
+        code = ord(ch)
+        if code < 0x80 or code in _KNOWN_TO_INPUTENC:
+            return ch
+        if not (unicodedata.category(ch).startswith("M") or any(lo <= code <= hi for lo, hi in _UNSAFE_RANGES)):
+            return ch
+        replaced.append(f"U+{code:04X}")
+        if any(lo <= code <= hi for lo, hi in _PICTOGRAPH_RANGES) or unicodedata.category(ch).startswith("M"):
+            return ""
+        plain = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
+        return plain if plain.strip() else "?"
+
+    return "".join(one(ch) for ch in markdown), replaced
+
+
 def _sanitize_unicode_for_latex(markdown: str) -> str:
     """Replace common LLM-emitted Unicode math/typography glyphs with
     LaTeX-safe equivalents so ``pdflatex`` + ``\\usepackage[utf8]{inputenc}``
     doesn't error with ``Unicode character … not set up for use with
     LaTeX``.
 
-    Skipped glyphs (anything outside :data:`_LATEX_UNICODE_REPLACEMENTS`)
-    are left as-is. If the template's ``\\DeclareUnicodeCharacter``
-    safety net covers them, fine; otherwise pdflatex will still error
-    — at which point the right fix is to extend the map. Logged at
-    INFO when the sanitizer actually replaced anything so run.log
-    surfaces what was rewritten.
+    A combining mark after a letter becomes a math accent (``x̄`` is
+    ``\\ensuremath{\\bar{x}}``), and a glyph in none of the maps below that
+    pdflatex still cannot set (see :func:`_replace_unsettable`) is replaced by
+    its plain form or a ``?``: a glyph the maps do not know no longer stops the
+    PDF. It is logged at WARNING so run.log names it, and the map can grow.
+    Latin letters and other scripts are left as they are (a script FI sets with
+    XeLaTeX is not touched).
 
     A math span (``$..$``, ``$$..$$``, ``\\(..\\)``, ``\\[..\\]``, found by
     pandoc's own rules) takes :data:`_LATEX_MATH_OVERRIDES` for the dashes, so
@@ -279,11 +405,19 @@ def _sanitize_unicode_for_latex(markdown: str) -> str:
     super/subscript glyphs as one script (``$10⁻³$`` is ``10^{-3}``). Code,
     fenced or inline, is not math and is rewritten as prose is: a raw glyph
     left in it would still stop pdflatex."""
-    return "".join(
+    markdown = _COMBINING_RE.sub(_accented_letter, markdown)
+    out = "".join(
         _script_glyph_runs_as_one_script(segment).translate(_LATEX_MATH_TRANSLATOR)
         if is_math else segment.translate(_LATEX_UNICODE_TRANSLATOR)
         for segment, is_math in _split_math_segments(markdown)
     )
+    out, replaced = _replace_unsettable(out)
+    if replaced:
+        _log.warning(
+            "paper.pdf: %d glyph(s) pdflatex cannot set were replaced by their plain form or a '?' (%s)",
+            len(replaced), ", ".join(sorted(set(replaced))[:12]),
+        )
+    return out
 
 
 # Pattern: any code-fence block (used by tests + downstream tooling
@@ -579,6 +713,74 @@ def _author_metadata_args(output) -> list[str]:
     return args
 
 
+# pdflatex names the glyph it cannot set: "Unicode character x̄ (U+0304) not set up for use with LaTeX".
+_STOPPED_GLYPH_RE = re.compile(r"Unicode char(?:acter)?[^\n]*?\(U\+([0-9A-Fa-f]{4,6})\)")
+_MAX_GLYPH_REPAIRS = 3
+
+
+def _glyphs_pdflatex_stopped_on(log: str) -> list[str]:
+    """The glyphs a LaTeX log says it stopped on, once each, in order."""
+    found: list[str] = []
+    for m in _STOPPED_GLYPH_RE.finditer(log):
+        try:
+            ch = chr(int(m.group(1), 16))
+        except (ValueError, OverflowError):
+            continue
+        if ch not in found:
+            found.append(ch)
+    return found
+
+
+def _replace_glyphs(text: str, glyphs: list[str]) -> str:
+    """``text`` with each of ``glyphs`` replaced: by the map's LaTeX when it has
+    one, by nothing for a mark or a pictograph, by its plain letters when it has
+    some, by ``?`` otherwise."""
+    for ch in glyphs:
+        if ch in _LATEX_UNICODE_REPLACEMENTS:
+            text = text.replace(ch, _LATEX_UNICODE_REPLACEMENTS[ch])
+            continue
+        plain = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
+        if unicodedata.category(ch).startswith("M"):
+            plain = ""
+        elif not plain.strip():
+            plain = "?"
+        text = text.replace(ch, plain)
+    return text
+
+
+def page_count(pdf: Path | str) -> int | None:
+    """Pages of a PDF, counted the way the page-limit step counts them (every page,
+    References included), or ``None`` when the PDF cannot be read."""
+    from generation._pdf_measure import measure_pdf
+
+    doc = measure_pdf(pdf)
+    return len(doc.pages) if doc is not None else None
+
+
+RENDER_RECORD = Path(".fi") / "paper_render.json"
+
+
+def write_render_record(out_dir: Path, record: dict) -> None:
+    """Write ``<out_dir>/.fi/paper_render.json``; never raises."""
+    try:
+        target = Path(out_dir) / RENDER_RECORD
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError as e:
+        _log.warning("paper.pdf: could not write %s (%r)", RENDER_RECORD, e)
+
+
+def read_render_record(quest_root: Path) -> dict | None:
+    """How the quest's ``paper.pdf`` was made: ``{"engine", "typeset", "rc", "reason",
+    "pages", "format"}``, or ``None`` when there is no record. ``typeset`` is False
+    for a PDF the browser fallback made (it carries a "not typeset" line on page 1)."""
+    try:
+        data = json.loads((Path(quest_root) / RENDER_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _dedupe_duplicated_references(markdown: str) -> str:
     """Collapse ``"1. Foo. Foo."`` reference lines to ``"1. Foo."``.
 
@@ -635,6 +837,8 @@ class _PdfSkipReason:
 class PaperGenerator:
     def __init__(self, config: Config) -> None:
         self.config = config
+        # How the last PDF was made: engine, typeset or not, rc, reason, pages.
+        self.last_render: dict | None = None
 
     def generate(self, art: QuestArtifacts, out_dir: Path) -> dict[str, Path]:
         kinds = set(self.config.output.kinds)
@@ -793,7 +997,7 @@ class PaperGenerator:
         return _find_pdf_engine_impl(REPO_ROOT)
 
     def _try_html_pdf_fallback(
-        self, paper_md: Path, out_dir: Path, pandoc_exe: str, *, why: str,
+        self, paper_md: Path, out_dir: Path, pandoc_exe: str, *, why: str, rc: int | None = None,
     ) -> Path | None:
         """Last-resort paper.pdf via pandoc → styled HTML → headless browser,
         used when the LaTeX path can't deliver — EITHER no engine was found OR
@@ -820,15 +1024,65 @@ class PaperGenerator:
             paper_md, out_dir / "paper.pdf",
             pandoc_path=pandoc_exe, browser=browser, log=_log,
             author_line=_author_line(self.config.output),
+            not_typeset=why,
         )
         if pdf is not None:
+            self._note("html_fallback", typeset=False, rc=rc, reason=why)
             return pdf
         _log.warning(
             "paper.pdf: HTML fallback did not produce a PDF (%s)", detail,
         )
         return None
 
+    def _note(self, engine: str, *, typeset: bool, rc: int | None = None, reason: str = "") -> None:
+        """Remember how this paper's PDF was made (see :func:`read_render_record`)."""
+        self.last_render = {"engine": engine, "typeset": typeset, "rc": rc, "reason": reason}
+
+    @staticmethod
+    def _run_pandoc(cmd: list[str], out_dir: Path, timeout_s: int) -> "subprocess.CompletedProcess[str]":
+        # UTF-8 with replacement: the log of a glyph that stopped LaTeX holds that
+        # glyph, and the platform's code page (cp1252 on Windows) cannot decode it,
+        # which used to leave the error text empty.
+        return subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(out_dir), timeout=timeout_s,
+        )
+
     def _compile_pdf(
+        self, paper_md: Path, out_dir: Path, *, extra_lines: int = 0, smaller_tables: bool = False,
+    ) -> tuple[Path | None, _PdfSkipReason | None]:
+        """Make ``out_dir/paper.pdf`` (see :meth:`_compile_pdf_once`) and record
+        in ``<out_dir>/.fi/paper_render.json`` how: the engine used, its exit
+        code, whether the paper is typeset, and the page count. The record is
+        what the quality report reads, so a PDF made by the fallback never
+        passes for a typeset one."""
+        self.last_render = None
+        pdf, skip = self._compile_pdf_once(paper_md, out_dir, extra_lines=extra_lines, smaller_tables=smaller_tables)
+        if self.last_render is None:
+            self._note("none", typeset=False, reason=skip.summary if skip is not None else "no PDF was made")
+        record = dict(self.last_render or {})
+        record["format"] = self.config.output.paper_format
+        record["pages"] = page_count(pdf) if pdf is not None else None
+        self.last_render = record
+        write_render_record(out_dir, record)
+        return pdf, skip
+
+    def compile_for_page_count(
+        self, paper_md: Path, scratch: Path,
+    ) -> tuple[Path | None, str, dict]:
+        """A PDF of ``paper_md`` in ``scratch`` for counting its pages, whatever
+        it takes: LaTeX first (after the glyph repair), then the browser render
+        when LaTeX still fails, even if ``output.html_pdf_fallback`` is off (the
+        page count is only a measurement; the delivered paper follows the
+        config). Returns ``(pdf, reason_if_none, record)``; ``record`` says
+        which engine made it and whether it is typeset."""
+        forced = PaperGenerator(self.config.model_copy(update={
+            "output": self.config.output.model_copy(update={"html_pdf_fallback": True}),
+        }))
+        pdf, skip = forced._compile_pdf(paper_md, scratch)
+        return pdf, skip.summary if skip is not None else "", dict(forced.last_render or {})
+
+    def _compile_pdf_once(
         self, paper_md: Path, out_dir: Path, *, extra_lines: int = 0, smaller_tables: bool = False,
     ) -> tuple[Path | None, _PdfSkipReason | None]:
         """Run pandoc + a LaTeX engine over ``paper_md`` to produce
@@ -898,6 +1152,7 @@ class PaperGenerator:
                     author_line=_author_line(self.config.output),
                 )
                 if pdf is not None:
+                    self._note("html_briefing", typeset=True)
                     return pdf, None
                 _log.warning(
                     "paper.pdf: briefing render did not produce a PDF (%s); "
@@ -992,6 +1247,9 @@ class PaperGenerator:
             # The template numbers figures, so the writer's "**Figure 2.**"
             # would print as "Figure 2: Figure 2.".
             sanitized_md = numbers_off_figure_captions(sanitized_md)
+            # The template numbers the sections, so the writer's "## 1. Introduction"
+            # would print as "1 1. Introduction".
+            sanitized_md = strip_heading_numbers(sanitized_md)
             # Pandoc gives a caption only to an image that is a paragraph of its
             # own, so figures written one under the other lost theirs.
             sanitized_md = blank_lines_around_figures(sanitized_md)
@@ -1169,10 +1427,29 @@ class PaperGenerator:
         # network.
         timeout_s = 360 if engine_name == "tectonic" else 300
         try:
-            r = subprocess.run(
-                cmd, capture_output=True, text=True, cwd=str(out_dir),
-                timeout=timeout_s,
-            )
+            r = self._run_pandoc(cmd, out_dir, timeout_s)
+            # A glyph the maps did not know stops pdflatex with the code point in
+            # its log. Replace those glyphs in the PDF source and run again (up to
+            # three times), so one stray character never costs the typeset paper.
+            for _repair in range(_MAX_GLYPH_REPAIRS):
+                if r.returncode == 0 or pandoc_input == paper_md:
+                    break
+                stuck = _glyphs_pdflatex_stopped_on(r.stderr or "")
+                if not stuck:
+                    break
+                try:
+                    source = pandoc_input.read_text(encoding="utf-8")
+                except OSError:
+                    break
+                fixed = _replace_glyphs(source, stuck)
+                if fixed == source:
+                    break
+                pandoc_input.write_text(fixed, encoding="utf-8")
+                _log.warning(
+                    "paper.pdf: %s stopped on %s; replaced it in the PDF source and ran again",
+                    engine_name, ", ".join(f"U+{ord(c):04X}" for c in stuck),
+                )
+                r = self._run_pandoc(cmd, out_dir, timeout_s)
         except FileNotFoundError:
             msg = "pandoc invocation failed; paper.pdf skipped"
             _log.warning(msg)
@@ -1222,10 +1499,11 @@ class PaperGenerator:
             # experience; the warning above keeps the LaTeX error in run.log.
             pdf = self._try_html_pdf_fallback(
                 paper_md, out_dir, pandoc_exe,
-                why=f"{engine_name} errored (rc={r.returncode})",
+                why=f"{engine_name} errored (rc={r.returncode})", rc=r.returncode,
             )
             if pdf is not None:
                 return pdf, None
+            self._note("none", typeset=False, rc=r.returncode, reason=f"{engine_name} errored (rc={r.returncode})")
             return None, _PdfSkipReason(
                 code=f"{engine_name}_rc_{r.returncode}",
                 summary=(
@@ -1271,6 +1549,7 @@ class PaperGenerator:
                     f"writable and re-run."
                 ),
             )
+        self._note(engine_name, typeset=True, rc=0)
         return out_pdf, None
 
 

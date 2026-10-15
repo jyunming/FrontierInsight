@@ -59,7 +59,7 @@ def test_script_glyphs_in_prose_and_in_code_are_as_they_were() -> None:
 
 def test_every_script_glyph_of_the_map_merges_with_its_neighbour() -> None:
     glyphs = paper_mod._SCRIPT_GLYPHS
-    assert set(SUP + SUB + "\u00b0") == set(glyphs)
+    assert set(SUP + SUB + "\u00b0") <= set(glyphs)   # the map also holds the subscript parens and letters
     for glyph in glyphs:
         out = sanitize(f"$x{glyph}{glyph}y$")
         assert out.count("\\ensuremath{") == 1, (glyph, out)

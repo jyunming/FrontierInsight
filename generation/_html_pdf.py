@@ -27,6 +27,7 @@ import tempfile
 from pathlib import Path
 
 from generation._figure_captions import blank_lines_around_figures, numbers_off_figure_captions
+from generation._headings import strip_heading_numbers
 from generation._keywords import keywords_block
 from generation._pandoc import HTML_MARKDOWN_READER
 
@@ -135,6 +136,18 @@ def raw_tex_outside_math(markdown: str) -> list[str]:
     return found
 
 
+# The line printed at the top of a paper the browser made because LaTeX could not.
+NOT_TYPESET_TEXT = (
+    "Not typeset: this copy was made without LaTeX, so formulas, tables and page breaks "
+    "may look different from a typeset paper."
+)
+NOT_TYPESET_BANNER_HTML = (
+    '<p class="fi-not-typeset" style="border:1px solid #b45309;color:#b45309;'
+    'padding:3pt 6pt;margin:0 0 8pt 0;font:bold 9.5pt sans-serif;text-indent:0;text-align:left">'
+    + NOT_TYPESET_TEXT + "</p>\n"
+)
+
+
 def _split_title(md_text: str) -> tuple[str, str]:
     """Split off the first ``# Heading`` so pandoc renders it in the title
     block (with the author byline) rather than as an in-body H1. Returns
@@ -157,6 +170,7 @@ def render_paper_html_pdf(
     log: logging.Logger | None = None,
     timeout_s: float = 180.0,
     author_line: tuple[str, ...] = (),
+    not_typeset: str | None = None,
 ) -> tuple[Path | None, str]:
     """Render ``paper_md`` to ``out_pdf`` via pandoc → styled HTML → headless
     browser. Returns ``(out_pdf, "")`` on success or ``(None, reason)``.
@@ -166,7 +180,12 @@ def render_paper_html_pdf(
     ``cwd = out_pdf.parent`` so ``figures/…`` references resolve against the
     copied ``figures/`` dir (same contract the LaTeX path relies on);
     ``--embed-resources`` then inlines the images + any embedded fonts, so
-    the printed PDF is fully self-contained."""
+    the printed PDF is fully self-contained.
+
+    ``not_typeset`` is the reason LaTeX did not make this paper (when it is the
+    fallback for it): the first page then says, in a visible line, that the
+    paper is not typeset. Sections are numbered once, by the theme: a number the
+    writer typed at the start of a heading comes off."""
     log = log or logging.getLogger("frontier_insight.paper")
     browser_name, browser_path = browser
     css_path = css_path or _CSS_PATH
@@ -182,7 +201,8 @@ def render_paper_html_pdf(
     # A table right under its caption line would print as raw pipes.
     from generation._tables import blank_line_before_tables
 
-    title, body = _split_title(blank_line_before_tables(blank_lines_around_figures(numbers_off_figure_captions(md_text))))
+    title, body = _split_title(strip_heading_numbers(blank_line_before_tables(
+        blank_lines_around_figures(numbers_off_figure_captions(md_text)))))
     # The keywords line under the abstract becomes a block the themes style.
     keywords, body = keywords_block(body)
 
@@ -217,6 +237,12 @@ def render_paper_html_pdf(
             len(leftover), ", ".join(leftover[:5]),
         )
 
+    banner_args: list[str] = []
+    if not_typeset is not None:
+        banner = work / "paper_html_banner.html"
+        banner.write_text(NOT_TYPESET_BANNER_HTML, encoding="utf-8")
+        banner_args = ["--include-before-body", banner.name]
+
     pandoc_cmd = [
         pandoc_path, body_md.name,
         "--standalone", "--embed-resources", "--mathml",
@@ -229,6 +255,7 @@ def render_paper_html_pdf(
         "--metadata", f"title={title or 'Untitled'}",
         *byline_args,
         "--metadata", "pagetitle=paper",
+        *banner_args,
         *(["--metadata", "keywords=" + ", ".join(keywords)] if keywords else []),
         "-o", html_path.name,
     ]
