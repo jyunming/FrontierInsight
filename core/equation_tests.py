@@ -73,8 +73,18 @@ SEED_PARAM = "seed"
 TEST_NAME = "test_equations.py"
 TESTS_DIR = "tests"
 TEST_PATH = f"{TESTS_DIR}/{TEST_NAME}"
-#: Beside the test file: what the last ``--json`` run measured (value got, expected value, tolerance) per equation.
+#: What the tests FI writes into ``code/tests/`` compare with (expected values, tolerances, the worked examples' inputs)
+#: is never written into ``code/``: a coding agent that works in ``code/`` could read it there and special-case it. It
+#: lives in the quest's ``.fi/checks/`` (beside ``code/``, outside it), and the test files read it when they run;
+#: ``FI_CHECKS_DIR`` points them elsewhere.
+CHECKS_DIR = ".fi/checks"
+CHECKS_ENV = "FI_CHECKS_DIR"
+#: In ``.fi/checks/``: each equation's worked example (inputs, expected output, tolerance, variance), by equation id.
+VALUES_NAME = "equation_values.json"
+#: In ``.fi/checks/``: what the last ``--json`` run measured (value got, expected value, tolerance) per equation.
 NUMBERS_NAME = "equation_numbers.json"
+#: The fields of a case that hold values a test compares with: kept out of the test file.
+_HIDDEN = ("inputs", "expected", "rel", "abs", "variance")
 #: The line the test file prints (with ``--json``), one JSON list of ``{"id", "function", "status", "detail"}``.
 MARK = "EQUATION_TESTS:"
 
@@ -595,20 +605,37 @@ from the plan's own worked example: the inputs are the plan's, and the output is
     python -m pytest tests/test_equations.py        (or: python tests/test_equations.py)
 
 Each test imports the function labelled with the equation (`# E1`) and calls it with the example's inputs, by name.
+The inputs and the output are not in this folder: Frontier Insight keeps them in the quest's `.fi/checks/{values_name}`
+(next to `code/`), so code written here cannot read them. Run the tests inside the quest folder, or set FI_CHECKS_DIR to
+the folder that holds that file.
 """
 import importlib
 import inspect
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-CASES = json.loads({cases!r})
+CHECKS_DIR = Path(os.environ.get("FI_CHECKS_DIR") or Path(__file__).resolve().parent.parent.parent / ".fi" / "checks")
+VALUES_NAME = {values_name!r}
+NUMBERS_NAME = {numbers!r}
+
+
+def _values():
+    try:
+        data = json.loads((CHECKS_DIR / VALUES_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {{}}
+    return data if isinstance(data, dict) else {{}}
+
+
+_VALUES = _values()
+CASES = [{{**c, **_VALUES[c["id"]]}} if isinstance(_VALUES.get(c["id"]), dict) else c for c in json.loads({cases!r})]
 DRAWS, MIN_DRAWS, TIME_LIMIT_S, SIGMAS = {draws!r}, {min_draws!r}, {limit!r}, {sigmas!r}
 RNG_PARAMS = {rng_params!r}
-NUMBERS_NAME = {numbers!r}
 
 
 def _run_random(case, fn, params):
@@ -740,6 +767,11 @@ def _run_multi(case, fn):
 def _run(case):
     """(status, detail, value, tolerance, expected): status ok | mismatch | contract | error. The detail never holds the
     expected value (it goes to the model that repairs the function); the last three are for the record and the log."""
+    if any(k not in case for k in ("inputs", "expected", "rel", "abs")):
+        # Never a pass: without FI's values the test has nothing to compare with.
+        return ("error", "the worked example this test compares with is not here (Frontier Insight keeps it in the "
+                "quest's .fi/checks/" + VALUES_NAME + ", outside code/); run the tests inside the quest folder",
+                None, None, None)
     want = case["expected"]
     try:
         fn = getattr(importlib.import_module(case["module"]), case["function"])
@@ -786,10 +818,13 @@ def _check(index):
 
 
 def test_source(case_list: list[dict[str, Any]]) -> str:
-    """``tests/test_equations.py`` for ``case_list`` (:func:`cases`): a test per equation, and a runner."""
-    text = _TEMPLATE.format(cases=json.dumps(case_list, default=str), draws=DRAWS, min_draws=MIN_DRAWS,
+    """``tests/test_equations.py`` for ``case_list`` (:func:`cases`): a test per equation, and a runner. The file holds
+    each equation's id, formula and function; the example's inputs, output and tolerance (:func:`values_of`) are read
+    when it runs from the quest's ``.fi/checks/`` (:func:`write_values`), never written into it."""
+    public = [{k: v for k, v in c.items() if k not in _HIDDEN} for c in case_list]
+    text = _TEMPLATE.format(cases=json.dumps(public, default=str), draws=DRAWS, min_draws=MIN_DRAWS,
                             limit=TIME_LIMIT_S, sigmas=SIGMAS, rng_params=RNG_PARAMS,
-                            numbers=NUMBERS_NAME)
+                            numbers=NUMBERS_NAME, values_name=VALUES_NAME)
     names = []
     for i, c in enumerate(case_list):
         name = "test_" + re.sub(r"[^a-z0-9]+", "_", str(c["id"]).lower()).strip("_")
@@ -811,8 +846,10 @@ if __name__ == "__main__":
     if "--json" in sys.argv:
         # The numbers (value got, expected value, tolerance) are for the run log, in a file of their own: this line is
         # read by code that may report to the model that writes the function, and it never carries the expected value.
+        # The file goes beside FI's values, outside code/.
         try:
-            Path(__file__).with_name(NUMBERS_NAME).write_text(json.dumps(numbers), encoding="utf-8")
+            CHECKS_DIR.mkdir(parents=True, exist_ok=True)
+            (CHECKS_DIR / NUMBERS_NAME).write_text(json.dumps(numbers), encoding="utf-8")
         except OSError:
             pass
         print("''' + MARK + ''' " + json.dumps(results))
@@ -853,10 +890,32 @@ def failure_message(result: dict[str, Any], formula: str) -> str:
     return head + f" Calling it with the equation's inputs raised: {result.get('detail')}"
 
 
+def checks_dir(code_dir: Path) -> Path:
+    """Where FI keeps what its tests in ``code_dir/tests/`` compare with: ``<quest>/.fi/checks/``, beside ``code/`` and
+    outside it (the place the test files look when ``FI_CHECKS_DIR`` is not set)."""
+    return Path(code_dir).resolve().parent / CHECKS_DIR
+
+
+def values_of(case_list: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """What each equation's test compares with, by equation id: the example's inputs, output, tolerance and variance."""
+    return {str(c["id"]): {k: c[k] for k in _HIDDEN if k in c} for c in case_list}
+
+
+def write_values(code_dir: Path, case_list: list[dict[str, Any]]) -> Path | None:
+    """Write :func:`values_of` into :func:`checks_dir` (removing it when there is no case); the file written."""
+    path = checks_dir(code_dir) / VALUES_NAME
+    if not case_list:
+        path.unlink(missing_ok=True)
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(values_of(case_list), default=str, indent=1) + "\n", encoding="utf-8")
+    return path
+
+
 def load_numbers(code_dir: Path) -> dict[str, dict[str, Any]]:
     """What the last ``--json`` run of the test file measured, by equation id (``{}`` when there is none)."""
     try:
-        value = json.loads((Path(code_dir) / TESTS_DIR / NUMBERS_NAME).read_text(encoding="utf-8"))
+        value = json.loads((checks_dir(code_dir) / NUMBERS_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return {str(k): v for k, v in value.items() if isinstance(v, dict)} if isinstance(value, dict) else {}
@@ -886,8 +945,10 @@ def failure_reason(result: dict[str, Any]) -> str:
 
 
 def write(code_dir: Path, case_list: list[dict[str, Any]]) -> Path | None:
-    """Write ``tests/test_equations.py`` into ``code_dir`` (removing it when there is no case); the file written."""
+    """Write ``tests/test_equations.py`` into ``code_dir`` and what it compares with into the quest's ``.fi/checks/``
+    (:func:`write_values`; removing both when there is no case); the test file written."""
     path = Path(code_dir) / TEST_PATH
+    write_values(code_dir, case_list)
     if not case_list:
         try:
             path.unlink()

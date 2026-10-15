@@ -541,7 +541,7 @@ same PR that adds, splits or renames one.
   (`example_rows`: FI computes the output with `oracle_forms`' calculator; `request` asks the plan for a missing or
   unusable one; `locate` finds the function labelled `# E<n>`; `cases` / `test_source` / `write` produce
   `code/tests/test_equations.py`; `failure_message` names the function and equation, never the expected value; `failure_reason` + `load_numbers` give the run log the
-  value got, the expected value and the tolerance from `tests/equation_numbers.json`; `is_random` reads a flag on the equation or
+  value got, the expected value and the tolerance from `.fi/checks/equation_numbers.json`; the test file holds ids, formulas and functions only, and `values_of` / `write_values` / `checks_dir` keep the inputs, outputs and tolerances in `<quest>/.fi/checks/equation_values.json`, outside `code/` (`FI_CHECKS_DIR` overrides where the test file looks); `is_random` reads a flag on the equation or
   example, or a formula that says a term follows a distribution (`~N(0,1)`, `~U(a,b)`, "drawn from", "random")). Called
   by `Engine._equation_gate` (in `_node_execute` before the oracle gate; repairs a failing function alone, then returns
   a failed run for the existing `execute_reflect`), by `_hold_oracle_forms` (missing examples ride in the one request to
@@ -617,7 +617,8 @@ same PR that adds, splits or renames one.
 - `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in
   a package of their own (`code/<package>/`, name from the title via `package_name`, kept in `.fi/code_layout.json`),
   `simulate.py` as the scenario FI still calls, `tests/test_oracles.py` (`oracle_tests`, the plan's checks as unit tests,
-  same seed as `trial_runner.run_case`) and `METHODS.md` (`equation_map` / `methods_text`, each `generates` equation to the
+  same seed as `trial_runner.run_case`; each check's expected value and tolerance, `oracle_values`, go to
+  `<quest>/.fi/checks/oracle_values.json` through `write_check_values`, never into `code/`) and `METHODS.md` (`equation_map` / `methods_text`, each `generates` equation to the
   function carrying its label), both written by FI through `code_project.refresh(extra_files=...)`. The cost over two
   scripts is worked out at plan time (`estimate`), decided against `execution.code_package_max_extra_lines` /
   `code_package_max_extra_calls` (`decide`) and shown in plan.md (`plan_lines`, section *How the code will be laid

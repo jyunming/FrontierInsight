@@ -10128,6 +10128,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # git and the file scan block: keep them off the event loop so a --fleet's other quests keep going.
             protocol = self._protocol_block(state)
             package = self._package_in_use(state)
+            if package:
+                # What the tests FI writes into code/ compare with goes to .fi/checks/, never into code/.
+                await asyncio.to_thread(_code_layout.write_check_values, self.quest_root / "code", protocol)
             await asyncio.to_thread(
                 _code_project.refresh,
                 self.quest_root, deps=deps, protocol=protocol,
