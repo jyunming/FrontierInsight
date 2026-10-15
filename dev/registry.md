@@ -51,6 +51,10 @@ same PR that adds, splits or renames one.
   (`(name, why)` per check), `DERIVATION_RULE` (a derivation needs at least one equation with `=`).
   `plan.normalize_model` / `normalize_protocol` convert only shapes they used to refuse (equations as text or a mapping,
   a kind/reference written as a list); `plan.repair_protocol` leaves out one unreadable check, not the list;
+  `plan.accept_answer` takes a model's answer to a plan request part by part and entry by entry (what the answer broke
+  stays as the plan had it; `None` when it adds nothing readable), used by `Engine._keep_only_what_the_topic_asked` and
+  `_ask_design_for_the_topic`; what was not taken (`Engine._answer_refused`, also set by `_keep_only_the_parts` when
+  some parts were taken) goes back with the next request in `_ask_plan_to_complete` (outcome `kept in part`);
   `plan.listed_sources` reads *The sources this quest found* back from `plan.md`; `plan.refresh_model_section` shows the
   model section again from the block after a rewrite. Under research, `Engine._settle_plan_sources` (all four call
   sites) first runs `_fill_plan_sources`: once per quest (`.fi/plan_sources_asked.json`, written once the model has

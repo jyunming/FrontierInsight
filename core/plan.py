@@ -1087,6 +1087,53 @@ def repair_block(block: str) -> tuple[str | None, list[str]]:
     return None, []
 
 
+def _entry_key(entry: Any) -> str | None:
+    if isinstance(entry, dict):
+        for name in ("id", "name"):
+            if entry.get(name) is not None:
+                return str(entry[name])
+    return None
+
+
+def accept_answer(before: Any, after: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(protocol, refused)`` for a model's answer to a request to complete the plan: ``after`` as it is when it can be
+    read whole; otherwise what can be read of it, part by part and entry by entry (:func:`repair_protocol`), with each
+    part or entry of ``before`` (the plan as it was) that the answer broke put back as the plan had it, and one sentence
+    per part or entry of the answer that was not taken (the reader's own reason, to send back to the model). A real plan
+    request lost its whole answer, the metrics it added and the formula's mapping, to one metric whose `kind` the reader
+    refuses. Nothing is loosened: what cannot be read is still not taken. ``(None, reasons)`` when nothing of the answer
+    can be read, or taking it would cost the plan a part it had."""
+    fixed, why = normalize_protocol(after)
+    if fixed is not None:
+        return fixed, []
+    repaired, notes = repair_protocol(after)
+    if repaired is None:
+        return None, notes or [str(why)]
+    base = before if isinstance(before, dict) else {}
+    for key, value in base.items():
+        if key not in repaired:
+            trials = [value]
+        elif isinstance(value, list) and isinstance(repaired[key], list):
+            trials = [e for e in value if _entry_key(e) is not None
+                      and _entry_key(e) not in {_entry_key(x) for x in repaired[key]}]
+        elif isinstance(value, dict) and isinstance(repaired[key], dict):
+            trials = [{k: v} for k, v in value.items() if k not in repaired[key]]
+        else:
+            trials = []
+        for item in trials:  # one at a time, each on what is already kept
+            now = repaired.get(key)
+            option = ([*now, item] if isinstance(now, list) else {**now, **item} if isinstance(now, dict) else item)
+            trial, _ = normalize_protocol({**repaired, key: option})
+            if trial is not None:
+                repaired = trial
+    # Taken in part only when the part taken adds to the plan and costs it nothing it had.
+    plan_now = normalize_protocol(base)[0] or base
+    gained = any(k not in plan_now or repaired[k] != plan_now[k] for k in repaired)
+    if not gained or any(k not in repaired for k in plan_now):
+        return None, notes or [str(why)]
+    return repaired, notes
+
+
 def repair_design(text: str) -> tuple[str | None, list[str]]:
     """``text`` with its design block repaired by :func:`repair_block` (``(None, [])`` when there is no block, the block
     cannot be repaired that way, or it was valid already)."""

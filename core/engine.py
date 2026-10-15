@@ -5912,6 +5912,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             schema = False
             try:
                 await self._complete_plan_parts(ask, path, expect=text, keep=keep, note=note)
+                refused = list(getattr(self, "_answer_refused", []) or [])
+                if refused:
+                    # Taken in part: what could not be read goes back with the next request, as a refusal does.
+                    outcome = "kept in part"
+                    schema = True
+                    last_problem = ("Part of your last answer was used. This part was not: "
+                                    + " ".join(" ".join(refused).split()))[:1500]
+                    self._log.warning("[plan] the plan step's answer to complete %s was used in part; not used: %s",
+                                      short, "; ".join(refused)[:600])
             except _PlanEditedMeanwhile:
                 outcome = "plan changed meanwhile"
                 self._log.warning("[plan] plan.md was changed while FI waited for the plan's model; FI kept the version "
@@ -6016,6 +6025,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         person saved a change meanwhile) nothing is written (:class:`_PlanEditedMeanwhile`)."""
         current = path.read_text(encoding="utf-8")
         _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
+        self._answer_refused = []  # what of the answer the keep did not take, with the reader's reasons
         prompt = self._prompts["plan_parts"].substitute(topic=self.config.topic, plan_md=current, request=request)
         parts = await self._ask_for_plan_parts(prompt)
         kept = keep(current, parts)
@@ -6246,9 +6256,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         merged = _topic_req.merge(old, new, gaps) if isinstance(old, dict) and isinstance(new, dict) else None
         if merged is None:
             raise ValueError("your answer has none of what was asked in a form that can be read; plan.md is unchanged")
-        fixed, why = _plan.normalize_protocol(merged.get("protocol"))
+        # Part by part and entry by entry: what can be read is taken, and what cannot goes back with its reason (the
+        # topic's gaps are worked out again, so a refused part is asked for again).
+        before = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
+        fixed, refused = _plan.accept_answer(before, merged.get("protocol"))
         if fixed is None:
-            raise ValueError(f"what the plan added cannot be read ({why}); plan.md is unchanged")
+            raise ValueError(f"what the plan added cannot be read ({' '.join(refused)}); plan.md is unchanged")
+        self._answer_refused = refused
         edited = _plan.edit_design_block(before_text, lambda _design: {**merged, "protocol": fixed})
         if edited is None or _plan.parse(edited).design is None:
             raise ValueError("the plan with your answer in it cannot be read; plan.md is unchanged")
@@ -6379,7 +6393,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 save(asks)
                 continue
             merged = _topic_req.merge(design, obj, gaps) if isinstance(obj, dict) else None
-            fixed, why = _plan.normalize_protocol(merged.get("protocol")) if merged is not None else (None, "nothing came back")
+            before = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+            fixed, refused = (_plan.accept_answer(before, merged.get("protocol")) if merged is not None
+                              else (None, ["nothing came back"]))
+            why = " ".join(refused)
+            if merged is not None and fixed is not None and refused:
+                # Taken in part: what can be read is kept; what the topic still lacks is asked again with the reason.
+                design = {**merged, "protocol": fixed}
+                gaps, _unjudged = await self._topic_gaps(req, design)
+                self._log.warning("[design] the design step's answer to add what the topic asks for was used in part; "
+                                  "not used: %s", why[:600])
+                if not gaps:
+                    problem, schema = "", False
+                    save(asks)
+                    return design
+                problem = ("Part of your last answer was used. This part was not: " + " ".join(why.split()))[:1500]
+                schema = True
+                save(asks)
+                continue
             if merged is not None and fixed is not None:
                 problem, schema = "", False  # used: an older refusal must not widen the bound of a later request
                 save(asks)
@@ -6591,6 +6622,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if reasons:  # the reader's exact reason goes back to the model with the next request
                 raise ValueError(" ".join(reasons))
             return None
+        self._answer_refused = reasons  # parts taken beside parts not: the reasons still go back
         edited = _plan.edit_design_block(before_text, lambda design: {**design, "protocol": merged})
         if edited is None or _plan.parse(edited).design is None:
             return None
