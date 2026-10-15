@@ -25570,7 +25570,8 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
-  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every grid setting uses the same random numbers, so settings are compared trial by trial; false otherwise (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>"}],
+  "labels": {"<each grid parameter and each other quantity a figure plots, named as the code names it>": "<the reader's name for it: words, its symbol in $...$ and its unit, for example Activation energy $E_a$ (kJ/mol)>"},
+  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "label": "<the reader's name for the number, written the same way>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>","cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every grid setting uses the same random numbers, so settings are compared trial by trial; false otherwise (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>"}],
   "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "expected_formula": "<for a check that is not an invariant, a symmetry or a second implementation: @@FORMULA@@>", "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<how the number is computed from what that run returns: one name the simulation function returns, or a formula of them, e.g. abs(P_out - P_in) / P_in>"}],
   "model": {
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
@@ -25606,6 +25607,8 @@ Mistakes that stop a run, each seen in real quests:
 - Each oracle check runs on a small, fast case: all of them together must finish in seconds (the pre-check has a time limit of a fraction of the run's timeout).
 - An `expected` of 0 takes an absolute `tolerance`; a relative one around 0 cannot be judged.
 - `expected_formula` is the working of `expected` as one formula FI computes itself (before anything runs, so that a value written from memory, such as the complete elliptic integral K(m), cannot be wrong): @@FORMULA@@. For example `2*pi*sqrt(1/9.81)*(2/pi)*ellipk(sin(15*pi/180)**2)`. `expected` is that formula's value to full precision; where the two differ by more than `tolerance`, FI uses the formula.
+
+`labels` and each metric's `label` are what a reader sees on a figure's axes and in its tables: the code's names (`Ea_hat`, `pi1`) are not, and a figure axis that shows one is sent back to be renamed to its label.
 
 Every number the topic sets (a set in braces, a count of runs, a threshold) must appear in `protocol` exactly as the topic gives it, and the design's method must use those values. Add values the topic does not name only when the method needs them, and say why in `method`. Leave out the keys that do not apply (an analytical study has no grid).
 """
@@ -29140,33 +29143,72 @@ def _figure_overlap_findings(state: QuestState) -> list[str]:
                     )
     except Exception:  # noqa: BLE001
         return []
-    return found
+    return found + _figure_label_findings(state)
+
+
+def _figure_label_findings(state: QuestState) -> list[str]:
+    """Axis labels of the run's figures that show the code's name for a quantity (``Ea_hat``, ``pi1``), one sentence
+    each, with the plan's label to rename it to when the plan gives one (``core/figure_labels.py``). They ride the same
+    one redraw as the layout findings. A figure drawn as the mean over the seeds counts too: the redraw takes its labels
+    from the script's figure. Never raises."""
+    try:
+        from . import figure_labels as _figure_labels
+        from .plan import plan_labels, plan_names
+
+        protocol = (state.get("design") or {}).get("protocol")
+        found = _figure_labels.findings(state.get("figure_records") or {}, list(state.get("figures") or []),
+                                        plan_labels(protocol), plan_names(protocol))
+        return [_figure_labels.sentence(f) for f in found]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _figure_overlap_directive(findings: list[str]) -> str:
     """Stands where the traceback would be in the ``execute_reflect`` prompt, for
-    the one redraw a run whose figures overlap is offered (see
-    ``Engine._node_execute_reflect``)."""
-    return (
+    the one redraw a run whose figures overlap, or whose axis labels show the
+    code's names, is offered (see ``Engine._node_execute_reflect``)."""
+    from .figure_labels import MARK
+
+    labels = [f for f in findings if MARK in f]
+    layout = [f for f in findings if MARK not in f]
+    shown = (layout[:8] + labels[:8])
+    parts = [
         "FIGURE LAYOUT: the script exited 0, printed its RESULT_JSON and drew its figures, "
         "and those results stand: the account of a crash above does not apply. But the saved "
-        "figures have text or a legend drawn over what a reader needs, measured on the "
-        "finished canvas:\n"
-        + "\n".join(f"- {finding}" for finding in findings[:8])
-        + "\n\nChange only how these figures are laid out, so that nothing is drawn over "
-        "anything else. For a legend over the data: put it outside the axes (loc=\"upper left\" "
-        "with bbox_to_anchor=(1.02, 1.0), or loc=\"lower center\" with bbox_to_anchor=(0.5, 1.02) "
-        "and ncol), or in a corner the data does not reach, or make it smaller (fontsize, ncol). "
-        "loc=\"best\" alone is not a fix: a bare ax.legend() already uses it, and it only picks the "
-        "emptiest corner, which is not always empty. Keep the legend inside the saved image "
-        "(bbox_inches=\"tight\" does that). For a figure title over a panel title: make "
-        "room for it (fig.suptitle(..., y=1.02) with bbox_inches=\"tight\", or "
-        "fig.tight_layout(rect=(0, 0, 1, 0.94)), or a constrained layout).\n\n"
+        "figures " + ("have text or a legend drawn over what a reader needs, measured on the finished canvas"
+                      if layout else "")
+        + (", and " if layout and labels else "")
+        + ("label axes with the names the code gives its variables, which a reader cannot read" if labels else "")
+        + ":\n" + "\n".join(f"- {finding}" for finding in shown)
+    ]
+    if layout:
+        parts.append(
+            "Change only how these figures are laid out, so that nothing is drawn over "
+            "anything else. For a legend over the data: put it outside the axes (loc=\"upper left\" "
+            "with bbox_to_anchor=(1.02, 1.0), or loc=\"lower center\" with bbox_to_anchor=(0.5, 1.02) "
+            "and ncol), or in a corner the data does not reach, or make it smaller (fontsize, ncol). "
+            "loc=\"best\" alone is not a fix: a bare ax.legend() already uses it, and it only picks the "
+            "emptiest corner, which is not always empty. Keep the legend inside the saved image "
+            "(bbox_inches=\"tight\" does that). For a figure title over a panel title: make "
+            "room for it (fig.suptitle(..., y=1.02) with bbox_inches=\"tight\", or "
+            "fig.tight_layout(rect=(0, 0, 1, 0.94)), or a constrained layout)."
+        )
+    if labels:
+        parts.append(
+            "Rename each axis label named above as it says: the plan's name for the quantity where one is given, "
+            "otherwise words a reader uses, with its symbol in $...$ and its unit (for example "
+            "\"Activation energy $E_a$ (kJ/mol)\"). Change the text of those axis labels only."
+        )
+    allowed = ", ".join(
+        (["positions, sizes and the number of legend columns"] if layout else [])
+        + (["the text of the axis labels named above"] if labels else []))
+    parts.append(
         "Do NOT change any computation, data, parameter, use of the random seed, printed value, "
         "the final RESULT_JSON line, the file name of any figure, or what any panel plots: only "
-        "positions, sizes and the number of legend columns. Return the whole script in `code`, one "
+        f"{allowed}. Return the whole script in `code`, one "
         "sentence in `patch_summary`, and leave `give_up_reason` empty."
     )
+    return "\n\n".join(parts)
 
 
 def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None) -> str:

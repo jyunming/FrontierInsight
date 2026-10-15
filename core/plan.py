@@ -575,8 +575,9 @@ PART_RULES = {
             "such as [0.1, 0.2, 0.4], or names such as [euler, rk4]. Take the settings to vary from `variables.independent`, "
             "the method and the topic.",
     "metrics": "`protocol.metrics`: a list; each entry has an `id` (the name the script gives the number), a `kind` "
-               "(`proportion` or `mean`), an `estimand` (text: what the number estimates) and a `unit` (text: what one "
-               "independent observation is).",
+               "(`proportion` or `mean`), an `estimand` (text: what the number estimates), a `unit` (text: what one "
+               "independent observation is) and, optionally, a `label` (the reader's name for the number: words, its "
+               "symbol in $...$ and its unit, e.g. `Activation energy $E_a$ (kJ/mol)`).",
     "runs_per_setting": "`protocol.runs_per_setting`: a whole number of at least 1.",
     "precision": "`protocol.precision`: a mapping with `target_half_width`, a number between 0 and 1, and optionally "
                  "`metric` and `reason` (text).",
@@ -592,6 +593,52 @@ PART_RULES = {
              "mapping of each input's name to its unit), `output`, and optionally `uses` (equation ids of the model), "
              "`source`, `example` and `relations`. Write the model's other keys again unchanged.",
 }
+
+
+def plan_labels(protocol: Any) -> dict[str, str]:
+    """The reader's name for each quantity the plan names, by the name the code uses for it: the ``label`` of a
+    ``protocol.metrics`` entry (an output) and ``protocol.labels`` (``{name: label}``, a setting of the grid or any other
+    input). A label is words, the symbol in ``$...$`` and the unit (``Activation energy $E_a$ (kJ/mol)``). Both are
+    optional, nothing gates on them, and an old plan without them gives ``{}``; an entry that is not text is skipped."""
+    out: dict[str, str] = {}
+    if not isinstance(protocol, dict):
+        return out
+    labels = protocol.get("labels")
+    if isinstance(labels, dict):
+        for name, label in labels.items():
+            if isinstance(label, str) and label.strip() and str(name).strip():
+                out[str(name).strip()] = " ".join(label.split())
+    metrics = protocol.get("metrics")
+    for metric in metrics if isinstance(metrics, list) else [metrics] if isinstance(metrics, dict) else []:
+        if not isinstance(metric, dict):
+            continue
+        name, label = str(metric.get("id") or "").strip(), metric.get("label")
+        if name and isinstance(label, str) and label.strip():
+            out.setdefault(name, " ".join(label.split()))
+    return out
+
+
+def plan_names(protocol: Any) -> set[str]:
+    """Every name the plan gives a quantity the code handles: the grid's and ``in_each_run``'s settings, the metrics'
+    ids, the names ``protocol.labels`` labels and the inputs of the model's step cards. A figure axis labelled with one
+    of these shows the code's name, not the reader's."""
+    names: set[str] = set(plan_labels(protocol))
+    if not isinstance(protocol, dict):
+        return names
+    for key in ("grid", "in_each_run"):
+        if isinstance(protocol.get(key), dict):
+            names |= {str(k).strip() for k in protocol[key] if str(k).strip()}
+    metrics = protocol.get("metrics")
+    for metric in metrics if isinstance(metrics, list) else []:
+        if isinstance(metric, dict) and str(metric.get("id") or "").strip():
+            names.add(str(metric["id"]).strip())
+    model = protocol.get("model")
+    steps = model.get("steps") if isinstance(model, dict) else None
+    for step in steps if isinstance(steps, list) else []:
+        inputs = step.get("inputs") if isinstance(step, dict) else None
+        if isinstance(inputs, dict):
+            names |= {str(k).strip() for k in inputs if str(k).strip()}
+    return names
 
 
 def part_request(topic: str, unread: dict[str, str]) -> str:
