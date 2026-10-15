@@ -118,7 +118,7 @@ same PR that adds, splits or renames one.
   `core/rerun_from.py` moves both markers aside with the plan (and the test-run one with the design).
   `expected_formula` (a check's expected value as one formula FI computes itself, with `evaluate(..., special=True)`
   on the check's numeric `case` settings; `SPECIAL_FUNCTIONS`: `ellipk`, `erf`, `erfc`, `gamma`, `lgamma`, `j0`/`J0`,
-  `j1`/`J1`, no SciPy; prose derivations use only `PROSE_FUNCTIONS`, via `oracle_triage.calculate`): `formula_value` / `formula_findings` (only checks `oracle_triage.correctable`
+  `j1`/`J1`, `ndtr`/`ndtri` (the standard normal distribution function and its inverse), `erfinv`, no SciPy; prose derivations use only `PROSE_FUNCTIONS`, via `oracle_triage.calculate`): `formula_value` / `formula_findings` (only checks `oracle_triage.correctable`
   allows and that can be judged), `formula_request` (the part of the SAME one request about the checks),
   `apply_formulas` (a formula that still disagrees by more than the check's own tolerance sets `expected`; the
   tolerance, mode, case and measure are never touched), `EXPECTED_FORMULA_LANGUAGE` (generated from the
@@ -300,7 +300,32 @@ same PR that adds, splits or renames one.
   aside when a quest starts again (`Engine._check_records_changed_outside`), `evidence_gaps` feeds `core/evidence.py`.
 - `core/numeric_oracle.py`, `core/stat_claims.py`, `core/number_provenance.py` — the three paper-vs-results audits
   (`needs/{numeric,statistics,provenance}_audit.json`) that `internally_reconciled` requires all three of.
+  `number_provenance.check(trial_settings=, references=)`: the reference values are a pool of their own (exact at
+  the paper's precision), and a number of the per-setting table is also accounted for by `_named_by_setting` when the
+  place it stands (`_setting_contexts`: a table row's first cells and column header, or a prose sentence) states the
+  setting and the column header / caption / paragraph names the value; the 0.05 limit on an unnamed match is unchanged.
 - `core/trial_table.py` — FI's own table of what every trial gave, per setting, from `raw/trials.json` (mean, SD, 95% interval of the mean, Wilson for 0/1 values): `paper/results_table.md`, the writer's evidence while short (`write_note`), and a separate pool for `number_provenance.check(trial_table=)`. `Engine._provenance_report` builds the provenance inputs once for the paper (`_number_provenance_hits`) and the analysis (`_analysis_numbers_note`, the writer's list of analysis numbers nothing accounts for). `stat_claims.seed_records` / `disclosure.recorded_seeds` read the seeds the records hold for the `seed_not_recorded` check.
+  `summaries` / `summary` (n, mean, SD, 0/1 flag with successes, index/constant flags, a digest of the values) are
+  what the rows are computed from (`rows_of`, `interval`, `kept_values`), so a pooled or trimmed record gives the same
+  numbers; each row carries its `cell`, and `settings(rows)` gives each label's settings to the provenance check.
+- `core/reference_values.py` — the value a metric should take at each setting, computed by FI from the frozen plan:
+  an optional `reference` on a `protocol.metrics` entry (`value` = the trial value it is for, `formula` in the
+  `oracle_forms` calculator language over grid values, fixed settings and thresholds = `inputs`, `kind`
+  value/bound/lower_bound, `when` filters, `checked_by`, `note`). `shape_problem` (called by `metric_spec.normalize`),
+  `problems` (called at the end of `plan.normalize_protocol`: computes the formula on every covered grid setting and
+  compares it with the plan's known-answer checks at their cases), `without_bad_reference` (`plan.repair_protocol`
+  drops only that reference), `cross_check` (agrees / disagrees / not_confirmed / unchecked, only a check the engine
+  ran and passed confirms), `copies_measured` (a bare number read off the run), `compute`, `pool` (the provenance
+  check's own pool). `PLAN_FIELD` / `PLAN_RULE` are the plan-prompt text, not yet in `_PLAN_DIRECTIVE`.
+- `core/results_by_setting.py` — FI's results tables: `unread_axes` (grid axes no study code reads, via
+  `grid_keys.reads`; FI's own `run.py`/`fi_search.py` skipped; `opaque_uses` makes every axis read when a setting is
+  used in a way the reading cannot follow), `distinct` (pools cells that differ only in unread axes when their means
+  agree within `POOL_Z` standard errors, counting identical trials once), `build` (one `Table` per quantity: settings,
+  n, mean ± 95% half-width, SD, reference, comparison agrees/differs/within bound/above bound), pure renderings
+  `markdown` / `latex` (booktabs) / `csv_text` / `reference_section` / `reference_section_latex`, `writer_note`
+  (trial table while it fits, else these tables, else a slice, else the file), `write` (`paper/results_by_setting.*`,
+  `paper/reference_values.json`, called in `Engine._write_whole_paper` beside `trial_table.write`), and
+  `provenance_inputs` (`Engine._provenance_report`: the pooled rows, each label's settings, the references).
 - `core/numeric_warnings.py` — solver/runtime warnings from a run's own stderr that a paper must not be written over.
 - `core/plausibility.py` — the design's declared `result_assertions` (legal ranges for a result) checked in code, including caps the script puts on a result (`clamp_constants`; `direct_caps`: a cap written where a value is reported -- proven at its whole path in the printed result, or a warning (`engine._assertion_warnings`); `caps_of_other_values`: caps proven to be another value's, which do not count for a value on its bound).
 - `core/goal_coverage.py` — does the experiment use the numbers the topic itself asked for?
