@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from . import in_run as _in_run
+from . import mc_error as _mc
 from . import optimise as _optimise
 from . import oracle_check as _oracle
 from . import trial_runner as _trial_runner
@@ -268,7 +269,8 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
             try:
                 checks, problems, _ = await _trial_runner.measure_oracles(
                     executor, python, quest_root, _SIMULATE.as_posix(), [hidden], timeout_s=timeout_s, env=env,
-                    thresholds=thresholds, case_env=env, in_each_run=_in_run.of(protocol))
+                    thresholds=thresholds, case_env=env, in_each_run=_in_run.of(protocol),
+                    mean_names=_mc.mean_names(protocol))
             except Exception as e:  # noqa: BLE001 -- a run that cannot start is recorded, never raised
                 checks, problems = [], [f"the run could not start: {type(e).__name__}: {str(e)[:200]}"]
             judged = _oracle.judged([hidden], {"checks": checks, "engine_measured": True})[0]

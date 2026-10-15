@@ -508,6 +508,24 @@ def seeds_entry(oracle: dict[str, Any], result: dict[str, Any]) -> dict[str, Any
             **{k: v for k, v in result.items() if k != "verdict"}, "tried": tried, "cause": cause}
 
 
+def trials_entry(oracle: dict[str, Any], judged: dict[str, Any]) -> dict[str, Any]:
+    """A check judged on the mean of many trials (core/mc_error.py) that is outside its tolerance by less than three
+    standard errors of those trials: they do not decide it, so it points to neither the script nor the check."""
+    from . import mc_error as _mc
+
+    name = str(oracle.get("name") or "").strip()
+    expected, limit, _mode = _oracle.limit_of(oracle)
+    mc = judged.get("mc") if isinstance(judged.get("mc"), dict) else {}
+    how = _mc.words(mc, limit)
+    return {"check": name, "kind": "trials", "verdict": "within_error", "points_to": "tolerance",
+            "trials": mc.get("trials"), "se": mc.get("se"), "value": judged.get("value"),
+            "tried": f"FI judged `{name}` on {how}.",
+            "cause": {"text": f"`{name}` is outside its tolerance by less than three standard errors of the trials it "
+                              "was judged on: those trials do not decide it, and the script is not rewritten for it.",
+                      "evidence": f"measured {_fmt(_num(judged.get('value')))} ({how}); expected {_fmt(expected)} "
+                                  f"within {_fmt(limit)}."}}
+
+
 # --- the arithmetic a derivation writes out ------------------------------------------------------------------------------
 #
 # A derivation often ends in numbers: "T = T0 * (2/pi) * K(sin(45deg)) = 2*pi*sqrt(1/9.81) * (2/pi) * 1.85407 => 1.18034".

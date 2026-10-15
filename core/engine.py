@@ -93,6 +93,7 @@ from . import disclosure as _disclosure
 from . import paper_facts as _paper_facts
 from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
+from . import mc_error as _mc_error
 from . import run_manifest as _run_manifest
 from . import trial_runner as _trial_runner
 from . import goal_coverage
@@ -13157,6 +13158,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                             run_oracles, timeout_s=limit_s, env=env,
                             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
                             case_env=dict(_replicate_env(exec_env, 0, stride)), in_each_run=_in_run.of(protocol),
+                            mean_names=_mc_error.mean_names(protocol),
                         )
                     except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
                         checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
@@ -13359,8 +13361,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # unconfirmed (one that measured nothing too), recorded as automatic and bound, as a person's choice was, to
             # the check and to this version of the code. The evidence keeps the result below "independently validated"
             # and the paper says so: nothing about the check is relaxed.
+            # A check FI found within the noise of the trials it was judged on is said as not decided, not as failed.
             went_on = [{**c, "by": _accepted.AUTOMATIC, "via": _accepted.AUTOMATIC, "script": self._rel_to_quest(seed_path),
-                        "script_version": version}
+                        "script_version": version,
+                        **({"within_mc_error": True} if c.get("name") in self._oracle_noisy else {})}
                        for c in (go_on_checks or _accepted.went_on_entries(found, run_oracles,
                                                                            attempts[-1].get("judged") or []))]
         status = ("ok" if not found else "warned" if self.config.engine.oracle_check == "warn"
@@ -14102,6 +14106,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     self.executor, py, root, simulate, oracles,
                     timeout_s=max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)),
                     env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of(protocol),
+                    mean_names=_mc_error.mean_names(protocol),
                 )
                 problems += found
                 judged = _oracle_with_reader_flags(
@@ -14531,6 +14536,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 continue
             looked.add(name)
             oracle = by_name[name]
+            if j.get("within_error"):
+                # Outside its tolerance by less than three standard errors of the trials it was judged on
+                # (core/mc_error.py): those trials do not decide it, so the script is not rewritten for it.
+                found = _oracle_triage.trials_entry(oracle, j)
+                entries.append(found)
+                self._oracle_set_aside[name] = found["cause"]["text"]
+                self._oracle_noisy.add(name)
+                self._log.warning("[oracle] %s", found["cause"]["text"])
+                continue
             slip = _oracle_triage.plan_slip(oracle)
             if slip is not None:
                 # The plan's own working does not give the expected value it writes: the check is what is wrong, so
@@ -14591,6 +14605,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             own = _oracle.case_of(cases.get(name) or oracle)
             if not trial or own is None or j.get("measured_by") != "engine":
                 continue  # FI runs a case itself only under the trial contract, for a check it measured
+            if (j.get("mc") or {}).get("varies"):
+                continue  # already judged on many trials, with their Monte Carlo error: more seeds would add nothing
             case, measure = own
             # Per check: which function FI calls depends on the check (a one-trial check, or a number of the setting).
             try:

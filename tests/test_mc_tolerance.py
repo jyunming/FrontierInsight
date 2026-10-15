@@ -90,8 +90,10 @@ def test_the_s1_bound_is_judged_on_the_mean_over_enough_trials_and_passes(tmp_pa
     record = j["mc"]
     assert j["passed_by_engine"] is True and j["value"] < 0.01
     assert record["read_as"] == "mean" and record["varies"] is True and record["precision"] == "planned"
-    # The trials the spread asks for: the standard error a quarter of the tolerance or less.
-    assert record["trials"] >= 100 and record["se"] <= 0.25 * 0.01 + 1e-12
+    # The trials the first batch's spread asks for (a standard error of about a quarter of the tolerance): three
+    # standard errors fit inside it.
+    assert record["trials"] >= 100 and record["wanted_trials"] == record["trials"]
+    assert 3 * record["se"] <= 0.01 and record["se"] == pytest.approx(0.0025, rel=0.25)
     assert record["shape"] == "bound" and record["inner"] == "fdr_bh - 0.04"
     assert abs(record["inner_mean"]) < 3 * record["se"] + 0.002, "the mean FDR sits at about pi0*alpha = 0.04"
     assert record["limit_used"] == pytest.approx(0.01), "the plan's tolerance, unchanged"
@@ -110,27 +112,69 @@ def test_the_other_s1_checks_keep_their_verdicts(tmp_path: Path) -> None:
         assert by_name[name]["mc"]["read_as"] == "mean", name
 
 
+@pytest.mark.asyncio
+async def test_the_s1_gate_passes_every_check_with_no_repair_and_no_failed_check_for_the_paper(tmp_path: Path) -> None:
+    """The oracle gate itself, on the s1 simulation and the s1 protocol's checks, metrics and values compared in each
+    run: every check passes on the first measurement, no repair is asked for, and nothing goes to the paper as failed."""
+    from core import plan
+    from core.engine import Engine
+    from tests.test_known_answer_self_checks import _config, _Model
+
+    engine = Engine(_config(tmp_path))
+    model = _Model()
+    engine._client = model
+    protocol = {k: PROTOCOL[k] for k in ("grid", "in_each_run", "metrics", "oracles", "thresholds")}
+    design = {"hypothesis": "BH keeps its FDR at pi0*q", "protocol": protocol}
+    text = plan.render(engine.config.topic, {}, design)
+    plan.plan_path(engine.quest_root).write_text(text, encoding="utf-8")
+    plan.record_version(engine.quest_root, text, by="user")
+    shutil.copytree(FIXTURE / "code", engine.quest_root / "code", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    engine.executor = SharedInterpreterExecutor(python_version="3.11")
+    engine._trial_mode = True
+    await engine._oracle_gate({"topic": engine.config.topic, "iteration": 0, "design": design}, sys.executable, None,
+                              engine.quest_root / "code" / "simulate.py")
+    record = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    judged = {j["name"]: j for j in record["attempts"][-1]["judged"]}
+    assert record["status"] == "ok", record.get("problems")
+    assert model.repairs == [] and len(record["attempts"]) == 1
+    assert judged["bh_fdr_upper_bound"]["passed_by_engine"] is True and judged["bh_fdr_upper_bound"]["mc"]["trials"] > 100
+    assert ac.failing_disclosure(record) == ""
+
+
 # --- planted faults: still fail, at the same number of trials --------------------------------------------------------
 
 PLANTED = {
-    "bh_at_twice_its_level": ({"model.bh_stepup(p, ALPHA)": "model.bh_stepup(p, 2 * ALPHA)"}, None),
-    "fdp_doubled_in_the_tally": ({'out["fdr_" + s] = float(fdp)': 'out["fdr_" + s] = float(2 * fdp)'}, None),
-    "no_correction_called_bh": ({'masks[meth] = model.bh_stepup(p, ALPHA)': 'masks[meth] = p <= ALPHA'}, None),
-    "wrong_tail_of_the_p_value": (None, {"return norm.sf(z)": "return norm.cdf(z)"}),
+    "bh_at_twice_its_level": {"model.bh_stepup(p, ALPHA)": "model.bh_stepup(p, 2 * ALPHA)"},
+    "fdp_doubled_in_the_tally": {'out["fdr_" + s] = float(fdp)': 'out["fdr_" + s] = float(2 * fdp)'},
+    "no_correction_called_bh": {'masks[meth] = model.bh_stepup(p, ALPHA)': 'masks[meth] = p <= ALPHA'},
 }
-SAME_TRIALS = 300
+SAME_TRIALS = 200
 
 
 @pytest.mark.parametrize("fault", sorted(PLANTED))
 def test_a_planted_fault_still_fails_the_bound_at_the_same_number_of_trials(tmp_path: Path, fault: str) -> None:
-    simulate, model = PLANTED[fault]
     _c, _p, right, _f = _measure(_quest(tmp_path / "right"), [BOUND], most_trials=SAME_TRIALS)
-    _c, problems, wrong, found = _measure(_quest(tmp_path / "wrong", simulate=simulate, model=model), [BOUND],
+    _c, problems, wrong, found = _measure(_quest(tmp_path / "wrong", simulate=PLANTED[fault]), [BOUND],
                                           most_trials=SAME_TRIALS)
-    assert right[0]["passed_by_engine"] is True
+    assert right[0]["passed_by_engine"] is True and right[0]["mc"]["precision"] == "planned"
     assert wrong[0]["passed_by_engine"] is False and found, (fault, wrong, problems)
-    assert wrong[0]["mc"]["trials"] <= SAME_TRIALS and right[0]["mc"]["trials"] <= SAME_TRIALS
+    assert wrong[0]["mc"]["trials"] == right[0]["mc"]["trials"] == SAME_TRIALS
     assert not wrong[0]["within_error"], "beyond the Monte Carlo error: a fault, not noise"
+
+
+def test_the_wrong_tail_of_the_p_value_is_invisible_to_the_bound_and_caught_by_the_power_check(tmp_path: Path) -> None:
+    """With the p-value's lower tail the real effects are never rejected: every rejection is a null, BH still keeps the
+    FDR at about pi0*q, and the bound passes, rightly. The power check fails, at the same number of trials."""
+    planted = {"return norm.sf(z)": "return norm.cdf(z)"}
+    power = ORACLES["bonferroni_power_exact"]
+    _c, _p, bound, _f = _measure(_quest(tmp_path / "bound", model=planted), [BOUND])
+    assert bound[0]["passed_by_engine"] is True
+    _c, _p, right, _f = _measure(_quest(tmp_path / "right"), [power], most_trials=SAME_TRIALS)
+    _c, _p, wrong, found = _measure(_quest(tmp_path / "wrong", model=planted), [power], most_trials=SAME_TRIALS)
+    assert right[0]["passed_by_engine"] is True and right[0]["mc"]["trials"] == SAME_TRIALS
+    # No real effect is ever rejected: the power is 0 in every trial, so it is judged as a number that does not vary.
+    assert wrong[0]["passed_by_engine"] is False and found and wrong[0]["value"] == 0.0 and "mc" not in wrong[0]
 
 
 EQUALS_PI0_Q = {"name": "bh_fdr_equals_pi0_q", "kind": "special_case",
@@ -184,15 +228,16 @@ def test_a_correct_random_simulation_passes_on_enough_trials(tmp_path: Path) -> 
     (j,) = judged
     assert not problems and not found and j["passed_by_engine"] is True
     assert j["mc"]["trials"] > mc.PILOT_TRIALS, "the first batch's spread asked for more trials"
-    assert j["mc"]["se"] <= 0.25 * 0.01 + 1e-12 and j["mc"]["precision"] == "planned"
+    assert 3 * j["mc"]["se"] <= 0.01 and j["mc"]["precision"] == "planned"
     assert checks[0]["returned"]["n_trials"] == j["mc"]["trials"]
 
 
 def test_a_twice_biased_random_simulation_fails_at_the_same_number_of_trials(tmp_path: Path) -> None:
-    _c, _p, right, _f = _rate(tmp_path / "right", 0.05, most_trials=60)
-    _c, _p, wrong, found = _rate(tmp_path / "wrong", 0.10, most_trials=60)
-    assert right[0]["passed_by_engine"] is True and right[0]["mc"]["trials"] == 60
-    assert wrong[0]["passed_by_engine"] is False and wrong[0]["mc"]["trials"] == 60 and found
+    larger = {**RATE_CHECK, "case": {"k": 400}}
+    _c, _p, right, _f = _rate(tmp_path / "right", 0.05, larger, most_trials=20)
+    _c, _p, wrong, found = _rate(tmp_path / "wrong", 0.10, larger, most_trials=20)
+    assert right[0]["passed_by_engine"] is True and right[0]["mc"]["trials"] == 20
+    assert wrong[0]["passed_by_engine"] is False and wrong[0]["mc"]["trials"] == 20 and found
     assert not wrong[0]["within_error"]
 
 

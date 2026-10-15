@@ -300,9 +300,12 @@ MEAN_CHECK = {"name": "global null rate", "kind": "special_case", "check": "rate
               "tolerance": 0.01, "case": {"m": 20}, "measure": "rate"}
 
 
-def test_a_check_on_a_mean_is_measured_on_run_cell_when_it_is_built_from_run_trial(tmp_path: Path) -> None:
+def test_a_check_on_a_mean_is_measured_on_the_trials_of_run_trial_the_study_runs(tmp_path: Path) -> None:
+    """A check on a mean is measured on as many trials of run_trial as its tolerance needs (core/mc_error.py), not on
+    run_cell's own handful of trials."""
     checks, problems, found = _measure(tmp_path, BUILT_FROM_TRIALS, [MEAN_CHECK])
-    assert not problems and found == [] and abs(checks[0]["value"] - 0.05) < 1e-12, (checks, problems)
+    assert not problems and found == [] and abs(checks[0]["value"] - 0.05) <= 0.01, (checks, problems)
+    assert checks[0]["mc"]["trials"] > 10 and checks[0]["mc"]["precision"] == "planned"
 
 
 def test_a_run_cell_with_a_formula_of_its_own_does_not_hide_a_bug_in_run_trial(tmp_path: Path) -> None:

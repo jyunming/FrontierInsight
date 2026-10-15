@@ -277,6 +277,17 @@ def short_version(version: Any) -> str:
     return str(version or "")[:12]
 
 
+def _mc_said(judged: dict[str, Any], limit: Any) -> dict[str, Any]:
+    """What a failed check's entry keeps about the trials it was judged on (core/mc_error.py): how its number was had
+    (``mc_words``) and whether it failed by less than their Monte Carlo error (``within_mc_error``)."""
+    from . import mc_error as _mc
+
+    mc = judged.get("mc") if isinstance(judged.get("mc"), dict) else None
+    words = _mc.words(mc, limit if isinstance(limit, (int, float)) else None)
+    return {**({"mc_words": words} if words else {}),
+            **({"within_mc_error": True} if judged.get("within_error") else {})}
+
+
 def offer(found: list[str], oracles: list[dict[str, Any]],
           judged: list[dict[str, Any]] | None) -> tuple[list[dict[str, Any]], str]:
     """Whether the stop may offer "mark it unconfirmed and go on": ``(checks, "")`` when every problem in ``found`` is a
@@ -306,6 +317,7 @@ def offer(found: list[str], oracles: list[dict[str, Any]],
                 "name": name, "fingerprint": fingerprint(oracle), "expected": expected, "limit": limit,
                 "tolerance": oracle.get("tolerance"), "tolerance_mode": mode, "case": oracle.get("case"),
                 "measure": oracle.get("measure"), "measured": value, "measured_by": j.get("measured_by") or "",
+                **_mc_said(j, limit),
             })
     if unmeasured:
         return [], (f"nothing was measured for {', '.join(repr(n) for n in unmeasured)} (the run stopped before it "
@@ -345,7 +357,7 @@ def went_on_entries(found: list[str], oracles: list[dict[str, Any]],
         out.append({"name": name, "fingerprint": fingerprint(oracle), "expected": expected, "limit": limit,
                     "tolerance": oracle.get("tolerance"), "tolerance_mode": mode, "case": oracle.get("case"),
                     "measure": oracle.get("measure"), "measured": value, "measured_by": j.get("measured_by") or "",
-                    **({"unmeasured": said[:300]} if value is None else {})})
+                    **({"unmeasured": said[:300]} if value is None else _mc_said(j, limit))})
     if not out and found:
         out.append({"name": "", "measured": None, "unmeasured": str(found[0])[:300]})
     return out
@@ -457,7 +469,14 @@ def gap(entry: dict[str, Any]) -> str:
             return f"FI went on by itself although no known-answer check could be judged ({entry.get('unmeasured')})"
         return (f"FI went on by itself although the known-answer check '{name}' could not be judged "
                 f"({entry.get('unmeasured')}); it is marked {UNCONFIRMED}")
-    how = conditions_text(entry)
+    how = conditions_text(entry) + (f"; {entry['mc_words']}" if entry.get("mc_words") else "")
+    if entry.get("within_mc_error"):
+        # Outside its tolerance by less than the Monte Carlo error of the trials it was judged on (core/mc_error.py):
+        # those trials do not decide it either way.
+        who = "FI went on by itself" if entry.get("by") == AUTOMATIC else f"{entry.get('by')} chose to go on"
+        return (f"{who} although the known-answer check '{name}' was not decided ({how}): it is outside its tolerance "
+                "by less than the Monte Carlo error of the trials it was judged on, so those trials neither confirm "
+                f"nor refute it; it is marked {UNCONFIRMED}")
     if entry.get("by") == AUTOMATIC:
         return (f"FI went on by itself although the known-answer check '{name}' failed ({how}); "
                 f"it is marked {UNCONFIRMED}")
@@ -465,13 +484,25 @@ def gap(entry: dict[str, Any]) -> str:
 
 
 def failing_disclosure(record: Any) -> str:
-    """What the paper must say about the failed checks the quest went on with (``needs/ORACLE_CHECK.json``), or ``""``."""
+    """What the paper must say about the failed checks the quest went on with (``needs/ORACLE_CHECK.json``), or ``""``.
+    A check outside its tolerance by less than its Monte Carlo error is said as not decided, never as a sign the method
+    is broken."""
     if not isinstance(record, dict) or record.get("status") != WENT_ON:
         return ""
     entries = [e for e in record.get("went_on") or [] if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
     if not entries:
         return ""
-    lines = "; ".join(gap(e) for e in entries)
-    return (f"These known-answer checks FAILED and the run went on anyway: {lines}. Say so plainly where the checks are "
-            "described and in the limitations: the result is not validated against these known answers, and nothing "
-            "here may be described as checked against them.")
+    failed = [e for e in entries if not e.get("within_mc_error")]
+    undecided = [e for e in entries if e.get("within_mc_error")]
+    out: list[str] = []
+    if failed:
+        out.append(f"These known-answer checks FAILED and the run went on anyway: {'; '.join(gap(e) for e in failed)}. "
+                   "Say so plainly where the checks are described and in the limitations: the result is not validated "
+                   "against these known answers, and nothing here may be described as checked against them.")
+    if undecided:
+        out.append(f"These known-answer checks were not decided by the trials they were judged on, and the run went on: "
+                   f"{'; '.join(gap(e) for e in undecided)}. Say plainly where the checks are described that each was "
+                   "not decided at its tolerance because its value is within the Monte Carlo error of those trials: "
+                   "the result is not validated against it. Do not say or imply that the method or the simulation may "
+                   "be wrong because of it.")
+    return " ".join(out)

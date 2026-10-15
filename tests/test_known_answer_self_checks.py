@@ -324,11 +324,27 @@ MM1 = {"name": "mm1_mean_wait", "kind": "special_case", "check": "the M/M/1 mean
 
 
 @pytest.mark.asyncio
-async def test_a_single_random_trial_judged_tighter_than_its_noise_is_said_and_not_repaired(tmp_path: Path) -> None:
+async def test_a_random_check_is_judged_on_enough_trials_for_its_tolerance_and_passes(tmp_path: Path) -> None:
+    """The M/M/1 mean wait is a mean over trials (core/mc_error.py): FI runs as many trials as the tolerance needs and
+    the check passes, with no repair and no extra seeds."""
     engine = Engine(_config(tmp_path))
     model = _Model(recompute={"expected": 1.0, "how": "Wq = rho/(mu-lambda)"}, repair_code=MM1_SOURCE)
     engine._client = model
     await _gate(engine, [MM1], MM1_SOURCE)
+    record = _record(engine)
+    (judged,) = record["attempts"][-1]["judged"]
+    assert record["status"] == "ok" and judged["passed_by_engine"] is True and model.repairs == []
+    assert judged["mc"]["trials"] > 100 and 3 * judged["mc"]["se"] <= 0.01 and judged["precision"] == "planned"
+    assert _triage(record, "seeds") == []
+
+
+@pytest.mark.asyncio
+async def test_a_single_random_trial_judged_tighter_than_its_noise_is_said_and_not_repaired(tmp_path: Path) -> None:
+    """Declared ``per_trial: true``, the same check is judged on one trial: FI's three more seeds show the noise."""
+    engine = Engine(_config(tmp_path))
+    model = _Model(recompute={"expected": 1.0, "how": "Wq = rho/(mu-lambda)"}, repair_code=MM1_SOURCE)
+    engine._client = model
+    await _gate(engine, [{**MM1, "per_trial": True}], MM1_SOURCE)
     record = _record(engine)
     (seeds,) = _triage(record, "seeds")
     assert seeds["verdict"] == "noise" and len(seeds["values"]) == 4 and seeds["sd"] > 0.01
@@ -336,6 +352,9 @@ async def test_a_single_random_trial_judged_tighter_than_its_noise_is_said_and_n
     assert model.repairs == [] and record["self_checks"]["extra_runs"] == 3
     assert "smaller than one trial's noise" in (seeds.get("cause") or {}).get("text", "")
     assert record["status"] == "went_on_failing" and _explained(engine)["leaning"] == "check"
+    # Not decided by its trials: the paper is not told the check shows the method broken.
+    (went_on,) = record["went_on"]
+    assert went_on["within_mc_error"] is True and "not decided" in record["summary"]
 
 
 SAME_ERROR = '''
