@@ -210,3 +210,59 @@ def test_a_check_that_names_another_equation_or_is_another_kind_does_not_count()
                                  {"name": "converges", "kind": "convergence_rate", "check": "E1 converges", "expected": 2.0,
                                   "reference": "derivation: order"}]}
     assert _row(eqt.example_rows(other), "E1")["state"] == "unprotected"
+
+
+# --- the equation as written, computed on its own example's inputs ------------------------------------------------------
+# In the suite's rounds, 35 of 90 worked examples could be checked against their own equation this way, and none
+# disagreed: the check is insurance before the run, and after a failure it tells the code's fault from the example's.
+
+ARRHENIUS = "k = A * exp(-Ea / (R * T))"  # suite r1 kinetics, verbatim
+ARRHENIUS_INPUTS = {"A": 1e10, "Ea": 50000.0, "R": 8.314, "T": 300.0}
+
+
+@pytest.mark.parametrize(("formula", "inputs", "value"), [
+    (ARRHENIUS, ARRHENIUS_INPUTS, 19.67488661945756),
+    ("k(T) = A * exp(-Ea / (R * T))", ARRHENIUS_INPUTS, 19.67488661945756),
+    ("N_abs = Phi * A * (1 - exp(-alpha * t))", {"Phi": 68.0, "A": 1.0, "alpha": 0.005, "t": 35.0}, 10.9169225876939),
+])
+def test_an_equation_that_defines_one_name_is_computed_on_the_examples_inputs(formula, inputs, value) -> None:  # noqa: ANN001
+    assert abs(eqt.equation_value(formula, inputs) - value) < 1e-9 * value
+
+
+@pytest.mark.parametrize("formula", [
+    "Bonferroni rejects i when p_i <= q/m",                      # a relation
+    "p_i <= q / m",
+    "z_i = mu_i + epsilon_i, epsilon_i ~ N(0,1)",                # a distribution
+    "Ea_hat = -R * b; lnA_hat = a - b * xbar",                    # several definitions
+    "y = log(x)",                                                 # log of which base
+    "y = sin(x)",                                                 # an angle with no unit
+    "y = gamma(x)",                                               # in prose, maybe the author's own gamma
+    "y = c0 * exp(-k * t)",                                       # a name the inputs do not give
+])
+def test_an_equation_fi_cannot_read_for_sure_is_not_judged(formula: str) -> None:
+    assert eqt.equation_value(formula, {"x": 1.0, "q": 0.05, "m": 20.0, "R": 8.3, "b": 1.0, "a": 1.0, "xbar": 0.1,
+                                        "c0": 1.0, "k": 1.0}) is None
+
+
+def _one(formula: str, example: dict[str, Any]) -> dict[str, Any]:
+    return eqt.example_rows({"model": {"equations": [{"id": "E1", "formula": formula, "role": "generates",
+                                                      "example": example}]}})[0]
+
+
+def test_an_example_its_own_equation_gives_is_recorded_as_agreeing() -> None:
+    row = _one(ARRHENIUS, {"inputs": ARRHENIUS_INPUTS, "expected_formula": "A * exp(-Ea / (R * T))"})
+    assert row["state"] == "ok" and row["equation_agrees"] is True
+    assert "equation_agrees" not in _one("y = c0 * exp(-k * t)", {"inputs": {"k": 1.0, "t": 1.0},
+                                                                   "expected_formula": "exp(-k * t)"})
+
+
+def test_an_example_that_contradicts_its_own_equation_is_not_used_and_goes_to_the_one_request() -> None:
+    # No real plan did this yet; a wrong unit factor is the likely way (J against kJ).
+    row = _one(ARRHENIUS, {"inputs": ARRHENIUS_INPUTS, "expected_formula": "A * exp(-Ea / (1000 * R * T))"})
+    assert row["state"] == "unusable" and row["equation_agrees"] is False
+    assert "19.67488662" in row["why"] and "the equation as written gives" in row["why"]
+    asked = eqt.request([row])
+    assert "E1" in asked and "the equation as written gives" in asked
+    # Within the test's own tolerance it agrees: correct code would pass it.
+    near = _one(ARRHENIUS, {"inputs": ARRHENIUS_INPUTS, "expected_formula": "A * exp(-Ea / (R * T)) * (1 + 1e-7)"})
+    assert near["state"] == "ok" and near["equation_agrees"] is True

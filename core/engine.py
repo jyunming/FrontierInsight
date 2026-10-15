@@ -12240,10 +12240,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         the plan's own, so the plan is asked, once per equation, to work it out again from the equation. The ids whose
         example changed (:meth:`_rederive_examples`)."""
         by_id = {str(eq["id"]).strip(): eq for eq in _equation_tests.eligible(protocol)}
+        # An example the equation as written gives too (FI computed both) is right: the code is wrong, and the plan has
+        # nothing to work out again.
+        agrees = {r["id"] for r in _equation_tests.example_rows(protocol) if r.get("equation_agrees") is True}
+        for f in failures:
+            if str(f.get("id")) in agrees:
+                self._log.info("[equations] the worked example of %s is what its equation as written gives for the same "
+                               "inputs, so the code, not the example, is wrong; the plan is not asked about it", f.get("id"))
         asks = [{"id": str(f.get("id")), "formula": " ".join(str(f.get("formula") or "").split()),
                  "example": _equation_tests.example_as_written(protocol, str(f.get("id"))), "why": f.get("status"),
                  "source": "tests"}
-                for f in failures if str(f.get("id")) in by_id and _equation_tests.repairable_by_example(f)]
+                for f in failures if str(f.get("id")) in by_id and str(f.get("id")) not in agrees
+                and _equation_tests.repairable_by_example(f)]
         return await self._rederive_examples(state, protocol, asks)
 
     async def _rederive_examples(self, state: QuestState, protocol: dict[str, Any] | None,

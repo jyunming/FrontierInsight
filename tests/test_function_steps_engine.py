@@ -93,7 +93,10 @@ async def test_a_function_still_wrong_after_its_repairs_is_sent_to_the_existing_
     patch = await engine._equation_gate(STATE, None, None)
     repairs = [p for p in writer.prompts if "You are revising the plan" not in p]
     assert len(repairs) == 2, "at most function_steps.REPAIRS repairs of one function"
-    assert len(writer.prompts) == 3, "and the one request to the plan about its example (tests/test_replay_bad_example.py)"
+    # E2's example is what its equation as written gives for the same inputs (FI computed both): the code is wrong, so
+    # the plan is not asked to work the example out again (tests/test_replay_bad_example.py asks when it cannot tell).
+    assert len(writer.prompts) == 2, "no request to the plan about an example its own equation gives"
+    assert "the code, not the example, is wrong" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     assert patch is not None and patch["exec_result"]["returncode"] == 1 and patch["result_json"] == {}
     assert patch["exec_result"]["failed_script"] == "simulate.py"
     stderr = patch["exec_result"]["stderr_tail"]

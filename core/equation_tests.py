@@ -311,7 +311,41 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
                    abs=abs_tol, method=method)
         if row["random"]:
             row["variance"] = _stated_variance(example if "variance_formula" in example else eq, good)
+            continue
+        own = equation_value(row["formula"], row["inputs"])
+        if own is not None:
+            row["equation_value"] = own
+            row["equation_agrees"] = abs(own - float(value)) <= max(rel * abs(float(value)), abs_tol)
+            if not row["equation_agrees"]:
+                # Code that follows the equation would fail this example: the example, not the code, is wrong.
+                row.update(state="unusable", why=(
+                    f"its `expected_formula` gives {float(value):.10g} for its inputs, but the equation as written gives "
+                    f"{own:.10g} for the same inputs (FI computed both)"))
     return rows
+
+
+_DEFINITION = re.compile(r"^\s*[A-Za-z_]\w*\s*(?:\([^()=]*\))?\s*=(?![=<>])(.*)$", re.S)
+
+
+def equation_value(formula: str, inputs: dict[str, float]) -> float | None:
+    """What the equation as written gives for ``inputs``, computed by FI, or ``None`` when its text cannot be read that
+    way for sure: only one statement that defines one name (``k = A*exp(-Ea/(R*T))`` or ``k(T) = ...``) whose right side
+    FI's calculator reads from the inputs alone, with the functions it reads in prose (a plan's equation is prose, not the
+    language FI states for ``expected_formula``), and that cannot be read two ways (a bare ``log``, an angle with no
+    unit). A relation, a distribution, several definitions or index notation are not read (in the suite's rounds, 35 of 90
+    worked examples could be read this way, and none disagreed with its equation)."""
+    from . import oracle_triage as _triage
+
+    statements = _statements(formula)
+    if len(statements) != 1:
+        return None
+    m = _DEFINITION.match(statements[0])
+    if m is None:
+        return None
+    right = m.group(1).strip()
+    if not right or re.search(r"[=<>~]", right) or _triage.ambiguous(right):
+        return None
+    return _forms.evaluate(right, inputs, special=_forms.PROSE_FUNCTIONS).value
 
 
 def _multi_output_row(row: dict[str, Any], example: dict[str, Any], good: dict[str, float], names: list[str]) -> None:
