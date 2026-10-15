@@ -29084,6 +29084,9 @@ def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
         except (OSError, ValueError):
             continue
         if isinstance(data, dict) and isinstance(data.get("axes"), list):
+            # What the paper copy changed (sizes in inches, text sizes in pt) stays in the file for a person: its
+            # numbers are not the figure's, and the number check would otherwise trace a paper's "6.3" or "15" to them.
+            data.pop("paper", None)
             records[name] = data
     return records
 

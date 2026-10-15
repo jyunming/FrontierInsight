@@ -95,6 +95,10 @@ PAPER_TITLE_PT = 9.0
 #: figure at a third of the text height).
 PAPER_ROW_MIN_IN = 2.0
 PAPER_ROW_MAX_IN = 2.9
+#: The whole figure, a legend under it included, is at most this tall (or a row
+#: of panels at their least, when that is taller): the copy is placed at its own
+#: width, which bypasses the template's own cap of a third of the text height.
+PAPER_MAX_HEIGHT_IN = 3.2
 #: A single panel at least this many times as wide as it is tall (a time series)
 #: prints at the full width.
 PAPER_WIDE_ASPECT = 2.0
@@ -113,7 +117,7 @@ def paper_profile() -> dict[str, object]:
         "other_scale": round(PAPER_TICK_PT / HOUSE_TICK_PT, 4), "other_min_pt": 7.0, "other_max_pt": 9.0,
         # Lines and markers drawn for a slide are heavy on a page: scaled down, never up.
         "line_scale": 0.6, "line_min_pt": 0.6, "marker_scale": 0.65, "marker_min_pt": 1.5,
-        "row_min_in": PAPER_ROW_MIN_IN, "row_max_in": PAPER_ROW_MAX_IN,
+        "row_min_in": PAPER_ROW_MIN_IN, "row_max_in": PAPER_ROW_MAX_IN, "max_height_in": PAPER_MAX_HEIGHT_IN,
         "wide_aspect": PAPER_WIDE_ASPECT, "dpi": PAPER_DPI,
     }
 
@@ -130,6 +134,7 @@ def paper_figure_size(drawn_in, rows=1, cols=1, profile=None):
     height = width * h0 / w0 if w0 > 0 and h0 > 0 else width * 0.62
     rows = max(1, int(rows))
     height = min(max(height, rows * p["row_min_in"]), rows * p["row_max_in"])
+    height = min(height, max(p["max_height_in"], rows * p["row_min_in"]))
     return width, round(height, 4), "full" if full else "half"
 
 
@@ -1267,7 +1272,7 @@ _PAPER_SOURCE = '''\
                     # it, so the panels keep their height.
                     renderer = _fi_draw(fig)
                     extra = max(leg.get_window_extent(renderer).height for leg in below) / fig.dpi + 0.05
-                    height = min(height + extra, rows * p["row_max_in"] + 1.0)
+                    height = min(height + extra, max(p["max_height_in"], rows * p["row_min_in"] + extra))
                     fig.set_size_inches(width, height)
                     renderer = _fi_draw(fig)
                     for _ in range(2):

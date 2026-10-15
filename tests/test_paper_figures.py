@@ -51,7 +51,7 @@ def test_the_slide_profile_is_unchanged_and_the_paper_profile_is_body_sized() ->
     ((6, 5), 1, 1, (PAPER_HALF_WIDTH_IN, round(3.1 * 5 / 6, 4), "half")),
     ((7, 4.3), 1, 1, (PAPER_HALF_WIDTH_IN, 2.0, "half")),
     ((10, 4), 1, 1, (PAPER_FULL_WIDTH_IN, 2.52, "full")),  # one wide panel: a time series
-    ((8, 10), 2, 2, (PAPER_FULL_WIDTH_IN, 5.8, "full")),  # 7.875 tall is capped at two rows' maximum
+    ((8, 10), 2, 2, (PAPER_FULL_WIDTH_IN, 4.0, "full")),  # 7.875 tall is capped at two rows at their least
     ((4, 8), 1, 1, (PAPER_HALF_WIDTH_IN, 2.9, "half")),
 ])
 def test_the_paper_size_rule(drawn, rows, cols, expected) -> None:
@@ -328,3 +328,16 @@ def test_a_layout_redraw_that_is_put_back_puts_the_paper_copy_back(tmp_path: Pat
     _put_back_paper_copies(backup, figures, "a.png")
     assert (figures / "paper" / "a.pdf").read_bytes() == b"before"
     assert not (figures / "paper" / "a.png").exists()
+
+
+def test_what_the_paper_copy_changed_stays_out_of_the_records_the_checks_read(tmp_path: Path) -> None:
+    """Its sizes (6.3 in, 8 pt, the drawn 15 x 4.4 in) are not numbers of the figure: the number check walks every
+    number of a record, and would trace a paper's "15" or "6.3" to them."""
+    from core.engine import _read_figure_records
+
+    record = {"file": "a.png", "axes": [{"title": "t", "series": []}], "tick_pt": 15.0,
+              "paper": {"drawn_in": [15.0, 4.4], "width_in": 6.3, "tick_pt": 8.0}}
+    (tmp_path / "a.json").write_text(json.dumps(record), encoding="utf-8")
+    read = _read_figure_records(tmp_path, ["a.png"])
+    assert "paper" not in read["a.png"] and read["a.png"]["tick_pt"] == 15.0
+    assert "paper" in json.loads((tmp_path / "a.json").read_text(encoding="utf-8"))

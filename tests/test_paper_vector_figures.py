@@ -106,4 +106,30 @@ def test_a_real_paper_prints_the_figure_text_at_the_body_size(tmp_path: Path) ->
     doc = measure_pdf(pdf)
     labels = [line for page in doc.pages for line in page.lines if "Elapsed time" in line.text]
     assert labels, [line.text for page in doc.pages for line in page.lines]
-    assert all(8.5 <= line.size <= 9.8 for line in labels), [line.size for line in labels]
+    # The size the PDF states is the figure's own (9 pt) whatever the figure is scaled to on the page; how big it
+    # prints is the height of the same letter on the page over its height in the figure's own PDF.
+    scale = _letter_height(pdf, "E") / _letter_height(tmp_path / "figures" / "paper" / "wide.pdf", "E")
+    assert 0.95 <= scale <= 1.05, scale
+    assert all(8.5 <= 9.0 * scale <= 9.5 for _ in labels)
+
+
+def _letter_height(path: Path, letter: str) -> float:
+    """The median height (pt) of ``letter`` set at 9 pt in ``path``, as drawn on the page."""
+    import statistics
+
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
+
+    pdf = pdfium.PdfDocument(str(path))
+    heights = []
+    try:
+        for index in range(len(pdf)):
+            text = pdf[index].get_textpage()
+            for i in range(text.count_chars()):
+                if text.get_text_range(i, 1) == letter and abs(raw.FPDFText_GetFontSize(text.raw, i) - 9.0) < 0.01:
+                    box = text.get_charbox(i)
+                    heights.append(box[3] - box[1])
+    finally:
+        pdf.close()
+    assert heights, f"no 9 pt {letter!r} in {path}"
+    return statistics.median(heights)
