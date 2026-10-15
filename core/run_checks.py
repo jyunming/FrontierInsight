@@ -840,6 +840,89 @@ class RunChecksMixin:
             "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
         }
 
+    async def _small_run(self, state: Any, py: Any, exec_env: Any) -> Any:
+        """FI's small run of the simulation on the code as it is (core/small_run.py), or ``None`` when the simulation does
+        not follow the trial contract (``run_trial`` / ``run_cell`` in simulate.py). A run of the same code and settings is
+        not made again: its record (``.fi/small_run.json``) is read back."""
+        from . import small_run as _small
+
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
+        if not getattr(self, "_trial_mode", False) or not simulate.is_file():
+            return None
+        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        from . import optimisation_plan as _optim
+        from . import optimise as _optimise
+
+        # A search for the best design has no grid: FI's search runner evaluates the baseline first, at its own settings.
+        if _optim.has_block(state.get("design")) or _optimise.block_of(protocol) is not None:
+            return None
+        self._small_run_ctx = (state, py, exec_env)
+        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+        deterministic = "run_trial" not in set(getattr(self, "_trial_entries", set()) or ())
+        key = _small.key_of(simulate, grid, deterministic, thresholds)
+        record = _small.read_record(self.quest_root)  # type: ignore[attr-defined]
+        if record.get("key") == key:
+            self._small_run_note = str(record.get("for_reader") or "")
+            return record
+        paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
+        inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
+        got = await _small.run(
+            self.executor, py, self.quest_root, simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
+            deterministic=deterministic, timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
+            env=dict(exec_env or {}), thresholds=thresholds, paired=paired, in_each_run=inside)
+        _small.write_record(self.quest_root, key, got)  # type: ignore[attr-defined]
+        self._small_run_note = got.for_reader()
+        self._log.info("[execute] FI's small run before the code is read: %s", got.says())  # type: ignore[attr-defined]
+        return _small.read_record(self.quest_root)  # type: ignore[attr-defined]
+
+    async def _small_run_gate(self, state: Any, py: Any, exec_env: Any) -> dict[str, Any] | None:
+        """Before the code is read: FI runs the simulation on a small case (core/small_run.py). A crash (it cannot be loaded,
+        or most trials of a setting fail) goes to the repair of a failed run with the place and the traceback, while a
+        repair is left; then the code is read with what the run gave. ``None`` to go on."""
+        from . import small_run as _small
+
+        record = await self._small_run(state, py, exec_env)
+        if not record or not record.get("crashed"):
+            return None
+        if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+            self._log.warning("[execute] FI's small run still fails (%s) and no repair is left; the study's own run "  # type: ignore[attr-defined]
+                              "and its checks decide", record.get("says"))
+            return None
+        settings = [_small.Setting(str(s.get("key") or ""), int(s.get("planned") or 0), int(s.get("ok") or 0),
+                                   int(s.get("failed") or 0), bool(s.get("timed_out")),
+                                   [(str(r), int(n)) for r, n in s.get("reasons") or []])
+                    for s in record.get("settings") or [] if isinstance(s, dict)]
+        tb = ""
+        try:
+            for path in sorted((self.quest_root / _small.DIR).glob("s*/cell*.out.jsonl")):  # type: ignore[attr-defined]
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    row = json.loads(line) if line.strip().startswith("{") else {}
+                    if isinstance(row, dict) and row.get("traceback"):
+                        tb = str(row["traceback"])
+                        break
+                if tb:
+                    break
+        except (OSError, ValueError):
+            tb = ""
+        for s in settings:
+            if s.fault and not s.traceback:
+                s.traceback = tb
+                break
+        message = _small.SmallRun(settings, str(record.get("load_error") or "")).directive()
+        self._log.warning("[execute] FI's small run of the simulation failed before the code is read (%s); sending it "  # type: ignore[attr-defined]
+                          "to be repaired", record.get("says"))
+        return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
+
+    async def _small_run_again(self) -> str:
+        """For a repair of a reader's finding: ``""`` when FI's small run still runs on the code as it is now, else why not.
+        ``""`` when there is no small run to make."""
+        ctx = getattr(self, "_small_run_ctx", None)
+        if not ctx:
+            return ""
+        record = await self._small_run(*ctx)
+        return str(record.get("says") or "it failed") if record and record.get("crashed") else ""
+
     async def _review_crash_run(self, state: Any) -> dict[str, Any] | None:
         """A test written for a reader's finding that crashed inside the code (not in the test) showed a crash, not the
         finding: it goes to the crash repair like a failed run, with the place and the call that crashed, while a repair is

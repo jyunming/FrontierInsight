@@ -26,6 +26,12 @@ $plan
 
 $code
 
+# What the code gave when FI ran it
+
+FI ran the simulation itself on a few of the plan's settings (a few trials each) before this reading. Read the code with these results: a value that cannot be right for what the plan defines, a setting where trials fail, or a quantity that does not change where the plan says it must, points to a problem in the code. They are a small case, not the study's results.
+
+$small_run
+
 $previous
 
 # What to judge, for each requirement

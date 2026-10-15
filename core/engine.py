@@ -11723,7 +11723,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     again, left, asked_again = _pairs.REASK, list(reqs), True
                 prompt = self._prompts["code_review"].substitute(
                     topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
-                    plan=plan_text, code=sources, previous=earlier) + again
+                    plan=plan_text, code=sources, previous=earlier,
+                    small_run=getattr(self, "_small_run_note", "") or "(FI did not run the simulation before this reading)"
+                ) + again
                 reply = await self._ask_reader(prompt, review_node)
                 parsed = _parse_json_lenient(reply, node=review_node)
                 got = _code_review.parse(parsed, left, values)
@@ -11846,7 +11848,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             equations=_code_review.equations_view(protocol if isinstance(protocol, dict) else None, values),
             scrub=lambda text: _pairs.scrub(text, values), log=self._log, package=package,
             other=(reader if same is False else ""), code_model=self._model_for_node("implement") or self.config.provider.model or "",
-            on_accept=on_accept)
+            on_accept=on_accept, small_run=self._small_run_again)
         changed = await _finding_repair.repair_issues(env)
         record["repaired"] = bool(changed)
         # Progress is what FI's own test runs show: the faults a failing test showed that now pass it (code_review.note_reading).
@@ -15772,6 +15774,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return stop, None, False
         # One small test per equation of the model, from the plan's own worked example, before anything else runs: a
         # function that computes another equation than the plan's is found here, not after the study.
+        # FI runs the simulation on a small case first: a crash goes to the repair of a failed run, and the code is read
+        # with what the run gave (core/small_run.py).
+        if (small := await self._small_run_gate(state, py, exec_env)) is not None:
+            return small, None, False
         await self._code_review_gate(state)
         # A finding's test that crashed inside the code showed a crash, not the finding: the crash repair takes it.
         if (crashed := await self._review_crash_run(state)) is not None:
