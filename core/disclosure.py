@@ -445,7 +445,7 @@ def write_precision_record(quest_root: Path, missed: list[dict[str, Any]]) -> No
 
 #: A reviewer's objections to the design that no check of FI's confirms, kept by the review step when the paper is
 #: written again after it (``Engine._note_design_objections``), cleared when a new design is made:
-#: ``[{"names": [...], "said": str}]``.
+#: ``[{"names": [...], "hits": [...], "said": str}]`` (``names`` are the keys a repeated objection is found by).
 OBJECTIONS_RECORD = Path(".fi") / "review_objections.json"
 
 
@@ -459,9 +459,11 @@ def stated_objections(quest_root: Path) -> set[str]:
     return {str(n) for r in _objection_rows(quest_root) for n in r.get("names") or [] if str(n).strip()}
 
 
-def add_objections(quest_root: Path, names: list[str], said: str) -> None:
-    """Add one review's objections (``names``, and the reviewer's own reason ``said``) to the record."""
-    rows = _objection_rows(quest_root) + [{"names": [str(n) for n in names], "said": str(said or "").strip()}]
+def add_objections(quest_root: Path, hits: list[tuple[str, str]], said: str) -> None:
+    """Add one review's objections (``hits``: each ``(key, the hit as the reviewer wrote it)``, and the reviewer's own
+    reason ``said``) to the record."""
+    rows = _objection_rows(quest_root) + [{"names": [str(k) for k, _t in hits], "hits": [str(t) for _k, t in hits],
+                                           "said": str(said or "").strip()}]
     path = Path(quest_root) / OBJECTIONS_RECORD
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
@@ -472,16 +474,16 @@ def clear_objections(quest_root: Path) -> None:
 
 
 def _objections_sentence(rows: Any) -> str:
-    """The reviewer's objections, each in the reviewer's own words when it gave a reason, else by its name."""
+    """The reviewer's objections, each in the reviewer's own words: its reason when it gave one, else each objection as
+    it wrote it (an identifier read as words). The same words twice are said once."""
     said: list[str] = []
     for r in rows if isinstance(rows, list) else []:
         if not isinstance(r, dict):
             continue
         reason = " ".join(str(r.get("said") or "").split()).rstrip(".")
-        names = [str(n).replace("_", " ") for n in r.get("names") or [] if str(n).strip()]
-        if reason:
-            said.append(f"\"{reason}\"")
-        said += names if not reason else []
+        hits = [re.sub(r"^\s*\[[^\]]*\]\s*", "", str(h)) for h in r.get("hits") or r.get("names") or []]
+        words = [reason] if reason else [" ".join(h.replace("_", " ").split()).rstrip(".") for h in hits if h.strip()]
+        said += [f"\"{w}\"" for w in words if f"\"{w}\"" not in said]
     if not said:
         return ""
     more = f" and {len(said) - _SHOWN} more" if len(said) > _SHOWN else ""

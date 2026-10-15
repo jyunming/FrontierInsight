@@ -85,6 +85,33 @@ def test_an_objection_is_recorded_stated_in_the_paper_and_not_counted_again(tmp_
     assert disclosure.stated_objections(tmp_path) == set()
 
 
+def test_two_objections_written_as_prose_are_two_and_each_is_said_as_written(tmp_path: Path) -> None:
+    from core import disclosure
+    from core.engine import _objection_key
+
+    assert _objection_key("[methodologist] circular_evaluation: the test set is the training set") == "circular_evaluation"
+    assert _objection_key("pseudo_units") == "pseudo_unit" and _objection_key("`single_point_eval`") == "single_point_eval"
+    assert _objection_key("The baseline is weak") != _objection_key("The sample is too small")
+    eng = _engine(tmp_path, max_iterations=3)
+    eng._note_design_objections({"iteration": 0}, {"verdict": "accept", "must_flag_hits": ["The baseline is weak"]})  # type: ignore[arg-type]
+    second = {"verdict": "accept", "must_flag_hits": ["The sample is too small"]}
+    assert eng._note_design_objections({"iteration": 1}, second) == ["The sample is too small"]  # type: ignore[arg-type]
+    assert "objections_repeated" not in second
+    text = disclosure.run_record(tmp_path)
+    assert '"The baseline is weak"; "The sample is too small"' in text
+
+
+def test_an_objection_is_recorded_when_a_record_rewrite_follows_outside_the_rounds(tmp_path: Path) -> None:
+    from core import disclosure
+
+    eng = _engine(tmp_path, max_iterations=1)  # no round left: only the rewrite for FI's records follows
+    review = {"verdict": "accept",
+              "must_flag_hits": ["[methodologist] circular_evaluation", "record_contradiction: the paper says validated"]}
+    eng._note_design_objections({"iteration": 0}, review)  # type: ignore[arg-type]
+    assert disclosure.stated_objections(tmp_path) == {"circular_evaluation"}
+    assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": 1}) == "rewrite"  # type: ignore[arg-type]
+
+
 def test_fi_adds_the_unsupported_claim_hit_from_its_own_claim_check() -> None:
     from core.engine import _unsupported_claim_hit
 

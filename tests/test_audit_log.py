@@ -190,7 +190,7 @@ async def test_a_quest_leaves_a_trace_of_its_nodes_checks_routes_and_the_reasons
 ) -> None:
     prompts: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _with_rationale(_fake(prompts, second_design={})))
-    monkeypatch.setattr("core.engine.Engine._precision_missed", lambda self, state: ["score"])
+    monkeypatch.setattr("core.engine.Engine._precision_missed", lambda self, state, **kw: ["score"])
     engine = Engine(_cfg(tmp_path))
     artifacts = await engine.run()
     assert artifacts.paper_md is not None

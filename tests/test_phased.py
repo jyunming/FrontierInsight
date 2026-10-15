@@ -366,7 +366,7 @@ def test_in_the_confirm_stage_a_redesign_is_not_followed(tmp_path: Path) -> None
 
     engine = Engine(_config(tmp_path / "out", phased_on=True))
     state = {"cross_check": [{"finding": "x"}], "analysis": {"next_step": "re_experiment"}, "iteration": 0}
-    engine._precision_missed = lambda s: ["p"]  # type: ignore[method-assign]  # FI's record agrees with the request
+    engine._precision_missed = lambda s, **kw: ["p"]  # type: ignore[method-assign]  # FI's record agrees with the request
     assert engine._route_after_cross_check(state) == "redesign", "exploration may redesign"
     phased.prepare(engine.quest_root, engine.quest_id)
     phased.enter_confirm(engine.quest_root, explore_result={"a": 1}, frozen_sha256=None, stride=1, replicates=1,

@@ -173,19 +173,19 @@ async def test_cross_check_tolerates_search_failure(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_cross_check_bumps_iteration_on_re_experiment(tmp_path: Path) -> None:
-    """When analyze's `next_step` is `re_experiment` AND budget remains,
-    the cross_check node bumps the shared iteration counter (mirrors
-    review's bump-on-revise behavior). Without this, the re-route
-    would loop forever."""
+    """When analyze's `next_step` is `re_experiment`, budget remains AND FI's precision record agrees (so the router
+    redesigns), the cross_check node bumps the shared iteration counter. Without this, the re-route would loop forever.
+    A request the router will not follow costs no round."""
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     eng._client = type("Stub", (), {"chat": AsyncMock(return_value="{}")})()
     eng.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    state = {"analysis": {"key_findings": ["x"], "next_step": "re_experiment"}, "iteration": 0}
 
-    patch = await eng._node_cross_check({
-        "analysis": {"key_findings": ["x"], "next_step": "re_experiment"},
-        "iteration": 0,
-    })
-    assert patch["iteration"] == 1
+    patch = await eng._node_cross_check(dict(state))
+    assert "iteration" not in patch and eng._route_after_cross_check({**state, **patch}) == "write"
+    eng._precision_missed = lambda s, quiet=False: ["p"]  # type: ignore[method-assign]
+    patch = await eng._node_cross_check(dict(state))
+    assert patch["iteration"] == 1 and eng._route_after_cross_check({**state, **patch}) == "redesign"
 
 
 @pytest.mark.asyncio
@@ -227,8 +227,8 @@ async def test_cross_check_makes_no_search_or_model_call_when_the_run_has_no_res
     assert len(patch["cross_check"]) == 1
     assert "no results" in patch["cross_check"][0]["summary"]
     # The analysis's request to run again is not followed on its word: a run with no results goes to the evidence
-    # check, which sends it back to the design once from its own record.
-    assert patch["iteration"] == 1
+    # check, which sends it back to the design once from its own record. The request costs no round.
+    assert "iteration" not in patch
     assert eng._route_after_cross_check({**_FAILED_RUN, **patch}) == "write"
 
 
@@ -504,7 +504,7 @@ def test_route_after_cross_check_re_experiment_routes_to_design_only_on_fis_prec
              "analysis": {"next_step": "re_experiment", "next_step_reason": "repair the interface and rerun"}}
     assert eng._route_after_cross_check(state) == "write"
     assert "FI's record shows no precision target missed" in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
-    eng._precision_missed = lambda s: ["p_reject"]  # type: ignore[method-assign]
+    eng._precision_missed = lambda s, **kw: ["p_reject"]  # type: ignore[method-assign]
     assert eng._route_after_cross_check(state) == "redesign"
 
 
@@ -538,13 +538,19 @@ def test_a_missed_precision_sends_the_quest_back_only_when_a_larger_run_fits(tmp
     state = _precision_state(0.1)
     assert eng._precision_missed(state) == []  # no estimate
     record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text(json.dumps({"estimate_s": 100.0, "limit_s": 300.0, "fits": True, "reduced": None}), encoding="utf-8")
+    size = {"cells": 1, "trials": 1}  # the plan in this state has no grid and one run per setting
+
+    def estimate(**fields: object) -> None:
+        record.write_text(json.dumps({**size, "reduced": None, **fields}), encoding="utf-8")
+
+    estimate(estimate_s=100.0, limit_s=300.0, fits=True)
     assert eng._precision_missed(state) == ["p"]
-    record.write_text(json.dumps({"estimate_s": 100.0, "limit_s": 200.0, "fits": True, "reduced": None}), encoding="utf-8")
+    estimate(estimate_s=100.0, limit_s=200.0, fits=True)
     assert eng._precision_missed(state) == []  # about 230 s, over the 200 allowed
-    record.write_text(json.dumps({"estimate_s": 10.0, "limit_s": 300.0, "fits": False, "reduced": "fewer runs"}),
-                      encoding="utf-8")
+    estimate(estimate_s=10.0, limit_s=300.0, fits=False, reduced="fewer runs")
     assert eng._precision_missed(state) == []  # FI already had to make it smaller
+    estimate(estimate_s=10.0, limit_s=300.0, fits=True, cells=4, trials=400)
+    assert eng._precision_missed(state) == []  # the estimate of another design's run (FI times only the first)
     assert "a run large enough for it would take" in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
 
 
@@ -554,6 +560,11 @@ def test_a_missed_precision_is_said_in_the_paper_from_the_record(tmp_path: Path)
     disclosure.write_precision_record(tmp_path, [{"name": "p", "half_width": 0.152, "target": 0.1, "trials": 40}])
     text = disclosure.run_record(tmp_path)
     assert "precision target (a 95% interval of ±0.1) was not reached for p (±0.152 from 40 trials)" in text
+    # FI's own sentence, in its block in the paper, is not a number the paper's number check holds against the run.
+    from core import number_provenance
+
+    paper = disclosure.mark_run_record("# T\n\n## Results\n\np = 0.475.\n\n## Limitations\n\nToy.\n", text)
+    assert "0.152" in paper and number_provenance.check(paper, result_json={"p": 0.475}).ok
     disclosure.write_precision_record(tmp_path, [])
     assert not (tmp_path / disclosure.PRECISION_RECORD).exists()
     assert "precision" not in disclosure.run_record(tmp_path)

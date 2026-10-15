@@ -193,7 +193,7 @@ async def test_full_dag_with_analyze_re_experiment_reroute(
     (tests/test_cross_check.py)."""
 
     state_flags = {"analyze_calls": 0, "design_calls": 0}
-    monkeypatch.setattr("core.engine.Engine._precision_missed", lambda self, state: ["outbreak_probability"])
+    monkeypatch.setattr("core.engine.Engine._precision_missed", lambda self, state, **kw: ["outbreak_probability"])
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]

@@ -188,7 +188,7 @@ def _fake(prompts: list[str], *, second_design: dict[str, Any], first_protocol: 
 @pytest.fixture(autouse=True)
 def _precision_missed(monkeypatch: pytest.MonkeyPatch) -> None:
     """FI's record agrees with the analysis's request to run again (the plan's precision target was missed)."""
-    monkeypatch.setattr("core.engine.Engine._precision_missed", lambda self, state: ["score"])
+    monkeypatch.setattr("core.engine.Engine._precision_missed", lambda self, state, **kw: ["score"])
 
 
 def _frozen(engine: Engine) -> dict[str, Any]:

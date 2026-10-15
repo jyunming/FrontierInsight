@@ -2872,29 +2872,35 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._log.warning("[precision] the precision record could not be read (%r)", e)
             return []
 
-    def _precision_missed(self, state: QuestState) -> list[str]:
+    def _precision_missed(self, state: QuestState, *, quiet: bool = False) -> list[str]:
         """The probabilities whose precision target this run missed and a larger run could reach in the time allowed:
         the trials scale with the square of the interval's width, so the run is ``(half_width / target) ** 2`` times
         longer, and FI's own estimate of this run (``.fi/run_estimate.json``, which already carries its safety margin)
-        times that must fit the time the study is allowed. No estimate, a run FI already had to make smaller, or one
-        that would not fit: empty (the paper says the target was missed)."""
+        times that must fit the time the study is allowed. The estimate counts only when it is of this run's size (its
+        settings and trials; FI times only the first design's run, so after a redesign it is another run's). No such
+        estimate, a run FI already had to make smaller, or one that would not fit: empty (the paper says the target was
+        missed). ``quiet``: the same answer, without saying why in run.log (the router says it)."""
         from . import run_estimate as _estimate
 
         missed = self._precision_shortfalls(state)
         if not missed:
             return []
+        say = (lambda *a: None) if quiet else self._log.info
         record = _estimate.read_record(self.quest_root)
         estimate_s, limit_s = record.get("estimate_s"), record.get("limit_s")
+        grid, runs, _thresholds = self._grid_and_runs(state)
+        cells = _estimate.cell_count(grid)
         if record.get("reduced") or not record.get("fits") or not all(
-                isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0 for x in (estimate_s, limit_s)):
-            self._log.info("[cross_check] the precision target was not reached (%s); FI has no estimate showing a larger "
-                           "run fits the time allowed", ", ".join(m["name"] for m in missed[:4]))
+                isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0 for x in (estimate_s, limit_s)) \
+                or record.get("cells") != cells or record.get("trials") not in (cells, cells * runs):
+            say("[cross_check] the precision target was not reached (%s); FI has no estimate of this run showing a "
+                "larger run fits the time allowed", ", ".join(m["name"] for m in missed[:4]))
             return []
         scale = max((m["half_width"] / m["target"]) ** 2 for m in missed)
         if float(estimate_s) * scale > float(limit_s):  # type: ignore[arg-type]
-            self._log.info("[cross_check] the precision target was not reached (%s); a run large enough for it would take "
-                           "about %.0f s, over the %.0f s allowed", ", ".join(m["name"] for m in missed[:4]),
-                           float(estimate_s) * scale, float(limit_s))  # type: ignore[arg-type]
+            say("[cross_check] the precision target was not reached (%s); a run large enough for it would take about "
+                "%.0f s, over the %.0f s allowed", ", ".join(m["name"] for m in missed[:4]),
+                float(estimate_s) * scale, float(limit_s))  # type: ignore[arg-type]
             return []
         return [m["name"] for m in missed]
 
@@ -18194,9 +18200,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # mirrors how `_node_review` bumps on `verdict=revise`.
         if self.config.engine.enable_analyze_reroute:
             next_step = (state.get("analysis") or {}).get("next_step", "publish")
+            # A re_experiment the router will not follow (FI's precision record does not agree) costs no round.
             if (
                 next_step in ("re_experiment", "broaden_lit")
                 and state.get("iteration", 0) < self.config.engine.max_iterations
+                and (next_step == "broaden_lit" or self._precision_missed(state, quiet=True))
             ):
                 patch["iteration"] = state.get("iteration", 0) + 1
                 self._log.info(
@@ -19232,6 +19240,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # the writer (core/disclosure.py:run_record). Before the code findings, which go after it.
         try:
             _disclosure.write_precision_record(self.quest_root, self._precision_shortfalls(state))
+        except Exception as e:  # noqa: BLE001 -- the rest of the run record is still written
+            self._log.warning("[write] the record of the precision reached could not be kept (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+        try:
             markdown = _disclosure.mark_run_record(markdown, _disclosure.run_record(
                 self.quest_root, topic=str(self.config.topic or ""),
                 duration_s=(state.get("exec_result") or {}).get("duration_s")))
@@ -21277,13 +21289,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.info("[review] objections the paper's limitations already state, not counted again: %s",
                                ", ".join(repeated))
             counted = [h for h in hits if _objection_key(h) not in set(repeated)]
-            new = [_objection_key(h) for h in objections if _objection_key(h) not in stated]
+            new = [(_objection_key(h), _one_line(str(h), 300)) for h in objections if _objection_key(h) not in stated]
             said = str(review.get("blocking") or "").strip() if review.get("verdict") == "revise" else ""
             if said and not counted and (self.config.pauses.review == "ask" or not self.config.engine.review_loop):
                 said = ""  # a person decides, or nothing is rewritten: the reason is not an objection the paper states
             rerun = (_review_sends_the_experiment_back(review, state)
                      and int(state.get("code_reexecutes") or 0) + 1 <= _CODE_REEXECUTES)
-            if (new or said) and not rerun and int(state.get("iteration", 0) or 0) + 1 < self.config.engine.max_iterations:
+            # The paper is written again after this review: within the rounds, or for a claim FI's records contradict
+            # (those rewrites have their own count, outside the rounds).
+            rewritten = int(state.get("iteration", 0) or 0) + 1 < self.config.engine.max_iterations or (
+                any(_hit_name(h) == _record_claims.HIT for h in hits)
+                and int(state.get("record_rewrites") or 0) + 1 <= _RECORD_REWRITES)
+            if (new or said) and not rerun and rewritten:
                 _disclosure.add_objections(self.quest_root, new, said)
             return counted
         except Exception as e:  # noqa: BLE001 -- FI's record is a help, never a reason to stop
@@ -28312,9 +28329,16 @@ def _hit_name(hit: Any) -> str:
     return m.group(1).lower().removesuffix("s") if m else ""
 
 
+_IDENTIFIER_HIT = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?[`'\"]?([A-Za-z]+_[A-Za-z_]+|[A-Za-z]+(?=[`'\"]?\s*(?::|$)))")
+
+
 def _objection_key(hit: Any) -> str:
-    """How FI's record names an objection: its identifier, or its first words when it starts with none."""
-    return _hit_name(hit) or _one_line(str(hit), 80)
+    """How FI's record names an objection: its identifier (``circular_evaluation``, ``circular_evaluation: ...``, a single
+    word), or else its whole text in lower case, so two objections written as prose are never taken for one."""
+    if _IDENTIFIER_HIT.match(str(hit)):
+        return _hit_name(hit)
+    text = re.sub(r"^\s*\[[^\]]*\]\s*", "", str(hit))
+    return " ".join(text.lower().split())[:120]
 
 
 def _unsupported_claim_hit(state: QuestState, hits: list[Any]) -> list[str]:
