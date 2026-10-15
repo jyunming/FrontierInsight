@@ -88,3 +88,56 @@ def test_the_design_step_keeps_what_it_can_read_and_asks_again_for_the_rest(tmp_
     assert len(prompts) == 2
     assert "Part of your last answer was used. This part was not:" in prompts[1] and "`kind` must be" in prompts[1]
     assert [m["id"] for m in result["protocol"]["metrics"]] == ["realized_fdr", "power", "realized_fdr_uncertainty"]
+
+
+ORACLE = {"name": "tail_agreement", "kind": "second_implementation", "check": "p-values agree with erfc",
+          "expected": 0, "tolerance": 1e-12, "tolerance_mode": "absolute",
+          "reference": "independent second implementation: shares no code", "case": {"m": 20}, "measure": "max_abs_diff"}
+CRITERION = {"name": "tail-agreement", "oracle": "tail_agreement", "use": "value", "direction": "lower", "target": 0,
+             "tolerance": 1e-12}
+
+
+def test_a_part_that_rests_on_another_comes_back_whatever_the_order_of_the_plan() -> None:
+    # The criterion names the check: put back before the check, it cannot be read; it must still come back.
+    before = {"criteria": [CRITERION], "oracles": [ORACLE], **PLAN}
+    assert plan.normalize_protocol(before)[0] is not None
+    got, refused = plan.accept_answer(before, {"metrics": [FDR, REFUSED_KIND, POWER]})
+    assert got is not None and refused
+    assert [c["name"] for c in got["criteria"]] == ["tail-agreement"]
+    assert [o["name"] for o in got["oracles"]] == ["tail_agreement"]
+    assert {m["id"] for m in got["metrics"]} == {"realized_fdr", "power"}
+
+
+def test_an_equation_the_answer_lost_inside_the_model_comes_back_beside_the_answer_s_own() -> None:
+    model = {"summary": "independent tests", "equations": [
+        {"id": "E1", "formula": "p = 0.5*erfc(z/sqrt(2))", "role": "generates", "source": "derivation", "derivation": "x = y"},
+        {"id": "E2", "formula": "q = p*m/k", "role": "analyses", "source": "derivation", "derivation": "x = y"}]}
+    before = {**PLAN, "model": model}
+    assert plan.normalize_protocol(before)[0] is not None
+    answer = {**PLAN, "metrics": [FDR, POWER], "model": {"summary": "independent tests", "equations": [
+        model["equations"][0], {"id": "E3", "role": "generates"},  # E3 has no formula: not taken
+        {"id": "E4", "formula": "power = s/n1", "role": "analyses", "source": "derivation", "derivation": "x = y"}]}}
+    got, refused = plan.accept_answer(before, answer)
+    assert got is not None and refused
+    assert [e["id"] for e in got["model"]["equations"]] == ["E1", "E4", "E2"]
+    assert {m["id"] for m in got["metrics"]} == {"realized_fdr", "power"}
+
+
+def test_the_same_part_refused_twice_is_not_asked_for_a_third_time(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    plan.plan_path(engine.quest_root).parent.mkdir(parents=True, exist_ok=True)
+    plan.plan_path(engine.quest_root).write_text("# plan\n", encoding="utf-8")
+    asked: list[str] = []
+
+    async def complete(ask, path, **kwargs):
+        asked.append(ask)
+        engine._answer_refused = ["`protocol.metrics` entry `realized_fdr_uncertainty`: `kind` must be `proportion`"]
+
+    engine._complete_plan_parts = complete  # type: ignore[method-assign]
+    engine._design_from_plan = lambda: ({"a": 1}, "sha2")  # type: ignore[method-assign]
+    engine._progress = lambda *a, **k: None  # type: ignore[method-assign]
+    asyncio.run(engine._ask_plan_to_complete(
+        {}, "sha", lacks=lambda design: ["uncertainty is missing"], request=lambda design, text: "ask",
+        keep=lambda before, revised: revised, file="part_asked.json", what="settings", short="it", note="n"))
+    assert len(asked) == 2
+    assert "same part that could not be used" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")

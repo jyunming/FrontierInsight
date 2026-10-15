@@ -5910,6 +5910,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             earlier_problem = last_problem
             last_problem = ""
             schema = False
+            repeated = False
             try:
                 await self._complete_plan_parts(ask, path, expect=text, keep=keep, note=note)
                 refused = list(getattr(self, "_answer_refused", []) or [])
@@ -5921,6 +5922,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                     + " ".join(" ".join(refused).split()))[:1500]
                     self._log.warning("[plan] the plan step's answer to complete %s was used in part; not used: %s",
                                       short, "; ".join(refused)[:600])
+                    repeated = bool(earlier_problem) and last_problem == earlier_problem
             except _PlanEditedMeanwhile:
                 outcome = "plan changed meanwhile"
                 self._log.warning("[plan] plan.md was changed while FI waited for the plan's model; FI kept the version "
@@ -5969,6 +5971,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 whole = f"the plan now has {what}" if what.startswith("what ") else f"the plan's {what} is complete now"
                 self._log.info("[plan] %s (asked %d time(s))", whole, count)
                 print(f"[FI] {whole}; going on")
+                return design, plan_sha
+            if repeated:
+                # The same part refused twice for the same reason: asking again would return it once more.
+                self._log.warning("[plan] the plan's model gave the same part that could not be used for %s twice, so FI "
+                                  "stopped asking (%d request(s) made)", short, count)
                 return design, plan_sha
         return design, plan_sha
 

@@ -1095,6 +1095,51 @@ def _entry_key(entry: Any) -> str | None:
     return None
 
 
+def _lost(had: Any, now: Any, depth: int = 2) -> bool:
+    """Whether ``now`` lacks something ``had`` has: a key of a mapping, or a named entry of a list (by its ``id`` or
+    ``name``), looked at ``depth`` levels down (a protocol's parts, and the entries and keys inside each)."""
+    if isinstance(had, dict):
+        if not isinstance(now, dict) or any(k not in now for k in had):
+            return True
+        return depth > 0 and any(_lost(v, now[k], depth - 1) for k, v in had.items())
+    if isinstance(had, list) and any(_entry_key(e) is not None for e in had):
+        if not isinstance(now, list):
+            return True
+        named = {_entry_key(x): x for x in now if _entry_key(x) is not None}
+        return any(_entry_key(e) is not None and (_entry_key(e) not in named
+                                                   or (depth > 0 and _lost(e, named[_entry_key(e)], depth - 1)))
+                   for e in had)
+    return False
+
+
+def _put_back_inside(plan_part: Any, kept: Any) -> list[Any]:
+    """The ways to put back, one at a time, what ``kept`` (the answer's version of a part) lost of the plan's own
+    ``plan_part``: a named entry of a list that is missing added, or one that lost something mended the same way (the
+    plan's own entry when it is neither a list nor a mapping inside); a key of a mapping that is missing or lost something
+    likewise; the answer's own additions beside them stay. The whole part when it is neither."""
+    if isinstance(plan_part, list) and isinstance(kept, list):
+        out: list[Any] = []
+        for entry in plan_part:
+            name = _entry_key(entry)
+            if name is None:
+                continue
+            at = next((i for i, x in enumerate(kept) if _entry_key(x) == name), None)
+            if at is None:
+                out.append([*kept, entry])
+            elif _lost(entry, kept[at]):
+                out.extend([*kept[:at], mended, *kept[at + 1:]] for mended in _put_back_inside(entry, kept[at]))
+        return out
+    if isinstance(plan_part, dict) and isinstance(kept, dict):
+        out = []
+        for key, value in plan_part.items():
+            if key not in kept:
+                out.append({**kept, key: value})
+            elif _lost(value, kept[key]):
+                out.extend({**kept, key: mended} for mended in _put_back_inside(value, kept[key]))
+        return out
+    return [plan_part]
+
+
 def accept_answer(before: Any, after: Any) -> tuple[dict[str, Any] | None, list[str]]:
     """``(protocol, refused)`` for a model's answer to a request to complete the plan: ``after`` as it is when it can be
     read whole; otherwise what can be read of it, part by part and entry by entry (:func:`repair_protocol`), with each
@@ -1110,26 +1155,43 @@ def accept_answer(before: Any, after: Any) -> tuple[dict[str, Any] | None, list[
     if repaired is None:
         return None, notes or [str(why)]
     base = before if isinstance(before, dict) else {}
-    for key, value in base.items():
-        if key not in repaired:
-            trials = [value]
-        elif isinstance(value, list) and isinstance(repaired[key], list):
-            trials = [e for e in value if _entry_key(e) is not None
-                      and _entry_key(e) not in {_entry_key(x) for x in repaired[key]}]
-        elif isinstance(value, dict) and isinstance(repaired[key], dict):
-            trials = [{k: v} for k, v in value.items() if k not in repaired[key]]
-        else:
-            trials = []
-        for item in trials:  # one at a time, each on what is already kept
-            now = repaired.get(key)
-            option = ([*now, item] if isinstance(now, list) else {**now, **item} if isinstance(now, dict) else item)
-            trial, _ = normalize_protocol({**repaired, key: option})
-            if trial is not None:
-                repaired = trial
-    # Taken in part only when the part taken adds to the plan and costs it nothing it had.
     plan_now = normalize_protocol(base)[0] or base
+    restored = True
+    for _pass in range(16):  # again until nothing more comes back: a part can rest on one put back later in the pass
+        if not restored:
+            break
+        restored = False
+        for key, value in base.items():
+            if key not in repaired:
+                trials = [value]
+            elif isinstance(value, list) and isinstance(repaired[key], list):
+                trials = [e for e in value if _entry_key(e) is not None
+                          and _entry_key(e) not in {_entry_key(x) for x in repaired[key]}]
+            elif isinstance(value, dict) and isinstance(repaired[key], dict):
+                trials = [{k: v} for k, v in value.items() if k not in repaired[key]]
+            else:
+                trials = []
+            for item in trials:  # one at a time, each on what is already kept
+                now = repaired.get(key)
+                option = ([*now, item] if isinstance(now, list) else {**now, **item} if isinstance(now, dict) else item)
+                trial, _ = normalize_protocol({**repaired, key: option})
+                if trial is not None:
+                    repaired, restored = trial, True
+            # Something inside a part lost (an equation of the model, a key of an entry): the plan's own goes back, one
+            # entry or key at a time, each on what is already kept; the answer's additions beside it stay.
+            for _round in range(64):  # bounded: each round puts back one entry or key
+                if not (key in repaired and key in plan_now and _lost(plan_now[key], repaired[key])):
+                    break
+                for option in _put_back_inside(plan_now[key], repaired[key]):
+                    trial, _ = normalize_protocol({**repaired, key: option})
+                    if trial is not None and trial != repaired:
+                        repaired, restored = trial, True
+                        break
+                else:
+                    break
+    # Taken in part only when the part taken adds to the plan and costs it nothing it had, a part or anything in one.
     gained = any(k not in plan_now or repaired[k] != plan_now[k] for k in repaired)
-    if not gained or any(k not in repaired for k in plan_now):
+    if not gained or _lost(plan_now, repaired, depth=3):
         return None, notes or [str(why)]
     return repaired, notes
 
