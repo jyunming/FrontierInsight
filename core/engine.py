@@ -16443,7 +16443,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         no_random_source = not _script_has_random_source(seed_path)
         replicates_ran = False
         all_agreed = True  # every replicate that finished gave seed 0's numbers
-        primary_figures: dict[str, tuple[bytes, bytes | None]] = {}
+        primary_figures: dict[str, tuple[bytes, bytes | None, dict[str, bytes]]] = {}
         if result.returncode == 0 and result_json is not None:
             # Tag seed 0 explicitly so the aggregator can attribute it.
             result_json_replicates.append({"_seed": 0, **result_json})
@@ -16854,6 +16854,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         big: list[str] = []
         for f in figures:
             shutil.copy2(fig_dir / f, backup / "figures" / f)
+        from .plot_style import PAPER_DIRNAME
+
+        if (fig_dir / PAPER_DIRNAME).is_dir():  # the figures' paper copies, put back with them
+            shutil.copytree(fig_dir / PAPER_DIRNAME, backup / "figures" / PAPER_DIRNAME)
         for d in data:
             if (self.quest_root / d).stat().st_size > self._RUN_DATA_MAX_BYTES:
                 big.append(d)
@@ -16931,6 +16935,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     if not failed:
                         self._log.warning("[replot_layout] %s was changed without being named; it is put back", f)
                     shutil.copy2(backup / "figures" / f, fig_dir / f)
+                    _put_back_paper_copies(backup / "figures", fig_dir, f)
             for d in data:
                 if d in before_big:
                     if digest(self.quest_root / d) != before_big[d]:
@@ -17016,6 +17021,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if (backup / "figures" / f).is_file():
                     fig_dir.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(backup / "figures" / f, fig_dir / f)
+            from .plot_style import PAPER_DIRNAME
+
+            shutil.rmtree(fig_dir / PAPER_DIRNAME, ignore_errors=True)
+            if (backup / "figures" / PAPER_DIRNAME).is_dir():
+                shutil.copytree(backup / "figures" / PAPER_DIRNAME, fig_dir / PAPER_DIRNAME)
             for d in data:
                 if (backup / d).is_file():
                     (self.quest_root / d).parent.mkdir(parents=True, exist_ok=True)
@@ -22833,6 +22843,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     removed += 1
                 except OSError:
                     pass
+        # The figures' paper copies (figures/paper/, core/plot_style.py) go with them.
+        from .plot_style import PAPER_DIRNAME
+
+        shutil.rmtree(fig_dir / PAPER_DIRNAME, ignore_errors=True)
         if removed:
             self._log.info(
                 "[execute] cleared %d stale figure(s) from a prior experiment "
@@ -28975,7 +28989,7 @@ def _read_primary_figures(
     """Each figure file the primary run drew, with the record of what it draws
     (``None`` when it has none), by file name, before the replicate runs draw
     over them."""
-    kept: dict[str, tuple[bytes, bytes | None]] = {}
+    kept: dict[str, tuple[bytes, bytes | None, dict[str, bytes]]] = {}
     for name in figures:
         try:
             image = (figures_dir / name).read_bytes()
@@ -28985,25 +28999,66 @@ def _read_primary_figures(
             record: bytes | None = (records_dir / f"{Path(name).stem}.json").read_bytes()
         except OSError:
             record = None
-        kept[name] = (image, record)
+        kept[name] = (image, record, _paper_copies(figures_dir, name))
     return kept
 
 
+def _put_back_paper_copies(source: Path, figures_dir: Path, name: str) -> None:
+    """Figure ``name``'s paper copy as it is in the folder ``source`` (a backup of ``figures/``); one that has none
+    there has none after."""
+    from .plot_style import PAPER_DIRNAME
+
+    for suffix in (".pdf", ".png"):
+        kept = source / PAPER_DIRNAME / f"{Path(name).stem}{suffix}"
+        target = figures_dir / PAPER_DIRNAME / kept.name
+        if kept.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(kept, target)
+        else:
+            target.unlink(missing_ok=True)
+
+
+def _paper_copies(figures_dir: Path, name: str) -> dict[str, bytes]:
+    """The paper copy of figure ``name`` (``figures/paper/<stem>.pdf`` and ``.png``, ``core/plot_style.py``), by file
+    name: put back with the figure, so the paper and the slides show the same run."""
+    from .plot_style import PAPER_DIRNAME
+
+    out: dict[str, bytes] = {}
+    for suffix in (".pdf", ".png"):
+        path = figures_dir / PAPER_DIRNAME / f"{Path(name).stem}{suffix}"
+        try:
+            out[path.name] = path.read_bytes()
+        except OSError:
+            continue
+    return out
+
+
 def _restore_primary_figures(
-    figures_dir: Path, records_dir: Path, kept: dict[str, tuple[bytes, bytes | None]],
+    figures_dir: Path, records_dir: Path, kept: dict[str, tuple[bytes, bytes | None, dict[str, bytes]]],
     *, redrawn: Any,
 ) -> list[str]:
     """Put back the primary run's file and record of every kept figure that is
     not in ``redrawn``, so it shows seed 0 rather than the last replicate.
     Returns the figures put back."""
     restored: list[str] = []
-    for name, (image, record) in kept.items():
+    from .plot_style import PAPER_DIRNAME
+
+    for name, (image, record, *paper) in kept.items():
         if name in redrawn:
             continue
         target = records_dir / f"{Path(name).stem}.json"
         try:
             figures_dir.mkdir(parents=True, exist_ok=True)
             (figures_dir / name).write_bytes(image)
+            copies = paper[0] if paper else {}
+            for suffix in (".pdf", ".png"):
+                path = figures_dir / PAPER_DIRNAME / f"{Path(name).stem}{suffix}"
+                if path.name in copies:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(copies[path.name])
+                else:
+                    # A replicate's paper copy would show another run than the figure.
+                    path.unlink(missing_ok=True)
             if record is None:
                 # A replicate's record would describe a figure no longer on disk.
                 target.unlink(missing_ok=True)

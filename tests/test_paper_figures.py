@@ -273,3 +273,58 @@ def test_the_paper_copy_is_made_without_records_too(tmp_path: Path) -> None:
     ), records=False)
     assert (root / "figures" / "paper" / "bare.pdf").is_file()
     assert not (root / ".fi" / "figure_records").exists()
+
+
+# ---- the engine keeps each paper copy with its figure ----------------------
+
+
+def test_a_rerun_clears_the_previous_versions_paper_copies(tmp_path: Path) -> None:
+    import logging
+    from types import SimpleNamespace
+
+    from core.engine import Engine
+
+    paper = tmp_path / "figures" / "paper"
+    paper.mkdir(parents=True)
+    (tmp_path / "figures" / "old.png").write_bytes(b"png")
+    (paper / "old.pdf").write_bytes(b"pdf")
+    (tmp_path / "figures" / "results.csv").write_text("a,b\n", encoding="utf-8")
+    removed = Engine._clear_stale_figures(SimpleNamespace(quest_root=tmp_path, _log=logging.getLogger("t")))
+    assert removed == 1 and not paper.exists() and (tmp_path / "figures" / "results.csv").is_file()
+
+
+def test_a_figure_put_back_to_seed_0_gets_seed_0s_paper_copy_back(tmp_path: Path) -> None:
+    from core.engine import _read_primary_figures, _restore_primary_figures
+
+    figures, records = tmp_path / "figures", tmp_path / "records"
+    (figures / "paper").mkdir(parents=True)
+    records.mkdir()
+    for name in ("bars.png", "lines.png"):
+        (figures / name).write_bytes(b"seed0 " + name.encode())
+        (records / f"{Path(name).stem}.json").write_text("{}", encoding="utf-8")
+    (figures / "paper" / "bars.pdf").write_bytes(b"seed0 bars pdf")
+    (figures / "paper" / "bars.png").write_bytes(b"seed0 bars png")
+    kept = _read_primary_figures(figures, records, ["bars.png", "lines.png"])
+    # A replicate draws over all of them, and gives lines.png a paper copy seed 0 did not have.
+    for name in ("bars.pdf", "bars.png", "lines.pdf"):
+        (figures / "paper" / name).write_bytes(b"replicate")
+    (figures / "bars.png").write_bytes(b"replicate")
+    restored = _restore_primary_figures(figures, records, kept, redrawn={})
+    assert sorted(restored) == ["bars.png", "lines.png"]
+    assert (figures / "paper" / "bars.pdf").read_bytes() == b"seed0 bars pdf"
+    assert (figures / "paper" / "bars.png").read_bytes() == b"seed0 bars png"
+    assert not (figures / "paper" / "lines.pdf").exists()
+
+
+def test_a_layout_redraw_that_is_put_back_puts_the_paper_copy_back(tmp_path: Path) -> None:
+    from core.engine import _put_back_paper_copies
+
+    backup, figures = tmp_path / "backup", tmp_path / "figures"
+    (backup / "paper").mkdir(parents=True)
+    (figures / "paper").mkdir(parents=True)
+    (backup / "paper" / "a.pdf").write_bytes(b"before")
+    (figures / "paper" / "a.pdf").write_bytes(b"failed redraw")
+    (figures / "paper" / "a.png").write_bytes(b"failed redraw")
+    _put_back_paper_copies(backup, figures, "a.png")
+    assert (figures / "paper" / "a.pdf").read_bytes() == b"before"
+    assert not (figures / "paper" / "a.png").exists()
