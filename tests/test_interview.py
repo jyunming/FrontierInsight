@@ -373,7 +373,7 @@ def test_export_schema_json_carries_choice_lists() -> None:
     paper_format_values = {c["value"] for c in payload["paper_formats"]}
     assert "generic" in paper_format_values
     assert "essay" in paper_format_values
-    assert len(paper_format_values) == 9
+    assert len(paper_format_values) == 10
     # provider_models dict has a model list per provider.
     for provider in payload["provider_models"]:
         assert isinstance(payload["provider_models"][provider], list)

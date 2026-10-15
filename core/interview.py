@@ -155,6 +155,8 @@ PAPER_FORMATS: tuple[Choice, ...] = (
     # Scientific venues — keep order in sync with PaperFormat in core/config.py.
     Choice("generic", "generic — scientific paper, IMRAD",
            "Default for scientific topics. Surveys, comparative reviews, theoretical derivations, brief preprints."),
+    Choice("article", "article — plain one-column paper, no venue style",
+           "A neutral layout with no conference name or logo; the same IMRAD paper as generic."),
     Choice("neurips", "NeurIPS — ML benchmark / algorithm",
            "Empirical ML, neural networks, learning algorithms, journal-length."),
     Choice("iclr", "ICLR — representation learning",

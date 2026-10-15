@@ -1,0 +1,57 @@
+% fi_paper.sty -- the neutral paper style of Frontier Insight.
+% Copyright 2026 Frontier Insight contributors. Licensed under the Apache License, Version 2.0
+% (like the rest of Frontier Insight). Written for this project; it is not a copy of any
+% conference or journal kit and prints no venue name.
+%
+% One column, Latin Modern, microtype, small captions, figures as wide as the text, floats at
+% the top of a page, and float settings that keep a page of text and figures from being left
+% half empty. generation/paper.py copies this file next to the paper source before pandoc runs,
+% so a plain "\usepackage{fi_paper}" finds it. The pandoc-specific parts (tables, the figure
+% height cap, the float barrier) are in template.tex.
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{fi_paper}[2026/10/15 neutral paper style]
+
+\RequirePackage{iftex}
+\ifPDFTeX
+  \RequirePackage[T1]{fontenc}
+  \RequirePackage[utf8]{inputenc}
+  \RequirePackage{lmodern}
+\fi
+\RequirePackage{microtype}
+\RequirePackage{amsmath, amssymb}
+\RequirePackage{graphicx}
+\RequirePackage{xcolor}
+\RequirePackage[font=small,labelfont=bf,labelsep=period,skip=4pt,justification=centering,singlelinecheck=true]{caption}
+\captionsetup[table]{position=top}
+\captionsetup[figure]{position=bottom}
+
+% Sections and subsections are numbered once (generation/_headings.py takes the writer's own
+% numbers off); deeper levels are not numbered.
+\setcounter{secnumdepth}{2}
+\setlength{\emergencystretch}{3em}
+
+% A figure is as wide as the text and keeps its shape.
+\setkeys{Gin}{width=\linewidth,keepaspectratio}
+
+% Figures and tables go to the top of a page (t), else the bottom (b) or a page of floats
+% (p); a page of floats must be well filled, so a figure is not left alone on a half-empty page.
+\makeatletter
+\def\fps@figure{tbp}
+\def\fps@table{tbp}
+\makeatother
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.5}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\setcounter{totalnumber}{4}
+\setlength{\textfloatsep}{12pt plus 2pt minus 4pt}
+\setlength{\floatsep}{10pt plus 2pt minus 2pt}
+\setlength{\intextsep}{10pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{0pt}
+\clubpenalty=10000
+\widowpenalty=10000
+\renewcommand{\arraystretch}{1.1}
+
+\endinput

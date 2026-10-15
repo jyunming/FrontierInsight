@@ -824,6 +824,17 @@ def _copy_brand_icon(out_dir: Path) -> bool:
         return False
 
 
+def _copy_template_support(template: Path, out_dir: Path) -> None:
+    """Copy the style files that sit beside ``template`` (a ``.sty`` the template loads,
+    such as the neutral template's ``fi_paper.sty``, or a venue's own) next to the
+    pandoc source, where LaTeX looks first."""
+    try:
+        for sty in template.parent.glob("*.sty"):
+            shutil.copyfile(sty, out_dir / sty.name)
+    except OSError as e:
+        _log.warning("paper.pdf: could not copy the template's style files (%r)", e)
+
+
 @dataclass
 class _PdfSkipReason:
     """Why ``_compile_pdf`` returned ``None``. Surfaced to the user via
@@ -1411,6 +1422,7 @@ class PaperGenerator:
         if page_limit is not None:
             cmd.extend(["-V", "fi-tight=true"])
         if template.exists():
+            _copy_template_support(template, out_dir)
             cmd.extend(["--template", str(template)])
         else:
             _log.info(

@@ -276,3 +276,41 @@ def test_compile_for_page_count_falls_back_even_when_the_config_has_it_off(tmp_p
     pdf, why, record = gen.compile_for_page_count(md, scratch)
     assert pdf is not None and why == ""
     assert record["typeset"] is False and record["engine"] == "html_fallback"
+
+
+# ---------------------------------------------------------------------------
+# The neutral template
+
+
+def test_the_neutral_article_template_typesets_a_real_paper(tmp_path: Path) -> None:
+    _need_latex()
+    from generation._pdf_measure import measure_pdf
+
+    source = (FIXTURES / "s1_kinetics_paper_pdf_source.md").read_text(encoding="utf-8")
+    md = tmp_path / "in.md"
+    md.write_text(source, encoding="utf-8")
+    _figures(tmp_path, source)
+    gen = PaperGenerator(_config(tmp_path, paper_format="article", page_limit=4))
+    pdf, skip = gen._compile_pdf(md, tmp_path)
+    assert skip is None, skip.summary if skip else ""
+    assert (tmp_path / "fi_paper.sty").is_file()          # copied next to the source
+    assert "pdfTeX" in _producer(pdf)
+    doc = measure_pdf(pdf)
+    first = " ".join(line.text for line in doc.pages[0].lines)
+    assert "Frontier Insight" in first                    # the neutral byline
+    assert not doc.pages[0].images                        # no logo in the page foot
+    everything = " ".join(line.text for page in doc.pages for line in page.lines)
+    for venue in ("ICLR", "NeurIPS", "Conference", "Under review", "IEEE"):
+        assert venue not in everything
+    assert gen.last_render["typeset"] is True
+
+
+def test_the_article_format_is_a_choice_everywhere_the_formats_are_listed() -> None:
+    import typing
+
+    from core.config import PaperFormat, SCIENTIFIC_PAPER_FORMATS
+    from core.interview import PAPER_FORMATS
+
+    assert "article" in typing.get_args(PaperFormat)
+    assert "article" in SCIENTIFIC_PAPER_FORMATS
+    assert "article" in {c.value for c in PAPER_FORMATS}
