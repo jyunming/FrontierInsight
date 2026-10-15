@@ -381,6 +381,7 @@ class ClaudeCliRunner:
         resume = bool(session_id)
         session = session_id or str(uuid.uuid4())
         name = ""
+        env = self.process_env()   # first: a missing login is said before any image is built
         if self.mode == "docker":
             await self.ensure_image()
             assert self.home_dir is not None
@@ -389,7 +390,6 @@ class ClaudeCliRunner:
                 os.chmod(self.home_dir, 0o700)
             name = f"fi-agent-{self.home_dir.name[:30]}-{os.getpid()}-{int(time.time())}".replace("_", "-")
         argv = self.argv(code_dir=cwd.resolve(), name=name, session_id=session, resume=resume)
-        env = self.process_env()
         tree = await AsyncProcessTree.start(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd) if self.mode == "host" else None, env=env, **_no_window())
@@ -460,9 +460,12 @@ def reaches_outside(source: str, rel: str = "") -> list[str]:
         return []
     where = f"{rel}:" if rel else "line "
     found: list[str] = []
+    # A string that is a statement of its own (a docstring) is text for a reader, never a path the code opens.
+    prose = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+             and isinstance(n.value.value, str)}
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in prose:
             text = node.value
             if len(text) > 300:   # a docstring or a long message, not a path
                 continue

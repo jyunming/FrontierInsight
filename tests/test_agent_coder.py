@@ -297,8 +297,18 @@ def test_reaches_outside_finds_the_ways_out_and_spares_ordinary_code() -> None:
     assert ac.reaches_outside("from pathlib import Path\nPath(__file__).parents[2]")
     ordinary = ("import os, json\nfrom pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
                 "out = Path(os.environ.get('FI_RAW_DIR', 'raw'))\nlabel = 'k / s'\nfits = 'model.fits'\n"
-                "t = json.loads(os.environ.get('FI_THRESHOLDS', '{}'))\n")
-    assert ac.reaches_outside(ordinary) == []
+                "t = json.loads(os.environ.get('FI_THRESHOLDS', '{}'))\n"
+                "def f():\n    '''Reads ../data and .fi/checks the way a reader would describe it.'''\n    return 1\n")
+    assert ac.reaches_outside('"""Module: see ../README and the .fi/ folder."""\n' + ordinary) == []
+
+
+async def test_a_missing_login_is_said_before_any_image_is_built(tmp_path: Path) -> None:
+    calls = tmp_path / "docker_calls.txt"
+    docker = _fake(tmp_path, "docker_log", f"import sys\nopen({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n")
+    runner = ac.ClaudeCliRunner(mode="docker", home_dir=tmp_path / "home", docker=docker, environ={})
+    with pytest.raises(RuntimeError, match="claude setup-token"):
+        await runner.run("task", cwd=tmp_path / "code", session_id=None, timeout_s=10)
+    assert not calls.exists(), "no docker command (no image inspect, no build) before the login is there"
 
 
 async def test_a_round_that_overruns_its_cap_is_stopped(quest: Path, tmp_path: Path, standin) -> None:
