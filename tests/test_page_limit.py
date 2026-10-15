@@ -43,7 +43,7 @@ from generation.paper import PaperGenerator, small_source_lists
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "templates" / "paper"
 FORMATS = sorted(p.parent.name for p in TEMPLATES.glob("*/template.tex"))
-ONE_INCH_MARGIN = {"generic", "iclr", "neurips", "report", "whitepaper"}
+ONE_INCH_MARGIN = {"generic", "article", "iclr", "neurips", "report", "whitepaper"}
 
 # The topic of the graded SIR trend runs, word for word.
 SIR_TOPIC = """TOPIC: Compare a deterministic SIR epidemic model (ODE) with its stochastic

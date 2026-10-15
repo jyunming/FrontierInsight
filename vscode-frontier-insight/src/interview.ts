@@ -840,6 +840,11 @@ async function pickPaperFormat(): Promise<PaperFormat | undefined> {
                 value: "generic" as const,
             },
             {
+                label: "$(file) article — plain one-column paper, no venue style",
+                description: "A neutral layout with no conference name or logo; the same IMRAD paper as generic.",
+                value: "article" as const,
+            },
+            {
                 label: "$(beaker) NeurIPS — ML benchmark / algorithm",
                 description: "Empirical ML, neural networks, learning algorithms, journal-length.",
                 value: "neurips" as const,

@@ -12,6 +12,8 @@ $if(fi-cjk-font)$
   \setCJKsansfont{$fi-cjk-font$}
   \setCJKmonofont{$fi-cjk-font$}
 $endif$
+\else
+  \usepackage[utf8]{inputenc}
 \fi
 % A paper with a page limit (fi-tight, set by generation/paper.py) gets 2 cm margins.
 $if(fi-tight)$
@@ -31,8 +33,15 @@ $endif$
 \providecommand{\passthrough}[1]{#1}
 % A figure is as wide as the text and at most a third of its height, so two fit on a page with
 % their captions (see the generic template for why the cap matters).
+\makeatletter
+\newsavebox{\FI@figbox}
 \providecommand{\pandocbounded}[1]{%
-  \begingroup\setkeys{Gin}{width=\linewidth,height=0.33\textheight,keepaspectratio}#1\endgroup}
+  \sbox{\FI@figbox}{#1}%
+  \Gscale@div\@tempa{0.33\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%
+  \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%
+  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi
+  \noindent\scalebox{\@tempa}{\usebox{\FI@figbox}}}
+\makeatother
 % A float waiting for a later page is placed before what follows. The reference list ends the
 % body, and a figure held past it would print among the references; generation/paper.py writes
 % \FIfloatbarrier just before that list. placeins is not used: not every TeX install has it.
