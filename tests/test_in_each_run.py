@@ -199,3 +199,12 @@ def test_pooled_counts_are_unchanged_for_a_study_that_compares_nothing_inside_it
     assert cells == [{"cell": {"a": 1}, "key": "a=1", "planned": 2, "ok": 1, "failed": 1,
                       "metrics": {"x": {"values": [1.0], "trials": [0], "count": 1, "total": 1.0, "non_finite": 0}}}]
     assert in_run.flat("a=1", {"x": 1.0}) == [("a=1", "x", 1.0)]
+
+
+def test_a_formula_reads_a_number_per_value_only_inside_min_max_or_sum() -> None:
+    from core import oracle_forms
+    values = {"k_hat": [1.0, 2.0, 10.0], "c": 2.0}
+    assert oracle_forms.evaluate("max(k_hat) / min(k_hat)", values).value == 10.0
+    assert oracle_forms.evaluate("sum(k_hat) * c", values).value == 26.0
+    elsewhere = oracle_forms.evaluate("k_hat * c", values)
+    assert elsewhere.value is None and "one number per value" in elsewhere.problem

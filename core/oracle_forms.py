@@ -66,6 +66,9 @@ FUNCTIONS: dict[str, Callable[..., float]] = {
 }
 #: The names a formula may use that are not returned by the simulation.
 CONSTANTS: dict[str, float] = {"pi": math.pi}
+#: The functions that take any number of numbers: a name the simulation returns as one number per value each run
+#: compares (core/in_run.py) is given to them as all those numbers (``max(k_hat) / min(k_hat)``), and is read nowhere else.
+SPREAD_OVER = frozenset({"min", "max", "sum"})
 
 
 def _ellipk(m: float) -> float:
@@ -221,8 +224,13 @@ def evaluate(text: Any, values: dict[str, Any], *,
     tree, why = _tree(text, functions)
     if tree is None:
         return Evaluated(unreadable=why)
-    missing = [n for n in names(text, functions)
-               if not isinstance(values.get(n), (int, float)) or isinstance(values.get(n), bool)]
+    def number(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    def per_value(v: Any) -> bool:
+        return isinstance(v, list) and bool(v) and all(number(x) for x in v)
+
+    missing = [n for n in names(text, functions) if not number(values.get(n)) and not per_value(values.get(n))]
     if missing:
         return Evaluated(missing=missing)
 
@@ -237,13 +245,25 @@ def evaluate(text: Any, values: dict[str, Any], *,
         if isinstance(node, ast.Constant):
             return real(node.value)
         if isinstance(node, ast.Name):
-            return real(CONSTANTS[node.id] if node.id in CONSTANTS and node.id not in values else values[node.id])
+            if node.id in CONSTANTS and node.id not in values:
+                return real(CONSTANTS[node.id])
+            if per_value(values[node.id]):
+                raise ValueError(f"`{node.id}` is one number per value each run compares: it is read inside min(), "
+                                 "max() or sum(), or the check's case names the value")
+            return real(values[node.id])
         if isinstance(node, ast.UnaryOp):
             return real(_UNARY[type(node.op)](walk(node.operand)))
         if isinstance(node, ast.BinOp):
             return real(_BINARY[type(node.op)](walk(node.left), walk(node.right)))
         if isinstance(node, ast.Call):
-            return real(functions[node.func.id](*[walk(a) for a in node.args]))  # type: ignore[union-attr]
+            name = node.func.id  # type: ignore[union-attr]
+            args: list[float] = []
+            for a in node.args:
+                if name in SPREAD_OVER and isinstance(a, ast.Name) and per_value(values.get(a.id)):
+                    args.extend(real(x) for x in values[a.id])
+                else:
+                    args.append(walk(a))
+            return real(functions[name](*args))
         raise ValueError(f"cannot compute {type(node).__name__}")
 
     try:
