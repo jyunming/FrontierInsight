@@ -34,6 +34,7 @@ from generation._figure_captions import blank_lines_around_figures, numbers_off_
 from generation._headings import strip_heading_numbers
 from generation._keywords import extract_keywords
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
+from generation._unicode_fonts import find_fonts
 
 
 # Unicode math + typographic glyphs LLMs routinely emit that
@@ -43,12 +44,12 @@ from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 # necessary) — except the two dashes (ligatures of the TEXT fonts) and the
 # super/subscript glyphs (a double script when two meet), which are set
 # differently INSIDE a math span (see ``_LATEX_MATH_OVERRIDES``).
-# This map is the ONLY protection for these glyphs — the
-# paper templates load ``inputenc`` but do not currently define
-# ``\DeclareUnicodeCharacter`` mappings, so any glyph that escapes
-# this dict will reach pdflatex unchanged and fail compile. Extend
-# the map (don't carve out skip regions) when new glyphs show up in
-# user-reported failures.
+# Every entry is the glyph's exact LaTeX form, used by both engines outside
+# code (XeLaTeX would set most glyphs as they are, but in math a glyph needs
+# its command). A glyph in no map is set as itself by XeLaTeX (from a fallback
+# font when the text font lacks it); under pdflatex inputenc sets it or the
+# paper is marked not typeset (see ``_prepare_unicode``). Code is never
+# rewritten.
 _LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
     # Math operators
     "×": r"\ensuremath{\times}",        # ×
@@ -122,7 +123,7 @@ _LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
     "β": r"\ensuremath{\beta}",
     "γ": r"\ensuremath{\gamma}",
     "δ": r"\ensuremath{\delta}",
-    "ε": r"\ensuremath{\epsilon}",
+    "ε": r"\ensuremath{\varepsilon}",   # U+03B5 is the open epsilon, LaTeX's \varepsilon
     "ζ": r"\ensuremath{\zeta}",
     "η": r"\ensuremath{\eta}",
     "θ": r"\ensuremath{\theta}",
@@ -220,10 +221,11 @@ def _math(command: str) -> str:
     return "\\ensuremath{" + command + "}"
 
 
-# More glyphs a model writes (written as code points so no editor can alter them).
-# A subscript parenthesis (U+208D) and a macron (U+0304, below) each stopped the
-# PDF of a real paper. A glyph in no map at all is replaced at the end of
-# :func:`_sanitize_unicode_for_latex`, never left for pdflatex to stop on.
+# More glyphs a model writes. A subscript parenthesis (U+208D) and a macron (U+0304,
+# below) each stopped the PDF of a real paper. Every entry is the glyph's exact LaTeX
+# form: a glyph is set as itself (XeLaTeX), mapped to the command that means the same,
+# or the paper is not typeset. Nothing is mapped to a different letter, a ``?``, or
+# dropped.
 _MORE_GLYPHS: dict[str, str] = {
     "₌": _script("_", "="), "₍": _script("_", "("), "₎": _script("_", ")"),
     # Subscript letters (U+2090-U+209C, U+1D62-U+1D6A, U+2C7C) and superscript letters.
@@ -236,8 +238,8 @@ _MORE_GLYPHS: dict[str, str] = {
         (0x1D43, "a"), (0x1D47, "b"), (0x1D9C, "c"), (0x1D48, "d"), (0x1D49, "e"), (0x1D4F, "k"),
         (0x1D50, "m"), (0x1D56, "p"), (0x1D57, "t"), (0x02E3, "x"), (0x2071, "i"),
     )},
-    # Greek variants and letter-like symbols.
-    "ϕ": _math("\\phi"), "ϑ": _math("\\vartheta"), "ϵ": _math("\\varepsilon"),
+    # Greek variants and letter-like symbols. U+03F5 is the lunate epsilon, LaTeX's \epsilon.
+    "ϕ": _math("\\phi"), "ϑ": _math("\\vartheta"), "ϵ": _math("\\epsilon"),
     "ϱ": _math("\\varrho"), "ς": _math("\\varsigma"), "ϖ": _math("\\varpi"),
     "ℓ": _math("\\ell"), "ℏ": _math("\\hbar"), "ℵ": _math("\\aleph"),
     # Operators, relations, arrows, brackets.
@@ -252,9 +254,22 @@ _MORE_GLYPHS: dict[str, str] = {
     "⌈": _math("\\lceil"), "⌉": _math("\\rceil"),
     "⌊": _math("\\lfloor"), "⌋": _math("\\rfloor"),
     "‖": _math("\\|"), "✓": _math("\\checkmark"), "✔": _math("\\checkmark"),
-    "✗": "x", "✘": "x", "□": _math("\\square"), "■": _math("\\blacksquare"),
-    "★": "*", "☆": "*",
+    "□": _math("\\square"), "■": _math("\\blacksquare"),
     "℃": _math("^{\\circ}") + "C", "℉": _math("^{\\circ}") + "F",
+    # The increment sign (Option-J on a Mac) is a capital delta; the up tack is the
+    # transpose; slanted and double-line relations and the negated ones.
+    "∆": _math("\\Delta"), "⊤": _math("\\top"), "⟂": _math("\\perp"),
+    "⩽": _math("\\leqslant"), "⩾": _math("\\geqslant"), "≦": _math("\\leqq"), "≧": _math("\\geqq"),
+    "≮": _math("\\nless"), "≯": _math("\\ngtr"), "≰": _math("\\nleq"), "≱": _math("\\ngeq"),
+    "≉": _math("\\not\\approx"), "≢": _math("\\not\\equiv"), "∤": _math("\\nmid"),
+    "∦": _math("\\nparallel"), "⊄": _math("\\not\\subset"), "⊅": _math("\\not\\supset"),
+    "⊈": _math("\\nsubseteq"), "⊉": _math("\\nsupseteq"), "∌": _math("\\not\\ni"),
+    "⨯": _math("\\times"), "⋆": _math("\\star"), "∛": _math("\\sqrt[3]{}"), "∜": _math("\\sqrt[4]{}"),
+    "‴": _math("'''"),
+    # Capital Greek letters drawn like Latin ones are set as that letter, upright as
+    # LaTeX sets the other capital Greek letters; small omicron is an o.
+    **{greek: _math("\\mathrm{" + latin + "}") for greek, latin in zip("ΑΒΕΖΗΙΚΜΝΟΡΤΧ", "ABEZHIKMNOPTX")},
+    "Υ": _math("\\Upsilon"), "ο": _math("o"),
     # Dashes, hyphens, quotes and spaces of other widths.
     "―": "---", "‑": "-", "‐": "-", "‒": "--", "‚": ",", "„": ",,",
     " ": " ", " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
@@ -263,6 +278,119 @@ _MORE_GLYPHS: dict[str, str] = {
     "️": "", "︎": "",   # variation selectors that follow an emoji or a symbol
 }
 for _glyph, _latex in _MORE_GLYPHS.items():
+    _LATEX_UNICODE_REPLACEMENTS.setdefault(_glyph, _latex)
+
+
+def _inner(latex: str) -> str:
+    """``\\alpha`` from ``\\ensuremath{\\alpha}``; the text as it is otherwise."""
+    m = re.fullmatch(r"\\ensuremath\{(.*)\}", latex)
+    return m.group(1) if m else latex
+
+
+def _letter_in_math(ch: str) -> str | None:
+    """How ``ch`` (a Latin or Greek letter, or a digit) is written in math, or None."""
+    if ch.isascii() and ch.isalnum():
+        return ch
+    latex = _LATEX_UNICODE_REPLACEMENTS.get(ch)
+    return _inner(latex) if latex and latex.startswith("\\ensuremath{\\") else None
+
+
+def _script_letters() -> dict[str, str]:
+    """Every superscript and subscript letter Unicode has (``ᵀ``, ``ʰ``, ``ᵝ``, ``ᵢ``) as
+    the script it is, read off Unicode's own decomposition (``<super> T``). The
+    transpose and the conjugate transpose are upright sans, as they are written."""
+    found: dict[str, str] = {}
+    ranges = ((0x02B0, 0x02FF), (0x1D2C, 0x1D6A), (0x1D9B, 0x1DBF), (0x2070, 0x209F),
+              (0x2C7C, 0x2C7D), (0xA69C, 0xA69D), (0xA770, 0xA770), (0xA7F8, 0xA7F9), (0xAB5C, 0xAB5F))
+    for lo, hi in ranges:
+        for code in range(lo, hi + 1):
+            parts = unicodedata.decomposition(chr(code)).split()
+            if len(parts) != 2 or parts[0] not in ("<super>", "<sub>"):
+                continue
+            base = chr(int(parts[1], 16))
+            inner = _letter_in_math(base)
+            if inner is None:
+                continue
+            if base in "TH" and parts[0] == "<super>":
+                inner = "\\mathsf{" + base + "}"
+            found[chr(code)] = _script("^" if parts[0] == "<super>" else "_", inner)
+    return found
+
+
+# Unicode's mathematical alphanumerics (U+1D400-U+1D7FF) by the style their name gives.
+_MATH_STYLES: tuple[tuple[str, str, bool], ...] = (
+    # (name prefix, command, letters only in upper case)
+    ("MATHEMATICAL BOLD ITALIC ", "\\boldsymbol", False),
+    ("MATHEMATICAL BOLD SCRIPT ", "\\mathcal", True),
+    ("MATHEMATICAL BOLD FRAKTUR ", "\\mathfrak", False),
+    ("MATHEMATICAL SANS-SERIF BOLD ITALIC ", "\\mathsf", False),
+    ("MATHEMATICAL SANS-SERIF BOLD ", "\\mathsf", False),
+    ("MATHEMATICAL SANS-SERIF ITALIC ", "\\mathsf", False),
+    ("MATHEMATICAL SANS-SERIF ", "\\mathsf", False),
+    ("MATHEMATICAL BOLD ", "\\mathbf", False),
+    ("MATHEMATICAL ITALIC ", "", False),
+    ("MATHEMATICAL SCRIPT ", "\\mathcal", True),
+    ("MATHEMATICAL FRAKTUR ", "\\mathfrak", False),
+    ("MATHEMATICAL DOUBLE-STRUCK ", "\\mathbb", True),
+    ("MATHEMATICAL MONOSPACE ", "\\mathtt", False),
+)
+
+
+def _math_alphanumerics() -> dict[str, str]:
+    """``𝐱`` as ``\\mathbf{x}``, ``𝑥`` as ``x``, ``ℬ``-style capitals as ``\\mathcal{B}``:
+    each styled letter as the LaTeX style it names. A style LaTeX's fonts do not have
+    for that letter (a double-struck digit, a small script letter) is left out."""
+    found: dict[str, str] = {}
+    for code in range(0x1D400, 0x1D800):
+        ch = chr(code)
+        name = unicodedata.name(ch, "")
+        parts = unicodedata.decomposition(ch).split()
+        if len(parts) != 2 or parts[0] != "<font>":
+            continue
+        base = chr(int(parts[1], 16))
+        inner = _letter_in_math(base)
+        if inner is None:
+            continue
+        for prefix, command, upper_only in _MATH_STYLES:
+            if name.startswith(prefix):
+                if upper_only and not (base.isascii() and base.isupper()):
+                    break
+                if command in ("\\mathbf", "\\mathsf", "\\mathtt", "\\mathcal", "\\mathfrak", "\\mathbb") \
+                        and not base.isascii():
+                    command = "\\boldsymbol" if "BOLD" in prefix else ""
+                found[ch] = _math(command + "{" + inner + "}" if command else inner)
+                break
+    return found
+
+
+for _glyph, _latex in {**_script_letters(), **_math_alphanumerics()}.items():
+    _LATEX_UNICODE_REPLACEMENTS.setdefault(_glyph, _latex)
+
+
+def _vulgar_fractions() -> dict[str, str]:
+    """``⅓`` as ``\\tfrac{1}{3}``, from Unicode's ``<fraction> 1 ⁄ 3``."""
+    found: dict[str, str] = {}
+    for code in [*range(0xBC, 0xBF), *range(0x2150, 0x2160), 0x2189]:
+        parts = unicodedata.decomposition(chr(code)).split()
+        if not parts or parts[0] != "<fraction>" or "2044" not in parts:
+            continue
+        cut = parts.index("2044")
+        top = "".join(chr(int(p, 16)) for p in parts[1:cut])
+        bottom = "".join(chr(int(p, 16)) for p in parts[cut + 1:])
+        if top.isdigit() and bottom.isdigit():
+            found[chr(code)] = _math("\\tfrac{" + top + "}{" + bottom + "}")
+    return found
+
+
+# Glyphs a Unicode engine sets as they are, which pdflatex's fonts do not have: their
+# LaTeX form, used only when the paper is typeset with pdflatex. A double-struck digit
+# (the indicator 𝟙) is bold under pdflatex, the usual way to write it without bbm.
+_PDFLATEX_ONLY: dict[str, str] = {
+    **_vulgar_fractions(),
+    **{chr(0x1D7D8 + d): _math("\\mathbf{" + str(d) + "}") for d in range(10)},
+    "★": _math("\\bigstar"),
+}
+for _glyph, _latex in _PDFLATEX_ONLY.items():
     _LATEX_UNICODE_REPLACEMENTS.setdefault(_glyph, _latex)
 
 # Pre-compile a translator for str.translate — that path is faster
@@ -290,6 +418,13 @@ _LATEX_MATH_OVERRIDES: dict[str, str] = {
     "–": r"\text{--}",    # – en dash
 }
 _LATEX_MATH_TRANSLATOR = str.maketrans({**_LATEX_UNICODE_REPLACEMENTS, **_LATEX_MATH_OVERRIDES})
+# Under XeLaTeX the glyphs of ``_PDFLATEX_ONLY`` are set as they are.
+_UNICODE_ENGINE_TEXT_TRANSLATOR = {
+    k: v for k, v in _LATEX_UNICODE_TRANSLATOR.items() if chr(k) not in _PDFLATEX_ONLY
+}
+_UNICODE_ENGINE_MATH_TRANSLATOR = {
+    k: v for k, v in _LATEX_MATH_TRANSLATOR.items() if chr(k) not in _PDFLATEX_ONLY
+}
 
 # The super/subscript entries of the map, read off it: glyph -> ("^" or "_", what
 # goes in the braces). ``°`` is one of them (``^{\circ}``).
@@ -316,128 +451,289 @@ def _script_glyph_runs_as_one_script(math: str) -> str:
 
 
 # A combining mark after a letter (``x`` + U+0304 is "x-bar"): pdflatex stops on
-# the mark, and Unicode has no single character for most such letters.
-_COMBINING_RE = re.compile(r"(\w)([\u0300-\u036f\u20d0-\u20ff]+)")
+# the mark, and Unicode has no single character for most such letters. The text is
+# put in NFC first, so a mark that has a composed letter (``e`` + U+0302 is ``ê``,
+# ``=`` + U+0338 is ``≠``) is that letter before this runs.
+_COMBINING_RE = re.compile(r"(\w)([̀-ͯ⃐-⃿]+)")
 _COMBINING_ACCENTS: dict[int, str] = {
     0x0300: "\\grave", 0x0301: "\\acute", 0x0302: "\\hat", 0x0303: "\\tilde", 0x0304: "\\bar",
     0x0305: "\\overline", 0x0306: "\\breve", 0x0307: "\\dot", 0x0308: "\\ddot", 0x030a: "\\mathring",
-    0x030c: "\\check", 0x20d7: "\\vec", 0x20db: "\\dddot",
+    0x030c: "\\check", 0x0332: "\\underline", 0x20d7: "\\vec", 0x20db: "\\dddot",
 }
-_MARK_RE = re.compile(r"[\u0300-\u036f\u20d0-\u20ff]")
-# Where a glyph the maps do not know is still not safe for pdflatex's utf8
-# input: Greek, the symbol blocks (punctuation, scripts, arrows, math, technical,
-# shapes, dingbats), mathematical alphanumerics, emoji and private use. Latin
-# letters (U+00A0-U+017F) are set up by inputenc, and a language written in its
-# own script (Cyrillic, CJK, ...) goes to XeLaTeX, so neither is touched.
-_UNSAFE_RANGES: tuple[tuple[int, int], ...] = (
-    (0x0370, 0x03ff), (0x2000, 0x2bff), (0x2e00, 0x2e7f), (0x1d400, 0x1d7ff),
-    (0x1f000, 0x1ffff), (0xe000, 0xf8ff), (0xfff0, 0xffff),
-)
-# Inside those ranges inputenc does set these up (and the maps above leave them).
-_KNOWN_TO_INPUTENC = frozenset({0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2020, 0x2021,
-                                0x2022, 0x2026, 0x2030, 0x20ac, 0x2116, 0x2122})
-_PICTOGRAPH_RANGES: tuple[tuple[int, int], ...] = ((0x1f000, 0x1ffff), (0x2600, 0x27bf), (0xe000, 0xf8ff))
 
 
 def _accented_letter(match: "re.Match[str]") -> str:
-    """``x`` + a combining macron as ``\\ensuremath{\\bar{x}}``; a letter Unicode
-    has one character for (``e`` + acute) as that character. A mark with no
-    LaTeX accent here is dropped, the letter kept."""
+    """``x`` + a combining macron as ``\\ensuremath{\\bar{x}}``. A mark LaTeX has no
+    accent for here is left as written, with its letter: XeLaTeX sets it, and pdflatex
+    stops on it, so the paper is marked not typeset; it is never dropped."""
     base, marks = match.group(1), match.group(2)
-    composed = unicodedata.normalize("NFC", base + marks)
-    # An accent of a word (cafe + acute, n + tilde) is the accented letter; a hat, bar,
-    # dot or tilde on a variable is a statistician's accent and stays math.
-    prose = marks[0] in "̧̨̀́̈" or (marks[0] == "̃" and base in "nNaAoO")
-    if prose and len(composed) == 1 and 0xa0 <= ord(composed) <= 0x17f:
-        return composed
-    inner = _LATEX_UNICODE_REPLACEMENTS.get(base, base)
-    wrapped = re.fullmatch(r"\\ensuremath\{(.*)\}", inner)
-    if wrapped:
-        inner = wrapped.group(1)
-    elif not base.isascii() or not base.isalnum():
-        return base
+    if not all(ord(mark) in _COMBINING_ACCENTS for mark in marks):
+        return match.group(0)
+    latex = _LATEX_UNICODE_REPLACEMENTS.get(base)
+    if latex is not None and latex.startswith("\\ensuremath{\\"):
+        inner = _inner(latex)
+    elif base.isascii() and base.isalnum():
+        inner = base
+    else:
+        return match.group(0)
     for mark in marks:
-        accent = _COMBINING_ACCENTS.get(ord(mark))
-        if accent:
-            inner = f"{accent}{{{inner}}}"
-    return "\\ensuremath{" + inner + "}" if inner != base else base
+        inner = f"{_COMBINING_ACCENTS[ord(mark)]}{{{inner}}}"
+    return "\\ensuremath{" + inner + "}"
 
 
-def _replace_unsettable(markdown: str) -> tuple[str, list[str]]:
-    """Every glyph left that pdflatex cannot set (see ``_UNSAFE_RANGES``, a mark
-    with no letter before it) becomes its plain-letter form when it has one
-    (``𝑥`` as ``x``), nothing when it is a pictograph or a stray mark, and a ``?``
-    otherwise. Returns the text and the glyphs it replaced, as ``U+XXXX``."""
-    replaced: list[str] = []
-
-    def one(ch: str) -> str:
-        code = ord(ch)
-        if code < 0x80 or code in _KNOWN_TO_INPUTENC:
-            return ch
-        if not (unicodedata.category(ch).startswith("M") or any(lo <= code <= hi for lo, hi in _UNSAFE_RANGES)):
-            return ch
-        replaced.append(f"U+{code:04X}")
-        if any(lo <= code <= hi for lo, hi in _PICTOGRAPH_RANGES) or unicodedata.category(ch).startswith("M"):
-            return ""
-        plain = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
-        return plain if plain.strip() else "?"
-
-    return "".join(one(ch) for ch in markdown), replaced
-
-
-def _sanitize_unicode_for_latex(markdown: str) -> str:
-    """Replace common LLM-emitted Unicode math/typography glyphs with
-    LaTeX-safe equivalents so ``pdflatex`` + ``\\usepackage[utf8]{inputenc}``
-    doesn't error with ``Unicode character … not set up for use with
-    LaTeX``.
-
-    A combining mark after a letter becomes a math accent (``x̄`` is
-    ``\\ensuremath{\\bar{x}}``), and a glyph in none of the maps below that
-    pdflatex still cannot set (see :func:`_replace_unsettable`) is replaced by
-    its plain form or a ``?``: a glyph the maps do not know no longer stops the
-    PDF. It is logged at WARNING so run.log names it, and the map can grow.
-    Latin letters and other scripts are left as they are (a script FI sets with
-    XeLaTeX is not touched).
-
-    A math span (``$..$``, ``$$..$$``, ``\\(..\\)``, ``\\[..\\]``, found by
-    pandoc's own rules) takes :data:`_LATEX_MATH_OVERRIDES` for the dashes, so
-    ``$0.322–0.338$`` prints a dash between the numbers, and sets a run of
-    super/subscript glyphs as one script (``$10⁻³$`` is ``10^{-3}``). Code,
-    fenced or inline, is not math and is rewritten as prose is: a raw glyph
-    left in it would still stop pdflatex."""
-    markdown = _COMBINING_RE.sub(_accented_letter, markdown)
-    out = "".join(
-        _script_glyph_runs_as_one_script(segment).translate(_LATEX_MATH_TRANSLATOR)
-        if is_math else segment.translate(_LATEX_UNICODE_TRANSLATOR)
-        for segment, is_math in _split_math_segments(markdown)
+def _nfc_outside_code(markdown: str) -> str:
+    """``markdown`` in Unicode NFC, code left exactly as written. NFC joins a letter and
+    its mark into the one character Unicode has for them (``=`` + U+0338 is ``≠``, ``e``
+    + U+0302 is ``ê``) and turns the unit signs into the letters (U+212B ANGSTROM SIGN is
+    ``Å``, U+2126 OHM SIGN is ``Ω``), which every engine sets."""
+    return "".join(
+        segment if is_code else unicodedata.normalize("NFC", segment)
+        for segment, is_code in _split_code_segments(markdown)
     )
-    out, replaced = _replace_unsettable(out)
-    if replaced:
-        _log.warning(
-            "paper.pdf: %d glyph(s) pdflatex cannot set were replaced by their plain form or a '?' (%s)",
-            len(replaced), ", ".join(sorted(set(replaced))[:12]),
-        )
+
+
+@dataclass
+class _UnicodeSource:
+    """The paper's source ready for one TeX engine, and what was done to its glyphs."""
+
+    text: str
+    # (glyph, what it became, where: "text", "math" or "code") -> how many times.
+    replacements: "Counter[tuple[str, str, str]]"
+    # Glyphs neither a font nor an exact LaTeX form can set: the paper is not typeset.
+    not_set: list[str]
+    # LaTeX for ``fi_unicode.tex`` (fallback fonts, the code font, code glyphs).
+    header: str = ""
+    code_font: str | None = None
+
+    def record(self) -> list[dict]:
+        """The replacements for ``.fi/paper_render.json``, most frequent first."""
+        return [
+            {"glyph": glyph, "code_point": "+".join(f"U+{ord(c):04X}" for c in glyph),
+             "became": became, "where": where, "count": count}
+            for (glyph, became, where), count in sorted(self.replacements.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+
+
+def _translate_counted(segment: str, table: dict, counts, where: str) -> str:
+    for ch in set(segment):
+        if ord(ch) in table and table[ord(ch)] != ch:
+            counts[(ch, table[ord(ch)] or "(nothing: an invisible character)", where)] += segment.count(ch)
+    return segment.translate(table)
+
+
+def _accents_counted(segment: str, counts, where: str) -> str:
+    def one(match: "re.Match[str]") -> str:
+        out = _accented_letter(match)
+        if out != match.group(0):
+            counts[(match.group(0), out, where)] += 1
+        return out
+
+    return _COMBINING_RE.sub(one, segment)
+
+
+def _sanitize_unicode_for_latex(markdown: str, *, rewrite_code: bool = True) -> str:
+    """The pdflatex form of ``markdown``: each glyph of the maps above as its exact
+    LaTeX (``≈`` is ``\\ensuremath{\\approx}``), a letter with a combining accent as a
+    math accent (``x̄`` is ``\\ensuremath{\\bar{x}}``), after NFC. A glyph in no map is
+    left as it is: inputenc sets many (``₩``, ``‰``, ``‹``), and on one it cannot set
+    pdflatex stops and the paper is marked not typeset. Nothing is replaced by another
+    letter, a ``?``, or dropped.
+
+    A math span (``$..$``, ``$$..$$``, ``\\(..\\)``, ``\\[..\\]``, found by pandoc's own
+    rules) takes :data:`_LATEX_MATH_OVERRIDES` for the dashes, so ``$0.322–0.338$``
+    prints a dash between the numbers, and sets a run of super/subscript glyphs as one
+    script (``$10⁻³$`` is ``10^{-3}``). Code is rewritten as prose is when
+    ``rewrite_code`` (the poster); the paper keeps its code as written (see
+    :func:`_prepare_unicode`)."""
+    return _prepare_unicode(markdown, fonts=None, rewrite_code=rewrite_code).text
+
+
+# Where a URL or an HTML comment sits in the text: a glyph there is never wrapped in a
+# font command, which would change the address.
+_NO_WRAP_RE = re.compile(r"\]\([^)\s]*|<https?://[^>]*>|https?://[^\s)>\]]+|<!--.*?-->", re.DOTALL)
+_FONT_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_BRACE_AFTER_GLYPH_RE = re.compile(r"(?<=[^\x00-\x7f])\{")
+
+
+def _font_command(index: int) -> str:
+    letters = ""
+    index += 1
+    while index:
+        index, rest = divmod(index - 1, 26)
+        letters = _FONT_LETTERS[rest] + letters
+    return "\\FIfont" + letters
+
+
+def _clusters(text: str) -> list[str]:
+    """``text`` cut into characters, each with the combining marks after it."""
+    out: list[str] = []
+    for ch in text:
+        if out and unicodedata.category(ch).startswith("M"):
+            out[-1] += ch
+        else:
+            out.append(ch)
     return out
+
+
+def _wrap_for_fonts(segment: str, fonts, cjk: bool, used: dict, not_set: list[str], counts, where: str) -> str:
+    """``segment`` with every run of glyphs the text fonts lack wrapped in the command
+    of the fallback font that sets them (``\\FIfontB{Колмогоров}``). A glyph no font
+    sets is added to ``not_set``. URLs and HTML comments are left as they are."""
+    from generation._unicode_fonts import unsupported_script
+
+    protected = [(m.start(), m.end()) for m in _NO_WRAP_RE.finditer(segment)]
+    out: list[str] = []
+    run: list[str] = []
+    run_font = None
+    pos = 0
+
+    def flush() -> None:
+        nonlocal run, run_font
+        if run:
+            glyphs = "".join(run)
+            out.append(used.setdefault(run_font.name, (_font_command(len(used)), run_font))[0] + "{" + glyphs + "}")
+            for cluster in run:
+                counts[(cluster, f"itself, in {run_font.name}", where)] += 1
+            run, run_font = [], None
+
+    for cluster in _clusters(segment):
+        start = pos
+        pos += len(cluster)
+        codes = [ord(c) for c in cluster]
+        if all(code < 0x80 for code in codes) or any(lo <= start < hi for lo, hi in protected):
+            flush()
+            out.append(cluster)
+            continue
+        # In math a character is looked up in the math fonts, so any glyph left there is
+        # set from a font in text mode, even one the text fonts have.
+        if (where != "math" and all(fonts.in_text_fonts(code) for code in codes)) or (cjk and _cjk.has_cjk(cluster)):
+            flush()
+            out.append(cluster)
+            continue
+        if any(unsupported_script(code) for code in codes):
+            flush()
+            not_set.append(cluster)
+            out.append(cluster)
+            continue
+        font = fonts.fallback_for(codes)
+        if font is None:
+            flush()
+            if fonts.known:
+                not_set.append(cluster)
+            out.append(cluster)
+            continue
+        if run_font is not None and run_font.name != font.name:
+            flush()
+        run_font = font
+        run.append(cluster)
+    flush()
+    return "".join(out)
+
+
+def _code_glyphs(markdown: str) -> list[str]:
+    return [
+        cluster for segment, is_code in _split_code_segments(markdown) if is_code
+        for cluster in _clusters(segment) if any(ord(c) >= 0x80 for c in cluster)
+    ]
+
+
+def _prepare_unicode(
+    markdown: str, *, fonts=None, cjk: bool = False, rewrite_code: bool = False,
+) -> _UnicodeSource:
+    """``markdown`` made ready for the TeX engine, with a record of every replacement.
+
+    ``fonts`` is the :class:`generation._unicode_fonts.FontPlan` of a Unicode engine
+    (XeLaTeX), or None for pdflatex. Outside code, both engines: NFC, a letter with a
+    combining accent as the math accent, each glyph of the maps as its exact LaTeX.
+    Then, under XeLaTeX, a glyph the text fonts lack is wrapped in a fallback font that
+    has it (set as itself); under pdflatex the maps also give the forms of
+    ``_PDFLATEX_ONLY`` (``⅓`` is ``\\tfrac{1}{3}``). Code is never rewritten (unless
+    ``rewrite_code``): XeLaTeX sets it in a code font that has all of its glyphs, and
+    pdflatex gets ``\\DeclareUnicodeCharacter`` for the code's mapped glyphs, which
+    holds in verbatim text too. A glyph nothing can set is listed in ``not_set``."""
+    from collections import Counter
+
+    counts: Counter = Counter()
+    not_set: list[str] = []
+    used: dict = {}
+    unicode_engine = fonts is not None
+    text_table = _UNICODE_ENGINE_TEXT_TRANSLATOR if unicode_engine else _LATEX_UNICODE_TRANSLATOR
+    math_table = _UNICODE_ENGINE_MATH_TRANSLATOR if unicode_engine else _LATEX_MATH_TRANSLATOR
+    out: list[str] = []
+    for segment, is_code in _split_code_segments(markdown):
+        if is_code and not rewrite_code:
+            out.append(segment)
+            continue
+        if not is_code:
+            segment = unicodedata.normalize("NFC", segment)
+        segment = _accents_counted(segment, counts, "code" if is_code else "text")
+        for piece, is_math in (_split_math_segments(segment) if not is_code else [(segment, False)]):
+            where = "code" if is_code else "math" if is_math else "text"
+            if is_math:
+                piece = _translate_counted(_script_glyph_runs_as_one_script(piece), math_table, counts, where)
+            else:
+                if not is_code:
+                    # A glyph may become a LaTeX command (``\\ensuremath{..}``), and pandoc
+                    # would read a brace right after it as that command's argument: the
+                    # braces of ``𝟙{X>0}`` vanished. Escaped, it is the same literal brace.
+                    piece = _BRACE_AFTER_GLYPH_RE.sub(r"\\{", piece)
+                piece = _translate_counted(piece, text_table, counts, where)
+            if unicode_engine and not is_code:
+                piece = _wrap_for_fonts(piece, fonts, cjk, used, not_set, counts, where)
+            out.append(piece)
+    text = "".join(out)
+
+    header: list[str] = []
+    code_font = None
+    code = [] if rewrite_code else _code_glyphs(markdown)
+    if unicode_engine:
+        for command, font in used.values():
+            file, options = font.fontspec_file_and_options()
+            family = command.replace("FIfont", "FIfamily")
+            header.append(f"\\newfontfamily{family}{{{file}}}[{options}]")
+            header.append(
+                f"\\DeclareRobustCommand{{{command}}}[1]{{\\ifmmode\\mbox{{{family} #1}}\\else{{{family} #1}}\\fi}}"
+            )
+        code = [c for c in code if not (cjk and _cjk.has_cjk(c))]
+        if code:
+            codes = {ord(ch) for cluster in code for ch in cluster}
+            best = max(fonts.monos, key=lambda f: len(codes & f.covers), default=None) if fonts.monos else None
+            first = next((f for f in fonts.monos if codes <= f.covers), None)
+            chosen = first or best
+            if chosen is not None and fonts.monos and chosen is not fonts.monos[0]:
+                file, options = chosen.fontspec_file_and_options()
+                header.append(f"\\setmonofont{{{file}}}[{options},Scale=MatchLowercase]")
+                code_font = chosen.name
+            if chosen is not None:
+                not_set += [c for c in dict.fromkeys(code) if not all(ord(ch) in chosen.covers for ch in c)]
+            elif fonts.known:
+                not_set += list(dict.fromkeys(code))
+    else:
+        for glyph in dict.fromkeys(c for cluster in code for c in cluster):
+            latex = _LATEX_UNICODE_REPLACEMENTS.get(glyph)
+            if latex is not None and (latex == "" or latex.startswith("\\ensuremath{")):
+                header.append(f"\\DeclareUnicodeCharacter{{{ord(glyph):04X}}}{{{latex}}}")
+                counts[(glyph, latex or "(nothing: an invisible character)", "code")] += sum(
+                    seg.count(glyph) for seg, is_code in _split_code_segments(markdown) if is_code
+                )
+    if header:
+        header.insert(0, "% Written by generation/paper.py for this paper (see _prepare_unicode).")
+    return _UnicodeSource(
+        text=text, replacements=counts, not_set=list(dict.fromkeys(not_set)),
+        header="\n".join(header) + ("\n" if header else ""), code_font=code_font,
+    )
 
 
 # Pattern: any code-fence block (used by tests + downstream tooling
 # that wants prose-only sanitization for non-PDF flows). The PDF
-# pipeline uses the unconditional sanitizer below — preserving raw
-# glyphs in code blocks would just push the pdflatex failure
-# downstream because the templates don't have a
-# ``\DeclareUnicodeCharacter`` safety net to catch them.
+# pipeline leaves code as written too (see ``_prepare_unicode``).
 _CODE_FENCE_RE = re.compile(r"(```.*?\n.*?```|`[^`\n]+`)", re.DOTALL)
 
 
 def _sanitize_unicode_outside_code_blocks(markdown: str) -> str:
     """Apply :func:`_sanitize_unicode_for_latex` to prose but leave
-    fenced code + inline code untouched. NOTE: this is NOT what the
-    PDF pipeline uses — that path sanitizes everything to avoid the
-    "raw glyph survives in a code block and pdflatex errors" failure
-    mode. This helper is kept as a documented option for any future
-    consumer that legitimately needs prose-only rewriting; today no
-    caller in this file uses it (tests still pin its behaviour as
-    contract)."""
+    fenced code + inline code untouched. The PDF pipeline does the same
+    through :func:`_prepare_unicode`; tests pin this helper's contract."""
     parts = _CODE_FENCE_RE.split(markdown)
     # Even-indexed parts are prose; odd-indexed are code matches.
     for i in range(0, len(parts), 2):
@@ -713,15 +1009,16 @@ def _author_metadata_args(output) -> list[str]:
     return args
 
 
-# pdflatex names the glyph it cannot set: "Unicode character x̄ (U+0304) not set up for use with LaTeX".
+# pdflatex names the glyph it cannot set: "Unicode character x̄ (U+0304) not set up for use
+# with LaTeX". Pandoc passes on XeLaTeX's "Missing character: There is no ᵀ (U+1D40) in font
+# ...", a glyph XeLaTeX left off the page while its exit code still said success.
 _STOPPED_GLYPH_RE = re.compile(r"Unicode char(?:acter)?[^\n]*?\(U\+([0-9A-Fa-f]{4,6})\)")
-_MAX_GLYPH_REPAIRS = 3
+_MISSING_GLYPH_RE = re.compile(r"Missing character: There is no .*?\(U\+([0-9A-Fa-f]{4,6})\)")
 
 
-def _glyphs_pdflatex_stopped_on(log: str) -> list[str]:
-    """The glyphs a LaTeX log says it stopped on, once each, in order."""
+def _glyphs_named(log: str, pattern: "re.Pattern[str]") -> list[str]:
     found: list[str] = []
-    for m in _STOPPED_GLYPH_RE.finditer(log):
+    for m in pattern.finditer(log):
         try:
             ch = chr(int(m.group(1), 16))
         except (ValueError, OverflowError):
@@ -731,21 +1028,20 @@ def _glyphs_pdflatex_stopped_on(log: str) -> list[str]:
     return found
 
 
-def _replace_glyphs(text: str, glyphs: list[str]) -> str:
-    """``text`` with each of ``glyphs`` replaced: by the map's LaTeX when it has
-    one, by nothing for a mark or a pictograph, by its plain letters when it has
-    some, by ``?`` otherwise."""
-    for ch in glyphs:
-        if ch in _LATEX_UNICODE_REPLACEMENTS:
-            text = text.replace(ch, _LATEX_UNICODE_REPLACEMENTS[ch])
-            continue
-        plain = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
-        if unicodedata.category(ch).startswith("M"):
-            plain = ""
-        elif not plain.strip():
-            plain = "?"
-        text = text.replace(ch, plain)
-    return text
+def _glyphs_pdflatex_stopped_on(log: str) -> list[str]:
+    """The glyphs a LaTeX log says it stopped on, once each, in order."""
+    return _glyphs_named(log, _STOPPED_GLYPH_RE)
+
+
+def _glyphs_left_off_the_page(log: str) -> list[str]:
+    """The glyphs XeLaTeX had no font for (pandoc's "Missing character" warnings)."""
+    return _glyphs_named(log, _MISSING_GLYPH_RE)
+
+
+def _named(glyphs: list[str], limit: int = 8) -> str:
+    return ", ".join(f"{g} (" + "+".join(f"U+{ord(c):04X}" for c in g) + ")" for g in glyphs[:limit]) + (
+        f" and {len(glyphs) - limit} more" if len(glyphs) > limit else ""
+    )
 
 
 def page_count(pdf: Path | str) -> int | None:
@@ -848,8 +1144,11 @@ class _PdfSkipReason:
 class PaperGenerator:
     def __init__(self, config: Config) -> None:
         self.config = config
-        # How the last PDF was made: engine, typeset or not, rc, reason, pages.
+        # How the last PDF was made: engine, typeset or not, rc, reason, pages, glyphs.
         self.last_render: dict | None = None
+        self._glyphs: list[dict] = []
+        self._glyphs_not_set: list[str] = []
+        self._code_font: str | None = None
 
     def generate(self, art: QuestArtifacts, out_dir: Path) -> dict[str, Path]:
         kinds = set(self.config.output.kinds)
@@ -1049,6 +1348,11 @@ class PaperGenerator:
         """Remember how this paper's PDF was made (see :func:`read_render_record`)."""
         self.last_render = {"engine": engine, "typeset": typeset, "rc": rc, "reason": reason}
 
+    def _find_unicode_engine(self, engine: tuple[str, str]) -> tuple[str, str] | None:
+        """The Unicode TeX engine to typeset with in place of ``engine`` (XeLaTeX on
+        PATH or beside the pdflatex found; tectonic is XeTeX already), or None."""
+        return _cjk.find_xelatex(engine)
+
     @staticmethod
     def _run_pandoc(cmd: list[str], out_dir: Path, timeout_s: int) -> "subprocess.CompletedProcess[str]":
         # UTF-8 with replacement: the log of a glyph that stopped LaTeX holds that
@@ -1068,12 +1372,24 @@ class PaperGenerator:
         what the quality report reads, so a PDF made by the fallback never
         passes for a typeset one."""
         self.last_render = None
+        self._glyphs: list[dict] = []
+        self._glyphs_not_set: list[str] = []
+        self._code_font: str | None = None
         pdf, skip = self._compile_pdf_once(paper_md, out_dir, extra_lines=extra_lines, smaller_tables=smaller_tables)
         if self.last_render is None:
             self._note("none", typeset=False, reason=skip.summary if skip is not None else "no PDF was made")
         record = dict(self.last_render or {})
         record["format"] = self.config.output.paper_format
         record["pages"] = page_count(pdf) if pdf is not None else None
+        # Every glyph that is not set as the writer typed it in the text font: its
+        # LaTeX form, or the fallback font that sets it; and any glyph nothing here
+        # could set (the reason the paper is not typeset).
+        record["glyphs_replaced"] = self._glyphs
+        record["glyphs_not_set"] = [
+            {"glyph": g, "code_point": "+".join(f"U+{ord(c):04X}" for c in g)} for g in self._glyphs_not_set
+        ]
+        if self._code_font:
+            record["code_font"] = self._code_font
         self.last_render = record
         write_render_record(out_dir, record)
         return pdf, skip
@@ -1219,7 +1535,6 @@ class PaperGenerator:
                 ),
             )
         engine_name, engine_path = engine
-        _log.info("paper.pdf: using pdf-engine=%s at %s", engine_name, engine_path)
 
         fmt = self.config.output.paper_format
         template = TEMPLATES_DIR / fmt / "template.tex"
@@ -1228,27 +1543,104 @@ class PaperGenerator:
         # the template to its tighter layout and sets the source lists smaller.
         page_limit = resolve_page_limit(self.config)
 
-        # Pre-process: rewrite common Unicode math glyphs (≈, ≥, ×, −,
-        # —, lowercase Greek, etc.) into LaTeX commands before pandoc
-        # sees the file. ``pdflatex`` + ``inputenc utf8`` can't handle
-        # them on its own ("Unicode character ≈ (U+2248) not set up for
-        # use with LaTeX"). Sanitize UNCONDITIONALLY (including inside
-        # fenced + inline code) because the paper templates don't have
-        # a ``\DeclareUnicodeCharacter`` safety net — a raw glyph
-        # surviving in a code block would still kill the compile, just
-        # one stack-frame later. The user's original paper.md is
-        # preserved unchanged; the sanitized copy lands at
-        # ``out_dir/paper_pdf_source.md`` so it's visible if the user
-        # wants to see exactly what pandoc consumed.
+        try:
+            md_text = paper_md.read_text(encoding="utf-8")
+        except OSError as e:
+            md_text = None
+            _log.warning("paper.pdf: could not read paper.md (%r)", e)
+
+        # The engine. A Unicode engine (XeLaTeX) sets every glyph as itself, from a
+        # fallback font where the text font lacks it, so a paper is typeset with one
+        # whenever one is installed; pdflatex is used only when there is none.
+        # Chinese, Japanese or Korean text anywhere in the paper or its author line
+        # also needs an installed CJK font (xeCJK); without one, or without XeLaTeX,
+        # the HTML render makes the paper. The writer's paper.md is read for it: the
+        # lifted title sits in the source's front matter as \u escapes.
+        unicode_engine = self._find_unicode_engine(engine)
+        cjk_font: str | None = None
+        cjk_text = "\n".join([md_text or "", *_author_line(self.config.output)])
+        if _cjk.has_cjk(cjk_text):
+            cjk_font = _cjk.find_cjk_font(cjk_text) if unicode_engine is not None else None
+            if unicode_engine is None or cjk_font is None:
+                missing = "XeLaTeX" if unicode_engine is None else "a font for it"
+                why = f"paper.md has Chinese, Japanese or Korean text and {missing} was not found"
+                pdf = self._try_html_pdf_fallback(paper_md, out_dir, pandoc_exe, why=why)
+                if pdf is not None:
+                    return pdf, None
+                msg = f"{why}; paper.pdf skipped."
+                _log.warning(msg)
+                return None, _PdfSkipReason(
+                    code="cjk_no_xelatex" if unicode_engine is None else "cjk_no_font",
+                    summary=msg,
+                    how_to_fix=(
+                        "pdflatex cannot set Chinese, Japanese or Korean "
+                        "characters; FI switches to XeLaTeX with a CJK font "
+                        "when both are installed. XeLaTeX comes with MiKTeX "
+                        "and TeX Live. Fonts: Windows ships Microsoft "
+                        "JhengHei, YaHei, Yu Gothic and Malgun Gothic; on "
+                        "Linux install Noto CJK (`sudo apt install "
+                        "fonts-noto-cjk`). Or keep `output.html_pdf_fallback: "
+                        "true` (the default) with Edge/Chrome/Chromium "
+                        "installed, and the paper renders through the browser."
+                    ),
+                )
+        if unicode_engine is not None:
+            engine_name, engine_path = unicode_engine
+        _log.info(
+            "paper.pdf: using pdf-engine=%s at %s%s", engine_name, engine_path,
+            f" with CJK font {cjk_font!r}" if cjk_font else "",
+        )
+
+        # The source pandoc reads: the glyphs prepared for the engine (see
+        # ``_prepare_unicode``: exact LaTeX forms, fallback fonts, code left as
+        # written), then the layout fixes below. The user's paper.md is kept as
+        # written; the copy lands at ``out_dir/paper_pdf_source.md``.
         # Default to "no title lifted" so the OSError fallback below
         # (which skips the title-extraction code path entirely) still
         # has a defined name when the cmd builder consults it for the
         # shift-heading-level decision.
         title: str | None = None
+        unicode_header = ""
         try:
-            md_text = paper_md.read_text(encoding="utf-8")
-            glyph_count = _count_sanitized_glyphs(md_text)
-            sanitized_md = _sanitize_unicode_for_latex(md_text)
+            if md_text is None:
+                raise OSError("paper.md could not be read")
+            prepared = _prepare_unicode(
+                md_text,
+                fonts=find_fonts(engine_path) if unicode_engine is not None else None,
+                cjk=cjk_font is not None,
+            )
+            self._glyphs = prepared.record()
+            self._code_font = prepared.code_font
+            if prepared.not_set:
+                # No font here and no exact LaTeX form: typesetting would drop or
+                # change these glyphs, so the paper is made by the browser and marked.
+                why = (
+                    f"no font here sets {_named(prepared.not_set)}, and LaTeX has no exact form "
+                    f"for {'it' if len(prepared.not_set) == 1 else 'them'}"
+                )
+                _log.warning("paper.pdf: %s; the paper is not typeset", why)
+                self._glyphs_not_set = list(prepared.not_set)
+                pdf = self._try_html_pdf_fallback(paper_md, out_dir, pandoc_exe, why=why)
+                if pdf is not None:
+                    return pdf, None
+                self._note("none", typeset=False, reason=why)
+                return None, _PdfSkipReason(
+                    code="glyph_not_set",
+                    summary=f"{why}; paper.pdf skipped.",
+                    how_to_fix=(
+                        "Install a font that has these characters (DejaVu and Noto cover most "
+                        "scripts and symbols), or keep `output.html_pdf_fallback: true` (the "
+                        "default) with Edge/Chrome/Chromium installed, and the paper renders "
+                        "through the browser, marked as not typeset."
+                    ),
+                )
+            unicode_header = prepared.header
+            sanitized_md = prepared.text
+            if prepared.replacements:
+                _log.info(
+                    "paper.pdf: %d glyph(s) set by their LaTeX form or a fallback font "
+                    "(listed in .fi/paper_render.json)", sum(prepared.replacements.values()),
+                )
             # Tighten ``$ \beta $`` → ``$\beta$`` so pandoc parses it
             # as inline math instead of treating the dollars as
             # literal text (the latter produced "Missing $" /
@@ -1279,12 +1671,6 @@ class PaperGenerator:
                 sanitized_md, two_column=self.config.output.paper_format in TWO_COLUMN_FORMATS,
                 smaller=smaller_tables,
             )
-            if glyph_count:
-                _log.info(
-                    "paper.pdf: rewrote %d Unicode glyph occurrence(s) "
-                    "in paper.md before pandoc",
-                    glyph_count,
-                )
             # Lift the first `# H1` to YAML frontmatter so `\title{}`
             # in the template gets populated. Without this, pandoc
             # leaves `\title{}` empty and re-emits the H1 as a
@@ -1338,49 +1724,6 @@ class PaperGenerator:
             )
             pandoc_input = paper_md
 
-        # Chinese, Japanese or Korean anywhere in the paper or its author
-        # line stops pdflatex at the first character. XeLaTeX with xeCJK and
-        # an installed CJK font sets it; without both, the HTML render does.
-        # Read the writer's paper.md: the lifted title sits in the source's
-        # front matter as \u escapes, which would hide a Chinese title.
-        cjk_font: str | None = None
-        try:
-            cjk_text = paper_md.read_text(encoding="utf-8")
-        except OSError:
-            cjk_text = ""
-        cjk_text = "\n".join([cjk_text, *_author_line(self.config.output)])
-        if _cjk.has_cjk(cjk_text):
-            xelatex = _cjk.find_xelatex(engine)
-            cjk_font = _cjk.find_cjk_font(cjk_text) if xelatex is not None else None
-            if xelatex is None or cjk_font is None:
-                missing = "XeLaTeX" if xelatex is None else "a font for it"
-                why = f"paper.md has Chinese, Japanese or Korean text and {missing} was not found"
-                pdf = self._try_html_pdf_fallback(paper_md, out_dir, pandoc_exe, why=why)
-                if pdf is not None:
-                    return pdf, None
-                msg = f"{why}; paper.pdf skipped."
-                _log.warning(msg)
-                return None, _PdfSkipReason(
-                    code="cjk_no_xelatex" if xelatex is None else "cjk_no_font",
-                    summary=msg,
-                    how_to_fix=(
-                        "pdflatex cannot set Chinese, Japanese or Korean "
-                        "characters; FI switches to XeLaTeX with a CJK font "
-                        "when both are installed. XeLaTeX comes with MiKTeX "
-                        "and TeX Live. Fonts: Windows ships Microsoft "
-                        "JhengHei, YaHei, Yu Gothic and Malgun Gothic; on "
-                        "Linux install Noto CJK (`sudo apt install "
-                        "fonts-noto-cjk`). Or keep `output.html_pdf_fallback: "
-                        "true` (the default) with Edge/Chrome/Chromium "
-                        "installed, and the paper renders through the browser."
-                    ),
-                )
-            engine_name, engine_path = xelatex
-            _log.info(
-                "paper.pdf: Chinese/Japanese/Korean text; using %s at %s with font %r",
-                engine_name, engine_path, cjk_font,
-            )
-
         cmd: list[str] = [
             pandoc_exe,
             str(pandoc_input),
@@ -1421,6 +1764,20 @@ class PaperGenerator:
             cmd.extend(["-V", f"fi-extra-lines={int(extra_lines)}"])
         if page_limit is not None:
             cmd.extend(["-V", "fi-tight=true"])
+        # The fallback fonts, the code font, or (pdflatex) the code's glyphs: the
+        # templates read fi_unicode.tex when fi-unicode is set.
+        unicode_file = out_dir / "fi_unicode.tex"
+        if unicode_header:
+            try:
+                unicode_file.write_text(unicode_header, encoding="utf-8")
+                cmd.extend(["-V", "fi-unicode=true"])
+            except OSError as e:
+                _log.warning("paper.pdf: could not write %s (%r)", unicode_file.name, e)
+        elif unicode_file.is_file():
+            try:
+                unicode_file.unlink()
+            except OSError:
+                pass
         if template.exists():
             _copy_template_support(template, out_dir)
             cmd.extend(["--template", str(template)])
@@ -1440,28 +1797,6 @@ class PaperGenerator:
         timeout_s = 360 if engine_name == "tectonic" else 300
         try:
             r = self._run_pandoc(cmd, out_dir, timeout_s)
-            # A glyph the maps did not know stops pdflatex with the code point in
-            # its log. Replace those glyphs in the PDF source and run again (up to
-            # three times), so one stray character never costs the typeset paper.
-            for _repair in range(_MAX_GLYPH_REPAIRS):
-                if r.returncode == 0 or pandoc_input == paper_md:
-                    break
-                stuck = _glyphs_pdflatex_stopped_on(r.stderr or "")
-                if not stuck:
-                    break
-                try:
-                    source = pandoc_input.read_text(encoding="utf-8")
-                except OSError:
-                    break
-                fixed = _replace_glyphs(source, stuck)
-                if fixed == source:
-                    break
-                pandoc_input.write_text(fixed, encoding="utf-8")
-                _log.warning(
-                    "paper.pdf: %s stopped on %s; replaced it in the PDF source and ran again",
-                    engine_name, ", ".join(f"U+{ord(c):04X}" for c in stuck),
-                )
-                r = self._run_pandoc(cmd, out_dir, timeout_s)
         except FileNotFoundError:
             msg = "pandoc invocation failed; paper.pdf skipped"
             _log.warning(msg)
@@ -1495,6 +1830,30 @@ class PaperGenerator:
                 ),
             )
 
+        # XeLaTeX leaves a glyph no font has off the page and still exits 0; pandoc
+        # names each one. Such a paper is missing a character, so it is not passed
+        # as typeset: the browser makes it (marked), or it is skipped.
+        left_off = _glyphs_left_off_the_page(r.stderr or "") if r.returncode == 0 else []
+        if left_off:
+            why = f"{engine_name} had no font for {_named(left_off)}, which it would have left off the page"
+            _log.warning("paper.pdf: %s; the paper is not typeset", why)
+            self._glyphs_not_set = left_off
+            try:
+                out_pdf.unlink()
+            except OSError:
+                pass
+            pdf = self._try_html_pdf_fallback(paper_md, out_dir, pandoc_exe, why=why, rc=0)
+            if pdf is not None:
+                return pdf, None
+            self._note("none", typeset=False, rc=0, reason=why)
+            return None, _PdfSkipReason(
+                code="glyph_not_set", summary=f"{why}; paper.pdf skipped.",
+                how_to_fix=(
+                    "Install a font that has these characters (DejaVu and Noto cover most "
+                    "scripts and symbols), or keep `output.html_pdf_fallback: true` (the "
+                    "default) with Edge/Chrome/Chromium installed."
+                ),
+            )
         if r.returncode != 0:
             stderr_tail = r.stderr[-500:] if r.stderr else "(empty stderr)"
             msg = (
@@ -1502,6 +1861,14 @@ class PaperGenerator:
                 f"paper.pdf skipped. stderr_tail={stderr_tail}"
             )
             _log.warning(msg)
+            stuck = _glyphs_pdflatex_stopped_on(r.stderr or "")
+            if stuck:
+                # pdflatex has no form for a glyph the maps do not know. It is never
+                # replaced by another letter: the paper is made by the browser, marked.
+                self._glyphs_not_set = stuck
+                _log.warning(
+                    "paper.pdf: %s cannot set %s; the paper is not typeset", engine_name, _named(stuck),
+                )
             # The LaTeX engine is present but ERRORED — almost always on
             # something the LLM emitted that pandoc translated into broken
             # LaTeX (a bare \command in text mode, an unsupported glyph).
@@ -1509,13 +1876,13 @@ class PaperGenerator:
             # go through LaTeX, so the same paper.md usually renders fine.
             # A produced PDF beats a diagnostic-only skip for the default
             # experience; the warning above keeps the LaTeX error in run.log.
-            pdf = self._try_html_pdf_fallback(
-                paper_md, out_dir, pandoc_exe,
-                why=f"{engine_name} errored (rc={r.returncode})", rc=r.returncode,
+            why = f"{engine_name} errored (rc={r.returncode})" + (
+                f" on {_named(stuck)}, which it has no form for" if stuck else ""
             )
+            pdf = self._try_html_pdf_fallback(paper_md, out_dir, pandoc_exe, why=why, rc=r.returncode)
             if pdf is not None:
                 return pdf, None
-            self._note("none", typeset=False, rc=r.returncode, reason=f"{engine_name} errored (rc={r.returncode})")
+            self._note("none", typeset=False, rc=r.returncode, reason=why)
             return None, _PdfSkipReason(
                 code=f"{engine_name}_rc_{r.returncode}",
                 summary=(

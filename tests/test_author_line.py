@@ -146,10 +146,11 @@ def test_a_real_latex_compile_prints_special_characters_in_the_author_line(tmp_p
     assert pdf is not None, skip
     doc = measure_pdf(pdf, max_pages=1)
     text = " ".join(line.text for line in doc.pages[0].lines)
-    # The OT1 font draws \_ as a rule rather than a glyph, so the PDF's text
-    # layer reads it as a space although the page shows an underscore.
+    # Under pdflatex the OT1 font draws \_ as a rule rather than a glyph, so the
+    # PDF's text layer reads it as a space although the page shows an underscore;
+    # XeLaTeX sets the underscore itself.
     for value in AUTHOR.values():
-        assert value.replace("_", " ") in text
+        assert value in text or value.replace("_", " ") in text
 
 
 # ---------------------------------------------------------------------------

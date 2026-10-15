@@ -16,6 +16,11 @@ $endif$
 \else
   \usepackage[utf8]{inputenc}
 \fi
+% Glyphs (generation/paper.py, _prepare_unicode): under XeLaTeX the fallback fonts that set
+% what the text font lacks and the code font; under pdflatex the code's glyphs.
+$if(fi-unicode)$
+\input{fi_unicode.tex}
+$endif$
 % A paper with a page limit (fi-tight, set by generation/paper.py) gets 2 cm margins.
 $if(fi-tight)$
 \usepackage[margin=2cm]{geometry}

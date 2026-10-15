@@ -1483,16 +1483,13 @@ def test_count_sanitized_glyphs_returns_source_count() -> None:
     assert paper_mod._count_sanitized_glyphs("≈ a ≈ b ≈ c") == 3
 
 
-def test_compile_pdf_sanitizes_unicode_inside_code_blocks_too(
+def test_compile_pdf_keeps_code_as_written_and_declares_its_glyphs_for_pdflatex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: an earlier version sanitized only prose, leaving
-    raw glyphs inside fenced/inline code. pdflatex still errored on
-    those because the templates don't have a
-    ``\\DeclareUnicodeCharacter`` safety net. The PDF pipeline now
-    sanitizes everything — what lands in ``paper_pdf_source.md``
-    has zero leftover unicode from the source paper.md, including
-    inside code blocks."""
+    """Code is never rewritten: a ``\\ensuremath{..}`` put into a code block printed
+    literally. With pdflatex (no XeLaTeX here) the code's glyphs are declared with
+    ``\\DeclareUnicodeCharacter`` in ``fi_unicode.tex``, which holds in verbatim text
+    too, so pdflatex still sets them; prose is rewritten as before."""
     def fake_which(name):  # type: ignore[no-untyped-def]
         return "/fake/pandoc" if name == "pandoc" else "/fake/pdflatex" if name == "pdflatex" else None
     monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
@@ -1517,11 +1514,12 @@ def test_compile_pdf_sanitizes_unicode_inside_code_blocks_too(
     PaperGenerator(cfg).generate(art, out_dir)
 
     sanitized = (out_dir / "paper_pdf_source.md").read_text(encoding="utf-8")
-    assert "≈" not in sanitized, (
-        "raw ≈ inside code blocks must also be rewritten — "
-        "templates lack a \\DeclareUnicodeCharacter safety net"
-    )
-    assert "≥" not in sanitized
+    assert "Text \\ensuremath{\\approx} outside." in sanitized
+    assert "print('inside ≈ would have killed pdflatex')" in sanitized
+    assert "`f(x) ≥ y`" in sanitized
+    header = (out_dir / "fi_unicode.tex").read_text(encoding="utf-8")
+    assert "\\DeclareUnicodeCharacter{2248}{\\ensuremath{\\approx}}" in header
+    assert "\\DeclareUnicodeCharacter{2265}{\\ensuremath{\\geq}}" in header
 
 
 def test_compile_pdf_clears_stale_source_md_on_early_skip(

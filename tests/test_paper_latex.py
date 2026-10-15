@@ -4,7 +4,8 @@ and says so when the paper is not typeset.
 Replays the two ``paper_pdf_source.md`` files of the s1 suite round whose PDF fell
 back to the browser: pdflatex stopped on U+0304 (the macron of an x-bar) in one and
 on U+208D (a subscript parenthesis) in the other, and the page limit was then never
-checked. Both must now compile with pdflatex (Producer pdfTeX, not Skia/Chrome).
+checked. Both must now be typeset: with XeLaTeX when it is installed (every glyph set as
+itself or as its exact LaTeX form), and with pdflatex when it is the only engine.
 """
 
 from __future__ import annotations
@@ -64,11 +65,17 @@ def _figures(folder: Path, source_md: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The sanitizer: no glyph is left for pdflatex to stop on
+# The sanitizer (pdflatex form): exact LaTeX or the glyph as it is, never another one
 
 
 def test_a_combining_macron_becomes_a_math_accent() -> None:
-    assert sanitize("the mean x̄ and ŷ") == r"the mean \ensuremath{\bar{x}} and \ensuremath{\hat{y}}"
+    assert sanitize("the mean x̄ and σ̂") == r"the mean \ensuremath{\bar{x}} and \ensuremath{\hat{\sigma}}"
+
+
+def test_a_letter_with_a_mark_unicode_has_one_character_for_is_that_character() -> None:
+    # NFC first: y + U+0302 is ŷ, e + U+0301 is é, = + U+0338 is ≠.
+    assert sanitize("ŷ and café") == "ŷ and café"
+    assert sanitize("a ≠ b") == r"a \ensuremath{\neq} b"
 
 
 def test_a_combining_accent_on_a_greek_letter_wraps_the_letters_command() -> None:
@@ -76,11 +83,14 @@ def test_a_combining_accent_on_a_greek_letter_wraps_the_letters_command() -> Non
 
 
 def test_a_letter_unicode_has_one_character_for_is_that_character() -> None:
-    assert sanitize("café") == "café"
+    assert sanitize("café") == "café"
 
 
-def test_a_stray_combining_mark_is_dropped() -> None:
-    assert sanitize("a ̄ b") == "a  b"
+def test_a_mark_with_no_latex_accent_is_kept_never_dropped() -> None:
+    # A stray mark, and a strike-through on a letter: kept as written (XeLaTeX sets them;
+    # pdflatex stops on them and the paper is marked not typeset).
+    assert sanitize("a ̄ b") == "a ̄ b"
+    assert sanitize("x̸") == "x̸"
 
 
 def test_a_subscript_parenthesis_is_a_subscript() -> None:
@@ -88,13 +98,12 @@ def test_a_subscript_parenthesis_is_a_subscript() -> None:
     assert sanitize("Eₐ") == r"E\ensuremath{_{a}}"
 
 
-def test_a_glyph_in_no_map_is_replaced_not_left(caplog) -> None:
-    # U+2B50 (a star) and U+1D465 (math italic x) are in no map; neither stays raw.
+def test_a_glyph_in_no_map_is_left_as_it_is_never_replaced() -> None:
+    # U+2B50 (a star), an emoji and U+2A01 have no exact LaTeX form here: they stay, so
+    # XeLaTeX sets them or pdflatex stops and the paper is marked. Nothing becomes "?".
     out = sanitize("a ⭐ b \U0001d465 c \U0001f600 d ⨁")
-    assert all(ord(c) < 0x2000 for c in out), out
-    assert "a  b x c" in out.replace("?", " ") or " x " in out   # the math-italic x reads as an x
-    assert "?" in out                          # the unknown ones are marked
-    assert "\U0001f600" not in out             # a pictograph is dropped
+    assert out == "a ⭐ b \\ensuremath{x} c \U0001f600 d ⨁"
+    assert "?" not in out
 
 
 def test_latin_letters_and_other_scripts_are_left_alone() -> None:
@@ -147,9 +156,19 @@ def test_the_pdf_source_has_no_doubled_number(tmp_path: Path) -> None:
 # The replay of the two papers whose PDF fell back to the browser
 
 
+def _unicode_engine():
+    from generation import _cjk
+    from generation._pdf_engine import find_pdf_engine
+
+    return _cjk.find_xelatex(find_pdf_engine(REPO))
+
+
 @pytest.mark.parametrize("name, glyph", [("kinetics", "̄"), ("fdr", "₍")])
-def test_the_s1_papers_compile_with_pdflatex(tmp_path: Path, name: str, glyph: str) -> None:
+def test_the_s1_papers_are_typeset(tmp_path: Path, name: str, glyph: str) -> None:
+    """Under the Unicode engine (XeLaTeX) when there is one, which is what FI uses."""
     _need_latex()
+    if _unicode_engine() is None:
+        pytest.skip("needs XeLaTeX")
     source = (FIXTURES / f"s1_{name}_paper_pdf_source.md").read_text(encoding="utf-8")
     assert glyph in source, "the fixture must hold the glyph pdflatex stopped on"
     md = tmp_path / "in.md"
@@ -158,18 +177,46 @@ def test_the_s1_papers_compile_with_pdflatex(tmp_path: Path, name: str, glyph: s
     gen = PaperGenerator(_config(tmp_path))
     pdf, skip = gen._compile_pdf(md, tmp_path)
     assert skip is None, skip.summary if skip else ""
+    assert "dvipdfmx" in _producer(pdf).lower(), _producer(pdf)   # XeLaTeX's PDF writer
+    record = json.loads((tmp_path / ".fi" / "paper_render.json").read_text(encoding="utf-8"))
+    assert record["typeset"] is True and record["rc"] == 0 and record["engine"] == "xelatex"
+    assert record["pages"] and record["pages"] >= 3
+    assert record["glyphs_not_set"] == []
+    assert record["glyphs_replaced"], "each replacement is recorded"
+
+
+@pytest.mark.parametrize("name, glyph", [("kinetics", "̄"), ("fdr", "₍")])
+def test_the_s1_papers_compile_with_pdflatex_when_there_is_no_unicode_engine(
+    tmp_path: Path, monkeypatch, name: str, glyph: str,
+) -> None:
+    _need_latex()
+    import shutil
+
+    if shutil.which("pdflatex") is None:
+        pytest.skip("needs pdflatex")
+    monkeypatch.setattr(PaperGenerator, "_find_unicode_engine", lambda self, engine: None)
+    source = (FIXTURES / f"s1_{name}_paper_pdf_source.md").read_text(encoding="utf-8")
+    md = tmp_path / "in.md"
+    md.write_text(source, encoding="utf-8")
+    _figures(tmp_path, source)
+    gen = PaperGenerator(_config(tmp_path))
+    pdf, skip = gen._compile_pdf(md, tmp_path)
+    assert skip is None, skip.summary if skip else ""
     assert "pdfTeX" in _producer(pdf), _producer(pdf)
     record = json.loads((tmp_path / ".fi" / "paper_render.json").read_text(encoding="utf-8"))
-    assert record["typeset"] is True and record["rc"] == 0 and record["engine"] == "pdflatex"
-    assert record["pages"] and record["pages"] >= 3
+    assert record["typeset"] is True and record["engine"] == "pdflatex"
 
 
-def test_a_glyph_the_sanitizer_does_not_know_is_repaired_and_the_paper_still_typesets(
-    tmp_path: Path, monkeypatch, caplog,
-) -> None:
-    """U+0250 is a Latin letter, so no map touches it; pdflatex stops on it. The log
-    names it, FI replaces it in the PDF source and runs again."""
+def test_a_glyph_pdflatex_cannot_set_marks_the_paper_not_typeset(tmp_path: Path, monkeypatch, caplog) -> None:
+    """U+0250 has no LaTeX form and inputenc does not know it. Without a Unicode engine
+    pdflatex stops on it; the glyph is never replaced by another one: the paper is not
+    typeset, and the record and the log name it."""
     _need_latex()
+    import shutil
+
+    if shutil.which("pdflatex") is None:
+        pytest.skip("needs pdflatex")
+    monkeypatch.setattr(PaperGenerator, "_find_unicode_engine", lambda self, engine: None)
     md = tmp_path / "paper.md"
     md.write_text("# T\n\n## Abstract\n\nA.\n\n## Body\n\nThe symbol ɐ appears here.\n", encoding="utf-8")
     out = tmp_path / "out"
@@ -177,17 +224,37 @@ def test_a_glyph_the_sanitizer_does_not_know_is_repaired_and_the_paper_still_typ
     gen = PaperGenerator(_config(tmp_path))
     with caplog.at_level("WARNING", logger="frontier_insight.paper"):
         pdf, skip = gen._compile_pdf(md, out)
-    assert skip is None and pdf is not None
+    assert pdf is None and skip is not None
     assert "U+0250" in caplog.text
-    assert "ɐ" not in (out / "paper_pdf_source.md").read_text(encoding="utf-8")
+    assert "ɐ" in (out / "paper_pdf_source.md").read_text(encoding="utf-8")
+    record = paper_mod.read_render_record(out)
+    assert record["typeset"] is False and "U+0250" in record["reason"]
+    assert record["glyphs_not_set"] == [{"glyph": "ɐ", "code_point": "U+0250"}]
+
+
+def test_the_unicode_engine_sets_a_glyph_no_map_knows_as_itself(tmp_path: Path) -> None:
+    _need_latex()
+    if _unicode_engine() is None:
+        pytest.skip("needs XeLaTeX")
+    from generation._pdf_measure import measure_pdf
+
+    md = tmp_path / "paper.md"
+    md.write_text("# T\n\n## Abstract\n\nA.\n\n## Body\n\nThe symbol ɐ appears here.\n", encoding="utf-8")
+    gen = PaperGenerator(_config(tmp_path))
+    pdf, skip = gen._compile_pdf(md, tmp_path)
+    assert skip is None and pdf is not None
+    text = " ".join(line.text for page in measure_pdf(pdf).pages for line in page.lines)
+    assert "symbol ɐ appears" in text
     assert gen.last_render["typeset"] is True
 
 
-def test_the_stopped_glyph_is_read_from_a_log() -> None:
+def test_the_glyphs_a_log_names_are_read() -> None:
     log = "! LaTeX Error: Unicode character ɐ (U+0250)\n(inputenc) not set up for use with LaTeX.\n"
     assert paper_mod._glyphs_pdflatex_stopped_on(log) == ["ɐ"]
     assert paper_mod._glyphs_pdflatex_stopped_on("no such thing") == []
-    assert paper_mod._replace_glyphs("aɐb", ["ɐ"]) == "a?b"
+    xe = "[WARNING] Missing character: There is no ᵀ (U+1D40) in font [lmroman10-regular]:mapping=tex-text;!\n"
+    assert paper_mod._glyphs_left_off_the_page(xe) == ["ᵀ"]
+    assert paper_mod._glyphs_left_off_the_page(log) == []
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +361,7 @@ def test_the_neutral_article_template_typesets_a_real_paper(tmp_path: Path) -> N
     pdf, skip = gen._compile_pdf(md, tmp_path)
     assert skip is None, skip.summary if skip else ""
     assert (tmp_path / "fi_paper.sty").is_file()          # copied next to the source
-    assert "pdfTeX" in _producer(pdf)
+    assert "skia" not in _producer(pdf).lower() and "chrom" not in _producer(pdf).lower()
     doc = measure_pdf(pdf)
     first = " ".join(line.text for line in doc.pages[0].lines)
     assert "Frontier Insight" in first                    # the neutral byline
