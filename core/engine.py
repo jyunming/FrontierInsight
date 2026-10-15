@@ -101,6 +101,7 @@ from . import paper_trim
 from . import plan as _plan
 from . import criteria as _criteria
 from . import improve as _improve
+from . import in_run as _in_run
 from . import plan_settings as _plan_settings
 from . import receipts as _receipts
 from . import source_text as _source_text
@@ -7066,7 +7067,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         parts = record.get("substituted") if isinstance(record, dict) else None
         if not isinstance(parts, list) or not parts:
             return ""
-        names = {"grid": "settings to vary", "metrics": "metrics", "runs_per_setting": "runs per setting"}
+        names = {"grid": "settings to vary", "in_each_run": "what each run compares inside it", "metrics": "metrics",
+                 "runs_per_setting": "runs per setting"}
         listed = ", ".join(names.get(str(p), str(p).replace("_", " ")) for p in parts)
         return (f"The redesign's {listed} could not be read, even when the model was asked to write them again, so FI ran the "
                 "plan's own instead. What ran is the plan's, not what the redesign meant: do NOT describe the redesign's "
@@ -10559,6 +10561,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self.executor, python, self.quest_root, f"code/{_split_run.SIMULATE_NAME}",
                 timeout_s=self.config.execution.timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+                in_each_run=_in_run.of(protocol),
             ), label="calling a setting of simulate.py again")
         except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
             same, why = None, f"{type(e).__name__}: {e}"[:300]
@@ -11209,7 +11212,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return design
 
     #: The protocol keys an audit may change: how the study is run, never what its results are judged by.
-    _AUDIT_MAY_CHANGE = frozenset({"grid", "seed_policy", "failure_policy", "ci_method"})
+    _AUDIT_MAY_CHANGE = frozenset({"grid", "in_each_run", "seed_policy", "failure_policy", "ci_method"})
 
     def _keep_what_the_results_are_judged_by(self, before: dict[str, Any], amended: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """``(design, changed)``: ``amended`` with every protocol key but those in ``_AUDIT_MAY_CHANGE`` put back as it was
@@ -13138,7 +13141,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                             self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(),
                             run_oracles, timeout_s=limit_s, env=env,
                             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                            case_env=dict(_replicate_env(exec_env, 0, stride)),
+                            case_env=dict(_replicate_env(exec_env, 0, stride)), in_each_run=_in_run.of(protocol),
                         )
                     except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
                         checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
@@ -14083,7 +14086,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 checks, found, _timed_out = await _trial_runner.measure_oracles(
                     self.executor, py, root, simulate, oracles,
                     timeout_s=max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)),
-                    env=env, thresholds=thresholds, case_env=dict(env),
+                    env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of(protocol),
                 )
                 problems += found
                 judged = _oracle_with_reader_flags(
@@ -14101,6 +14104,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     base_seed=int(env.get("FI_REPLICATE_SEED") or 0), deterministic="run_trial" not in entries,
                     timeout_s=self.config.execution.timeout_s, env=env, thresholds=thresholds,
                     paired=any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or []),
+                    in_each_run=_in_run.of(protocol),
                 )
                 series = _improve.series_of(run, trial_names)
                 if run.ok_trials == 0:
@@ -14584,7 +14588,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 try:
                     values, _why = await _trial_runner.run_case(
                         self.executor, py, self.quest_root, rel, cell=cell, timeout_s=timeout, env=case_env,
-                        thresholds=thresholds, trial=trial_no, oracle=oracle)
+                        thresholds=thresholds, trial=trial_no, oracle=oracle, in_each_run=_in_run.of(protocol))
                 except Exception as e:  # noqa: BLE001 -- a look that could not be had never stops a quest
                     self._log.warning("[oracle] an extra run of %r's case could not be made: %r", name, e)
                     return None
@@ -23580,8 +23584,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not self._split_on(state):
             return ""
         search = _optim.has_block(state.get("design")) and not self.config.execution.background_jobs
+        inside = _in_run.of(self._protocol_block(state))
         block = (_SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
-                 + (_SEARCH_PROTOCOL if search else ""))
+                 + (_SEARCH_PROTOCOL if search else "")
+                 + (_IN_EACH_RUN_PROTOCOL.replace("$factors", ", ".join(f"`{k}`" for k in inside)) if inside else ""))
         layout = self._code_layout(state)
         # An extension of code kept as two scripts is not asked to restructure it into a package.
         extending_two_scripts = bool(state.get("refine_extend")) and not self._package_in_use(state)
@@ -25202,6 +25208,19 @@ _CLUSTER_REPLY_REMINDER = (
     "`# file: experiment.py` and `# file: submit.py`, as the section on the cluster above says."
 )
 
+_IN_EACH_RUN_PROTOCOL = """
+**What each run compares inside it** (`protocol.in_each_run`: $factors). These are not settings of their own: every run
+goes through ALL their values together, on the same random numbers (one fit across all of them, or every method applied
+to the same simulated data). FI gives each run the whole list in its cell, in the protocol's order (`cell["<name>"]` is
+that list); the function uses every value of it, never a value or a list of its own. A number the run gives once (fitted
+across all the values, a difference between two of them on the same data) is returned as a number. A number it gives FOR
+EACH value is returned as a mapping of each value to its number (`"power": {"bonferroni": 0.41, "bh": 0.52}`), or as a list
+of one number per value in the order the run was given them; every value is there (NaN where it does not exist).
+In FI_TRIALS each setting is followed by one record per value (its `cell` and `key` name the value too, as in
+`"key": "m=20,procedure=bh"`, with `"level"`): a number per value is in the value's own record and a number per run in the
+setting's own, each once. The analysis reports each from where it is, and never counts a number per run once per value.
+"""
+
 _SPLIT_PROTOCOL = """\
 ## The experiment is two scripts, and FI runs the trials (execution.split_analysis is on)
 
@@ -25311,7 +25330,7 @@ _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 #: The parts of a protocol that a redesign writes itself: it is never given the plan's in their place by
 #: :meth:`Engine._inherit_plan_parts` (a search for the best design is a different kind of study, not a missing part).
-_REDESIGN_OWNED_PARTS = frozenset({"grid", "metrics", "model", "topic_map", "optimisation"})
+_REDESIGN_OWNED_PARTS = frozenset({"grid", "in_each_run", "metrics", "model", "topic_map", "optimisation"})
 _DRAFTED_PARTS_ASKED = "drafted_parts_asked.json"  # the same bound, for protocol parts a redesign drafted that could not be read
 _LEDGER_ASKED = "ledger_asked.json"  # which ledger parts were asked about, in which design round
 _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger parts: each asked once per quest
@@ -25484,6 +25503,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 
 "protocol": {
   "grid": {"<parameter, named as the code will name it>": [<every value it takes>]},
+  "in_each_run": {"<what ONE run goes through all of together: the conditions one fit spans, the methods applied to the same simulated data>": [<all its values>]},
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
   "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it, never below, and keeps every setting; leave out for a deterministic study>,
   "thresholds": {"<name>": <value>},
@@ -25492,7 +25512,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
-  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>"}],
+  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every grid setting uses the same random numbers, so settings are compared trial by trial; false otherwise (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>"}],
   "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "expected_formula": "<for a check that is not an invariant, a symmetry or a second implementation: @@FORMULA@@>", "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<how the number is computed from what that run returns: one name the simulation function returns, or a formula of them, e.g. abs(P_out - P_in) / P_in>"}],
   "model": {
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",

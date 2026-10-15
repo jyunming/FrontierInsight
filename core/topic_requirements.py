@@ -158,8 +158,9 @@ def _tokens(text: Any) -> set[str]:
 
 
 def view(design: Any, protocol: Any = None) -> dict[str, Any]:
-    """What the plan can be searched for: ``axes`` ({name: values}, from ``protocol.grid``, a search's design variables and
-    the settings its own scan compares: ``protocol.optimisation.grid``),
+    """What the plan can be searched for: ``axes`` ({name: values}, from ``protocol.grid``, what each run compares inside
+    it: ``protocol.in_each_run``, a search's design variables and the settings its own scan compares:
+    ``protocol.optimisation.grid``),
     ``metrics`` ([(id, text)]), ``equations`` ([{id, formula, source}]) and ``assumptions`` (text). ``protocol`` is the one
     that runs when it differs from the design's own (the frozen one)."""
     design = design if isinstance(design, dict) else {}
@@ -168,6 +169,11 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
     axes: dict[str, list[Any]] = {}
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     for axis, values in grid.items():
+        axes[str(axis)] = list(values) if isinstance(values, list) else [values]
+    # What each run compares inside it (all five temperatures of one fit, every procedure on the same data) is varied by
+    # the study as much as a setting is: each run goes through all its values.
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    for axis, values in inside.items():
         axes[str(axis)] = list(values) if isinstance(values, list) else [values]
     block = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else {}
     for variable in block.get("design_variables") if isinstance(block.get("design_variables"), list) else []:

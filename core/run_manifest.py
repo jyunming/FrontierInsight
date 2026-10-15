@@ -939,6 +939,23 @@ def strata_coverage(protocol: dict[str, Any] | None, result_json: Any) -> list[s
     return out
 
 
+def metric_grid(protocol: dict[str, Any] | None, metric: str,
+                recorded_by_cell: dict[str, Any] | None) -> dict[str, list[Any]]:
+    """The settings ``metric`` is recorded over: the protocol's grid, and, for a number each run gives per value of what it
+    compares inside it (``protocol.in_each_run``; FI keeps it under the value's own key, core/in_run.py), those values too.
+    A number per run is counted once per run, a number per value once per value: never one as the other."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    if not inside:
+        return grid
+    for key, by_name in (recorded_by_cell or {}).items():
+        parsed = _parse_cell(key)
+        if parsed and set(parsed) & set(inside) and recorded_counts(by_name, metric) is not None:
+            return {**grid, **inside}
+    return grid
+
+
 def _value_count_findings(
     protocol: dict[str, Any], manifest: dict[str, Any], result_json: Any, *, trial_mode: bool = False,
     recorded: dict[str, Any] | None = None, recorded_by_cell: dict[str, Any] | None = None,
@@ -1008,7 +1025,8 @@ def _value_count_findings(
             defined, undefined = counts
             measured = defined + undefined
             listed_defined, listed_undefined, excesses, accounted_defined, accounted_undefined = _listed_counts(
-                result_json, metric, grid, (defined, undefined), recorded_by_cell)
+                result_json, metric, metric_grid(protocol, metric, recorded_by_cell), (defined, undefined),
+                recorded_by_cell)
             made = (f"in {measured:g} trial(s) of FI's record: {defined:g} with a value and {undefined:g} with none "
                     "(the measurement does not exist there)")
             if not _values_listed(result_json, metric) and not accounted_defined and not accounted_undefined:

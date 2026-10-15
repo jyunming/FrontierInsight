@@ -25,7 +25,9 @@ Mandatory checklist — if any apply, you MUST patch them:
 
 8. **Arbitrary thresholds** — does a conclusion depend on a cut-off the design chose (an outbreak is "more than 5% of N", a peak is "above 0.1")? Then the design must vary it over a stated set, or justify it from the definition, and say the conclusion has to hold across the set.
 
-9. **Random streams** — do different settings and different runs draw from independent streams, or share one (the same seed rebuilt for every setting makes them correlated without saying so)? The design must say how streams are derived (`protocol.seed_policy`), and a deliberate common-random-numbers design must say so and be analysed as paired.
+9. **Random streams** — do different settings and different runs draw from independent streams, or share one (the same seed rebuilt for every setting makes them correlated without saying so)? The design must say how streams are derived (`protocol.seed_policy`), and a deliberate common-random-numbers design must say so and be analysed as paired. What one run uses all of together
+(the conditions one fit spans, the methods applied to the same simulated data) belongs in `protocol.in_each_run`, not in
+`protocol.grid`: a grid setting is run on its own, with its own random numbers.
 
 10. **Numerical convergence** — if a solver, a grid or a step size is involved, does the design say how it is shown converged (halve the step or the tolerance and compare) and which conservation law or invariant every run must satisfy?
 

@@ -61,6 +61,8 @@ QUEST = HERE.parent if (HERE.parent / ".fi").is_dir() else None
 WORK = (QUEST / "run_output") if QUEST else (HERE / "output")
 
 
+# @IN_RUN@ (the text of core/in_run.py: what a run returned, read as FI reads it)
+
 MAX_SETTINGS = 500000  # the most settings listed from one grid (core.optimise_search.MAX_LISTED_SETTINGS)
 
 
@@ -72,12 +74,6 @@ def cells(grid):
     if not axes:
         return [{}]
     return [dict(zip((a for a, _ in axes), combo)) for combo in itertools.product(*(v for _, v in axes))]
-
-
-def fmt(value):
-    if isinstance(value, list):  # an array setting: no comma, a key is split on them (kept equal to core/trial_runner.py)
-        return "[" + ";".join(fmt(x) for x in value) + "]"
-    return repr(value) if isinstance(value, float) and value.is_integer() else str(value)
 
 
 def cell_key(cell):
@@ -111,18 +107,19 @@ def run_cell_child(study, index, out_path):
     fn = getattr(module, entry)
     cell = cells(study.get("grid") or {})[index]
     key = cell_key(cell)
+    inside = study.get("in_each_run") or {}
+    levels = level_cells(inside)
     runs = 1 if entry == "run_cell" else int(study.get("runs_per_setting") or 1)
     rows = []
     for trial in range(runs):
         seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
         try:
-            value = fn(dict(cell)) if entry == "run_cell" else fn(dict(cell), trial, seed)
-            if not isinstance(value, dict) or not value:
-                raise TypeError(f"{entry}() must return a dict of numbers")
-            bad = [k for k, v in value.items() if not is_number(v)]
-            if bad:
-                raise TypeError(f"{entry}() returned non-numbers for {bad[:5]}")
-            rows.append({"trial": trial, "ok": True, "values": {str(k): float(v) for k, v in value.items()}})
+            given = dict(cell, **inside)  # every value each run compares inside it, as FI gives them
+            value = fn(given) if entry == "run_cell" else fn(given, trial, seed)
+            kept, why = read_returned(value, levels, entry)
+            if kept is None:
+                raise TypeError(why)
+            rows.append({"trial": trial, "ok": True, "values": kept})
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -134,6 +131,7 @@ def run_cell_child(study, index, out_path):
 def run_trials(study):
     out = []
     planned = 1 if study["entry"] == "run_cell" else int(study.get("runs_per_setting") or 1)
+    levels = level_cells(study.get("in_each_run") or {})
     for index, cell in enumerate(cells(study.get("grid") or {})):
         key = cell_key(cell)
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,24 +140,8 @@ def run_trials(study):
             study_file.write_text(json.dumps(study), encoding="utf-8")
             subprocess.call([sys.executable, str(HERE / "run.py"), "--cell", str(index), str(result), str(study_file)])
             rows = json.loads(result.read_text(encoding="utf-8")) if result.is_file() else []
-        metrics, trials_of = {}, {}
-        for row in rows:
-            if row.get("ok"):
-                for name, value in row["values"].items():
-                    metrics.setdefault(name, []).append(value)
-                    trials_of.setdefault(name, []).append(row["trial"])
+        out.extend(summary_cells(cell, key, planned, rows, levels))
         ok = sum(1 for r in rows if r.get("ok"))
-        out.append({
-            "cell": cell, "key": key, "planned": planned, "ok": ok, "failed": planned - ok,
-            "metrics": {
-                name: {
-                    "values": values, "trials": trials_of[name], "count": len(values),
-                    "total": math.fsum(v for v in values if math.isfinite(v)),
-                    "non_finite": sum(1 for v in values if not math.isfinite(v)),
-                }
-                for name, values in metrics.items()
-            },
-        })
         print(f"[run] {key or 'the one setting'}: {ok} of {planned} ok", file=sys.stderr)
     return {"schema": "fi.trials/v1", "thresholds": study.get("thresholds") or {}, "cells": out}
 
@@ -296,6 +278,10 @@ def main():
 if __name__ == "__main__":
     main()
 '''
+# The text of core/in_run.py goes where the marker is: run.py reads what a run returned as FI does.
+RUN_SOURCE = RUN_SOURCE.replace(
+    "# @IN_RUN@ (the text of core/in_run.py: what a run returned, read as FI reads it)\n",
+    (Path(__file__).with_name("in_run.py")).read_text(encoding="utf-8"), 1)
 
 
 def _sha(text: str) -> str:
@@ -407,9 +393,11 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
         return study
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     metrics = protocol.get("metrics") or []
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     return {
         "entry": entry,
         "grid": grid,
+        **({"in_each_run": inside} if inside else {}),
         "runs_per_setting": int(protocol.get("runs_per_setting") or 1),
         "base_seed": 0,
         "paired": any(isinstance(m, dict) and m.get("paired") for m in metrics),
@@ -445,6 +433,13 @@ def study_differences(code_dir: Path, protocol: dict[str, Any] | None, *, split:
     for name in have_grid:
         if name not in grid:
             found.append(f"it varies `{name}`, which the protocol does not")
+    inside, have_inside = wanted.get("in_each_run") or {}, have.get("in_each_run") or {}
+    for name, values in inside.items():
+        if have_inside.get(name) != values:
+            found.append(f"each run compares `{name}` over {have_inside.get(name)}, the protocol says {values}")
+    for name in have_inside:
+        if name not in inside:
+            found.append(f"each run compares `{name}`, which the protocol does not")
     return found
 
 

@@ -84,7 +84,8 @@ def _as_list(value: Any) -> list[str]:
 #: The parts of the protocol. A model sometimes writes one of them beside ``protocol:`` (at the top level of the design
 #: block) instead of under it; the plan's readers look only under ``protocol``, so the part read as absent.
 PROTOCOL_PARTS = (
-    "optimisation", "grid", "runs_per_setting", "min_runs_per_setting", "numerical_axes", "thresholds", "metrics",
+    "optimisation", "grid", "in_each_run", "runs_per_setting", "min_runs_per_setting", "numerical_axes", "thresholds",
+    "metrics",
     "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
 )
 
@@ -213,14 +214,14 @@ def _number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _grid_values(axis: Any, values: Any) -> tuple[list[Any] | None, str | None]:
+def _grid_values(axis: Any, values: Any, part: str = "grid") -> tuple[list[Any] | None, str | None]:
     """``(the values of one grid axis, None)`` or ``(None, why)``.
 
     An axis takes numbers, names (text), or tuples (a list of equal-length lists of numbers, each inner list being ONE
     setting, such as an inner and an outer radius). A list that mixes names and numbers is refused with how to write it
     (it may be a numeric sweep with a stray piece of text, which must not silently become names), and so is a list that
     mixes tuples with anything else, since there is no single meaning for either."""
-    where = f"`protocol.grid.{axis}`"
+    where = f"`protocol.{part}.{axis}`"
     if not isinstance(values, list) or not values:
         return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
     if all(isinstance(v, (list, tuple)) for v in values):
@@ -265,6 +266,26 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
                 return None, why
             fixed[str(axis)] = fixed_values
         out["grid"] = fixed
+    inside = out.get("in_each_run")
+    if inside is not None:
+        # What every run goes through together (core/in_run.py): all five temperatures one fit uses, every procedure applied
+        # to the same simulated data. Not a setting of its own: each run is given the whole list.
+        if not isinstance(inside, dict) or not inside:
+            return None, ("`protocol.in_each_run` must map each thing every run compares inside it (all its values in "
+                          "one run, on the same random numbers) to the list of those values")
+        fixed_inside: dict[str, list[Any]] = {}
+        for factor, values in inside.items():
+            fixed_values, why = _grid_values(factor, values, part="in_each_run")
+            if why:
+                return None, why
+            if len(fixed_values or []) < 2:
+                return None, (f"`protocol.in_each_run.{factor}` has one value: a single value is not compared; it is "
+                              "a fixed setting of the run")
+            if str(factor) in (out.get("grid") or {}):
+                return None, (f"`{factor}` is both a setting of `protocol.grid` (each value run on its own) and in "
+                              "`protocol.in_each_run` (all its values in one run): it is one or the other")
+            fixed_inside[str(factor)] = fixed_values or []
+        out["in_each_run"] = fixed_inside
     runs = out.get("runs_per_setting")
     if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):
         return None, "`protocol.runs_per_setting` must be a whole number of at least 1"
@@ -344,6 +365,9 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         # `grid`: a protocol is either a sweep or a search, never both.
         from . import optimisation_plan
 
+        if out.get("in_each_run") is not None:
+            return None, ("`protocol.optimisation` and `protocol.in_each_run` cannot both be given: a search for the best "
+                          "design runs one design at a time")
         if out.get("grid") is not None:
             return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
                           "best design puts the settings it compares, and a coarse scan run before it, in "

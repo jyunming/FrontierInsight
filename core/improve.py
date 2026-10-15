@@ -775,7 +775,8 @@ def values_line(rows: list[dict[str, Any]], comparison: list[dict[str, Any]] | N
 def series_of(run: Any, names: set[str] | list[str]) -> dict[str, dict[str, list[float]]]:
     """Each trial number's values per setting, in trial order, from a :class:`core.trial_runner.TrialRun`."""
     out: dict[str, dict[str, list[float]]] = {}
-    for cell in getattr(run, "cells", None) or []:
+    cells = run.record_cells() if callable(getattr(run, "record_cells", None)) else getattr(run, "cells", None) or []
+    for cell in cells:
         rows = sorted((r for r in cell.rows if r.get("status") == "ok"), key=lambda r: r.get("trial") or 0)
         for name in names:
             values = [v for v in ((r.get("values") or {}).get(name) for r in rows) if _num(v) is not None]

@@ -55,6 +55,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import in_run as _in_run
 from . import trial_runner as _tr
 
 #: The margin added to the measured total before it is compared with the time allowed.
@@ -278,11 +279,13 @@ async def measure(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs: int,
     deterministic: bool, limit_s: float, budget_s: float, env: dict[str, str] | None = None,
     thresholds: dict[str, Any] | None = None, cached: dict[str, Probe] | None = None,
+    in_each_run: dict[str, list[Any]] | None = None,
 ) -> tuple[list[Probe] | None, str]:
     """Time the settings of :func:`probe_cells`. ``(probes, "")``, or ``(None, why)`` when the simulation could not be timed
     (it failed, or could not be loaded: the real run's repair is what handles that). ``budget_s`` is the most time all the
     timing together may take; the settings not reached are left out (the estimate then says it is not complete).
-    ``cached``: settings already timed on this grid (by their key), not timed again."""
+    ``cached``: settings already timed on this grid (by their key), not timed again. ``in_each_run``: the values each run
+    goes through together; a timed run is given all of them, as the study gives them, so one run's time is one trial's."""
     quest_root = Path(quest_root)
     total_trials = trial_count(grid, runs, deterministic)
     allowance = max(60.0, 3.0 * limit_s / max(1, total_trials))
@@ -301,7 +304,7 @@ async def measure(
             return True, "budget"
         timeout = int(max(5, min(allowance, max(left, 60.0) if not probes else left)))
         probe, why = await _time_one(executor, python, quest_root, module, cell, runs=runs, deterministic=deterministic,
-                                     timeout_s=timeout, env=env, thresholds=thresholds)
+                                     timeout_s=timeout, env=env, thresholds=thresholds, in_each_run=in_each_run)
         if probe is None:
             return False, f"at {_tr.cell_key(cell) or 'its only setting'}: {why}"
         probe.axis, probe.index = axis, index
@@ -328,6 +331,7 @@ async def measure(
 async def _time_one(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, cell: dict[str, Any], *, runs: int,
     deterministic: bool, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+    in_each_run: dict[str, list[Any]] | None = None,
 ) -> tuple[Probe | None, str]:
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -338,8 +342,10 @@ async def _time_one(
     n = 1 if deterministic else (2 if int(runs) >= 2 else 1)
     trials = [{"trial": t, "seed": None if deterministic else _tr.trial_seed(0, key, t)} for t in range(n)]
     nonce = f"pilot{time.time_ns()}"
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     spec.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
-                                "cell": cell, "trials": trials, "nonce": nonce, "thresholds": dict(thresholds or {})},
+                                "cell": {**cell, **inside}, "levels": _in_run.level_cells(inside), "trials": trials,
+                                "nonce": nonce, "thresholds": dict(thresholds or {})},
                                default=str), encoding="utf-8")
     t0 = time.monotonic()
     result = await executor.execute(
@@ -425,8 +431,16 @@ def _finite(value: Any) -> bool:
 
 
 def observations(probes: list[Probe]) -> list[tuple[dict[str, Any], dict[str, float]]]:
-    """Every pilot trial as ``(its setting, what it returned)``."""
-    return [(dict(p.cell), dict(t)) for p in probes for t in p.trials]
+    """Every pilot trial as ``(its setting, what it returned)``. A run that compared values inside it is its setting's
+    numbers per run, and one observation per value with that value's numbers (its setting names the value too)."""
+    out: list[tuple[dict[str, Any], dict[str, float]]] = []
+    for p in probes:
+        for t in p.trials:
+            per_run, per_level = _in_run.split(t)
+            out.append((dict(p.cell), dict(per_run)))
+            for lk, named in per_level.items():
+                out.append(({**p.cell, **_in_run.parse_level_key(lk)}, dict(named)))
+    return out
 
 
 def _settings_text(obs: list[tuple[dict[str, Any], dict[str, float]]], limit: int = 6) -> str:
@@ -569,8 +583,10 @@ def directive(pilot: Pilot) -> str:
 async def run_values(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, cell: dict[str, Any], *, deterministic: bool,
     timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-) -> dict[str, float] | None:
-    """What one trial of ``cell`` returns (nothing is written to FI's ledger), or ``None`` when it failed or did not finish."""
+    in_each_run: dict[str, list[Any]] | None = None,
+) -> dict[str, Any] | None:
+    """What one trial of ``cell`` returns (nothing is written to FI's ledger), or ``None`` when it failed or did not finish.
+    With values compared inside each run, the run is given all of them and may return a number per value."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -579,8 +595,10 @@ async def run_values(
     out.unlink(missing_ok=True)
     key = _tr.cell_key(cell)
     nonce = f"pilot{time.time_ns()}"
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     spec.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
-                                "cell": cell, "trials": [{"trial": 0, "seed": None if deterministic else _tr.trial_seed(0, key, 0)}],
+                                "cell": {**cell, **inside}, "levels": _in_run.level_cells(inside),
+                                "trials": [{"trial": 0, "seed": None if deterministic else _tr.trial_seed(0, key, 0)}],
                                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
     await executor.execute(
         [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
@@ -599,7 +617,7 @@ async def pilot(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]],
     probes: list[Probe], kinds: dict[str, str], *, deterministic: bool, budget_s: float, allowance_s: float,
     env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
-    exempt: set[str] | frozenset[str] = frozenset(),
+    exempt: set[str] | frozenset[str] = frozenset(), in_each_run: dict[str, list[Any]] | None = None,
 ) -> Pilot:
     """Read what the timed trials returned (:func:`pilot_problems`). When a metric looks undefined everywhere, the settings with
     few values are first tried in every combination, one trial each, within ``budget_s``: a metric that applies to only some
@@ -622,11 +640,12 @@ async def pilot(
                 reached = False
                 break
             values = await run_values(executor, python, quest_root, module, cell, deterministic=deterministic,
-                                      timeout_s=int(max(5, min(allowance_s, left))), env=env, thresholds=thresholds)
+                                      timeout_s=int(max(5, min(allowance_s, left))), env=env, thresholds=thresholds,
+                                      in_each_run=in_each_run)
             if values is None:
                 reached = False
                 continue
-            obs.append((dict(cell), values))
+            obs.extend(observations([Probe(None, None, dict(cell), 0.0, trials=[values])]))
         if whole and reached:
             tried_all = (f"; FI also tried every value of every setting and every combination of the settings that take few "
                          f"values ({_setting_count(obs)} settings in all)")

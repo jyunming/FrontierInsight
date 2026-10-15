@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from . import frozen_protocol as _frozen
+from . import in_run as _in_run
 from . import oracle_forms as _forms
 from . import plan as _plan
 from . import probes as _probes
@@ -415,8 +416,10 @@ class RunChecksMixin:
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
         return grid, max(1, int(protocol.get("runs_per_setting") or 1)), thresholds
 
-    def _sizing_key(self, runner: Any, grid: dict[str, list[Any]], runs: int, limit_s: float) -> str:
-        return _trial_runner._run_key(runner.simulate, {"grid": grid}, runs, 0, runner.deterministic) + f"|{int(limit_s)}"
+    def _sizing_key(self, runner: Any, grid: dict[str, list[Any]], runs: int, limit_s: float,
+                    inside: dict[str, list[Any]] | None = None) -> str:
+        what = {"grid": grid, **({"in_each_run": inside} if inside else {})}
+        return _trial_runner._run_key(runner.simulate, what, runs, 0, runner.deterministic) + f"|{int(limit_s)}"
 
     async def _size_the_run(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
         """Before the protocol is frozen and the study starts: time a few real trials, add them up, and compare the total with
@@ -459,7 +462,8 @@ class RunChecksMixin:
         cut_done = bool(reduced) and prior.get("fits") is False
         for _round in range(2):
             grid, runs, thresholds = self._grid_and_runs(state)
-            key = self._sizing_key(runner, grid, runs, limit_s)
+            inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
+            key = self._sizing_key(runner, grid, runs, limit_s, inside)
             record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
             if record.get("key") == key and record.get("fits"):
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
@@ -471,7 +475,7 @@ class RunChecksMixin:
                 self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
                 runs=runs, deterministic=runner.deterministic, limit_s=limit_s,
                 budget_s=max(0.0, budget_s - self._pilot_spent), env=env,
-                thresholds=thresholds, cached=cached)
+                thresholds=thresholds, cached=cached, in_each_run=inside)
             if probes is None:
                 # A setting that fails when timed is a setting the simulation fails at: the same repair as a failed run, naming
                 # it (the error only; the repair is never given an expected value).
@@ -607,7 +611,8 @@ class RunChecksMixin:
                 self.executor, python, self.quest_root,  # type: ignore[attr-defined]
                 runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
                 grid, probes, kinds, deterministic=runner.deterministic, budget_s=left,
-                allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol))
+                allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol),
+                in_each_run=_in_run.of(protocol))
             self._pilot_spent += time.monotonic() - began
         base = {"trials": result.trials, "settings": result.settings, "metrics_read": result.checked,
                 "not_ruled_out": result.unsure, "at": time.time(), "trial_count_read": total, "code_key": code_key,
