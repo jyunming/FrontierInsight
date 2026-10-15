@@ -141,3 +141,25 @@ def test_the_same_part_refused_twice_is_not_asked_for_a_third_time(tmp_path: Pat
         keep=lambda before, revised: revised, file="part_asked.json", what="settings", short="it", note="n"))
     assert len(asked) == 2
     assert "same part that could not be used" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+def test_a_part_refused_again_while_other_gaps_are_filled_is_asked_for_again(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    plan.plan_path(engine.quest_root).parent.mkdir(parents=True, exist_ok=True)
+    plan.plan_path(engine.quest_root).write_text("# plan\n", encoding="utf-8")
+    asked: list[str] = []
+
+    async def complete(ask, path, **kwargs):
+        asked.append(ask)
+        engine._answer_refused = ["`protocol.metrics` entry `realized_fdr_uncertainty`: `kind` must be `proportion`"]
+
+    lacks = iter([["a", "b", "c"], ["a", "b"], ["a"], ["a"], ["a"], ["a"]])
+    engine._complete_plan_parts = complete  # type: ignore[method-assign]
+    engine._design_from_plan = lambda: ({"a": 1}, "sha2")  # type: ignore[method-assign]
+    engine._progress = lambda *a, **k: None  # type: ignore[method-assign]
+    asyncio.run(engine._ask_plan_to_complete(
+        {}, "sha", lacks=lambda design: next(lacks), request=lambda design, text: "ask",
+        keep=lambda before, revised: revised, file="part_asked.json", what="settings", short="it", note="n"))
+    assert len(asked) == 3  # asked again while the gaps shrank; stopped once the same refusal left them as they were
+    record = json.loads((engine.fi_dir / "part_asked.json").read_text(encoding="utf-8"))
+    assert "same refusal again" in json.dumps(record)

@@ -5885,6 +5885,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                <= _SEARCH_CALLS + (_SCHEMA_RETRY_ASKS * _SEARCH_CALLS_PER_ASK if schema else 0)):
             text = path.read_text(encoding="utf-8")
             sha_before = _plan.sha256(text)
+            gaps_asked = list(gaps)  # what this request asks for: a part refused again is a repeat only if nothing else came
             # `what` is a part of the plan ("settings the experiment needs") or, when it begins "what", the thing the plan lacks.
             lacking = f"the plan lacks {what}" if what.startswith("what ") else f"the plan's {what} was missing"
             self._log.warning("[plan] %s: %s; FI asked the plan to complete it (%d of %d)", lacking,
@@ -5972,8 +5973,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.info("[plan] %s (asked %d time(s))", whole, count)
                 print(f"[FI] {whole}; going on")
                 return design, plan_sha
-            if repeated:
-                # The same part refused twice for the same reason: asking again would return it once more.
+            if repeated and list(gaps) == gaps_asked:
+                # The same part refused twice for the same reason, and nothing else came with it: asking again would return
+                # it once more. Recorded so, so a resume does not ask once more either.
+                self._record_search_asked(count, calls, plan_sha, "same refusal again", file,
+                                          {**(extra or {}), "problem": last_problem, "schema": False})
                 self._log.warning("[plan] the plan's model gave the same part that could not be used for %s twice, so FI "
                                   "stopped asking (%d request(s) made)", short, count)
                 return design, plan_sha
