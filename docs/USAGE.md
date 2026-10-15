@@ -520,7 +520,7 @@ knowledge:
 
 output:
   kinds: [paper_md, paper_pdf]
-  paper_format: generic             # scientific: generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
+  paper_format: generic             # scientific: generic | article | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
   output_dir: ./outputs
   save_model_calls: false           # keep every prompt and answer, whole, in .fi/io/ (one file per call); see docs/trace.md
   save_thinking: true               # keep the reasoning summary the provider returns, when its connection gives one, in .fi/thinking.jsonl (for reading; it is not the model's hidden or complete chain of thought, and never evidence); false keeps none (set it for a quest that handles sensitive data), and on the VS Code connection stops asking Copilot for the model's reasoning (asked by default: Copilot's undocumented `_enableThinking` option for Claude, whose Opus returns a summary, and `includeEncryptedThinking` for a GPT model's reasoning summary). `--why <quest> <step>` says whether the file holds that step's reasoning and how long it is. It can quote your data and prompts: only credentials and your home folder are removed, so check it before sharing the quest folder
