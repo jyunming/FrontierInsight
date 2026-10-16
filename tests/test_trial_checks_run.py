@@ -213,3 +213,22 @@ def test_replay_r12_with_one_more_low_noise_setting_still_stops():
     # with nothing declared, the remaining settings are not shown sound either: a stop
     v = trial_checks.judge(cells, data.get("protocol"), data["thresholds"], repairs_left=False)
     assert v.action == trial_checks.STOP and not v.left_out and "could not" in v.say
+
+
+GRID_CHECKING_ANALYSIS = """
+import json, os
+data = json.load(open(os.environ["FI_TRIALS"]))
+if len(data["cells"]) != 2:
+    raise ValueError("FI_TRIALS record must contain both planned noise levels")
+print("RESULT_JSON: {}")
+"""
+
+
+def test_an_analysis_that_cannot_run_without_the_left_out_settings_stops_plainly(tmp_path: Path) -> None:
+    pytest.importorskip("scipy")
+    root = _quest(tmp_path)
+    (root / "code" / "experiment.py").write_text(GRID_CHECKING_ANALYSIS, encoding="utf-8")
+    runner, result = _run(root, [0.005, 0.08], repairs_left=False)
+    assert result.returncode == 1 and runner.left_out_settings == ["noise_std_rel=0.08,n_timepoints=12"]
+    assert runner.trial_fault["action"] == trial_checks.STOP and not runner.trial_fault["partial"]
+    assert "could not run without them" in runner.trial_fault["say"] and "both planned noise levels" in runner.trial_fault["say"]

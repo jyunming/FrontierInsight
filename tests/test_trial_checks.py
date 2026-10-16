@@ -415,3 +415,17 @@ def test_a_coverage_the_analysis_reports_is_recounted_from_the_trials():
     # a mean metric is not a coverage, and nothing is judged without a declaration
     assert tc.reported_coverage_mismatches(data["cells"], _protocol(data, [{**spec, "kind": "mean"}]), wrong) == []
     assert tc.reported_coverage_mismatches(data["cells"], _protocol(data, []), wrong) == []
+
+
+def test_trials_the_time_limit_cut_off_are_not_failures_of_the_code():
+    from core import trial_runner
+
+    cells = [{"key": "a=1", "planned": 10, "failed": 10, "metrics": {}},
+             {"key": "a=2", "planned": 10, "failed": 8, "metrics": {}}]
+    reasons = {"a=1": Counter({trial_runner.OUT_OF_TIME: 10}),
+               "a=2": Counter({trial_runner.OUT_OF_TIME: 4, "ZeroDivisionError: division by zero": 4})}
+    fails = tc.failures(cells, reasons)
+    assert [(f.key, f.failed, f.out_of_time, f.fault) for f in fails] == [("a=1", 0, 10, False), ("a=2", 4, 4, True)]
+    assert "4 of 6 trials failed" in fails[1].says() and "time" not in fails[1].says()
+    record = tc.summary(fails, None)
+    assert record["out_of_time"] == [{"key": "a=1", "planned": 10, "trials": 10}, {"key": "a=2", "planned": 10, "trials": 4}]

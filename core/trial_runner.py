@@ -271,6 +271,11 @@ def _append(path: Path, row: dict[str, Any]) -> None:
         fh.write(json.dumps(row, allow_nan=True, default=str) + "\n")
 
 
+#: Why a trial the study's time limit cut off has no result: FI's limit, not a fault of the code (core/trial_checks.py
+#: counts these apart from the failed trials).
+OUT_OF_TIME = "the study's time (execution.timeout_s) ran out before this setting's trial"
+
+
 def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
     """Per cell, each metric's values over the trials that succeeded, with their count and total: what the analysis
     script reads (``FI_TRIALS``) and what FI's statistics are computed from. Each metric's ``trials`` is the trial each
@@ -362,7 +367,7 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
         elif result is None:
             why_missing = not_reported
         elif run.timed_out:
-            why_missing = "the study's time (execution.timeout_s) ran out before this setting's trial"
+            why_missing = OUT_OF_TIME
         elif result.returncode == 0:
             why_missing = "the cell's process ended normally but never reported this trial"
         else:
@@ -861,6 +866,19 @@ class TrialsRunner:
                         "FI_RAW_DIR": run.summary_path.parent.relative_to(self.quest_root).as_posix()}
         result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self.failed_script = None if result.returncode == 0 else self.analysis.name
+        if result.returncode != 0 and self.left_out_settings and not self.trial_fault:
+            # Settings are left out only once the repairs are spent, so no repair of the analysis is coming: an analysis
+            # that cannot run without them (it checks the planned grid) ends the quest with that said plainly.
+            last = next((ln.strip() for ln in reversed((result.stderr or "").splitlines()) if ln.strip()), "")
+            many = len(self.left_out_settings)
+            self.trial_fault = {
+                "action": "stop", "partial": False,
+                "say": (f"{many} setting(s) were left out because most of their trials failed "
+                        f"({', '.join(self.left_out_settings[:4])}), and the analysis could not run without them"
+                        + (f" ({last[:300]})" if last else "")),
+                "tried": ["ran every trial of the study, sent the settings where most trials failed back to be repaired, "
+                          "and left them out once the repairs were spent",
+                          "ran the analysis on the remaining settings; it failed"]}
         return ExecutionResult(
             returncode=result.returncode, stdout=result.stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr() + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,

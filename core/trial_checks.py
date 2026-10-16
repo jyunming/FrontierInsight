@@ -69,6 +69,8 @@ RATIO_HIGH = 1.5
 FAMILY_ALPHA = 0.05
 #: The fewest trials of a setting that are judged.
 MIN_TRIALS = 10
+#: The reason FI's harness gives a trial its time limit cut off (core/trial_runner.OUT_OF_TIME).
+_OUT_OF_TIME = "the study's time (execution.timeout_s) ran out"
 #: Where FI keeps what the checks found on the last run of the trials (QUALITY.md and the paper's required items read it).
 RECORD = Path(".fi") / "trial_checks.json"
 
@@ -147,22 +149,29 @@ class SettingFailures:
     planned: int
     failed: int
     reasons: list[tuple[str, int]] = field(default_factory=list)
+    #: Trials the study's time limit cut off (not failures of the code, not in ``failed``).
+    out_of_time: int = 0
+
+    @property
+    def ran(self) -> int:
+        """The planned trials the time limit did not cut off."""
+        return max(0, self.planned - self.out_of_time)
 
     @property
     def fraction(self) -> float:
-        return self.failed / self.planned if self.planned else 0.0
+        return self.failed / self.ran if self.ran else 0.0
 
     @property
     def fault(self) -> bool:
-        return self.planned > 0 and self.fraction > FAULT_FRACTION
+        return self.ran > 0 and self.fraction > FAULT_FRACTION
 
     @property
     def stated(self) -> bool:
-        return self.planned > 0 and self.fraction > STATE_FRACTION
+        return self.ran > 0 and self.fraction > STATE_FRACTION
 
     def says(self) -> str:
         why = "; ".join(f"{n}x {r if len(r) <= 200 else r[:197] + '...'}" for r, n in self.reasons[:3])
-        return (f"{self.key or 'the one setting'}: {self.failed} of {self.planned} trials failed ({self.fraction:.0%})"
+        return (f"{self.key or 'the one setting'}: {self.failed} of {self.ran} trials failed ({self.fraction:.0%})"
                 + (f" - {why}" if why else ""))
 
 
@@ -228,13 +237,18 @@ def failures(cells: list[dict[str, Any]], reasons: dict[str, Counter] | None = N
         failed = int(c.get("failed") or 0)
         key = str(c.get("key") or "")
         got = Counter((reasons or {}).get(key) or Counter())
+        # A trial FI's own time limit cut off is not a failure of the code: counted apart, never sent to a repair.
+        late = sum(n for r, n in got.items() if r.startswith(_OUT_OF_TIME))
+        if late:
+            got = Counter({r: n for r, n in got.items() if not r.startswith(_OUT_OF_TIME)})
+            failed = max(0, failed - late)
         if names:
             records = [c] + [r for r in cells if r.get("level") and of_settings(r, {key})]
             empty = _no_value_trials(records, names)
             for name in empty.values():
                 got[f"the trial returned no number (NaN, an infinity or nothing) for `{name}`, which the plan declares"] += 1
             failed = min(planned, failed + len(empty)) if planned else failed
-        out.append(SettingFailures(key, planned, failed, got.most_common()))
+        out.append(SettingFailures(key, planned, failed, got.most_common(), out_of_time=late))
     return out
 
 
@@ -737,6 +751,7 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
     return {
         "failures": [{"key": s.key, "planned": s.planned, "failed": s.failed, "fraction": round(s.fraction, 4),
                       "fault": s.fault, "reasons": [[r, n] for r, n in s.reasons[:5]]} for s in fails if s.failed],
+        "out_of_time": [{"key": s.key, "planned": s.planned, "trials": s.out_of_time} for s in fails if s.out_of_time],
         "settings": len(fails),
         "calibration": None if cal is None else {
             "quantities": [{"kind": q.kind, "label": q.label, "names": q.names, "level": q.level, "truth": q.truth,
