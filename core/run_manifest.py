@@ -63,6 +63,20 @@ UNACCOUNTED = "unaccounted"
 UNPRINTED = "unprinted"
 
 
+#: The end of the sentence of an :data:`UNPRINTED` finding made against FI's own record of the trials. Only
+#: :func:`is_unprinted` reads it: for a record written before findings carried their kind into ``RUN_MANIFEST_CHECK.json``
+#: (an exception for those records; a record written now keeps the unprinted findings under their own key).
+UNPRINTED_TAIL = (" — the analysis must print the per-trial values it averaged, so the claimed trial count can be "
+                  "checked against them")
+
+
+def is_unprinted(sentence: Any) -> bool:
+    """Whether ``sentence`` is FI's own :data:`UNPRINTED` finding against its record of the trials (a record written before
+    the kind was kept; see :data:`UNPRINTED_TAIL`)."""
+    text = str(sentence or "")
+    return text.endswith(UNPRINTED_TAIL) and "of FI's record" in text
+
+
 class Finding(str):
     """A finding's sentence, carrying its kind (:data:`FABRICATED` or :data:`UNACCOUNTED`) from where it is made. It is a
     ``str`` in every other way (joined, compared, written as JSON)."""
@@ -1414,8 +1428,7 @@ def _value_count_findings(
             if not _values_listed(result_json, metric) and not accounted_defined and not accounted_undefined:
                 out.append((Finding(
                     f"the metric `{metric}` is a mean over the trials that measured it, {made}, but the analysis's "
-                    f"RESULT_JSON has no `{metric}_values` list at all — the analysis must print the per-trial values "
-                    "it averaged, so the claimed trial count can be checked against them",
+                    f"RESULT_JSON has no `{metric}_values` list at all{UNPRINTED_TAIL}",
                     UNPRINTED),
                     True,
                 ))

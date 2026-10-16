@@ -79,9 +79,9 @@ async def test_still_unusable_after_one_ask_is_a_requirement_not_done_and_the_pa
     assert "in_each_run" not in _design(eng)["protocol"]
     (left,) = _covered(eng).get("not_done")
     assert left["name"] == "comparison inside each run" and left["kind"] == "in_each_run"
-    assert "has one value" in left["sentence"] and "asked the plan's model to write it again once" in left["sentence"]
+    assert "has one value" in left["sentence"] and "the plan was written again once" in left["sentence"]
     # Said as what FI recorded, not as what the code did (the code may compare those values in each run anyway).
-    assert "FI did not record a comparison of those values inside each run" in left["sentence"]
+    assert "no comparison of those values inside each run was recorded" in left["sentence"]
     assert "no run compares" not in left["sentence"]
     assert "still not readable (the experiment goes on without it)" in _text(eng)
     # An item the paper must name, checked, and said in the run record (QUALITY.md).

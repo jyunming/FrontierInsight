@@ -6208,8 +6208,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._note_not_done([], kind="in_each_run")
             return
         reason = str(why).split("; " + _plan.ASK_MARK)[0].strip().rstrip(".")
-        again = ", even when FI asked the plan's model to write it again once" if asked_again else ""
-        sentence = (f"{reason}{again}. So FI did not record a comparison of those values inside each run, and there is no "
+        again = ", even when the plan was written again once" if asked_again else ""
+        sentence = (f"{reason}{again}. So no comparison of those values inside each run was recorded, and there is no "
                     "result per value of them")
         before = [e for e in self._topic_covered_read().get("not_done") or [] if isinstance(e, dict)
                   and e.get("kind") == "in_each_run"]
@@ -10770,6 +10770,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._manifest_analysis_problems: list[str] = []
         # The findings of numbers FI's trials never produced (core/run_manifest.py FABRICATED): never record-only.
         self._manifest_fabricated: list[str] = []
+        # The findings that only say the analysis printed no per-trial list for a mean FI holds trial by trial: kept apart
+        # from the differences of the record (core/run_manifest.py UNPRINTED).
+        self._manifest_unprinted: list[str] = []
         self._manifest_differences: list[dict[str, Any]] = []  # what FI counted: where the analysis lists more than ran
         self._manifest_note = ""  # a plain sentence for the record, when the run was compared in a way worth saying
         if self.config.engine.run_manifest_check == "off":
@@ -10849,6 +10852,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                                                     recorded_by_cell=per_cell)
             # The kind each finding was given where it was made; from here on the findings are plain sentences.
             self._manifest_fabricated = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.FABRICATED]
+            self._manifest_unprinted = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.UNPRINTED]
             self._manifest_analysis_problems = [str(f) for f in self._manifest_analysis_problems]
             return ("differs" if found else "ok"), [str(f) for f in found]
         if self.config.rigor_profile == "research":
@@ -16634,6 +16638,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         manifest_attempts_next = manifest_attempts if (result.returncode != 0 or manifest_status in ("not_run", "pending")) else 0
         manifest_analysis_only = False
         acting: list[str] = []
+        unprinted_recorded: list[str] = []  # warn: what the analysis did not print, kept in the record for QUALITY.md
         if manifest_found:
             mode = self.config.engine.run_manifest_check
             # What is acted on: every finding under block; under warn only the numbers FI's trials never produced (they
@@ -16664,8 +16669,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             elif mode == "warn" and not acting:
                 # What the analysis does not print of trials FI holds whole is not a difference in the record: the log has
                 # it, the paper (core/paper_facts.py) and the quality report do not.
-                unprinted = [f for f in manifest_found if _run_manifest.kind_of(f) == _run_manifest.UNPRINTED]
+                unprinted = [f for f in manifest_found if f in set(self._manifest_unprinted)]
                 manifest_found = [f for f in manifest_found if f not in unprinted]
+                unprinted_recorded = unprinted
                 manifest_status = "warned" if manifest_found else "ok"
                 self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join([*manifest_found, *unprinted]))
             elif manifest_attempts < _manifest_repair_budget(
@@ -16703,6 +16709,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._run_manifest_record({
             "status": manifest_status, "problems": manifest_found, "attempts": manifest_attempts_next or manifest_attempts,
             "failed_trials": getattr(self, "_manifest_failed_trials", 0) or 0,
+            **({"unprinted": list(unprinted_recorded)} if unprinted_recorded else {}),
             **({"note": self._manifest_note} if getattr(self, "_manifest_note", "") else {}),
             **({"headline": warned_headline} if warned_headline else {}),
         })

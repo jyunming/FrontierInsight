@@ -51,6 +51,7 @@ from . import disclosure as _disclosure
 from . import frozen_protocol as _frozen
 from . import paper_values as _values
 from . import run_facts as _run_facts
+from . import run_manifest as _run_manifest
 from . import typed_numbers as _typed
 
 HIT = "paper_record_mismatch"
@@ -208,6 +209,28 @@ def _topic_sentence(gap: Any) -> tuple[str, str]:
                                    f"The topic asks for {name}; this study did not do it")
 
 
+def _said(root: Path, name: str) -> str:
+    """A quantity the way the paper names it: the plan's label for it, else its name, in quotes (never a code identifier
+    in backticks)."""
+    metric, label = _metric_of(root, name)
+    return f'"{label or name}"'
+
+
+def _code_files_sentence(root: Path) -> str:
+    """The code is in more files than the topic asked for, said for a reader of the paper from the layout FI recorded
+    (``.fi/code_layout.json``), never from the sentence FI stored for its own log."""
+    from . import code_layout as _layout
+
+    decision = _layout.load(root) or {}
+    asked = decision.get("topic_code_files")
+    parts = ("the simulation, the analysis, the model's functions and their tests" if decision.get("shape") == _layout.PACKAGE
+             else "the simulation and the analysis")
+    if not isinstance(asked, int) or asked < 1:
+        return f"The code is kept in separate parts ({parts}), in more files than the topic asked for"
+    wanted = "the single file" if asked == 1 else f"the {asked} files"
+    return f"The code is kept in separate parts ({parts}), not in {wanted} the topic asked for"
+
+
 def required_items(quest_root: Path | str) -> list[Item]:
     """Every item the Limitations must place, from FI's records. A missing or unreadable record gives none."""
     root = Path(quest_root)
@@ -237,7 +260,9 @@ def required_items(quest_root: Path | str) -> list[Item]:
     # What the study did not do as the plan wrote it (``not_done``, kept by the engine with a ``kind``: a comparison
     # inside each run that could not be used, code not in the files the topic asked for): its sentence is FI's own.
     for gap in (covered.get("not_done") if isinstance(covered, dict) else None) or []:
-        if isinstance(gap, dict) and _one(gap.get("sentence")):
+        if isinstance(gap, dict) and gap.get("kind") == "code_files":
+            add(NOT_DONE, gap.get("name"), _sentence(_code_files_sentence(root)))
+        elif isinstance(gap, dict) and _one(gap.get("sentence")):
             add(NOT_DONE, gap.get("name"), _sentence(_one(gap.get("sentence")).rstrip(".")))
     record = _read(root, ".fi/code_review.json")
     issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
@@ -251,19 +276,19 @@ def required_items(quest_root: Path | str) -> list[Item]:
         if gate.get("outcome") == "left_out":
             gated.add(str(fid))
             q = _one(gate.get("quantity"))
-            add(LEFT_OUT, q, _sentence(f"`{q}` is not reported: a test FI ran on the code showed that the code computes it "
-                                       "wrongly"))
+            add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a test of the code showed that the code computes "
+                                       "it wrongly"))
         elif gate.get("outcome") == "not_computed":
             gated.add(str(fid))
             for n in gate.get("names") if isinstance(gate.get("names"), list) else []:
-                add(NOT_COMPUTED, n, _sentence(f"The plan asks for `{_one(n)}`; the code does not compute it, so this study "
-                                               "does not report it"))
+                add(NOT_COMPUTED, n, _sentence(f"The plan asks for {_said(root, _one(n))}; the code does not compute it, so "
+                                               "this study does not report it"))
     checked = _read(root, "needs/RESULT_CHECK.json")
     for c in (checked.get("checks") if isinstance(checked, dict) else None) or []:
         if isinstance(c, dict) and c.get("quantity"):
             q = _one(c["quantity"])
             note = _one(c.get("note"))[:200].rstrip(".")
-            add(LEFT_OUT, q, _sentence(f"`{q}` is not reported: a check FI ran showed the value is wrong"
+            add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
     _precision_items(root, add)
     # A key function whose second, independently written version still gives different results (not one that could not
@@ -303,10 +328,10 @@ def required_items(quest_root: Path | str) -> list[Item]:
         where = _one(issue.get("function") or issue.get("file"))
         detail = _one(err.get("detail"))[:160].rstrip(".")
         add(CODE_FINDING, text[:80] or str(fid), _sentence(
-            "A test FI ran showed a fault that can change a reported result"
-            + (f" (in `{where}`)" if where else "") + (f": {text}" if text else "")
-            + "; on the code that produced the results this test no longer runs"
-            + (f" ({detail})" if detail else "") + ", so FI could not confirm the fault is fixed"), key=fid)
+            "A test of the code showed a fault that can change a reported result"
+            + (f" (in {where})" if where else "") + (f": {text}" if text else "")
+            + "; the test no longer runs on the code that produced the results, so it is not confirmed that the fault is "
+            "fixed"), key=fid)
     # Open problems in the code, flagged by a second reading, that can change a reported result (one about a function the
     # run never calls cannot: core/code_review.py:open_findings leaves those out).
     try:
@@ -324,7 +349,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 continue
             text = _code_review._plain_text(v.get("text"))
             if text:
-                add(CODE_FINDING, text[:80], _sentence("A second reading of the code flagged a problem that can change a "
+                add(CODE_FINDING, text[:80], _sentence("A review of the code flagged a problem that can change a "
                                                        f"reported result and was not resolved: {text}"), key=fid or text)
     except Exception:  # noqa: BLE001
         pass
@@ -344,15 +369,15 @@ def required_items(quest_root: Path | str) -> list[Item]:
     if isinstance(reduced, dict) and (said := fewer_runs_text(reduced)):
         add(FEWER_RUNS, FEWER_RUNS_NAME, _sentence(f"The experiment ran {said}"), key="runs")
     manifest = _read(root, "needs/RUN_MANIFEST_CHECK.json")
-    if isinstance(manifest, dict) and manifest.get("status") in ("warned", "differs_in_replicates"):
+    if (isinstance(manifest, dict) and manifest.get("status") in ("warned", "differs_in_replicates")
+            and run_difference_text(manifest)):
         add(RUN_DIFFERENCE, RUN_DIFFERENCE_NAME, _sentence(run_difference_text(manifest)), key="record")
     _left_out_setting_items(root, add)
     _trial_check_items(root, add)
     pages = _read(root, str(PAGE_RECORD))
     if isinstance(pages, dict) and pages.get("final") and isinstance(pages.get("pages"), int)             and isinstance(pages.get("limit"), int) and pages["pages"] > pages["limit"]:
         add(PAGE_LIMIT, "page limit", _sentence(
-            f"The paper is {pages['pages']} pages long, over the topic's limit of {pages['limit']}: FI asked for it to be "
-            "shortened and it was not brought within the limit"), key="limit")
+            f"This paper is {pages['pages']} pages, over the {pages['limit']}-page limit set for it"), key="limit")
     return items
 
 
@@ -361,24 +386,24 @@ _MAX_DIFFERENCE_CHARS = 500
 
 def run_difference_text(record: dict[str, Any]) -> str:
     """The sentence FI puts in the Limitations for a difference it recorded and went on with
-    (``needs/RUN_MANIFEST_CHECK.json``): the plain sentence FI made of it, or its first finding, and that the numbers rest
-    on it."""
-    headline = str(record.get("headline") or "").strip()
-    problems = [str(p) for p in record.get("problems") or [] if str(p).strip()]
+    (``needs/RUN_MANIFEST_CHECK.json``), for a reader of the paper: that the numbers the analysis reports do not all match
+    the trials that were run, how many places, and that the results rest on the analysis. ``""`` when the record holds no
+    such difference: a finding that only says the analysis printed no per-trial list is not one (it is in QUALITY.md and
+    run.log). The technical findings stay in the record."""
+    headline = " ".join(str(record.get("headline") or "").replace("`", "").split())
+    problems = [p for p in record.get("problems") or [] if str(p).strip() and not _run_manifest.is_unprinted(p)]
     seeds = record.get("seeds") if isinstance(record.get("seeds"), dict) else {}
-    if not headline and problems:
-        # Whole findings, never a cut one: every finding when they fit a line or two, else how many there are and the first
-        # one in full.
-        said = [p.rstrip(". ") for p in problems]
-        headline = (said[0] if len(said) == 1 else "; ".join(said) if sum(map(len, said)) <= _MAX_DIFFERENCE_CHARS
-                    else f"it differs in {len(said)} places, the first being that {said[0]}")
-    if not headline and seeds:
-        seed, found = next(iter(seeds.items()))
-        first = str(found[0]) if isinstance(found, list) and found else "it differs"
-        headline = f"the run with seed {seed} differs from the plan: {first.rstrip(chr(46) + chr(32))}"
-    return ("FI's record of the trials that ran does not match what the analysis reports: "
-            + (headline.rstrip(".") or "the two differ")
-            + ". The numbers reported here rest on that analysis")
+    lead = "The numbers the analysis reports do not all match the record of the trials that were run"
+    if headline:
+        said = f"{lead}. {headline.rstrip('.')}"
+    elif problems:
+        said = lead + ": they differ in " + ("1 place" if len(problems) == 1 else f"{len(problems)} places")
+    elif seeds:
+        said = ("A repeat of the experiment with another random seed differs from the plan"
+                + ("" if len(seeds) == 1 else f" ({len(seeds)} repeats)"))
+    else:
+        return ""
+    return said + ". The numbers reported here rest on that analysis"
 
 
 def _runs(part: Any) -> int | None:
@@ -401,7 +426,7 @@ def fewer_runs_text(reduced: dict[str, Any]) -> str:
     elif reduced.get("limit") == "topic":
         why = "so that the run fits the topic's time limit"
     else:
-        why = "so that the run fits FI's time limit for one run"
+        why = "so that the run fits the time limit for one run"
     said = f"{ran} runs per setting instead of the {asked} the plan asked for ({why})"
     if reduced.get("below_plan_minimum") and isinstance(reduced.get("plan_minimum"), (int, float)):
         said += f", below the plan's minimum of {int(reduced['plan_minimum'])}"
@@ -506,7 +531,7 @@ def _label_of_names(root: Path, names: list[str], fallback: str) -> str:
     return fallback
 
 
-def _undefined_items(rec: dict[str, Any], add: Any) -> None:
+def _undefined_items(root: Path, rec: dict[str, Any], add: Any) -> None:
     """Each value of the plan with no number in SOME trials of a setting (core/trial_checks.py:undefined), one item per
     value. A value with none in EVERY trial of a setting has none there by its definition (a power where there is no true
     effect): it is a plain line in QUALITY.md and run.log, and the writer may say it anywhere, so it is not an item."""
@@ -515,7 +540,7 @@ def _undefined_items(rec: dict[str, Any], add: Any) -> None:
         if isinstance(u, dict) and u.get("metric") and not u.get("all"):
             by.setdefault(str(u["metric"]), []).append(u)
     for metric, some in by.items():
-        said = f"`{metric}` has no value in " + "; ".join(
+        said = f"{_said(root, metric)} has no value in " + "; ".join(
             f"{u.get('trials')} of {u.get('ran')} trials at {u.get('key') or 'the one setting'}" for u in some[:6]) + (
             f"; and at {len(some) - 6} more settings" if len(some) > 6 else "")
         add(UNDEFINED, metric, _sentence(said), key=metric)
@@ -531,19 +556,6 @@ def _planned_runs(root: Path) -> int:
     return int(runs) if isinstance(runs, (int, float)) and not isinstance(runs, bool) else 0
 
 
-def _plain_not_checked(reason: str) -> str:
-    """A "not checked" reason in plain words: the two that every quest without a declared true value, or every search,
-    has are said without FI's own terms."""
-    from . import optimise as _optimise
-    from . import trial_checks as _trial_checks
-
-    if reason == _trial_checks.NO_DECLARATION:
-        return "the plan gives no true value to compare them with"
-    if reason == _optimise.NO_CALIBRATION:
-        return "the study searched for the best design, and a search's intervals are not compared with true values"
-    return _one(reason).rstrip(".")
-
-
 def _trial_check_items(root: Path, add: Any) -> None:
     """What FI's checks of the trials (core/trial_checks.py) could not show, for a plan with more than one trial a setting:
     that the trials were not FI's to check at all, that the reported intervals and standard errors were not measured
@@ -554,13 +566,13 @@ def _trial_check_items(root: Path, add: Any) -> None:
     rec = _trial_checks.read_record(root)
     if not rec:
         return
-    _undefined_items(rec, add)
+    _undefined_items(root, rec, add)
     if rec.get("not_run"):
         if _planned_runs(root) <= 1:
             return
         add(TRIALS_UNCHECKED, "trials not checked", _sentence(
-            "The simulation ran its trials by itself, so FI did not count its failed trials or measure its reported "
-            "intervals and standard errors against true values"), key="all")
+            "The simulation ran its trials by itself, so its failed trials were not counted and its reported intervals and "
+            "standard errors were not checked against known true values"), key="all")
         return
     cal = rec.get("calibration") if isinstance(rec.get("calibration"), dict) else None
     # The trials FI ran (its ledger): a simulation FI found deterministic ran each setting once whatever the plan asked.
@@ -570,11 +582,18 @@ def _trial_check_items(root: Path, add: Any) -> None:
         return
     reasons = [str(r) for r in cal.get("not_checked") or [] if str(r).strip()]
     if reasons:
-        said = "; ".join(dict.fromkeys(_plain_not_checked(r) for r in reasons[:3]))
+        # Why (a plan that names no true value, too few trials) is in the quality report; the paper says what was not
+        # checked, and the one reason a reader needs: a search's intervals are not compared with true values.
+        from . import optimise as _optimise
+
+        search = any(r == _optimise.NO_CALIBRATION for r in reasons)
+        said = ("The coverage of the reported intervals, and the accuracy of their standard errors, were not checked "
+                "against known true values" if not cal.get("checked") else
+                "The coverage of some of the reported intervals, and the accuracy of some of their standard errors, were "
+                "not checked against known true values")
         add(CALIBRATION, "calibration not checked", _sentence(
-            ("FI did not measure the reported intervals and standard errors against the true values: " if not cal.get("checked")
-             else "FI did not measure some of the reported intervals and standard errors against the true values: ")
-            + said[:400]), key="all")
+            said + ("; the study searched for the best design, and the intervals of a search are not compared with true "
+                    "values" if search else "")), key="all")
     for q in cal.get("quantities") or []:
         if not isinstance(q, dict) or q.get("fault") or not q.get("below"):
             continue

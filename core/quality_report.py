@@ -416,6 +416,12 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("run", _one((_list(first.get("problems")) or ["the run did not report what the protocol fixed"])[0], 200),
                             found_by, "fixed" if last in ("ok", "pass", "not_applicable") else "not fixed",
                             f".fi/audit.jsonl seq {first.get('seq')}"))
+    # What the analysis did not print of trials FI holds whole is not a difference in the results: it is here, not in the paper.
+    unprinted = _list(_dict(_json(q.root / "needs" / "RUN_MANIFEST_CHECK.json")).get("unprinted"))
+    if unprinted:
+        out.append(_problem("run", _one(f"the analysis prints no per-trial list for {len(unprinted)} metric(s) FI holds trial "
+                                        f"by trial; first: {unprinted[0]}", 300),
+                            "FI's run-record check (recorded only)", "not fixed", "needs/RUN_MANIFEST_CHECK.json"))
     pilot = q.pilot
     if _list(pilot.get("problems")):
         out.append(_problem("run", _one(str(_list(pilot["problems"])[0]), 200), "FI's pilot check",
