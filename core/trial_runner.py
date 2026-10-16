@@ -1584,8 +1584,11 @@ def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Count
                     out.setdefault(where, {}).setdefault(str(name), Counter())[key] += 1
     problems = []
     if altered:
-        problems = [f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
-                    f"values: the record was changed after the trials ran, so FI runs the trials again"]
+        from core import run_manifest as _rm
+
+        problems = [_rm.fabricated(
+            f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
+            f"values: the record was changed after the trials ran, so FI runs the trials again")]
         (root / RUN_RECORD).unlink(missing_ok=True)  # the next run cannot reuse it: the trials are run afresh
     return out, problems
 
@@ -1775,11 +1778,11 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
         for name in names:
             if any(not _missing_exact(numbers, form) for form in _derived_counts(per_cell, cells, name, grid)):
                 return
-        out.append(
+        out.append(_rm.fabricated(
             f"the analysis reports `{where}` for `{metric}`, a mean over a subset of the trials, with values FI's trials "
             f"never produced in {'those settings' if len(cells) < len(all_cells) else 'the run'}: "
             + _rm.DERIVED
-        )
+        ))
 
     given_of = {str(m["id"]): str(m["given"]) for m in protocol.get("metrics") or []
                 if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")}
@@ -1853,11 +1856,11 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                             )
                         if exact is not None and isinstance(count, (int, float)) and not isinstance(count, bool) \
                                 and float(count) != exact:
-                            out.append(
+                            out.append(_rm.fabricated(
                                 f"at `{path or 'the top level'}`, `{given}_count` says {count:g}, but FI's trials of "
                                 f"those settings returned `{given}` = 1 for {exact:g} of them: the mean averages "
                                 "every trial in the subset, not a selection"
-                            )
+                            ))
                     elif isinstance(k, str) and stem.match(k) and isinstance(v, list):
                         check(metric, here, v, all_cells)
                     else:
@@ -1918,6 +1921,8 @@ def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> l
     of its own. Under the trial contract FI holds every trial's value, so a list the analysis says it computed from is
     checked value by value. A list named for something the analysis derived itself (no trial returned that name) is not
     FI's to check here; a mean over a subset of the trials is checked by :func:`given_values_not_run`."""
+    from core import run_manifest as _rm
+
     out: list[str] = []
 
     def walk(node: Any, path: str) -> None:
@@ -1927,11 +1932,11 @@ def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> l
                 if isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
                     extra = _not_among(v, recorded[k[:-7]])
                     if extra:
-                        out.append(
+                        out.append(_rm.fabricated(
                             f"the analysis reports `{here}` with {len(extra)} value(s) FI's trials of `{k[:-7]}` never "
                             f"produced (e.g. {extra[0]:g}): experiment.py must print the values FI_TRIALS holds, as they "
                             f"are; a list of something derived from them needs a name of its own"
-                        )
+                        ))
                 else:
                     walk(v, here)
         elif isinstance(node, list):

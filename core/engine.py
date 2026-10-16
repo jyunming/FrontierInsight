@@ -10589,6 +10589,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         :meth:`_run_cell_randomness` found (``None`` when it was not asked, which holds the run to the protocol's count)."""
         self._manifest_failed_trials: int | None = None  # None: no manifest was read, so nothing corroborates a 0
         self._manifest_analysis_problems: list[str] = []
+        # The findings of numbers FI's trials never produced (core/run_manifest.py FABRICATED): never record-only.
+        self._manifest_fabricated: list[str] = []
         self._manifest_differences: list[dict[str, Any]] = []  # what FI counted: where the analysis lists more than ran
         self._manifest_note = ""  # a plain sentence for the record, when the run was compared in a way worth saying
         if self.config.engine.run_manifest_check == "off":
@@ -10661,7 +10663,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             )
             self._manifest_differences = _run_manifest.differences(counted, manifest, result_json, recorded=recorded,
                                                                     recorded_by_cell=per_cell)
-            return ("differs" if found else "ok"), found
+            # The kind each finding was given where it was made; from here on the findings are plain sentences.
+            self._manifest_fabricated = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.FABRICATED]
+            self._manifest_analysis_problems = [str(f) for f in self._manifest_analysis_problems]
+            return ("differs" if found else "ok"), [str(f) for f in found]
         if self.config.rigor_profile == "research":
             # The older contract: the simulation ran its own loop and wrote its own record. Research needs FI's record,
             # so the repair asks for the trial contract, and after it the quest stops.
@@ -10722,7 +10727,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not split or replicates < 2:
             return
         record = _read_json_or_none_path(self.quest_root / "needs" / "RUN_MANIFEST_CHECK.json")
-        if not isinstance(record, dict) or record.get("status") != "ok":
+        # Under warn the first run's difference was recorded, not repaired: the other seeds are compared all the same.
+        if not isinstance(record, dict) or record.get("status") not in ("ok", "warned"):
             return
         protocol = self._protocol_block(state)
         if protocol is None:
@@ -10737,7 +10743,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if found:
                 seeds[str(index)] = found
         if seeds:
-            record = {**record, "status": "differs_in_replicates", "seeds": seeds}
+            record = {**record, "status": "warned" if record.get("status") == "warned" else "differs_in_replicates",
+                      "seeds": seeds}
             self._log.warning(
                 "[run_manifest] %d replicate(s) differ from the frozen protocol: %s", len(seeds),
                 "; ".join(f"seed {k}: {v[0]}" for k, v in seeds.items()),
@@ -16319,8 +16326,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # (an analysis repair that crashes must not earn a fresh budget when the crash is fixed).
         manifest_attempts_next = manifest_attempts if (result.returncode != 0 or manifest_status in ("not_run", "pending")) else 0
         manifest_analysis_only = False
+        acting: list[str] = []
         if manifest_found:
             mode = self.config.engine.run_manifest_check
+            # What is acted on: every finding under block; under warn only the numbers FI's trials never produced (they
+            # are sent back and stop the quest like under block), the rest being recorded.
+            fabricated_found = set(getattr(self, "_manifest_fabricated", []) or [])
+            acting = [f for f in manifest_found if f in fabricated_found] if mode == "warn" else list(manifest_found)
             budget = int(self.config.engine.run_manifest_repair_attempts)
             by_request = self._goes_beyond_protocol_by_request()
             protocol_now = self._protocol_of(state)
@@ -16334,28 +16346,28 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     "extended at a person's request (%s); the difference is recorded",
                     "; ".join(manifest_found), "; ".join(by_request),
                 )
-            elif mode == "warn":
+            elif mode == "warn" and not acting:
                 manifest_status = "warned"
                 self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join(manifest_found))
             elif manifest_attempts < _manifest_repair_budget(
-                    budget, set(manifest_found) <= set(self._manifest_analysis_problems)):
+                    budget, set(acting) <= set(self._manifest_analysis_problems)):
                 manifest_status = "repairing"
                 manifest_attempts_next = manifest_attempts + 1
                 # Only what the analysis failed to print is the analysis's to fix; anything else (the simulation swept
                 # another grid, a claimed count its own values do not back) sends simulate.py back, as it always did.
-                analysis_only = set(manifest_found) <= set(self._manifest_analysis_problems)
+                analysis_only = set(acting) <= set(self._manifest_analysis_problems)
                 budget = _manifest_repair_budget(budget, analysis_only)
                 manifest_analysis_only = analysis_only
                 to_fix = _split_run.ANALYSIS_NAME if analysis_only else _split_run.SIMULATE_NAME
                 self._log.warning(
                     "[run_manifest] the run differs from the frozen protocol (%d): %s; sending %s back (%d of %d)",
-                    len(manifest_found), "; ".join(manifest_found), to_fix, manifest_attempts_next, budget,
+                    len(acting), "; ".join(acting), to_fix, manifest_attempts_next, budget,
                 )
                 # The rejected run's numbers must not reach the analysis if the repair gives up: no RESULT_JSON line, no figures.
                 kept = "\n".join(line for line in (result.stdout or "").splitlines() if not line.startswith("RESULT_JSON:"))
                 why = (
-                    _run_manifest.analysis_directive(manifest_found, self._manifest_differences) if analysis_only
-                    else _run_manifest.directive(manifest_found, self._protocol_block(state) or {},
+                    _run_manifest.analysis_directive(acting, self._manifest_differences) if analysis_only
+                    else _run_manifest.directive(acting, self._protocol_block(state) or {},
                                                  # research asks the older contract for run_trial as well
                                                  trial_mode=bool(getattr(self, "_trial_mode", False))
                                                  or self.config.rigor_profile == "research")
@@ -16380,15 +16392,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if manifest_status == "stopped":
             try:
                 plain_stop = (_run_manifest.plain_difference(self._manifest_differences)
-                              if set(manifest_found) <= set(self._manifest_analysis_problems) else "")
+                              if set(acting) <= set(self._manifest_analysis_problems) else "")
                 manifest_stop.write_text(json.dumps({
-                    "problems": manifest_found, **({"headline": plain_stop, "differences": self._manifest_differences}
+                    "problems": acting, **({"headline": plain_stop, "differences": self._manifest_differences}
                                                    if plain_stop else {})}) + "\n", encoding="utf-8")
             except OSError:
                 pass
             # The rejected run's figures go, as when it is sent back: a stopped quest shows none of its output.
             self._clear_stale_figures()
-            return self._manifest_stop(manifest_found, manifest_attempts_next or manifest_attempts)
+            return self._manifest_stop(acting, manifest_attempts_next or manifest_attempts)
         # What the run reports is compared with what ran; a fault is sent back like a failed run, and what stays is left out
         # (core/result_checks.py).
         result, failed_script = await self._results_match_run(state, result, failed_script, split)
@@ -17095,14 +17107,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _manifest_repair_gave_up(self, state: QuestState, history: list[dict[str, Any]] | None = None) -> QuestState | None:
         """When the repair gives up, or none is left, on a run the run-manifest check sent back
-        (``engine.run_manifest_check: block``): the difference it found still stands, so the quest must stop and name
+        (any difference under ``engine.run_manifest_check: block``; under ``warn`` numbers FI's trials never produced): the
+        difference it found still stands, so the quest must stop and name
         it, as when the repairs run out, and not go on as a run that merely produced no results (which went back to
         design, then wrote a paper from none, the named difference lost). The repairs count as spent and the same
         scripts run once more, so the stop happens in the run step and a resume after fixing them runs them again: the
         check finds the difference and the run stops there, with the reason. On the trial contract FI's trials are
         reused (the simulation is unchanged); the older contract, or a record changed on disk, runs them again.
         ``None`` when the failure was not a run-manifest difference."""
-        if self.config.engine.run_manifest_check != "block" or not int(state.get("run_manifest_failures") or 0):
+        # run_manifest_failures counts repairs the check sent: under block any difference, under warn only numbers FI's
+        # trials never produced.
+        if self.config.engine.run_manifest_check == "off" or not int(state.get("run_manifest_failures") or 0):
             return None
         self._log.warning(
             "[execute_reflect] no repair of the run-manifest difference (it gave up, or none is left); the run is "
@@ -17181,7 +17196,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # The repair of an analysis the run record sent back has a budget of its own (``run_manifest_failures``, at most
         # three): it neither waits for a crash repair to be left nor spends one.
         manifest_turn = (rc != 0 and bool(state.get("run_manifest_failures")) and bool(state.get("run_manifest_analysis_only"))
-                         and self.config.engine.run_manifest_check == "block")
+                         and self.config.engine.run_manifest_check != "off")
         bump = 0 if manifest_turn else 1
         if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn:
             # A run the run-manifest check sent back, with no repair left (earlier crashes spent them, or none are

@@ -50,6 +50,36 @@ NAME = "run_manifest.json"
 LEDGER_NAME = "trial_ledger.jsonl"
 _NO_MATCH = object()  # a cell key's value that names none of the protocol's own values for that axis
 
+#: The two kinds of a run-record finding. ``fabricated``: the analysis reports numbers FI's trials never produced (a value
+#: not in FI's record, more values or more undefined trials than a setting's record holds, a record changed on disk); no
+#: honest analysis makes one, so it is sent back and stops the quest in every mode. ``unaccounted``: what the analysis
+#: lists does not account for every trial, or the run differs from the protocol in what was counted; under
+#: ``engine.run_manifest_check: warn`` it is recorded and the quest goes on.
+FABRICATED = "fabricated"
+UNACCOUNTED = "unaccounted"
+
+
+class Finding(str):
+    """A finding's sentence, carrying its kind (:data:`FABRICATED` or :data:`UNACCOUNTED`) from where it is made. It is a
+    ``str`` in every other way (joined, compared, written as JSON)."""
+
+    kind: str
+
+    def __new__(cls, text: str, kind: str = UNACCOUNTED) -> "Finding":
+        obj = super().__new__(cls, text)
+        obj.kind = kind
+        return obj
+
+
+def fabricated(text: str) -> Finding:
+    """``text`` as a finding of numbers FI's trials never produced."""
+    return Finding(text, FABRICATED)
+
+
+def kind_of(finding: Any) -> str:
+    """A finding's kind; a plain sentence is :data:`UNACCOUNTED`."""
+    return getattr(finding, "kind", UNACCOUNTED)
+
 
 def read_ledger(raw_dir: Path) -> tuple[list[dict[str, Any]] | None, str]:
     """The per-trial ledger a simulation appended to in ``raw_dir`` (one JSON object per line: ``{"cell": "<axis=value,...>",
@@ -1103,10 +1133,10 @@ def _value_count_findings(
                     too_many.append(f"{listed_undefined} undefined where FI's record has {undefined:g} trial(s) with none")
                 if listed_defined + listed_undefined > measured:
                     too_many.append(f"{listed_defined + listed_undefined} in all where {measured:g} trial(s) measured it")
-                out.append((
+                out.append((fabricated(
                     f"the metric `{metric}` is measured {made}; the analysis reports more than that: "
                     + "; ".join(too_many) + ". The values and the undefined ones must be what the trials returned, no "
-                    "more: copy the lists FI_TRIALS holds, never add to them",
+                    "more: copy the lists FI_TRIALS holds, never add to them"),
                     True,
                 ))
             continue
