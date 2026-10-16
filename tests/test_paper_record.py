@@ -185,8 +185,116 @@ def test_a_placeholder_fi_cannot_fill_reads_not_recorded_and_is_listed(tmp_path:
     assert "{{trials_failed}}" not in out.text and "{{cpu_hours}}" not in out.text and "{{not_done" not in out.text
     assert set(out.unfilled) >= {"trials_failed", "cpu_hours", "not_done:topic-bogus"}
     assert paper_facts.NOT_RECORDED in out.text
-    assert "$x^{{2}}$" in out.text and "{{a}}" in out.text, "a single word in double braces (LaTeX) is left alone"
-    assert set(paper_facts.unfilled_in(out.text)) >= {"trials_failed", "not_done:topic-bogus"}
+    assert "$x^{{2}}$" in out.text, "double braces inside math (LaTeX) are left alone"
+    assert "{{a}}" not in paper_facts.without_marks(out.text), "outside math and code, every {{name}} is FI's"
+    assert set(paper_facts.unfilled_in(out.text)) >= {"trials_failed", "not_done:topic-bogus", "a"}
+
+
+# Second review (P1-5): no {{...}} the writer typed reaches paper.md raw. A known name in extra braces is filled; any other
+# name is "not recorded" between markers, so QUALITY.md lists it and the check asks for one of FI's names instead.
+ODD_PLACEHOLDERS = {
+    "nested 4 braces": ("Seed: {{{{seed}}}}.", "seed"),
+    "triple": ("Seed: {{{seed}}}.", "seed"),
+    "brace inside": ("Seed: {{ {seed} }}.", "seed"),
+    "spaces": ("Seed: {{ seed }} and {{ run time }}.", "seed"),
+    "dot": ("It took {{run.time}}.", "run_time"),
+    "duration": ("The experiment took {{duration}}.", None),
+    "time": ("It took {{time}}.", None),
+    "seeds": ("Seeds: {{seeds}}.", None),
+    "base_seed": ("Seed was {{base_seed}}.", None),
+}
+
+
+@pytest.mark.parametrize("label", sorted(ODD_PLACEHOLDERS))
+def test_no_raw_double_braces_reach_the_paper(tmp_path: Path, label: str) -> None:
+    root, topic = _quest(tmp_path, "kinetics_s1")
+    sentence, known = ODD_PLACEHOLDERS[label]
+    out = paper_facts.render(f"# K\n\n## Methods\n{sentence}\n", root, topic=topic).text
+    plain = paper_facts.without_marks(out)
+    assert "{{" not in plain and "}}" not in plain, plain
+    if known:
+        value = paper_facts.facts(root, topic=topic)[known].text
+        assert value in plain and "{" + value not in plain and value + "}" not in plain, plain
+    else:
+        assert paper_facts.NOT_RECORDED in plain
+        name = paper_facts._norm_name(sentence.split("{{")[1].split("}}")[0])
+        assert name in paper_facts.unfilled_in(out), "an unknown name is listed in QUALITY.md"
+        hits = paper_facts.placement_hits(out, root, topic=topic)
+        assert any(f"{{{{{name}}}}}" in h and "{{run_time}}" in h for h in hits), hits
+    # Re-rendering keeps it the same.
+    assert paper_facts.render(out, root, topic=topic).text == out
+
+
+def test_latex_double_braces_are_left_alone(tmp_path: Path) -> None:
+    root, topic = _quest(tmp_path, "kinetics_s1")
+    src = "# K\n\n## Methods\n$\\frac{{a}}{b}$ and \\textbf{{x}} and $$y^{{n}}$$ and \\(z_{{k}}\\).\n"
+    assert paper_facts.render(src, root, topic=topic).text == src
+
+
+def test_an_invented_item_id_and_a_wrong_case_id(tmp_path: Path) -> None:
+    root = _items_quest(tmp_path)
+    out = paper_facts.render("# P\n\n## Limitations\n{{not_done:TOPIC-TEMPERATURE}} {{not_done:made-up-thing}}\n",
+                             root).text
+    plain = paper_facts.without_marks(out)
+    item = next(i for i in paper_facts.required_items(root) if i.id == "topic-temperature")
+    assert item.sentence in plain, "an id is matched whatever its case"
+    assert paper_facts.unfilled_in(out) == ["not_done:made-up-thing"]
+    hits = paper_facts.placement_hits(out, root)
+    assert not any("Put {{not_done:topic-temperature}}" in h or "{{not_done:topic-temperature}} (" in h
+                   for h in hits), hits
+    assert any("{{not_done:made-up-thing}}" in h and "not one of" in h for h in hits), hits
+
+
+def test_the_quality_report_lists_an_invented_name(tmp_path: Path) -> None:
+    root, topic = _quest(tmp_path, "kinetics_s1")
+    paper = paper_facts.render("# P\n\n## Methods\nSeed was {{base_seed}}; it took {{duration}}.\n", root, topic=topic).text
+    paper_facts.keep_check(root, paper_facts.check(paper, root, topic=topic), paper)
+    md = quality_report.render(quality_report.build(root, running=False))
+    assert "base_seed" in md and "duration" in md
+
+
+# Second review (P1-6): a placeholder in math or code gets the plain value, never FI's markers.
+@pytest.mark.parametrize("snippet", ["```\nseed = {{seed}}\n```", "Run with `--seed {{seed}}`.",
+                                     "The run used $N = {{trials_per_setting}}$ trials.", "$$T = {{run_time}}$$",
+                                     "\\(T = {{run_time}}\\)", "<!-- the run took {{run_time}} -->"])
+def test_a_placeholder_in_math_code_or_a_comment_gets_the_plain_value(tmp_path: Path, snippet: str) -> None:
+    root, topic = _quest(tmp_path, "kinetics_s1")
+    out = paper_facts.render(f"# K\n\n## Methods\n{snippet}\n", root, topic=topic).text
+    body = out.split("## Methods\n", 1)[1]
+    assert "fi:fact" not in body and "{{" not in body, body
+    name = snippet.split("{{")[1].split("}}")[0]
+    assert paper_facts.facts(root, topic=topic)[name].text in body
+
+
+# Second review (P2-2): a required placeholder counts only where a reader sees it.
+@pytest.mark.parametrize("where", ["```\n{{seed}} {{run_time}} {{time_limit_met}}\n```",
+                                   "<!-- {{seed}} {{run_time}} {{time_limit_met}} -->",
+                                   "`{{seed}} {{run_time}} {{time_limit_met}}`"])
+def test_a_required_fact_hidden_in_code_or_a_comment_is_not_placed(tmp_path: Path, where: str) -> None:
+    root, topic = _quest(tmp_path, "kinetics_s1")
+    out = paper_facts.render(f"# S\n\n## Methods\n{where}\n\n## Limitations\nNone.\n", root, topic=topic).text
+    hits = paper_facts.placement_hits(out, root, topic=topic)
+    assert any("does not state {{run_time}}" in h for h in hits), hits
+
+
+@pytest.mark.parametrize("heading", ["References", "Further reading", "Bibliography"])
+def test_a_required_fact_in_the_source_list_is_not_placed(tmp_path: Path, heading: str) -> None:
+    root, topic = _quest(tmp_path, "kinetics_s1")
+    out = paper_facts.render(f"# S\n\n## Methods\nM.\n\n## {heading}\n{{{{seed}}}} {{{{run_time}}}} "
+                             "{{time_limit_met}}\n", root, topic=topic).text
+    hits = paper_facts.placement_hits(out, root, topic=topic)
+    assert any("does not state {{seed}}" in h for h in hits), hits
+
+
+@pytest.mark.parametrize("lim", ["<!-- {{not_done:topic-temperature}} -->",
+                                 "```\n{{not_done:topic-temperature}}\n```"])
+def test_an_item_hidden_in_the_limitations_is_not_placed(tmp_path: Path, lim: str) -> None:
+    root, topic = _quest(tmp_path, "kinetics_s1")
+    (root / ".fi" / "topic_covered.json").write_text(json.dumps({"left": [{"kind": "factor", "name": "temperature"}]}))
+    out = paper_facts.render(LIMITS_OK.replace("{{not_done:topic-temperature}} We could not.", lim), root,
+                             topic=topic).text
+    hits = paper_facts.placement_hits(out, root, topic=topic)
+    assert any("topic-temperature" in h for h in hits), hits
 
 
 # ---- what the writer is given --------------------------------------------------------------------------------------------

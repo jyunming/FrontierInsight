@@ -425,15 +425,43 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
 
 # ---- the placeholders and their markers ------------------------------------------------------------------------------
 
-_PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z][A-Za-z _-]*?)\s*(?::\s*([A-Za-z0-9_.\-]+)\s*)?\}\}")
+#: Any name between double braces, with extra braces around it taken in (``{{{{seed}}}}``, ``{{ {seed} }}``).
+_PLACEHOLDER = re.compile(r"\{\{[\s{]*([A-Za-z][^{}\n:]{0,59}?)\s*(?::\s*([^{}\n]{1,80}?)\s*)?[\s}]*\}\}")
 _MARK = re.compile(r"<!-- fi:fact-([\w-]+) -->(.*?)<!-- /fi:fact-\1 -->", re.S)
 _TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->")
 _ITEM_KEY = "not_done-"
+#: Where no reader sees a placeholder as text: a code block or inline code, math, an HTML comment (not FI's own markers).
+_HIDDEN = re.compile(
+    r"^[ \t]*(?P<fence>```|~~~)[^\n]*\n.*?^[ \t]*(?P=fence)[^\n]*$"
+    r"|^[ \t]*(?:```|~~~).*\Z"
+    r"|<!--(?!\s*/?fi:fact-).*?-->"
+    r"|(?P<ticks>`+)(?:(?!\n[ \t]*\n)[^`])+?(?P=ticks)"
+    r"|\$\$.+?\$\$|\\\[.+?\\\]|\\\(.+?\\\)"
+    r"|(?<![\\$])\$[^$\n]+?\$",
+    re.M | re.S)
+#: A double brace right after a LaTeX command or a closing brace is LaTeX (``\textbf{{x}}``), not a placeholder.
+_LATEX_BEFORE = re.compile(r"(?:\\[A-Za-z]+\*?\s*|[}^_])$")
+#: The sections that list sources: a placeholder there is not where a reader looks for the run's facts.
+_SOURCES = re.compile(r"^#{1,6}[ \t]+" + _disclosure._SECTION_NUMBER
+                      + r"(?:references|bibliography|further[ \t]+reading|works[ \t]+cited|sources)\b", re.I)
 
 
 def _norm_name(raw: str) -> str:
-    name = re.sub(r"[\s-]+", "_", raw.strip().lower())
+    name = re.sub(r"[\s.\-]+", "_", raw.strip().strip("{} ").strip().lower())
     return _ALIASES.get(name, name)
+
+
+def _key(name: str) -> str:
+    """The marker key of a name that is no placeholder of FI's: the name as written, in the characters a marker holds."""
+    return re.sub(r"[^\w-]+", "_", name).strip("_")[:60] or "unnamed"
+
+
+def _hidden_spans(markdown: str) -> list[tuple[int, int]]:
+    return [m.span() for m in _HIDDEN.finditer(markdown)]
+
+
+def _inside(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(a <= pos < b for a, b in spans)
 
 
 def _is_item(name: str) -> bool:
@@ -466,33 +494,45 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
     """``markdown`` with every placeholder (and every value FI filled in before, so a re-render takes the records as they
     are now) filled from FI's records, between markers. A placeholder FI cannot fill reads "not recorded" and is in
     ``unfilled``; an unknown name that looks like a placeholder (``{{run_seconds}}``, ``{{not_done:x}}``) is treated the
-    same. A single word between double braces that is no placeholder of FI's (LaTeX) is left as it is."""
+    same. Any other name between double braces is no placeholder of FI's: it reads "not recorded" between markers, so it
+    is listed in QUALITY.md and the check asks for one of FI's names. Extra braces around a name are taken in.
+
+    Inside math, code or an HTML comment, a placeholder of FI's gets its plain value with no markers (a marker there would
+    print as text), and anything else between double braces is left as written (LaTeX's ``{{x}}``); so is a double brace
+    right after a LaTeX command."""
     root = Path(quest_root)
     known = facts(root, topic=topic, fallback_s=fallback_s)
-    items = {i.id: i for i in required_items(root)}
+    items = {i.id.lower(): i for i in required_items(root)}
     unfilled: list[str] = []
     text = to_placeholders(markdown)
+    hidden = _hidden_spans(text)
 
     def fill(m: re.Match[str]) -> str:
         raw, arg = m.group(1), m.group(2)
         name = _norm_name(raw)
+        plain = _inside(m.start(), hidden)
+        if _LATEX_BEFORE.search(text[max(0, m.start() - 40):m.start()]):
+            return m.group(0)
         if _is_item(name) or arg is not None and name.startswith("not"):
             ident = (arg or "").strip()
-            item = items.get(ident)
-            value = item.sentence if item else NOT_RECORDED
+            item = items.get(ident.lower())
+            if plain:
+                return item.sentence if item else m.group(0)
+            key = _ITEM_KEY + (item.id if item else _slug(ident))
             if item is None:
-                unfilled.append(f"not_done:{ident}")
-            return f"<!-- fi:fact-{_ITEM_KEY}{_slug(ident) if item is None else ident} -->{value}<!-- /fi:fact-{_ITEM_KEY}" \
-                   f"{_slug(ident) if item is None else ident} -->"
+                unfilled.append(f"not_done:{_slug(ident)}")
+            return f"<!-- fi:fact-{key} -->{item.sentence if item else NOT_RECORDED}<!-- /fi:fact-{key} -->"
         if name in FACT_NAMES:
             fact = known.get(name)
             if fact is None:
                 unfilled.append(name)
-            return f"<!-- fi:fact-{name} -->{fact.text if fact else NOT_RECORDED}<!-- /fi:fact-{name} -->"
-        if "_" in name or arg is not None:
-            unfilled.append(name + (f":{arg}" if arg else ""))
-            return NOT_RECORDED
-        return m.group(0)
+            value = fact.text if fact else NOT_RECORDED
+            return value if plain else f"<!-- fi:fact-{name} -->{value}<!-- /fi:fact-{name} -->"
+        if plain:
+            return m.group(0)
+        key = _key(name)
+        unfilled.append(key)
+        return f"<!-- fi:fact-{key} -->{NOT_RECORDED}<!-- /fi:fact-{key} -->"
 
     out = _PLACEHOLDER.sub(fill, text)
     # A placeholder for a whole sentence followed by the writer's own full stop: one full stop.
@@ -599,8 +639,45 @@ def _limitations_spans(markdown: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _sources_spans(markdown: str) -> list[tuple[int, int]]:
+    """The character spans of the sections that list sources (References, Bibliography, Further reading)."""
+    lines = markdown.split("\n")
+    offsets, pos = [], 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+    heads = _disclosure._headings(lines, 0)
+    spans = []
+    for i, lv, text in heads:
+        if _SOURCES.match(text):
+            end = _disclosure._section_end(heads, i, lv, len(lines))
+            spans.append((offsets[i], offsets[end] if end < len(lines) else len(markdown)))
+    return spans
+
+
 def _placed(markdown: str, key: str) -> list[int]:
-    return [m.start() for m in _MARK.finditer(markdown) if m.group(1) == key]
+    """Where FI's value for ``key`` is in text a reader sees: not inside an HTML comment, code or math, and not in the
+    list of sources."""
+    away = _hidden_spans(markdown) + _sources_spans(markdown)
+    return [m.start() for m in _MARK.finditer(markdown) if m.group(1) == key and not _inside(m.start(), away)]
+
+
+def _unknown_hits(markdown: str, quest_root: Path | str, known: dict[str, Fact]) -> list[str]:
+    """A hit for each name between double braces that is no placeholder of FI's (it reads "not recorded")."""
+    ids = {i.id for i in required_items(quest_root)}
+    names = ", ".join("{{" + n + "}}" for n in (known or dict.fromkeys(FACT_NAMES)))
+    hits: list[str] = []
+    for key in dict.fromkeys(m.group(1) for m in _MARK.finditer(markdown)):
+        if key.startswith(_ITEM_KEY):
+            if key[len(_ITEM_KEY):] not in ids:
+                listed = ", ".join("{{not_done:" + i + "}}" for i in sorted(ids))
+                hits.append(f"{HIT}: {{{{not_done:{key[len(_ITEM_KEY):]}}}}} is not one of the parts FI recorded as not "
+                            "done, so the paper reads \"not recorded\" there. "
+                            + (f"Use one of {listed}, or take it out." if listed else "Take it out."))
+        elif key not in FACT_NAMES:
+            hits.append(f"{HIT}: {{{{{key}}}}} is not one of FI's placeholders, so the paper reads \"not recorded\" there. "
+                        f"Use one of {names}, or write it in your own words without double braces.")
+    return hits
 
 
 def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> list[str]:
@@ -608,8 +685,9 @@ def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fa
     title, each ``not_done`` item inside the Limitations section."""
     text = _disclosure.without_block(paper_md)
     t0, t1 = _title_span(text)
-    hits: list[str] = []
-    for fact in facts(quest_root, topic=topic, fallback_s=fallback_s).values():
+    known = facts(quest_root, topic=topic, fallback_s=fallback_s)
+    hits: list[str] = _unknown_hits(text, quest_root, known)
+    for fact in known.values():
         if not fact.required:
             continue
         where = [p for p in _placed(text, fact.name) if not t0 <= p < t1]
