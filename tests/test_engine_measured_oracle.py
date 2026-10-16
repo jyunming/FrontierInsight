@@ -305,7 +305,7 @@ def test_a_check_on_a_mean_is_measured_on_the_trials_of_run_trial_the_study_runs
     run_cell's own handful of trials."""
     checks, problems, found = _measure(tmp_path, BUILT_FROM_TRIALS, [MEAN_CHECK])
     assert not problems and found == [] and abs(checks[0]["value"] - 0.05) <= 0.01, (checks, problems)
-    assert checks[0]["mc"]["trials"] > 10 and checks[0]["mc"]["precision"] == "planned"
+    assert checks[0]["mc"]["trials"] > 10 and checks[0]["mc"]["verdict"] == "pass"
 
 
 def test_a_run_cell_with_a_formula_of_its_own_does_not_hide_a_bug_in_run_trial(tmp_path: Path) -> None:

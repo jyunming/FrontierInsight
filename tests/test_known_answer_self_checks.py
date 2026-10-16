@@ -334,7 +334,8 @@ async def test_a_random_check_is_judged_on_enough_trials_for_its_tolerance_and_p
     record = _record(engine)
     (judged,) = record["attempts"][-1]["judged"]
     assert record["status"] == "ok" and judged["passed_by_engine"] is True and model.repairs == []
-    assert judged["mc"]["trials"] > 100 and 3 * judged["mc"]["se"] <= 0.01 and judged["precision"] == "planned"
+    assert judged["mc"]["trials"] > 100 and judged["mc"]["verdict"] == "pass"
+    assert abs(judged["value"] - 1.0) + 3 * judged["mc"]["se"] <= 0.01
     assert _triage(record, "seeds") == []
 
 
@@ -352,9 +353,10 @@ async def test_a_single_random_trial_judged_tighter_than_its_noise_is_said_and_n
     assert model.repairs == [] and record["self_checks"]["extra_runs"] == 3
     assert "smaller than one trial's noise" in (seeds.get("cause") or {}).get("text", "")
     assert record["status"] == "went_on_failing" and _explained(engine)["leaning"] == "check"
-    # Not decided by its trials: the paper is not told the check shows the method broken.
+    # Four seeds compute no Monte Carlo error of a mean: the check is said as failed, never as "not decided".
     (went_on,) = record["went_on"]
-    assert went_on["within_mc_error"] is True and "not decided" in record["summary"]
+    assert not went_on.get("within_mc_error") and not went_on.get("undecided"), went_on
+    assert "failed" in record["summary"] and "not decided" not in record["summary"]
 
 
 SAME_ERROR = '''
