@@ -23,3 +23,11 @@ def fake_html_run(monkeypatch: Any, fake_run: Callable[..., Any]) -> None:
     import generation._html_pdf as html_pdf
 
     monkeypatch.setattr(html_pdf, "_run", lambda cmd, *, timeout, cwd=None: fake_run(cmd, cwd=cwd, timeout=timeout))
+
+
+def fake_poster_run(monkeypatch: Any, fake_run: Callable[..., Any]) -> None:
+    """Replace the poster's LaTeX run (``generation.poster._run``) with
+    ``fake_run(cmd, cwd=..., timeout=...)``."""
+    import generation.poster as poster
+
+    monkeypatch.setattr(poster, "_run", lambda cmd, *, timeout, cwd=None: fake_run(cmd, cwd=cwd, timeout=timeout))

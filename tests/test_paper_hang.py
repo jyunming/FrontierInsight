@@ -96,6 +96,37 @@ def test_the_browser_fallback_runs_stop_a_hung_browser_at_their_timeout(tmp_path
     assert not _alive(child)
 
 
+def test_the_poster_compile_stops_a_hung_engine_at_its_timeout(tmp_path: Path, monkeypatch) -> None:
+    """The poster runs its LaTeX engine as ``engine -interaction=nonstopmode -halt-on-error poster.tex``;
+    a stand-in engine (a script the engine path names) starts a child that keeps the output and sleeps.
+    The compile must end at its time limit with the poster's timeout reason, and the child must be gone."""
+    import generation.poster as poster
+
+    script, pid_file = _holder(tmp_path)
+    if os.name == "nt":
+        engine = tmp_path / "engine.cmd"
+        engine.write_text(f'@"{script[0]}" "{script[1]}" "{pid_file}" %*\r\n', encoding="utf-8")
+    else:
+        engine = tmp_path / "engine.sh"
+        engine.write_text(f'#!/bin/sh\nexec "{script[0]}" "{script[1]}" "{pid_file}" "$@"\n', encoding="utf-8")
+        engine.chmod(0o755)
+    tex = tmp_path / "poster.tex"
+    tex.write_text("\\documentclass{article}\\begin{document}x\\end{document}\n", encoding="utf-8")
+    monkeypatch.setattr(poster, "_COMPILE_TIMEOUT_S", 3)
+    start = time.monotonic()
+    failure = poster.PosterGenerator._compile(
+        None, ("pdflatex", str(engine)), tex, tmp_path, tmp_path / "poster.pdf",  # type: ignore[arg-type]
+    )
+    assert time.monotonic() - start < 30
+    assert failure is not None and failure[0] == "pdflatex_timeout"
+    assert "(>3s)" in failure[1]
+    child = int(pid_file.read_text())
+    deadline = time.monotonic() + 10
+    while _alive(child) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _alive(child), "the child the engine started is still running"
+
+
 # ---------------------------------------------------------------------------
 # After a timeout, or an exit 0 with no PDF, the paper is made by the browser, marked
 

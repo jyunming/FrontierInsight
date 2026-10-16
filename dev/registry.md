@@ -505,7 +505,7 @@ same PR that adds, splits or renames one.
   (`await AsyncProcessTree.start(...)`, `await kill()`, `await aclose()` in a `finally` for cancellation; a test's
   stand-in process gets no job or group). `run_tree` is `subprocess.run(capture_output=True, timeout=)` on a
   `ProcessTree` (the paper's pandoc + LaTeX in `PaperGenerator._run_pandoc`, the browser fallback's pandoc and
-  browser in `_html_pdf._run`). Used where a timeout or a cancellation must stop a whole tree:
+  browser in `_html_pdf._run`, the poster's LaTeX engine in `generation/poster.py::_run`). Used where a timeout or a cancellation must stop a whole tree:
   `scripts/import_scientist_skills.py` (`_git`), `generation/_office_pdf.py` (`_run`), `core/engine.py`
   (`_record_environment`'s `pip freeze`), `generation/slides.py` (`_run_cli`), `web/quest_launcher.py` (detached:
   `ProcessTree(detached=True)`, no kill-on-close job, only an explicit `kill()` stops it), the provider proxies
