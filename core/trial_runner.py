@@ -1397,26 +1397,24 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     used = _mc.measure_names(measure, first)
     if not used or not all(_scalar(first.get(n)) for n in used):
         return None
-    stat = _mc.statistic(rows, measure, means)
+    stat = _mc.statistic(rows, measure, means, expected)
     if stat is None:
         return None
-    rare = False
     # A number is taken for a constant only when at least MIN_TRIALS trials agree: two or three equal draws of a random
-    # number are not a constant (a starved first batch of a 0/1/2 count agreed so, and was judged on trial 0 alone).
-    if len(rows) >= _mc.MIN_TRIALS and not stat["varies"]:
-        rare = _mc.rare_outcome(stat, expected, rows)
-        if not rare:
-            # The check's own number did not move: judged at once on trial 0's number, as a deterministic check is.
-            check, problem = _check_from(name, measure, first)
-            verdict, why_failed = _mc.failed_share_verdict(len(failed) + int(stat.get("dropped") or 0), ran, None)
-            if check is not None and why_failed:
-                check["mc"] = _mc.record(stat, read_as="once", verdict=verdict, why=why_failed,
-                                         failed=len(failed) + int(stat.get("dropped") or 0), started=ran,
-                                         failed_example=clip_keeping_place(failed[0], 200) if failed else "")
-            return check, problem, False
+    # number are not a constant (a starved first batch of a 0/1/2 count agreed so, and was judged on trial 0 alone). A
+    # 0/1 outcome of a random simulation never is: it is judged on its binomial interval (mc_error.statistic).
+    if len(rows) >= _mc.MIN_TRIALS and not stat["varies"] and not stat.get("binary"):
+        # The check's own number did not move: judged at once on trial 0's number, as a deterministic check is.
+        check, problem = _check_from(name, measure, first)
+        verdict, why_failed = _mc.failed_share_verdict(len(failed) + int(stat.get("dropped") or 0), ran, None)
+        if check is not None and why_failed:
+            check["mc"] = _mc.record(stat, read_as="once", verdict=verdict, why=why_failed,
+                                     failed=len(failed) + int(stat.get("dropped") or 0), started=ran,
+                                     failed_example=clip_keeping_place(failed[0], 200) if failed else "")
+        return check, problem, False
     verdict, why_open = None, ""
     while True:
-        verdict = _mc.mean_verdict(stat, expected, limit, rare=rare)
+        verdict = _mc.mean_verdict(stat, expected, limit)
         if verdict is not None or stat.get("value") is None:
             break
         if len(rows) >= most:
@@ -1426,7 +1424,7 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
         if left < 0.5:
             why_open = "time"
             break
-        wanted = _mc.trials_wanted(stat, float(expected), float(limit), rare=rare, most=most)  # type: ignore[arg-type]
+        wanted = _mc.trials_wanted(stat, float(expected), float(limit), most=most)  # type: ignore[arg-type]
         more, _why, more_failed, more_ran = await run_case_trials(
             executor, python, quest_root, module, cell=case, trials=list(range(ran, ran + max(1, wanted - len(rows)))),
             timeout_s=max(1, int(math.ceil(left)) + 1), env=env, thresholds=thresholds, in_each_run=in_each_run,
@@ -1435,13 +1433,11 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
         if not more:
             why_open = "time"
             break
-        stat = _mc.statistic(rows, measure, means) or stat
-        if rare and stat.get("varies"):
-            rare = False  # the outcome happened: its own spread counts from here on
+        stat = _mc.statistic(rows, measure, means, expected) or stat
     lost = len(failed) + int(stat.get("dropped") or 0)
     verdict, why_failed = _mc.failed_share_verdict(lost, ran, verdict)
     record = _mc.record(stat, read_as="mean", verdict=verdict, why=why_failed or why_open, failed=lost, started=ran,
-                        failed_example=clip_keeping_place(failed[0], 200) if failed else "", rare=rare)
+                        failed_example=clip_keeping_place(failed[0], 200) if failed else "")
     keys = [k for k, v in first.items() if _scalar(v)]
     returned = {k: math.fsum(float(r[k]) for r in rows) / len(rows) for k in keys
                 if all(_scalar(r.get(k)) and math.isfinite(r[k]) for r in rows)}

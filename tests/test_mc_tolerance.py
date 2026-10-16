@@ -359,6 +359,45 @@ def test_the_trials_decide_a_check_only_when_three_standard_errors_put_it_on_one
     assert mc.decide(0.04, 0.0, 0.01, 0.005, shape="bound") == "fail"
 
 
+def _outcomes(ones: int, n: int) -> list[dict[str, float]]:
+    """``n`` trials of a 0/1 outcome, ``ones`` of them 1, in a random simulation (another number varies)."""
+    return [{"hit": 1.0 if i < ones else 0.0, "wall": float(i)} for i in range(n)]
+
+
+@pytest.mark.parametrize("means", [(), ("hit",)])
+def test_a_0_1_outcome_is_judged_on_its_binomial_interval_at_every_number_of_trials(means: tuple[str, ...]) -> None:
+    """Review pass 2, the rare-outcome corner: the uncertainty of a 0/1 outcome is never its sample spread (ten zeros
+    have a spread of 0, which says nothing). Every 0/1 outcome of a random simulation is judged on its Wilson interval
+    at the checks' three standard errors: ten zeros against 0.05 within 0.01 are not decided (their interval reaches
+    about 0.47); 2000 zeros fail; 400 in 8000 pass. 200 in 4000 is not decided: at three standard errors the interval
+    is ±0.0104, wider than the tolerance."""
+    def verdict(ones: int, n: int) -> str | None:
+        stat = mc.statistic(_outcomes(ones, n), "hit", means, 0.05)
+        assert stat is not None and stat["binary"], stat
+        return mc.mean_verdict(stat, 0.05, 0.01)
+
+    assert verdict(0, 10) is None
+    assert verdict(0, 2000) == "fail"
+    assert verdict(400, 8000) == "pass"
+    assert verdict(200, 4000) is None
+    assert verdict(4000, 4000) == "fail"
+    lo, hi = mc.wilson(0, 10)
+    assert lo == 0.0 and 0.46 < hi < 0.48
+
+
+def test_a_0_1_number_of_a_simulation_that_never_varies_is_judged_at_once() -> None:
+    """A flag that is 1 in every trial of a simulation whose numbers never vary is a constant, as before; so is a
+    distance that is exactly 0 in every trial of a random simulation and expected to be 0 (``test_b``)."""
+    stat = mc.statistic([{"converged": 1.0}] * 10, "converged", (), 1.0)
+    assert stat is not None and not stat.get("binary")
+    assert mc.mean_verdict(stat, 1.0, 0.0) == "pass"
+    zero = mc.statistic([{"gap": 0.0, "wall": float(i)} for i in range(10)], "gap", (), 0.0)
+    assert zero is not None and not zero.get("binary") and mc.mean_verdict(zero, 0.0, 1e-9) == "pass"
+    # Both values seen: an outcome, whatever is expected.
+    seen = mc.statistic(_outcomes(1, 10), "hit", (), 0.0)
+    assert seen is not None and seen["binary"] and mc.mean_verdict(seen, 0.0, 0.01) is None
+
+
 def test_the_paper_says_a_check_that_could_not_be_decided_was_not_decided_in_neutral_words() -> None:
     """An undecided check is said plainly as not decided and not validated against: neither a hint that the method is
     wrong nor a reassurance that it is right."""

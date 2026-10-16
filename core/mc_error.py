@@ -36,9 +36,11 @@ judges with them. The first rule is that a check the trials cannot decide is nev
   stand for the case (a wrong mean whose largest draws crash would pass on the survivors).
 * **A number that does not move** in a first batch of at least :data:`MIN_TRIALS` trials is judged at once on trial
   0's number, as a deterministic check is, so a constant quantity never runs to the time limit (fewer trials that
-  agree show no constant, and leave it not decided); the one exception is a 0/1 outcome that has not happened yet
-  (or always happened) whose expected value lies strictly between 0 and 1, in a simulation whose other numbers do
-  vary: it is sized with the spread a proportion at the expected value has (:func:`rare_se`).
+  agree show no constant, and leave it not decided).
+* **A 0/1 outcome of a random simulation** (every trial gives 0 or 1, some number the simulation returns varies, and
+  both values occurred or the check expects a rate strictly between 0 and 1) is judged on its binomial interval, never on its sample spread (:func:`wilson`, :func:`binomial_verdict`), at every
+  number of trials: ten zeros are not a rate of 0 (their interval at three standard errors reaches 0.47), so they do
+  not decide a check that expects 0.05 within 0.01; 2000 zeros fail it.
 """
 
 from __future__ import annotations
@@ -280,17 +282,53 @@ def summarise(rows: list[dict[str, Any]], measure: str) -> dict[str, Any] | None
     return out
 
 
-def statistic(rows: list[dict[str, Any]], measure: str, means: Any = ()) -> dict[str, Any] | None:
+def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expected: Any = None) -> dict[str, Any] | None:
     """The mean check's number and its error (see the module docstring): the formula on the names' means when every name
-    it uses is a declared mean or proportion (``means``), else the mean of the formula trial by trial."""
+    it uses is a declared mean or proportion (``means``), else the mean of the formula trial by trial. A 0/1 outcome
+    (``binary``; ``expected`` is the check's expected value) carries its Wilson ``interval`` and the standard error
+    that interval stands for."""
     measure = str(measure or "").strip()
     first = next((r for r in rows if isinstance(r, dict)), None)
     if first is None:
         return None
     used = measure_names(measure, first)
-    if used and set(used) <= set(means or ()):
-        return summarise(rows, measure)
-    return per_trial_summary(rows, measure)
+    stat = summarise(rows, measure) if used and set(used) <= set(means or ()) else per_trial_summary(rows, measure)
+    if stat is None:
+        return None
+    # A 0/1 outcome of a random simulation: its uncertainty is its binomial interval, never its sample spread (ten
+    # zeros have a spread of 0, which says nothing about a rate of 0.05). One rule at every number of trials. A 0/1
+    # number is an outcome when both values occurred, or when the check expects a rate strictly between 0 and 1; one
+    # that is the same in every trial and expected to be exactly that (a distance that is exactly 0) is a constant.
+    values = _outcome_values(rows, stat)
+    rate = expected is not None and _number(expected) and 0.0 < float(expected) < 1.0
+    if (values and all(v in (0.0, 1.0) for v in values) and returned_varies(rows)
+            and (rate or len(set(values)) > 1)):
+        lo, hi = wilson(int(sum(values)), len(values))
+        stat.update(binary=True, successes=int(sum(values)), interval=[lo, hi], se=(hi - lo) / (2 * BAND_SE))
+    return stat
+
+
+def _outcome_values(rows: list[dict[str, Any]], stat: dict[str, Any]) -> list[float]:
+    """The per-trial values of the quantity a mean check's ``stat`` is about: the formula trial by trial, or, on the
+    names' means, the one name inside it (``[]`` for a formula of several names: its mean is not a proportion)."""
+    inner_text = str(stat.get("inner") or "")
+    if stat.get("on") == "trials":
+        return [v for v in per_trial_values(rows, inner_text) if v is not None]
+    if not _forms.is_name(inner_text):
+        return []
+    return [float(r[inner_text]) for r in rows if isinstance(r, dict) and _number(r.get(inner_text))]
+
+
+def wilson(successes: int, trials: int, z: float = BAND_SE) -> tuple[float, float]:
+    """The Wilson interval of a proportion, ``successes`` of ``trials``, at ``z`` standard errors (the checks' three):
+    ten zeros give (0, 0.47)."""
+    n = max(int(trials), 1)
+    k = min(max(int(successes), 0), n)
+    p = k / n
+    z2 = z * z
+    centre = (p + z2 / (2 * n)) / (1 + z2 / n)
+    half = z * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n)) / (1 + z2 / n)
+    return (0.0 if k == 0 else max(0.0, centre - half)), (1.0 if k == n else min(1.0, centre + half))
 
 
 def returned_varies(rows: list[dict[str, Any]]) -> bool:
@@ -308,20 +346,20 @@ def returned_varies(rows: list[dict[str, Any]]) -> bool:
     return False
 
 
-def rare_outcome(stat: dict[str, Any], expected: float | None, rows: list[dict[str, Any]]) -> bool:
-    """Whether a check whose number did not move in the first batch is a 0/1 outcome that has not happened yet (or always
-    happened): the number stayed at 0 or 1, the expected value lies strictly between 0 and 1, and the simulation's other
-    numbers do vary (it is random). Anything else that did not move is judged at once."""
-    centre = stat.get("inner_mean") if stat.get("on") == "means" else stat.get("value")
-    return (centre in (0.0, 1.0) and expected is not None and 0.0 < float(expected) < 1.0
-            and returned_varies(rows))
-
-
-def rare_se(trials: int, expected: float) -> float:
-    """The standard error a proportion at ``expected`` has over ``trials`` trials: the least a 0/1 outcome that has not
-    moved yet is credited with."""
-    p = min(max(float(expected), 0.0), 1.0)
-    return math.sqrt(p * (1.0 - p) / max(int(trials), 1))
+def binomial_verdict(stat: dict[str, Any], expected: float, limit: float) -> str | None:
+    """:func:`decide` for a 0/1 outcome (``stat["interval"]``, its Wilson interval): ``"pass"`` when the interval lies
+    inside what the check accepts (``expected`` within ``limit``; for a bound or a distance expecting 0, at most
+    ``limit``), ``"fail"`` when it lies wholly outside, else ``None``. The tolerance is never widened."""
+    lo, hi = (float(x) for x in stat["interval"])
+    if stat.get("on") == "means" and stat.get("shape") in ("bound", "abs") and expected == 0:
+        low, high = -math.inf, float(limit)
+    else:
+        low, high = float(expected) - float(limit), float(expected) + float(limit)
+    if lo >= low and hi <= high:
+        return "pass"
+    if hi < low or lo > high:
+        return "fail"
+    return None
 
 
 def decide(centre: float, expected: float, limit: float, se: float, *, shape: str = "") -> str | None:
@@ -349,8 +387,8 @@ def _centre(stat: dict[str, Any], expected: float) -> tuple[float | None, str]:
     return stat.get("value"), ""
 
 
-def mean_verdict(stat: dict[str, Any], expected: float | None, limit: float | None, *, rare: bool = False) -> str | None:
-    """:func:`decide` for a mean check's ``stat`` (``rare``: a 0/1 outcome that did not move yet, :func:`rare_se`);
+def mean_verdict(stat: dict[str, Any], expected: float | None, limit: float | None) -> str | None:
+    """:func:`decide` for a mean check's ``stat`` (a 0/1 outcome of a random simulation: :func:`binomial_verdict`);
     ``None`` while it is not decided, and always with fewer than :data:`MIN_TRIALS` trials (moving or not)."""
     if expected is None or limit is None:
         return None
@@ -360,19 +398,17 @@ def mean_verdict(stat: dict[str, Any], expected: float | None, limit: float | No
         return None
     if n < MIN_TRIALS:  # fewer trials than this show neither a spread nor a constant
         return None
-    if rare:
-        se = max(float(se), rare_se(n, float(expected)))
+    if stat.get("binary"):
+        return binomial_verdict(stat, float(expected), float(limit))
     return decide(float(centre), float(expected), float(limit), float(se), shape=shape)
 
 
-def trials_wanted(stat: dict[str, Any], expected: float, limit: float, *, rare: bool = False,
-                  most: int = MAX_TRIALS) -> int:
+def trials_wanted(stat: dict[str, Any], expected: float, limit: float, *, most: int = MAX_TRIALS) -> int:
     """How many trials in all the next step runs: as many as the spread says would decide the check (with a margin),
-    at least half as many again, at most :data:`GROWTH` times as many as there are, never more than ``most``."""
+    at least half as many again, at most :data:`GROWTH` times as many as there are, never more than ``most``. A 0/1
+    outcome's spread is its binomial interval's (:func:`statistic`), so ten zeros still ask for more trials."""
     n = max(int(stat.get("trials") or 0), 1)
     se = float(stat.get("se") or 0.0)
-    if rare:
-        se = max(se, rare_se(n, expected))
     centre, shape = _centre(stat, expected)
     target = GROWTH * n
     if centre is not None and se > 0:
@@ -443,7 +479,7 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
 
 
 def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, why: str, failed: int, started: int,
-           failed_example: str = "", rare: bool = False, **extra: Any) -> dict[str, Any]:
+           failed_example: str = "", **extra: Any) -> dict[str, Any]:
     """The ``mc`` entry a check keeps (``needs/ORACLE_CHECK.json``): how it was read, its trials and their error, and
     the verdict they gave (``pass``, ``fail``, ``undecided``) with why it was not decided (``time``, ``most_trials``,
     ``failed_trials``)."""
@@ -456,7 +492,7 @@ def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, wh
         "inner": stat.get("inner"), "inner_mean": stat.get("inner_mean"), "shape": stat.get("shape") or "",
         "verdict": verdict or "undecided", "why": why if (verdict or "undecided") == "undecided" or why == "failed_trials"
         else "",
-        **({"rare": True} if rare else {}), **extra,
+        **({"binomial_interval": stat["interval"]} if stat.get("binary") else {}), **extra,
     }
     if failed_example:
         out["failed_example"] = failed_example
