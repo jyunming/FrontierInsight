@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from core import code_review, run_checks
+from core import code_review, paper_facts, run_checks
 from core.engine import Engine
 from tests.test_shown_finding_gate import STATE, _engine, _issue, _record
 
@@ -56,6 +56,24 @@ async def test_with_the_budget_spent_it_is_recorded_and_stops_nothing(tmp_path: 
     assert await engine._shown_fault_verdict(state) is None
     issue = code_review.load(engine.quest_root)["issues"]["F-1"]
     assert issue["gate_error"]["place"] == "program" and issue["gate_error"]["at"] == "code/experiment.py:2"
+    # ... and the paper must say so: nothing shows the fault fixed, and the reading's own list is no help here (it has no
+    # record of the version that ran), so the item is read from the issue itself.
+    [item] = [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.CODE_FINDING]
+    assert item.id == "finding-f-1"
+    assert "dose_to_size is set to a typed-in value" in item.sentence
+    assert "this test no longer runs" in item.sentence and "could not confirm the fault is fixed" in item.sentence
+
+
+@pytest.mark.asyncio
+async def test_a_later_gate_where_the_test_passes_drops_the_error_and_the_item(tmp_path: Path) -> None:
+    engine = _crashing(tmp_path)
+    state: dict[str, Any] = {**STATE, "exec_reflect_iter": engine.config.engine.exec_reflect_max_iterations}
+    assert await engine._shown_fault_verdict(state) is None
+    assert code_review.load(engine.quest_root)["issues"]["F-1"].get("gate_error")
+    (engine.quest_root / "code" / "experiment.py").write_text("def dose():\n    return 61.0\n", encoding="utf-8")
+    assert await engine._shown_fault_verdict(state) is None
+    assert "gate_error" not in code_review.load(engine.quest_root)["issues"]["F-1"]
+    assert [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.CODE_FINDING] == []
 
 
 @pytest.mark.asyncio

@@ -472,7 +472,13 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
     rec = q.trial_checks
     if not rec:
         return None
-    fails = [f for f in _list(rec.get("failures")) if isinstance(f, dict)]
+    if rec.get("not_run"):
+        from . import trial_checks as _tc
+
+        why = _tc.NOT_RUN.get(str(rec["not_run"]), str(rec["not_run"]))
+        return {"action": "", "left_out": [], "checked": False, "faults": 0, "not_run": True,
+                "lines": [f"FI's checks of the trials did not run: {why}"]}
+    fails =[f for f in _list(rec.get("failures")) if isinstance(f, dict)]
     left = [str(k) for k in _list(rec.get("left_out_settings"))]
     cal = _dict(rec.get("calibration"))
     quantities = [x for x in _list(cal.get("quantities")) if isinstance(x, dict)]
@@ -1237,10 +1243,13 @@ def render(report: dict[str, Any]) -> str:
         lines += [f"- ({b['strength']}) {b['says']}" for b in checks["broken_items"]]
     trials = report.get("trial_checks")
     if trials:
-        lines += ["", "## FI's checks of the trials", "",
-                  "FI counted the failed trials of each setting and measured the intervals and standard errors the "
-                  "simulation reports against the true values it was given:"]
-        lines += [f"- {line}" for line in trials["lines"]]
+        lines += ["", "## FI's checks of the trials", ""]
+        if trials.get("not_run"):
+            lines += [f"{line}." for line in trials["lines"]]
+        else:
+            lines += ["FI counted the failed trials of each setting and measured the intervals and standard errors the "
+                      "simulation reports against the true values it was given:"]
+            lines += [f"- {line}" for line in trials["lines"]]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")
     if f:

@@ -63,7 +63,7 @@ _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_
 
 NOT_DONE, LEFT_OUT, NOT_COMPUTED, PRECISION = "not_done", "left_out", "not_computed", "precision"
 SECOND_VERSION, UNTESTED, CODE_FINDING, FAILED_TRIALS = "second_version", "untested", "code_finding", "failed_trials"
-SETTING_LEFT_OUT = "setting_left_out"
+SETTING_LEFT_OUT, CALIBRATION, TRIALS_UNCHECKED = "setting_left_out", "calibration", "trials_unchecked"
 _KIND_WORDS = {
     NOT_DONE: "a part of the topic the study did not do",
     LEFT_OUT: "a quantity left out of the results because a test showed the code computes it wrongly",
@@ -74,10 +74,12 @@ _KIND_WORDS = {
     CODE_FINDING: "an open problem in the code that can change a reported result",
     FAILED_TRIALS: "trials that failed",
     SETTING_LEFT_OUT: "a setting left out of the results because most of its trials failed",
+    CALIBRATION: "reported intervals or standard errors that were not measured against the true values, or are off",
+    TRIALS_UNCHECKED: "trials FI did not run itself, so it did not check them",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
-              SETTING_LEFT_OUT: "setting-left-out"}
+              SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -259,6 +261,22 @@ def required_items(quest_root: Path | str) -> list[Item]:
                                                 + " before the run"))
         else:
             add(UNTESTED, text[:60], _sentence(text))
+    # A fault a test showed by its own assertion, whose test errored on the code that produced the results (the evidence
+    # gate keeps where, ``gate_error``): nothing shows it fixed, so the paper says so. Read from the issues themselves:
+    # a repair since the reading changes the code, and the reading's own list is then empty (core/code_review.py).
+    for fid, issue in issues.items():
+        err = issue.get("gate_error") if isinstance(issue, dict) else None
+        if (not isinstance(err, dict) or str(fid) in gated or issue.get("changes_result") is not True
+                or not _code_findings.flagged_now(issue) or not _code_findings.shown_by_assertion(issue)):
+            continue
+        text = _one(issue.get("text"))[:240].rstrip(".")
+        where = _one(issue.get("function") or issue.get("file"))
+        detail = _one(err.get("detail"))[:160].rstrip(".")
+        add(CODE_FINDING, text[:80] or str(fid), _sentence(
+            "A test FI ran showed a fault that can change a reported result"
+            + (f" (in `{where}`)" if where else "") + (f": {text}" if text else "")
+            + "; on the code that produced the results this test no longer runs"
+            + (f" ({detail})" if detail else "") + ", so FI could not confirm the fault is fixed"), key=fid)
     # Open problems in the code, flagged by a second reading, that can change a reported result (one about a function the
     # run never calls cannot: core/code_review.py:open_findings leaves those out).
     try:
@@ -283,12 +301,89 @@ def required_items(quest_root: Path | str) -> list[Item]:
     rows = _disclosure._ledger_rows(root)
     if rows:
         statuses = [status for status, _seed in rows[1].values()]
-        failed = sum(1 for s in statuses if s == "failed")
-        if failed:
-            add(FAILED_TRIALS, "failed trials", _sentence(f"{failed:,} of {len(statuses):,} trials failed; their results are "
-                                                          "not in the reported numbers"), key="all")
+        late = _out_of_time(root)
+        failed = max(0, sum(1 for s in statuses if s == "failed") - late)
+        if failed or late:
+            add(FAILED_TRIALS, "failed trials", _sentence(
+                (f"{failed:,} of {len(statuses):,} trials failed; their results are not in the reported numbers"
+                 if failed else "")
+                + ("; " if failed and late else "")
+                + (f"{late:,} trials were not run because the study's time limit ran out" if late else "")), key="all")
     _left_out_setting_items(root, add)
+    _trial_check_items(root, add)
     return items
+
+
+def _planned_runs(root: Path) -> int:
+    """The trials per setting the frozen plan asks for (0 when there is no frozen plan or it gives none)."""
+    from . import frozen_protocol as _frozen
+
+    record = _frozen.load(root) or {}
+    protocol = record.get("protocol") if isinstance(record.get("protocol"), dict) else {}
+    runs = protocol.get("runs_per_setting")
+    return int(runs) if isinstance(runs, (int, float)) and not isinstance(runs, bool) else 0
+
+
+def _plain_not_checked(reason: str) -> str:
+    """A "not checked" reason in plain words: the two that every quest without a declared true value, or every search,
+    has are said without FI's own terms."""
+    from . import optimise as _optimise
+    from . import trial_checks as _trial_checks
+
+    if reason == _trial_checks.NO_DECLARATION:
+        return "the plan gives no true value to compare them with"
+    if reason == _optimise.NO_CALIBRATION:
+        return "the study searched for the best design, and a search's intervals are not compared with true values"
+    return _one(reason).rstrip(".")
+
+
+def _trial_check_items(root: Path, add: Any) -> None:
+    """What FI's checks of the trials (core/trial_checks.py) could not show, for a plan with more than one trial a setting:
+    that the trials were not FI's to check at all, that the reported intervals and standard errors were not measured
+    against the true values (and why), and each one measured below its level in some settings (beyond chance, but not
+    grossly: a gross miss stops the quest)."""
+    from . import trial_checks as _trial_checks
+
+    rec = _trial_checks.read_record(root)
+    if not rec:
+        return
+    if rec.get("not_run"):
+        if _planned_runs(root) <= 1:
+            return
+        add(TRIALS_UNCHECKED, "trials not checked", _sentence(
+            "The simulation ran its trials by itself, so FI did not count its failed trials or measure its reported "
+            "intervals and standard errors against true values"), key="all")
+        return
+    cal = rec.get("calibration") if isinstance(rec.get("calibration"), dict) else None
+    # The trials FI ran (its ledger): a simulation FI found deterministic ran each setting once whatever the plan asked.
+    rows = _disclosure._ledger_rows(root)
+    ran = max(rows[0].values(), default=0) if rows else _planned_runs(root)
+    if cal is None or ran <= 1:
+        return
+    reasons = [str(r) for r in cal.get("not_checked") or [] if str(r).strip()]
+    if reasons:
+        said = "; ".join(dict.fromkeys(_plain_not_checked(r) for r in reasons[:3]))
+        add(CALIBRATION, "calibration not checked", _sentence(
+            ("FI did not measure the reported intervals and standard errors against the true values: " if not cal.get("checked")
+             else "FI did not measure some of the reported intervals and standard errors against the true values: ")
+            + said[:400]), key="all")
+    for q in cal.get("quantities") or []:
+        if not isinstance(q, dict) or q.get("fault") or not q.get("below"):
+            continue
+        vals = [s.get("value") for s in q.get("settings") or [] if isinstance(s, dict)
+                and isinstance(s.get("value"), (int, float))]
+        label, n, of = _one(q.get("label")), int(q.get("below") or 0), int(q.get("judged") or 0)
+        if q.get("kind") == "coverage":
+            level = q.get("level")
+            pct = f"{float(level):.0%}" if isinstance(level, (int, float)) else "their stated level"
+            said = (f"The {pct} intervals reported for `{label}` contain the true value less often than {pct} in {n} of "
+                    f"{of} settings, by more than chance explains"
+                    + (f" (lowest coverage {min(vals):.2f})" if vals else ""))
+        else:
+            said = (f"The standard error reported for `{label}` differs from the spread of the estimates over the trials "
+                    f"in {n} of {of} settings, by more than chance explains"
+                    + (f" (ratio {min(vals):.2g} to {max(vals):.2g}; 1 when right)" if vals else ""))
+        add(CALIBRATION, label or "a reported uncertainty", _sentence(said), key=f"{q.get('kind')}-{label}")
 
 
 def _left_out_setting_items(root: Path, add: Any) -> None:
@@ -409,8 +504,17 @@ def _trial_counts(root: Path) -> tuple[str, str, str]:
         counts[c] = counts.get(c, 0) + 1
     per = sorted(set(planned.values())) or sorted({counts.get(cell, 0) for cell in cells})
     each = f"{per[0]:,}" if len(per) == 1 else f"{per[0]:,} to {per[-1]:,}"
-    failed = sum(1 for status, _s in trials.values() if status == "failed")
+    failed = max(0, sum(1 for status, _s in trials.values() if status == "failed") - _out_of_time(root))
     return each, f"{len(cells):,}", f"{failed:,}"
+
+
+def _out_of_time(root: Path) -> int:
+    """The trials the study's time limit cut off (FI's ledger records them as failed): they are not failures of the code
+    (core/trial_checks.py keeps them apart, ``out_of_time``)."""
+    from . import trial_checks as _trial_checks
+
+    rows = _trial_checks.read_record(root).get("out_of_time") or []
+    return sum(int(r.get("trials") or 0) for r in rows if isinstance(r, dict))
 
 
 def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> dict[str, Fact]:

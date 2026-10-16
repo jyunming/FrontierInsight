@@ -543,3 +543,53 @@ async def test_a_deterministic_quest_whose_protocol_asks_for_repeats_runs_each_s
     assert "ExecuteReflect" not in calls
     record = _json(engine, "needs/EVIDENCE.json")
     assert record["levels"]["protocol_runtime_matched"] is True, record["all_gaps"]
+    # FI found the simulation deterministic and ran each setting once: no item says its intervals went unchecked.
+    from core import paper_facts
+
+    kinds = {i.kind for i in paper_facts.required_items(engine.quest_root)}
+    assert not kinds & {paper_facts.CALIBRATION, paper_facts.TRIALS_UNCHECKED}, kinds
+
+
+#: One script that loops over the plan's settings and trials by itself.
+OWN_TRIALS = """import os, json, random
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+DT = [0.1, 0.05]
+RUNS = 3
+rng = random.Random(1)
+errors = {dt: [abs(rng.gauss(0.0, dt ** 4)) for _ in range(RUNS)] for dt in DT}
+os.makedirs('figures', exist_ok=True)
+plt.figure(); plt.plot(DT, [sum(v) / RUNS for v in errors.values()]); plt.savefig('figures/result.png', dpi=72)
+print('RESULT_JSON: ' + json.dumps({'max_error': max(max(v) for v in errors.values())}))
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_one_script_quest_with_repeats_says_fi_did_not_check_its_trials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One script runs its own trials: FI's checks of the trials (core/trial_checks.py) cannot run, and the record and
+    the paper's required items say so instead of saying nothing."""
+    from core import paper_facts, trial_checks
+
+    calls: list[str] = []
+    fake = _fake(calls, SIMULATE)
+
+    async def with_repeats(self, messages, **kw):  # noqa: ANN001
+        reply = await fake(self, messages, **kw)
+        if _classify(messages[-1]["content"]) == "Experiment Design":
+            body = json.loads(reply)
+            body["protocol"] = {**PROTOCOL, "runs_per_setting": 3}
+            return json.dumps(body)
+        if reply.startswith("{") and '"code"' in reply:
+            return json.dumps({"code": OWN_TRIALS, "deps": ["matplotlib"]})
+        return reply
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", with_repeats)
+    engine = Engine(_cfg(tmp_path, split_analysis=False))
+    await engine.run()
+    assert not (engine.quest_root / "code" / "simulate.py").is_file()
+    assert trial_checks.read_record(engine.quest_root) == {"not_run": "one_script"}
+    items = [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.TRIALS_UNCHECKED]
+    assert [i.id for i in items] == ["trials-unchecked-all"], items

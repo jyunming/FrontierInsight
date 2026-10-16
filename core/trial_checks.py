@@ -11,7 +11,7 @@ fail is as bad: its numbers rest on the few that happened to survive, and a ques
 of 100 trials. A setting where more than :data:`FAULT_FRACTION` of the trials failed is a fault: the simulation is sent back
 to be repaired with the reasons the trials gave; if the repairs end with it, the setting's numbers are left out of what the
 analysis is given and the paper says so; if more than half of the settings are so, the quest stops (too little would be
-left to report). A setting where more than :data:`STATE_FRACTION` failed is recorded and the paper states it.
+left to report). Every failed trial is recorded and the paper states how many failed (core/paper_facts.py).
 
 **Calibration against the truth (:func:`calibration`).** Read only from what the plan declares, never from the
 names the code happens to use. A metric of the protocol with a ``known_value``
@@ -54,7 +54,7 @@ from . import stats as _stats
 
 #: A setting where more than this share of the trials failed is a fault (its numbers rest on the trials that survived).
 FAULT_FRACTION = 0.5
-#: A setting where more than this share failed is stated in the paper.
+#: A setting where more than this share failed is named in run.log (the paper states every failed trial: core/paper_facts.py).
 STATE_FRACTION = 0.05
 #: A coverage is grossly low when its whole interval is more than this below the level of the intervals. Chosen from the
 #: replay of real quests (tests/test_trial_checks.py): clean quests' lowest coverages were 0.81 to 0.88 (normal intervals
@@ -784,6 +784,21 @@ def write_record(quest_root: Path | str, record: dict[str, Any]) -> None:
         path.write_text(json.dumps(record, indent=1, allow_nan=True), encoding="utf-8")
     except OSError:
         pass
+
+
+#: Why FI's checks of the trials did not run on the last run, by how the simulation ran its trials (the record's
+#: ``not_run``): FI checks only the trials it runs itself (``run_trial`` / ``run_cell``, or a search's designs).
+NOT_RUN = {
+    "one_script": "the code is one script that runs its own trials, so FI did not run them",
+    "own_loop": "the simulation loops over its own trials (it defines no run_trial or run_cell for FI to call), so FI did "
+                "not run them",
+}
+
+
+def record_not_run(quest_root: Path | str, mode: str) -> None:
+    """Record that the last run's trials were not FI's to check (``mode`` is a key of :data:`NOT_RUN`): the paper's
+    required items and the quality report say so, instead of saying nothing."""
+    write_record(quest_root, {"not_run": mode})
 
 
 def read_record(quest_root: Path | str) -> dict[str, Any]:

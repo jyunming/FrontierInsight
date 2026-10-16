@@ -16026,6 +16026,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 simulate=simulate_path, analysis=code_path, log=self._log,
             )
         seed_path = simulate_path if split else code_path
+        if not (searching or (split and self._trial_mode)):
+            # FI's checks of the trials (core/trial_checks.py) run only on trials FI runs: the record says they did not.
+            from . import trial_checks as _trial_checks
+
+            _trial_checks.record_not_run(self.quest_root, "own_loop" if split else "one_script")
 
         # Clear figures from a PRIOR experiment version before this run. On a
         # re_experiment / broaden / repair loop the implement node rewrites
@@ -18792,7 +18797,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return None
         record = _code_review.load(self.quest_root)
         # What an earlier pass of the gate decided about an issue is decided again on this run's code and results.
-        stale = [i for i in _code_findings.issues_of(record).values() if isinstance(i, dict) and i.pop("at_gate", None)]
+        stale = [i for i in _code_findings.issues_of(record).values()
+                 if isinstance(i, dict) and any([i.pop("at_gate", None), i.pop("gate_error", None)])]
         if stale:
             _code_review.save(self.quest_root, record)
         shown = _code_findings.shown_open(record)
