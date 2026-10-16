@@ -1884,11 +1884,18 @@ def _half_step(x: Any) -> float:
     return 0.5 * 10 ** (-(places - int(exponent or 0)))
 
 
+#: A value read through float32 (``np.float32(v).tolist()``) moves by at most this much of itself: it is still the
+#: trial's value. A 0 read that way matches a recorded value below float32's smallest normal number.
+_FLOAT32 = 2.0 ** -24
+_FLOAT32_TINY = 1.1754943508222875e-38
+
+
 def _not_among(values: list[Any], recorded: Counter) -> list[float]:
     """The numbers of ``values`` that are not trial values, each trial's value used once. A number printed to fewer
     places than the trial returned (``1.2346`` for ``1.23456789``, ``0.0`` for ``1e-05``, ``3`` for ``2.8``) is that
     value: it matches a recorded value within half its last printed place. The most precise numbers are matched first,
-    each to the nearest value left, so a coarse one cannot take the value a precise one needed."""
+    each to the nearest value left, so a coarse one cannot take the value a precise one needed. A value within a relative
+    :data:`_FLOAT32` of a recorded one is that value read through float32."""
     import bisect
 
     left: Counter = Counter()
@@ -1916,7 +1923,8 @@ def _not_among(values: list[Any], recorded: Counter) -> list[float]:
             continue
         i = bisect.bisect_left(pool, value)
         near = [(abs(pool[j] - value), j) for j in (i - 1, i) if 0 <= j < len(pool)
-                and abs(pool[j] - value) <= half * (1 + 1e-9)]
+                and abs(pool[j] - value) <= max(half * (1 + 1e-9), _FLOAT32 * max(abs(pool[j]), abs(value)),
+                                                _FLOAT32_TINY if value == 0 else 0.0)]
         if near:
             pool.pop(min(near)[1])  # the nearest value left: the same choice as a search of every value
         else:
