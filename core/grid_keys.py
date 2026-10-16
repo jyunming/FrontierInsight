@@ -161,6 +161,25 @@ def _grown(scope: ast.AST, names: set[str]) -> set[str]:
     return names
 
 
+def _given_settings(fn: ast.Lambda, outer: ast.AST, holders: set[str], parent: dict[int, ast.AST]) -> set[str]:
+    """The parameters of the lambda ``fn`` (in ``outer``, whose names ``holders`` hold a setting) that are handed a
+    setting: by a call of it with one (``(lambda c: ...)(cell)``, or ``f(cell)`` after ``f = lambda c: ...`` in
+    ``outer``), or by a default (``lambda t, c=cell: ...``). A lambda's parameter is not a setting by its name: the
+    ``cell`` of ``max(rows, key=lambda cell: cell["score"])`` is one of the rows."""
+    positional = [a.arg for a in (*fn.args.posonlyargs, *fn.args.args)]
+    given = {a.arg for a, d in zip(fn.args.args[::-1], fn.args.defaults[::-1]) if _setting_like(d, holders)}
+    given |= {a.arg for a, d in zip(fn.args.kwonlyargs, fn.args.kw_defaults) if d is not None and _setting_like(d, holders)}
+    up = parent.get(id(fn))
+    calls = [up] if isinstance(up, ast.Call) and up.func is fn else []
+    if isinstance(up, ast.Assign) and up.value is fn and len(up.targets) == 1 and isinstance(up.targets[0], ast.Name):
+        name = up.targets[0].id
+        calls += [n for n in _own_nodes(outer) if isinstance(n, ast.Call) and _is_name(n.func, name)]
+    for call in calls:
+        given |= {p for p, arg in zip(positional, call.args) if _setting_like(arg, holders)}  # type: ignore[union-attr]
+        given |= {k.arg for k in call.keywords if k.arg and _setting_like(k.value, holders)}  # type: ignore[union-attr]
+    return given
+
+
 def _scopes(tree: ast.Module) -> list[tuple[ast.AST, set[str]]]:
     """Each function and lambda with the names in it that hold a setting, and the module body with its own.
 
@@ -168,7 +187,7 @@ def _scopes(tree: ast.Module) -> list[tuple[ast.AST, set[str]]]:
     itself, so a setting read in a closure or a callback (``lambda: cell["sigma"]``, ``solve_ivp(lambda t, y:
     -cell["k"] * y, ...)``, ``def model(x): return x * c["a"]``) is a read of the function it is in; so is one in a
     lambda of the module body. A function defined at the top of the module does not see the module's names (as
-    before)."""
+    before). A lambda's own parameter holds a setting only when the lambda is handed one (:func:`_given_settings`)."""
     parent: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
@@ -188,10 +207,13 @@ def _scopes(tree: ast.Module) -> list[tuple[ast.AST, set[str]]]:
         if not isinstance(node, _FUNCTIONS):
             continue
         args = _params(node)
-        names = {a for a in args if a in SETTING_NAMES}
-        if isinstance(node, _FUNCTIONS[:2]) and node.name in ENTRIES and args:
-            names.add(args[0])
         outer = enclosing(node)
+        if isinstance(node, ast.Lambda):
+            names = _given_settings(node, outer, held.get(id(outer), set()), parent) if outer is not None else set()
+        else:
+            names = {a for a in args if a in SETTING_NAMES}
+            if node.name in ENTRIES and args:
+                names.add(args[0])
         if outer is not None:
             mine = _locals(node)
             names |= {n for n in held.get(id(outer), set()) if n not in mine}

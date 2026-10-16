@@ -58,9 +58,11 @@ _HARMLESS_CALLS = frozenset({"print", "repr", "str", "isinstance", "len", "id", 
 # --- which grid axes the simulation reads ----------------------------------------------------------------------------
 
 
-def _followed(node: ast.AST, parents: dict[int, ast.AST], defs: dict[str, list[str]]) -> bool:
+def _followed(node: ast.AST, parents: dict[int, ast.AST], defs: dict[str, list[str]],
+              shared: frozenset[str] = frozenset()) -> bool:
     """Whether a use of a setting is one the reading of the code follows: a read by a literal key, a copy into a
-    name, a hand-over to the trial contract's entry point or to a function whose parameter is a setting, or a use that
+    name of the function's own (not one in ``shared``, declared ``global`` or ``nonlocal``: other functions read it), a
+    hand-over to the trial contract's entry point or to a function whose parameter is a setting, or a use that
     reads no value (printed, a presence test)."""
     parent = parents.get(id(node))
     if isinstance(parent, ast.Subscript) and parent.value is node:
@@ -82,7 +84,7 @@ def _followed(node: ast.AST, parents: dict[int, ast.AST], defs: dict[str, list[s
         index = parent.args.index(node)  # type: ignore[arg-type]
         return params is not None and index < len(params) and params[index] in _grid_keys.SETTING_NAMES
     if isinstance(parent, ast.Assign) and parent.value is node:
-        return all(isinstance(t, ast.Name) for t in parent.targets)
+        return all(isinstance(t, ast.Name) and t.id not in shared for t in parent.targets)
     if isinstance(parent, ast.Compare):
         return all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)
     return isinstance(parent, (ast.FormattedValue, ast.Expr))
@@ -97,6 +99,7 @@ def opaque_uses(source: str, script: str) -> list[str]:
     parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     defs = {n.name: [a.arg for a in (*n.args.posonlyargs, *n.args.args)]
             for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    shared = frozenset(name for n in ast.walk(tree) if isinstance(n, (ast.Global, ast.Nonlocal)) for name in n.names)
     out: list[str] = []
     for scope, names in _grid_keys._scopes(tree):
         names = set(names)
@@ -109,7 +112,7 @@ def opaque_uses(source: str, script: str) -> list[str]:
         for node in nodes:
             holder = (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in names) \
                 or _grid_keys._is_record_get(node)
-            if holder and not _followed(node, parents, defs):
+            if holder and not _followed(node, parents, defs, shared):
                 out.append(f"{script} line {getattr(node, 'lineno', 0)}")
     return out
 

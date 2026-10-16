@@ -110,6 +110,28 @@ def test_a_nested_function_that_rebinds_the_name_does_not_read_a_setting() -> No
     assert [r.keys for r in gk.reads(src, "simulate.py")] == [("rate",)]
 
 
+@pytest.mark.parametrize("src", [
+    "def summarise(rows):\n    best = max(rows, key=lambda cell: cell['score'])\n    return best\n",
+    "def rank(cells):\n    return sorted(cells, key=lambda setting: setting['mse'])\n",
+    "best = min(results, key=lambda cell: cell['loss'])\n",
+])
+def test_a_lambda_parameter_named_like_a_setting_is_not_one_by_its_name(src: str) -> None:
+    """A ``key=lambda cell: ...`` over other rows reads those rows, not the run's settings: no read, and no stop."""
+    assert gk.reads(src, "simulate.py") == []
+    assert _names({"simulate.py": src}) == []
+
+
+@pytest.mark.parametrize("src", [
+    "def run_trial(cell, i, seed):\n    f = lambda c: c['rate_hz']\n    return {'y': f(cell)}\n",
+    "def run_trial(cell, i, seed):\n    f = lambda t, cell: cell['rate_hz'] * t\n    return {'y': f(1.0, cell)}\n",
+    "def run_trial(cell, i, seed):\n    return {'y': (lambda c: c['rate_hz'])(cell)}\n",
+    "def run_trial(cell, i, seed):\n    f = lambda t, c=cell: c['rate_hz'] * t\n    return {'y': f(1.0)}\n",
+])
+def test_a_lambda_called_with_the_run_s_settings_reads_them(src: str) -> None:
+    assert [r.keys for r in gk.reads(src, "simulate.py")] == [("rate_hz",)]
+    assert _names({"simulate.py": src}) == [("simulate.py", ("rate_hz",))]
+
+
 def test_a_dict_that_is_not_a_setting_is_not_read_as_one() -> None:
     src = ('def run_cell(cell):\n    table = {"a": 1}\n    other = dict(table)\n'
            '    return {"y": table["a"] + other.get("b", 0) + cell["rate"]}\n')
