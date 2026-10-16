@@ -408,15 +408,22 @@ class RunChecksMixin:
         if isinstance(reduced, dict) and reduced.get("note"):
             parts.append(f"{reduced['note']} Say this in the paper with the numbers (it is among FI's facts about this run, "
                          "given below), and write no result for what was left out.")
-        if isinstance(sized.get("over_topic"), str) and sized["over_topic"].strip():
-            parts.append(f"{sized['over_topic']} Say this in the paper, with how long the run took; do not describe the run "
-                         "as within the topic's time limit.")
         unread = _read_json(self.fi_dir / UNREAD_SETTINGS_RECORD)  # type: ignore[attr-defined]
         if isinstance(unread.get("note"), str) and unread["note"].strip():
             names = ", ".join(f"`{k}`" for k in unread.get("dropped") or {})
             parts.append(f"{unread['note']} Do not describe {names} as a setting the study varied or compared across "
                          "settings.")
         return "\n\n".join(parts)
+
+    # ---- the topic's own run-time limit ---------------------------------------------------------------------------------
+    # The same helper as fix/run-size's (core/run_checks.py there): at the merge one copy is kept.
+
+    def _topic_limit_s(self, state: Any) -> float | None:
+        """The one run-time limit the topic states (in seconds), read as the paper's run record reads it, or ``None``."""
+        from . import disclosure as _disclosure
+
+        limit = _disclosure.topic_limit(self.quest_root, str(state.get("topic") or ""))  # type: ignore[attr-defined]
+        return float(limit) if isinstance(limit, (int, float)) and limit > 0 else None
 
     # ---- a setting of the grid the simulation never reads ----------------------------------------------------------------
 
@@ -546,16 +553,6 @@ class RunChecksMixin:
                 or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0):  # type: ignore[attr-defined]
             return None
         limit_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
-        # The topic's own run-time limit, when it states a shorter one, is what the run is sized to; FI's own limit
-        # (execution.timeout_s) stays the point where a run is stopped, and the time the timing itself may take.
-        aim = self._run_time_aim(state, limit_s)
-        smaller = aim < limit_s
-        if smaller:
-            said = (f"the topic asks for a run of at most {_estimate.plain_duration(aim)}; FI sizes the experiment to that, "
-                    f"not to its own {_estimate.plain_duration(limit_s)} (execution.timeout_s), which stays the point where a "
-                    "run is stopped")
-            self._log.info("[execute] %s", said)  # type: ignore[attr-defined]
-            print(f"[FI] {said[:1].upper() + said[1:]}")
         budget_s = max(limit_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
         cached: dict[str, _estimate.Probe] = {}
         prior = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
@@ -566,7 +563,7 @@ class RunChecksMixin:
         for _round in range(2):
             grid, runs, thresholds = self._grid_and_runs(state)
             inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
-            key = self._sizing_key(runner, grid, runs, aim, inside)
+            key = self._sizing_key(runner, grid, runs, limit_s, inside)
             record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
             if record.get("key") == key and record.get("fits"):
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
@@ -593,33 +590,20 @@ class RunChecksMixin:
             est = _estimate.estimate(grid, runs, runner.deterministic, probes)
             if est is None:
                 return None
-            line = _estimate.says(est, aim) + (" (the topic's own limit)" if smaller else "")
+            line = _estimate.says(est, limit_s)
             base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
-                    "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
-                    **({"topic_limit_s": aim} if smaller else {})}
-            if not _estimate.known_too_long(est, aim):
+                    "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials}
+            if not _estimate.known_too_long(est, limit_s):
                 self._log.info("[execute] %s", line)  # type: ignore[attr-defined]
                 print(f"[FI] {line}")
                 _estimate.write_record(self.quest_root, {**base, "fits": True})  # type: ignore[attr-defined]
                 return None
-            self._log.warning("[execute] %s, so it would not finish%s", line,  # type: ignore[attr-defined]
-                              " within the topic's limit" if smaller else "")
+            self._log.warning("[execute] %s, so it would not finish", line)  # type: ignore[attr-defined]
             # Fewer runs per setting is the only cut FI makes: every setting the study compares is kept, and the runs never go
-            # below the fewest the plan states. The shorter run is timed again before it is used. No model is asked. Aimed at
-            # the topic's limit first; when that cannot be met, at FI's own.
-            note = None
-            for target in (aim, limit_s) if smaller else (aim,):
-                fewer = None if cut_done else _estimate.runs_that_fit(
-                    est, target, runs, runner.deterministic, self._protocol_block(state) or {}, est.spreads)  # type: ignore[attr-defined]
-                if fewer is not None:
-                    note = self._lower_the_runs(state, runs, fewer, est, target, grid, topic=target < limit_s)
-                    break
-            if note is None and smaller and not _estimate.known_too_long(est, limit_s):
-                # The topic's limit cannot be met without leaving out what the plan compares: run within FI's own limit,
-                # and say so plainly (plan.md, run.log, the paper). The topic's other requirements are still met.
-                over = self._over_the_topic_limit(est, aim, limit_s, reduced)
-                _estimate.write_record(self.quest_root, {**base, "fits": True, "over_topic": over})  # type: ignore[attr-defined]
-                return None
+            # below the fewest the plan states. The shorter run is timed again before it is used. No model is asked.
+            fewer = None if cut_done else _estimate.runs_that_fit(
+                est, limit_s, runs, runner.deterministic, self._protocol_block(state) or {}, est.spreads)  # type: ignore[attr-defined]
+            note = self._lower_the_runs(state, runs, fewer, est, limit_s, grid) if fewer is not None else None
             if note is None:
                 text = self._too_long_text(est, limit_s)
                 _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text})  # type: ignore[attr-defined]
@@ -902,44 +886,8 @@ class RunChecksMixin:
         design["protocol"] = {**(design.get("protocol") if isinstance(design.get("protocol"), dict) else {}), **sized}
         return design
 
-    def _run_time_aim(self, state: Any, limit_s: float) -> float:
-        """The run time the experiment is sized to: the topic's own limit when it states one shorter than FI's
-        (:func:`core.disclosure.topic_limit`, the same reading the paper's run record uses), else ``limit_s``."""
-        from . import disclosure as _disclosure
-
-        topic = str(state.get("topic") or getattr(self.config, "topic", "") or "")  # type: ignore[attr-defined]
-        stated = _disclosure.topic_limit(self.quest_root, topic)  # type: ignore[attr-defined]
-        return float(stated) if stated is not None and 0 < float(stated) < limit_s else limit_s
-
-    def _over_the_topic_limit(self, est: _estimate.Estimate, aim: float, limit_s: float,
-                              reduced: dict[str, Any] | None) -> str:
-        """The experiment takes longer than the topic's limit and cannot be made shorter without leaving out what the plan
-        compares: it runs within FI's own limit, said in run.log, plan.md (under the checks FI made) and the paper."""
-        from . import engine as _e
-
-        words = "at least " if est.at_least else "about "
-        note = (f"The topic asks for a run of at most {_estimate.plain_duration(aim)}; FI estimates this experiment takes "
-                f"{words}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}"
-                f"{' even with fewer runs per setting' if reduced else ''}, and it cannot be made shorter without leaving out "
-                "settings the plan compares or going below the fewest runs per setting the plan states. FI runs it within its "
-                f"own limit of {_estimate.plain_duration(limit_s)} (execution.timeout_s): the topic's time limit is not met.")
-        self._log.warning("[execute] %s", note)  # type: ignore[attr-defined]
-        print(f"[FI] {note}")
-        path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
-        try:
-            text = path.read_text(encoding="utf-8")
-            if note not in text and _plan.parse(text).design is not None:
-                edited = _plan.add_to_section(text, _e._PART_HEADING, ["", f"- {note}"])
-                _plan.note_edit(self.quest_root, text)  # type: ignore[attr-defined]
-                path.write_text(edited, encoding="utf-8")
-                _plan.record_version(self.quest_root, edited, by="engine",  # type: ignore[attr-defined]
-                                     note="the topic's time limit cannot be met, said by FI")
-        except OSError as e:
-            self._log.warning("[execute] FI could not note the topic's time limit in plan.md: %r", e)  # type: ignore[attr-defined]
-        return note
-
     def _lower_the_runs(self, state: Any, runs: int, fewer: int, est: _estimate.Estimate, limit_s: float,
-                        grid: dict[str, list[Any]], topic: bool = False) -> dict[str, Any] | None:
+                        grid: dict[str, list[Any]]) -> dict[str, Any] | None:
         """FI's own smaller run: the same settings with ``fewer`` runs each, written into plan.md as a version of the engine
         (no request to the plan's model). The record of it, or ``None`` when plan.md could not be changed."""
         path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
@@ -958,9 +906,7 @@ class RunChecksMixin:
             self._log.warning("[execute] FI could not lower the runs per setting in plan.md: %r", e)  # type: ignore[attr-defined]
             return None
         words = "at least " if est.at_least else "about "
-        allowed = (f"the topic's limit of {_estimate.plain_duration(limit_s)}" if topic
-                   else f"the time allowed ({_estimate.plain_duration(limit_s)})")
-        note = (f"FI made the experiment smaller so that it fits {allowed}: it "
+        note = (f"FI made the experiment smaller so that it fits the time allowed ({_estimate.plain_duration(limit_s)}): it "
                 f"would have taken {words}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}. FI lowered the runs per "
                 f"setting from {runs} to {fewer} and kept all {_estimate.cell_count(grid)} setting(s); the checks, thresholds "
                 "and tolerances are unchanged.")

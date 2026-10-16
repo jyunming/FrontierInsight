@@ -4927,7 +4927,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # excerpts cost it the context a sound design rests on.
             literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
             review_feedback=review_feedback or "(none — first iteration)",
-            timeout_s=self._planning_limit(state),
+            timeout_s=str(self.config.execution.timeout_s),
             time_note=self._time_note(state),
             clarify_block=_format_clarify(state),
             skills_block=(
@@ -11464,6 +11464,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._log.warning("[implement] could not ask for the equation labels: %r", e)
             return None
 
+    def _planning_limit(self, state: QuestState) -> str:
+        """The run time the code-writing prompts are given (their ``$timeout_s``): the topic's own limit when it states a
+        shorter one than ``execution.timeout_s`` (the topic's constraints win over FI's default), else FI's. The design
+        prompt keeps FI's limit beside :meth:`_time_note`, which states the topic's."""
+        own = int(self.config.execution.timeout_s)
+        limit = self._topic_limit_s(state)
+        if limit is None or not limit < own:
+            return str(own)
+        return (f"{_disclosure._plain_seconds(limit).removesuffix(' s')} (the topic's own limit, which the code is written "
+                f"for; FI stops a run that takes longer than {own} s, its execution.timeout_s)")
+
     def _code_layout(self, state: QuestState, protocol: Any = None) -> dict[str, Any] | None:
         """How this quest's code is laid out (:mod:`core.code_layout`): a small research tool or two scripts, with what
         that costs. ``None`` for a quest that keeps no simulation of its own in two scripts (the no-simulation path, a
@@ -12031,37 +12042,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return {**scrub_secrets(), **_finding_repair.run_environment(
             self.quest_root, _split_run.env_value(self._raw_root(), self.quest_root), stand_ins=stand_ins)}
 
-    def _topic_run_limit(self, state: QuestState) -> float | None:
-        """The one run-time limit the topic states, in seconds (:func:`core.disclosure.topic_limit`, the reading the paper's
-        run record uses), or ``None``."""
-        return _disclosure.topic_limit(self.quest_root, str(state.get("topic") or self.config.topic or ""))
-
-    def _planning_limit(self, state: QuestState) -> str:
-        """The run time the plan and the code are written for (the prompts' ``$timeout_s``): the topic's own limit when it
-        states a shorter one than ``execution.timeout_s`` (the topic's constraints win over FI's default), else FI's."""
-        own = int(self.config.execution.timeout_s)
-        limit = self._topic_run_limit(state)
-        if limit is None or not 0 < limit < own:
-            return str(own)
-        return (f"{_disclosure._plain_seconds(limit).removesuffix(' s')} (the topic's own limit; FI stops a run only at "
-                f"{own} s, its execution.timeout_s)")
-
     def _time_note(self, state: QuestState) -> str:
-        """What the plan is told about the run time: the topic's own limit, when it states one shorter than FI's, is the one
-        to plan for; FI times the experiment against it before the study (core/run_checks.py::_size_the_run)."""
-        own = float(self.config.execution.timeout_s)
-        limit = self._topic_run_limit(state)
-        if limit is None:
-            return ("This is the limit FI enforces on one run. If the topic asks for a shorter run, plan for the topic's "
-                    "figure.")
-        if limit >= own:
-            return (f"The topic allows a run of up to {_disclosure._plain_seconds(limit)}; FI's own limit of "
-                    f"{_disclosure._plain_seconds(own)} is shorter and is the one that holds.")
-        return (f"The topic asks for a run of at most {_disclosure._plain_seconds(limit)}: that is the limit to plan for, "
-                f"not FI's own {_disclosure._plain_seconds(own)}. Before the study FI times a few runs; a study that would "
-                "take longer than the topic's limit has its runs per setting lowered (never below the fewest the plan "
-                "states), and one that still takes longer is run within FI's own limit, and the paper says the topic's "
-                "limit was not met. Choose settings and runs per setting that fit the topic's limit.")
+        """What the plan is told about the topic's own runtime request next to FI's enforced limit (read the way the
+        paper's run record reads it, :func:`core.disclosure._topic_limit`); it never becomes a limit."""
+        required = _disclosure._read_json(self.quest_root / ".fi" / "topic_requirements.json")
+        stated = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
+                  for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
+        limit = _disclosure._topic_limit([c for c in stated if isinstance(c, str)], str(state.get("topic") or ""))
+        asked = (f"The topic asks for a run of at most {_disclosure._plain_seconds(limit)}" if limit is not None
+                 else "If the topic asks for a shorter run")
+        return (f"This is the limit FI enforces on one run. {asked}: plan to stay within the shorter of the two where "
+                "the study allows. FI does not enforce the topic's figure and does not refuse a plan over it; the paper "
+                "reports how long the run took.")
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
                           env: dict[str, str] | None = None) -> tuple[int, str, str]:
