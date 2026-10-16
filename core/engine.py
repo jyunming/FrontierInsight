@@ -30505,40 +30505,10 @@ def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str
                     )
             if finding not in findings:
                 findings.append(finding)
-        for claim_finding in [*_flat_claim_findings(name, record, caption), *_denied_line_findings(name, record, caption)]:
+        for claim_finding in _flat_claim_findings(name, record, caption):
             if claim_finding not in findings:
                 findings.append(claim_finding)
     return findings
-
-
-# A clause that says something is not drawn ("the figure draws no theory curve", "the ellipse is not drawn"), and the
-# kind of thing it denies. Both must be in one clause; the closed lists are what a caption uses to deny a drawn line.
-_DENIES_DRAWING_RE = re.compile(
-    r"\b(?:(?:draws?|shows?|plots?|has|have|includes?|contains?)\s+no|(?:does|do)\s+not\s+(?:draw|show|plot)"
-    r"|(?:is|are)\s+not\s+(?:drawn|shown|plotted)|not\s+(?:drawn|shown|plotted)|without\s+(?:a|any)\b)"
-)
-_A_LINE_WORD_RE = re.compile(r"\b(?:curves?|lines?|bands?|ellipses?|predictions?|overlays?|references?|theory|theoretical)\b")
-
-
-def _denied_line_findings(name: str, record: dict[str, Any] | None, caption: str) -> list[str]:
-    """Findings for a caption that says a curve or line is not drawn when its figure draws dashed lines its legend does
-    not name (``unlabelled_lines`` of the record). FI does not know what those lines are, so it asks the caption to say
-    what they are, or to drop the denial. A figure whose record lists none, and a clause that denies something that is
-    not a line (error bars), is left alone."""
-    axes = [ax for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict) and ax.get("unlabelled_lines")]
-    if not axes:
-        return []
-    clause = next((c.strip() for c in _CAPTION_CLAUSE_RE.split(caption)
-                   if _DENIES_DRAWING_RE.search(c) and _A_LINE_WORD_RE.search(c)), "")
-    if not clause:
-        return []
-    where = "; ".join(
-        f'"{ax.get("title") or ax.get("ylabel") or "a panel"}" ('
-        + ", ".join(f'{g["count"]} {g["style"]} line{"s" if g["count"] > 1 else ""}' for g in ax["unlabelled_lines"])
-        + f', {min(g["min"] for g in ax["unlabelled_lines"]):.3g} to {max(g["max"] for g in ax["unlabelled_lines"]):.3g})'
-        for ax in axes)
-    return [f'figure_caption: the caption of figures/{name} says "{clause}", but the figure draws lines its legend does '
-            f"not name: {where}. Say what they are, or drop the denial"]
 
 
 def _format_figure_check(paper_md: str, state: QuestState) -> str:

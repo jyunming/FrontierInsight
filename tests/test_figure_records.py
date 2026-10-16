@@ -512,32 +512,3 @@ def test_the_writer_is_told_about_the_lines_the_legend_does_not_name(tmp_path: P
     note = _figure_list_for_prompt({"figures": ["spread.png"], "figure_records": records})
     assert "also draws 2 dashed lines with no legend label (0.0043 to 0.108)" in note
     assert "also draws 1 dashed line with no legend label (0 to 0)" in note
-
-
-def test_a_caption_saying_a_line_is_not_drawn_is_flagged_when_the_figure_draws_dashed_lines(tmp_path: Path) -> None:
-    records = _spread_records(tmp_path)
-    (finding,) = _figure_caption_findings(SPREAD_CAPTION, records)
-    assert finding.startswith("figure_caption: the caption of figures/spread.png says "
-                              "\"the figure draws no fisher theory curve\"")
-    assert '"Spread of $E_a$ vs noise" (2 dashed lines, 0.0043 to 0.108)' in finding
-    assert "legend does not name" in finding and "Say what they are" in finding
-
-
-def test_a_denial_is_fine_when_the_figure_draws_no_such_line(tmp_path: Path) -> None:
-    (tmp_path / "spread.json").write_text(json.dumps(SPREAD), encoding="utf-8")
-    plain = {"file": "spread.png", "axes": [{"title": "a", "lines": [_line("n=5", "-", "o", [1.0, 2.0])]},
-                                            {"title": "b", "lines": []}]}
-    records = _spread_records(tmp_path, plain)
-    assert _figure_caption_findings(SPREAD_CAPTION, records) == []
-    # No record of the lines (an older figure): nothing to compare.
-    (tmp_path / "spread.seed0.json").unlink()
-    assert _figure_caption_findings(SPREAD_CAPTION, _read_figure_records(tmp_path, ["spread.png"])) == []
-
-
-def test_a_caption_that_does_not_deny_a_line_is_fine_on_the_same_figure(tmp_path: Path) -> None:
-    records = _spread_records(tmp_path)
-    ok = SPREAD_CAPTION.replace("The figure draws no Fisher-theory curve; the theory comparison is given in the text.",
-                                "Dashed lines are the Fisher theory.")
-    assert _figure_caption_findings(ok, records) == []
-    other = SPREAD_CAPTION.replace("The figure draws no Fisher-theory curve", "No error bars are drawn")
-    assert _figure_caption_findings(other, records) == []
