@@ -258,6 +258,8 @@ def _engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Engine:
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
     ))
     eng._trial_mode = True
+    named = ["gain", "level", "capped"]   # the plan names these as estimated from the data (a flat one is questioned)
+    eng._protocol_block = lambda state: {"metrics": [{"id": n} for n in named]}  # type: ignore[method-assign]
     root = eng.quest_root
     (root / "raw").mkdir(parents=True, exist_ok=True)
     record = {"cells": [{"cell": c["cell"], "metrics": {n: {"values": v} for n, v in c["metrics"].items()}}
@@ -374,6 +376,73 @@ def test_what_the_plan_expects_to_stay_put_is_exempt() -> None:
     names = dr.expected_constants(protocol)
     assert {"total_out", "total_in", "ceiling"} <= names and "gain" not in names
     assert _flags(_cells(gain=lambda r: 3 * r, total_in=2.5), REPORTED | {"total_in"}, names) == []
+
+
+# ---- only what the plan says is estimated from the data is questioned -------------------------------------------------------
+
+#: A kinetics-shaped plan: the estimate and its coverage are named, the theory value is not.
+KINETICS_PLAN = {
+    "metrics": [{"id": "Ea_hat", "known_value": {"estimate": "Ea_hat", "standard_error": "Ea_se", "interval": ["Ea_lo", "Ea_hi"]}},
+                {"id": "coverage_Ea"}],
+    "precision": {"metric": "coverage_Ea"},
+    "oracles": [
+        {"name": "coverage_Ea_benign", "kind": "special_case", "measure": "coverage_Ea", "expected": 0.95},
+        {"name": "polyfit_agrees", "kind": "second_implementation", "measure": "abs(Ea_hat - Ea_polyfit)", "expected": 0}],
+}
+
+
+def _kinetics_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **flat: float) -> Engine:
+    """An engine whose last run varied ``Ea_hat`` and ``Ea_bias`` with the setting and held every quantity in ``flat`` at one number."""
+    eng = _engine(tmp_path, monkeypatch)
+    eng._protocol_block = lambda state: KINETICS_PLAN  # type: ignore[method-assign]
+    (eng.quest_root / "figures" / "empty_one.png").unlink()
+    cells = _cells(Ea_hat=lambda r: 50.0 + r, Ea_bias=lambda r: 0.1 * r, **flat)
+    (eng.quest_root / "raw" / "trials.json").write_text(json.dumps({"cells": [
+        {"cell": c["cell"], "metrics": {n: {"values": v} for n, v in c["metrics"].items()}} for c in cells]}), encoding="utf-8")
+    return eng
+
+
+def _kinetics_run(*names: str) -> ExecutionResult:
+    return ExecutionResult(0, "RESULT_JSON: " + json.dumps({"Ea_hat": 51.0, "Ea_bias": 0.1, **{n: 0.9 for n in names}}), "", 1.0, False)
+
+
+@pytest.mark.asyncio
+async def test_a_flat_quantity_the_plan_does_not_name_is_kept_and_stated_never_sent_back_or_stripped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live s4 case: the theory correlation depends on the fixed design only, so it is the same at every setting."""
+    eng = _kinetics_engine(tmp_path, monkeypatch, theory_corr=0.999074)
+    result, _ = await eng._results_match_run({"iteration": 0}, _kinetics_run("theory_corr"), None, True)
+    assert result.returncode == 0, "nothing is sent back for a number the plan does not say is estimated"
+    assert eng._left_out_quantities() == set() and "theory_corr" in result.stdout
+    assert eng._without_typed_results({"Ea_hat": 51.0, "theory_corr": 0.999074}) == {"Ea_hat": 51.0, "theory_corr": 0.999074}
+    note = eng._run_checks_note()
+    assert "`theory_corr`" in note and "identical at all 8 settings" in note and "limitations" in note
+
+
+@pytest.mark.asyncio
+async def test_a_flat_estimate_the_plan_names_is_still_sent_back_then_left_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _kinetics_engine(tmp_path, monkeypatch, coverage_Ea=0.95)
+    for _ in (1, 2):
+        result, script = await eng._results_match_run({"iteration": 0}, _kinetics_run("coverage_Ea"), None, True)
+        assert result.returncode == 1 and script == "simulate.py" and "`coverage_Ea` is 0.95" in result.stderr
+    result, _ = await eng._results_match_run({"iteration": 0}, _kinetics_run("coverage_Ea"), None, True)
+    assert result.returncode == 0 and eng._left_out_quantities() == {"coverage_Ea"}
+
+
+@pytest.mark.asyncio
+async def test_a_check_measuring_an_expression_does_not_hide_the_plans_own_estimate_in_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A planted ``fdr_bh = 0.05`` (the nominal level typed in) passed because ``abs(fdr_bh - 0.05)`` is a check's measure."""
+    plan = {"metrics": [{"id": "fdr_bh"}],
+            "oracles": [{"name": "fdr_at_level", "kind": "invariant", "measure": "abs(fdr_bh - 0.05)", "expected": 0},
+                        {"name": "second_bh", "kind": "second_implementation", "measure": "bh_scipy_disagree", "expected": 0}]}
+    assert "fdr_bh" not in dr.expected_constants(plan) and "bh_scipy_disagree" in dr.expected_constants(plan)
+    eng = _kinetics_engine(tmp_path, monkeypatch, fdr_bh=0.05, bh_scipy_disagree=0.0)
+    eng._protocol_block = lambda state: plan  # type: ignore[method-assign]
+    result, script = await eng._results_match_run({"iteration": 0}, _kinetics_run("fdr_bh", "bh_scipy_disagree"), None, True)
+    assert result.returncode == 1 and "`fdr_bh` is 0.05" in result.stderr and "bh_scipy_disagree" not in result.stderr
 
 
 SOURCED = "the reference level taken from the study's source table"
