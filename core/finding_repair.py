@@ -31,7 +31,7 @@ import re
 import string
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterable
 
 from . import code_findings as _issues
 from . import function_steps as _steps
@@ -366,6 +366,59 @@ def unpassed_params(old_fn: str, new_fn: str, name: str, callers: dict[str, str]
                     return (f"the study's call still uses the default: `{fname}` in {other} calls `{name}` without "
                             + ", ".join(f"`{p}`" for p in missing)
                             + ", so the repair changes nothing the study runs; pass it on from the caller")
+    return ""
+
+
+def _calls_to(node: ast.AST, name: str) -> list[ast.Call]:
+    return [c for c in ast.walk(node) if isinstance(c, ast.Call) and (
+        (isinstance(c.func, ast.Name) and c.func.id == name) or (isinstance(c.func, ast.Attribute) and c.func.attr == name))]
+
+
+def _typed_number(node: ast.AST) -> bool:
+    """Whether an argument is only a number written into the code (``0.01``, ``-1e-3``, ``(2)``)."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        return _typed_number(node.operand)
+    return isinstance(node, ast.Constant) and isinstance(node.value, (int, float, complex)) and not isinstance(
+        node.value, bool)
+
+
+def caller_edit_problem(before: str, after: str, caller_names: set[str] | Iterable[str], callee: str) -> str:
+    """Why a repair's change to a function that calls the repaired one directly is not allowed (``""`` when it is). Only the
+    arguments of its calls of ``callee`` may change: everything else in the caller stays as it was (compared as code, with
+    those calls' arguments set aside), so a repair cannot change another reported number on its way. And an argument the
+    repair adds or changes may not be a number typed into the call: the old typed-in value passed by name is the same
+    typed-in value, and the study would run unchanged."""
+    try:
+        old_funcs, new_funcs = _top_functions(ast.parse(before)), _top_functions(ast.parse(after))
+    except SyntaxError:
+        return ""
+
+    def masked(fn: ast.FunctionDef) -> str:
+        fn = copy.deepcopy(fn)
+        for call in _calls_to(fn, callee):
+            call.args, call.keywords = [], []
+        return ast.dump(fn)
+
+    for name in sorted(caller_names):
+        old, new = old_funcs.get(name), new_funcs.get(name)
+        if old is None or new is None or ast.dump(old) == ast.dump(new):
+            continue
+        if masked(old) != masked(new):
+            return (f"it changed `{name}` beyond its call of `{callee}`: only the arguments of its call of `{callee}` may "
+                    "change in a function that calls it")
+        old_calls, new_calls = _calls_to(old, callee), _calls_to(new, callee)
+        for i, call in enumerate(new_calls):
+            was = old_calls[i] if i < len(old_calls) else None
+            was_args = [ast.dump(a) for a in was.args] if was is not None else []
+            was_kw = {k.arg: ast.dump(k.value) for k in was.keywords} if was is not None else {}
+            given = [(f"argument {j + 1}", a) for j, a in enumerate(call.args)
+                     if j >= len(was_args) or ast.dump(a) != was_args[j]]
+            given += [(f"`{k.arg}`", k.value) for k in call.keywords if was_kw.get(k.arg) != ast.dump(k.value)]
+            for what, value in given:
+                if _typed_number(value):
+                    return (f"`{name}` passes the number `{ast.unparse(value)}` for {what} of `{callee}`: a number typed "
+                            "into the call is the same typed-in value, and the study runs unchanged; pass it from what "
+                            f"`{name}` is given (its parameters, the setting or the thresholds)")
     return ""
 
 
@@ -1197,6 +1250,12 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         edits[rel] = (old, new)
     if not edits:
         return False, "the reply changed nothing"
+    if scope:
+        # a function that calls the repaired one may change only the arguments of that call
+        for target, (before, after_text) in edits.items():
+            problem = caller_edit_problem(before, after_text, set(callers.get(target) or ()) - {scope}, scope)
+            if problem:
+                return False, problem if target == rel else f"its change to {target}: {problem}"
     if scope and rel in edits:
         final = {c: (edits[c][1] if c in edits else _read(env.code / c)) for c in callers}
         unpassed = unpassed_params(function_source(old, scope), function_source(edits[rel][1], scope), scope, final,

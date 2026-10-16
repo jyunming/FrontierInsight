@@ -169,6 +169,48 @@ def test_replay_r12_a_repair_that_leaves_the_study_on_the_default_is_rejected(tm
     assert env.changed == []
 
 
+def _with_caller(root: Path, edit: Any) -> str:
+    correct, _wrong = _replies(root)
+    fit_part, caller_part = correct.split("\n\n```python\n# file: simulate.py")
+    edited = edit(caller_part)
+    assert edited != caller_part
+    return fit_part + "\n\n```python\n# file: simulate.py" + edited
+
+
+@pytest.mark.parametrize("edit, said", [
+    # (b) the caller passes the old typed value literally: every study trial still fits with 0.01
+    (lambda c: c.replace("model.fit_rate(time, observed, noise_std_rel)",
+                         "model.fit_rate(time, observed, noise_std_rel=0.01)"), "passes the number `0.01`"),
+    # (c) the caller passes the parameter AND changes another reported number
+    (lambda c: c.replace('f"{label}_Ea_hat": ea_hat,', 'f"{label}_Ea_hat": ea_hat * 0.98,'),
+     "only the arguments of its call of `fit_rate` may change"),
+])
+def test_replay_r12_a_caller_may_change_only_the_arguments_of_its_call(tmp_path: Path, edit: Any, said: str) -> None:
+    pytest.importorskip("scipy")
+    root = _r12(tmp_path)
+    model_before = (root / "code" / "kinetics_parameter_recovery" / "model.py").read_text(encoding="utf-8")
+    sim_before = (root / "code" / "simulate.py").read_text(encoding="utf-8")
+    env = _env(root, _with_caller(root, edit))
+    ok, why = asyncio.run(fr._attempt(env, dict(ISSUE), "kinetics_parameter_recovery/model.py", "code", ""))
+    assert not ok and said in why, why
+    assert "`run_trial`" in why
+    assert (root / "code" / "kinetics_parameter_recovery" / "model.py").read_text(encoding="utf-8") == model_before
+    assert (root / "code" / "simulate.py").read_text(encoding="utf-8") == sim_before
+    assert env.changed == []
+
+
+@pytest.mark.parametrize("call, ok", [
+    ("f(x, s)", True), ("f(x, scale=cell['s'])", True), ("f(x, scale=s * 2)", True),
+    ("f(x, 0.5)", False), ("f(x, scale=-1e-3)", False), ("f(x, scale=(2))", False)])
+def test_a_caller_passes_an_added_parameter_from_what_it_has_never_a_typed_number(call: str, ok: bool) -> None:
+    before = "def g(x, s, cell):\n    y = f(x)\n    return y + 1\n"
+    after = f"def g(x, s, cell):\n    y = {call}\n    return y + 1\n"
+    why = fr.caller_edit_problem(before, after, {"g"}, "f")
+    assert (why == "") is ok, why
+    # any other change to the caller is not the call's
+    assert "only the arguments" in fr.caller_edit_problem(before, after.replace("y + 1", "y + 2"), {"g"}, "f")
+
+
 @pytest.mark.parametrize("call, ok", [("f(x)", False), ("f(x, s)", True), ("f(x, scale=s)", True), ("m.f(x)", False),
                                       ("f(x, **kw)", True), ("f(*args)", True)])
 def test_every_direct_caller_must_pass_an_added_parameter(call: str, ok: bool) -> None:
