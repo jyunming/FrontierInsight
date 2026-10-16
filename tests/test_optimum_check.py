@@ -405,7 +405,7 @@ import math
 
 
 def run_cell(cell):
-    with open("count.txt", "a", encoding="utf-8") as fh:
+    with open(r"__COUNT__", "a", encoding="utf-8") as fh:
         fh.write("1\\n")
     x = cell["x"]
     return {"f": x ** 2 - 60.0 * cell["mesh"] ** 2 * math.exp(-((x - 3.0) ** 2))}
@@ -425,7 +425,7 @@ def _runner_quest(tmp_path: Path, simulate: str) -> Path:
     root = tmp_path / "quest"
     (root / "code").mkdir(parents=True)
     (root / ".fi").mkdir()
-    (root / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(simulate.replace("__COUNT__", str(tmp_path / "count.txt")), encoding="utf-8")
     (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
     return root
 
@@ -461,11 +461,11 @@ async def test_a_failed_check_is_reported_and_the_analysis_still_runs(tmp_path: 
     assert "[optimise] check at finer numerical settings: The improvement over the baseline disappears" in text
     assert "changed FI's record of the search" in text
     # The check's evaluations went through FI's harness too: the simulation counted them.
-    count = len((root / "count.txt").read_text(encoding="utf-8").splitlines())
+    count = len((root.parent / "count.txt").read_text(encoding="utf-8").splitlines())
     assert count == best["evaluations"]["search"] + check["evaluations"]["check"]
     # A second run (an analysis repair) uses the search and the check FI already ran.
     await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=120)
-    assert len((root / "count.txt").read_text(encoding="utf-8").splitlines()) == count
+    assert len((root.parent / "count.txt").read_text(encoding="utf-8").splitlines()) == count
     assert any("the check at finer settings FI already ran is used" in line for line in logs)
     # The evidence level is limited, with the check's plain sentence.
     gaps = oc.evidence_gaps(root, {"optimisation": block})
