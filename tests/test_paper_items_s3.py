@@ -55,11 +55,11 @@ def test_a_paper_over_its_page_limit_after_the_rewrites_says_so_with_the_measure
     assert not [i for i in paper_facts.required_items(root) if i.kind == paper_facts.PAGE_LIMIT]
     paper_facts.write_page_record(root, 7, 4, final=True)
     (item,) = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.PAGE_LIMIT]
-    assert "7 pages" in item.sentence and "limit of 4" in item.sentence
+    assert "7 pages" in item.sentence and "4-page limit" in item.sentence
     paper = "# T\n\n## Methods\nM.\n\n## Discussion\n**Limitations.** Few.\n\n## References\n1. A.\n"
     out = paper_facts.render(paper_facts.place_items(paper, root), root).text
-    assert "The paper is 7 pages long, over the topic's limit of 4" in out
-    assert out.index("## Limitations") < out.index("The paper is 7 pages") < out.index("## References")
+    assert "This paper is 7 pages, over the 4-page limit set for it" in out
+    assert out.index("## Limitations") < out.index("This paper is 7 pages") < out.index("## References")
 
 
 async def test_the_review_puts_the_page_overrun_in_the_paper_and_measures_the_paper_that_carries_it(tmp_path: Path) -> None:
@@ -77,14 +77,14 @@ async def test_the_review_puts_the_page_overrun_in_the_paper_and_measures_the_pa
 
     async def measure(path: Path, state: dict) -> dict:
         seen.append(Path(path).read_text(encoding="utf-8"))
-        return {"pages": 7 if "pages long" in seen[-1] else 6}  # the sentence tips the paper onto one more page
+        return {"pages": 7 if "pages, over the" in seen[-1] else 6}  # the sentence tips the paper onto one more page
 
     eng._measure_draft_pages = measure  # type: ignore[method-assign]
     pages = await eng._state_page_overrun({}, paper, 4, 6)
     text = paper.read_text(encoding="utf-8")
-    assert pages == 7 and "The paper is 7 pages long, over the topic's limit of 4" in text
+    assert pages == 7 and "This paper is 7 pages, over the 4-page limit set for it" in text
     assert json.loads((root / ".fi" / "page_limit.json").read_text()) == {"pages": 7, "limit": 4, "final": True}
-    assert text.count("pages long") == 1  # re-stated, not added again
+    assert text.count("pages, over the") == 1  # re-stated, not added again
 
 
 async def test_a_paper_that_leaves_the_review_over_its_page_limit_says_so_whatever_route_brought_it(
@@ -115,7 +115,7 @@ async def test_a_paper_that_leaves_the_review_over_its_page_limit_says_so_whatev
     eng._measure_draft_pages = measure  # type: ignore[method-assign]
     out = await eng._node_citation_check({"paper_md": str(paper)})  # type: ignore[arg-type]
     assert out == {"citation_next": "done"}
-    assert "The paper is 7 pages long, over the topic's limit of 4" in paper.read_text(encoding="utf-8")
+    assert "This paper is 7 pages, over the 4-page limit set for it" in paper.read_text(encoding="utf-8")
     assert json.loads((root / ".fi" / "page_limit.json").read_text()) == {"pages": 7, "limit": 4, "final": True}
 
     # A paper within the limit is left as it is.
