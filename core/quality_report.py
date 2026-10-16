@@ -538,7 +538,28 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
+    pdf = _paper_pdf(q)
+    if pdf and not pdf["typeset"] and _paper_exists(q.root):
+        out.append(_problem("paper", "paper.pdf is not typeset (a browser drew it): " + _one(pdf["reason"], 200),
+                            "FI's PDF render", "not fixed", ".fi/paper_render.json"))
     return out
+
+
+def _paper_pdf(q: _Quest) -> dict[str, Any] | None:
+    """How ``paper.pdf`` was made (``.fi/paper_render.json``, written by the paper generator): typeset by LaTeX or
+    drawn by the browser, every character set in another form or font than the text's, and any no font here could
+    set. ``None`` when there is no record."""
+    try:
+        from generation.paper import read_render_record
+        rec = _dict(read_render_record(q.root))
+    except Exception:  # noqa: BLE001 — the report never fails over one record
+        return None
+    if not rec:
+        return None
+    return {"typeset": bool(rec.get("typeset")), "engine": str(rec.get("engine") or ""),
+            "reason": str(rec.get("reason") or ""), "pages": rec.get("pages"), "format": rec.get("format"),
+            "glyphs_replaced": [_dict(g) for g in _list(rec.get("glyphs_replaced"))],
+            "glyphs_not_set": [_dict(g) for g in _list(rec.get("glyphs_not_set"))]}
 
 
 def _citations(q: _Quest) -> dict[str, Any] | None:
@@ -1074,6 +1095,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "behaviour_checks": _probes_summary(q),
         "trial_checks": _trial_checks_summary(q),
         "citations": _citations(q),
+        "paper_pdf": _paper_pdf(q),
         "left_out_of_paper": _left_out_of_paper(q),
         "paper_records": _paper_records(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
@@ -1142,6 +1164,15 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
 
 def _cell(text: str) -> str:
     return text.replace("|", "/").replace("\n", " ")
+
+
+def _paper_pdf_line(pdf: dict[str, Any]) -> str:
+    pages = f", {pdf['pages']} pages" if pdf.get("pages") else ""
+    if not pdf["typeset"]:
+        return f"paper.pdf is **not typeset**: a browser drew it{pages}. Why: {_one(pdf['reason'], 300)}"
+    changed = len(pdf["glyphs_replaced"])
+    return (f"paper.pdf is typeset by {pdf['engine'] or 'LaTeX'}{pages}."
+            + (f" {changed} character(s) are printed in another form or font than the text's:" if changed else ""))
 
 
 def _citations_line(c: dict[str, Any]) -> str:
@@ -1272,6 +1303,13 @@ def render(report: dict[str, Any]) -> str:
             what = (f"backed by: \"{_one(r.get('passage'), 200)}\"" if r["status"] == "supported"
                     else f"{str(r['status']).replace('_', ' ')} ({_one(r.get('problem'), 160)})")
             lines.append(f"- [{r['label']}] {_one(r.get('sentence'), 90)} -- {what}")
+    pdf = report.get("paper_pdf")
+    if pdf:
+        lines += ["", "## The PDF", "", _paper_pdf_line(pdf)]
+        lines += [f"- `{_cell(str(g.get('glyph', '')))}` ({g.get('code_point', '')}) printed as "
+                  f"{_cell(str(g.get('became', '')))}, {g.get('count', 1)} time(s)" for g in pdf["glyphs_replaced"]]
+        lines += [f"- `{_cell(str(g.get('glyph', '')))}` ({g.get('code_point', '')}): no font here has it"
+                  for g in pdf["glyphs_not_set"]]
     if report.get("left_out_of_paper"):
         lines += ["", "## Left out of the paper", "",
                   "These quantities are not in the paper's results; FI checks that the paper says so:", ""]

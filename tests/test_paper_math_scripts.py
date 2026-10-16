@@ -59,7 +59,11 @@ def test_script_glyphs_in_prose_and_in_code_are_as_they_were() -> None:
 
 def test_every_script_glyph_of_the_map_merges_with_its_neighbour() -> None:
     glyphs = paper_mod._SCRIPT_GLYPHS
-    assert set(SUP + SUB + "\u00b0") == set(glyphs)
+    # The digits and signs, the degree, the subscript equals and parentheses, and every
+    # super/subscript letter Unicode decomposes to a Latin or Greek letter: no more, no less.
+    letters = set(paper_mod._script_letters())
+    assert set(glyphs) == set(SUP + SUB + "\u00b0") | set("\u208c\u208d\u208e") | letters
+    assert {"\u1d40", "\u1d34", "\u02b0", "\u1d5d", "\u1d62", "\u2090"} <= letters   # \u1d40 \u1d34 \u02b0 \u1d5d \u1d62 \u2090
     for glyph in glyphs:
         out = sanitize(f"$x{glyph}{glyph}y$")
         assert out.count("\\ensuremath{") == 1, (glyph, out)

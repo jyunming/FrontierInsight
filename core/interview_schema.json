@@ -65,6 +65,11 @@
           "description": "Default for scientific topics. Surveys, comparative reviews, theoretical derivations, brief preprints."
         },
         {
+          "value": "article",
+          "label": "article — plain one-column paper, no venue style",
+          "description": "A neutral layout with no conference name or logo; the same IMRAD paper as generic."
+        },
+        {
           "value": "neurips",
           "label": "NeurIPS — ML benchmark / algorithm",
           "description": "Empirical ML, neural networks, learning algorithms, journal-length."
@@ -1135,6 +1140,11 @@
       "value": "generic",
       "label": "generic — scientific paper, IMRAD",
       "description": "Default for scientific topics. Surveys, comparative reviews, theoretical derivations, brief preprints."
+    },
+    {
+      "value": "article",
+      "label": "article — plain one-column paper, no venue style",
+      "description": "A neutral layout with no conference name or logo; the same IMRAD paper as generic."
     },
     {
       "value": "neurips",

@@ -56,7 +56,7 @@ SandboxKind = Literal["venv", "docker"]
 # via ``$persona_block``. Scientific venues yield an empty persona
 # block, so ``write.md`` falls through to its built-in IMRAD voice.
 PaperFormat = Literal[
-    "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+    "generic", "article", "neurips", "iclr", "ieee_access", "nature_mi",
     "essay", "report", "policy_brief", "whitepaper",
 ]
 # Subsets of PaperFormat used by Engine._resolve_write_persona and
@@ -65,7 +65,7 @@ PaperFormat = Literal[
 # PaperFormat invariants are pinned by
 # test_paper_format_subsets_partition_the_literal.
 SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
-    "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+    "generic", "article", "neurips", "iclr", "ieee_access", "nature_mi",
 })
 NON_SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
     "essay", "report", "policy_brief", "whitepaper",

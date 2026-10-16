@@ -93,11 +93,16 @@ dependencies = [
   #   latex2mathml -> generation/_pptx_math.py turns the deck's $...$ LaTeX into
   #                   MathML for native PowerPoint equations in slides.pptx.
   #                   MIT, pure Python, no dependencies.
+  #   fonttools    -> generation/_unicode_fonts.py reads which characters each
+  #                   installed font has, so XeLaTeX sets every character of the
+  #                   paper in a font that has it. MIT, pure Python. Without it
+  #                   any character beyond Latin makes the paper not typeset.
   "python-pptx>=0.6.23",
   "pypandoc_binary>=1.13",
   "pillow>=10.0",
   "pypdfium2>=4.30",
   "latex2mathml>=3.81",
+  "fonttools>=4.40",
 ]
 
 [project.optional-dependencies]
@@ -185,7 +190,7 @@ exclude = [
 # wheel and are reachable via the same relative paths the runtime
 # uses in the source tree.
 [tool.setuptools.package-data]
-"*" = ["*.md", "*.tex", "*.css", "*.html", "*.js", "*.otf"]
+"*" = ["*.md", "*.tex", "*.sty", "*.css", "*.html", "*.js", "*.otf"]
 
 [tool.coverage.run]
 # tests/test_crash_kind.py compiles a small function under this name inside core/ so its frames count as FI's own

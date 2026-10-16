@@ -15,6 +15,7 @@ from core.knowledge import Knowledge, _render_paper_spine
 from generation import _html_pdf
 from generation._html_pdf import render_paper_html_pdf
 from generation._keywords import extract_keywords, keywords_block, paper_keywords, split_keywords
+from tests.paper_fakes import fake_html_run
 
 REPO = Path(__file__).resolve().parent.parent
 PAPER = (
@@ -71,7 +72,7 @@ def _html_render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, markdown: str)
         calls.append(list(cmd))
         raise OSError("stop at pandoc")
 
-    monkeypatch.setattr(_html_pdf.subprocess, "run", fake_run)
+    fake_html_run(monkeypatch, fake_run)
     pmd = tmp_path / "paper.md"
     pmd.write_text(markdown, encoding="utf-8")
     render_paper_html_pdf(pmd, tmp_path / "paper.pdf", pandoc_path="pandoc", browser=("msedge", "edge"))

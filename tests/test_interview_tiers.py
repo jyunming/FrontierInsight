@@ -140,9 +140,9 @@ def test_derive_tier2_picks_no_simulation_for_prose_formats() -> None:
 
 
 def test_derive_tier2_keeps_simulation_for_scientific_formats() -> None:
-    """generic / neurips / iclr / ieee_access / nature_mi default to
+    """generic / article / neurips / iclr / ieee_access / nature_mi default to
     no_simulation=False — they expect a Python experiment."""
-    for fmt in ("generic", "neurips", "iclr", "ieee_access", "nature_mi"):
+    for fmt in ("generic", "article", "neurips", "iclr", "ieee_access", "nature_mi"):
         out = derive_tier2({"topic": "x", "paper_format": fmt})
         assert out["no_simulation"] is False
 

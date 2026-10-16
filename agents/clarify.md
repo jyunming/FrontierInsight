@@ -97,7 +97,7 @@ downstream prompt (`ideate`, `design`, `implement`, `analyze`, `write`).
     "default": "journal-length"
   },
   "paper_venue": {
-    "question": "<one sentence asking which paper template / format style fits — scientific venues (generic, neurips, iclr, ieee_access, nature_mi) or non-scientific prose (essay, report, policy_brief, whitepaper)>",
+    "question": "<one sentence asking which paper template / format style fits — scientific venues (generic, article, neurips, iclr, ieee_access, nature_mi) or non-scientific prose (essay, report, policy_brief, whitepaper)>",
     "default": "<your best guess; see venue rules below>"
   },
   "topic_shape": {
@@ -127,12 +127,13 @@ downstream prompt (`ideate`, `design`, `implement`, `analyze`, `write`).
   `comprehensive review` (10–15 pages, synthesis with extensive prior-work discussion).
   Pick the level that matches the topic's natural scope — narrow benchmarks → brief, established
   research questions → journal-length, broad survey/comparative topics → comprehensive review.
-- The `paper_venue` default is one of `{generic, neurips, iclr, ieee_access, nature_mi, essay, report, policy_brief, whitepaper}` — pick by topic + study_depth + empirical_vs_theoretical + simulatability:
+- The `paper_venue` default is one of `{generic, article, neurips, iclr, ieee_access, nature_mi, essay, report, policy_brief, whitepaper}` — pick by topic + study_depth + empirical_vs_theoretical + simulatability:
   * **Scientific venues** (when `simulatability=yes` AND the topic is computational/experimental):
     - `neurips` / `iclr` — ML benchmarks, learning algorithms, neural-network experiments (empirical + journal-length).
     - `ieee_access` — engineering systems, hardware/software architectures, measurement studies (empirical + journal-length).
     - `nature_mi` — physics / chemistry / materials simulation, scientific-method experiments (empirical + journal-length).
     - `generic` — surveys, comparative reviews, theoretical derivations, brief preprints, scientific topics that don't fit a specific venue.
+    - `article` — the same kinds of topic as `generic`, in a plain one-column article with no venue name and no logo. Pick it only when the topic or the person asks for a plain article; otherwise `generic`.
   * **Non-scientific prose formats** (when `simulatability=no` OR the topic is qualitative/historical/cultural/business):
     - `essay` — long-form argumentative prose. Cultural comparisons, historical analyses, intellectual history, qualitative cross-case studies. Picks when the natural shape is "argue a thesis with evidence", not "report a measurement".
     - `report` — consulting-style executive report with cover + TOC. Business analyses, operational reviews, market assessments. Picks when the audience is decision-makers and the structure is exec-summary → findings → recommendations.

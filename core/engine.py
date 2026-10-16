@@ -21178,9 +21178,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             scratch.mkdir(parents=True, exist_ok=True)
             if quest_figures.is_dir():
                 shutil.copytree(quest_figures, scratch / "figures")
-            pdf, skip = PaperGenerator(config)._compile_pdf(Path(paper_path), scratch)
+            pdf, skip, record = PaperGenerator(config).compile_for_page_count(Path(paper_path), scratch)
             if pdf is None:
-                return None, skip.summary if skip is not None else "the render produced no PDF"
+                return None, skip or "the render produced no PDF"
+            if not record.get("typeset", True):
+                self._log.warning(
+                    "[page_limit] LaTeX could not typeset the draft (%s); its pages are counted on the "
+                    "browser render instead",
+                    record.get("reason") or "no reason given",
+                )
             doc = measure_pdf(pdf)
             if doc is None or not doc.pages:
                 return None, "the rendered PDF could not be read"
@@ -26738,7 +26744,7 @@ def _default_clarify_questions(topic: str) -> dict[str, Any]:
             "default": "journal-length",
         },
         "paper_venue": {
-            "question": "Which paper template should we use? (generic / neurips / iclr / ieee_access / nature_mi)",
+            "question": "Which paper template should we use? (generic / article / neurips / iclr / ieee_access / nature_mi)",
             "default": "generic",
         },
         "topic_shape": {
