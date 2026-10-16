@@ -10884,6 +10884,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # The older contract's record is the simulation's own statement, never the level FI's own record reaches.
         return ("differs" if found else "self_reported"), found
 
+    def _grid_values_left_out(self, state: QuestState) -> list[str]:
+        """Grid values the analysis script names only some of (a ``for`` loop over literals, which the protocol check does
+        not stop on under the trial contract) that FI's own count of the run shows it reports no trials for. Empty when
+        there is no such loop, or the analysis reports every setting."""
+        protocol = self._protocol_of(state)
+        if protocol is None or not getattr(self, "_trial_mode", False):
+            return []
+        suspects = _protocol.analysis_suspects(protocol, self._scripts_on_disk())
+        return _run_manifest.confirmed(suspects, list(getattr(self, "_manifest_differences", None) or [])) if suspects else []
+
     def _manifest_stop(self, found: list[str], attempts: int) -> QuestState:
         """The run's record still differs from the frozen protocol after the repairs (``engine.run_manifest_check: block``):
         the quest ends in the honest stop (no paper), with what differed and how often the script was sent back. Nobody is
@@ -11226,6 +11236,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "[protocol] the script holds to the plan's protocol%s",
                 "" if len(attempts) == 1 else f" (after {len(attempts) - 1} repair(s))",
             )
+            for suspect in _protocol.analysis_suspects(protocol, self._scripts_on_disk()):
+                self._log.info("[protocol] the analysis loops over only %s of %s; after the run FI checks, from its own count of "
+                               "the trials, that the analysis reports every setting", suspect.found, suspect.name)
             return code, deps
         if self.config.engine.protocol_check == "warn":
             self._log.warning("[protocol] the script still differs from the plan's protocol: %s", "; ".join(m.message() for m in final))
@@ -16627,6 +16640,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # are sent back and stop the quest like under block), the rest being recorded.
             fabricated_found = set(getattr(self, "_manifest_fabricated", []) or [])
             acting = [f for f in manifest_found if f in fabricated_found] if mode == "warn" else list(manifest_found)
+            if mode == "warn" and (left_out := self._grid_values_left_out(state)):
+                # The analysis names only some of an axis's values (read from its code) and FI's own count shows it reports
+                # no trials for them: a fact about the report, not a note. Its findings are acted on like under block.
+                self._log.warning("[run_manifest] %s; the analysis is sent back", "; ".join(left_out))
+                acting = list(dict.fromkeys([*acting, *(f for f in manifest_found if f in set(self._manifest_analysis_problems))]))
             budget = int(self.config.engine.run_manifest_repair_attempts)
             by_request = self._goes_beyond_protocol_by_request()
             protocol_now = self._protocol_of(state)
