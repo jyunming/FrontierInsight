@@ -432,7 +432,9 @@ async def test_execute_draws_the_line_figure_as_the_mean_of_the_seeds(tmp_path: 
     # The histogram goes back to seed 0's file and record, and says it shows seed 0 alone.
     assert histograms["png0"] != histograms["png2"] and histograms["json0"] != histograms["json2"]
     assert (eng.quest_root / "figures" / "sizes.png").read_bytes() == histograms["png0"]
-    assert records["sizes.png"] == {**json.loads(histograms["json0"]), "single_seed": 0}
+    # (What its paper copy changed stays in the file, out of the record the checks read.)
+    seed0 = {k: v for k, v in json.loads(histograms["json0"]).items() if k != "paper"}
+    assert records["sizes.png"] == {**seed0, "single_seed": 0}
     # The figure on disk now draws the mean of the three seeds' lines.
     seed_lines = [
         json.loads((eng.fi_dir / "figure_records" / f"outbreak.seed{k}.json").read_text(encoding="utf-8"))

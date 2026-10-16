@@ -26,6 +26,9 @@ def _copies(root: Path) -> None:
     paper.mkdir(parents=True)
     (paper / "wide.pdf").write_bytes(PDF_63)
     (paper / "single.pdf").write_bytes(PDF_31)
+    # The figures themselves: a copy is used only beside its figure.
+    for name in ("wide.png", "single.png"):
+        (root / "figures" / name).write_bytes(b"png")
 
 
 def test_a_figure_with_a_paper_copy_points_at_it_at_its_share_of_the_line(tmp_path: Path) -> None:

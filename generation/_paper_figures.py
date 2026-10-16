@@ -16,7 +16,7 @@ from pathlib import Path
 from core.plot_style import PAPER_DIRNAME, PAPER_FULL_WIDTH_IN
 
 # The target of a Markdown image (or link) to a figure file in figures/, with an optional {attributes} block after it.
-_FIGURE_TARGET = re.compile(r"\]\(figures/([^)\s/]+)\.(?:png|jpe?g|svg)\)(\{[^}]*\})?", re.IGNORECASE)
+_FIGURE_TARGET = re.compile(r"\]\(figures/([^)\s/]+)\.(png|jpe?g|svg)\)(\{[^}]*\})?", re.IGNORECASE)
 _MEDIABOX = re.compile(rb"/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\]")
 
 
@@ -37,18 +37,20 @@ def _width_in(pdf: Path) -> float | None:
 
 def prefer_paper_figures(markdown: str, root: Path, *, two_column: bool = False) -> tuple[str, int]:
     """``(markdown, n)``: each image of ``figures/<stem>.png`` (or .jpg, .svg) whose paper copy
-    ``figures/paper/<stem>.pdf`` exists under ``root`` points at that copy instead, with ``{width=NN%}`` of the line
-    width that the copy was drawn at (an attribute block the writer gave is kept as it is); ``n`` is how many were
-    swapped. A two-column paper is returned unchanged."""
+    ``figures/paper/<stem>.pdf`` exists under ``root``, beside the figure itself, points at that copy instead, with
+    ``{width=NN%}`` of the line width that the copy was drawn at (an attribute block the writer gave is kept as it is);
+    ``n`` is how many were swapped. A two-column paper is returned unchanged."""
     if two_column:
         return markdown, 0
     swapped = 0
 
     def swap(match: re.Match[str]) -> str:
         nonlocal swapped
-        stem, attributes = match.group(1), match.group(2)
+        stem, suffix, attributes = match.group(1), match.group(2), match.group(3)
         pdf = Path(root) / "figures" / PAPER_DIRNAME / f"{stem}.pdf"
-        if not pdf.is_file():
+        # Only the copy of a figure that is there: a figure FI took out of figures/ is not shown through a copy left
+        # behind.
+        if not pdf.is_file() or not (Path(root) / "figures" / f"{stem}.{suffix}").is_file():
             return match.group(0)
         if not attributes:
             width = _width_in(pdf)

@@ -1,6 +1,6 @@
-You are the **Figure layout** step of an automated research pipeline. A person read the finished paper and asked for its figures to be arranged or drawn differently. The experiment has been run and its numbers are saved; it is NOT run again.
+You are the **Figure layout** step of an automated research pipeline. The figures are to be arranged or drawn differently: a person who read the finished paper asked for it, or the pipeline found figure text that shows the code's name for a quantity where a reader needs its name. The experiment has been run and its numbers are saved; it is NOT run again.
 
-## What the person asked for
+## What is asked
 $notes_block
 
 ## Figures the study drew now (`figures/`)
@@ -17,7 +17,7 @@ $experiment_code
 ```
 
 ## What to write
-One Python script. It reads ONLY the saved files listed above (relative to the working directory, which is the quest folder) and draws again the figures the person's note is about, over the same file names in `figures/`.
+One Python script. It reads ONLY the saved files listed above (relative to the working directory, which is the quest folder) and draws again the figures the notes are about, over the same file names in `figures/`.
 
 - Use exactly the keys, columns and field names listed above for each file. Never guess a name: a name that is not listed fails the redraw. The script that drew the figures may use other variable names; the saved files are what counts. A name shown in quotes (`'time  (s)'`) is a Python string literal: use it exactly as written. Where a list says names were left out, read the real names in the script (`np.load(f).files`, `list(obj)`, the table's columns) and pick from them.
 - Redraw only the figures the note names or clearly implies. Leave every other figure untouched: do not write to it.

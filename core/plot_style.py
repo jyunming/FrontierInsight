@@ -103,6 +103,8 @@ PAPER_MAX_HEIGHT_IN = 3.2
 #: prints at the full width.
 PAPER_WIDE_ASPECT = 2.0
 PAPER_DPI = 300
+#: A scatter (or mesh) of more points than this is set as an image inside the paper copy's vector PDF.
+PAPER_RASTER_OVER = 5000
 
 
 def paper_profile() -> dict[str, object]:
@@ -115,10 +117,12 @@ def paper_profile() -> dict[str, object]:
         # Any other text (an annotation, a colorbar's tick text set by hand) is
         # scaled as the ticks are and kept between these sizes.
         "other_scale": round(PAPER_TICK_PT / HOUSE_TICK_PT, 4), "other_min_pt": 7.0, "other_max_pt": 9.0,
-        # Lines and markers drawn for a slide are heavy on a page: scaled down, never up.
-        "line_scale": 0.6, "line_min_pt": 0.6, "marker_scale": 0.65, "marker_min_pt": 1.5,
         "row_min_in": PAPER_ROW_MIN_IN, "row_max_in": PAPER_ROW_MAX_IN, "max_height_in": PAPER_MAX_HEIGHT_IN,
         "wide_aspect": PAPER_WIDE_ASPECT, "dpi": PAPER_DPI,
+        # A collection of more points or cells than this is an image inside the vector PDF.
+        "raster_over": PAPER_RASTER_OVER,
+        # A copy whose first layout failed tries another only within this many seconds of starting.
+        "budget_s": 20.0,
     }
 
 
@@ -136,6 +140,16 @@ def paper_figure_size(drawn_in, rows=1, cols=1, profile=None):
     height = min(max(height, rows * p["row_min_in"]), rows * p["row_max_in"])
     height = min(height, max(p["max_height_in"], rows * p["row_min_in"]))
     return width, round(height, 4), "full" if full else "half"
+
+
+def remove_paper_copies(figures_dir: Path, name: str) -> None:
+    """Remove the paper copy of figure ``name`` (``figures/paper/<stem>.pdf`` and ``.png``): a figure FI takes out of
+    ``figures/`` must not reach ``paper.pdf`` through its copy. Never raises."""
+    for suffix in (".pdf", ".png"):
+        try:
+            (Path(figures_dir) / PAPER_DIRNAME / f"{Path(name).stem}{suffix}").unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def figure_facecolor(paper_style: str) -> str:
@@ -822,13 +836,24 @@ try:
                         plot = _fi_plot_data(self, name)
                 except Exception:
                     record = None
-            # The paper copy (figures/paper/<stem>.pdf and .png): drawn from the same
-            # figure, which is then put back as the script left it. Never raises.
+            # The paper copy (figures/paper/<stem>.pdf and .png): drawn from a copy of
+            # the figure, which stays as the script left it. This file name's earlier
+            # copy goes first, whatever happens next: a copy that is not made again
+            # (the save was slow, the copy failed) must not show an older figure.
             paper_dir = _fi_paper_dir(fname)
             if paper_dir is not None:
-                info = _fi_paper_copy(self, fname, paper_dir) if saved_in < 10 else {"skipped": "slow to save"}
+                try:
+                    _fi_paper_clear(_fi_paper_outputs(fname, paper_dir)[1])
+                    info = _fi_paper_copy(self, fname, paper_dir) if saved_in < 10 else {"skipped": "slow to save"}
+                except Exception as exc:
+                    info = {"error": repr(exc)[:300]}
                 if record is not None:
                     record["paper"] = info
+                    # Titles the paper copy does not show: the writer is told, so the caption can say it.
+                    gone = ([info["suptitle_dropped"]] if info.get("suptitle_dropped") else []) + list(
+                        info.get("titles_dropped") or [])
+                    if "error" not in info and "skipped" not in info and gone:
+                        record["paper_dropped"] = gone
             if record is None:
                 return result
             try:
@@ -858,15 +883,48 @@ except Exception:
 # The paper copy, inserted into the recorder above (at @@PAPER_SOURCE@@, inside
 # its guarded block). A paper figure is the script's own figure drawn again under
 # the paper profile, never a redraw from numbers: what it plots is what the
-# script plotted. Every change is undone after the copy is saved, so a script that
-# saves the same figure again (a PNG, then a PDF) saves it as it drew it.
+# script plotted. It is drawn from an independent copy of the figure (a pickle
+# round trip), so the script's figure is never changed: a script that saves the
+# same figure again (a PNG, then a PDF) saves it as it drew it, and nothing has
+# to be undone. Only text changes size on the copy; lines, markers and a
+# scatter's points are as the script drew them (a bubble's size is data).
 _PAPER_SOURCE = '''\
+        import copyreg as _fi_copyreg
+        import io as _fi_io
+        import pickle as _fi_pickle
+        import types as _fi_types
         import matplotlib as _fi_mpl
-        from matplotlib.text import Text as _FiText
+        from matplotlib.legend import Legend as _FiLegend
+
+        try:
+            from matplotlib.backend_bases import _get_renderer as _fi_get_renderer
+        except Exception:
+            _fi_get_renderer = None
 
         _FI_PAPER = @@PAPER_PROFILE@@
 
 @@PAPER_SIZE@@
+
+        # Each legend keeps the artists it was made from, beside the texts it shows: the paper copy sets a legend
+        # elsewhere with the same entries, each drawn as the legend drew it (its own drawn keys are only the first
+        # piece of an error bar's).
+        try:
+            _fi_init_legend_box = _FiLegend._init_legend_box
+
+            def _fi_legend_box(self, handles, labels, *args, **kwargs):
+                handles, labels = list(handles), list(labels)
+                result = _fi_init_legend_box(self, handles, labels, *args, **kwargs)
+                try:
+                    keys = list(self.legend_handles)
+                    self._fi_entries = [(label, handle) for handle, label, key in zip(handles, labels, keys)
+                                        if key is not None]
+                except Exception:
+                    pass
+                return result
+
+            _FiLegend._init_legend_box = _fi_legend_box
+        except Exception:
+            pass
 
         def _fi_paper_dir(fname):
             # The paper copy goes beside the figure, in figures/paper/, only for a
@@ -884,6 +942,77 @@ _PAPER_SOURCE = '''\
                 return None
             return _fi_os.path.join(parent, _FI_PAPER["dirname"])
 
+        def _fi_paper_outputs(fname, paper_dir):
+            stem = _fi_os.path.splitext(_fi_os.path.basename(_fi_os.fsdecode(_fi_os.fspath(fname))))[0]
+            return stem, [_fi_os.path.join(paper_dir, stem + ext) for ext in (".pdf", ".png")]
+
+        def _fi_paper_clear(paths):
+            for path in paths:
+                try:
+                    _fi_os.remove(path)
+                except OSError:
+                    pass
+
+        class _FiCopier(_fi_pickle.Pickler):
+            # Pickles the figure as one pyplot does not manage, so the copy is never made pyplot's current figure
+            # (a later plt.savefig() of the script saves its own figure), and a plain function (a tick formatter's
+            # lambda, which cannot be pickled) by reference: the copy shares it.
+            def __init__(self, handle, fig, shared):
+                _fi_pickle.Pickler.__init__(self, handle, protocol=_fi_pickle.HIGHEST_PROTOCOL)
+                self._fi_fig = fig
+                self._fi_shared = shared
+
+            def reducer_override(self, obj):
+                if obj is self._fi_fig:
+                    state = obj.__getstate__()
+                    state.pop("_restore_to_pylab", None)
+                    return (_fi_copyreg._reconstructor, (type(obj), object, None), state)
+                return NotImplemented
+
+            def persistent_id(self, obj):
+                if isinstance(obj, _fi_types.FunctionType):
+                    self._fi_shared.append(obj)
+                    return len(self._fi_shared) - 1
+                return None
+
+        class _FiCopyLoader(_fi_pickle.Unpickler):
+            def __init__(self, handle, shared):
+                _fi_pickle.Unpickler.__init__(self, handle)
+                self._fi_shared = shared
+
+            def persistent_load(self, pid):
+                return self._fi_shared[pid]
+
+        def _fi_copy_maker(fig):
+            # A function that returns a new independent copy of fig at each call, with a canvas of its own. Raises
+            # when the figure cannot be copied.
+            shared = []
+            handle = _fi_io.BytesIO()
+            _FiCopier(handle, fig, shared).dump(fig)
+            data = handle.getvalue()
+
+            def make():
+                from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+                copy = _FiCopyLoader(_fi_io.BytesIO(data), shared).load()
+                FigureCanvasAgg(copy)
+                return copy
+            return make
+
+        def _fi_spec(ax):
+            # The place of an Axes in the figure's own grid: a colorbar made beside a panel puts the panel in a grid
+            # of its own inside that place.
+            try:
+                spec = ax.get_subplotspec()
+            except Exception:
+                return None
+            if spec is None:
+                return None
+            try:
+                return spec.get_topmost_subplotspec()
+            except Exception:
+                return spec
+
         def _fi_panels(fig):
             # What a reader sees as panels: every visible Axes but a colorbar's.
             return [ax for ax in fig.get_axes() if ax.get_visible() and getattr(ax, "_colorbar", None) is None]
@@ -891,10 +1020,7 @@ _PAPER_SOURCE = '''\
         def _fi_grid(panels):
             rows = cols = 1
             for ax in panels:
-                try:
-                    spec = ax.get_subplotspec()
-                except Exception:
-                    spec = None
+                spec = _fi_spec(ax)
                 if spec is None:
                     continue
                 r, c = spec.get_gridspec().get_geometry()
@@ -902,102 +1028,104 @@ _PAPER_SOURCE = '''\
             return rows, cols
 
         def _fi_place(ax):
+            spec = _fi_spec(ax)
             try:
-                spec = ax.get_subplotspec()
                 if spec is not None:
                     return (spec.rowspan.start, spec.rowspan.stop, spec.colspan.start, spec.colspan.stop)
             except Exception:
                 pass
             return tuple(round(float(v), 3) for v in ax.get_position().bounds)
 
+        def _fi_cap(rows):
+            # The tallest a paper copy is saved: the profile's height, or its rows at their least when that is more.
+            p = _FI_PAPER
+            return max(p["max_height_in"], max(1, int(rows)) * p["row_min_in"])
+
         def _fi_draw(fig):
+            # Lays the figure out and places its text without painting it (a scatter of many points costs nothing
+            # here); the renderer returned measures what is drawn where.
             try:
+                renderer = _fi_get_renderer(fig)
+                with renderer._draw_disabled():
+                    fig.draw(renderer)
+                return renderer
+            except (AttributeError, TypeError):
                 fig.canvas.draw()
                 return fig.canvas.get_renderer()
-            except Exception:
-                fig.draw_without_rendering()
-                return fig._get_renderer()
 
-        def _fi_size_of(undo, text, size):
-            old = text.get_fontsize()
-            if abs(float(old) - float(size)) < 1e-9:
-                return
-            text.set_fontsize(size)
-            undo.append(lambda t=text, o=old: t.set_fontsize(o))
+        def _fi_all_axes(fig):
+            # Every Axes, an inset's (a child of its Axes) included.
+            out, seen, todo = [], set(), list(fig.get_axes())
+            while todo:
+                ax = todo.pop(0)
+                if id(ax) in seen:
+                    continue
+                seen.add(id(ax))
+                out.append(ax)
+                todo.extend(getattr(ax, "child_axes", None) or [])
+            return out
 
         def _fi_all_titles(ax):
             return [t for t in (ax.title, getattr(ax, "_left_title", None), getattr(ax, "_right_title", None))
                     if t is not None]
 
         def _fi_legends(fig):
-            out = [ax.get_legend() for ax in fig.get_axes()]
+            out = [ax.get_legend() for ax in _fi_all_axes(fig)]
             return [leg for leg in out + list(getattr(fig, "legends", [])) if leg is not None]
 
-        def _fi_paper_text(fig, undo):
+        def _fi_other_pt(text):
             p = _FI_PAPER
-            for ax in fig.get_axes():
-                for name, axis in (("x", ax.xaxis), ("y", ax.yaxis)):
-                    olds = {}
-                    for which, kw in (("major", getattr(axis, "_major_tick_kw", {})),
-                                      ("minor", getattr(axis, "_minor_tick_kw", {}))):
-                        olds[which] = kw.get("labelsize", _fi_mpl.rcParams[name + "tick.labelsize"])
-                    ax.tick_params(axis=name, which="both", labelsize=p["tick_pt"])
+            return min(max(float(text.get_fontsize()) * p["other_scale"], p["other_min_pt"]), p["other_max_pt"])
 
-                    def back(ax=ax, name=name, olds=olds):
-                        for which, old in olds.items():
-                            ax.tick_params(axis=name, which=which, labelsize=old)
-                    undo.append(back)
-                    _fi_size_of(undo, axis.label, p["label_pt"])
-                    _fi_size_of(undo, axis.get_offset_text(), p["tick_pt"])
+        def _fi_paper_text(fig):
+            # Text at the body's sizes. Nothing else changes size.
+            p = _FI_PAPER
+            insets = {id(child) for ax in fig.get_axes() for child in (getattr(ax, "child_axes", None) or [])}
+            for ax in _fi_all_axes(fig):
+                inset = id(ax) in insets
+                try:
+                    ax.tick_params(axis="both", which="both", labelsize=p["tick_pt"])
+                except Exception:
+                    pass
+                for axis in (ax.xaxis, ax.yaxis):
+                    axis.label.set_fontsize(p["tick_pt"] if inset else p["label_pt"])
+                    axis.get_offset_text().set_fontsize(p["tick_pt"])
+                if inset:
+                    for title in _fi_all_titles(ax):
+                        title.set_fontsize(p["tick_pt"])
                 for text in ax.texts:
-                    _fi_size_of(undo, text, min(max(float(text.get_fontsize()) * p["other_scale"], p["other_min_pt"]),
-                                                p["other_max_pt"]))
+                    text.set_fontsize(_fi_other_pt(text))
             for leg in _fi_legends(fig):
                 for text in leg.get_texts():
-                    _fi_size_of(undo, text, p["legend_pt"])
-                _fi_size_of(undo, leg.get_title(), p["legend_pt"])
+                    text.set_fontsize(p["legend_pt"])
+                leg.get_title().set_fontsize(p["legend_pt"])
             for key in ("_supxlabel", "_supylabel"):
                 text = getattr(fig, key, None)
                 if text is not None:
-                    _fi_size_of(undo, text, p["label_pt"])
+                    text.set_fontsize(p["label_pt"])
             skip = {id(getattr(fig, k, None)) for k in ("_suptitle", "_supxlabel", "_supylabel")}
             for text in fig.texts:
                 if id(text) not in skip:
-                    _fi_size_of(undo, text, min(max(float(text.get_fontsize()) * p["other_scale"], p["other_min_pt"]),
-                                                p["other_max_pt"]))
+                    text.set_fontsize(_fi_other_pt(text))
 
-        def _fi_scaled(value, scale, low):
-            # Thinner, never thicker, and not below the floor unless it already was.
-            value = float(value)
-            return value if value <= low else max(low, value * scale)
-
-        def _fi_paper_lines(fig, undo):
-            p = _FI_PAPER
-            lines = [line for ax in fig.get_axes() for line in ax.get_lines()]
-            for leg in _fi_legends(fig):
-                lines += [h for h in (getattr(leg, "legend_handles", None) or getattr(leg, "legendHandles", None) or [])
-                          if hasattr(h, "get_markersize")]
-            for line in lines:
-                lw, ms = line.get_linewidth(), line.get_markersize()
-                line.set_linewidth(_fi_scaled(lw, p["line_scale"], p["line_min_pt"]))
-                line.set_markersize(_fi_scaled(ms, p["marker_scale"], p["marker_min_pt"]))
-                undo.append(lambda l=line, a=lw, b=ms: (l.set_linewidth(a), l.set_markersize(b)))
-            for ax in fig.get_axes():
+        def _fi_rasterize_big(fig):
+            # A collection of many points or cells is set as an image inside the vector PDF: drawn as vectors, a
+            # scatter of 200,000 points made a 9 MB file that took a minute to save.
+            out = 0
+            for ax in _fi_all_axes(fig):
                 for coll in ax.collections:
                     try:
-                        widths = [float(w) for w in coll.get_linewidths()]
-                        coll.set_linewidths([_fi_scaled(w, p["line_scale"], p["line_min_pt"]) for w in widths])
-                        undo.append(lambda c=coll, w=widths: c.set_linewidths(w))
+                        if hasattr(coll, "get_coordinates"):
+                            shape = coll.get_coordinates().shape
+                            n = int(shape[0]) * int(shape[1])
+                        else:
+                            n = max(len(coll.get_offsets()), len(getattr(coll, "_paths", None) or []))
                     except Exception:
-                        pass
-                    if isinstance(coll, _FiPathCollection) and hasattr(coll, "get_sizes"):
-                        try:
-                            sizes = _fi_np.asarray(coll.get_sizes(), dtype=float).copy()
-                            if len(sizes):
-                                coll.set_sizes(sizes * p["marker_scale"] ** 2)
-                                undo.append(lambda c=coll, s=sizes: c.set_sizes(s))
-                        except Exception:
-                            pass
+                        continue
+                    if n > _FI_PAPER["raster_over"]:
+                        coll.set_rasterized(True)
+                        out += 1
+            return out
 
         def _fi_set_loc(leg, loc):
             try:
@@ -1016,22 +1144,78 @@ _PAPER_SOURCE = '''\
                 pass
             return (bottom - 3 * fig.dpi / 72 - box.y0) / max(box.height, 1.0)
 
-        def _fi_entries(fig, legends):
-            # Each label of these legends once, with the artist it labels (the legend's
-            # own drawing of it when no Axes lists that label), in the legends' order.
-            known = {}
-            for ax in fig.get_axes():
-                for handle, label in zip(*ax.get_legend_handles_labels()):
-                    known.setdefault(label, handle)
-            entries = {}
-            for leg in legends:
-                proxies = list(getattr(leg, "legend_handles", None) or getattr(leg, "legendHandles", None) or [])
-                for i, text in enumerate(leg.get_texts()):
-                    label = text.get_text()
-                    handle = known.get(label, proxies[i] if i < len(proxies) else None)
-                    if handle is not None and label not in entries:
-                        entries[label] = handle
-            return entries
+        def _fi_legend_entries(leg):
+            # (label, artist) of each entry the legend shows, in its order, a label shown twice twice: the artists
+            # it was made from, else its own drawn keys.
+            texts = [t.get_text() for t in leg.get_texts()]
+            kept = getattr(leg, "_fi_entries", None)
+            if kept is not None and len(kept) == len(texts):
+                return [(text, handle) for text, (_label, handle) in zip(texts, kept)]
+            keys = [k for k in (getattr(leg, "legend_handles", None) or getattr(leg, "legendHandles", None) or [])
+                    if k is not None]
+            return [(text, keys[i]) for i, text in enumerate(texts) if i < len(keys)]
+
+        def _fi_key_colour(value):
+            from matplotlib.colors import to_hex
+
+            try:
+                arr = _fi_np.asarray(value, dtype=float)
+                if arr.ndim == 2:
+                    if not len(arr):
+                        return None
+                    arr = arr[0]
+                return to_hex(arr, keep_alpha=True)
+            except Exception:
+                try:
+                    return to_hex(value, keep_alpha=True)
+                except Exception:
+                    return str(value)
+
+        def _fi_key_style(handle):
+            # How a legend key draws its series: colour, line style and marker (fill, edge and hatch for a patch or
+            # a scatter). A container (error bars, bars) is drawn as its first piece.
+            artist, depth = handle, 0
+            while isinstance(artist, (tuple, list)) and depth < 4:
+                artist = next((a for a in artist if a is not None), None)
+                depth += 1
+            if artist is None:
+                return None
+            try:
+                if hasattr(artist, "get_marker"):
+                    return ("line", _fi_key_colour(artist.get_color()), str(artist.get_linestyle()),
+                            str(artist.get_marker()), _fi_key_colour(artist.get_markerfacecolor()))
+                if hasattr(artist, "get_facecolor"):
+                    hatch = artist.get_hatch() if hasattr(artist, "get_hatch") else None
+                    return (type(artist).__name__, _fi_key_colour(artist.get_facecolor()),
+                            _fi_key_colour(artist.get_edgecolor()), str(hatch))
+            except Exception:
+                pass
+            return (type(artist).__name__, id(artist))
+
+        def _fi_mergeable(groups):
+            # One legend for several panels says a name is drawn alike in every panel: only when it is, and no
+            # legend names two series alike.
+            styles = {}
+            for entries in groups:
+                names = [label for label, _ in entries]
+                if len(set(names)) != len(names):
+                    return False
+                for label, handle in entries:
+                    style = _fi_key_style(handle)
+                    if styles.setdefault(label, style) != style:
+                        return False
+            return True
+
+        def _fi_legend_kwargs(leg):
+            kw = {}
+            for key in ("numpoints", "scatterpoints", "markerscale"):
+                value = getattr(leg, key, None)
+                if value is not None:
+                    kw[key] = value
+            handler_map = getattr(leg, "_custom_handler_map", None)
+            if handler_map:
+                kw["handler_map"] = handler_map
+            return kw
 
         def _fi_fitted_legend(make, n, room, renderer, columns):
             # The legend make(ncol) with the most columns (up to `columns`) whose width fits
@@ -1050,27 +1234,32 @@ _PAPER_SOURCE = '''\
                 new.get_title().set_fontsize(_FI_PAPER["legend_pt"])
             return new
 
-        def _fi_figure_legend(fig, legends, loc, renderer, undo):
-            # One legend for the figure at `loc` ("outside lower center", ...), in place of
-            # `legends`; a constrained layout makes room for it.
-            entries = _fi_entries(fig, legends)
+        def _fi_figure_legend(fig, legends, loc, renderer, merge):
+            # One legend for the figure at `loc` ("outside lower center", ...), in place of `legends`; a constrained
+            # layout makes room for it. Merged, a name the legends share is listed once (they draw it alike).
+            entries, seen = [], set()
+            for leg in legends:
+                for label, handle in _fi_legend_entries(leg):
+                    if merge and label in seen:
+                        continue
+                    seen.add(label)
+                    entries.append((label, handle))
             if not entries:
                 return None
-            labels, handles = list(entries), list(entries.values())
+            labels, handles = [label for label, _ in entries], [handle for _, handle in entries]
             title = next((leg.get_title().get_text() for leg in legends if leg.get_title().get_text()), "")
             columns = 6 if loc.endswith("center") else 1
+            kw = _fi_legend_kwargs(legends[0])
 
             def make(ncol):
                 return _fi_titled(fig.legend(handles, labels, loc=loc, ncol=ncol, frameon=False,
-                                             fontsize=_FI_PAPER["legend_pt"], title=title or None), title)
+                                             fontsize=_FI_PAPER["legend_pt"], title=title or None, **kw), title)
             new = _fi_fitted_legend(make, len(labels), fig.bbox.width * 0.98, renderer, columns)
             for leg in legends:
                 leg.set_visible(False)
-                undo.append(lambda leg=leg: leg.set_visible(True))
-            undo.append(lambda new=new: new.remove())
             return new
 
-        def _fi_outside_figure_legends(fig, undo, renderer):
+        def _fi_outside_figure_legends(fig, renderer):
             # A figure legend placed off the canvas (bbox_to_anchor below it, kept by a
             # tight crop) is set "outside" the panels instead.
             moved, below = [], []
@@ -1089,7 +1278,7 @@ _PAPER_SOURCE = '''\
                     loc = "outside left upper"
                 else:
                     continue
-                new = _fi_figure_legend(fig, [leg], loc, renderer, undo)
+                new = _fi_figure_legend(fig, [leg], loc, renderer, False)
                 if new is None:
                     continue
                 moved.append({"panel": "figure", "to": loc})
@@ -1097,45 +1286,46 @@ _PAPER_SOURCE = '''\
                     below.append(new)
             return moved, below
 
-        def _fi_move_legends(fig, panels, undo, renderer, several):
-            # A legend over the data: first where matplotlib finds the emptiest corner;
-            # then, if that is over the data too, under the plot: one legend for the
-            # figure under its panels when there are several, else under the axes.
-            moved, below, still = [], [], []
+        def _fi_move_legends(fig, panels, renderer, several, constrained):
+            # A legend over the data: first where matplotlib finds the emptiest corner; then, if that is over the
+            # data too, under the plot: one legend for the figure under its panels when there are several and every
+            # panel's legend draws each name alike, else under its own axes.
+            moved, below, still, over = [], [], [], []
             for index, ax in enumerate(panels):
                 leg = ax.get_legend()
                 if leg is None or not leg.get_visible() or sum(_fi_legend_hits(ax, leg, renderer)) <= 0:
                     continue
-                old_loc, old_anchor = leg._loc, getattr(leg, "_bbox_to_anchor", None)
-
-                def back(leg=leg, loc=old_loc, anchor=old_anchor):
-                    leg._loc = loc
-                    leg._bbox_to_anchor = anchor
-                undo.append(back)
                 _fi_set_loc(leg, "best")
                 leg.set_bbox_to_anchor(None)
+                over.append((index, ax, leg))
+            if over:
+                # One draw places them all: each legend's place depends on its own axes only.
                 renderer = _fi_draw(fig)
+            for index, ax, leg in over:
                 if sum(_fi_legend_hits(ax, leg, renderer)) <= 0:
                     moved.append({"panel": index, "to": "best"})
                 else:
                     still.append((index, ax, leg))
-            if still and several:
-                new = _fi_figure_legend(fig, [leg for _, _, leg in still], "outside lower center", renderer, undo)
-                if new is not None:
-                    moved += [{"panel": index, "to": "below the panels"} for index, _, _ in still]
-                    below.append(new)
-                    return moved, below, renderer
+            if still and several and constrained:
+                shown = [ax.get_legend() for ax in panels]
+                groups = [_fi_legend_entries(leg) for leg in shown if leg is not None and leg.get_visible()]
+                if _fi_mergeable(groups):
+                    new = _fi_figure_legend(fig, [leg for _, _, leg in still], "outside lower center", renderer, True)
+                    if new is not None:
+                        moved += [{"panel": index, "to": "below the panels"} for index, _, _ in still]
+                        below.append(new)
+                        return moved, below, renderer
             for index, ax, leg in still:
-                entries = _fi_entries(fig, [leg])
+                entries = _fi_legend_entries(leg)
                 if not entries:
                     continue
-                labels, handles = list(entries), list(entries.values())
+                labels, handles = [label for label, _ in entries], [handle for _, handle in entries]
                 title = leg.get_title().get_text()
+                kw = _fi_legend_kwargs(leg)
 
-                def make(ncol, ax=ax, labels=labels, handles=handles, title=title):
+                def make(ncol, ax=ax, labels=labels, handles=handles, title=title, kw=kw):
                     return _fi_titled(ax.legend(handles, labels, loc="upper center", ncol=ncol, frameon=False,
-                                                fontsize=_FI_PAPER["legend_pt"], title=title or None), title)
-                undo.append(lambda ax=ax, leg=leg: setattr(ax, "legend_", leg))
+                                                fontsize=_FI_PAPER["legend_pt"], title=title or None, **kw), title)
                 new = _fi_fitted_legend(make, len(labels), ax.get_window_extent(renderer).width, renderer, 6)
                 new.set_bbox_to_anchor((0.5, _fi_below(fig, ax, renderer)), transform=ax.transAxes)
                 moved.append({"panel": index, "to": "below the axes"})
@@ -1170,7 +1360,7 @@ _PAPER_SOURCE = '''\
             out.append(line)
             return "\\n".join(out)
 
-        def _fi_wrap_labels(fig, panels, undo, renderer):
+        def _fi_wrap_labels(fig, panels, renderer):
             # An axis label longer than its axis, or cut by the canvas edge, is set on two
             # (or three) lines.
             wrapped = []
@@ -1190,155 +1380,159 @@ _PAPER_SOURCE = '''\
                     if new == text:
                         continue
                     label.set_text(new)
-                    undo.append(lambda t=label, o=text: t.set_text(o))
                     wrapped.append(text)
             return wrapped
 
-        def _fi_paper_copy(fig, fname, paper_dir):
+        def _fi_paper_attempt(fig, mode, stem, outputs):
+            # Draws `fig` (a copy) as the paper copy under one layout, "constrained", or "tight" or "none" when that
+            # fails, and saves it to `outputs`. Raises when it cannot.
             p = _FI_PAPER
-            undo = []
-            info = {}
-            stem = _fi_os.path.splitext(_fi_os.path.basename(_fi_os.fsdecode(_fi_os.fspath(fname))))[0]
-            outputs = [_fi_os.path.join(paper_dir, stem + ext) for ext in (".pdf", ".png")]
-            try:
-                panels = _fi_panels(fig)
-                rows, cols = _fi_grid(panels)
-                drawn = [float(v) for v in fig.get_size_inches()]
-                width, height, rule = _fi_paper_figure_size(drawn, rows, cols, p)
-                info.update({"file": p["dirname"] + "/" + stem + ".pdf", "png": p["dirname"] + "/" + stem + ".png",
-                             "drawn_in": [round(v, 3) for v in drawn], "width": rule})
-                # The layout: constrained, with the axes' places put back afterwards.
-                places = [(ax, ax.get_position(original=True).frozen(), ax.get_position(original=False).frozen())
-                          for ax in fig.get_axes()]
-                old_engine = fig.get_layout_engine()
+            panels = _fi_panels(fig)
+            rows, cols = _fi_grid(panels)
+            cap = _fi_cap(rows)
+            drawn = [float(v) for v in fig.get_size_inches()]
+            width, height, rule = _fi_paper_figure_size(drawn, rows, cols, p)
+            info = {"file": p["dirname"] + "/" + stem + ".pdf", "png": p["dirname"] + "/" + stem + ".png",
+                    "drawn_in": [round(v, 3) for v in drawn], "width": rule}
+            fig.set_layout_engine(mode)
+            constrained = mode == "constrained"
+            fig.set_size_inches(width, height)
+            # No title inside the plot: the caption carries it. A one-panel figure
+            # loses its title. In a figure of several panels the panels' titles name
+            # them and stay, all of them, when each fits over its panel; else all go.
+            dropped, kept = [], []
+            sup = getattr(fig, "_suptitle", None)
+            if sup is not None and sup.get_visible() and sup.get_text().strip():
+                info["suptitle_dropped"] = sup.get_text()
+                sup.set_visible(False)
+            several = len({_fi_place(ax) for ax in panels}) > 1
+            titles = [t for ax in panels for t in _fi_all_titles(ax) if t.get_visible() and t.get_text().strip()]
 
-                def back_layout(places=places, engine=old_engine):
-                    fig._layout_engine = engine
-                    for ax, original, active in places:
-                        ax._set_position(original, which="original")
-                        ax._set_position(active, which="active")
-                undo.append(back_layout)
-                fit = "constrained"
-                try:
-                    fig.set_layout_engine("constrained")
-                except Exception:
-                    fit = "tight"
-                undo.append(lambda size=list(drawn): fig.set_size_inches(*size))
-                fig.set_size_inches(width, height)
-                # No title inside the plot: the caption carries it. A one-panel figure
-                # loses its title. In a figure of several panels the panels' titles name
-                # them and stay, all of them, when each fits over its panel; else all go.
-                dropped, kept = [], []
-                sup = getattr(fig, "_suptitle", None)
-                if sup is not None and sup.get_visible() and sup.get_text().strip():
-                    info["suptitle_dropped"] = sup.get_text()
-                    sup.set_visible(False)
-                    undo.append(lambda t=sup: t.set_visible(True))
-                several = len({_fi_place(ax) for ax in panels}) > 1
-                titles = [t for ax in panels for t in _fi_all_titles(ax) if t.get_visible() and t.get_text().strip()]
-
-                def drop(texts):
-                    for text in texts:
-                        dropped.append(text.get_text())
-                        old = text.get_text()
-                        text.set_text("")
-                        undo.append(lambda t=text, o=old: t.set_text(o))
-                if several:
-                    for text in titles:
-                        _fi_size_of(undo, text, p["title_pt"])
+            def drop(texts):
+                for text in texts:
+                    dropped.append(text.get_text())
+                    text.set_text("")
+            if several:
+                for text in titles:
+                    text.set_fontsize(p["title_pt"])
+            else:
+                drop(titles)
+            _fi_paper_text(fig)
+            rasterized = _fi_rasterize_big(fig)
+            renderer = _fi_draw(fig)
+            if several and titles:
+                room = {id(t): ax.get_window_extent(renderer).width for ax in panels for t in _fi_all_titles(ax)}
+                if all(t.get_window_extent(renderer).width <= room.get(id(t), 0) for t in titles):
+                    kept = [t.get_text() for t in titles]
                 else:
                     drop(titles)
-                _fi_paper_text(fig, undo)
-                _fi_paper_lines(fig, undo)
+                    renderer = _fi_draw(fig)
+            wrapped = _fi_wrap_labels(fig, panels, renderer)
+            if wrapped:
                 renderer = _fi_draw(fig)
-                if several and titles:
-                    room = {id(t): ax.get_window_extent(renderer).width for ax in panels for t in _fi_all_titles(ax)}
-                    if all(t.get_window_extent(renderer).width <= room.get(id(t), 0) for t in titles):
-                        kept = [t.get_text() for t in titles]
-                    else:
-                        drop(titles)
-                        renderer = _fi_draw(fig)
-                wrapped = _fi_wrap_labels(fig, panels, undo, renderer)
-                if wrapped:
+            moved, below = _fi_outside_figure_legends(fig, renderer) if constrained else ([], [])
+            if moved:
+                renderer = _fi_draw(fig)
+            more, under, renderer = _fi_move_legends(fig, panels, renderer, several, constrained)
+            moved += more
+            below += under
+            if below:
+                # A legend set under the plot takes room of its own: the canvas grows by
+                # it, up to the height cap, so the panels keep their height.
+                renderer = _fi_draw(fig)
+                extra = max(leg.get_window_extent(renderer).height for leg in below) / fig.dpi + 0.05
+                height = min(height + extra, cap)
+                fig.set_size_inches(width, height)
+                renderer = _fi_draw(fig)
+                for _ in range(2):
+                    for leg in below:
+                        if leg.axes is not None:
+                            leg.set_bbox_to_anchor((0.5, _fi_below(fig, leg.axes, renderer)),
+                                                   transform=leg.axes.transAxes)
                     renderer = _fi_draw(fig)
-                moved, below = _fi_outside_figure_legends(fig, undo, renderer)
-                if moved:
+            more_wrapped = _fi_wrap_labels(fig, panels, renderer)
+            if more_wrapped:
+                wrapped += more_wrapped
+                renderer = _fi_draw(fig)
+            # Anything still off the canvas (text placed outside the axes by hand) is kept by a tight crop, as is
+            # everything when the layout is not a constrained one; the canvas is then narrowed (and shortened) by
+            # what the crop adds, so the saved copy is no wider than the paper width and no taller than the cap.
+            pad = 0.02
+            tight = not constrained
+            box = fig.get_tightbbox(renderer)
+            if tight or box.x0 < -0.02 or box.x1 > width + 0.02 or box.y0 < -0.02 or box.y1 > height + 0.02:
+                tight = True
+                for _ in range(4):
+                    wide = box.width + 2 * pad - width
+                    tall = box.height + 2 * pad - cap
+                    if wide <= 0.02 and tall <= 0.02:
+                        break
+                    w_now, h_now = (float(v) for v in fig.get_size_inches())
+                    fig.set_size_inches(max(w_now - max(wide, 0.0), width * 0.5), max(h_now - max(tall, 0.0), cap * 0.3))
                     renderer = _fi_draw(fig)
-                more, under, renderer = _fi_move_legends(fig, panels, undo, renderer, several)
-                moved += more
-                below += under
-                if below:
-                    # A legend set under the plot takes room of its own: the canvas grows by
-                    # it, so the panels keep their height.
-                    renderer = _fi_draw(fig)
-                    extra = max(leg.get_window_extent(renderer).height for leg in below) / fig.dpi + 0.05
-                    height = min(height + extra, max(p["max_height_in"], rows * p["row_min_in"] + extra))
-                    fig.set_size_inches(width, height)
-                    renderer = _fi_draw(fig)
-                    for _ in range(2):
-                        for leg in below:
-                            if leg.axes is not None:
-                                leg.set_bbox_to_anchor((0.5, _fi_below(fig, leg.axes, renderer)),
-                                                       transform=leg.axes.transAxes)
-                        renderer = _fi_draw(fig)
-                more_wrapped = _fi_wrap_labels(fig, panels, undo, renderer)
-                if more_wrapped:
-                    wrapped += more_wrapped
-                    renderer = _fi_draw(fig)
-                # Anything still off the canvas (text placed outside the axes by hand) is
-                # kept by a tight crop; the canvas is first narrowed by what sticks out,
-                # so the saved width stays the paper width.
-                tight = False
-                box = fig.get_tightbbox(renderer)
-                over = max(0.0, -box.x0) + max(0.0, box.x1 - width)
-                if fit == "tight" or over > 0.02 or box.y0 < -0.02 or box.y1 > height + 0.02:
-                    tight = True
-                    if over > 0.02:
-                        fig.set_size_inches(max(width - over, width * 0.5), height)
-                        renderer = _fi_draw(fig)
-                        box = fig.get_tightbbox(renderer)
-                    fit = fit + ", cropped"
-                pad = 0.02
-                saved = ([box.width + 2 * pad, box.height + 2 * pad] if tight
-                         else [float(v) for v in fig.get_size_inches()])
-                layout = []
-                for index, ax in enumerate(panels):
-                    leg = ax.get_legend()
-                    if leg is not None and leg.get_visible():
-                        line_px, points = _fi_legend_hits(ax, leg, renderer)
-                        if line_px > 0 or points > 0:
-                            layout.append({"check": "legend_over_data", "panel": index,
-                                           "legend": [t.get_text() for t in leg.get_texts()],
-                                           "line_px": round(line_px, 1), "points": points})
-                ticks = _fi_tick_pt(fig)
-                labels = [float(t.get_fontsize()) for ax in panels for t in (ax.xaxis.label, ax.yaxis.label)
-                          if t.get_visible() and t.get_text().strip()]
-                _fi_os.makedirs(paper_dir, exist_ok=True)
-                kw = {"bbox_inches": "tight" if tight else None, "pad_inches": pad}
-                with _fi_mpl.rc_context({"pdf.fonttype": 42, "savefig.bbox": "standard"}):
-                    _fi_savefig(fig, outputs[0], format="pdf", **kw)
-                    _fi_savefig(fig, outputs[1], format="png", dpi=p["dpi"], **kw)
-                info.update({
-                    "width_in": round(saved[0], 3), "height_in": round(saved[1], 3), "fit": fit,
-                    "tick_pt": ticks, "label_pt": min(labels) if labels else None,
-                    "titles_dropped": dropped, "titles_kept": kept, "labels_wrapped": wrapped,
-                    "legend_moved": moved, "layout": layout,
-                })
-            except Exception as exc:
-                for path in outputs:
-                    try:
-                        _fi_os.remove(path)
-                    except OSError:
-                        pass
-                info = {"error": repr(exc)[:300]}
-            finally:
-                for step in reversed(undo):
-                    try:
-                        step()
-                    except Exception:
-                        pass
-                fig.stale = True
+                    box = fig.get_tightbbox(renderer)
+                if box.height + 2 * pad > cap + 0.05:
+                    # Taller than a page allows even after shortening: no copy rather than one the page cannot hold.
+                    raise ValueError("the copy is %.2f in tall, more than the %.2f in a paper figure may be"
+                                     % (box.height + 2 * pad, cap))
+            saved = ([box.width + 2 * pad, box.height + 2 * pad] if tight
+                     else [float(v) for v in fig.get_size_inches()])
+            layout = []
+            for index, ax in enumerate(panels):
+                leg = ax.get_legend()
+                if leg is not None and leg.get_visible():
+                    line_px, points = _fi_legend_hits(ax, leg, renderer)
+                    if line_px > 0 or points > 0:
+                        layout.append({"check": "legend_over_data", "panel": index,
+                                       "legend": [t.get_text() for t in leg.get_texts()],
+                                       "line_px": round(line_px, 1), "points": points})
+            ticks = _fi_tick_pt(fig)
+            labels = [float(t.get_fontsize()) for ax in panels for t in (ax.xaxis.label, ax.yaxis.label)
+                      if t.get_visible() and t.get_text().strip()]
+            _fi_os.makedirs(_fi_os.path.dirname(outputs[0]), exist_ok=True)
+            kw = {"bbox_inches": "tight" if tight else None, "pad_inches": pad, "dpi": p["dpi"]}
+            with _fi_mpl.rc_context({"pdf.fonttype": 42, "savefig.bbox": "standard"}):
+                _fi_savefig(fig, outputs[0], format="pdf", **kw)
+                _fi_savefig(fig, outputs[1], format="png", **kw)
+            info.update({
+                "width_in": round(saved[0], 3), "height_in": round(saved[1], 3),
+                "fit": mode + (", cropped" if tight else ""),
+                "tick_pt": ticks, "label_pt": min(labels) if labels else None,
+                "titles_dropped": dropped, "titles_kept": kept, "labels_wrapped": wrapped,
+                "legend_moved": moved, "layout": layout,
+            })
+            if rasterized:
+                info["rasterized"] = rasterized
             return info
+
+        def _fi_paper_copy(fig, fname, paper_dir):
+            # The paper copy of fig, drawn from an independent copy of it: fig itself is never changed. The caller
+            # has removed this file name's earlier copy; when no copy can be made, none is left. Never raises.
+            started = _fi_time.perf_counter()
+            stem, outputs = _fi_paper_outputs(fname, paper_dir)
+            try:
+                _fi_os.makedirs(paper_dir, exist_ok=True)
+            except OSError as exc:
+                return {"error": "no folder for the paper copy: " + repr(exc)[:240]}
+            try:
+                make = _fi_copy_maker(fig)
+            except Exception as exc:
+                return {"error": "the figure could not be copied: " + repr(exc)[:240]}
+            failed = []
+            for mode in ("constrained", "tight", "none"):
+                if failed and _fi_time.perf_counter() - started > _FI_PAPER["budget_s"]:
+                    failed.append("no time left for another layout")
+                    break
+                try:
+                    info = _fi_paper_attempt(make(), mode, stem, outputs)
+                except Exception as exc:
+                    _fi_paper_clear(outputs)
+                    failed.append(mode + ": " + repr(exc)[:200])
+                    continue
+                if failed:
+                    info["layouts_failed"] = failed
+                return info
+            return {"error": "; ".join(failed)[:600]}
 '''
 
 

@@ -437,6 +437,9 @@ class QuestState(TypedDict, total=False):
     # ``_figure_overlap_findings``). One such round per quest, so a model that
     # cannot lay a figure out is not asked again.
     figure_overlap_repaired: bool
+    # Set once figure text that shows the code's name for a quantity was sent to the redraw from the saved numbers
+    # (``_node_write``, core/figure_labels.py): once per quest.
+    figure_labels_redrawn: bool
     # Set by the execute-repair loop when a script exits 0 but every
     # numeric metric is ~0 (a degenerate run) and the repair attempts
     # couldn't produce real numbers. analyze/write/review read this so a
@@ -10453,11 +10456,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         for found in typed.values():
             drop |= set(_figdata.figures_to_drop(found, figures))
         removed = [n for n in figures if Path(n).name in drop]
+        from .plot_style import remove_paper_copies
+
         for name in removed:
             targets = [self.quest_root / "figures" / name]
-            # The figure's record is shared by its other formats: it goes with the last of them.
+            # The figure's record and its paper copy are shared by its other formats: they go with the last of them.
             if not any(Path(n).stem == Path(name).stem and n not in removed for n in figures):
                 targets += [records_dir / f"{Path(name).stem}.json", self.quest_root / "figures" / f"{Path(name).stem}.json"]
+                remove_paper_copies(self.quest_root / "figures", name)
             for target in targets:
                 try:
                     target.unlink(missing_ok=True)
@@ -10491,8 +10497,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             text = _best_report.strip_for_checks(paper_md, self._best_design_section(state, paper_md))
             figures: set[str] | None = None
             if (self.quest_root / "figures").is_dir():  # no figures folder at all: which figures the run drew is not known
-                figures = {p.name for sub in ("figures", "paper") if (self.quest_root / sub).is_dir()
-                           for p in (self.quest_root / sub).rglob("*") if p.is_file()}
+                figures = _figure_files_on_disk(self.quest_root)
                 if not any(Path(n).suffix.lower() in _FIGURE_SUFFIXES for n in figures):
                     figures = None  # the run drew none: a paper citing one is not judged here
             hits = _record_claims.contradictions(
@@ -16832,12 +16837,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             and "literature" not in f.parts
         )
         data = list(dict.fromkeys(data))
+        from .figure_labels import MARK as _LABEL_MARK
+
+        def persons(found: list[str]) -> list[str]:
+            # FI's own requests (figure text that shows a code name, ``_node_write``) are not a reader's: one the
+            # redraw could not carry out is said in run.log, and the paper is not written again for it.
+            return [n for n in found if _LABEL_MARK not in n]
         if not notes or not figures or not data:
             self._log.warning(
                 "[replot_layout] nothing to redraw from (%s); the figures stay as they are",
                 "no layout note" if not notes else "no figure" if not figures else "no saved numbers",
             )
-            return {**done, "layout_missed": notes}
+            return {**done, "layout_missed": persons(notes)}
         from .data_shape import describe_data_files
 
         experiment = self.quest_root / "code" / "experiment.py"
@@ -16951,6 +16962,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if failed or f.startswith("data/") or Path(f).name not in drawn:
                     self._log.warning("[replot_layout] %s was added by the script; it is removed", f)
                     path.unlink(missing_ok=True)
+                    if f.startswith("figures/"):
+                        # Its paper copy goes with it (or is the earlier one again, for a file name the run had).
+                        _put_back_paper_copies(backup / "figures", fig_dir, f)
             if failed:
                 what = "ran too long and was stopped" if timed_out else f"stopped with an error (exit code {result.returncode})"
             elif (len(not_drawn) < len(notes) and all(digest(fig_dir / f) == before_fig[f] for f in figures)
@@ -16975,10 +16989,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                   "do not guess a name.\n"
             )
         if failed:
-            done["layout_missed"] = notes
+            done["layout_missed"] = persons(notes)
             # A note the script said is about the text (NOT_DRAWN) goes to the writer, not onto the "not applied" line.
             declared = {n.casefold() for n in not_drawn}
-            done["layout_not_redrawn"] = [n for n in notes if n.casefold() not in declared] or notes
+            done["layout_not_redrawn"] = persons([n for n in notes if n.casefold() not in declared] or notes)
             self._log.warning(
                 "[replot_layout] your figure request was NOT applied: two tries at redrawing did not work, so the "
                 "figures are as they were (%s)", "; ".join(n[:120] for n in notes))
@@ -19368,6 +19382,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # A layout note waits through an extended run (its figures are drawn again after the paper is written).
             "refine_layout": layout if refine_round else list(state.get("refine_layout") or []),
         }
+        if not refine_round and not needs_experiment and not extend and not state.get("figure_labels_redrawn"):
+            # Figure text that shows the code's name for a quantity (core/figure_labels.py): the figures are drawn
+            # again from the saved numbers, once per quest, by the same redraw as a person's layout note. The
+            # experiment is not run again and no repair attempt is spent.
+            labels = _figure_label_findings(state, self.quest_root / "code")
+            if labels:
+                out["refine_layout"] = list(out["refine_layout"]) + labels
+                out["figure_labels_redrawn"] = True
+                self._log.info("[write] %d figure label(s) show the code's name for a quantity; the figures are "
+                               "drawn again from the saved numbers to rename them", len(labels))
         if reported:
             out["extend_missed"], out["layout_missed"] = [], []
         # A new refine starts over: an extension it asks for records its own check (``_node_implement``).
@@ -26717,11 +26741,17 @@ def _replicate_env(
     LANG and SystemRoot (Windows) and the venv python.exe would fail at its
     DLL-load step.
     """
-    return {
+    env = {
         **(exec_env or scrub_secrets()),
         "FI_REPLICATE_SEED": str(index * stride),
         "FI_REPLICATE_INDEX": str(index),
     }
+    if index > 0:
+        # A replicate's figures are put back to the first run's, or redrawn as the mean over the seeds: a paper copy
+        # of them (core/plot_style.py) would be drawn for nothing, and on a large figure that costs as much as the
+        # figure itself.
+        env["FI_PAPER_FIGURES"] = "0"
+    return env
 
 
 def _script_reads_replicate_seed(code_path: Path) -> bool:
@@ -27509,7 +27539,7 @@ def _replicate_metric_kinds(state: "QuestState") -> dict[str, str]:
 # engine.max_iterations, and each script's own repairs by engine.exec_reflect_max_iterations.
 _FRESH_SCRIPT: dict[str, Any] = {
     "exec_reflect_iter": 0, "exec_reflect_history": [], "exec_give_up_reason": "", "exec_patch_pending": False,
-    "run_manifest_failures": 0, "run_manifest_analysis_only": False, "figure_data_repairs": 0, "figure_overlap_repaired": False, "bounded_seen": [],
+    "run_manifest_failures": 0, "run_manifest_analysis_only": False, "figure_data_repairs": 0, "figure_overlap_repaired": False, "figure_labels_redrawn": False, "bounded_seen": [],
 }
 
 
@@ -29021,6 +29051,22 @@ def _put_back_paper_copies(source: Path, figures_dir: Path, name: str) -> None:
             target.unlink(missing_ok=True)
 
 
+def _figure_files_on_disk(quest_root: Path) -> set[str]:
+    """The names of the files in ``figures/`` and ``paper/``, the figures' paper copies (``figures/paper/``) left out: a
+    copy is not the figure, and a figure FI dropped must not count as drawn through the copy it left."""
+    from .plot_style import PAPER_DIRNAME
+
+    out: set[str] = set()
+    for sub in ("figures", "paper"):
+        root = Path(quest_root) / sub
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*"):
+            if p.is_file() and not (p.parent.name == PAPER_DIRNAME and p.parent.parent.name == "figures"):
+                out.add(p.name)
+    return out
+
+
 def _paper_copies(figures_dir: Path, name: str) -> dict[str, bytes]:
     """The paper copy of figure ``name`` (``figures/paper/<stem>.pdf`` and ``.png``, ``core/plot_style.py``), by file
     name: put back with the figure, so the paper and the slides show the same run."""
@@ -29146,21 +29192,32 @@ def _figure_overlap_findings(state: QuestState) -> list[str]:
                     )
     except Exception:  # noqa: BLE001
         return []
-    return found + _figure_label_findings(state)
+    return found
 
 
-def _figure_label_findings(state: QuestState) -> list[str]:
-    """Axis labels of the run's figures that show the code's name for a quantity (``Ea_hat``, ``pi1``), one sentence
-    each, with the plan's label to rename it to when the plan gives one (``core/figure_labels.py``). They ride the same
-    one redraw as the layout findings. A figure drawn as the mean over the seeds counts too: the redraw takes its labels
-    from the script's figure. Never raises."""
+def _figure_label_findings(state: QuestState, code_dir: Path | None = None) -> list[str]:
+    """Axis labels, panel titles and legend entries of the run's figures that show the code's name for a quantity
+    (``Ea_hat``, ``pi1``), one sentence each, with the plan's label to use when the plan gives one
+    (``core/figure_labels.py``). A name counts when the plan or the experiment's code (the ``.py`` files in
+    ``code_dir`` the run wrote, not FI's redraw scripts) names it and it is written as code writes a name. They go to
+    the redraw from the saved numbers (``_node_write``), not to a repair of the script. Never raises."""
     try:
         from . import figure_labels as _figure_labels
         from .plan import plan_labels, plan_names
 
+        sources: list[str] = []
+        if code_dir is not None and Path(code_dir).is_dir():
+            for path in sorted(Path(code_dir).rglob("*.py")):
+                if path.name in ("replot_layout.py", "replot_figures.py") or len(sources) >= 50:
+                    continue
+                try:
+                    sources.append(path.read_text(encoding="utf-8", errors="replace")[:400_000])
+                except OSError:
+                    continue
         protocol = (state.get("design") or {}).get("protocol")
         found = _figure_labels.findings(state.get("figure_records") or {}, list(state.get("figures") or []),
-                                        plan_labels(protocol), plan_names(protocol))
+                                        plan_labels(protocol), plan_names(protocol),
+                                        _figure_labels.code_identifiers(sources))
         return [_figure_labels.sentence(f) for f in found]
     except Exception:  # noqa: BLE001
         return []
@@ -29168,50 +29225,28 @@ def _figure_label_findings(state: QuestState) -> list[str]:
 
 def _figure_overlap_directive(findings: list[str]) -> str:
     """Stands where the traceback would be in the ``execute_reflect`` prompt, for
-    the one redraw a run whose figures overlap, or whose axis labels show the
-    code's names, is offered (see ``Engine._node_execute_reflect``)."""
-    from .figure_labels import MARK
-
-    labels = [f for f in findings if MARK in f]
-    layout = [f for f in findings if MARK not in f]
-    shown = (layout[:8] + labels[:8])
-    parts = [
+    the one redraw a run whose figures overlap is offered (see
+    ``Engine._node_execute_reflect``)."""
+    return (
         "FIGURE LAYOUT: the script exited 0, printed its RESULT_JSON and drew its figures, "
         "and those results stand: the account of a crash above does not apply. But the saved "
-        "figures " + ("have text or a legend drawn over what a reader needs, measured on the finished canvas"
-                      if layout else "")
-        + (", and " if layout and labels else "")
-        + ("label axes with the names the code gives its variables, which a reader cannot read" if labels else "")
-        + ":\n" + "\n".join(f"- {finding}" for finding in shown)
-    ]
-    if layout:
-        parts.append(
-            "Change only how these figures are laid out, so that nothing is drawn over "
-            "anything else. For a legend over the data: put it outside the axes (loc=\"upper left\" "
-            "with bbox_to_anchor=(1.02, 1.0), or loc=\"lower center\" with bbox_to_anchor=(0.5, 1.02) "
-            "and ncol), or in a corner the data does not reach, or make it smaller (fontsize, ncol). "
-            "loc=\"best\" alone is not a fix: a bare ax.legend() already uses it, and it only picks the "
-            "emptiest corner, which is not always empty. Keep the legend inside the saved image "
-            "(bbox_inches=\"tight\" does that). For a figure title over a panel title: make "
-            "room for it (fig.suptitle(..., y=1.02) with bbox_inches=\"tight\", or "
-            "fig.tight_layout(rect=(0, 0, 1, 0.94)), or a constrained layout)."
-        )
-    if labels:
-        parts.append(
-            "Rename each axis label named above as it says: the plan's name for the quantity where one is given, "
-            "otherwise words a reader uses, with its symbol in $...$ and its unit (for example "
-            "\"Activation energy $E_a$ (kJ/mol)\"). Change the text of those axis labels only."
-        )
-    allowed = ", ".join(
-        (["positions, sizes and the number of legend columns"] if layout else [])
-        + (["the text of the axis labels named above"] if labels else []))
-    parts.append(
+        "figures have text or a legend drawn over what a reader needs, measured on the "
+        "finished canvas:\n"
+        + "\n".join(f"- {finding}" for finding in findings[:8])
+        + "\n\nChange only how these figures are laid out, so that nothing is drawn over "
+        "anything else. For a legend over the data: put it outside the axes (loc=\"upper left\" "
+        "with bbox_to_anchor=(1.02, 1.0), or loc=\"lower center\" with bbox_to_anchor=(0.5, 1.02) "
+        "and ncol), or in a corner the data does not reach, or make it smaller (fontsize, ncol). "
+        "loc=\"best\" alone is not a fix: a bare ax.legend() already uses it, and it only picks the "
+        "emptiest corner, which is not always empty. Keep the legend inside the saved image "
+        "(bbox_inches=\"tight\" does that). For a figure title over a panel title: make "
+        "room for it (fig.suptitle(..., y=1.02) with bbox_inches=\"tight\", or "
+        "fig.tight_layout(rect=(0, 0, 1, 0.94)), or a constrained layout).\n\n"
         "Do NOT change any computation, data, parameter, use of the random seed, printed value, "
         "the final RESULT_JSON line, the file name of any figure, or what any panel plots: only "
-        f"{allowed}. Return the whole script in `code`, one "
+        "positions, sizes and the number of legend columns. Return the whole script in `code`, one "
         "sentence in `patch_summary`, and leave `give_up_reason` empty."
     )
-    return "\n\n".join(parts)
 
 
 def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None) -> str:
@@ -29253,6 +29288,13 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
         note += f" — each line is the mean of {mean_of} seeds, shaded with its 95% confidence interval"
     elif single_seed is not None:
         note += f" — shows {_single_seed_note(single_seed, n_seeds)}"
+    # The paper copy drops a figure's title (the caption carries it, core/plot_style.py): what it said reaches the
+    # reader only through the caption.
+    gone = [" ".join(str(t).split()) for t in ((record or {}).get("paper_dropped") or []) if str(t).strip()]
+    if gone:
+        note += (" — in paper.pdf this figure does not show its title" + ("s " if len(gone) > 1 else " ")
+                 + "; ".join(f'"{_one_line(t, 120)}"' for t in gone)
+                 + ": put in the caption whatever it says that a reader needs")
     return note
 
 
