@@ -154,6 +154,21 @@ def test_a_standard_error_far_too_small_is_a_fault_and_a_right_one_is_not():
     assert not tc.calibration(cells, proto).faults
 
 
+def test_estimates_that_never_vary_while_the_trials_report_an_error_are_a_fault_a_noise_free_setting_is_not():
+    """A simulation that ignores its seed returns one number a trial: with only a standard error declared (no interval,
+    so no coverage), the estimates' spread is 0 against a reported error of 0.5, a gross miss of the ratio. Before, a
+    setting with no spread was skipped and this passed. A setting where the error reported is nil too has no noise."""
+    rng = random.Random(8)
+    proto = _proto(known("x_hat", "x_true", se="x_se"), thresholds={"x_true": 5.0})
+    same = _cells({f"s{i}": {"x_hat": [5.3] * 50, "x_se": [0.5] * 50} for i in range(4)})
+    cal = tc.calibration(same, proto)
+    assert [q.kind for q in cal.faults] == ["se_ratio"] and all(s.value == 0.0 for s in cal.faults[0].settings)
+    quiet = _cells({f"s{i}": {"x_hat": [5.0] * 50, "x_se": [0.0] * 50} for i in range(4)})
+    assert not tc.calibration(quiet, proto).faults, "no noise and no error reported: nothing to compare"
+    noisy = _cells({f"s{i}": {"x_hat": [5 + rng.gauss(0, 0.5) for _ in range(50)], "x_se": [0.5] * 50} for i in range(4)})
+    assert not tc.calibration(noisy, proto).faults, "a right error is still not a fault"
+
+
 def test_coverage_is_computed_by_fi_from_the_interval_and_the_true_value_never_from_the_codes_flag():
     rng = random.Random(5)
     # The code's interval is around a value 3 standard errors off the truth, and its own flag says it always covered.
@@ -357,7 +372,10 @@ def test_replay_r2_wrong_two_step_errors_are_caught():
     faults = {(q.kind, q.label) for q in cal.faults}
     assert ("se_ratio", "two_step_ea") in faults and ("se_ratio", "two_step_ln_a") in faults
     ratio = next(q for q in cal.faults if q.kind == "se_ratio" and q.label == "two_step_ea")
-    assert all(s.value > 5 for s in ratio.settings)
+    # a setting whose estimates never vary (noise_fraction=0) while the code reports an error of its own reads 0 (a fault of
+    # its own, since the code claims an error it does not show); every setting with noise is far above 5
+    assert all(s.value > 5 for s in ratio.settings if "noise_fraction=0.0," not in s.key)
+    assert all(s.value == 0.0 for s in ratio.settings if "noise_fraction=0.0," in s.key)
     assert not {label for _k, label in faults} & {"global_ea", "global_ln_a"}
 
 
