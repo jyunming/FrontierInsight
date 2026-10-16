@@ -576,6 +576,39 @@ def test_g_trials_that_failed_are_never_dropped_into_a_pass(tmp_path: Path) -> N
     assert any("trials" in f and "failed" in f for f in found), found
 
 
+ONE_LOST = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    if trial_id == 7:
+        LOSE
+    return {"x": random.Random(seed).expovariate(1.0)}
+'''
+
+
+@pytest.mark.parametrize("lost", ['raise OverflowError("blew up")', 'return {"x": float("nan")}'])
+def test_a_check_with_any_failed_or_non_finite_trial_is_never_a_pass(tmp_path: Path, lost: str) -> None:
+    """Review pass 2, P0-2: one trial of hundreds raises, or gives NaN. The others' mean is right, but a mean of the
+    trials that survived is not the case's mean (a wrong simulation whose largest draws crash passed so): the check is
+    not decided, and says how many trials failed. It is never a pass."""
+    check = {"name": "mean_wait", "kind": "special_case", "expected": 1.0, "tolerance": 0.2, "case": {"n": 1},
+             "measure": "x", "reference": "derivation: an exponential with rate 1 has mean 1"}
+    _c, problems, judged, found = _plain(_synth(tmp_path, ONE_LOST.replace("LOSE", lost)), [check], timeout_s=60)
+    (j,) = judged
+    assert j["passed_by_engine"] is None and j.get("undecided"), (j, problems)
+    assert j["mc"]["why"] == "failed_trials" and j["mc"]["failed_trials"] == 1, j["mc"]
+    assert any("was not decided" in f and f"1 of {j['mc']['started']} trials" in f for f in found), found
+    assert "mean_wait" not in oc.engine_passed(judged)
+
+
+def test_any_failed_trial_leaves_a_pass_undecided_and_more_than_half_fails() -> None:
+    assert mc.failed_share_verdict(1, 10_000, "pass") == ("undecided", "failed_trials")
+    assert mc.failed_share_verdict(1, 10_000, None) == ("undecided", "failed_trials")
+    assert mc.failed_share_verdict(1, 10_000, "fail") == ("fail", "")
+    assert mc.failed_share_verdict(6, 10, "pass") == ("fail", "failed_trials")
+    assert mc.failed_share_verdict(0, 10, "pass") == ("pass", "")
+
+
 # --- not decided is never validated --------------------------------------------------------------------------------
 
 

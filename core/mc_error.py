@@ -32,8 +32,8 @@ judges with them. The first rule is that a check the trials cannot decide is nev
   tolerance is never widened, and a tolerance of 0 stays 0.
 * **Failed trials count** (:func:`failed_share_verdict`): a trial that raised, or gave no number for the check, is not
   left out quietly. More than :data:`FAULT_SHARE` of the check's trials failing is a failure of the check (a fault, sent
-  to repair); more than :data:`STATE_SHARE` makes a check that would pass not decided, since the trials that finished
-  cannot stand for the case. (The shares are those FI uses for the main run's trials.)
+  to repair); any failed trial at all makes a check that would pass not decided, since the trials that finished cannot
+  stand for the case (a wrong mean whose largest draws crash would pass on the survivors).
 * **A number that does not move** in the first batch is judged at once on trial 0's number, as a deterministic check
   is, so a constant quantity never runs to the time limit; the one exception is a 0/1 outcome that has not happened yet
   (or always happened) whose expected value lies strictly between 0 and 1, in a simulation whose other numbers do
@@ -65,8 +65,6 @@ PILOT_SHARE = 1 / 3
 GROWTH = 4
 #: More than this share of a check's trials failing is a failure of the check: a fault in the simulation, repaired.
 FAULT_SHARE = 0.5
-#: More than this share failing leaves a check that would pass not decided, with the failures said.
-STATE_SHARE = 0.05
 
 
 def mean_names(protocol: dict[str, Any] | None) -> frozenset[str]:
@@ -392,13 +390,13 @@ def worst(values: list[float | None], expected: float) -> int | None:
 
 def failed_share_verdict(failed: int, started: int, verdict: str | None) -> tuple[str | None, str]:
     """``(the verdict once failed trials count, why)``: more than :data:`FAULT_SHARE` of ``started`` failing is a
-    ``"fail"``; more than :data:`STATE_SHARE` makes a ``"pass"`` (or an open one) ``"undecided"``; else as it was."""
+    ``"fail"``; any failed or non-finite trial makes a ``"pass"`` (or an open one) ``"undecided"``, since the mean of
+    the trials that survived is not the case's mean; else as it was."""
     if started <= 0 or failed <= 0:
         return verdict, ""
-    share = failed / started
-    if share > FAULT_SHARE:
+    if failed / started > FAULT_SHARE:
         return "fail", "failed_trials"
-    if share > STATE_SHARE and verdict != "fail":
+    if verdict != "fail":
         return "undecided", "failed_trials"
     return verdict, ""
 
