@@ -46,6 +46,7 @@ from typing import Any
 from . import flat_output as _flat
 from . import optimisation_plan as _plan
 from . import optimise_search as _search
+from . import outside_run as _outside
 from . import trial_runner as _trials
 
 LEDGER_PATH = Path(_trials.RAW_DIRNAME) / "optimisation_ledger.jsonl"
@@ -305,7 +306,8 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
     # Fresh for every evaluation: nothing an earlier evaluation wrote there is run.
     (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
     started = time.monotonic()
-    result = await executor.execute(
+    # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
+    result = await _outside.OutsideExecutor(executor, quest_root).execute(
         [str(python), _trials.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
          out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=max(1, math.ceil(timeout_s)), env=env,
@@ -363,7 +365,7 @@ async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, A
     spec_path.write_text(json.dumps({**spec, "nonce": nonce}), encoding="utf-8")
     # FI's own search code, fresh for every step: nothing an evaluation wrote there is run.
     (quest_root / SEARCH_SOURCE).write_text(Path(_search.__file__).read_text(encoding="utf-8"), encoding="utf-8")
-    result = await executor.execute(
+    result = await _outside.OutsideExecutor(executor, quest_root).execute(
         [str(python), SEARCH_SOURCE.as_posix(), "--drive", spec_path.relative_to(quest_root).as_posix(),
          out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=max(1, math.ceil(timeout_s)), env=env,

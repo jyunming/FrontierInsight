@@ -29,7 +29,7 @@ from tests.test_optimise_runner import LocalExecutor
 # meets. From the baseline x = 0, six evaluations do not get there: a continued search does.
 SIMULATE = '''\
 def run_cell(cell):
-    with open("count.txt", "a", encoding="utf-8") as fh:
+    with open(r"__COUNT__", "a", encoding="utf-8") as fh:
         fh.write("1\\n")
     x, y = cell["x"], cell["y"]
     return {"f": (x - 3.0) ** 2 + 2.0 * (y - 1.5) ** 2 + 10.0 + 0.5 * cell["mesh"] ** 2, "g": x}
@@ -62,7 +62,7 @@ def _quest(tmp_path: Path) -> Path:
     root = tmp_path / "quest"
     (root / "code").mkdir(parents=True)
     (root / ".fi").mkdir()
-    (root / "code" / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(SIMULATE.replace("__COUNT__", str(root.parent / "count.txt")), encoding="utf-8")
     (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
     return root
 
@@ -81,7 +81,7 @@ async def _run(runner: optimise.OptimisationRunner, root: Path) -> dict[str, Any
 
 
 def _count(root: Path) -> int:
-    return len((root / "count.txt").read_text(encoding="utf-8").splitlines())
+    return len((root.parent / "count.txt").read_text(encoding="utf-8").splitlines())
 
 
 PAPER = "# A study\n\n## Methods\n\nWe searched.\n\n## Results\n\nThe search ran.\n\n## Discussion\n\nIt worked.\n"
@@ -291,7 +291,7 @@ def test_the_write_step_puts_fis_section_in_the_paper_and_its_numbers_are_not_ty
     root = eng.quest_root
     (root / "code").mkdir(parents=True, exist_ok=True)
     (root / "paper").mkdir(parents=True, exist_ok=True)
-    (root / "code" / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(SIMULATE.replace("__COUNT__", str(root.parent / "count.txt")), encoding="utf-8")
     (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
     result_json = asyncio.run(_run(_runner(root, block), root))
     eng._protocol_block = lambda state: {"optimisation": block}  # type: ignore[method-assign]
@@ -335,7 +335,7 @@ async def test_the_three_interfaces_show_the_best_design_and_list_its_files(tmp_
     root = out_root / "1700000000-best-aaaa11"
     (root / "code").mkdir(parents=True)
     (root / ".fi").mkdir()
-    (root / "code" / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(SIMULATE.replace("__COUNT__", str(root.parent / "count.txt")), encoding="utf-8")
     (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
     await _run(_runner(root, block), root)
     line = report.summary_line(root)
