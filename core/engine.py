@@ -19825,9 +19825,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return
         try:
             before = Path(path).read_text(encoding="utf-8")
-            after = self._render_paper_facts(_disclosure.without_block(before), state)
+            after = self._render_paper_facts(
+                _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
             if before.rstrip() != after.rstrip() and (
-                    _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before):
+                    _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before
+                    or "fi:fact-" in after):
                 Path(path).write_text(after, encoding="utf-8")
                 self._log.info("[review] took FI's old blocks out of the paper and filled its facts of the run from the "
                                "records again before checking it")
@@ -19981,6 +19983,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # FI's tables of every setting (core/results_by_setting.py): where the writer put {{results_table}}, else before
         # the discussion; filled from FI's records with the facts below, so no number of them is typed by a model.
         markdown = _paper_facts.place_blocks(markdown, self.quest_root)
+        # A new draft is not yet measured against the page limit: an earlier draft's measurement is not this one's.
+        (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
+        # What the study did not do (core/paper_facts.py): each item the writer did not place is put in the Limitations by FI.
+        markdown = _paper_facts.place_items(markdown, self.quest_root)
         # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
         # placeholder (core/paper_facts.py).
         markdown = self._render_paper_facts(markdown, state)
@@ -21942,6 +21948,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._log.info("[page_limit] the draft is still over the limit after %d sentences were taken out", len(taken))
         return None
 
+    async def _state_page_overrun(self, state: QuestState, paper_path: Path, limit: int, pages: int) -> int:
+        """The paper stays over its page limit: FI's measurement goes on record (``.fi/page_limit.json``), FI puts the
+        sentence that says so in the Limitations (core/paper_facts.py ``PAGE_LIMIT``), and the paper that now carries it is
+        measured again, since the sentence is a few lines of its own. Returns the page count of the paper as it stands,
+        which is the one the sentence states (twice at most: a sentence that tips the paper onto one more page is stated
+        with that page)."""
+        for _ in range(2):
+            _paper_facts.write_page_record(self.quest_root, pages, limit, final=True)
+            try:
+                before = paper_path.read_text(encoding="utf-8")
+                after = self._render_paper_facts(
+                    _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
+                if after != before:
+                    paper_path.write_text(after, encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                self._log.warning("[page_limit] the paper could not be given its sentence on the page limit (%s)", e)
+                break
+            again = await self._measure_draft_pages(paper_path, state)
+            if again is None or int(again["pages"]) == pages:
+                break
+            pages = int(again["pages"])
+        if pages <= limit:  # the sentence was the only thing over: nothing to state
+            _paper_facts.write_page_record(self.quest_root, pages, limit, final=False)
+        return pages
+
     async def _page_limit_review(
         self, state: QuestState, paper_path: str | Path | None,
     ) -> tuple[list[str], dict[str, Any] | None]:
@@ -21996,6 +22027,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 )
         if pages <= limit:
             self._log.info("[page_limit] the draft renders to %d pages; the limit is %d", pages, limit)
+            _paper_facts.write_page_record(self.quest_root, pages, limit, final=False)
             return [], record
         if done >= _PAGE_LIMIT_REWRITES:
             record["exceeded_after_rewrites"] = True
@@ -22003,6 +22035,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "[page_limit] the draft renders to %d pages, over the limit of %d, after %d shortening "
                 "rewrites; recorded in the review, not forced again", pages, limit, done,
             )
+            record["pages"] = await self._state_page_overrun(state, Path(paper_path), limit, pages)
             return [], record
         words = _words_to_cut(pages, limit, float(measured.get("last_page_empty") or 0.0))
         record["words_to_cut"] = words

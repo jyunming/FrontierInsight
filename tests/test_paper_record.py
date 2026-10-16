@@ -297,13 +297,14 @@ def test_a_required_fact_in_the_source_list_is_not_placed(tmp_path: Path, headin
 
 @pytest.mark.parametrize("lim", ["<!-- {{not_done:topic-temperature}} -->",
                                  "```\n{{not_done:topic-temperature}}\n```"])
-def test_an_item_hidden_in_the_limitations_is_not_placed(tmp_path: Path, lim: str) -> None:
+def test_an_item_hidden_in_the_limitations_is_put_in_by_fi(tmp_path: Path, lim: str) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
     (root / ".fi" / "topic_covered.json").write_text(json.dumps({"left": [{"kind": "factor", "name": "temperature"}]}))
-    out = paper_facts.render(LIMITS_OK.replace("{{not_done:topic-temperature}} We could not.", lim), root,
-                             topic=topic).text
-    hits = paper_facts.placement_hits(out, root, topic=topic)
-    assert any("topic-temperature" in h for h in hits), hits
+    draft = LIMITS_OK.replace("{{not_done:topic-temperature}} We could not.", lim)
+    out = paper_facts.render(paper_facts.place_items(draft, root), root, topic=topic).text
+    assert paper_facts.placement_hits(out, root, topic=topic) == []
+    visible = out.replace(lim, "")
+    assert "<!-- fi:fact-not_done-topic-temperature -->" in visible or "temperature" in visible
 
 
 # ---- what the writer is given --------------------------------------------------------------------------------------------
@@ -386,23 +387,38 @@ LIMITS_OK = ("# Kinetics\n\n## Methods\nWe used {{seed}}; the run took {{run_tim
              "## Limitations\n{{not_done:topic-temperature}} We could not.\n")
 
 
-def test_a_required_placeholder_must_be_placed_and_in_the_limitations(tmp_path: Path) -> None:
+def test_a_required_fact_must_be_placed_and_fi_places_the_items_itself(tmp_path: Path) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
     (root / ".fi" / "topic_covered.json").write_text(json.dumps({"left": [{"kind": "factor", "name": "temperature"}]}))
 
     def hits(draft: str) -> list[str]:
         return paper_facts.placement_hits(paper_facts.render(draft, root, topic=topic).text, root, topic=topic)
 
+    def placed(draft: str) -> str:
+        return paper_facts.render(paper_facts.place_items(draft, root), root, topic=topic).text
+
+    mark = "fi:fact-not_done-topic-temperature -->"
     assert hits(LIMITS_OK) == []
-    # The item's NAME in the paper does not count: only its placeholder does (the title, "we varied the temperature").
-    named = "# Temperature dependence\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## Limitations\nWe varied the temperature.\n"
-    assert any("does not say a part of the topic the study did not do" in h for h in hits(named))
+    # An item the paper does not hold is put at the end of its Limitations by FI (the item's NAME in the text does not count).
+    named = ("# Temperature dependence\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n"
+             "## Limitations\nWe varied the temperature.\n")
+    out = placed(named)
+    assert out.index("## Limitations") < out.index(mark) and hits(out) == []
+    # Wherever the writer put it, it stays there (no second copy, no hit): FI does not check the place.
     elsewhere = LIMITS_OK.replace("## Limitations\n{{not_done:topic-temperature}}", "## Results\n{{not_done:topic-temperature}}")
-    assert any("outside the Limitations section" in h for h in hits(elsewhere))
+    assert placed(elsewhere).count(mark) == 2 and hits(elsewhere) == []  # the opening and the closing marker
+    # Not in the title, though: the title does not hold it.
     title = "# {{not_done:topic-temperature}}\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n"
-    assert any("in the title" in h for h in hits(title))
-    no_section = "# T\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n"
-    assert any("has no Limitations section" in h for h in hits(no_section))
+    assert "## Limitations" in placed(title)
+    # A paper with no Limitations section gets one, before the sources.
+    no_section = "# T\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## References\n1. A.\n"
+    out = placed(no_section)
+    assert out.index("## Limitations") < out.index(mark) < out.index("## References")
+    # A Limitations that is a bold paragraph inside the Discussion (s3 fdr) is not a section: FI adds its own.
+    bold = "# T\n\n## Methods\n{{seed}}\n\n## Discussion\n**Limitations.** Few settings.\n\n## References\n1. A.\n"
+    out = placed(bold)
+    assert out.count("## Limitations") == 1 and out.index("## Discussion") < out.index("## Limitations") < out.index("## References")
+    assert paper_facts.place_items(out, root) == out  # a second pass adds nothing
     no_time = LIMITS_OK.replace("{{run_time}}", "223 s")
     assert any("does not state {{run_time}}" in h for h in hits(no_time))
 
