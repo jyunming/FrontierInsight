@@ -827,8 +827,11 @@ class FunctionFiller:
         results = None
         out = err = ""
         for _try in range(2):  # a harness that printed nothing is run once more: it is not the function's fault
-            rc, out, err = await self.run(["code/" + _eqt.TEST_PATH, "--json", "--only", spec.equation])
-            results = _eqt.parse_results(out)
+            # The function is called in a process given only its inputs; FI judges what it returns here, with the
+            # example's expected value that process never had (core/equation_measure.py).
+            nonce = _eqt.new_nonce()
+            rc, out, err = await self.run(_eqt.measure_argv(case_list, nonce=nonce, only=[spec.equation]))
+            results = _eqt.judged(case_list, out, nonce=nonce, only=[spec.equation])
             if results is not None:
                 break
         if results is None:

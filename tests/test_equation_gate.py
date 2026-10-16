@@ -219,22 +219,27 @@ def test_the_code_layout_writes_the_equation_tests_with_the_other_files(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_the_checks_run_from_the_quest_folder_with_paths_relative_to_it_so_a_container_can_run_them(tmp_path: Path) -> None:
+async def test_the_checks_run_from_a_copy_outside_the_quest_with_paths_relative_to_it(tmp_path: Path) -> None:
+    """The functions are measured from a copy of code/ outside the quest folder (core/outside_run.py), named by a random
+    id, with no path into the quest on the command line, and judged in FI's process (core/equation_measure.py)."""
     engine = _engine(tmp_path)
     seen: list[dict[str, Any]] = []
     real = engine.executor.execute
 
     async def spy(cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001
-        seen.append({"cmd": [str(c) for c in cmd], "cwd": cwd})
+        seen.append({"cmd": [str(c) for c in cmd], "cwd": Path(cwd),
+                     "listing": {p.relative_to(cwd).as_posix().split("/")[0] for p in Path(cwd).rglob("*")}})
         return await real(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
 
     engine.executor.execute = spy  # type: ignore[method-assign]
     _plan_md(engine)
     _write_code(engine, GOOD["quality"])
     assert await engine._equation_gate(STATE, None, None) is None
-    assert seen and all(c["cwd"] == engine.quest_root for c in seen)
+    root = engine.quest_root.resolve()
+    assert seen and all(not c["cwd"].is_relative_to(root) and root.name not in str(c["cwd"]) for c in seen)
+    assert all(not ({".fi", "needs"} & c["listing"]) and "code" in c["listing"] for c in seen)
     assert all(str(engine.quest_root) not in " ".join(c["cmd"][1:]) for c in seen), "no host path for a container to miss"
-    assert "code/tests/test_equations.py" in seen[-1]["cmd"]
+    assert seen[-1]["cmd"][2] == "-c" and eqt.TEST_PATH not in " ".join(seen[-1]["cmd"])
 
 
 # --- an equation the plan calls untestable needs another check, asked once and recorded plainly -------------------------------

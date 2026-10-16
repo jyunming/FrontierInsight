@@ -24,6 +24,7 @@ from core import agent_coder as ac
 from core import code_layout
 from core import equation_tests as eqt
 from core import figure_data_check, run_facts, step_coverage, typed_results
+from tests.equation_judge_helpers import fi_verdict
 from tests.test_agent_coder import STANDIN
 
 FIXTURES = Path(__file__).parent / "fixtures" / "agent_cheats"
@@ -67,10 +68,8 @@ def _flags(tmp_path: Path, cheat: str | None, topic: str | None = None) -> dict[
     sources["simulate.py"] = simulate
     cases = eqt.cases(eqt.example_rows(protocol), eqt.locate(protocol, sources))
     eqt.write(code, cases)
-    ran = subprocess.run([sys.executable, "-B", "code/" + eqt.TEST_PATH, "--json"], cwd=root, capture_output=True,
-                         text=True, timeout=300)
-    results = eqt.parse_results(ran.stdout)
-    assert results is not None, ran.stderr
+    # FI's verdict: measured in a process given only the inputs, judged in FI's own (core/equation_measure.py).
+    results = fi_verdict(cases, root, code="code", timeout=300)
     shutil.rmtree(code / "tests")
     return {
         "typed_results": [f"{t.key}" for t in typed_results.typed_results(simulate)],

@@ -123,6 +123,7 @@ from . import trial_table as _trial_table
 from . import plan_ledger as _ledger
 from . import plan_steps as _plan_steps
 from . import equation_tests as _equation_tests
+from . import outside_run as _outside_run
 from . import code_reach as _code_reach
 from . import code_review as _code_review
 from . import review_pairs as _pairs
@@ -11874,8 +11875,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 raw_dir = self._raw_root() / "equation_tests"
                 raw_dir.mkdir(parents=True, exist_ok=True)
                 env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
-                _rc, text, _err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
-                for r in _equation_tests.parse_results(text) or []:
+                # Measured from a copy outside the quest, judged here (core/equation_measure.py).
+                results, _rc, _err = await _equation_tests.run_and_judge(self._run_in_env, case_list, timeout_s=300,
+                                                                         env=env, outside=True)
+                for r in results or []:
                     out[f"equation:{r.get('id')}"] = "pass" if r.get("status") == _equation_tests.OK else "fail"
         accepted = [p for p in record.get("accepted_tests") or [] if isinstance(p, str)]
         if accepted:
@@ -12008,19 +12011,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "reports how long the run took.")
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
-                          env: dict[str, str] | None = None) -> tuple[int, str, str]:
+                          env: dict[str, str] | None = None, outside: bool = False) -> tuple[int, str, str]:
         """Run ``python <argv>`` from the quest folder, in the quest's environment (a venv, the shared interpreter, or the
-        Docker container): ``(returncode, stdout, stderr)``."""
+        Docker container): ``(returncode, stdout, stderr)``. ``outside``: from a copy of ``code/`` outside the quest
+        folder (core/outside_run.py), so FI's records are not next to the code that runs."""
         py = self.executor.python_path(self.quest_root)
         # A function rewritten within the same second to the same size would be read from its stale compiled copy.
         for cache in (self.quest_root / "code").glob("**/__pycache__"):
             shutil.rmtree(cache, ignore_errors=True)
+        executor = _outside_run.OutsideExecutor(self.executor, self.quest_root) if outside else self.executor
+        env = {k: v for k, v in env.items() if k != "FI_CHECKS_DIR"} if env is not None else None
         try:
             # From the quest folder with paths relative to it: in Docker that folder is what is mounted as /work.
-            ran = await self.executor.execute([str(py), "-B", *argv], cwd=self.quest_root, timeout_s=timeout_s, env=env)
+            ran = await executor.execute([str(py), "-B", *argv], cwd=self.quest_root, timeout_s=timeout_s, env=env)
         except Exception as e:  # noqa: BLE001 -- a check that could not start is a failed check, said as such
             return -1, "", repr(e)
         return ran.returncode, ran.stdout or "", (ran.stderr or "") + ("\n(timed out)" if ran.timed_out else "")
+
+    async def _run_outside(self, argv: list[str], **kwargs: Any) -> tuple[int, str, str]:
+        """:meth:`_run_in_env` from a copy of ``code/`` outside the quest folder (core/outside_run.py)."""
+        return await self._run_in_env(argv, outside=True, **kwargs)
 
     def _function_steps_partial_note(self) -> str:
         """For the code-writing prompt when the package was kept with functions that still fail their check."""
@@ -12069,7 +12079,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             summary=str(view.get("summary") or ""),
             prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"],
                      "module": self._prompts["implement_module_repair"]},
-            chat=chat, run=self._run_in_env, log=self._log, repairs=_function_steps.REPAIRS,
+            chat=chat, run=self._run_outside, log=self._log, repairs=_function_steps.REPAIRS,
             max_calls=_function_steps.max_calls_for(len(specs)), constants=constants, install=self._install_packages,
             declared=deps, topic_block=self._topic_block(), passages=passages)
 
@@ -12133,8 +12143,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         raw_dir = self._raw_root() / "equation_tests"
         raw_dir.mkdir(parents=True, exist_ok=True)
         env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
-        rc, out, _err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
-        results = _equation_tests.parse_results(out)
+        results, rc, _err = await _equation_tests.run_and_judge(self._run_in_env, case_list, timeout_s=300, env=env,
+                                                                outside=True)
         if results is None:
             # the tests were written and started but gave no results: the package crashed or hung, which is a failure,
             # never a pass (a repair that leaves a model the tests cannot even run is not kept)
@@ -12337,8 +12347,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 failures = []
                 break
             _equation_tests.write(self.quest_root / "code", case_list)
-            rc, out, err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
-            results = _equation_tests.parse_results(out)
+            # The functions are called in a process of their own, from a copy of code/ outside the quest, given only their
+            # inputs; what they return is compared with the plan's examples here, in FI's process (core/equation_measure.py).
+            results, rc, err = await _equation_tests.run_and_judge(self._run_in_env, case_list, timeout_s=300, env=env,
+                                                                   outside=True)
+            out = ""
             if results is None:
                 self._log.warning("[equations] the tests of the model's equations did not run (%s); going on without them",
                                   _function_steps.exception_line(err or out, 160) if (err or out).strip() else f"exit code {rc}")
@@ -12346,8 +12359,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 failures = []
                 break
             by_id = {c["id"]: c for c in case_list}
-            numbers = _equation_tests.load_numbers(self.quest_root / "code")
-            failures = [{**r, **numbers.get(str(r.get("id")), {}), "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
+            failures = [{**r, "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
                          "module": by_id.get(str(r.get("id")), {}).get("module", "")}
                         for r in results if r.get("status") not in (_equation_tests.OK, _equation_tests.OUTPUTS)]
             # The test could not judge it (one value for outputs returned by name): not tested before the run, said so in the

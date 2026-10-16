@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -14,6 +13,7 @@ from typing import Any
 import pytest
 
 from core import equation_tests as eqt
+from tests.equation_judge_helpers import fi_verdict
 
 # A damped spring: the quality factor Q = sqrt(m k) / c. The wrong version divides by a different quantity.
 SPRING = {"summary": "a mass on a damped spring", "equations": [
@@ -171,11 +171,7 @@ def test_a_tiny_output_is_held_to_its_size_and_only_an_exact_zero_gets_the_round
     (tmp_path / "m.py").write_text("def f(x):" + chr(10) + "    return 0.0" + chr(10), encoding="utf-8")
     for name, c, want in (("tiny", tiny, "mismatch"), ("zero", zero, "ok")):
         one = [{**c, "module": "m", "function": "f"}]
-        (tmp_path / "t.py").write_text(eqt.test_source(one), encoding="utf-8")
-        (tmp_path / eqt.VALUES_NAME).write_text(json.dumps(eqt.values_of(one)), encoding="utf-8")
-        done = subprocess.run([sys.executable, "-B", "t.py", "--json"], cwd=tmp_path, capture_output=True, text=True,
-                              env={**os.environ, eqt.CHECKS_ENV: str(tmp_path)})
-        assert eqt.parse_results(done.stdout)[0]["status"] == want, name
+        assert fi_verdict(one, tmp_path)[0]["status"] == want, name
 
 
 # --- `untestable` is accepted only when something else checks the equation -----------------------------------------------

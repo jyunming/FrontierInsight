@@ -30,14 +30,19 @@ def _results(tmp_path: Path, source: str, protocol: dict[str, Any] = PROTOCOL, e
     (tmp_path / "pkg" / "model.py").write_text(source, encoding="utf-8")
     rows = eqt.example_rows(protocol)
     located = {eid: {"module": "pkg.model", "function": "z_statistic", "file": "pkg/model.py"}}
-    eqt.write(tmp_path, eqt.cases(rows, located))
+    case_list = eqt.cases(rows, located)
+    eqt.write(tmp_path, case_list)
     done = subprocess.run([sys.executable, "-B", str(tmp_path / eqt.TEST_PATH), "--json"], cwd=tmp_path,
                           capture_output=True, text=True, timeout=240)
     found = eqt.parse_results(done.stdout)
     assert found is not None, done.stderr[-800:]
-    result = next(r for r in found if r["id"] == eid)
     assert "2.5" not in done.stdout, "the runner's output names no number of the worked example"
-    return {**result, **eqt.load_numbers(tmp_path).get(eid, {})}
+    from tests.equation_judge_helpers import fi_verdict
+
+    fi = next(r for r in fi_verdict(case_list, tmp_path) if r["id"] == eid)
+    person = next(r for r in found if r["id"] == eid)
+    assert person["status"] == fi["status"], "a person's copy of the test agrees with FI's verdict"
+    return fi
 
 
 def test_the_evidence_is_what_the_real_quest_held() -> None:

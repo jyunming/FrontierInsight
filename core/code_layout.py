@@ -597,7 +597,7 @@ plan each time the code changes.
 Each test runs the simulation on the check's small case the way Frontier Insight does before the main run, and compares
 the number with the value the plan fixed (and the tolerance it allows). Those values are not in this folder: Frontier
 Insight keeps them in the quest's `.fi/checks/{values_name}` (next to `code/`), so code written here cannot read them.
-Run the tests inside the quest folder, or set FI_CHECKS_DIR to the folder that holds that file.
+Run the tests inside the quest folder, or name the folder that holds that file: python tests/{test_name} --checks <folder>.
 """
 import hashlib
 import json
@@ -616,7 +616,10 @@ VALUES_NAME = {values_name!r}
 
 
 def _values():
-    folder = os.environ.get("FI_CHECKS_DIR") or str(Path(__file__).resolve().parent.parent.parent / ".fi" / "checks")
+    if "--checks" in sys.argv[:-1]:
+        folder = sys.argv[sys.argv.index("--checks") + 1]
+    else:
+        folder = str(Path(__file__).resolve().parent.parent.parent / ".fi" / "checks")
     try:
         data = json.loads((Path(folder) / VALUES_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -791,7 +794,7 @@ def readme_lines(package: str) -> list[str]:
     return [f"- `{package}/`: the model's equations, one function each (no scenario values); `simulate.py` uses it.",
             f"- `{TEST_PATH}`: the plan's checks against known answers, as unit tests (`python -m pytest tests`). The "
             "values they compare with are kept by Frontier Insight in the quest's `.fi/checks/`, next to this folder, so "
-            "the tests run inside the quest folder (or with `FI_CHECKS_DIR` set to that folder).",
+            "the tests run inside the quest folder (or with `--checks <that folder>`).",
             f"- `{METHODS_NAME}`: which function computes each equation of the model."]
 
 

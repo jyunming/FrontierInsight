@@ -19,6 +19,7 @@ from pathlib import Path
 from core import code_layout as cl
 from core import code_project
 from core import equation_tests as eqt
+from tests.equation_judge_helpers import fi_verdict
 
 PKG = "decay_study"
 # Distinctive numbers: none of them can turn up in code/ by chance.
@@ -71,6 +72,10 @@ def _quest(tmp_path: Path, model: str = MODEL) -> Path:
     return root
 
 
+def _cases_of(code: Path) -> list[dict]:
+    return eqt.cases(eqt.example_rows(PROTOCOL), eqt.locate(PROTOCOL, dict(cl.package_sources(code))))
+
+
 def _literals(value: float) -> set[str]:
     return {repr(value), f"{value:.6g}", f"{value:.5f}", f"{value:.4f}"}
 
@@ -107,17 +112,18 @@ def test_a_generated_code_tree_holds_no_expected_value_tolerance_or_worked_examp
 def test_the_tests_still_run_from_code_and_give_the_same_verdicts(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     code = root / "code"
-    env = {k: v for k, v in os.environ.items() if k != eqt.CHECKS_ENV}
+    env = dict(os.environ)
     oracles = subprocess.run([sys.executable, "-B", cl.TEST_PATH], cwd=code, capture_output=True, text=True, env=env,
                              timeout=60)
     assert oracles.returncode == 0, oracles.stdout + oracles.stderr
-    # The engine runs the equation tests from the quest folder, as `code/tests/test_equations.py --json`.
+    # A person's run of the equation tests from the quest folder, as `code/tests/test_equations.py --json`.
     eq = subprocess.run([sys.executable, "-B", "code/" + eqt.TEST_PATH, "--json"], cwd=root, capture_output=True,
                         text=True, env=env, timeout=60)
     assert [r["status"] for r in eqt.parse_results(eq.stdout)] == [eqt.OK]
-    # What the run measured goes beside FI's values, not into code/tests/.
-    assert eqt.load_numbers(code)["E1"]["expected"] == EXAMPLE_OUT
-    assert not (code / eqt.TESTS_DIR / eqt.NUMBERS_NAME).exists()
+    # FI's own verdict: measured in a process given only the inputs, judged in FI's process with the numbers for the log.
+    fi = fi_verdict(_cases_of(code), root, code="code")
+    assert [r["status"] for r in fi] == [eqt.OK] and fi[0]["expected"] == EXAMPLE_OUT
+    assert not any((code / eqt.TESTS_DIR / n).exists() for n in eqt.STALE_NAMES)
     # pytest finds the same tests.
     run = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"], cwd=code,
                          capture_output=True, text=True, env=env, timeout=120)
@@ -150,10 +156,14 @@ def test_without_fis_values_a_test_fails_and_never_passes(tmp_path: Path) -> Non
     assert result["status"] == eqt.ERROR and ".fi/checks/" in result["detail"]
 
 
-def test_fi_checks_dir_points_the_tests_elsewhere(tmp_path: Path) -> None:
+def test_a_person_names_another_checks_folder_on_the_command_line_and_never_by_the_environment(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     moved = tmp_path / "elsewhere"
     (root / eqt.CHECKS_DIR).rename(moved)
-    run = subprocess.run([sys.executable, "-B", cl.TEST_PATH], cwd=root / "code", capture_output=True, text=True,
-                         timeout=60, env={**os.environ, eqt.CHECKS_ENV: str(moved)})
+    run = subprocess.run([sys.executable, "-B", cl.TEST_PATH, "--checks", str(moved)], cwd=root / "code",
+                         capture_output=True, text=True, timeout=60)
     assert run.returncode == 0, run.stdout + run.stderr
+    # A variable left in the environment (an older FI's FI_CHECKS_DIR) is never read.
+    stray = subprocess.run([sys.executable, "-B", cl.TEST_PATH], cwd=root / "code", capture_output=True, text=True,
+                           timeout=60, env={**os.environ, "FI_CHECKS_DIR": str(moved)})
+    assert stray.returncode == 1, stray.stdout + stray.stderr

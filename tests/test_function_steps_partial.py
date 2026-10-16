@@ -125,7 +125,7 @@ async def test_a_check_that_cannot_run_is_run_again_and_then_left_out_without_co
     calls = {"tests": 0}
 
     async def flaky(argv: list[str]) -> tuple[int, str, str]:
-        if argv and argv[0].endswith("test_equations.py"):
+        if argv[:1] == ["-c"] and "EQUATION_MEASURED" in argv[1]:  # FI's measuring run
             calls["tests"] += 1
             if calls["tests"] == 1:
                 return -1, "", "OSError('could not start')"
@@ -139,7 +139,7 @@ async def test_a_check_that_cannot_run_is_run_again_and_then_left_out_without_co
     silent_root = tmp_path / "silent"
 
     async def silent(argv: list[str]) -> tuple[int, str, str]:
-        if argv and argv[0].endswith("test_equations.py"):
+        if argv[:1] == ["-c"] and "EQUATION_MEASURED" in argv[1]:  # FI's measuring run
             return 0, "", ""  # the harness printed nothing, every time
         return await _run(argv, silent_root)
 
