@@ -6733,7 +6733,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     @staticmethod
     def _reading_unread(design: Any) -> dict[str, str]:
-        """``{"per_trial": why}`` when a known-answer check uses a number the protocol declares as an average over trials and
+        """``{"per_trial": why}`` when a known-answer rule uses a number the protocol declares as an average over trials and
         does not say whether it holds in every single trial or only on average (:func:`core.mc_error.unsaid_reading`):
         asked of the plan's model once, never guessed by FI and never a stop."""
         protocol = design.get("protocol") if isinstance(design, dict) and isinstance(design.get("protocol"), dict) else None
@@ -6797,7 +6797,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         iteration = int(state.get("iteration", 0) or 0)
 
         def unread(now: Any) -> dict[str, str]:
-            return {**self._unread_parts(now), **self._ledger_unread(now, passages), **self._reading_unread(now)}
+            # How a rule holds is asked only in the first design round, before anything ran: later, the model would
+            # answer having seen results, and `per_trial: false` could loosen a failing rule.
+            return {**self._unread_parts(now), **self._ledger_unread(now, passages),
+                    **(self._reading_unread(now) if iteration == 0 else {})}
 
         def digest(text: str) -> str:
             return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]

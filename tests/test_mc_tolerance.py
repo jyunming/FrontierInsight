@@ -924,10 +924,12 @@ def _plan_checks(engine: Any) -> dict[str, dict[str, Any]]:
 
 
 def test_the_checks_on_a_declared_average_with_no_reading_are_the_ones_asked_about() -> None:
-    """The s1 protocol as frozen: the bound (on ``fdr_bh``) and the Bonferroni power (``power_bonferroni``) use numbers
-    the protocol declares as averages over trials and say nothing of how they are read; a check that says it is not."""
-    assert mc.unsaid_reading(PROTOCOL) == ["bonferroni_power_exact", "bh_fdr_upper_bound"]
-    assert mc.unsaid_reading({**PROTOCOL, "oracles": S1_CHECKS}) == ["bonferroni_power_exact"]
+    """The s1 protocol as frozen: the bound (an invariant on ``fdr_bh``) uses a number the protocol declares as an
+    average over trials and says nothing of how it holds; a check that says it is not. A check of a quantity (the
+    Bonferroni power, a special case on ``power_bonferroni``) is read on the mean already and is not asked about:
+    ``per_trial: true`` would only make a random quantity a rule of every trial (review pass 2, P2)."""
+    assert mc.unsaid_reading(PROTOCOL) == ["bh_fdr_upper_bound"]
+    assert mc.unsaid_reading({**PROTOCOL, "oracles": S1_CHECKS}) == []
     every = [{**o, "per_trial": True} for o in PROTOCOL["oracles"]]
     assert mc.unsaid_reading({**PROTOCOL, "oracles": every}) == []
     assert mc.unsaid_reading(None) == []
@@ -943,7 +945,7 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
 
     engine, model = _s1_plan(tmp_path, [{"protocol": {"oracles": [
         {"name": "bh_fdr_upper_bound", "per_trial": False, "tolerance": 0.5, "expected": 7},
-        {"name": "bonferroni_power_exact", "per_trial": False},
+        {"name": "bonferroni_power_exact", "per_trial": True},  # a quantity, not asked about: not taken
         {"name": "bh_superset_of_bonferroni", "per_trial": False},  # not asked about: not taken
     ]}}])
     state = {"topic": engine.config.topic, "iteration": 0}
@@ -953,11 +955,11 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
     assert READING_ASK in model.asked[0]
     # The s1 plan's metric definitions ride in the same request; its opening says both.
     assert "also do not say whether they hold in every single trial or only on average" in model.asked[0]
-    assert "'bonferroni_power_exact', 'bh_fdr_upper_bound'" in model.asked[0] and "fdr_bh" in model.asked[0]
+    assert "the checks 'bh_fdr_upper_bound' use fdr_bh, which" in model.asked[0]
     checks = _plan_checks(engine)
     assert checks["bh_fdr_upper_bound"]["per_trial"] is False
-    assert checks["bonferroni_power_exact"]["per_trial"] is False
-    assert "per_trial" not in checks["bh_superset_of_bonferroni"], "a check not asked about keeps its own reading"
+    for name in ("bonferroni_power_exact", "bh_superset_of_bonferroni"):
+        assert "per_trial" not in checks[name], f"{name}, not asked about, keeps its own reading"
     for key in ("tolerance", "expected", "measure", "kind"):
         assert checks["bh_fdr_upper_bound"].get(key) == BOUND.get(key), key
     assert mc.unsaid_reading(engine._design_from_plan()[0]["protocol"]) == []
@@ -995,6 +997,17 @@ async def test_an_answer_that_does_not_say_leaves_the_check_judged_on_every_tria
     design, sha = engine._design_from_plan()
     await engine._ask_plan_for_the_parts(state, design, sha)
     assert len(model.asked) == first, "the same problem is not asked about again"
+
+
+@pytest.mark.asyncio
+async def test_how_a_check_holds_is_asked_only_before_the_first_run(tmp_path: Path) -> None:
+    """Review pass 2, P2: after a design round (results may exist), the model would answer having seen them, and
+    ``false`` would loosen a failing rule. It is asked only in the first round, before anything ran."""
+    engine, model = _s1_plan(tmp_path, [{"protocol": {"oracles": [{"name": "bh_fdr_upper_bound", "per_trial": False}]}}])
+    design, sha = engine._design_from_plan()
+    await engine._ask_plan_for_the_parts({"topic": engine.config.topic, "iteration": 1}, design, sha)
+    assert not any(READING_ASK in p for p in model.asked)
+    assert "per_trial" not in _plan_checks(engine)["bh_fdr_upper_bound"]
 
 
 def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_path: Path) -> None:
