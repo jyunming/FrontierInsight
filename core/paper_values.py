@@ -661,6 +661,8 @@ def resolve(text: str, rec: Records | None) -> Value:
                 out = fmt(measured, key.form, key.percent and measured.kind != "words")
             return Value(shown, out, numbers=measured.parts or [measured.value], inputs=_inputs(rec, key))
         measured = _one(rec, key, key.where)
+        if key.form == "sd" and not key.op:  # a spread is written with its own interval, as a mean's is
+            measured = _measure(rec, key.metric, "sd_ci", key.form_arg, key.where)
         out = fmt(measured, key.form, key.percent)
         return Value(shown, out, numbers=[measured.value] + ([measured.lower, measured.upper] if measured.lower is not None else []),
                      inputs=_inputs(rec, key))

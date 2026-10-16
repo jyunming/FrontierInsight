@@ -55,7 +55,8 @@ def test_the_paper_block_is_every_row_then_a_slice_then_a_sentence() -> None:
     assert "more rows than fit here" in cut and cut.count("| 2000 |") == 4 * 9
     assert "paper/results_by_setting.csv" in cut
     none = rbs.paper_block(built, cap=10)
-    assert "too long for the paper" in none and "|" not in none
+    assert "Results for all 25 settings are in the supplementary table `paper/results_by_setting.csv`." in none
+    assert "|" not in none
     assert rbs.paper_block(None) == ""
 
 
