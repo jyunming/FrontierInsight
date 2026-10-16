@@ -239,7 +239,7 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
     notes: list[str] = []
     out: list[Setting] = []
     kept_apart: list[str] = []
-    copied = 0
+    copied = joined = 0
     for members in groups.values():
         setting = {k: v for k, v in (members[0].get("cell") or {}).items() if k not in unread_set}
         merged: dict[str, dict[str, Any]] = {}
@@ -266,18 +266,20 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
                                                                   if c["metrics"].get(n)}))
             continue
         copied += dropped
+        joined += len(members) > 1
         out.append(Setting(setting, _label(setting), [c["key"] for c in members], merged, dropped))
-    if unread:
-        axes = " and ".join(f"`{a}`" for a in unread)
+    axes = " and ".join(f"`{a}`" for a in unread)
+    if joined:
         notes.append(f"FI found no read of {axes} in the simulation's code, so grid cells that differ only there are one "
                      "setting here: their trials are pooled and n counts them all.")
     if copied:
         notes.append("Some pooled cells gave exactly the same trials as another cell (the same random seeds); each such "
                      "set of trials is counted once.")
     if kept_apart:
-        notes.append(f"{len(kept_apart)} setting(s) were not pooled although FI found no read of the axis, because "
-                     f"their cells' means, spread or failed runs differ by more than {POOL_Z:g} standard errors: "
-                     f"{', '.join(kept_apart[:3])}.")
+        lead = (f"The cells of {len(kept_apart)} setting(s) were not pooled" if joined else
+                f"FI found no read of {axes} in the simulation's code, but its cells were not pooled")
+        notes.append(f"{lead}, because their means, spread or failed runs differ by more than {POOL_Z:g} standard "
+                     f"errors: {', '.join(kept_apart[:3])}.")
     return Distinct(out, list(unread), notes, values)
 
 

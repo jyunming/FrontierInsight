@@ -720,6 +720,7 @@ def test_cells_whose_spread_differs_are_not_pooled() -> None:
     assert len(found.settings) == 4
     assert {round(s.metrics["y"]["sd"], 2) for s in found.settings} == {0.01, 0.1}
     assert any("were not pooled" in n and "spread" in n for n in found.notes)
+    assert not any("pooled and n counts them all" in n for n in found.notes)  # nothing was pooled, so it is not said
 
 
 def test_cells_whose_failures_differ_are_not_pooled() -> None:
