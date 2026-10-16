@@ -913,6 +913,8 @@ class TrialsRunner:
                     self.log.info("[execute] %s; below the level in %d setting(s): reported, not a fault", q.says(), q.below)
             if not verdict.calibration.checked:
                 self.log.info("[execute] calibration not checked: %s", "; ".join(verdict.calibration.not_checked)[:400])
+            for u in verdict.undefined[:8]:
+                self.log.info("[execute] %s (not a failed trial)", u.says())
         if verdict.action == _checks.LEAVE_OUT:
             self.left_out_settings = list(verdict.left_out)
             if self.log is not None:

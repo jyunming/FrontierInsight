@@ -243,6 +243,19 @@ class Undefined:
     def as_dict(self) -> dict[str, Any]:
         return {"key": self.key, "metric": self.metric, "trials": self.trials, "ran": self.ran, "all": self.all}
 
+    def says(self) -> str:
+        """One plain line. With no value in any trial of the setting it is the value's definition there (a power where
+        there is no true effect): said in QUALITY.md and run.log, not required in the paper's Limitations."""
+        return said_undefined(self.as_dict())
+
+
+def said_undefined(u: dict[str, Any]) -> str:
+    """The plain line for one record of :func:`undefined` (``Undefined.as_dict``)."""
+    where = str(u.get("key") or "the one setting")
+    if u.get("all"):
+        return f"`{u.get('metric')}` has no value at {where} by its definition: every trial there"
+    return f"`{u.get('metric')}` has no value in {u.get('trials')} of {u.get('ran')} trials at {where}"
+
 
 def undefined(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None) -> list[Undefined]:
     """Where a value the plan declares has no number in trials that ran to the end, per setting (and per value compared

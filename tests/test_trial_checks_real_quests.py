@@ -67,8 +67,20 @@ def _check_fdr(v: tc.Verdict) -> None:
 
 
 @pytest.mark.parametrize("name", FDR)
-def test_a_correct_fdr_quest_does_not_stop_on_power_having_no_value_at_pi1_0(name: str) -> None:
-    _check_fdr(_judge(_load(name)))
+def test_a_correct_fdr_quest_does_not_stop_on_power_having_no_value_at_pi1_0(name: str, tmp_path: Path) -> None:
+    v = _judge(_load(name))
+    _check_fdr(v)
+    # power at pi1 = 0 has no value by its definition: a plain line in QUALITY.md and run.log, never forced into the
+    # Limitations
+    root = tmp_path / "q"
+    tc.write_record(root, v.record())
+    assert [i for i in paper_facts.required_items(root) if i.kind == paper_facts.UNDEFINED] == []
+    from types import SimpleNamespace
+
+    from core import quality_report
+
+    lines = quality_report._trial_checks_summary(SimpleNamespace(trial_checks=tc.read_record(root)))["lines"]
+    assert any("has no value at" in ln and "pi1=0" in ln and "by its definition: every trial there" in ln for ln in lines)
     # with repairs left, nothing is sent back to be repaired either
     assert _judge(_load(name), repairs_left=True).action == tc.OK
 
@@ -103,10 +115,11 @@ def test_a_value_with_no_number_in_some_trials_is_counted_and_is_a_required_item
     root = tmp_path / "q"
     tc.write_record(root, rec)
     items = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.UNDEFINED]
+    # only where SOME trials have no value is it a required item; where none has one it is the value's definition there
     assert [i.id for i in items] == ["undefined-power"]
     said = items[0].sentence
-    assert "`power` has no value at d=0 (in every trial there)" in said
-    assert "in 3 of 20 trials at d=1" in said
+    assert said == "`power` has no value in 3 of 20 trials at d=1." and "d=0" not in said
+    assert tc.Undefined("d=0", "power", 20, 20).says() == "`power` has no value at d=0 by its definition: every trial there"
     # a number the plan says has no value there is not said again
     proto["metrics"][0]["undefined_when"] = {"d": [0]}
     rec = tc.judge(cells, proto, None, {}, repairs_left=False).record()
@@ -268,3 +281,18 @@ def test_the_full_records_of_the_clean_kinetics_quests_pass_with_their_declarati
     assert v.calibration.checked and not v.calibration.faults
     # no paper item says a correct study's estimates are off the truth (their worst settings: 0.16 spreads or less)
     assert all(q.below == 0 for q in v.calibration.quantities if q.kind == "bias")
+
+
+def test_a_real_fdr_record_with_3_of_40_trials_undefined_at_one_setting_still_requires_the_item(tmp_path: Path) -> None:
+    d = _load("r14b_fdr")
+    cells = json.loads(json.dumps(d["cells"]))
+    # the values are kept per procedure compared inside each run (m=20,pi1=0.05,procedure=...)
+    target = next(c for c in cells if "pi1=0.0," not in str(c["key"])
+                  and isinstance((c.get("metrics") or {}).get("power"), dict) and len(c["metrics"]["power"]["values"]) == 40)
+    target["metrics"]["power"]["values"][:3] = [float("nan")] * 3
+    v = tc.judge(cells, d["protocol"], d["thresholds"] or None, {}, repairs_left=False)
+    assert v.action == tc.OK
+    root = tmp_path / "q"
+    tc.write_record(root, v.record())
+    [item] = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.UNDEFINED]
+    assert item.sentence == f"`power` has no value in 3 of 40 trials at {target['key']}."

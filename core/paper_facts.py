@@ -77,7 +77,7 @@ _KIND_WORDS = {
     SETTING_LEFT_OUT: "a setting left out of the results because most of its trials failed",
     CALIBRATION: "reported intervals or standard errors that were not measured against the true values, or are off",
     TRIALS_UNCHECKED: "trials FI did not run itself, so it did not check them",
-    UNDEFINED: "a value of the plan that has no number at some settings",
+    UNDEFINED: "a value of the plan that has no number in some trials of a setting",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
@@ -318,22 +318,17 @@ def required_items(quest_root: Path | str) -> list[Item]:
 
 
 def _undefined_items(rec: dict[str, Any], add: Any) -> None:
-    """Each value of the plan with no number in some trials of a setting (core/trial_checks.py:undefined), one item per value:
-    the settings where it has none at all (a power where there is no true effect), and where only some trials have one."""
+    """Each value of the plan with no number in SOME trials of a setting (core/trial_checks.py:undefined), one item per
+    value. A value with none in EVERY trial of a setting has none there by its definition (a power where there is no true
+    effect): it is a plain line in QUALITY.md and run.log, and the writer may say it anywhere, so it is not an item."""
     by: dict[str, list[dict[str, Any]]] = {}
     for u in rec.get("undefined") or []:
-        if isinstance(u, dict) and u.get("metric"):
+        if isinstance(u, dict) and u.get("metric") and not u.get("all"):
             by.setdefault(str(u["metric"]), []).append(u)
-    for metric, rows in by.items():
-        whole = [str(u.get("key") or "the one setting") for u in rows if u.get("all")]
-        some = [u for u in rows if not u.get("all")]
-        said = f"`{metric}` has no value"
-        if whole:
-            said += f" at {', '.join(whole[:8])}{', ...' if len(whole) > 8 else ''} (in every trial there)"
-        if some:
-            said += ("; and" if whole else "") + " in " + "; ".join(
-                f"{u.get('trials')} of {u.get('ran')} trials at {u.get('key') or 'the one setting'}" for u in some[:6]) + (
-                f"; and at {len(some) - 6} more settings" if len(some) > 6 else "")
+    for metric, some in by.items():
+        said = f"`{metric}` has no value in " + "; ".join(
+            f"{u.get('trials')} of {u.get('ran')} trials at {u.get('key') or 'the one setting'}" for u in some[:6]) + (
+            f"; and at {len(some) - 6} more settings" if len(some) > 6 else "")
         add(UNDEFINED, metric, _sentence(said), key=metric)
 
 

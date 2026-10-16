@@ -498,10 +498,10 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
                  else f"above the level in {_int(x.get('above'))} setting(s) (wider than need be): reported, not a fault"
                  if _int(x.get("above")) else "as it should be")
         lines.append(f"{_one(x.get('says'), 300)} - {state}")
+    from . import trial_checks as _tc
+
     for u in [u for u in _list(rec.get("undefined")) if isinstance(u, dict)][:8]:
-        lines.append(f"`{_one(u.get('metric'), 80)}` has no value " + ("in any trial" if u.get("all") else
-                     f"in {_int(u.get('trials'))} of {_int(u.get('ran'))} trials") + f" at {_one(u.get('key'), 120)}: "
-                     "not a failed trial; the paper says so")
+        lines.append(_one(_tc.said_undefined(u), 300) + ("" if u.get("all") else " (not a failed trial; the paper says so)"))
     not_checked = [str(n) for n in _list(cal.get("not_checked"))]
     if not cal.get("checked"):
         lines.append("calibration not checked: " + _one("; ".join(not_checked), 400))
