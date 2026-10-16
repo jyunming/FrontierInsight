@@ -23,8 +23,12 @@ flagged. So the writer no longer types these facts at all:
   editor gets placeholders again, :func:`to_placeholders`; the page trim never offers a sentence holding one; a resumed
   quest re-renders), and they are dropped wherever text leaves FI (:func:`without_marks`). A placeholder FI cannot fill
   reads "not recorded", is said in the run log and is listed in the quality report; it is never left raw and never guessed.
-* **The check** (:func:`check`, no model) is then simple: every required placeholder is in the paper, each ``not_done``
-  one inside the Limitations section (:func:`placement_hits`); and a run time typed as a number outside a placeholder that
+* **Placing.** FI puts each ``not_done`` item the paper does not hold at the end of its Limitations section (a paper
+  with none gets one before the sources) itself (:func:`place_items`); where the writer put one is left as it is. The
+  paper's page count against the topic's limit is one of the items: FI states it from its own measurement of the
+  finished paper (:data:`PAGE_RECORD`, written by the review), never from the writer.
+* **The check** (:func:`check`, no model) is then simple: every required fact placeholder is in the paper
+  (:func:`placement_hits`); and a run time typed as a number outside a placeholder that
   disagrees with the measurement, or a claim that the run kept to the topic's limit when it did not, is a mismatch to
   rewrite (:func:`stated_hits`). That second part is kept narrow: simulated or physical time, a time per trial or per
   setting, the analysis's time and another run's are left alone, and anything it is unsure of is left to the claim check,
@@ -75,6 +79,10 @@ SETTING_LEFT_OUT, CALIBRATION, TRIALS_UNCHECKED = "setting_left_out", "calibrati
 UNDEFINED = "undefined"
 FEWER_RUNS = "fewer_runs"
 RUN_DIFFERENCE = "run_difference"
+PAGE_LIMIT = "page_limit"
+#: FI's measurement of the finished paper against the topic's page limit (``Engine._page_limit_review``):
+#: ``{"pages", "limit", "final"}``. ``final``: no further shortening rewrite will follow, so the paper stays this long.
+PAGE_RECORD = Path(".fi") / "page_limit.json"
 #: The name of the item the paper must place when what the analysis reports differs from FI's record of the run and the
 #: quest went on (``engine.run_manifest_check: warn``).
 RUN_DIFFERENCE_NAME = "difference from the run record"
@@ -95,12 +103,13 @@ _KIND_WORDS = {
     UNDEFINED: "a value of the plan that has no number in some trials of a setting",
     FEWER_RUNS: "a part of the plan not fully done, to fit the time allowed",
     RUN_DIFFERENCE: "a difference between what the analysis reports and FI's record of the trials that ran",
+    PAGE_LIMIT: "that the paper is longer than the topic's page limit",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
-              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference"}
+              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -252,16 +261,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
             note = _one(c.get("note"))[:200].rstrip(".")
             add(LEFT_OUT, q, _sentence(f"`{q}` is not reported: a check FI ran showed the value is wrong"
                                        + (f" ({note})" if note else "")))
-    missed = _read(root, str(_disclosure.PRECISION_RECORD))
-    for m in missed if isinstance(missed, list) else []:
-        if isinstance(m, dict) and m.get("name"):
-            try:
-                said = (f"The 95% interval for `{_one(m['name'])}` is ±{float(m['half_width']):.3g}, wider than the plan's "
-                        f"target of ±{float(m['target']):.3g}"
-                        + (f" (from {int(m['trials']):,} trials)" if isinstance(m.get("trials"), (int, float)) else ""))
-            except (KeyError, TypeError, ValueError):
-                said = f"The plan's precision target for `{_one(m['name'])}` was not reached"
-            add(PRECISION, m["name"], _sentence(said))
+    _precision_items(root, add)
     # A key function whose second, independently written version still gives different results (not one that could not
     # be compared: that is in the quality report only).
     try:
@@ -344,6 +344,11 @@ def required_items(quest_root: Path | str) -> list[Item]:
         add(RUN_DIFFERENCE, RUN_DIFFERENCE_NAME, _sentence(run_difference_text(manifest)), key="record")
     _left_out_setting_items(root, add)
     _trial_check_items(root, add)
+    pages = _read(root, str(PAGE_RECORD))
+    if isinstance(pages, dict) and pages.get("final") and isinstance(pages.get("pages"), int)             and isinstance(pages.get("limit"), int) and pages["pages"] > pages["limit"]:
+        add(PAGE_LIMIT, "page limit", _sentence(
+            f"The paper is {pages['pages']} pages long, over the topic's limit of {pages['limit']}: FI asked for it to be "
+            "shortened and it was not brought within the limit"), key="limit")
     return items
 
 
@@ -405,10 +410,66 @@ def fewer_runs_text(reduced: dict[str, Any]) -> str:
     return said
 
 
-def missing_items(paper_md: str, items: list[Item]) -> list[Item]:
-    """The items whose short name does not appear in the paper (case, spacing, underscores and backticks ignored)."""
-    text = _norm(_disclosure.without_block(paper_md))
-    return [i for i in items if _norm(i.name) not in text]
+def _digits(value: float, other: float) -> str:
+    """``value`` with the fewest significant digits (3 to 6) that tell it from ``other`` when both are written the same way."""
+    for n in range(3, 7):
+        text = f"{value:.{n}g}"
+        if text != f"{other:.{n}g}" or n == 6:
+            return text
+    return f"{value:.6g}"
+
+
+def _precision_items(root: Path, add: Any) -> None:
+    """One item per quantity whose 95% interval was wider than the plan's target, with the range of half-widths over the
+    settings it missed in. A record names a quantity by its place in the analysis's output (``by_m.20.pi1_0.05.any_false_bh``):
+    the quantity is the plan's metric the name ends with (:func:`_metric_of`), said by the plan's own label; a name that
+    ends in none of them is its own item, as before."""
+    missed = _read(root, str(_disclosure.PRECISION_RECORD))
+    rows = [m for m in missed if isinstance(m, dict) and m.get("name")] if isinstance(missed, list) else []
+    groups: dict[str, list[dict[str, Any]]] = {}
+    labels: dict[str, str] = {}
+    for m in rows:
+        metric, label = _metric_of(root, str(m["name"]))
+        groups.setdefault(metric or str(m["name"]), []).append(m)
+        labels[metric or str(m["name"])] = f"\"{label}\"" if label else f"`{_one(m['name'])}`"
+    for key, members in groups.items():
+        try:
+            target = float(members[0]["target"])
+            widths = [float(m["half_width"]) for m in members]
+            trials = {int(m["trials"]) for m in members if isinstance(m.get("trials"), (int, float))}
+            low, high = min(widths), max(widths)
+            where = "" if len(members) == 1 and key == str(members[0]["name"]) else (
+                f" in {len(members)} of the settings" if len(members) > 1 else " in one setting")
+            span = (f"±{_digits(low, target)}" if low == high else
+                    f"between ±{_digits(low, target)} and ±{_digits(high, target)}")
+            from_trials = f" (from {next(iter(trials)):,} trials each)" if len(trials) == 1 and len(members) > 1 else (
+                f" (from {next(iter(trials)):,} trials)" if len(trials) == 1 else "")
+            said = (f"The 95% interval for {labels[key]} is {span}{where}, wider than the plan's target of "
+                    f"±{target:g}{from_trials}")
+        except (KeyError, TypeError, ValueError):
+            said = f"The plan's precision target for {labels[key]} was not reached"
+        add(PRECISION, labels[key], _sentence(said), key=key)
+
+
+def _metric_of(root: Path, name: str) -> tuple[str, str]:
+    """``(the plan's metric id, its label)`` that ``name`` (a path in the analysis's output) ends with: the longest id
+    when several fit. ``("", "")`` when the plan names none of them."""
+    try:
+        from . import frozen_protocol as _frozen
+
+        frozen = _frozen.load(root)
+        protocol = frozen.get("protocol") if isinstance(frozen, dict) else None
+        metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    except Exception:  # noqa: BLE001 -- no plan to read: the name stands as it is
+        return "", ""
+    best: dict[str, Any] | None = None
+    for m in metrics if isinstance(metrics, list) else []:
+        mid = str(m.get("id") or "") if isinstance(m, dict) else ""
+        if mid and (name == mid or name.endswith("." + mid)) and (best is None or len(mid) > len(str(best["id"]))):
+            best = m
+    if best is None:
+        return "", ""
+    return str(best["id"]), _one(best.get("label")) or str(best["id"])
 
 
 def _undefined_items(rec: dict[str, Any], add: Any) -> None:
@@ -776,6 +837,70 @@ def place_blocks(markdown: str, quest_root: Path | str) -> str:
     return text
 
 
+def write_page_record(quest_root: Path | str, pages: int, limit: int, *, final: bool) -> None:
+    """Keep FI's measurement of the paper against the page limit (:data:`PAGE_RECORD`)."""
+    path = Path(quest_root) / PAGE_RECORD
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pages": int(pages), "limit": int(limit), "final": bool(final)}) + "\n",
+                        encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _item_placed(markdown: str, item: Item) -> bool:
+    """Whether the paper holds ``item`` where a reader sees it: its filled sentence (not in the title, a comment, code,
+    math or the list of sources) or the writer's placeholder for it, not yet filled."""
+    t0, t1 = _title_span(markdown)
+    if any(not t0 <= p < t1 for p in _placed(markdown, _ITEM_KEY + item.id)):
+        return True
+    away = _hidden_spans(markdown) + _sources_spans(markdown)
+    return any(
+        _is_item(_norm_name(m.group(1))) or m.group(2) is not None and _norm_name(m.group(1)).startswith("not")
+        for m in _PLACEHOLDER.finditer(markdown)
+        if (m.group(2) or "").strip().lower() == item.id.lower() and not _inside(m.start(), away)
+        and not t0 <= m.start() < t1)
+
+
+def place_items(markdown: str, quest_root: Path | str, heading: str = "Limitations") -> str:
+    """``markdown`` with the placeholder of each item the study must state (:func:`required_items`) that the paper does
+    not hold put in by FI, as a list at the end of the paper's Limitations section; a paper with no such section gets
+    one of its own, before the sources. An item the writer placed itself stays where it is, wherever that is: FI places
+    what is missing instead of checking where the writer put it. :func:`render` then fills it."""
+    text = markdown or ""
+    todo = [i for i in required_items(quest_root) if not _item_placed(text, i)]
+    if not todo:
+        return text
+    lines = text.split("\n")
+    heads = _disclosure._headings(lines, 0)
+    title = next((i for i, lv, _t in heads if lv == 1), None)
+    levels = [lv for i, lv, _t in heads if i != title]
+    level = min(levels) if levels else 2
+    own = [h for h in heads if h[0] != title and _disclosure._LIMITS.match(h[2])]
+    block = [f"- {{{{not_done:{i.id}}}}}" for i in todo]
+    if own:
+        at, lv, _t = own[-1]
+        place = _disclosure._section_end(heads, at, lv, len(lines))
+        lead: list[str] = []
+    else:
+        refs = next((h for h in heads if h[0] != title and h[1] <= level and _disclosure._BEFORE_END.match(h[2])), None)
+        place = refs[0] if refs else len(lines)
+        lead = ["#" * level + f" {heading}", ""]
+    if place < len(lines):
+        while place > 0 and not lines[place - 1].strip():
+            place -= 1
+        if place > 0 and lines[place - 1].strip() == "---":  # the engine's references follow a rule line
+            place -= 1
+    head = lines[:place]
+    while head and not head[-1].strip():
+        head.pop()
+    tail = lines[place:]
+    while tail and not tail[0].strip():
+        tail.pop(0)
+    return "\n".join([*head, *([""] if head else []), *lead, *block, *([""] if tail else []), *tail]) + (
+        "" if tail else "\n")
+
+
 def without_blocks(markdown: str) -> str:
     """``markdown`` with each of FI's blocks (:data:`BLOCK_NAMES`) taken out, markers and all: what the checks of the
     writer's own text read (the block is FI's record, printed, not a claim of the writer's)."""
@@ -920,10 +1045,11 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     if over_note:
         lines.append(f"Time limit: {over_note} Say this in the paper.")
     if items:
-        lines.append("In the Limitations section (a section headed \"Limitations\"), put each of these placeholders on its "
-                     "own, as a sentence; FI replaces it with the plain sentence shown, from its record. You may add your "
-                     "own words before or after it, but do not move it out of the Limitations, change it or leave it out. "
-                     "A paper that leaves out a part of the topic without saying so is not trusted:")
+        lines.append("FI adds each of these to the paper's Limitations from its record, so you need not write them. If you "
+                     "want one in a particular place (the Limitations, or a sentence of your own that leads to it), put its "
+                     "placeholder there, on its own, as a sentence; FI replaces it with the plain sentence shown. Do not "
+                     "change it or word it differently. A paper that leaves out a part of the topic without saying so is "
+                     "not trusted:")
         lines += [f"- {{{{not_done:{i.id}}}}} ({_KIND_WORDS[i.kind]}): \"{i.sentence}\"" for i in items]
     lines.append("A placeholder FI cannot fill is printed as \"not recorded\", so use only the ones listed here.")
     return "\n".join(lines)
@@ -998,7 +1124,7 @@ def _unknown_hits(markdown: str, quest_root: Path | str, known: dict[str, Fact])
 
 def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> list[str]:
     """Must-fix hits for a required placeholder the paper does not hold: a required fact of the run anywhere but the
-    title, each ``not_done`` item inside the Limitations section."""
+    title, and a name between double braces that is none of FI's."""
     text = _disclosure.without_block(paper_md)
     t0, t1 = _title_span(text)
     known = facts(quest_root, topic=topic, fallback_s=fallback_s)
@@ -1012,20 +1138,8 @@ def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fa
             # writer is given it in FI's record section anyway.
             hits.append(f"{HIT}: the paper does not state {{{{{fact.name}}}}} ({_FACT_WORDS[fact.name]}). Put the "
                         f"placeholder {{{{{fact.name}}}}} in the Methods; do not type the value.")
-    spans = _limitations_spans(text)
-    for item in required_items(quest_root):
-        where = _placed(text, _ITEM_KEY + item.id)
-        inside = [p for p in where if any(a <= p < b for a, b in spans)]
-        if inside:
-            continue
-        if where:
-            what = ("in the title" if any(t0 <= p < t1 for p in where) else "outside the Limitations section")
-            hits.append(f"{HIT}: {{{{not_done:{item.id}}}}} ({_KIND_WORDS[item.kind]}) is {what}. Move it into the "
-                        "Limitations section.")
-        else:
-            hits.append(f"{HIT}: the paper does not say {_KIND_WORDS[item.kind]}: \"{item.sentence}\" Put "
-                        f"{{{{not_done:{item.id}}}}} in the Limitations section"
-                        + ("" if spans else " (the paper has no Limitations section: add one)") + ".")
+    # The items the study must state are not checked here: FI places each one that the paper does not hold
+    # (:func:`place_items`), so where the writer put it is not a fault of the paper.
     return hits
 
 
@@ -1290,16 +1404,14 @@ def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s:
 
 
 def keep_check(quest_root: Path | str, hits: list[str], paper_md: str) -> None:
-    """Keep what the last review found (``.fi/paper_record_check.json``): the hits, the required items the paper still does
-    not place in its Limitations, and the placeholders that read "not recorded". The quality report prints it, so what is
+    """Keep what the last review found (``.fi/paper_record_check.json``): the hits, the required items the paper does
+    not hold, and the placeholders that read "not recorded". The quality report prints it, so what is
     still unmet when the rounds are used up is on record."""
     path = Path(quest_root) / RECORD
     try:
         text = _disclosure.without_block(paper_md)
-        spans = _limitations_spans(text)
         unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
-                 for i in required_items(quest_root)
-                 if not any(any(a <= p < b for a, b in spans) for p in _placed(text, _ITEM_KEY + i.id))]
+                 for i in required_items(quest_root) if not _item_placed(text, i)]
         unfilled = unfilled_in(paper_md)
         if not hits and not unmet and not unfilled:
             path.unlink(missing_ok=True)

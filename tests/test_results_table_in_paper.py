@@ -109,3 +109,20 @@ def test_a_placed_table_with_no_record_reads_not_recorded(tmp_path: Path) -> Non
 def test_the_trial_table_cap_and_the_paper_cap_are_named_once() -> None:
     assert rbs.PAPER_MAX_ROWS < trial_table.WRITER_MAX_ROWS
     assert pf._BLOCK_FILES["results_table"] == rbs.PAPER_BLOCK
+
+
+def test_what_fi_cannot_follow_in_the_code_is_a_log_line_never_paper_text(tmp_path: Path) -> None:
+    """The s3 papers said "Every grid axis is treated as read: c is used in a way FI cannot follow (line 66)." in their
+    results: FI's reading of the code is a diagnostic (run.log), not text for the reader or the writer."""
+    root = _quest(tmp_path)
+    (root / "code" / "simulate.py").write_text(
+        "import json\ndef run_trial(cell, i, seed):\n    return {'hit': float(len(json.dumps(cell)) > 0)}\n",
+        encoding="utf-8")
+    protocol = {"grid": {"m": [1, 2], "x": [5, 6]}, "thresholds": {"p": 0.5},
+                "metrics": [{"id": "hit", "estimand": "P(hit)", "kind": "proportion", "unit": "a run",
+                             "reference": {"formula": "p"}}]}
+    built = rbs.write(root, protocol)
+    assert built is not None and any("treated as read" in d for d in built.diagnostics)
+    for text in (rbs.paper_block(built), rbs.writer_note([], built), "\n".join(built.notes),
+                 (root / "paper" / "results_by_setting.md").read_text(encoding="utf-8")):
+        assert "treated as read" not in text and "cannot follow" not in text
