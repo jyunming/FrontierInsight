@@ -29818,8 +29818,50 @@ def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
             # What the paper copy changed (sizes in inches, text sizes in pt) stays in the file for a person: its
             # numbers are not the figure's, and the number check would otherwise trace a paper's "6.3" or "15" to them.
             data.pop("paper", None)
+            _attach_unlabelled_lines(data, folder / f"{Path(name).stem}.seed0.json")
             records[name] = data
     return records
+
+
+#: matplotlib's names for a line style that is not a solid line, as a reader calls it.
+_NOT_SOLID = {"--": "dashed", "dashed": "dashed", ":": "dotted", "dotted": "dotted", "-.": "dash-dotted",
+              "dashdot": "dash-dotted"}
+
+
+def _attach_unlabelled_lines(record: dict[str, Any], lines_path: Path) -> None:
+    """Add to each panel of ``record`` the dashed, dotted or dash-dotted lines the figure draws that its legend does not
+    name, as ``unlabelled_lines`` (``style``, ``count``, ``min``, ``max`` of their y values), from the full line list the
+    recorder keeps next to it (``<stem>.seed0.json``). The series list holds the labelled series only, so a theory or
+    reference line drawn without a label was nowhere in the record, and a caption could deny it unchecked. A solid
+    unlabelled line (a family of runs), a marker or an error-bar cap is not one. Nothing is added when the line list is
+    missing or does not match the panels."""
+    try:
+        full = json.loads(lines_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    panels, drawn = record.get("axes"), full.get("axes") if isinstance(full, dict) else None
+    if not isinstance(panels, list) or not isinstance(drawn, list) or len(panels) != len(drawn):
+        return
+    for panel, got in zip(panels, drawn):
+        if not isinstance(panel, dict) or not isinstance(got, dict):
+            continue
+        groups: dict[str, dict[str, Any]] = {}
+        for line in got.get("lines") or []:
+            if not isinstance(line, dict) or not str(line.get("label") or "").startswith("_"):
+                continue
+            style = _NOT_SOLID.get(str(line.get("linestyle")))
+            if style is None or str(line.get("marker") or "None").lower() not in ("none", "", " ") \
+                    or len(line.get("x") or []) < 2:
+                continue
+            ys = [float(v) for v in line.get("y") or []
+                  if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+            if not ys:
+                continue
+            group = groups.setdefault(style, {"style": style, "count": 0, "min": min(ys), "max": max(ys)})
+            group["count"] += 1
+            group["min"], group["max"] = min(group["min"], min(ys)), max(group["max"], max(ys))
+        if groups:
+            panel["unlabelled_lines"] = list(groups.values())
 
 
 def _record_numbers(record: Any) -> list[tuple[float, ...]]:
@@ -30031,6 +30073,10 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
             series.append(f"{s.get('label')} {span}{tail}")
         if series:
             bits.append("series: " + "; ".join(series))
+        for group in ax.get("unlabelled_lines") or []:
+            k = int(group["count"])
+            bits.append(f'also draws {k} {group["style"]} line{"s" if k > 1 else ""} with no legend label '
+                        f'({group["min"]:.3g} to {group["max"]:.3g})')
         if bits:
             panels.append(", ".join(bits))
     note = (" — " + " | ".join(panels)) if panels else ""
@@ -30459,10 +30505,40 @@ def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str
                     )
             if finding not in findings:
                 findings.append(finding)
-        for claim_finding in _flat_claim_findings(name, record, caption):
+        for claim_finding in [*_flat_claim_findings(name, record, caption), *_denied_line_findings(name, record, caption)]:
             if claim_finding not in findings:
                 findings.append(claim_finding)
     return findings
+
+
+# A clause that says something is not drawn ("the figure draws no theory curve", "the ellipse is not drawn"), and the
+# kind of thing it denies. Both must be in one clause; the closed lists are what a caption uses to deny a drawn line.
+_DENIES_DRAWING_RE = re.compile(
+    r"\b(?:(?:draws?|shows?|plots?|has|have|includes?|contains?)\s+no|(?:does|do)\s+not\s+(?:draw|show|plot)"
+    r"|(?:is|are)\s+not\s+(?:drawn|shown|plotted)|not\s+(?:drawn|shown|plotted)|without\s+(?:a|any)\b)"
+)
+_A_LINE_WORD_RE = re.compile(r"\b(?:curves?|lines?|bands?|ellipses?|predictions?|overlays?|references?|theory|theoretical)\b")
+
+
+def _denied_line_findings(name: str, record: dict[str, Any] | None, caption: str) -> list[str]:
+    """Findings for a caption that says a curve or line is not drawn when its figure draws dashed lines its legend does
+    not name (``unlabelled_lines`` of the record). FI does not know what those lines are, so it asks the caption to say
+    what they are, or to drop the denial. A figure whose record lists none, and a clause that denies something that is
+    not a line (error bars), is left alone."""
+    axes = [ax for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict) and ax.get("unlabelled_lines")]
+    if not axes:
+        return []
+    clause = next((c.strip() for c in _CAPTION_CLAUSE_RE.split(caption)
+                   if _DENIES_DRAWING_RE.search(c) and _A_LINE_WORD_RE.search(c)), "")
+    if not clause:
+        return []
+    where = "; ".join(
+        f'"{ax.get("title") or ax.get("ylabel") or "a panel"}" ('
+        + ", ".join(f'{g["count"]} {g["style"]} line{"s" if g["count"] > 1 else ""}' for g in ax["unlabelled_lines"])
+        + f', {min(g["min"] for g in ax["unlabelled_lines"]):.3g} to {max(g["max"] for g in ax["unlabelled_lines"]):.3g})'
+        for ax in axes)
+    return [f'figure_caption: the caption of figures/{name} says "{clause}", but the figure draws lines its legend does '
+            f"not name: {where}. Say what they are, or drop the denial"]
 
 
 def _format_figure_check(paper_md: str, state: QuestState) -> str:

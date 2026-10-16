@@ -372,6 +372,33 @@ def _trials(cells: list[dict[str, Any]], metric: str) -> list[float]:
     return [v for c in cells for v in _tt._values(c["metrics"][metric])]
 
 
+def _setting_values(cells: list[dict[str, Any]], metric: str) -> list[float] | None:
+    """The one value per setting when ``metric`` is the same in every trial of every setting in ``cells`` (at least two
+    trials each, so a value that was only measured once is never taken for one), else ``None``. A value like that is
+    set by the setting, not measured in it: a theory line, a reference, an input echoed back."""
+    values: list[float] = []
+    for c in cells:
+        got = _tt._values(c["metrics"][metric]) if metric in c["metrics"] else []
+        if len(got) < 2 or not all(math.isclose(v, got[0], rel_tol=1e-9, abs_tol=1e-12) for v in got):
+            return None
+        values.append(got[0])
+    return values or None
+
+
+def _differs_between_settings(cells: list[dict[str, Any]], metric: str) -> bool:
+    """Whether ``metric`` is a value each setting sets (:func:`_setting_values`) and the settings in ``cells`` do not agree
+    on it. Its mean over them is then a number no setting has, set by how the grid happens to be laid out."""
+    values = _setting_values(cells, metric)
+    return values is not None and not all(math.isclose(v, values[0], rel_tol=1e-9, abs_tol=1e-12) for v in values)
+
+
+def set_by_setting(rec: Records) -> list[str]:
+    """The quantities of the record that are values each setting sets and that differ between settings, in the record's
+    order (the theory lines): the ones that have no value over several settings."""
+    return [m for m in rec.metrics()
+            if _differs_between_settings([c for c in rec.cells if m in c["metrics"]], m)]
+
+
 # --- statistics ---------------------------------------------------------------------------------------------------
 
 
@@ -493,6 +520,11 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
     values = _trials(cells, metric)
     if not values and form not in ("failed",):
         raise _Unfilled(f"{metric} has no numeric trials at that setting")
+    if form not in ("ref", "n", "failed", "count") and _differs_between_settings(cells, metric):
+        raise _Unfilled(
+            f"{metric} is a value each setting sets, and it differs between the settings pooled here, so it has no single "
+            f"value over them (a pooled spread is not comparable to the mean of such values); name one setting, or compare "
+            f"the measured value with it setting by setting: {{{{v:<measured>:sd @ <axis>=each, ... | ratio {metric} | range}}}}")
     if form == "ref":
         value, _kind = _reference(rec, metric, cells)
         return Measured(value)
@@ -800,12 +832,14 @@ def _line_key(metric: str, form: str, where: dict[str, Any]) -> str:
         f"{a}={_text_of(v) if not isinstance(v, Pick) else v.kind}" for a, v in where.items()) + "}}"
 
 
-def _sheet_line(rec: Records, metric: str, where: dict[str, Any]) -> str | None:
-    key = _line_key(metric, "mean_ci", where)
+def _sheet_line(rec: Records, metric: str, where: dict[str, Any], sets: frozenset[str] = frozenset()) -> str | None:
+    key = _line_key(metric, "mean" if metric in sets else "mean_ci", where)  # a value a setting sets has no interval
     shown = resolve(key, rec)
     if shown.hit:
         return None
     parts = [f"{key} -> {shown.text}"]
+    if metric in sets:
+        return "- " + parts[0]
     sd = resolve(_line_key(metric, "sd", where), rec)
     if sd.filled:
         parts.append(f"sd {_line_key(metric, 'sd', where)} -> {sd.text}")
@@ -813,6 +847,19 @@ def _sheet_line(rec: Records, metric: str, where: dict[str, Any]) -> str | None:
     if ref.filled:
         parts.append(f"reference {_line_key(metric, 'ref', where)} -> {ref.text}")
     return "- " + "; ".join(parts)
+
+
+def _set_by_setting_line(rec: Records, varied: list[str]) -> str:
+    """The sheet's line on the quantities each setting sets (a theory line): no pooled line is offered for them, so this
+    says how to compare a measured value with one. ``""`` when the record has none."""
+    names = set_by_setting(rec)
+    if not names or not varied:
+        return ""
+    where = ", ".join(f"{a}=each" if i == 0 else f"{a}=<value>|all" for i, a in enumerate(varied))
+    return ("Compare with a value each setting sets (" + ", ".join(names) + "): it has no value over several settings, and "
+            "a pooled measured value is not comparable to it. Compare setting by setting: "
+            "{{v:<measured>:sd @ " + where + " | ratio " + names[0] + " | range}}; write above or below only for what that "
+            "range shows (all of it over 1, or all of it under 1).\n")
 
 
 def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
@@ -827,6 +874,7 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
     varied = rec.varied()
     usable = {a: [v for v in vs if _addressable(v)] for a, vs in axes.items()}
     names = [m for m in rec.metrics()]
+    sets = frozenset(m for m in names if _setting_values([c for c in rec.cells if m in c["metrics"]], m) is not None)
     full: list[str] = []
     pooled: list[str] = []
     extremes: list[str] = []
@@ -840,7 +888,7 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
             if not all(_addressable(v) for v in where.values()) or json.dumps(where, default=str) in seen:
                 continue
             seen.add(json.dumps(where, default=str))
-            line = _sheet_line(rec, metric, where)
+            line = _sheet_line(rec, metric, where, sets)
             if line:
                 mean = _tt.summary(_trials([c], metric))["mean"] if _tt._values(c["metrics"][metric]) else 0.0
                 lines.append((mean, line))
@@ -852,11 +900,11 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
         for axis in varied:
             for value in usable[axis]:
                 where = {a: (value if a == axis else Pick("all")) for a in varied}
-                line = _sheet_line(rec, metric, where)
+                line = _sheet_line(rec, metric, where, sets)
                 if line:
                     pooled.append(line)
         if varied:
-            line = _sheet_line(rec, metric, {a: Pick("all") for a in varied})
+            line = _sheet_line(rec, metric, {a: Pick("all") for a in varied}, sets)
             if line:
                 pooled.append(line)
     head = ("Results you can place (FI fills each key in from its records; never type a result). "
@@ -864,7 +912,7 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
     body = full + ["Pooled (the trials of the other axes together; sd is the within-setting pooled SD):"] + pooled
     if sum(1 for line in body if line.startswith("- ")) > max_lines:
         body = ["Too many settings to list; the pooled lines and each value's extremes:"] + pooled + extremes
-    return head + "\n" + "\n".join(body) + "\n" + SHEET_GRAMMAR
+    return head + "\n" + "\n".join(body) + "\n" + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
 
 
 # --- what the prompts say -------------------------------------------------------------------------------------------
@@ -885,6 +933,9 @@ write a percent. Examples: {{v:coverage @ noise=0.05, n=all}}, {{v:coverage:mean
 {{v:bias @ noise=each, n=each | range | %}}.
 If FI cannot fill a key (a value the study did not record, a setting it did not run, a varied setting left out), it is sent back
 to you. Write the key; FI computes the number, so never work one out yourself from the list.
+A comparison word (above, below, larger, smaller, at every setting) is only as good as the numbers under it. Compare a
+measured value with a theory or reference value setting by setting (a ratio or a difference with =each and a range), never
+one pooled number with another, and write above or below only for what the numbers of every setting you name show.
 Numbers that are not available: a number that only the analysis script computed, and that no key on this list gives, is not
 available. The Analysis block above shows such numbers; do not copy any of them as digits. Use the key for the same quantity
 when the list has one, otherwise say it in words or leave it out."""
