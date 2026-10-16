@@ -304,9 +304,11 @@ same PR that adds, splits or renames one.
   place by place (`_PerSetting.accounts_for`, `_place_holds`): every place a number stands (`_setting_contexts`) that
   names a setting for it must account for it, and one place must. A setting is named only as `axis = value` (or a
   column headed by the axis, or a text value by its name: `_bindings`, `_axes_of`; `π₁`/`\pi_1`/`pi1` are one name,
-  `n_points` is also `n` when no other axis begins so) next to the number (`_named_beside`: at most `_NEXT_TO` words,
-  no clause between; a list of numbers takes a list of settings in order; a setting before the sentence's first
-  number holds for the sentence); a number beside another setting is not accounted for by the table. A reference value
+  only the axis's full name names it) next to the number (`_named_beside`: at most `_NEXT_TO` words, no clause between
+  (`_gap_words`); a setting in brackets is the number's it brackets; a list of numbers takes a list of settings in
+  order; a setting before the sentence's first number holds for the sentence; one axis named twice keeps the nearer
+  setting, a setting across a contrast word (`_CONTRAST`) counting as further than any on the number's side, and two
+  as near name no value, `_merge`); a number beside another setting is not accounted for by the table. A reference value
   counts only where the place states it as one (`_stated_as_reference`: a reference word just before it, or a column
   headed by a reference, or a caption naming one over a column that names no measured quantity).
 - `core/trial_table.py` — FI's own table of what every trial gave, per setting, from `raw/trials.json` (mean, SD, 95% interval of the mean, Wilson for 0/1 values): `paper/results_table.md`, the writer's evidence while short (`write_note`), and a separate pool for `number_provenance.check(trial_table=)`. `Engine._provenance_report` builds the provenance inputs once for the paper (`_number_provenance_hits`) and the analysis (`_analysis_numbers_note`, the writer's list of analysis numbers nothing accounts for). `stat_claims.seed_records` / `disclosure.recorded_seeds` read the seeds the records hold for the `seed_not_recorded` check.
@@ -324,7 +326,9 @@ same PR that adds, splits or renames one.
   own numbers are written to: read off the run), `compute`, `pool` (the provenance
   check's own pool). `PLAN_FIELD` / `PLAN_RULE` are the plan-prompt text, not yet in `_PLAN_DIRECTIVE`.
 - `core/results_by_setting.py` — FI's results tables: `unread_axes` (grid axes FI found no read of, via
-  `grid_keys.reads`, which follows reads in closures and lambdas; FI's own `run.py`/`fi_search.py` at the top of
+  `grid_keys.reads`, which follows reads in closures and lambdas, a lambda's own parameter only when the lambda is
+  handed a setting (`grid_keys._given_settings`); a setting put in a `global`/`nonlocal` name is a use FI cannot
+  follow; this reader is reached only through `unread_axes`; FI's own `run.py`/`fi_search.py` at the top of
   code/ skipped; `opaque_uses` or a file that does not parse makes every axis read), `distinct` (pools cells that
   differ only in unread axes when their means, SDs (`_differs`) and shares of failed runs (`_failures_differ`) agree
   within `POOL_Z` standard errors, counting identical trials once), `build` (one `Table` per quantity: settings, n,

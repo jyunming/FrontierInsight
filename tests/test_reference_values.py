@@ -613,9 +613,9 @@ LINE_34 = ("At π1 = 0 its FDR was 0.653 (95% Wilson interval 0.638–0.667) at 
     (FDR_AXES, ABSTRACT, "40.6", {"m": 2000, "pi1": 0.2}),
     (FDR_AXES, ABSTRACT, "0.9", {"m": 20, "pi1": 0.05}),
     (FDR_AXES, LINE_34, "0.653", {"pi1": 0.0, "m": 20}),
-    # "0.642, and 1.0" reads as one list, named "at m = 20" on one side and "at m = 200 and 2000" on the other: m
-    # is left unnamed, never given the wrong value
-    (FDR_AXES, LINE_34, "0.642", {"pi1": 0.0}),
+    # ", and" between two numbers joins two clauses, not a list: 0.642 is the exact value at m = 20 the sentence sets
+    # 0.653 against
+    (FDR_AXES, LINE_34, "0.642", {"pi1": 0.0, "m": 20}),
     (FDR_AXES, "At $m = 200$, $\\pi_1 = 0.05$ it was 0.533.", "0.533", {"m": 200, "pi1": 0.05}),
     (SOLVER_AXES, "For RK4 at m = 20 it was 0.396.", "0.396", {"solver": "rk4", "m": 20}),
     (SOLVER_AXES, "At m = 20 it was 0.396 for Euler and 0.512 for RK4.", "0.512", {"m": 20, "solver": "rk4"}),
@@ -634,6 +634,72 @@ def test_one_number_for_several_settings() -> None:
     flat = "At π1 = 0 the uncorrected FDR was 1.0 at m = 200 and 2000."
     rows = npv._named_beside(flat, npv._axes_of(FDR_AXES), flat.index("1.0 at"))
     assert rows == [{"pi1": 0.0, "m": 200}, {"pi1": 0.0, "m": 2000}]
+
+
+# --- the second review of the branch ---
+
+CONTRASTS = ("versus", "vs.", "compared with", "but", "while", "against", "rising to", "whereas", "than")
+
+
+@pytest.mark.parametrize("join", CONTRASTS + ("and then",))
+def test_a_contrast_word_ends_the_clause_of_a_setting(monkeypatch: pytest.MonkeyPatch, join: str) -> None:
+    """Uncorrected FDR at pi1 = 0.2: m = 20 is 0.177, m = 200 is 0.198. Swapped, each number is named beside the other
+    setting and flagged; in order, each is accounted for."""
+    swapped = f"At π1 = 0.2 the uncorrected FDR was 0.198 at m = 20 {join} 0.177 at m = 200."
+    flagged = _flagged(_in_results(_fdr_paper(), swapped), monkeypatch, new=True)
+    assert {"0.177", "0.198"} <= flagged, flagged
+    right = f"At π1 = 0.2 the uncorrected FDR was 0.177 at m = 20 {join} 0.198 at m = 200."
+    assert not {"0.177", "0.198"} & _flagged(_in_results(_fdr_paper(), right), monkeypatch, new=True)
+
+
+@pytest.mark.parametrize("sentence, token, named", [
+    ("At π1 = 0.2 the uncorrected FDR was 0.198 at m = 20 versus 0.177 at m = 200.", "0.177", {"pi1": 0.2, "m": 200}),
+    ("At π1 = 0.2 the uncorrected FDR was 0.198 at m = 20 versus 0.177 at m = 200.", "0.198", {"pi1": 0.2, "m": 20}),
+    # a setting inside another bracketed clause is not this number's; the nearer one is
+    ("At π1 = 0.2 the uncorrected FDR was 0.199 at m = 20 (m = 200: 0.198).", "0.199", {"pi1": 0.2, "m": 20}),
+    # a setting in brackets binds to the number it brackets, even after an earlier number in the sentence
+    ("Over 4000 trials, uncorrected FDR (m = 20, π1 = 0.2) was 0.199.", "0.199", {"m": 20, "pi1": 0.2}),
+    ("Uncorrected FDR (m = 20, π1 = 0.2) was 0.199.", "0.199", {"m": 20, "pi1": 0.2}),
+    # ... but one right after a number is that number's
+    ("BH FDR was 0.0415 (m = 200, π1 = 0.2) and 0.199 at m = 2000.", "0.199", {"m": 2000}),
+    # two settings of one axis at the same distance: the axis is named, by neither (no value fits)
+    ("At π1 = 0.2 and m = 200 (m = 20 per block), the uncorrected FDR was 0.177.", "0.177",
+     {"pi1": 0.2, "m": npv._NOT_A_VALUE}),
+])
+def test_two_settings_of_one_axis_never_unname_it(sentence: str, token: str, named: dict[str, Any]) -> None:
+    flat = npv.normalise(sentence)
+    at = re.search(r"(?<![\d.])" + re.escape(token) + r"(?!\d)", flat)
+    assert at is not None
+    assert npv._named_beside(flat, npv._axes_of(FDR_AXES), at.start()) == [named]
+
+
+@pytest.mark.parametrize("sentence, token", [
+    ("At π1 = 0.2 the uncorrected FDR was 0.199 at m = 20 (m = 200: 0.198).", "0.199"),
+    ("Over 4000 trials, uncorrected FDR (m = 20, π1 = 0.2) was 0.199.", "0.199"),
+    ("At π1 = 0.2 and m = 200 (m = 20 per block), the uncorrected FDR was 0.177.", "0.177"),
+    (r"At \(\pi_1 = 0.2\) the uncorrected FDR was 0.199 at \(m = 20\).", "0.199"),  # TeX's \( is no bracket
+])
+def test_a_number_beside_the_wrong_setting_is_flagged(monkeypatch: pytest.MonkeyPatch, sentence: str,
+                                                      token: str) -> None:
+    assert token in _flagged(_in_results(_fdr_paper(), sentence), monkeypatch, new=True)
+
+
+KIN_AXES = [{"sigma": s, "n_points": n} for s in (0.01, 0.02, 0.05) for n in (8, 12, 40)]
+
+
+def test_only_an_axis_s_full_name_names_it() -> None:
+    """``n_points`` is named as ``n_points`` (or by its value of a text axis), never as ``n``: an ``n = 400`` of runs
+    would otherwise name it, and erase or contradict the setting the sentence does name."""
+    axes = npv._axes_of(KIN_AXES)
+    assert "n" not in axes.by_name and axes.by_name["npoints"] == "n_points"
+    for sentence, named in (
+            ("At σ = 0.02 with 12 points the Ea coverage was 0.925 (n = 400).", {"sigma": 0.02}),
+            ("At σ = 0.02 and n_points = 12 the Ea coverage was 0.925 (n = 400 runs).", {"sigma": 0.02, "n_points": 12}),
+            ("At σ = 0.05 and n_points = 40 (n = 12 replicate fits) the SD was 1556 J/mol.",
+             {"sigma": 0.05, "n_points": 40})):
+        flat = npv.normalise(sentence)
+        at = flat.index("0.925" if "0.925" in flat else "1556")
+        assert npv._named_beside(flat, axes, at) == [named], sentence
 
 
 def _solver_study() -> tuple[dict[str, Any], dict[str, Any], dict[tuple[int, str], float]]:
@@ -690,6 +756,15 @@ def test_a_text_valued_setting_must_be_named_too(monkeypatch: pytest.MonkeyPatch
 ])
 def test_a_setting_read_in_a_lambda_or_closure_is_read(source: str) -> None:
     assert rbs.unread_axes({"grid": {"sigma": [0.01, 0.1], "n": [5, 50]}}, {"simulate.py": source}) == ([], "")
+
+
+def test_a_setting_put_in_a_global_makes_every_axis_read() -> None:
+    """``global CFG; CFG = cell`` hands the setting to every function of the module: FI cannot follow it, so no axis
+    counts as unread (and no cells are pooled over ``sigma``, which ``model`` reads through ``CFG``)."""
+    source = ("CFG = None\ndef run_trial(cell, i, seed):\n    global CFG\n    CFG = cell\n"
+              "    return {'y': model() + cell['n']}\ndef model():\n    return CFG['sigma']\n")
+    unread, why = rbs.unread_axes({"grid": {"sigma": [0.01, 0.1], "n": [5, 50]}}, {"simulate.py": source})
+    assert unread == [] and "cannot follow" in why and "simulate.py line 4" in why
 
 
 def test_code_fi_cannot_parse_makes_every_axis_read() -> None:

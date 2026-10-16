@@ -1406,9 +1406,10 @@ def _rounds_to(value: float, written: float, dec: int) -> bool:
 
 @dataclass(frozen=True)
 class _Axes:
-    """The axes FI's per-setting numbers vary over: each name a paper may write for one (``by_name``: the axis's own
-    name, and the first word of a name such as ``n_points`` when no other axis begins with it), its values, which take
-    text values (a method, a solver), and a pattern for each text value."""
+    """The axes FI's per-setting numbers vary over: the name a paper writes for each (``by_name``: the axis's own full
+    name, in any case, with Greek letters spelt out and punctuation dropped: ``π1`` for ``pi1``; never a part of it, so
+    the ``n`` of "n = 400 runs" does not name ``n_points``), its values, which take text values (a method, a solver),
+    and a pattern for each text value."""
 
     by_name: dict[str, str]
     values: dict[str, tuple[Any, ...]]
@@ -1425,13 +1426,6 @@ def _axes_of(settings: list[dict[str, Any]]) -> _Axes:
                 seen.append(v)
     text = frozenset(a for a, vs in values.items() if any(isinstance(v, str) for v in vs))
     by_name = {_canon(a): a for a in values}
-    heads: dict[str, list[str]] = {}
-    for a in values:
-        if "_" in a.strip("_"):
-            heads.setdefault(_canon(a.strip("_").split("_")[0]), []).append(a)
-    for head, owners in heads.items():
-        if head and len(owners) == 1 and head not in by_name:
-            by_name[head] = owners[0]
     patterns: list[tuple[str, Any, re.Pattern[str]]] = []
     for a in text:
         for v in values[a]:
@@ -1555,11 +1549,20 @@ def _label_setting(label: str) -> dict[str, Any]:
     return out
 
 
+#: ", and" between two numbers joins two clauses ("0.653 at m = 20 against an exact 0.642, and 1.0 at m = 200"); after
+#: two or more it ends a list ("0.177, 0.198, and 0.199").
+_CLAUSE_AND = re.compile(r"\s*,\s*(?:and|or)\s+")
 #: Settings named together: ``m = 200, π1 = 0``, ``(m = 20, π1 = 0.05)``, ``m = 200 and 2000``, ``Euler and RK4``.
 _JOINED = re.compile(r"\s*(?:,|,?\s*(?:and|or))?\s*")
 _PAREN = re.compile(r"\([^()]*\)")
 _GAP_WORD = re.compile(r"[^\W\d_]+")
 _GAP_SKIP = frozenset({"the", "a", "an", "of"})
+#: Words that set one number against another ("0.198 at m = 20 versus 0.177 at m = 200"): a setting across one is
+#: further from a number than any setting on its own side, so it names the number only when its own side names no
+#: value of that axis ("0.0415 against 0.04 at m = 200": both at m = 200).
+_CONTRAST = frozenset({"versus", "vs", "compared", "than", "while", "whereas", "but", "against"})
+_TEX_MATH = re.compile(r"\\[()]")
+_CHANGE_TO = re.compile(r"\b(?:rising|falling|rose|fell)\s+to\b", re.I)
 #: A setting is named next to a number when at most this many words (another number counts as one; "the", "a", "an",
 #: "of" and a bracket count as none) stand between them: "0.177 at m = 20", "at m = 200, π1 = 0.2 was 0.177", "0.0415
 #: against 0.04 at m = 200".
@@ -1582,23 +1585,30 @@ class _Cluster:
         return [{a: vs[i] if len(vs) == longest else vs[0] for a, vs in self.values.items()} for i in range(longest)]
 
 
-def _gap_words(text: str) -> int | None:
-    """The words standing between a setting and a number, or ``None`` when a clause ends between them (a ``;``, an
-    "and" / "or", a comma other than one comma alone: "at s = 2, 0.4200")."""
-    inner = _PAREN.sub(" ", text)
+def _gap_words(text: str) -> tuple[int, int] | None:
+    """``(the contrasts, the words)`` standing between a setting and a number (a contrast: :data:`_CONTRAST`, "rising
+    to"), or ``None`` when a clause ends between them (a ``;``, an "and" / "or", a comma other than one comma alone:
+    "at s = 2, 0.4200"; a bracket opened or closed between them: "0.199 at m = 20 (m = 200: 0.198)", but not TeX's
+    backslash-bracket, which opens and closes mathematics)."""
+    inner = _PAREN.sub(" ", _TEX_MATH.sub(" ", text))
     numbers = len(_CONTEXT_NUMBER.findall(inner))
     inner = _CONTEXT_NUMBER.sub(" ", inner)
-    if ";" in inner or ("," in inner and inner.strip() != ","):
+    if ";" in inner or ("," in inner and inner.strip() != ",") or "(" in inner or ")" in inner:
         return None
+    contrasts = len(_CHANGE_TO.findall(inner))
+    inner = _CHANGE_TO.sub(" ", inner)
     words = [w.lower() for w in _GAP_WORD.findall(inner)]
     if any(w in ("and", "or") for w in words):
         return None
-    return numbers + sum(1 for w in words if w not in _GAP_SKIP)
+    contrasts += sum(1 for w in words if w in _CONTRAST)
+    return contrasts, numbers + sum(1 for w in words if w not in _GAP_SKIP and w not in _CONTRAST)
 
 
-def _merge(rows: list[dict[str, Any]], more: list[dict[str, Any]], unnamed: set[str]) -> list[dict[str, Any]]:
-    """``rows`` with ``more`` named beside them: one row with many, many with one, or as many with as many in order. An
-    axis two of them name differently is ``unnamed``."""
+def _merge(rows: list[dict[str, Any]], more: list[dict[str, Any]], words: tuple[int, int],
+           near: dict[str, tuple[int, int]]) -> list[dict[str, Any]]:
+    """``rows`` with ``more`` (``words`` from the number, :func:`_gap_words`) beside them: one row with many, many with one, or as many
+    with as many in order. An axis named differently twice keeps the nearer setting (``near``: each axis's distance so
+    far); two at the same distance name a value of none (:data:`_NOT_A_VALUE`), so the number fits no setting."""
     if len(more) == 1:
         pairs = [(r, more[0]) for r in rows]
     elif len(rows) == 1:
@@ -1609,8 +1619,15 @@ def _merge(rows: list[dict[str, Any]], more: list[dict[str, Any]], unnamed: set[
         return rows
     out = []
     for r, m in pairs:
-        unnamed.update(a for a in m if a in r and not _same(r[a], m[a]))
-        out.append({**r, **m})
+        row = dict(r)
+        for a, v in m.items():
+            if a not in row or _same(row[a], v) or words < near[a]:
+                row[a] = v
+            elif words == near[a]:
+                row[a] = _NOT_A_VALUE
+        out.append(row)
+    for a in {a for m in more for a in m}:
+        near[a] = min(near.get(a, words), words)
     return out
 
 
@@ -1618,10 +1635,12 @@ def _named_beside(sentence: str, axes: _Axes, at: int) -> list[dict[str, Any]] |
     """The settings the sentence names for the number at ``at`` (one row, or one per setting it stands for), ``None``
     when the number is not one the sentence lists.
 
-    A setting is named next to its number (:data:`_NEXT_TO`): on either side, with no clause ending between (a setting
-    in brackets only after its number: "40.6 points (m = 2000, π1 = 0.2)"); a list of numbers takes a list of settings in
-    order ("0.177, 0.198 and 0.199 for m = 20, 200, 2000"); and a setting named before the sentence's first number, and
-    nowhere else in it, holds for the whole sentence ("At π1 = 0.05 BH power was 0.393, 0.267 and 0.234")."""
+    A setting is named next to its number (:data:`_NEXT_TO`): on either side, with no clause ending between
+    (:func:`_gap_words`); a setting in brackets is the number's it brackets: "40.6 points (m = 2000, π1 = 0.2)", "FDR
+    (m = 20, π1 = 0.2) was 0.199". A list of numbers takes a list of settings in order ("0.177, 0.198 and 0.199 for m =
+    20, 200, 2000"; two numbers joined by ", and" are two clauses, not a list), and a setting named before the
+    sentence's first number, and nowhere else in it, holds for the whole sentence ("At π1 = 0.05 BH power was 0.393,
+    0.267 and 0.234"). One axis named twice keeps the nearer setting (:func:`_merge`), never neither."""
     found = _bindings(sentence, axes)
     clusters: list[_Cluster] = []
     for axis, value, a, b in found:
@@ -1636,7 +1655,8 @@ def _named_beside(sentence: str, axes: _Axes, at: int) -> list[dict[str, Any]] |
     numbers = [m for m in _CONTEXT_NUMBER.finditer(sentence) if not any(a <= m.start() < b for a, b in spans)]
     groups: list[list[re.Match[str]]] = []
     for m in numbers:
-        if groups and _LIST_SEP.fullmatch(sentence[groups[-1][-1].end():m.start()]):
+        sep = sentence[groups[-1][-1].end():m.start()] if groups else ""
+        if groups and _LIST_SEP.fullmatch(sep) and not (len(groups[-1]) == 1 and _CLAUSE_AND.fullmatch(sep)):
             groups[-1].append(m)
         else:
             groups.append([m])
@@ -1645,34 +1665,50 @@ def _named_beside(sentence: str, axes: _Axes, at: int) -> list[dict[str, Any]] |
         return None
     first_number = numbers[0].start() if numbers else len(sentence)
 
-    def gap(lo: int, hi: int) -> int | None:
+    def outer(c: _Cluster) -> tuple[int, int]:
+        """``c``'s span with its brackets."""
+        if not c.in_brackets:
+            return c.start, c.end
+        return sentence.rindex("(", 0, c.start), sentence.index(")", c.end) + 1
+
+    def bracketed(c: _Cluster) -> bool:
+        """Whether ``c`` is in brackets right after a number (that number's)."""
+        lo, _ = outer(c)
+        before = [m for m in numbers if m.end() <= lo]
+        words = gap(before[-1].end(), lo) if before else None
+        return words is not None and words[0] == 0 and words[1] <= _NEXT_TO
+
+    def gap(lo: int, hi: int) -> tuple[int, int] | None:
         text = "".join(ch if not any(c.start <= i < c.end for c in clusters) else " "
                        for i, ch in enumerate(sentence[lo:hi], lo))
         return _gap_words(text)
 
-    attached: list[_Cluster] = []
+    attached: list[tuple[_Cluster, tuple[int, int]]] = []
     for side in (1, -1):
         near = [c for c in clusters if (c.start >= group[-1].end() if side > 0 else c.end <= group[0].start())]
         for c in (near if side > 0 else reversed(near)):
-            if side < 0 and c.in_brackets:
-                continue  # a setting in brackets belongs to the number before it
-            words = gap(group[-1].end(), c.start) if side > 0 else gap(c.end, group[0].start())
-            if words is None or words > _NEXT_TO:
+            if side < 0 and c.in_brackets and bracketed(c):
+                continue  # a setting in brackets right after another number is that number's
+            lo, hi = outer(c)
+            words = gap(group[-1].end(), lo) if side > 0 else gap(hi, group[0].start())
+            if words is None or words[1] > _NEXT_TO:
                 break
-            attached.append(c)
-    unnamed: set[str] = set()
+            attached.append((c, words))
+    distance: dict[str, tuple[int, int]] = {}
     rows: list[dict[str, Any]] = [{}]
-    for c in sorted(attached, key=lambda c: c.start):
+    for c, words in sorted(attached, key=lambda cw: cw[0].start):
         more = c.rows()
         if more:
-            rows = _merge(rows, more, unnamed)
+            rows = _merge(rows, more, words, distance)
     elsewhere = [c for c in clusters if c.start >= first_number]
+    whole: dict[str, Any] = {}
     for c in clusters:
         more = c.rows()
-        if c.end <= first_number and more and len(more) == 1 and c not in attached \
-                and not any(a in o.values for o in elsewhere for a in c.values):
-            rows = [{**more[0], **r} for r in rows]
-    rows = [{a: v for a, v in r.items() if a not in unnamed} for r in rows]
+        if c.end <= first_number and more and len(more) == 1 and all(c is not near for near, _ in attached) \
+                and not any(name in o.values for o in elsewhere for name in c.values):
+            for name, v in more[0].items():  # two such settings of one axis name a value of none
+                whole[name] = v if name not in whole or _same(whole[name], v) else _NOT_A_VALUE
+    rows = [{**whole, **r} for r in rows]
     if len(rows) == len(group) > 1:
         return [rows[[m.start() for m in group].index(at)]]
     if len(rows) > 1 and len(group) > 1:
