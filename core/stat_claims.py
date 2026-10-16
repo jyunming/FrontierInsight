@@ -905,6 +905,30 @@ def _series_extremes(figure_records: dict[str, Any]) -> set[float]:
     return out
 
 
+def _tables_as_words(text: str) -> str:
+    """``text`` with each Markdown table row read as sentences: every cell with its column's header ("Seed: 5."), and a
+    two-column row also as "name: value." The line under the header row is dropped."""
+    out: list[str] = []
+    header: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            header = []
+            out.append(line)
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+            continue
+        if not header:
+            header = cells
+            continue
+        said = [f"{h}: {c}." for h, c in zip(header, cells) if h and c]
+        if len(cells) == 2 and all(cells):
+            said.append(f"{cells[0]}: {cells[1]}.")
+        out.append(" ".join(said))
+    return "\n".join(out)
+
+
 def check(
     paper_text: str,
     *,
@@ -961,7 +985,8 @@ def check(
     # The seed FI put in through the paper's {{seed}} is FI's record, not the writer's statement: only what the writer typed
     # is held to the records (core/paper_facts.py).
     # A figure's caption is the writer's text too ("![... with seed 0 per setting.](...)"): read as its words.
-    seed_text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1 ", _FACT_SPAN.sub(" ", paper_text))
+    # A table's cell is read with its column's header ("Seed: 5."), a two-column row as "name: value".
+    seed_text = _tables_as_words(re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1 ", _FACT_SPAN.sub(" ", paper_text)))
     findings += _check_seeds(sentences(normalise(seed_text)), seeds, values)
 
     seen: set[str] = set()

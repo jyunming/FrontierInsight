@@ -168,3 +168,14 @@ def test_when_a_fixed_seed_drives_the_trials_too_a_base_seed_claim_is_flagged(tm
     seeds = seed_records(root)
     for sentence in _BASE_SEED_CLAIMS:
         assert _seed_findings(f"# P\n\n{sentence}\n", seeds), sentence
+
+
+def test_a_seed_in_a_table_is_read_as_its_column_s_words(tmp_path: Path) -> None:
+    """Second review (P1-3): a seed in a table row was never checked; the same number in a sentence was."""
+    seeds = seed_records(_quest(tmp_path))
+    two_cols = "## Methods\n\n| Quantity | Value |\n|---|---|\n| Random seed | 5 |\n| Trials | 400 |\n"
+    assert _seed_findings(two_cols, seeds), "a two-column row reads 'Random seed: 5'"
+    by_header = "## Methods\n\n| Setting | Seed | Trials |\n|---|---|---|\n| A | 5 | 400 |\n"
+    assert _seed_findings(by_header, seeds), "a cell reads with its column's header: 'Seed: 5'"
+    true_row = "## Methods\n\n| Quantity | Value |\n|---|---|\n| Trials | 400 |\n| Settings | 27 |\n"
+    assert not _seed_findings(true_row, seeds)
