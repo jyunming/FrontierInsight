@@ -144,3 +144,24 @@ def test_judge_follows_the_repairs():
     few = [{**c, "failed": 10} for c in cells]
     v = trial_checks.judge(few, repairs_left=False)
     assert v.action == trial_checks.OK and all(f.stated for f in v.fails)
+
+
+def test_more_than_half_of_the_settings_left_out_stops_with_a_plain_reason():
+    # what would be left is too little to report: the quest stops with no paper, once the repairs are spent
+    cells = [{"key": f"a={n}", "planned": 100, "failed": 80 if n < 3 else 0, "metrics": {}} for n in range(1, 4)]
+    v = trial_checks.judge(cells, repairs_left=True)
+    assert v.action == trial_checks.REPAIR and not v.partial
+    v = trial_checks.judge(cells, repairs_left=False)
+    assert v.action == trial_checks.STOP and not v.left_out
+    assert "2 of 3 settings" in v.say and "more than half of the settings" in v.say
+
+
+def test_replay_r12_thirteen_of_twenty_five_settings_left_out_is_a_stop_not_a_paper():
+    import gzip
+
+    with gzip.open(Path(__file__).parent / "fixtures" / "replay" / "trial_checks" / "r12_kinetics.json.gz", "rt",
+                   encoding="utf-8") as fh:
+        data = json.load(fh)
+    v = trial_checks.judge(data["cells"], data.get("protocol"), data.get("thresholds"), repairs_left=False)
+    assert v.action == trial_checks.STOP and not v.partial and not v.left_out
+    assert "13 of 25 settings" in v.say

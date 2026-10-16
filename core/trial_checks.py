@@ -10,8 +10,8 @@ up here with numbers, where a reader of the code and a test written by the model
 fail is as bad: its numbers rest on the few that happened to survive, and a quest once reported coverages computed from 2
 of 100 trials. A setting where more than :data:`FAULT_FRACTION` of the trials failed is a fault: the simulation is sent back
 to be repaired with the reasons the trials gave; if the repairs end with it, the setting's numbers are left out of what the
-analysis is given and the paper says so; if every setting is so, the quest stops. A setting where more than
-:data:`STATE_FRACTION` failed is recorded and the paper states it.
+analysis is given and the paper says so; if more than half of the settings are so, the quest stops (too little would be
+left to report). A setting where more than :data:`STATE_FRACTION` failed is recorded and the paper states it.
 
 **Calibration against the truth (:func:`calibration`).** Read from the names the trials return, and only when they pair up
 without doubt (anything else is "not checked", with the reason):
@@ -653,23 +653,26 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
           reasons: dict[str, Counter] | None = None, *, repairs_left: bool) -> Verdict:
     """Both checks on a run's per-setting summary, and what follows from them. A setting where most trials failed is judged
     by the failure check alone (its numbers rest on the trials that survived), so the calibration reads the other settings.
-    While a repair is left, any fault is sent back; once they are spent, a calibration fault or a failure in every setting
-    stops the quest, and failures in some settings leave those settings out."""
+    While a repair is left, any fault is sent back; once they are spent, a calibration fault or a failure in more than half
+    of the settings stops the quest, and failures in at most half of them leave those settings out."""
     fails = failures(cells, reasons)
     bad = [f for f in fails if f.fault]
     run = [f for f in fails if f.planned]
     every = bool(bad) and len(bad) == len(run)
+    # More than half of the settings left out would leave too little to report: that is a stop, never a paper.
+    most = bool(bad) and len(bad) * 2 > len(run)
     keys = {f.key for f in bad}
     cal = calibration([c for c in cells if not of_settings(c, keys)], protocol, thresholds)
     out = Verdict(fails, cal)
     if not bad and not cal.faults:
         return out
-    if cal.faults or every or repairs_left:
+    if cal.faults or most or repairs_left:
         parts = ([failures_directive(bad)] if bad else []) + ([calibration_directive(cal.faults)] if cal.faults else [])
         out.directive = "\n\n".join(parts)
         out.action = REPAIR if repairs_left else STOP
-        # Only some settings fail and nothing else is wrong: once the repairs are spent, those settings are left out.
-        out.partial = not cal.faults and not every
+        # Only some settings (at most half) fail and nothing else is wrong: once the repairs are spent, those settings
+        # are left out.
+        out.partial = not cal.faults and not most
         if cal.faults:
             q = cal.faults[0]
             out.say = ("FI measured the intervals and standard errors the simulation reports against the true values it "
@@ -680,6 +683,8 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
         else:
             many = "every setting" if every else f"{len(bad)} of {len(run)} settings"
             out.say = f"in {many} more than half of the trials failed ({bad[0].says()})"
+            if most and not every:
+                out.say += "; more than half of the settings would be left out, which leaves too little to report"
             out.tried = ["ran every trial of the study and counted the failed trials of each setting",
                          *[f.says() for f in bad[:2]]]
         return out
