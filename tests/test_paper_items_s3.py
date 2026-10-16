@@ -85,3 +85,42 @@ async def test_the_review_puts_the_page_overrun_in_the_paper_and_measures_the_pa
     assert pages == 7 and "The paper is 7 pages long, over the topic's limit of 4" in text
     assert json.loads((root / ".fi" / "page_limit.json").read_text()) == {"pages": 7, "limit": 4, "final": True}
     assert text.count("pages long") == 1  # re-stated, not added again
+
+
+async def test_a_paper_that_leaves_the_review_over_its_page_limit_says_so_whatever_route_brought_it(
+        tmp_path: Path, monkeypatch) -> None:
+    """Round s4: both papers left the review with "shortening 2 of 2" still pending and other findings out of rounds, so
+    the review never reached the step that states the overrun, and 6- and 7-page papers shipped silent. The last step
+    before delivery measures the delivered paper itself."""
+    import core.engine as engine_mod
+    from tests.test_plan_optimisation import _engine
+
+    eng = _engine(tmp_path, [])
+    root = eng.quest_root
+    (root / ".fi").mkdir(parents=True, exist_ok=True)
+    paper = root / "paper.md"
+    body = "# T\n\n## Methods\nM.\n\n## Limitations\nFew.\n\n## References\n1. A.\n"
+    paper.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(engine_mod, "resolve_page_limit", lambda config: 4)
+
+    async def no_citations(state: dict) -> dict:
+        return {"citation_next": "done"}
+
+    pages = {"n": 7}
+
+    async def measure(path: Path, state: dict) -> dict:
+        return {"pages": pages["n"]}
+
+    eng._check_citations = no_citations  # type: ignore[method-assign]
+    eng._measure_draft_pages = measure  # type: ignore[method-assign]
+    out = await eng._node_citation_check({"paper_md": str(paper)})  # type: ignore[arg-type]
+    assert out == {"citation_next": "done"}
+    assert "The paper is 7 pages long, over the topic's limit of 4" in paper.read_text(encoding="utf-8")
+    assert json.loads((root / ".fi" / "page_limit.json").read_text()) == {"pages": 7, "limit": 4, "final": True}
+
+    # A paper within the limit is left as it is.
+    paper.write_text(body, encoding="utf-8")
+    (root / ".fi" / "page_limit.json").unlink()
+    pages["n"] = 4
+    await eng._node_citation_check({"paper_md": str(paper)})  # type: ignore[arg-type]
+    assert paper.read_text(encoding="utf-8") == body and not (root / ".fi" / "page_limit.json").exists()

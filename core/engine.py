@@ -20411,6 +20411,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return {"claim_grounding": grounding, "claim_check_failed": failed}
 
     async def _node_citation_check(self, state: QuestState) -> QuestState:
+        """The last step before the paper is delivered: its citations are read against their sources
+        (:meth:`_check_citations`), then the paper as delivered is measured against the page limit, and one still over it
+        says so in its Limitations from that measurement (:meth:`_state_page_overrun`). The review states an overrun only
+        when it has used up its shortening rewrites, and a paper can also leave the review loop earlier (its other
+        findings out of rounds), so the delivered paper is measured here, whatever route brought it."""
+        out = await self._check_citations(state)
+        limit = resolve_page_limit(self.config)
+        paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
+        if limit is not None and paper_path and Path(paper_path).is_file():
+            measured = await self._measure_draft_pages(Path(paper_path), {**state, **out})  # type: ignore[arg-type]
+            if measured is not None and int(measured["pages"]) > limit:
+                pages = await self._state_page_overrun({**state, **out}, Path(paper_path), limit,  # type: ignore[arg-type]
+                                                       int(measured["pages"]))
+                self._log.warning("[page_limit] the paper as delivered renders to %d pages, over the limit of %d: "
+                                  "its Limitations say so", pages, limit)
+        return out
+
+    async def _check_citations(self, state: QuestState) -> QuestState:
         """Read every citation of the paper that is about to be delivered against the retrieved text of its source, and
         fix what that text does not support (core/citation_support.py). It runs last: after the review, the rewrites and
         the page-limit fit, so nothing can add a citation after it. A person is never asked; the paper is never stopped
