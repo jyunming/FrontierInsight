@@ -1129,6 +1129,28 @@ def read_render_record(quest_root: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+_ENGINE_NAMES = {"xelatex": "XeLaTeX", "pdflatex": "pdfLaTeX", "tectonic": "Tectonic", "lualatex": "LuaLaTeX"}
+
+
+def render_line(record: dict | None) -> str:
+    """One plain line, for run.log, on how ``paper.pdf`` was made: ``paper.pdf: typeset
+    with XeLaTeX, 4 pages``, ``paper.pdf: NOT typeset (no LaTeX found); made by the
+    browser, 5 pages``, or ``paper.pdf: not made (<reason>)``."""
+    if not record:
+        return "paper.pdf: not made (no record of a render)"
+    pages = record.get("pages")
+    pages_text = f", {pages} page{'' if pages == 1 else 's'}" if pages else ""
+    reason = str(record.get("reason") or "no reason recorded")
+    engine = str(record.get("engine") or "LaTeX")
+    if record.get("typeset") and engine == "html_briefing":
+        return f"paper.pdf: made by the browser in the briefing style, as configured{pages_text}"
+    if record.get("typeset"):
+        return f"paper.pdf: typeset with {_ENGINE_NAMES.get(engine, engine)}{pages_text}"
+    if pages:
+        return f"paper.pdf: NOT typeset ({reason}); made by the browser{pages_text}"
+    return f"paper.pdf: not made ({reason})"
+
+
 def _dedupe_duplicated_references(markdown: str) -> str:
     """Collapse ``"1. Foo. Foo."`` reference lines to ``"1. Foo."``.
 
