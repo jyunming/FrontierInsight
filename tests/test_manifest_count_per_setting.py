@@ -204,7 +204,9 @@ def test_an_estimator_dropped_and_another_ones_values_under_its_name_is_caught()
     for n in ("50", "500"):
         rj["by_n"][n]["by_estimator"].pop("trimmed")
         rj["by_n"][n]["stats"] = {"trimmed": {"err_values": list(vals[n]["median"])}}
-    assert _found(proto, man, rj, pc, "err")
+    # the median's values under the trimmed estimator's name: numbers that estimator never produced, not a count
+    found = _raw(proto, man, rj, pc)
+    assert any(rm.kind_of(s) == rm.FABRICATED and "stats/trimmed" in s for s in found), found
     rj = _honest(vals)
     rj["by_n"]["500"]["by_estimator"].pop("trimmed")
     assert _found(proto, man, rj, pc, "err")

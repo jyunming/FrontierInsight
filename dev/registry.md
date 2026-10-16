@@ -27,11 +27,16 @@ same PR that adds, splits or renames one.
   per setting; `Engine._run_cell_randomness` and `trial_runner.run_cell_again` decide there is no randomness).
   The count of what the analysis lists (`_listed_by_group`, `_path_cells`, `_mapping_counts`) reads a list's setting
   from its key path: `_grouped_segment` reads a key of a mapping whose keys are all values of one factor as that value;
-  a lone key that is a value's name (`_value_named`) is kept only when the list fits that setting's record
+  for the count, a lone key that is a value's name (`_value_named`) is kept only when the list fits that setting's record
   (`_read_pairs`, `_fits_record`). `_account` holds each setting to its own record exactly (values; undefined trials
   where the setting has values; `short` settings), judging the values and the undefined ones apart, each complete by
-  the per-setting copy, the largest pooled list or keys side by side; `_values_of_other_settings` finds a list placed
-  at a setting whose values are another setting's. Findings carry a kind (`Finding`, `fabricated` / `unaccounted`,
+  the per-setting copy, the largest pooled list or keys side by side. `_attribute` (via `_values_of_other_settings`)
+  holds each list to the trials of the setting its key path names: a lone key that is a value's name must hold that
+  value's trials, or the coarser setting's whole record (a summary), never fall back to the coarser setting; a list that
+  holds, at its setting, the values of the recorded output a key on its path names is counted as that output
+  (`relabelled`, logged by the engine); anything else is fabricated. `trial_runner.held_as` hands such lists over from
+  the pooled check, and `trial_runner.mean_beside` (in `reported_values_not_run`) calls a `<m>` / `<m>_mean` printed
+  beside `<m>_values` fabricated when it is neither the list's mean nor its standard deviation. Findings carry a kind (`Finding`, `fabricated` / `unaccounted`,
   `kind_of`): `Engine._run_manifest_problems` keeps the fabricated ones in `_manifest_fabricated`, which stop under
   `warn` too.
   `engine.run_manifest_check` defaults to `warn` (recorded: `needs/RUN_MANIFEST_CHECK.json` status `warned`, QUALITY.md

@@ -843,22 +843,21 @@ def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recor
             "values_complete": complete(0), "undefined_complete": complete(1)}
 
 
-def _lists_at_settings(result_json: Any, metric_id: str, grid: dict[str, list[Any]], fits: Any) -> list[tuple[str, Any, list[Any]]]:
-    """Each ``<metric_id>_values`` list with where it is and the setting it is read as (:func:`_read_pairs`, ``None`` when
-    its path names none): ``(where, pairs, values)``."""
+def _lists_with_paths(result_json: Any, metric_id: str, grid: dict[str, list[Any]]) -> list[tuple[str, tuple[Any, ...], list[Any]]]:
+    """Each ``<metric_id>_values`` list with where it is and its key path (a key of a mapping grouping by one factor as
+    :data:`GROUPED`): ``(where, path, values)``."""
     values_key = f"{metric_id}_values"
-    out: list[tuple[str, Any, list[Any]]] = []
+    out: list[tuple[str, tuple[Any, ...], list[Any]]] = []
 
     def walk(node: Any, path: tuple[Any, ...]) -> None:
         if isinstance(node, dict):
             listed = node.get(values_key)
             if isinstance(listed, list):
-                out.append(("/".join(_segment_text(s) for s in path + (values_key,)), _read_pairs(path, grid, fits, node), listed))
+                out.append(("/".join(_segment_text(s) for s in path + (values_key,)), path, listed))
             elif isinstance(listed, dict):
                 for key, value in listed.items():
                     if isinstance(value, list):
-                        out.append(("/".join(_segment_text(s) for s in path + (values_key, key)),
-                                    _read_pairs(path + (key,), grid, fits, {values_key: value}), value))
+                        out.append(("/".join(_segment_text(s) for s in path + (values_key, key)), path + (key,), value))
             for k, v in node.items():
                 if k != values_key:
                     walk(v, path + (_grouped_segment(node, k, grid, (values_key, f"{metric_id}_undefined")),))
@@ -874,34 +873,94 @@ def _segment_text(segment: Any) -> str:
     return str(segment[2]) if isinstance(segment, tuple) and len(segment) == 3 and segment[0] == GROUPED else str(segment)
 
 
-def _values_of_other_settings(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
-                              recorded_by_cell: dict[str, Any] | None) -> list[Finding]:
-    """Each list placed at a setting that holds values FI's trials produced, but not that setting's trials (another
-    setting's, or another procedure's of the same runs): numbers that setting never produced. A value no trial produced
-    anywhere is :func:`core.trial_runner.reported_values_not_run`'s, and is not told twice."""
-    from .trial_runner import _not_among
+def _defined_count(counts: Any) -> int:
+    return (recorded_counts({"x": counts}, "x") or (0, 0))[0]
+
+
+def _attribute(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
+               recorded_by_cell: dict[str, Any] | None) -> tuple[list[Finding], list[str]]:
+    """Each ``<metric_id>_values`` list held to the trials of the setting its key path names: ``(fabricated findings,
+    notes for run.log)``.
+
+    * A list is that setting's trials when every value is one of them.
+    * A key that is only a value's name (``stats/benjamini_hochberg``, or ``by_method/benjamini_hochberg`` beside a key
+      such as ``notes``) names that value: the list must be its trials, never the coarser setting's, unless it is
+      exactly the coarser setting's whole record (a summary over every procedure under ``summary/mean``).
+    * A list whose values are, at its setting, every one of the recorded output a key on its path names is that
+      output's: a note, not a finding.
+    * Anything else is numbers that setting never produced: fabricated. Values no trial of ``metric_id`` produced at any
+      setting are :func:`core.trial_runner.reported_values_not_run`'s to tell, and are not told twice."""
+    from collections import Counter
+
+    from .trial_runner import _not_among, held_as, pooled
 
     record = _record_by_setting(recorded_by_cell, metric_id, grid) if recorded_by_cell and grid else {}
     if not record:
-        return []
-    everywhere = _union(record, set(record))
-    fits = _fits_record(metric_id, grid, record)
-    out: list[Finding] = []
-    for where, pairs, values in _lists_at_settings(result_json, metric_id, grid, fits):
-        if not pairs:
-            continue
-        cells = {cell for cell in record if pairs <= cell}
-        if not cells:
-            continue
+        return [], []
+    everywhere = pooled(recorded_by_cell or {})
+    records: dict[str, dict[frozenset[tuple[str, Any]], Any]] = {metric_id: record}
+
+    def at(name: str, pairs: frozenset[tuple[str, Any]] | None) -> Counter:
+        if name not in records:
+            records[name] = _record_by_setting(recorded_by_cell, name, grid)
+        mine = records[name]
+        return _union(mine, {cell for cell in mine if pairs is None or pairs <= cell})
+
+    def setting(pairs: frozenset[tuple[str, Any]] | None) -> str:
+        return ",".join(f"{a}={v}" for a, v in sorted(pairs or (), key=lambda p: list(grid).index(p[0]))) or "every setting"
+
+    findings: list[Finding] = []
+    notes: list[str] = []
+    for where, path, values in _lists_with_paths(result_json, metric_id, grid):
         numbers = _finite(values)
-        here = len(_not_among(numbers, _union(record, cells)))
-        anywhere = len(_not_among(numbers, everywhere))
-        if here > anywhere:
-            setting = ",".join(f"{a}={v}" for a, v in sorted(pairs, key=lambda p: list(grid).index(p[0])))
-            out.append(fabricated(
-                f"the analysis reports `{where}` as `{metric_id}` at `{setting}`, but {here - anywhere} of its "
+        if not numbers:
+            continue
+        keys = [s for s in path if isinstance(s, str)]
+        named = next((k for k in reversed(keys) if k != metric_id and k in everywhere), None)
+        full, firm = _path_cells(path, grid), _path_cells(path, grid, bare=False)
+        if full is None and named is None:
+            continue  # a list that names no setting: pooled, judged over all settings by trial_runner
+        own = at(metric_id, full)
+        if not _not_among(numbers, own):
+            continue
+        if full != firm and named is None:
+            coarse = at(metric_id, firm)
+            if len(numbers) == _defined_count(coarse) and not _not_among(numbers, coarse):
+                continue  # the coarser setting's whole record under a value's name: a summary over all of it
+        candidates = [named] if named else []
+        holds = [o for o in candidates if not _not_among(numbers, at(o, full))]
+        if len(holds) == 1:
+            notes.append(f"`{where}` holds `{holds[0]}`'s values at `{setting(full)}`, not `{metric_id}`'s: FI counts it "
+                         f"as `{holds[0]}`")
+            continue
+        told = (len(_not_among(numbers, everywhere.get(metric_id) or Counter()))
+                if held_as(metric_id, values, everywhere, keys) == metric_id else 0)
+        here = len(_not_among(numbers, own))
+        if here > told:
+            findings.append(fabricated(
+                f"the analysis reports `{where}` as `{metric_id}` at `{setting(full)}`, but {here - told} of its "
                 f"{len(numbers)} value(s) are not that setting's trials (they are another setting's or another "
                 "procedure's): the list under a setting must be that setting's own values from FI_TRIALS"))
+    return findings, notes
+
+
+def _values_of_other_settings(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
+                              recorded_by_cell: dict[str, Any] | None) -> list[Finding]:
+    """Each list placed at a setting that holds values that are not that setting's trials (:func:`_attribute`)."""
+    return _attribute(result_json, metric_id, grid, recorded_by_cell)[0]
+
+
+def relabelled(protocol: dict[str, Any] | None, result_json: Any, recorded_by_cell: dict[str, Any] | None) -> list[str]:
+    """The lists of the protocol's metrics that hold another recorded output's values at their setting, each in a
+    sentence for run.log (:func:`_attribute`): counted as that output, not as numbers never produced."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    out: list[str] = []
+    if result_json is None or not recorded_by_cell:
+        return out
+    for spec in protocol.get("metrics") or []:
+        if isinstance(spec, dict) and spec.get("id") and not spec.get("given"):
+            metric = str(spec["id"])
+            out.extend(_attribute(result_json, metric, metric_grid(protocol, metric, recorded_by_cell), recorded_by_cell)[1])
     return out
 
 

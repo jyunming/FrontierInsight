@@ -1889,7 +1889,13 @@ def _not_among(values: list[Any], recorded: Counter) -> list[float]:
     places than the trial returned (``1.2346`` for ``1.23456789``, ``0.0`` for ``1e-05``, ``3`` for ``2.8``) is that
     value: it matches a recorded value within half its last printed place. The most precise numbers are matched first,
     each to the nearest value left, so a coarse one cannot take the value a precise one needed."""
-    left = Counter(recorded)
+    import bisect
+
+    left: Counter = Counter()
+    for k, n in recorded.items():
+        key = k if isinstance(k, str) else _value_key(k)
+        if key is not None:
+            left[key] += n
     pending: list[Any] = []
     for x in values:
         key = _value_key(x)
@@ -1901,16 +1907,70 @@ def _not_among(values: list[Any], recorded: Counter) -> list[float]:
             pending.append(x)
     if not pending:
         return []
-    pool = [float(k) for k, n in left.items() for _ in range(max(n, 0))]
+    pool = sorted(v for v in (_as_float(k) for k, n in left.items() for _ in range(max(n, 0))) if math.isfinite(v))
     extra = []
     for x in sorted(pending, key=_half_step):
         value, half = float(x), _half_step(x)
-        near = [(abs(v - value), i) for i, v in enumerate(pool) if math.isfinite(v) and abs(v - value) <= half * (1 + 1e-9)]
+        if not math.isfinite(value):
+            extra.append(value)
+            continue
+        i = bisect.bisect_left(pool, value)
+        near = [(abs(pool[j] - value), j) for j in (i - 1, i) if 0 <= j < len(pool)
+                and abs(pool[j] - value) <= half * (1 + 1e-9)]
         if near:
-            pool.pop(min(near)[1])
+            pool.pop(min(near)[1])  # the nearest value left: the same choice as a search of every value
         else:
             extra.append(value)
     return extra
+
+
+def _as_float(key: Any) -> float:
+    try:
+        return float(key)
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def held_as(name: str, values: list[Any], recorded: dict[str, Counter], keys: list[Any] | tuple[Any, ...] = ()) -> str:
+    """The name of FI's record a ``<name>_values`` list is held to over all settings: ``name`` when every value is one of
+    its trials'; else a recorded name a key on the list's path gives (``x1_power/power_values``) when every value is one of
+    that name's; else ``name``. A list held to another name is judged setting by setting in :mod:`core.run_manifest`
+    (``_attribute``), which says it in run.log or calls it fabricated."""
+    if name not in recorded or not _not_among(values, recorded[name]):
+        return name
+    named = [k for k in keys if isinstance(k, str) and k != name and k in recorded]
+    if named and not _not_among(values, recorded[named[-1]]):
+        return named[-1]
+    return name
+
+
+def mean_beside(mapping: dict[str, Any], name: str, values: list[Any]) -> str | None:
+    """A sentence when a number printed beside ``<name>_values`` as what they give (``<name>``, ``<name>_mean`` or
+    ``<name>: {"mean": ...}``) is neither the mean of that list's finite values nor their standard deviation (a metric
+    may be the spread of the per-trial values, as ``SD(Ea_hat)/Ea_true`` beside each trial's ``Ea_hat/Ea_true``); ``None``
+    when it is one of them, within what rounding the printed numbers could have moved it (the number's last printed place,
+    each value's, and float32), or when there is none."""
+    import statistics
+
+    finite = [float(x) for x in values if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)]
+    if not finite:
+        return None
+    mean = math.fsum(finite) / len(finite)
+    spreads = [statistics.pstdev(finite)] + ([statistics.stdev(finite)] if len(finite) > 1 else [])
+    slack = max(_half_step(x) for x in finite) + 2 ** -24 * max(abs(x) for x in finite)
+    given = []
+    for key in (name, f"{name}_mean"):
+        v = mapping.get(key)
+        if isinstance(v, dict):
+            v = v.get("mean")
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+            given.append((key, v))
+    for key, v in given:
+        tol = (_half_step(v) + slack) * (1 + 1e-9) + 1e-9 * max(1.0, abs(mean))
+        if all(abs(v - s) > tol for s in [mean, *spreads]):
+            return (f"`{key}` is printed as {v:g} beside `{name}_values`, whose {len(finite)} value(s) have a mean of "
+                    f"{mean:.6g} (and a standard deviation of {spreads[-1]:.6g})")
+    return None
 
 
 def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> list[str]:
@@ -1925,11 +1985,21 @@ def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> l
 
     out: list[str] = []
 
-    def walk(node: Any, path: str) -> None:
+    def walk(node: Any, path: str, keys: tuple[Any, ...] = ()) -> None:
         if isinstance(node, dict):
             for k, v in node.items():
                 here = f"{path}.{k}" if path else str(k)
                 if isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
+                    # the mean printed beside a list is that list's mean (a made-up mean beside honest values is not)
+                    off = mean_beside(node, k[:-7], v)
+                    if off:
+                        out.append(_rm.fabricated(
+                            f"the analysis reports at `{path or 'the top level'}` a mean FI's trials do not give: {off}; "
+                            "a number printed beside its values must be computed from them"))
+                    # a list of another recorded name's values (by its path, or the only one that holds them all) is
+                    # judged setting by setting in core/run_manifest.py
+                    if held_as(k[:-7], v, recorded, keys) != k[:-7]:
+                        continue
                     extra = _not_among(v, recorded[k[:-7]])
                     if extra:
                         out.append(_rm.fabricated(
@@ -1938,10 +2008,10 @@ def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> l
                             f"are; a list of something derived from them needs a name of its own"
                         ))
                 else:
-                    walk(v, here)
+                    walk(v, here, keys + (k,))
         elif isinstance(node, list):
             for i, v in enumerate(node[:200]):
-                walk(v, f"{path}[{i}]")
+                walk(v, f"{path}[{i}]", keys)
 
     walk(result_json, "")
     return out
