@@ -494,6 +494,31 @@ def settle(site: Site, labels: set[str], own_numbers: Any, claim_unsupported: bo
     return "drop_citation", plain, left
 
 
+#: Words that point back at the sentence before: a sentence starting with one cannot stand once that sentence is gone.
+_POINTS_BACK = frozenset({"neither", "either", "both", "none", "this", "that", "these", "those", "such", "it", "they"})
+
+
+def referrer_end(paper: str, site: Site) -> tuple[int, str]:
+    """``(end, why)`` for a sentence about to be cut out whole: ``(site.end, "")`` when the next sentence of its paragraph
+    does not point back at it, ``(end of that sentence, "")`` when the next sentence starts with a word that points back
+    ("Neither was run", "This holds...") and has no number and no citation of its own (it goes with it: left alone it
+    would refer to nothing), and ``(-1, why)`` when it points back but carries a number or a citation (then the
+    sentence is kept, with only its citation taken out)."""
+    end = references_start(paper)
+    units = _pp.sentence_units(paper[:end])
+    nxt = next(((a, b, blk) for a, b, blk in units if a >= site.end), None)
+    cur = next((blk for a, b, blk in units if a <= site.start < b), None)
+    if nxt is None or nxt[2] != cur:
+        return site.end, ""
+    text = paper[nxt[0]:nxt[1]]
+    first = re.match(r"[\s*_(\"']*([A-Za-z]+)", text)
+    if not first or first.group(1).lower() not in _POINTS_BACK:
+        return site.end, ""
+    if re.search(r"\d", text) or CITE_RE.search(text):
+        return -1, "left in the paper with its citation taken out: the next sentence refers back to it"
+    return nxt[1], ""
+
+
 def _apply(paper: str, edits: list[tuple[int, int, str]]) -> str:
     """The paper with each ``(start, end, replacement)`` made, from the end back so the spans stay true. A sentence cut
     out takes one of the spaces beside it."""
@@ -677,7 +702,15 @@ async def check_paper(
             new_text = plan["text"]
         else:
             new_text = rewrite_brackets(site.text, remove=set(labels))
-        edits.append((site.start, site.end, new_text))
+        cut_end = site.end
+        if not new_text:
+            cut_end, why = referrer_end(paper, site)
+            if cut_end < 0:  # something refers back to the sentence and cannot go with it: only its citation goes
+                cut_end, new_text = site.end, rewrite_brackets(site.text, remove=set(labels))
+                plan, note = {"action": "drop_citation", "text": ""}, note or why
+            elif cut_end > site.end:
+                note = note or "the next sentence, which referred back to it, was taken out with it"
+        edits.append((site.start, cut_end, new_text))
         plan.update(final=new_text, fell_back=fell_back, note=note)
         plans[sk] = plan
     new_paper = _apply(paper, edits) if edits else paper

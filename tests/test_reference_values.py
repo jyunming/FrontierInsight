@@ -81,7 +81,7 @@ def test_an_old_protocol_without_references_is_still_valid_and_reads_no_referenc
     assert {q["status"] for q in computed["quantities"]} == {"no reference"}
     built = _build("fdr_s1", protocol)
     assert len(built.distinct.settings) == 9
-    assert all("No reference" in t.caption and "reference" not in t.columns for t in built.tables)
+    assert all("no reference value" in t.caption and "reference" not in t.columns for t in built.tables)
 
 
 def test_the_plans_references_pass_the_plan_check() -> None:
@@ -174,7 +174,7 @@ def test_the_bh_reference_column_matches_arises_printed_table() -> None:
 def test_bh_power_has_no_reference_the_calculator_cannot_solve_a_fixed_point() -> None:
     built = _build("fdr_s1", P.fdr_protocol())
     table = _table(built, "power_bh")
-    assert "reference" not in table.columns and "No reference: the plan gives no reference for it" in table.caption
+    assert "reference" not in table.columns and "It has no reference value to compare with." in table.caption and "the plan gives" not in table.caption
     # ARIS's printed limit is not FI's: it is the m -> infinity root of an equation, which FI does not compute
     assert "0.466" in (ARIS / "tab_pow.tex").read_text(encoding="utf-8")
 

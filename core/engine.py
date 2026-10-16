@@ -102,6 +102,7 @@ from . import trial_runner as _trial_runner
 from . import goal_coverage
 from . import citation_support as _cs
 from . import paper_patch
+from . import paper_sections as _paper_sections
 from . import paper_trim
 from . import plan as _plan
 from . import criteria as _criteria
@@ -20005,6 +20006,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             markdown, unreported, reasked = await self._report_what_the_extension_added(state, persona_block, markdown)
         from generation._keywords import keep_one_keywords_form
 
+        # A scientific paper has an Abstract, whichever pass wrote this draft (first, revise or shortening): its structure is
+        # checked here, not its wording, and a draft without one has it written from the draft itself.
+        if not persona_block:
+            markdown = await self._ensure_abstract(state, markdown)
         # A scientific paper shows its keywords; a persona's paper keeps them
         # in a comment. A writer that gave both keeps the one its format uses.
         markdown = keep_one_keywords_form(markdown, visible=not persona_block)
@@ -20172,6 +20177,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "[write] %s, also after the writer was asked again; the values are in the run's results", said(still)[0],
         )
         return markdown, said(still), True
+
+    async def _ensure_abstract(self, state: QuestState, markdown: str) -> str:
+        """``markdown`` with an ``## Abstract`` (core/paper_sections.py). A draft without one is not sent whole again: the
+        Abstract alone is asked for, from the draft, once; a reply that is empty or fails leaves the draft as it was and the
+        log says so."""
+        if not _paper_sections.missing_abstract(markdown):
+            return markdown
+        self._log.warning("[write] the draft has no Abstract; asking for it from the draft")
+        try:
+            reply = await self._chat(self._prompts["write_abstract"].substitute(
+                topic=state.get("topic") or self.config.topic, paper=markdown), node="write.abstract")
+        except Exception as exc:  # noqa: BLE001 -- the draft that exists is kept
+            self._log.warning("[write] the Abstract could not be written (%s); the draft is kept without one", exc)
+            return markdown
+        lines = [ln for ln in str(reply).strip().splitlines() if not ln.lstrip().startswith("#")]
+        text = " ".join(" ".join(lines).split())
+        if len(text.split()) < 40:
+            self._log.warning("[write] the reply was not an Abstract; the draft is kept without one")
+            return markdown
+        return _paper_sections.with_abstract(markdown, text)
 
     async def _patch_flagged_passages(self, state: QuestState, persona_block: str) -> str | None:
         """The earlier draft with the passages the review named edited, or
@@ -20489,6 +20514,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return {"claim_grounding": grounding, "claim_check_failed": failed}
 
     async def _node_citation_check(self, state: QuestState) -> QuestState:
+        """The last step before the paper is delivered: its citations are read against their sources
+        (:meth:`_check_citations`), then the paper as delivered is measured against the page limit, and one still over it
+        says so in its Limitations from that measurement (:meth:`_state_page_overrun`). The review states an overrun only
+        when it has used up its shortening rewrites, and a paper can also leave the review loop earlier (its other
+        findings out of rounds), so the delivered paper is measured here, whatever route brought it."""
+        out = await self._check_citations(state)
+        limit = resolve_page_limit(self.config)
+        paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
+        if limit is not None and paper_path and Path(paper_path).is_file():
+            measured = await self._measure_draft_pages(Path(paper_path), {**state, **out})  # type: ignore[arg-type]
+            if measured is not None and int(measured["pages"]) > limit:
+                pages = await self._state_page_overrun({**state, **out}, Path(paper_path), limit,  # type: ignore[arg-type]
+                                                       int(measured["pages"]))
+                self._log.warning("[page_limit] the paper as delivered renders to %d pages, over the limit of %d: "
+                                  "its Limitations say so", pages, limit)
+        return out
+
+    async def _check_citations(self, state: QuestState) -> QuestState:
         """Read every citation of the paper that is about to be delivered against the retrieved text of its source, and
         fix what that text does not support (core/citation_support.py). It runs last: after the review, the rewrites and
         the page-limit fit, so nothing can add a citation after it. A person is never asked; the paper is never stopped
@@ -24853,6 +24896,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "write", "review",
         "write_patch",      # a revise for flagged passages: edits, not a new paper
         "write_trim",       # a draft a little over its page limit: sentences to take out
+        "write_abstract",   # a scientific paper whose draft has no Abstract: the Abstract alone, from the draft
         "replot_layout",    # a refine that only asks for the figures arranged again: redraw from saved data
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json

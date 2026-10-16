@@ -169,3 +169,36 @@ def test_a_passage_that_is_not_in_the_source_does_not_back_the_sentence() -> Non
     result = _check(paper, sources, judge, repair, cs.new_record(paper, None), [])
     assert result.counts["found_unsupported"] == 1 and "[1]" not in result.paper
     assert result.rows[0].problem == "the passage named is not in the retrieved text of [1]"
+
+
+def _drop_run(paper: str) -> cs.Result:
+    sources = {"1": _src("1", "One", FULL + "something else entirely", full=True)}
+
+    async def judge(prompt: str) -> str:
+        pid = prompt.splitlines()[0].split(" | ")[0]
+        return json.dumps({"verdicts": [{"id": pid, "supported": False, "why": "not there"}]})
+
+    async def repair(prompt: str) -> str:
+        return json.dumps({"fixes": [{"id": i, "action": "drop_sentence"} for i in json.loads(prompt)]})
+
+    return _check(paper, sources, judge, repair, cs.new_record(paper, None), [])
+
+
+def test_a_sentence_taken_out_does_not_leave_the_next_one_pointing_at_nothing() -> None:
+    paper = ("Intro sentence.\n\nHolm and adaptive procedures would close the gap [1]. Neither was run, so we claim nothing. "
+             "Another point.\n")
+    out = _drop_run(paper)
+    assert "Holm" not in out.paper and "Neither" not in out.paper, out.paper
+    assert "Another point." in out.paper and "Intro sentence." in out.paper
+
+
+def test_a_sentence_something_refers_back_to_stays_when_the_referrer_cannot_go() -> None:
+    paper = "Holm would close the gap [1]. Neither was run, and the gap is 0.25 here.\n"
+    out = _drop_run(paper)
+    assert "Neither was run, and the gap is 0.25 here." in out.paper
+    assert "[1]" not in out.paper, "only the citation went"
+
+
+def test_a_sentence_nothing_refers_back_to_is_still_taken_out_alone() -> None:
+    out = _drop_run("Holm would close the gap [1]. The study ran BH only.\n")
+    assert out.paper.strip() == "The study ran BH only."

@@ -356,6 +356,9 @@ def required_items(quest_root: Path | str) -> list[Item]:
     return items
 
 
+_MAX_DIFFERENCE_CHARS = 500
+
+
 def run_difference_text(record: dict[str, Any]) -> str:
     """The sentence FI puts in the Limitations for a difference it recorded and went on with
     (``needs/RUN_MANIFEST_CHECK.json``): the plain sentence FI made of it, or its first finding, and that the numbers rest
@@ -364,15 +367,17 @@ def run_difference_text(record: dict[str, Any]) -> str:
     problems = [str(p) for p in record.get("problems") or [] if str(p).strip()]
     seeds = record.get("seeds") if isinstance(record.get("seeds"), dict) else {}
     if not headline and problems:
-        headline = problems[0][:300] + ("..." if len(problems[0]) > 300 else "")
-        if len(problems) > 1:
-            headline += f" (and {len(problems) - 1} more)"
+        # Whole findings, never a cut one: every finding when they fit a line or two, else how many there are and the first
+        # one in full.
+        said = [p.rstrip(". ") for p in problems]
+        headline = (said[0] if len(said) == 1 else "; ".join(said) if sum(map(len, said)) <= _MAX_DIFFERENCE_CHARS
+                    else f"it differs in {len(said)} places, the first being that {said[0]}")
     if not headline and seeds:
         seed, found = next(iter(seeds.items()))
         first = str(found[0]) if isinstance(found, list) and found else "it differs"
-        headline = f"the run with seed {seed} differs from the plan: {first[:300]}"
+        headline = f"the run with seed {seed} differs from the plan: {first.rstrip(chr(46) + chr(32))}"
     return ("FI's record of the trials that ran does not match what the analysis reports: "
-            + (headline.rstrip(".") or "the difference is in the quality report")
+            + (headline.rstrip(".") or "the two differ")
             + ". The numbers reported here rest on that analysis")
 
 
@@ -455,9 +460,11 @@ def _precision_items(root: Path, add: Any) -> None:
         add(PRECISION, labels[key], _sentence(said), key=key)
 
 
-def _metric_of(root: Path, name: str) -> tuple[str, str]:
-    """``(the plan's metric id, its label)`` that ``name`` (a path in the analysis's output) ends with: the longest id
-    when several fit. ``("", "")`` when the plan names none of them."""
+_TRAILING_ID_RE = re.compile(r"(?:^|\.)([A-Za-z_][A-Za-z0-9_]*)$")
+
+
+def _plan_metrics(root: Path) -> list[dict[str, Any]]:
+    """The metrics of the frozen plan; ``[]`` when there is no plan to read."""
     try:
         from . import frozen_protocol as _frozen
 
@@ -465,15 +472,38 @@ def _metric_of(root: Path, name: str) -> tuple[str, str]:
         protocol = frozen.get("protocol") if isinstance(frozen, dict) else None
         metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
     except Exception:  # noqa: BLE001 -- no plan to read: the name stands as it is
-        return "", ""
+        return []
+    return [m for m in metrics if isinstance(m, dict)] if isinstance(metrics, list) else []
+
+
+def _metric_of(root: Path, name: str) -> tuple[str, str]:
+    """``(the metric, its label)`` that ``name`` (a path in the analysis's output, such as ``by_sigma.sigma=0.01.coverage_Ea``)
+    is about. The plan's metric the name ends with (the longest id when several fit) with the plan's own label; else the
+    name the path ends in, which is the quantity's own name and never the cell it was measured in (a label is then ``""``).
+    ``("", "")`` when the name ends in no name at all."""
     best: dict[str, Any] | None = None
-    for m in metrics if isinstance(metrics, list) else []:
-        mid = str(m.get("id") or "") if isinstance(m, dict) else ""
+    for m in _plan_metrics(root):
+        mid = str(m.get("id") or "")
         if mid and (name == mid or name.endswith("." + mid)) and (best is None or len(mid) > len(str(best["id"]))):
             best = m
-    if best is None:
-        return "", ""
-    return str(best["id"]), _one(best.get("label")) or str(best["id"])
+    if best is not None:
+        return str(best["id"]), _one(best.get("label")) or str(best["id"])
+    tail = _TRAILING_ID_RE.search(name.strip())
+    return (tail.group(1), "") if tail else ("", "")
+
+
+def _label_of_names(root: Path, names: list[str], fallback: str) -> str:
+    """What a reader calls the quantity whose columns in the trials are ``names`` (``Ea_lo``, ``Ea_hi``): the label of the
+    plan's metric that declares one of them as its estimate, standard error or interval; else ``fallback``."""
+    wanted = {str(n) for n in names if str(n).strip()}
+    for m in _plan_metrics(root):
+        known = m.get("known_value") if isinstance(m.get("known_value"), dict) else {}
+        mine = {str(known.get(k)) for k in ("estimate", "standard_error") if known.get(k)}
+        interval = known.get("interval")
+        mine |= {str(x) for x in interval} if isinstance(interval, (list, tuple)) else set()
+        if wanted & mine and _one(m.get("label")):
+            return _one(m.get("label"))
+    return fallback
 
 
 def _undefined_items(rec: dict[str, Any], add: Any) -> None:
@@ -550,24 +580,27 @@ def _trial_check_items(root: Path, add: Any) -> None:
             continue
         vals = [s.get("value") for s in q.get("settings") or [] if isinstance(s, dict)
                 and isinstance(s.get("value"), (int, float))]
-        label, n, of = _one(q.get("label")), int(q.get("below") or 0), int(q.get("judged") or 0)
+        plain = _label_of_names(root, q.get("names") or [], "")
+        label = _one(q.get("label"))
+        shown = f'"{plain}"' if plain else f"`{label}`"
+        n, of = int(q.get("below") or 0), int(q.get("judged") or 0)
         if q.get("kind") == "coverage":
             level = q.get("level")
             pct = f"{float(level):.0%}" if isinstance(level, (int, float)) else "their stated level"
-            said = (f"The {pct} intervals reported for `{label}` contain the true value less often than {pct} in {n} of "
+            said = (f"The {pct} intervals reported for {shown} contain the true value less often than {pct} in {n} of "
                     f"{of} settings, by more than chance explains"
                     + (f" (lowest coverage {min(vals):.2f})" if vals else ""))
         elif q.get("kind") == "bias":
-            said = (f"The estimates of `{label}` lie off the true value in {n} of {of} settings, by more than chance "
+            said = (f"The estimates of {shown} lie off the true value in {n} of {of} settings, by more than chance "
                     "explains" + (f" (by {min(vals):+.2f} to {max(vals):+.2f} of their own spread)" if vals else ""))
         elif q.get("kind") == "no_estimate":
-            said = (f"`{label}`, the estimate of a known true value, has no number in some trials at {n} settings"
+            said = (f"{shown}, the estimate of a known true value, has no number in some trials at {n} settings"
                     + (f" (up to {max(vals):.0%} of a setting's trials)" if vals else ""))
         else:
-            said = (f"The standard error reported for `{label}` differs from the spread of the estimates over the trials "
+            said = (f"The standard error reported for {shown} differs from the spread of the estimates over the trials "
                     f"in {n} of {of} settings, by more than chance explains"
                     + (f" (ratio {min(vals):.2g} to {max(vals):.2g}; 1 when right)" if vals else ""))
-        add(CALIBRATION, label or "a reported uncertainty", _sentence(said), key=f"{q.get('kind')}-{label}")
+        add(CALIBRATION, plain or label or "a reported uncertainty", _sentence(said), key=f"{q.get('kind')}-{label}")
 
 
 def _failed_where(root: Path, most: int = 4) -> str:
@@ -873,7 +906,9 @@ def place_items(markdown: str, quest_root: Path | str, heading: str = "Limitatio
     one of its own, before the sources. An item the writer placed itself stays where it is, wherever that is: FI places
     what is missing instead of checking where the writer put it. :func:`render` then fills it."""
     text = markdown or ""
-    todo = [i for i in required_items(quest_root) if not _item_placed(text, i)]
+    # A problem the second reading of the code left open is the writer's to state or not (the check of the draft asks for
+    # it); FI does not put it in the paper itself: left alone it is in QUALITY.md only (core/code_review.py findings_block).
+    todo = [i for i in required_items(quest_root) if i.kind != CODE_FINDING and not _item_placed(text, i)]
     if not todo:
         return text
     lines = text.split("\n")

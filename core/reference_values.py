@@ -406,7 +406,7 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
             continue
         if raw is None:
             quantities.append({"metric": ident, "value": name, "status": "no reference",
-                               "why": "the plan gives no reference for it"})
+                               "why": ""})
             continue
         shape = shape_problem(raw)
         if shape:
