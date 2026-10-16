@@ -180,6 +180,10 @@ def _fake(prompts: list[str], *, second_design: dict[str, Any], first_protocol: 
             if seen["analysis"] == 1:
                 body.update({"next_step": "re_experiment", "next_step_reason": "the grid is too thin"})
             return json.dumps(body)
+        if kind == "Writing":
+            # The one-script quest ran no trial checks of FI's, and FI's record requires the paper to say so (a required
+            # paper item); a draft without it costs a review round, which these tests count.
+            return _FAKE_RESPONSES["write"].replace("## References", "## Limitations\n{{not_done:trials-unchecked-all}}\n\n## References")
         return _fake_response_for(prompt)
 
     return fake_chat
