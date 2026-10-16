@@ -88,8 +88,11 @@ async def test_still_unusable_after_one_ask_is_a_requirement_not_done_and_the_pa
     from core import disclosure, paper_facts
 
     items = paper_facts.required_items(eng.quest_root)
-    assert [i.name for i in items if i.kind == paper_facts.NOT_DONE] == ["comparison inside each run"]
-    assert "comparison inside each run" in paper_facts.writer_section(eng.quest_root)
+    (item,) = [i for i in items if i.kind == paper_facts.NOT_DONE]
+    assert item.name == "comparison inside each run" and "has one value" in item.sentence
+    # The writer places it as a `{{not_done:<id>}}` item, which FI fills with that sentence.
+    section = paper_facts.writer_section(eng.quest_root)
+    assert "{{not_done:" + item.id + "}}" in section and item.sentence in section
     assert "has one value" in disclosure.run_record(eng.quest_root)
     # A resume asks no more.
     design, sha = eng._design_from_plan()
