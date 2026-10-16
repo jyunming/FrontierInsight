@@ -20665,8 +20665,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         final = paper
         new_literature = literature
         if result.changed:
-            final, new_literature = _finalize_after_citation_edits(result.paper, literature, audience)
+            final, new_literature, numbering = _finalize_with_numbering(result.paper, literature, audience)
         data = _cs.ledger(result, reader=reader, same_model=same)
+        if result.changed:
+            data = _cs.relabel_ledger(data, numbering)  # named by the numbers the delivered paper has
         c = result.counts
         summary = {**c, "reader": reader, "reader_is_writer": same, "judge_failed": result.judge_failed}
         # Everything a resume needs to put the state back is in the record BEFORE the paper is written.
@@ -27127,6 +27129,13 @@ def _reorder_literature(literature: list[Any], order: list[str]) -> list[Any]:
 
 
 def _finalize_after_citation_edits(markdown: str, literature: list[Any], audience: str) -> tuple[str, list[Any]]:
+    text, ordered, _mapping = _finalize_with_numbering(markdown, literature, audience)
+    return text, ordered
+
+
+def _finalize_with_numbering(
+    markdown: str, literature: list[Any], audience: str,
+) -> tuple[str, list[Any], dict[int, int]]:
     """The paper after the citation check took citations out or put one in: the sources it cites are numbered again in
     the order the text first cites them, ``## References`` lists exactly those, and the literature is reordered to
     match. Everything after the References (Further reading as the page-limit fit left it) is kept as it is."""
@@ -27148,7 +27157,7 @@ def _finalize_after_citation_edits(markdown: str, literature: list[Any], audienc
         text = text + "\n"
     if after:
         text = text.rstrip() + "\n\n" + after
-    return text, ordered
+    return text, ordered, mapping
 
 
 def cited_references(

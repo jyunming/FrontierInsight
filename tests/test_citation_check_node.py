@@ -198,3 +198,24 @@ def test_the_sources_are_numbered_again_in_the_order_the_text_cites_them() -> No
     assert first_cited == sorted(first_cited) and first_cited[0] == 1
     assert text.endswith("\n") and "## Further reading" in text
     assert [i["metadata"]["title"] for i in ordered[:5]][0].startswith("Über die Reaktions")
+
+
+def test_the_ledger_names_the_citations_by_the_numbers_of_the_paper_as_delivered(tmp_path: Path) -> None:
+    """Round s6: the check judged the Holm sentence as [8]; the sources were then numbered again and the paper delivered
+    it as [7], while the ledger (and the quality report built from it) still said [8] and listed [7] as another claim."""
+    eng = _engine(tmp_path)
+    paper = _paper(tmp_path)
+    _run(eng, paper, Replies())
+    final = paper.read_text(encoding="utf-8")
+    body = final.split("## References", 1)[0]
+    ledger = json.loads((paper.parent / "citations.json").read_text(encoding="utf-8"))
+    kept = [r for r in ledger["citations"] if r["status"] == "supported"]
+    assert kept
+    for r in kept:
+        assert r["sentence"] in body, "a backed citation is shown as the sentence stands in the delivered paper"
+        assert f"[{r['label']}]" in r["sentence"] or r["label"] in re.findall(r"\[([^\]]+)\]", r["sentence"])
+    for r in ledger["citations"]:
+        if r["status"] != "supported":
+            assert r["label"].startswith("was "), "a citation that was fixed is named as it was before the fix"
+            if r.get("new_sentence"):
+                assert r["new_sentence"] in body
