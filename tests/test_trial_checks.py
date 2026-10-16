@@ -204,6 +204,31 @@ def test_a_small_miss_is_only_reported_and_a_coverage_above_the_level_is_said():
     assert not q.fault and q.above == 5 and "wider than need be" in q.says()
 
 
+def test_one_grossly_missed_setting_is_a_fault_at_a_family_level_that_spares_a_clean_run():
+    rng = random.Random(12)
+    proto = _proto(known("x_hat", 0.0, se="x_se"))
+
+    def run(off: float, bad: int, settings: int = 25):
+        return _cells({f"s{i}": {"x_hat": [rng.gauss(off if i < bad else 0.0, 1) for _ in range(200)],
+                                 "x_se": [1.0] * 200} for i in range(settings)})
+
+    cal = tc.calibration(run(3.0, 1), proto)  # one corner of the grid 3 standard errors off
+    cover = next(q for q in cal.faults if q.kind == "coverage")
+    assert cover.gross == 1 and cover.judged == 25
+    # 25 clean settings: each interval is at 1 - 0.05/25, so an unlucky setting does not stop a right code
+    assert not tc.calibration(run(0.0, 0), proto).faults
+
+
+def test_a_moderate_miss_in_every_setting_is_caught_by_the_settings_together():
+    rng = random.Random(13)
+    cells = _cells({f"s{i}": {"x_hat": [rng.gauss(0, 1) for _ in range(400)], "x_se": [1 / 1.6] * 400}
+                    for i in range(25)})
+    cal = tc.calibration(cells, _proto(known("x_hat", 0.0, se="x_se")))
+    ratio = next(q for q in cal.quantities if q.kind == "se_ratio")
+    assert ratio.fault and ratio.pooled.gross and 1.5 < ratio.pooled.value < 1.7
+    assert "all of them together" in ratio.says() and tc.POOLED in tc.calibration_directive([ratio])
+
+
 def test_a_declared_name_the_trials_do_not_return_is_a_fault():
     rng = random.Random(9)
     cells = _cells({"s": {"x_hat": [rng.gauss(0, 1) for _ in range(50)]}})

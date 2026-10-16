@@ -24,13 +24,16 @@ trials to the typical reported standard error (the root of the mean squared one)
 code computed. A metric whose declared names the trials do not return is a fault (the code does not keep the plan's
 contract). Without any declaration the calibration is "not checked", and the paper and ``QUALITY.md`` say so.
 
-For each setting with at least :data:`MIN_TRIALS` trials: the coverage with its Wilson 95% interval, and the ratio with its
-sampling interval. A setting is a **gross miss** when the whole Wilson interval lies more than :data:`COVERAGE_GAP` below
-the level, or the whole interval of the ratio lies outside [:data:`RATIO_LOW`, :data:`RATIO_HIGH`]. A quantity grossly
-missed in at least :data:`GROSS_SHARE` of the settings it was judged in is a **fault FI owns**: it is sent to repair with
-the numbers, and if it stays the quest stops (a wrong code must never reach a paper). A smaller miss is not a fault (an
-interval of the wrong form can truly under-cover: a normal interval with three degrees of freedom covers about 0.86): it is
-recorded and reported, and so is a coverage above the level beyond its sampling error (intervals wider than they need be).
+For each setting with at least :data:`MIN_TRIALS` trials: the coverage with its Wilson interval, and the ratio with its
+sampling interval, both at the family level 1 - :data:`FAMILY_ALPHA` / k over the k settings judged (Bonferroni: with 25
+settings each interval is at 99.8%, so a clean run does not stumble on one unlucky setting); and the same two numbers pooled
+over every setting, at 95%. A setting, or the pool, is a **gross miss** when the whole coverage interval lies more than
+:data:`COVERAGE_GAP` below the level, or the whole interval of the ratio lies outside [:data:`RATIO_LOW`,
+:data:`RATIO_HIGH`]. **One gross miss is a fault FI owns** (a wrong code at one corner of the grid is as wrong as one
+everywhere; a standard error too small by 1.6 everywhere is caught by the pool): it is sent to repair with the numbers, and
+if it stays the quest stops (a wrong code must never reach a paper). A smaller miss is not a fault (an interval of the wrong
+form can truly under-cover: a normal interval with three degrees of freedom covers about 0.86): it is recorded and
+reported, and so is a coverage above the level beyond its sampling error (intervals wider than they need be).
 
 Pure functions over FI's per-setting trial summary (``raw/trials.json`` cells, :func:`core.trial_runner._summary`); nothing
 here knows a field of science, and no name of a quantity is written into it.
@@ -53,17 +56,17 @@ from . import stats as _stats
 FAULT_FRACTION = 0.5
 #: A setting where more than this share failed is stated in the paper.
 STATE_FRACTION = 0.05
-#: A coverage is grossly low when its whole Wilson interval is more than this below the level of the intervals.
-COVERAGE_GAP = 0.25
+#: A coverage is grossly low when its whole interval is more than this below the level of the intervals. Chosen from the
+#: replay of real quests (tests/test_trial_checks.py): clean quests' lowest coverages were 0.81 to 0.88 (normal intervals
+#: with few degrees of freedom, a wrong form that is reported, not a fault), so 0.80 for a 95% level is below every one.
+COVERAGE_GAP = 0.15
 #: A standard error is grossly wrong when the whole interval of (spread of the estimates / reported error) is outside these.
-RATIO_LOW = 0.5
-RATIO_HIGH = 2.0
-#: A quantity is a fault when it is grossly missed in at least this share of the settings it was judged in. Chosen from the
-#: replay of real quests (tests/test_trial_checks.py): clean quests had no grossly missed setting at all (several thousand
-#: judged settings; the lowest coverage 0.81, standard-error ratios 0.86 to 1.11), while a noise level typed into a fitting
-#: function missed in 12 of 25 settings (coverage down to 0.15) and weights on the wrong scale in 9 of 9 (ratios 10 to 18).
-#: "More than half the settings" would have let the first through at 12 of 25.
-GROSS_SHARE = 0.25
+#: Clean quests' ratios were 0.86 to 1.26 per setting; an error too small by 1.6 or more is outside.
+RATIO_LOW = 0.67
+RATIO_HIGH = 1.5
+#: The chance, over all the settings of one quantity together, that a right code shows a gross miss by sampling alone
+#: (each setting's interval is at 1 - FAMILY_ALPHA / k, Bonferroni over its k settings).
+FAMILY_ALPHA = 0.05
 #: The fewest trials of a setting that are judged.
 MIN_TRIALS = 10
 #: Where FI keeps what the checks found on the last run of the trials (QUALITY.md and the paper's required items read it).
@@ -214,6 +217,8 @@ class Quantity:
     level: float | None = None
     truth: str = ""
     settings: list[SettingCheck] = field(default_factory=list)
+    #: The same number over every setting together (at 95%): what catches a moderate miss present everywhere.
+    pooled: SettingCheck | None = None
 
     @property
     def judged(self) -> int:
@@ -225,7 +230,7 @@ class Quantity:
 
     @property
     def fault(self) -> bool:
-        return self.kind == "missing" or self.gross > 0 and self.gross >= GROSS_SHARE * self.judged
+        return self.kind == "missing" or self.gross > 0 or bool(self.pooled and self.pooled.gross)
 
     @property
     def below(self) -> int:
@@ -245,15 +250,22 @@ class Quantity:
             what = (f"coverage of the true value by `{self.label}` at the {self.level:.0%} level" if self.level is not None
                     else f"coverage `{self.label}`")
             rng = f"{min(vals):.3f} to {max(vals):.3f}" if vals else "no value"
-            return (f"{what}: {rng} over {self.judged} setting(s); grossly low (more than {COVERAGE_GAP:g} below the level, "
-                    f"beyond sampling error) in {self.gross}"
+            return (f"{what}: {rng} over {self.judged} setting(s)" + self._pool(".3f")
+                    + f"; grossly low (more than {COVERAGE_GAP:g} below the level, beyond sampling error) in {self.gross}"
                     + (f"; above the level beyond sampling error in {self.above} (wider than need be, not a fault)"
                        if self.above else ""))
         vals = [s.value for s in self.settings]
         rng = f"{min(vals):.3g} to {max(vals):.3g}" if vals else "no value"
         return (f"spread of `{self.names[0]}` over the trials / its reported standard error `{self.names[1]}`: {rng} over "
-                f"{self.judged} setting(s) (1 when the error is right); outside [{RATIO_LOW:g}, {RATIO_HIGH:g}] beyond "
-                f"sampling error in {self.gross}")
+                f"{self.judged} setting(s){self._pool('.3g')} (1 when the error is right); outside [{RATIO_LOW:g}, "
+                f"{RATIO_HIGH:g}] beyond sampling error in {self.gross}")
+
+    def _pool(self, fmt: str) -> str:
+        p = self.pooled
+        if p is None:
+            return ""
+        return (f", {format(p.value, fmt)} over all of them together"
+                + (" (grossly off beyond sampling error)" if p.gross else ""))
 
     def worst(self, n: int = 4) -> list[SettingCheck]:
         if self.kind == "coverage":
@@ -311,32 +323,72 @@ NO_DECLARATION = ("the plan declares no metric with a known true value (`known_v
                   "not measure the reported intervals and standard errors against the truth")
 
 
-def _coverage_check(key: str, hits: list[float], level: float) -> SettingCheck | None:
+def _z_family(k: int) -> float:
+    """The critical value of each of ``k`` settings' intervals when, together, a right code shows a gross miss by sampling
+    alone with chance :data:`FAMILY_ALPHA` at most."""
+    return NormalDist().inv_cdf(1.0 - FAMILY_ALPHA / (2.0 * max(1, k)))
+
+
+def _coverage_check(key: str, hits: list[float], level: float, z: float = _Z95) -> SettingCheck | None:
     n = len(hits)
     if n < MIN_TRIALS:
         return None
     k = sum(hits)
-    ci = _stats.wilson_interval(k, n)
+    ci = _stats.wilson_interval(k, n, z=z)
     if ci is None:
         return None
     lo, hi = ci
     return SettingCheck(key, n, k / n, lo, hi, gross=hi < level - COVERAGE_GAP, below=hi < level, above=lo > level)
 
 
-def _ratio_check(key: str, est: list[float], se: list[float]) -> SettingCheck | None:
+def _ratio_of(est: list[float], se: list[float]) -> tuple[float, int] | None:
+    """``(spread of the estimates / root mean square of their errors, degrees of freedom)``, or ``None`` when there is no
+    spread to judge (a setting without noise) or no error reported."""
     n = len(est)
     if n < MIN_TRIALS:
         return None
     mean = sum(est) / n
     sd = math.sqrt(sum((x - mean) ** 2 for x in est) / (n - 1))
     rms = math.sqrt(sum(s * s for s in se) / n)
-    scale = max(abs(mean), 1e-300)
-    if rms <= 0 or sd <= 1e-12 * scale:
-        return None  # no spread to judge (a setting without noise), or no error reported
-    ratio = sd / rms
-    half = _Z95 / math.sqrt(2.0 * (n - 1))
+    if rms <= 0 or sd <= 1e-12 * max(abs(mean), 1e-300):
+        return None
+    return sd / rms, n - 1
+
+
+def _ratio_band(key: str, n: int, ratio: float, dof: int, z: float = _Z95) -> SettingCheck:
+    half = z / math.sqrt(2.0 * dof)
     lo, hi = ratio * math.exp(-half), ratio * math.exp(half)
     return SettingCheck(key, n, ratio, lo, hi, gross=lo > RATIO_HIGH or hi < RATIO_LOW, below=lo > 1.25 or hi < 0.8)
+
+
+#: The key of the check over every setting together.
+POOLED = "all settings together"
+
+
+def _judge_coverage(q: "Quantity", per: list[tuple[str, list[float]]]) -> None:
+    """Each setting's coverage at the family level, and the pooled coverage at 95%."""
+    judged = [(key, hits) for key, hits in per if len(hits) >= MIN_TRIALS]
+    z = _z_family(len(judged))
+    for key, hits in judged:
+        got = _coverage_check(key, hits, q.level or 0.95, z)
+        if got is not None:
+            q.settings.append(got)
+    if len(judged) > 1:
+        q.pooled = _coverage_check(POOLED, [h for _k, hits in judged for h in hits], q.level or 0.95)
+
+
+def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]]) -> None:
+    """Each setting's spread / reported error at the family level, and the pooled ratio at 95% (the root of the mean squared
+    ratio weighted by each setting's degrees of freedom)."""
+    found = [(key, len(e), _ratio_of(e, s)) for key, e, s in per]
+    found = [(key, n, r) for key, n, r in found if r is not None]
+    z = _z_family(len(found))
+    for key, n, (ratio, dof) in found:
+        q.settings.append(_ratio_band(key, n, ratio, dof, z))
+    if len(found) > 1:
+        dof = sum(r[1] for _k, _n, r in found)
+        pooled = math.sqrt(sum(r[1] * r[0] ** 2 for _k, _n, r in found) / dof)
+        q.pooled = _ratio_band(POOLED, sum(n for _k, n, _r in found), pooled, dof)
 
 
 def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None,
@@ -378,6 +430,8 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
                          list(ends) if ends else [est, spread], level=level, truth=truth_label)
         ratio = Quantity("se_ratio", est, [est, spread], truth=truth_label) if spread else None
         z = _z(level)
+        cover_per: list[tuple[str, list[float]]] = []
+        ratio_per: list[tuple[str, list[float], list[float]]] = []
         for c in cells:
             key = str(c.get("key"))
             t = _truth_of(truth, c, thresholds)
@@ -392,14 +446,13 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
                 hits = [1.0 if lo[i] <= t <= hi[i] else 0.0 for i in lo if i in hi]
             else:
                 hits = [1.0 if abs(e[i] - t) <= z * s[i] else 0.0 for i in e if i in s and s[i] >= 0]
-            got = _coverage_check(key, hits, level)
-            if got is not None:
-                cover.settings.append(got)
+            cover_per.append((key, hits))
             if ratio is not None:
                 pairs = [(e[i], s[i]) for i in e if i in s and s[i] >= 0]
-                got = _ratio_check(key, [x for x, _ in pairs], [v for _, v in pairs])
-                if got is not None:
-                    ratio.settings.append(got)
+                ratio_per.append((key, [x for x, _ in pairs], [v for _, v in pairs]))
+        _judge_coverage(cover, cover_per)
+        if ratio is not None:
+            _judge_ratio(ratio, ratio_per)
         for q in (cover, ratio):
             if q is None:
                 continue
@@ -418,7 +471,8 @@ def calibration_directive(faults: list[Quantity]) -> str:
     FI's measurements on the run; no expected value of the study is in it."""
     lines = []
     for q in faults[:6]:
-        worst = "; ".join(f"{s.key}: {s.value:.3g} (n={s.n})" for s in q.worst())
+        worst = "; ".join(f"{s.key}: {s.value:.3g} (n={s.n})" for s in q.worst()
+                          + ([q.pooled] if q.pooled is not None and q.pooled.gross else []))
         lines.append(f"- {q.says()}." + (f" Worst settings: {worst}" if worst else
                                          " Return them from run_trial under exactly these names."))
     return ("FI measured the intervals and standard errors the simulation reports against the true values it was given, "
@@ -524,7 +578,10 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
                             "judged": q.judged, "gross": q.gross, "below": q.below, "above": q.above, "fault": q.fault,
                             "says": q.says(),
                             "settings": [{"key": s.key, "n": s.n, "value": round(s.value, 6), "low": round(s.low, 6),
-                                          "high": round(s.high, 6), "gross": s.gross} for s in q.settings]}
+                                          "high": round(s.high, 6), "gross": s.gross} for s in q.settings],
+                            "pooled": None if q.pooled is None else {
+                                "n": q.pooled.n, "value": round(q.pooled.value, 6), "low": round(q.pooled.low, 6),
+                                "high": round(q.pooled.high, 6), "gross": q.pooled.gross}}
                            for q in cal.quantities],
             "not_checked": list(cal.not_checked),
             "checked": cal.checked,
