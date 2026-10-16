@@ -57,6 +57,10 @@ _NO_MATCH = object()  # a cell key's value that names none of the protocol's own
 #: ``engine.run_manifest_check: warn`` it is recorded and the quest goes on.
 FABRICATED = "fabricated"
 UNACCOUNTED = "unaccounted"
+#: ``unprinted``: the analysis prints no per-trial list at all for a mean that FI's own record holds trial by trial. Nothing
+#: is left out of FI's record, so this is a rule about what the analysis prints (it is sent back under ``block``), never a
+#: statement about the trials that ran: under ``warn`` it is logged and the paper says nothing of it.
+UNPRINTED = "unprinted"
 
 
 class Finding(str):
@@ -1408,10 +1412,11 @@ def _value_count_findings(
             # has a value; a setting where none has one (power where there is no real effect) holds nothing to drop.
             owed_undefined = account["owed"][1]
             if not _values_listed(result_json, metric) and not accounted_defined and not accounted_undefined:
-                out.append((
+                out.append((Finding(
                     f"the metric `{metric}` is a mean over the trials that measured it, {made}, but the analysis's "
                     f"RESULT_JSON has no `{metric}_values` list at all — the analysis must print the per-trial values "
                     "it averaged, so the claimed trial count can be checked against them",
+                    UNPRINTED),
                     True,
                 ))
                 continue
@@ -1550,6 +1555,8 @@ def differences(
                            recorded_by_cell)
         listed_defined, listed_undefined, excesses = account["defined"], account["undefined"], account["excesses"]
         measured = defined + undefined
+        if (not _values_listed(result_json, metric) and not account["acc_defined"] and not account["acc_undefined"]):
+            continue  # it prints no list: nothing of FI's record is "left out" of one (the finding is UNPRINTED)
         short = ([s for s in account["short"] if s["listed"][0] < s["owed"][0] or s["listed"][1] < s["owed"][1]]
                  if not (account["values_complete"] and account["undefined_complete"]) else [])
         if (listed_defined > defined or listed_undefined > undefined or listed_defined + listed_undefined > measured

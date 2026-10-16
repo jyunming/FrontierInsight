@@ -16646,8 +16646,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     "; ".join(manifest_found), "; ".join(by_request),
                 )
             elif mode == "warn" and not acting:
-                manifest_status = "warned"
-                self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join(manifest_found))
+                # What the analysis does not print of trials FI holds whole is not a difference in the record: the log has
+                # it, the paper (core/paper_facts.py) and the quality report do not.
+                unprinted = [f for f in manifest_found if _run_manifest.kind_of(f) == _run_manifest.UNPRINTED]
+                manifest_found = [f for f in manifest_found if f not in unprinted]
+                manifest_status = "warned" if manifest_found else "ok"
+                self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join([*manifest_found, *unprinted]))
             elif manifest_attempts < _manifest_repair_budget(
                     budget, set(acting) <= set(self._manifest_analysis_problems)):
                 manifest_status = "repairing"
