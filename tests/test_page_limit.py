@@ -211,6 +211,49 @@ def test_every_template_caps_its_figure_height_unconditionally(fmt: str) -> None
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
+def test_every_template_keeps_a_figures_shape_when_given_a_width_and_a_height(fmt: str) -> None:
+    """pandoc writes ``{width=80%}`` as ``width=0.8\\linewidth,height=\\textheight,keepaspectratio``,
+    with no ``\\pandocbounded`` cap, so a tall figure printed 72% of the text height. Given
+    ``{width=80% height=33%}`` pandoc drops keepaspectratio; the template's Gin default keeps it,
+    so the figure fits inside both."""
+    lines = _code_lines(fmt)
+    if fmt == "article":
+        sty = (TEMPLATES / fmt / "fi_paper.sty").read_text(encoding="utf-8")
+        lines = [line for line in sty.splitlines() if not line.lstrip().startswith("%")]
+    gin = [line for line in lines if line.strip().startswith("\\setkeys{Gin}")]
+    assert gin and "keepaspectratio" in gin[-1], fmt
+
+
+def test_a_tall_figure_given_a_width_and_a_height_is_capped_at_the_height(tmp_path: Path) -> None:
+    from generation._pandoc import find_pandoc
+    from generation._pdf_engine import find_pdf_engine
+    from generation._pdf_measure import measure_pdf
+
+    if find_pandoc(REPO) is None or find_pdf_engine(REPO) is None:
+        pytest.skip("needs pandoc and a LaTeX engine")
+    from PIL import Image
+
+    (tmp_path / "figures").mkdir()
+    Image.new("RGB", (630, 900), "white").save(tmp_path / "figures" / "tall.png")
+    md = tmp_path / "paper.md"
+    md.write_text(
+        "# A Paper\n\n## Abstract\n\nShort.\n\n## Results\n\nText.\n\n"
+        "![A tall figure.](figures/tall.png){width=80% height=33%}\n\nMore text.\n", encoding="utf-8",
+    )
+    pdf, skip = PaperGenerator(_config(tmp_path))._compile_pdf(md, tmp_path)
+    assert skip is None and pdf is not None
+    doc = measure_pdf(pdf)
+    boxes = [box for page in doc.pages for box in page.images if (box[3] - box[1]) > 50]
+    assert boxes, "the figure is not on the page"
+    box = boxes[0]
+    width, height = box[2] - box[0], box[3] - box[1]
+    page = doc.pages[0]
+    # 33% of the text height is under 33% of the page height; uncapped it was over 60%.
+    assert height < 0.33 * page.height, (height, page.height)
+    assert abs(width / height - 630 / 900) < 0.02, (width, height)
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
 def test_templates_with_one_inch_margins_switch_to_two_centimetres(fmt: str) -> None:
     lines = _code_lines(fmt)
     switched = _contains_run(

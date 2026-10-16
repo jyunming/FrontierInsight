@@ -29,6 +29,9 @@ $endif$
 % section is numbered once.
 \setcounter{secnumdepth}{3}
 \usepackage{graphicx}
+% A figure given both a width and a height (``{width=80% height=33%}``) keeps its
+% shape and fits inside both, so a tall figure is capped at the height.
+\setkeys{Gin}{keepaspectratio}
 % Required for pandoc-rendered markdown tables (pandoc emits \begin{longtable}).
 \usepackage{longtable}
 % Required for pandoc-rendered table column widths. Pandoc emits column
