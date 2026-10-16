@@ -48,7 +48,10 @@ from pathlib import Path
 from typing import Any
 
 from . import disclosure as _disclosure
+from . import frozen_protocol as _frozen
+from . import paper_values as _values
 from . import run_facts as _run_facts
+from . import typed_numbers as _typed
 
 HIT = "paper_record_mismatch"
 RECORD = Path(".fi") / "paper_record_check.json"
@@ -142,6 +145,7 @@ class Fact:
 class Rendered:
     text: str
     unfilled: tuple[str, ...]  # the placeholders that read "not recorded"
+    values: tuple[_values.Value, ...] = ()  # every ``{{v:...}}`` key and what FI made of it
 
 
 def _read(root: Path, rel: str) -> Any:
@@ -750,7 +754,7 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
 # ---- the placeholders and their markers ------------------------------------------------------------------------------
 
 #: Any name between double braces, with extra braces around it taken in (``{{{{seed}}}}``, ``{{ {seed} }}``).
-_PLACEHOLDER = re.compile(r"\{\{[\s{]*([A-Za-z][^{}\n:]{0,59}?)\s*(?::\s*([^{}\n]{1,80}?)\s*)?[\s}]*\}\}")
+_PLACEHOLDER = re.compile(r"\{\{[\s{]*(?!v:)([A-Za-z][^{}\n:]{0,59}?)\s*(?::\s*([^{}\n]{1,80}?)\s*)?[\s}]*\}\}")
 _MARK = re.compile(r"<!-- fi:fact-([\w-]+) -->(.*?)<!-- /fi:fact-\1 -->", re.S)
 _TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->")
 _ITEM_KEY = "not_done-"
@@ -758,7 +762,7 @@ _ITEM_KEY = "not_done-"
 _HIDDEN = re.compile(
     r"^[ \t]*(?P<fence>```|~~~)[^\n]*\n.*?^[ \t]*(?P=fence)[^\n]*$"
     r"|^[ \t]*(?:```|~~~).*\Z"
-    r"|<!--(?!\s*/?fi:fact-).*?-->"
+    r"|<!--(?!\s*/?fi:(?:fact-|v\b)).*?-->"
     r"|(?P<ticks>`+)(?:(?!\n[ \t]*\n)[^`])+?(?P=ticks)"
     r"|\$\$.+?\$\$|\\\[.+?\\\]|\\\(.+?\\\)"
     r"|(?<![\\$])\$(?=\S)[^$\n]+?(?<=\S)\$(?!\d)",
@@ -801,12 +805,13 @@ def to_placeholders(markdown: str) -> str:
             return "{{not_done:" + key[len(_ITEM_KEY):] + "}}"
         return "{{" + key + "}}"
 
-    return _MARK.sub(back, markdown or "")
+    return _MARK.sub(back, _values.to_placeholders(markdown or ""))
 
 
 def without_marks(markdown: str) -> str:
-    """``markdown`` with FI's fact markers taken out and the values kept: what a reader, the slides and the poster get."""
-    return _TAG.sub("", markdown or "")
+    """``markdown`` with FI's markers (of its facts and of its filled result numbers) taken out and the values kept: what a
+    reader, the slides and the poster get."""
+    return _TAG.sub("", _values.without_marks(markdown or ""))
 
 
 def block_text(quest_root: Path | str, name: str) -> str:
@@ -910,10 +915,11 @@ def without_blocks(markdown: str) -> str:
 
 def mask(markdown: str, token: str = " FI-FACT ") -> str:
     """``markdown`` with each value FI filled in replaced by ``token``: what the writer typed, and nothing of FI's."""
-    return _MARK.sub(token, _PLACEHOLDER.sub(token, markdown or ""))
+    return _MARK.sub(token, _PLACEHOLDER.sub(token, _values._MARK.sub(token, markdown or "")))
 
 
-def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> Rendered:
+def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None,
+           records: _values.Records | None = None) -> Rendered:
     """``markdown`` with every placeholder (and every value FI filled in before, so a re-render takes the records as they
     are now) filled from FI's records, between markers. A placeholder FI cannot fill reads "not recorded" and is in
     ``unfilled``; an unknown name that looks like a placeholder (``{{run_seconds}}``, ``{{not_done:x}}``) is treated the
@@ -922,7 +928,11 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
 
     Inside math, code or an HTML comment, a placeholder of FI's gets its plain value with no markers (a marker there would
     print as text), and anything else between double braces is left as written (LaTeX's ``{{x}}``); so is a double brace
-    right after a LaTeX command."""
+    right after a LaTeX command.
+
+    A result number is a key ``{{v:...}}`` (:mod:`core.paper_values`): FI fills it from ``records`` (the quest's trial record
+    and plan) after the facts, between its own marker; a key it cannot fill reads "not recorded" and is in ``values`` with
+    the reason. ``records=None`` fills every key as not recorded."""
     root = Path(quest_root)
     known = facts(root, topic=topic, fallback_s=fallback_s)
     items = {i.id.lower(): i for i in required_items(root)}
@@ -968,32 +978,21 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
     out = _PLACEHOLDER.sub(fill, text)
     # A placeholder for a whole sentence followed by the writer's own full stop: one full stop.
     out = re.sub(r"([.!?])(<!-- /fi:fact-[\w-]+ -->)\.", r"\1\2", out)
-    return Rendered(out, tuple(dict.fromkeys(unfilled)))
+    # The result numbers go in last, from the trial record: a key inside math or code gets its bare value.
+    keyed_hidden = _hidden_spans(out)
+    out, values = _values.fill_values(out, records, plain=lambda pos: _inside(pos, keyed_hidden))
+    return Rendered(out, tuple(dict.fromkeys(unfilled)), tuple(values))
 
 
 def unfilled_in(markdown: str) -> list[str]:
-    """The placeholders of a rendered paper that read "not recorded"."""
+    """The placeholders and result keys of a rendered paper that read "not recorded"."""
     out = []
     for m in _MARK.finditer(markdown or ""):
         if m.group(2).strip() == NOT_RECORDED:
             key = m.group(1)
             out.append("not_done:" + key[len(_ITEM_KEY):] if key.startswith(_ITEM_KEY) else key)
+    out += ["v:" + k for k in _values.unfilled_in(markdown)]
     return list(dict.fromkeys(out))
-
-
-def fact_numbers(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> dict[str, float]:
-    """Every number FI puts into the paper through a placeholder, by where it comes from: FI's own record, which the
-    number checks must not count as a result nothing accounts for."""
-    out: dict[str, float] = {}
-    texts = [(f"fact.{f.name}", f.text) for f in facts(quest_root, topic=topic, fallback_s=fallback_s).values()]
-    texts += [(f"item.{i.id}", i.sentence) for i in required_items(quest_root)]
-    for where, text in texts:
-        for k, m in enumerate(re.finditer(r"-?\d[\d,]*(?:\.\d+)?", text)):
-            try:
-                out[f"{where}.{k}"] = float(m.group(0).replace(",", ""))
-            except ValueError:
-                continue
-    return out
 
 
 # ---- what the writer is given ---------------------------------------------------------------------------------------
@@ -1017,9 +1016,8 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
         return ""
     lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. Do not type them: write the "
                  "placeholder (double braces, exactly as shown) where the fact goes, and FI puts the value in from its "
-                 "records when the paper is saved. A seed or a run time typed as a number, or a claim about the topic's "
-                 "time limit that the record contradicts, is found by a check and the paper is sent back to be written "
-                 "again.")
+                 "records when the paper is saved. A seed or a run time typed as a number is sent back to "
+                 "you, and so is a claim about the topic's time limit that the record contradicts.")
     if known:
         lines.append("Placeholders (with what FI will put in for each, as the records stand now):")
         lines += [f"- {{{{{f.name}}}}}: {_FACT_WORDS[f.name]}. Now: \"{f.text}\"" for f in known.values()]
@@ -1143,282 +1141,69 @@ def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fa
     return hits
 
 
-# What (b) reads: a run time typed as a number outside a placeholder.
-_WORD_NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
-                 "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20, "thirty": 30,
-                 "forty": 40, "fifty": 50, "sixty": 60, "ninety": 90}
-_NUM = r"(?:\d[\d,]*(?:\.\d+)?|" + "|".join(sorted(_WORD_NUMBERS, key=len, reverse=True)) + r")"
-_UNIT = r"(?:milliseconds?|ms|seconds?|secs?|minutes?|mins?|hours?|hrs?|hr|s|h)"
-_DURATION = re.compile(
-    rf"(?<![\w.])(?:(?P<lo>{_NUM})\s*(?:-|–|to|and)\s*)?(?P<n>{_NUM})(?P<sep>\s*-\s*|\s*)(?P<u>{_UNIT})(?![\w])", re.I)
-#: Where a clause ends: what is on the other side is about something else.
-_BREAK = re.compile(r";|\bof which\b|\bwhereas\b|\bwhile\b|,\s*but\b|\bbut\b|—|\s–\s")
-#: A word that says the clause is about how long the experiment ran.
-_ANCHOR = re.compile(
-    r"\b(?:ran|run|runs|running|runtime|run[- ]time|took|takes|taking|completed|completes|finished|finishes|lasted|"
-    r"lasts|needed|needs|required|requires|elapsed|wall[- ]?clock|wall[- ]time|execution|executed|computation|"
-    r"compute[- ]time|computing[- ]time|cpu[- ]time|in total)\b", re.I)
-#: The time is simulated or physical, not the computer's (``600 s of simulated time``, ``t = 0 to 100 s``, a half-life).
-_PHYSICAL_BEFORE = re.compile(
-    r"(?:\bt\s*(?:=|∈|from|in)|\btimes?[- ]steps?\b|\bstep(?:\s+size)?\s+(?:of|=)|\bdt\s*=|Δt|\bhalf[- ]li(?:fe|ves)\b|"
-    r"\blifetimes?\b|\btime[- ]constants?\b|\bhorizons?\b|\bevery\b|\bintervals?\b|\bperiods?\b|\bdelays?\b|"
-    r"\bresidence\b|\buntil\b|\bsimulated\b|\breaction\b|\bphysical\b|\bat\s+t\b|\bsampl\w+)", re.I)
-_PHYSICAL_AFTER = re.compile(r"^\s*(?:of\s+)?(?:\w+\s+)?(?:simulated|simulation|reaction|physical|model|process|virtual)\b"
-                             r"|^\s*of\s+(?:\w+\s+)?time\b|^\s*(?:after|into)\b", re.I)
-# "The simulation" or "the model" as the subject is the computer's run as often as not ("The simulation took 2.3 s"): a
-# clause about simulated time says so itself (``simulated``, ``t =``, checked above). Only a physical subject is physical.
-_PHYSICAL_SUBJECT = re.compile(r"\b(?:reactions?|integration|ode|trajector(?:y|ies)|particles?|decay)\b\W*(?:\w+\W+){0,2}$",
-                               re.I)
-#: Another study's or another implementation's time, not this run's: a citation, a possessive name, "et al.", or a word
-#: that names another work ("the reference implementation", "prior work", "the original 2019 study", "reported by").
-_OTHER_STUDY = re.compile(
-    r"\[\s*@?\w[^\]]*\]|\bet\s+al\b|\b[A-Z][a-z]+['’]s\b|\b(?:reference|baseline|original|prior|previous|earlier|"
-    r"published|their|others?|existing|literature|competing|reported|benchmarked)\b|\b(?:19|20)\d\d\b(?!s)")
-#: A part of the run, or another run: a time per trial or setting, an average, the analysis, a discarded or earlier run.
-_PART_BEFORE = re.compile(
-    r"\b(?:(?:each|every|per|one|a\s+single|single|individual|average|mean|median|typical)\s+(?:\w+\s+)?"
-    r"(?:trials?|settings?|cells?|replicates?|famil(?:y|ies)|seeds?|simulations?|iterations?|runs?|steps?|fits?|tasks?)|"
-    r"analys[ie]s|analysing|analyzing|post-?processing|plotting|plots?|figures?|start-?up|imports?|loading|compil\w+|"
-    r"(?:unit\s+)?tests?|bootstrap\w*|trials?\s+alone|"
-    r"(?:first|earlier|previous|prior|discarded|pilot|exploratory|exploring|initial|warm-?up|probe|calibration|"
-    r"smaller|reduced|short|dry)[\s,]+(?:\w+\s+)?(?:runs?|attempts?|versions?|passes|pass))\b", re.I)
-_PART_AFTER = re.compile(r"^\s*(?:\w+\s+){0,2}?(?:per|each|apiece|on\s+average|a\s+piece)\b", re.I)
-_LINK = re.compile(r",|;|\band\b|\bwith\b|\bbut\b|\bthen\b|\bwhich\b|\bthat\b|\bwhere\b|\bso\b", re.I)
-_UPPER = re.compile(r"(?:\bunder|\bwithin|\bbelow|\bless\s+than|\bfewer\s+than|\bat\s+most|\bno\s+more\s+than|"
-                    r"\bnot\s+more\s+than|\bup\s+to|\binside|\bshorter\s+than|\bfaster\s+than|<=?|≤)\s*"
-                    r"(?:about\s+|roughly\s+|approximately\s+|~\s*|the\s+)?$", re.I)
-_LOWER = re.compile(r"(?:\bover|\bmore\s+than|\babove|\bat\s+least|\blonger\s+than|\bexceed\w*|\bbeyond|>=?|≥)\s*"
-                    r"(?:about\s+|roughly\s+|approximately\s+|~\s*|the\s+)?$", re.I)
-_LIMIT_AFTER = re.compile(r"^\s*(?:\w+\s+){0,1}(?:limit|budget|cap|ceiling|constraint|allowance|maximum|deadline)\b", re.I)
-_LIMIT_BEFORE = re.compile(r"\b(?:limit|budget|cap|ceiling|maximum|allowance|deadline)(?:\s+(?:of|is|was|at|set\s+at))?"
-                           r"\s*[:=]?\s*(?:about\s+|roughly\s+|~\s*)?$|\b(?:allowed|allotted|permitted)\s*$", re.I)
-_APPROX = re.compile(r"(?:about|around|roughly|approximately|nearly|almost|some|~)\s*$", re.I)
-#: How far a typed run time may be from the measured one (a rounding such as "about 4 minutes" for 223 s is within it).
-_TOLERANCE = 0.3
-#: A claim that the run kept to a limit (the met-word before the limit, or the limit then "was met"); a negation right
-#: before the met-word, or between the limit and "met", undoes it.
-_MET = re.compile(
-    r"(?P<neg>\b(?:not|n't|never|failed\s+to|fail\s+to|without)\s+(?:\w+\s+){0,1})?"
-    r"\b(?:within|under|inside|below|met|meet|meets|meeting|satisf\w+|respect\w*|compl(?:y|ies|ied)\s+with|"
-    r"kept\s+(?:to|within)|stay(?:ed|s)?\s+(?:within|under)|fit(?:s|ted)?\s+(?:in|within)|honou?r\w*)\s+"
-    r"(?P<what>(?:[\w'’-]+\s+){0,5}?)(?P<word>limit|budget|constraint|cap|ceiling|requirement|allowance|deadline)s?\b"
-    r"|(?P<what2>(?:[\w'’-]+\s+){0,2})(?P<word2>limit|budget|constraint|cap|ceiling|requirement|allowance|deadline)s?\s+"
-    r"(?:\w+\s+){0,2}?(?:was|were|is|are|has\s+been|had\s+been)\s+(?P<neg2>not\s+)?"
-    r"(?:met|satisfied|respected|honou?red|kept|observed)\b",
-    re.I)
-#: Words that make a limit a limit on time.
-_TIME_WORD = re.compile(r"\b(?:time|runtime|run[- ]time|wall|clock|cpu|compute|computing|duration|seconds?|minutes?|"
-                        r"hours?|FI-FACT)\b|\d\s*(?:s|sec|min|h)\b", re.I)
-#: A verb that says the run finished: with it, "inside the limit" is about time even when the limit's words do not say so.
-_DONE_VERB = re.compile(r"\b(?:ran|run|runs|completed|completes|finished|finishes|took|executed|stayed)\b", re.I)
-_STRONG_LIMIT = ("limit", "budget", "cap", "ceiling", "allowance", "deadline")
-_OTHER_LIMIT = re.compile(r"\b(?:accuracy|error|tolerance|memory|precision|page|word|length|size|sample|storage|"
-                          r"disk|budget\s+of\s+\d+\s+trials|iteration|step)\b", re.I)
-
-
-def _seconds(num: str, unit: str) -> float | None:
-    num = num.strip().lower()
-    value = float(_WORD_NUMBERS[num]) if num in _WORD_NUMBERS else None
-    if value is None:
-        try:
-            value = float(num.replace(",", ""))
-        except ValueError:
-            return None
-    u = unit.lower()
-    if u.startswith("ms") or u.startswith("milli"):
-        return value / 1000.0
-    if u.startswith("h"):
-        return value * 3600.0
-    if u.startswith("m"):
-        return value * 60.0
-    return value
-
-
-_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
-
-
-def _cells(line: str) -> list[str]:
-    return [c.strip() for c in line.strip().strip("|").split("|")]
-
-
-def _prose(markdown: str) -> list[str]:
-    """The sentences of the writer's own text, with FI's filled values masked: prose, a figure's caption, and each cell of
-    a table read with its column's header ("Run time: 2.3 s"), or a two-column row as "name: value". No code or headings."""
+def value_hits(paper_md: str, quest_root: Path | str) -> list[str]:
+    """A must-fix hit for each result key FI could not fill (it reads "not recorded"), naming the key, why, and the
+    writer's sentence (as the passage editor locates it): the writer fixes the key or leaves the number out."""
+    bare = to_placeholders(paper_md)
+    reasons = _values.unavailable_reasons(quest_root)
     out: list[str] = []
-    fenced = False
-    header: list[str] = []
-    for line in mask(_disclosure.without_block(markdown)).splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("```", "~~~")):
-            fenced = not fenced
-            continue
-        if stripped.startswith("|") and not fenced:
-            cells = _cells(stripped)
-            if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
-                continue  # the line under a table's header
-            if not header:
-                header = cells
-                continue
-            out.extend(f"{h}: {c}." for h, c in zip(header, cells) if h and c)
-            if len(cells) == 2 and cells[0] and cells[1]:
-                out.append(f"{cells[0]}: {cells[1]}.")
-            continue
-        header = []
-        if fenced or not stripped or stripped.startswith(("#", "<!--", "---")):
-            continue
-        line = _IMAGE.sub(lambda m: m.group(1) + " ", line)
-        out.extend(s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z(\[*`\"])", line) if s.strip())
+    for key in _values.unfilled_in(paper_md):
+        at = bare.find("{{v:" + key + "}}")
+        why = reasons.get(key) or "FI has no record for it"
+        sentence = _typed.sentence_around(bare, at, at + len(key)) if at >= 0 else ""
+        out.append(f"{HIT}: {{{{v:{key}}}}} is not recorded ({why}). Fix the key so FI can fill it, or leave the number out."
+                   + (f" \u2014 \u201c{sentence[:400]}\u201d" if sentence else ""))
     return out
 
 
-def _clause(sentence: str, start: int, end: int) -> tuple[str, int, str]:
-    """The clause around ``sentence[start:end]`` (to the nearest break on each side), with every bracketed aside that
-    does not hold it blanked out, where the span starts in it, and the break that opens it (``""`` at the start)."""
-    opened = None
-    for m in _BREAK.finditer(sentence, 0, start):
-        opened = m
-    left = opened.end() if opened else 0
-    right = next((m.start() for m in _BREAK.finditer(sentence, end)), len(sentence))
-    text = sentence[left:right]
-    rel = start - left
-
-    def blank(m: re.Match[str]) -> str:
-        return m.group(0) if m.start() <= rel < m.end() else " " * len(m.group(0))
-
-    return re.sub(r"\([^()]*\)", blank, text), rel, opened.group(0).strip().lower() if opened else ""
+def typed_hits(paper_md: str, protocol: dict[str, Any] | None, topic: str = "") -> list[str]:
+    """Rule R1 (:mod:`core.typed_numbers`) on the writer's own text: a hit for each sentence that types a number which is not
+    a number of the plan or the topic, or a label. Run only on a paper written under the rule."""
+    return _typed.hits(to_placeholders(_disclosure.without_block(paper_md)), _typed.plan_numbers(protocol, topic), HIT)
 
 
-def _attached(before: str, pattern: re.Pattern[str]) -> bool:
-    """Whether ``pattern`` is found in ``before`` with no linking word (a comma, "and", "with") between it and the end."""
-    for m in pattern.finditer(before):
-        if not _LINK.search(before[m.end():]):
-            return True
-    return False
+def plan_protocol(quest_root: Path | str, protocol: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The plan the typed numbers are held to: the one given, else the frozen protocol on disk."""
+    return protocol if isinstance(protocol, dict) and protocol else _frozen.protocol_of(Path(quest_root))
 
 
-def _shown(sentence: str) -> str:
-    one = _one(sentence).replace(" FI-FACT ", " [FI's value] ")
-    return one if len(one) <= 160 else one[:157] + "..."
-
-
-def stated_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> list[str]:
-    """Must-fix hits for a run time typed outside a placeholder that disagrees with the measured one, and for a claim that
-    the run kept to the topic's limit when the measurement says it did not. Silent when FI measured nothing; anything it is
-    unsure of is left alone (the claim check reads the paper against FI's record)."""
-    root = Path(quest_root)
-    wall, least = measured_run_time(root, fallback_s)
-    if wall is None and least is None:
-        return []
-    limit = _disclosure.topic_limit(root, topic)
-    over = limit is not None and ((wall is not None and wall > limit) or (wall is None and least is not None and least > limit))
-    hits: list[str] = []
-    measured = (f"FI measured {_plain(wall)} for the run whose trials are reported" if wall is not None
-                else f"the trials alone took at least {_plain(least)} in FI's ledger")  # type: ignore[arg-type]
-    for s in _prose(paper_md):
-        flagged = False
-        for m in _DURATION.finditer(s):
-            num, unit = m.group("n"), m.group("u")
-            if m.group("sep").strip() == "" and m.group("sep") == "" and unit.lower() in ("s", "h") and "." not in num:
-                if num.replace(",", "").isdigit() and int(num.replace(",", "")) >= 1000:
-                    continue  # "1990s"
-            seconds = _seconds(num, unit)
-            if seconds is None:
-                continue
-            lo = _seconds(m.group("lo"), unit) if m.group("lo") else None
-            clause, rel, opened = _clause(s, m.start(), m.end())
-            before, after = clause[:rel], clause[rel + (m.end() - m.start()):]
-            if not _ANCHOR.search(clause) or opened == "of which":
-                continue  # not about how long something ran, or a part of the time just given ("..., of which the trials took 33 s")
-            if _PHYSICAL_BEFORE.search(" ".join(before.split()[-6:])) or _PHYSICAL_AFTER.search(after) or \
-                    re.search(r"\b(?:simulated|simulation[- ]time|reaction[- ]time|physical[- ]time|model[- ]time)\b",
-                              clause, re.I):
-                continue
-            anchor = next(iter(_ANCHOR.finditer(clause)), None)
-            if anchor is not None and _PHYSICAL_SUBJECT.search(clause[:anchor.start()]):
-                continue
-            # Another study's time: named in the subject ("Smith's solver took", "Prior work needed"), or right after the
-            # number up to the next comma ("the 22 s reported by Smith [3]", "in an earlier study [3]").
-            subject = clause[:anchor.start()] if anchor is not None and anchor.start() < rel else before
-            near_after = re.split(r",|\.\s", after, maxsplit=1)[0]
-            if _OTHER_STUDY.search(subject) or _OTHER_STUDY.search(near_after):
-                continue
-            if _attached(before, _PART_BEFORE) or _PART_AFTER.search(after):
-                continue
-            if _LIMIT_AFTER.search(after) or _LIMIT_BEFORE.search(before):
-                continue  # the limit itself; whether the run kept to it is the claim below
-            if _UPPER.search(before):
-                if wall is not None and wall > seconds * 1.0001 or wall is None and least is not None and least > seconds:
-                    hits.append(f"{HIT}: the paper says the run took less than {_plain(seconds)} (\"{_shown(s)}\"), but "
-                                f"{measured}. Write {{{{run_time}}}} instead of a typed time.")
-                    flagged = True
-                continue
-            if _LOWER.search(before):
-                if wall is not None and wall < seconds * 0.9999:
-                    hits.append(f"{HIT}: the paper says the run took more than {_plain(seconds)} (\"{_shown(s)}\"), but "
-                                f"{measured}. Write {{{{run_time}}}} instead of a typed time.")
-                    flagged = True
-                continue
-            if wall is not None:
-                low, high = (min(lo, seconds), max(lo, seconds)) if lo is not None else (seconds, seconds)
-                slack = max(1.0, _TOLERANCE * wall)
-                if not (low - slack <= wall <= high + slack):
-                    hits.append(f"{HIT}: the paper says the run took {_plain(seconds) if lo is None else m.group(0)} "
-                                f"(\"{_shown(s)}\"), but {measured}. Write {{{{run_time}}}} instead of a typed time.")
-                    flagged = True
-            elif least is not None and seconds < least * 0.95 and not _APPROX.search(before):
-                hits.append(f"{HIT}: the paper says the run took {_plain(seconds)} (\"{_shown(s)}\"), but {measured}. "
-                            "Write {{run_time}} instead of a typed time.")
-                flagged = True
-        if not over or flagged:
-            continue
-        for m in _MET.finditer(s):
-            if m.group("neg") or (m.group("neg2") or "").strip():
-                continue
-            what = m.group("what") if m.group("word") else m.group("what2")
-            word = (m.group("word") or m.group("word2") or "").lower()
-            clause, rel, _opened = _clause(s, m.start(), m.end())
-            if _OTHER_LIMIT.search(what or ""):
-                continue  # an accuracy, memory or page limit
-            near = " ".join([*clause[:rel].split()[-3:], m.group(0), *clause[rel + len(m.group(0)):].split()[:4]])
-            about_time = bool(_TIME_WORD.search(near)) or (word in _STRONG_LIMIT and bool(_DONE_VERB.search(clause[:rel + 1])))
-            if not about_time:
-                continue
-            if re.search(r"\b(?:not|n't|never|did\s+not|failed|exceed\w*|over)\b", clause[max(0, rel - 25):rel], re.I):
-                continue
-            hits.append(f"{HIT}: the paper says the run kept to the topic's time limit (\"{_shown(s)}\"), but {measured}, "
-                        f"over the limit of {_plain(limit)}. Write {{{{time_limit_met}}}} (FI puts in \"over\"); do "
-                        "not say the limit was met.")  # type: ignore[arg-type]
-            break
-    return list(dict.fromkeys(hits))
-
-
-def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> list[str]:
-    """Every must-fix hit of the records check for ``paper_md``: a required placeholder missing or misplaced, a run time
-    typed outside a placeholder that disagrees with the measurement, a limit claim the measurement contradicts. Never
-    raises."""
+def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None, keyed: bool = False,
+          protocol: dict[str, Any] | None = None) -> list[str]:
+    """Every must-fix hit of the records check for ``paper_md``: a required placeholder missing or misplaced and, for a
+    paper written under the rule that FI fills every result number (``keyed``), a result key FI could not fill and a number
+    typed that is not a number of the plan or the topic. Never raises."""
     try:
-        return [*placement_hits(paper_md, quest_root, topic=topic, fallback_s=fallback_s),
-                *stated_hits(paper_md, quest_root, topic=topic, fallback_s=fallback_s)]
+        hits = placement_hits(paper_md, quest_root, topic=topic, fallback_s=fallback_s)
+        if keyed:
+            hits += value_hits(paper_md, quest_root)
+            hits += typed_hits(paper_md, plan_protocol(quest_root, protocol), topic)
+        return hits
     except Exception:  # noqa: BLE001 -- a check that cannot be made flags nothing
         return []
 
 
-def keep_check(quest_root: Path | str, hits: list[str], paper_md: str) -> None:
+def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, removed: list[tuple[str, str]] | None = None,
+               keyed: bool | None = None) -> None:
     """Keep what the last review found (``.fi/paper_record_check.json``): the hits, the required items the paper does
-    not hold, and the placeholders that read "not recorded". The quality report prints it, so what is
-    still unmet when the rounds are used up is on record."""
+    not hold, the placeholders that read "not recorded", the typed numbers FI took out when the rewrite rounds were used up
+    (``removed``: ``(number, sentence)``), and whether the paper was written under the rule that FI fills every result
+    number (``keyed``). The quality report prints it, so what is still unmet when the rounds are used up is on record."""
     path = Path(quest_root) / RECORD
     try:
         text = _disclosure.without_block(paper_md)
         unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
                  for i in required_items(quest_root) if not _item_placed(text, i)]
         unfilled = unfilled_in(paper_md)
-        if not hits and not unmet and not unfilled:
+        if not hits and not unmet and not unfilled and not removed and keyed is not False:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"at": time.time(), "hits": list(hits), "unmet_items": unmet, "unfilled": unfilled},
-                                   indent=1) + "\n", encoding="utf-8")
+        record: dict[str, Any] = {"at": time.time(), "hits": list(hits), "unmet_items": unmet, "unfilled": unfilled}
+        if removed:
+            record["removed_numbers"] = [{"number": n, "sentence": sent} for n, sent in removed]
+        if keyed is False:
+            record["not_filled_by_fi"] = True
+        path.write_text(json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     except (OSError, ValueError):
         pass
 

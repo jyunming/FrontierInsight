@@ -31,7 +31,6 @@ Nothing here knows what a metric or an axis means; the names are the plan's.
 
 from __future__ import annotations
 
-import itertools
 import json
 import math
 import re
@@ -622,6 +621,18 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
     return Measured(xs[pick], "words", words=f"at {_setting_words(settings[pick])}"), r
 
 
+def _inputs(rec: Records, key: Key) -> dict[str, Any]:
+    """What a filled key was computed from: the value's name, how many settings and trials it pools (the settings it
+    averages over; a key with ``each`` lists none)."""
+    try:
+        if any(p.kind == "each" for p in key.where.values()):
+            return {"value": key.metric, "settings": "each"}
+        cells = _matching(rec, key.where, key.metric)
+        return {"value": key.metric, "settings": len(cells), "trials": len(_trials(cells, key.metric))}
+    except _Unfilled:
+        return {}
+
+
 def resolve(text: str, rec: Records | None) -> Value:
     """The key's value rendered, or ``not recorded`` with a :class:`Hit` saying why. Never a guess."""
     shown = text.strip()
@@ -648,10 +659,11 @@ def resolve(text: str, rec: Records | None) -> Value:
                 out = " to ".join(sig(x * scale, digits) + tail for x in measured.parts)
             else:
                 out = fmt(measured, key.form, key.percent and measured.kind != "words")
-            return Value(shown, out, numbers=measured.parts or [measured.value])
+            return Value(shown, out, numbers=measured.parts or [measured.value], inputs=_inputs(rec, key))
         measured = _one(rec, key, key.where)
         out = fmt(measured, key.form, key.percent)
-        return Value(shown, out, numbers=[measured.value] + ([measured.lower, measured.upper] if measured.lower is not None else []))
+        return Value(shown, out, numbers=[measured.value] + ([measured.lower, measured.upper] if measured.lower is not None else []),
+                     inputs=_inputs(rec, key))
     except _Unfilled as why:
         return Value(shown, NOT_RECORDED, Hit(shown, str(why)))
 
@@ -659,17 +671,100 @@ def resolve(text: str, rec: Records | None) -> Value:
 # --- the paper -----------------------------------------------------------------------------------------------------
 
 
-def fill(markdown: str, rec: Records | None) -> tuple[str, list[Hit]]:
-    """``markdown`` with every ``{{v:...}}`` filled and wrapped in its marker, and the keys FI could not fill."""
-    hits: list[Hit] = []
+#: Where FI keeps every key the last draft used, its value, and the keys it could not fill.
+RECORD = Path(".fi") / "paper_values.json"
+
+
+def fill_values(markdown: str, rec: Records | None, plain: Any = None) -> tuple[str, list[Value]]:
+    """``markdown`` with every ``{{v:...}}`` filled and wrapped in its marker, and each key's :class:`Value`. ``plain``:
+    a function of a text offset that says the key sits where no reader sees a marker as markup (math, code); its value is
+    then written bare."""
+    values: list[Value] = []
 
     def one(m: re.Match[str]) -> str:
         value = resolve(m.group(1), rec)
-        if value.hit:
-            hits.append(value.hit)
-        return value.marked
+        values.append(value)
+        return value.text if plain is not None and plain(m.start()) else value.marked
 
-    return _PLACEHOLDER.sub(one, markdown or ""), hits
+    return _PLACEHOLDER.sub(one, markdown or ""), values
+
+
+def fill(markdown: str, rec: Records | None) -> tuple[str, list[Hit]]:
+    """``markdown`` with every ``{{v:...}}`` filled and wrapped in its marker, and the keys FI could not fill."""
+    text, values = fill_values(markdown, rec)
+    return text, [v.hit for v in values if v.hit]
+
+
+def keys_in(markdown: str) -> list[str]:
+    """The keys of a paper, filled or not, in order of first use."""
+    found = [m.group(1).strip() for m in _MARK.finditer(markdown or "")]
+    found += [m.group(1).strip() for m in _PLACEHOLDER.finditer(_MARK.sub("", markdown or ""))]
+    return list(dict.fromkeys(found))
+
+
+def unfilled_in(markdown: str) -> list[str]:
+    """The keys of a rendered paper that read ``not recorded``."""
+    return list(dict.fromkeys(m.group(1).strip() for m in _MARK.finditer(markdown or "")
+                              if m.group(2).strip() == NOT_RECORDED))
+
+
+def write_record(quest_root: Path | str, values: list[Value]) -> None:
+    """Keep every key the paper used: its value, the numbers behind it, what it was computed from, and (for a key FI could
+    not fill) why. This is the audit of "where did this number come from", and what the slides and poster can read."""
+    path = Path(quest_root) / RECORD
+    try:
+        if not values:
+            path.unlink(missing_ok=True)
+            return
+        seen: dict[str, Value] = {}
+        for v in values:
+            seen.setdefault(v.key, v)
+        rows = [{"key": v.key, "text": v.text, "numbers": v.numbers, "inputs": v.inputs,
+                 **({"not_recorded": v.hit.reason} if v.hit else {})} for v in seen.values()]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"keys": rows, "not_recorded": [r["key"] for r in rows if "not_recorded" in r]},
+                                   indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def read_record(quest_root: Path | str) -> dict[str, Any]:
+    try:
+        data = json.loads((Path(quest_root) / RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def unavailable_reasons(quest_root: Path | str) -> dict[str, str]:
+    """Why each key of the last draft that FI could not fill was not filled."""
+    return {r["key"]: str(r["not_recorded"]) for r in read_record(quest_root).get("keys") or []
+            if isinstance(r, dict) and r.get("not_recorded")}
+
+
+def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Records | None:
+    """The quest's records for the keys: its trial record, the frozen plan, and the grid axes the simulation never reads
+    (their cells are pooled, as the tables of every setting pool them). ``None`` without a trial record."""
+    root = Path(quest_root)
+    rec = load(root, protocol)
+    if rec is None or not rec.cells:
+        return rec
+    try:
+        from . import grid_keys as _grid_keys
+
+        formula_names: set[str] = set()
+        metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+        for m in metrics if isinstance(metrics, list) else []:
+            ref = m.get("reference") if isinstance(m, dict) else None
+            if isinstance(ref, dict) and ref.get("formula") is not None:
+                from . import oracle_forms as _forms
+
+                formula_names.update(_forms.names(str(ref["formula"]), {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS}))
+        unread, _why = _rbs.unread_axes(protocol, _grid_keys.code_files(root / "code"), formula_names)
+        rec.unread = tuple(unread)
+    except Exception:  # noqa: BLE001 -- an axis FI cannot tell is unread counts as read: nothing is pooled by guess
+        rec.unread = ()
+    return rec
 
 
 def to_placeholders(markdown: str) -> str:
@@ -770,3 +865,44 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
     if sum(1 for line in body if line.startswith("- ")) > max_lines:
         body = ["Too many settings to list; the pooled lines and each value's extremes:"] + pooled + extremes
     return head + "\n" + "\n".join(body) + "\n" + SHEET_GRAMMAR
+
+
+# --- what the prompts say -------------------------------------------------------------------------------------------
+
+WRITER_RULES = """\
+RESULT NUMBERS ARE FILLED IN BY FI. YOU DO NOT TYPE THEM.
+Every number that is a result of this study (anything the run computed: a mean, an interval, an SD, a bias, a coverage, a
+rate, a power, a correlation, a count of outcomes, a difference or ratio of these, the smallest or largest over settings) goes
+into the paper as a key in double braces, never as digits. FI replaces each key with the value from its own records when the
+paper is saved, so the reader sees the number.
+You may type only: a number the plan or the topic states, written exactly as the plan writes it (a setting, a true value, a
+nominal level, a constant of the method); the number of a figure, table, section or citation (Figure 2, Section 3, [4]); and a
+whole number from 0 to 10 inside a formula. A typed result, or any other typed number, is sent back to you.
+How to write a key: {{v:<value> @ <where>}}. The value is a quantity from the list below. <where> names every setting the
+study varied, each as name=<value it took> (one setting), name=all (the trials of all its settings together) or name=each (kept
+apart, for a smallest, largest or range). Add :<form> after the value for another form of it (default is the mean). Add | % to
+write a percent. Examples: {{v:coverage @ noise=0.05, n=all}}, {{v:coverage:mean_ci @ noise=0.05, n=20}},
+{{v:bias @ noise=each, n=each | range | %}}.
+If FI cannot fill a key (a value the study did not record, a setting it did not run, a varied setting left out), it is sent back
+to you. Write the key; FI computes the number, so never work one out yourself from the list.
+Numbers that are not available: a number that only the analysis script computed, and that no key on this list gives, is not
+available. The Analysis block above shows such numbers; do not copy any of them as digits. Use the key for the same quantity
+when the list has one, otherwise say it in words or leave it out."""
+
+
+def writer_block(rec: Records | None) -> str:
+    """The write prompt's "Results you can place" part: the rule in plain words, the quantities the trials recorded and the
+    settings they vary, the sheet of keys with their values, and the grammar. ``""`` when there is no trial record (the paper
+    then has no result for FI to fill, and the rule is not applied: :func:`has_keys`)."""
+    if not has_keys(rec):
+        return ""
+    assert rec is not None
+    varied = ", ".join(rec.varied()) or "none (one setting)"
+    head = (f"The study's quantities: {', '.join(rec.metrics())}. The settings it varied: {varied}"
+            + (f". Settings the simulation never reads, pooled by FI: {', '.join(rec.unread)}" if rec.unread else "") + ".")
+    return WRITER_RULES + "\n" + head + "\n\n" + sheet(rec)
+
+
+def has_keys(rec: Records | None) -> bool:
+    """Whether this study has trial records FI can fill keys from (else the paper is not held to the rule)."""
+    return rec is not None and bool(rec.cells)
