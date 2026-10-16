@@ -280,3 +280,9 @@ def test_the_timed_trials_give_the_spread_of_each_metric(tmp_path: Path) -> None
     root2 = _quest(tmp_path / "b", TOY_CELL)
     probes2, _ = _measure(root2, {"n": [1, 3]}, 1, True)
     assert probes2 is not None and all(p.spread == {} for p in probes2)
+
+
+def test_a_smaller_run_timed_again_is_held_to_the_limit_without_the_margin() -> None:
+    e = est.Estimate(seconds=100.0, at_least=False, complete=True, cells=1, trials=1)
+    assert est.known_too_long(e, 120.0) and not est.known_too_long(e, 120.0, timed_again=True)
+    assert est.known_too_long(e, 90.0, timed_again=True)

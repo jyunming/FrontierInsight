@@ -161,7 +161,7 @@ class Estimate:
     #: When two or more settings are each costly, the settings at their costly ends together and how many times the base's
     #: cost that was measured: ``{"cell": {...}, "ratio": 3.2}``.
     together: dict[str, Any] | None = None
-    #: ``{metric: the largest standard deviation any timed setting's two trials showed}``.
+    #: ``{metric: the largest standard deviation any timed setting's trials showed}``.
     spreads: dict[str, float] = field(default_factory=dict)
 
 

@@ -97,6 +97,11 @@ def test_a_null_and_a_count_of_the_same_undefined_trials_are_one_account() -> No
     assert run_manifest._mapping_counts(only_count, "power") == (1, 2)
     only_null = {"power_values": [0.1, None, float("nan")]}
     assert run_manifest._mapping_counts(only_null, "power") == (1, 2)
+    # The same, one list and one count per setting key, side by side.
+    keyed = {"power_values": {"m=20": [0.1, None, None], "m=200": [0.2, 0.3]}, "power_undefined": {"m=20": 2, "m=200": 0}}
+    by_under, _families = run_manifest._listed_by_group(keyed, "power", {"m": [20, 200]})
+    assert sum(d for d, _u in by_under.values()) == 3 and sum(u for _d, u in by_under.values()) == 2, by_under
+
 
 
 def test_a_bare_name_of_a_value_compared_in_each_run_names_it() -> None:

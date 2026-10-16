@@ -536,13 +536,17 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
             if isinstance(listed, list) or number(undefined):
                 add(read(under, path), parent, container if container is not None else id(node), _mapping_counts(node, metric_id))
             inner = ("inner", id(node))
-            if isinstance(listed, dict):
-                for key, value in listed.items():
-                    if isinstance(value, list):
-                        add(read(key, path + (key,)), id(node), inner, _mapping_counts({values_key: value}, metric_id))
-            if isinstance(undefined, dict):
-                for key, value in undefined.items():
-                    add(read(key, path + (key,)), id(node), inner, _mapping_counts({undefined_key: value}, metric_id))
+            # One entry per key, its list and its count read together: the same undefined trials given as ``null`` in the
+            # key's list and as the key's count are one account (:func:`_mapping_counts`), not two.
+            by_key = {**({k: None for k, v in listed.items() if isinstance(v, list)} if isinstance(listed, dict) else {}),
+                      **({k: None for k in undefined} if isinstance(undefined, dict) else {})}
+            for key in by_key:
+                one = {}
+                if isinstance(listed, dict) and isinstance(listed.get(key), list):
+                    one[values_key] = listed[key]
+                if isinstance(undefined, dict) and key in undefined:
+                    one[undefined_key] = undefined[key]
+                add(read(key, path + (key,)), id(node), inner, _mapping_counts(one, metric_id))
             for k, v in node.items():
                 if k in (values_key, undefined_key) and isinstance(v, dict):
                     continue  # read above, one entry per key
