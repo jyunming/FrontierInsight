@@ -325,6 +325,50 @@ def direct_callers(code: Path, rel: str, name: str) -> dict[str, set[str]]:
     return out
 
 
+def unpassed_params(old_fn: str, new_fn: str, name: str, callers: dict[str, str], caller_names: dict[str, set[str]]) -> str:
+    """Why a repair that added parameters to ``name`` leaves the study on their defaults (``""`` when it does not): every
+    call of ``name`` in a function that calls it directly (``callers``: ``{file: its text after the repair}``;
+    ``caller_names``: the calling functions of each file) must pass each added parameter, by name or by place (or forward
+    ``**kwargs``). A parameter added with the old value as its default and passed only by the finding's own test changes
+    nothing the study runs."""
+    try:
+        old = _top_functions(ast.parse(old_fn)).get(name)
+        new = _top_functions(ast.parse(new_fn)).get(name)
+    except SyntaxError:
+        return ""
+    if old is None or new is None:
+        return ""
+    before = set(_steps._param_names(old))
+    positional = [x.arg for x in [*new.args.posonlyargs, *new.args.args]]
+    added = [p for p in _steps._param_names(new) if p not in before and p not in (
+        new.args.vararg.arg if new.args.vararg else None, new.args.kwarg.arg if new.args.kwarg else None)]
+    if not added:
+        return ""
+    for other, text in sorted(callers.items()):
+        try:
+            funcs = _top_functions(ast.parse(text))
+        except SyntaxError:
+            continue
+        for fname in sorted(caller_names.get(other) or ()):
+            fn = funcs.get(fname)
+            for node in ast.walk(fn) if fn is not None else ():
+                if not isinstance(node, ast.Call):
+                    continue
+                f = node.func
+                if not ((isinstance(f, ast.Name) and f.id == name) or (isinstance(f, ast.Attribute) and f.attr == name)):
+                    continue
+                if any(k.arg is None for k in node.keywords):
+                    continue  # **kwargs passed on
+                given = {k.arg for k in node.keywords}
+                places = len(node.args) if not any(isinstance(a, ast.Starred) for a in node.args) else len(positional)
+                missing = [p for p in added if p not in given and not (p in positional and positional.index(p) < places)]
+                if missing:
+                    return (f"the study's call still uses the default: `{fname}` in {other} calls `{name}` without "
+                            + ", ".join(f"`{p}`" for p in missing)
+                            + ", so the repair changes nothing the study runs; pass it on from the caller")
+    return ""
+
+
 def file_blocks(reply: str) -> tuple[str, dict[str, str]]:
     """The reply's first fenced block that holds a ``def`` and is not marked for another file (``""`` when none), and
     ``{file named by its first line # file: <path>: the rest of that block}`` for the blocks so marked."""
@@ -1153,6 +1197,12 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         edits[rel] = (old, new)
     if not edits:
         return False, "the reply changed nothing"
+    if scope and rel in edits:
+        final = {c: (edits[c][1] if c in edits else _read(env.code / c)) for c in callers}
+        unpassed = unpassed_params(function_source(old, scope), function_source(edits[rel][1], scope), scope, final,
+                                   callers)
+        if unpassed:
+            return False, unpassed
     for target, (before, after_text) in edits.items():
         problem = env.keeps(before, after_text, target)
         if problem:

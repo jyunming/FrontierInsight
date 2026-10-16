@@ -154,6 +154,31 @@ def test_replay_r12_a_wrong_repair_is_still_rejected_by_the_findings_assertion(t
     assert (root / "code" / "simulate.py").read_text(encoding="utf-8") == sim_before
 
 
+def test_replay_r12_a_repair_that_leaves_the_study_on_the_default_is_rejected(tmp_path: Path) -> None:
+    # The noise level becomes a parameter whose default is the typed value, and run_trial is not changed: the finding's
+    # own test passes the parameter itself and would pass, while every study trial still fits with 0.01.
+    pytest.importorskip("scipy")
+    root = _r12(tmp_path)
+    model_before = (root / "code" / "kinetics_parameter_recovery" / "model.py").read_text(encoding="utf-8")
+    correct, _wrong = _replies(root)
+    default_only = correct.split("\n\n```python\n# file: simulate.py")[0]
+    env = _env(root, default_only)
+    ok, why = asyncio.run(fr._attempt(env, dict(ISSUE), "kinetics_parameter_recovery/model.py", "code", ""))
+    assert not ok and "the study's call still uses the default" in why and "`run_trial` in simulate.py" in why
+    assert (root / "code" / "kinetics_parameter_recovery" / "model.py").read_text(encoding="utf-8") == model_before
+    assert env.changed == []
+
+
+@pytest.mark.parametrize("call, ok", [("f(x)", False), ("f(x, s)", True), ("f(x, scale=s)", True), ("m.f(x)", False),
+                                      ("f(x, **kw)", True), ("f(*args)", True)])
+def test_every_direct_caller_must_pass_an_added_parameter(call: str, ok: bool) -> None:
+    old = "def f(x):\n    return x\n"
+    new = "def f(x, scale=1.0):\n    return x * scale\n"
+    caller = f"def g(x, s, kw, args):\n    return {call}\n"
+    why = fr.unpassed_params(old, new, "f", {"sim.py": caller}, {"sim.py": {"g"}})
+    assert (why == "") is ok, why
+
+
 def test_a_repair_the_small_run_no_longer_runs_is_not_kept(tmp_path: Path) -> None:
     pytest.importorskip("scipy")
     root = _r12(tmp_path)
