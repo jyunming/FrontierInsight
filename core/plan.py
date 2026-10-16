@@ -588,6 +588,12 @@ PART_RULES = {
                    "line), `source` (the [n] of a source listed in the plan), `quote` (the passage of that source that states "
                    "the definition, word for word) and `differs` (empty, or the id of a `simplifications` entry when you "
                    "define it differently; then leave `quote` empty if you have no source for your own definition).",
+    # A known-answer check on a number the plan declares as an average over trials (core/mc_error.py): asked once.
+    "per_trial": "`protocol.oracles`, for each check named below and nothing else about it: does it hold in every "
+                 "single trial, or only on average over trials? Write each as `{\"name\": \"<the check's name>\", "
+                 "\"per_trial\": true}` when it must hold in every single trial, or `\"per_trial\": false` when it holds "
+                 "only on average over trials (a false discovery rate at most q, an error rate at most alpha). FI takes "
+                 "only `per_trial` from your answer.",
     "steps": "`protocol.model.steps`: a list of step cards; each has an `id` (S1, S2, ...), `name`, `does`, `inputs` (a "
              "mapping of each input's name to its unit), `output`, and optionally `uses` (equation ids of the model), "
              "`source`, `example` and `relations`. Write the model's other keys again unchanged.",
@@ -601,8 +607,13 @@ def part_request(topic: str, unread: dict[str, str]) -> str:
              for part, why in unread.items() if part in PART_RULES]
     lead = ("Parts of this plan's protocol could not be read, so the experiment would not run what the study needs."
             if any(part in ASKED_PARTS for part in unread) else
+            "Some known-answer checks of this plan do not say whether they hold in every single trial or only on average "
+            "over trials." if set(unread) == {"per_trial"} else
             "Parts of this plan's protocol are missing or incomplete, so the plan does not say what it leaves out or how its "
             "metrics are defined.")
+    if "per_trial" in unread and set(unread) != {"per_trial"}:
+        lead += (" Some known-answer checks also do not say whether they hold in every single trial or only on average "
+                 "over trials.")
     return (
         f"{lead} Write "
         f"each of them again in the design block, from the plan and the topic: “{' '.join(str(topic or '').split())[:600]}”.\n"

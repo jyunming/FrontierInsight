@@ -101,6 +101,23 @@ def per_trial_flag(oracle: dict[str, Any]) -> bool | None:
     return None
 
 
+def unsaid_reading(protocol: dict[str, Any] | None) -> list[str]:
+    """The checks whose reading the plan has to say and has not: each check whose ``measure`` uses a number the protocol
+    declares as a mean or proportion over runs (:func:`mean_names`), with ``per_trial`` unset. Whether such a check holds in
+    every single trial or only on average is a fact about the science, so FI asks the plan once (the plan step's
+    per-part request) and never guesses it; a check still unsaid keeps its kind's reading (:func:`reads_a_mean`)."""
+    if not isinstance(protocol, dict):
+        return []
+    means = mean_names(protocol)
+    out: list[str] = []
+    for oracle in protocol.get("oracles") or []:
+        if not isinstance(oracle, dict) or per_trial_flag(oracle) is not None or not str(oracle.get("name") or "").strip():
+            continue
+        if set(_forms.names(str(oracle.get("measure") or ""))) & means:
+            out.append(str(oracle["name"]).strip())
+    return out
+
+
 def reads_a_mean(oracle: dict[str, Any]) -> bool:
     """Whether ``oracle``'s number is a mean over trials (see the module docstring): a check of a quantity unless it says
     ``per_trial: true``; a rule (an invariant, a symmetry, a second implementation) only when it says ``per_trial:

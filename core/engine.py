@@ -6591,6 +6591,29 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         taken: list[str] = []
         reasons: list[str] = []
         for part in parts:
+            if part == "per_trial":
+                # Only `per_trial` of the checks asked about is taken (core/mc_error.py::unsaid_reading): never a
+                # tolerance, an expected value or anything else of a check.
+                names = set(_mc_error.unsaid_reading(merged))
+                said = new_protocol.get("oracles") if isinstance(new_protocol.get("oracles"), list) else (
+                    new.get("oracles") if isinstance(new.get("oracles"), list) else [])
+                answers = {str(e.get("name") or "").strip(): _mc_error.per_trial_flag(e) for e in said
+                           if isinstance(e, dict)}
+                answers = {k: v for k, v in answers.items() if k in names and v is not None}
+                if not answers:
+                    reasons.append("no check named in the question came back with `per_trial` true or false")
+                    continue
+                candidate = {**merged, "oracles": [
+                    {**o, "per_trial": answers[str(o.get("name") or "").strip()]}
+                    if isinstance(o, dict) and str(o.get("name") or "").strip() in answers else o
+                    for o in merged.get("oracles") or []]}
+                fixed, why = _plan.normalize_protocol(candidate)
+                if fixed is None:
+                    reasons.append(f"the checks with `per_trial` as you wrote it cannot be read: {why}")
+                    continue
+                merged["oracles"] = candidate["oracles"]
+                taken.append(part)
+                continue
             if part == "steps":
                 # The step cards sit inside the model block: only the steps are taken (from `protocol.model.steps`, or
                 # `protocol.steps` written beside it), the rest of the model is the plan's.
@@ -6708,6 +6731,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return found
 
     @staticmethod
+    def _reading_unread(design: Any) -> dict[str, str]:
+        """``{"per_trial": why}`` when a known-answer check uses a number the protocol declares as an average over trials and
+        does not say whether it holds in every single trial or only on average (:func:`core.mc_error.unsaid_reading`):
+        asked of the plan's model once, never guessed by FI and never a stop."""
+        protocol = design.get("protocol") if isinstance(design, dict) and isinstance(design.get("protocol"), dict) else None
+        names = _mc_error.unsaid_reading(protocol)
+        if not names:
+            return {}
+        means = _mc_error.mean_names(protocol)
+        uses = sorted({n for o in protocol.get("oracles") or [] if isinstance(o, dict)  # type: ignore[union-attr]
+                       and str(o.get("name") or "").strip() in names
+                       for n in _forms.names(str(o.get("measure") or "")) if n in means})
+        return {"per_trial": (f"the checks {', '.join(repr(n) for n in names)} use {', '.join(uses)}, which the plan "
+                              "declares as an average over trials, and do not say whether they hold in every single "
+                              "trial or only on average over trials")}
+
+    @staticmethod
     def _own_definitions(protocol: Any) -> list[str]:
         """The metrics whose definition is the plan's own: marked so (``differs``), or with no source or no quote."""
         try:
@@ -6756,7 +6796,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         iteration = int(state.get("iteration", 0) or 0)
 
         def unread(now: Any) -> dict[str, str]:
-            return {**self._unread_parts(now), **self._ledger_unread(now, passages)}
+            return {**self._unread_parts(now), **self._ledger_unread(now, passages), **self._reading_unread(now)}
 
         def digest(text: str) -> str:
             return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
@@ -6766,9 +6806,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         current = unread(design)
         # A part asked about at the plan step is not asked about again at the design step of the same run; a ledger part is
         # asked once for the problem it has (a plan written anew has other problems and is asked afresh).
-        asked = [p for p in current if p not in before and not (p in _LEDGER_PARTS and seen.get(p) == digest(current[p]))]
+        asked = [p for p in current if p not in before and not (p in _ONCE_PARTS and seen.get(p) == digest(current[p]))]
         if asked:
-            ledger_asked = [p for p in asked if p in _LEDGER_PARTS]
+            ledger_asked = [p for p in asked if p in _ONCE_PARTS]
             if ledger_asked:  # recorded BEFORE the request: a killed run does not ask again
                 self._ledger_seen_write(iteration, {**seen, **{p: digest(current[p]) for p in ledger_asked}})
             record_parts = {"parts": sorted({*before, *asked}), "iteration": iteration}
@@ -6791,7 +6831,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 design, plan_sha, lacks=lacks, request=request, keep=keep, file=_PART_ASKED,
                 what="settings the experiment needs", short="the protocol",
                 note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts,
-                ask_limit=1 if all(p in _LEDGER_PARTS for p in asked) else None)
+                ask_limit=1 if all(p in _ONCE_PARTS for p in asked) else None)
             if ledger_asked:  # what the answer left is the problem it was asked about: not asked about again
                 after = unread(design)
                 self._ledger_seen_write(iteration, {**seen, **{p: digest(after[p]) for p in ledger_asked if p in after},
@@ -6803,7 +6843,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             left = unread(design)
             lines = []
             for part in asked:
-                if part in _LEDGER_PARTS:
+                if part == "per_trial":
+                    lines.append("FI asked the plan's model whether each check on an average over trials holds in every "
+                                 "single trial or only on average, and "
+                                 + ("a check still does not say (it is judged as its kind is: a rule on every trial, a "
+                                    "quantity on the average)" if part in left else "every such check says it now") + ".")
+                elif part in _LEDGER_PARTS:
                     lines.append(f"FI asked the plan's model to write `protocol.{part}` again, and "
                                  + ("it still has gaps (the experiment goes on; the paper says so)" if part in left
                                     else "it is complete now") + ".")
@@ -25404,6 +25449,8 @@ _REDESIGN_OWNED_PARTS = frozenset({"grid", "in_each_run", "metrics", "model", "t
 _DRAFTED_PARTS_ASKED = "drafted_parts_asked.json"  # the same bound, for protocol parts a redesign drafted that could not be read
 _LEDGER_ASKED = "ledger_asked.json"  # which ledger parts were asked about, in which design round
 _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger parts: each asked once per quest
+# Asked once per design round, never a stop: the ledger parts, and whether a check on an average holds in every trial.
+_ONCE_PARTS = (*_LEDGER_PARTS, "per_trial")
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"
 _TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks

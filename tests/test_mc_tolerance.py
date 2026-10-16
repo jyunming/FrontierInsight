@@ -726,3 +726,122 @@ def test_the_s1_bound_as_frozen_is_a_rule_of_every_trial_and_fails_as_on_base(tm
     _c, problems, judged, found = _measure(_quest(tmp_path), [BOUND], timeout_s=60)
     assert judged[0]["passed_by_engine"] is False and found, (judged, problems)
     assert judged[0]["value"] >= 0.0188235 - 1e-6, "never better than trial 0 alone"
+
+
+# --- the plan is asked once whether a check on an average holds in every trial or on average --------------------------
+
+#: The words of the request (core/plan.py::PART_RULES["per_trial"]).
+READING_ASK = "does it hold in every single trial, or only on average over trials?"
+
+
+class _PlanModel:
+    """The plan step's model: each request for parts is answered with the next of ``answers`` (a dict), and kept."""
+
+    def __init__(self, answers: list[dict[str, Any]]) -> None:
+        self.answers = list(answers)
+        self.asked: list[str] = []
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        self.asked.append(prompt)
+        return json.dumps(self.answers.pop(0) if self.answers else {})
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _s1_plan(tmp_path: Path, answers: list[dict[str, Any]]):
+    """An engine whose plan.md holds the s1 protocol as the planner wrote it (the bound with no ``per_trial``)."""
+    from core import plan
+    from core.engine import Engine
+    from tests.test_known_answer_self_checks import _config
+
+    engine = Engine(_config(tmp_path))
+    model = _PlanModel(answers)
+    engine._client = model
+    protocol = {k: PROTOCOL[k] for k in ("grid", "in_each_run", "metrics", "thresholds")}
+    protocol["oracles"] = [dict(o) for o in PROTOCOL["oracles"]]
+    design = {"hypothesis": "BH keeps its FDR at pi0*q", "protocol": protocol}
+    text = plan.render(engine.config.topic, {}, design)
+    plan.plan_path(engine.quest_root).write_text(text, encoding="utf-8")
+    plan.record_version(engine.quest_root, text, by="user")
+    return engine, model
+
+
+def _plan_checks(engine: Any) -> dict[str, dict[str, Any]]:
+    design, _sha = engine._design_from_plan()
+    return {o["name"]: o for o in design["protocol"]["oracles"]}
+
+
+def test_the_checks_on_a_declared_average_with_no_reading_are_the_ones_asked_about() -> None:
+    """The s1 protocol as frozen: the bound (on ``fdr_bh``) and the Bonferroni power (``power_bonferroni``) use numbers
+    the protocol declares as averages over trials and say nothing of how they are read; a check that says it is not."""
+    assert mc.unsaid_reading(PROTOCOL) == ["bonferroni_power_exact", "bh_fdr_upper_bound"]
+    assert mc.unsaid_reading({**PROTOCOL, "oracles": S1_CHECKS}) == ["bonferroni_power_exact"]
+    every = [{**o, "per_trial": True} for o in PROTOCOL["oracles"]]
+    assert mc.unsaid_reading({**PROTOCOL, "oracles": every}) == []
+    assert mc.unsaid_reading(None) == []
+
+
+@pytest.mark.asyncio
+async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_average_in_the_frozen_protocol(
+        tmp_path: Path) -> None:
+    """The s1 false stop does not hang on the planner remembering a field: at plan time FI asks the plan's model, once,
+    whether each such check holds in every single trial or only on average, takes ONLY ``per_trial`` from the answer
+    (a changed tolerance or expected value is not taken), and the frozen protocol carries it."""
+    from core import frozen_protocol as frozen
+
+    engine, model = _s1_plan(tmp_path, [{"protocol": {"oracles": [
+        {"name": "bh_fdr_upper_bound", "per_trial": False, "tolerance": 0.5, "expected": 7},
+        {"name": "bonferroni_power_exact", "per_trial": False},
+        {"name": "bh_superset_of_bonferroni", "per_trial": False},  # not asked about: not taken
+    ]}}])
+    state = {"topic": engine.config.topic, "iteration": 0}
+    design, sha = engine._design_from_plan()
+    await engine._ask_plan_for_the_parts(state, design, sha)
+    assert len(model.asked) == 1
+    assert READING_ASK in model.asked[0]
+    # The s1 plan's metric definitions ride in the same request; its opening says both.
+    assert "also do not say whether they hold in every single trial or only on average" in model.asked[0]
+    assert "'bonferroni_power_exact', 'bh_fdr_upper_bound'" in model.asked[0] and "fdr_bh" in model.asked[0]
+    checks = _plan_checks(engine)
+    assert checks["bh_fdr_upper_bound"]["per_trial"] is False
+    assert checks["bonferroni_power_exact"]["per_trial"] is False
+    assert "per_trial" not in checks["bh_superset_of_bonferroni"], "a check not asked about keeps its own reading"
+    for key in ("tolerance", "expected", "measure", "kind"):
+        assert checks["bh_fdr_upper_bound"].get(key) == BOUND.get(key), key
+    assert mc.unsaid_reading(engine._design_from_plan()[0]["protocol"]) == []
+    from core import plan
+    assert "every such check says it now" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
+    # Asked again (the design step of the same run): nothing is left to ask, and nothing is asked.
+    design, sha = engine._design_from_plan()
+    await engine._ask_plan_for_the_parts(state, design, sha)
+    assert len(model.asked) == 1
+    engine._freeze_protocol_if_due({"iteration": 0})
+    frozen_bound = {o["name"]: o for o in frozen.protocol_of(engine.quest_root)["oracles"]}["bh_fdr_upper_bound"]
+    assert frozen_bound["per_trial"] is False and mc.reads_a_mean(frozen_bound)
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_does_not_say_leaves_the_check_judged_on_every_trial_and_is_not_asked_again(
+        tmp_path: Path) -> None:
+    """The answer names the checks and says nothing of how they hold: nothing is taken, FI never guesses, the bound
+    stays a rule of every trial (as before), plan.md says so, and the same problem is not asked about again."""
+    from core import plan
+
+    silent = {"protocol": {"oracles": [{"name": "bh_fdr_upper_bound"}, {"name": "bonferroni_power_exact"}]}}
+    engine, model = _s1_plan(tmp_path, [silent] * 6)
+    state = {"topic": engine.config.topic, "iteration": 0}
+    design, sha = engine._design_from_plan()
+    await engine._ask_plan_for_the_parts(state, design, sha)
+    first = len(model.asked)
+    # One request, plus the one more a refused answer earns with its reason (the plan step's per-part request).
+    assert 1 <= first <= 2, first
+    if first == 2:
+        assert "`per_trial` true or false" in model.asked[1]
+    checks = _plan_checks(engine)
+    assert "per_trial" not in checks["bh_fdr_upper_bound"] and not mc.reads_a_mean(checks["bh_fdr_upper_bound"])
+    assert "a check still does not say" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
+    design, sha = engine._design_from_plan()
+    await engine._ask_plan_for_the_parts(state, design, sha)
+    assert len(model.asked) == first, "the same problem is not asked about again"
