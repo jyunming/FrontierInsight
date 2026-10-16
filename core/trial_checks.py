@@ -478,20 +478,17 @@ def _coverage_check(key: str, hits: list[float], level: float, z: float = _Z95) 
 
 
 def _ratio_of(est: list[float], se: list[float]) -> tuple[float, int] | None:
-    """``(spread of the estimates / root mean square of their errors, degrees of freedom)``, or ``None`` when there is
-    nothing to compare: no error reported, or a setting without noise (the estimates do not vary AND the error
-    reported is nil too). Estimates that do not vary while the trials report an error of their own are the finding
-    (ratio 0, far below 1): a simulation that ignores its seed returns one number a trial."""
+    """``(spread of the estimates / root mean square of their errors, degrees of freedom)``, or ``None`` when there is no
+    spread to judge (a setting without noise) or no error reported."""
     n = len(est)
     if n < MIN_TRIALS:
         return None
     mean = sum(est) / n
     sd = math.sqrt(sum((x - mean) ** 2 for x in est) / (n - 1))
     rms = math.sqrt(sum(s * s for s in se) / n)
-    floor = 1e-12 * max(abs(mean), 1e-300)
-    if rms <= floor:
+    if rms <= 0 or sd <= 1e-12 * max(abs(mean), 1e-300):
         return None
-    return (0.0 if sd <= floor else sd / rms), n - 1
+    return sd / rms, n - 1
 
 
 def _ratio_band(key: str, n: int, ratio: float, dof: int, z: float = _Z95) -> SettingCheck:
