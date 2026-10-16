@@ -50,6 +50,9 @@ _URL = re.compile(r"https?://\S+")
 _CODE = re.compile(r"`[^`\n]+`")
 _HEADING_NUMBER = re.compile(r"^(#{1,6}[ \t]+)(?:\d+(?:\.\d+)*\.?[ \t]|[IVXLC]+\.[ \t])", re.M)
 _LIST_NUMBER = re.compile(r"^([ \t]*(?:[-*+][ \t]+)?)\d+[.)][ \t]", re.M)
+# An inline enumeration inside one paragraph: "(1) ... (2) ... (3) ...". Each label is followed by text.
+_ENUM_LABEL = re.compile(r"(?<![\w)])\((\d{1,2})\)(?=[ \t]+[^\s\d(])")
+_PARAGRAPH = re.compile(r"[^\n]+(?:\n[^\n\S]*(?=\S)[^\n]+)*")
 MATH = re.compile(r"\$\$.+?\$\$|\\\[.+?\\\]|\\\(.+?\\\)|(?<![\\$])\$(?=\S)[^$\n]+?(?<=\S)\$(?!\d)", re.S)
 #: A label word, then its number: ``Figure 2``, ``Section 3.1``, ``Step 4``; for a whole number also a list of them after
 #: the label (``Figures 2 and 3``, ``Tables 1, 2``). A decimal after a list is a value, not a label.
@@ -72,15 +75,35 @@ def _blank(match: re.Match[str]) -> str:
     return re.sub(r"[^\n]", " ", match.group(0))
 
 
+def _enumeration_labels(text: str, maths: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The spans of the labels of every inline enumeration in ``text``: within one paragraph, the parenthesised integers that run
+    ``(1)``, ``(2)``, ... in order from 1 (at least ``(1)`` and ``(2)``). A label is document structure like a list's number.
+    A lone ``(6)``, a run that does not start at 1 or skips a number, and anything inside math stay numbers to be checked."""
+    spans: list[tuple[int, int]] = []
+    for para in _PARAGRAPH.finditer(text):
+        run: list[tuple[int, int]] = []
+        for m in _ENUM_LABEL.finditer(text, para.start(), para.end()):
+            if any(x <= m.start() < y for x, y in maths):
+                continue
+            if int(m.group(1)) == len(run) + 1:
+                run.append(m.span())
+        if len(run) >= 2:
+            spans.extend(run)
+    return spans
+
+
 def writers_text(markdown: str) -> str:
     """``markdown`` with everything that is not the writer's own words blanked out (same length, so offsets hold): FI's value
     markers and blocks, other HTML comments, double-brace placeholders, code, URLs, image targets, a heading's or list's
-    number, and the sources from ``References`` / ``Further reading`` on."""
+    number, an inline enumeration's labels "(1) ... (2) ...", and the sources from ``References`` / ``Further reading`` on."""
     t = markdown or ""
     for pattern in (_FI_V, _FI_PAIR, _COMMENT, _FENCE, _TAIL, _PLACEHOLDER, _IMG_TARGET, _URL, _CODE):
         t = pattern.sub(_blank, t)
     t = _HEADING_NUMBER.sub(lambda m: m.group(1) + re.sub(r"[^\n]", " ", m.group(0)[len(m.group(1)):]), t)
-    return _LIST_NUMBER.sub(lambda m: m.group(1) + " " * (len(m.group(0)) - len(m.group(1))), t)
+    t = _LIST_NUMBER.sub(lambda m: m.group(1) + " " * (len(m.group(0)) - len(m.group(1))), t)
+    for a, b in _enumeration_labels(t, [m.span() for m in MATH.finditer(markdown or "")]):
+        t = t[:a] + " " * (b - a) + t[b:]
+    return t
 
 
 # --- numbers ---------------------------------------------------------------------------------------------------------

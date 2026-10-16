@@ -133,7 +133,7 @@ def _typed_empty_plan(text: str) -> list[str]:
 
 def test_enumeration_labels_of_a_real_limitations_paragraph_are_not_numbers():
     left = _typed_empty_plan(LIMITATIONS)
-    assert not [t for t in left if t in {str(i) for i in range(1, 11)}], left
+    assert left == ["1", "1e-12"], left  # "1/T" and the tolerance are the paragraph's own numbers, the ten labels are not
     out, taken = tn.remove(LIMITATIONS, frozenset())
     assert all(f"({i})" in out for i in range(1, 11)), out
     assert "1e-12" in " ".join(tok for tok, _ in taken)  # a real number of the paragraph is still checked
