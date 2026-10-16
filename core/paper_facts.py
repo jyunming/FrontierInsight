@@ -343,7 +343,8 @@ def fewer_runs_text(reduced: dict[str, Any]) -> str:
     said = f"{ran} runs per setting instead of the {asked} the plan asked for ({why})"
     if reduced.get("below_plan_minimum") and isinstance(reduced.get("plan_minimum"), (int, float)):
         said += f", below the plan's minimum of {int(reduced['plan_minimum'])}"
-    elif reduced.get("limit") == "topic" and reduced.get("plan_minimum") is None and not reduced.get("over_topic_limit"):
+    elif (reduced.get("limit") == "topic" and reduced.get("plan_minimum") is None and not reduced.get("over_topic_limit")
+          and reduced.get("precision_known", True) is not False):
         said += "; the plan states no fewest number of runs"
     precision = reduced.get("precision")
     if isinstance(precision, dict) and isinstance(precision.get("half_width"), (int, float)):

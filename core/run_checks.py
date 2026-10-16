@@ -913,7 +913,7 @@ class RunChecksMixin:
                      + ("its minimum and its precision target" if fit.precision_known else "its stated minimum")
                      + "): the topic's time limit asked for it, so the plan's minimum number of runs is a part of the study "
                      "not fully done.")
-        elif fit.plan_floor is None and topic and not over_topic:
+        elif not _estimate.floor_is_stated(protocol) and topic and not over_topic:
             note += (" The plan states no fewest number of runs per setting; for the topic's own limit FI goes down to "
                      f"{_estimate.MIN_RUNS_FOR_LIMIT} at the least.")
         precision = _estimate.expected_precision(protocol, fewer, est.spreads) if fit.precision_known else None

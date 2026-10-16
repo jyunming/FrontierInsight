@@ -137,6 +137,8 @@ async def test_the_note_of_a_cut_with_an_unknown_spread_says_the_precision_was_n
     assert note["plan_minimum"] is None and not note["below_plan_minimum"]
     assert "was not known before the run" in note["note"] and "minimum of 1000" not in note["note"]
     assert "not known before the run" in paper_facts.fewer_runs_text(note)
+    # The plan states a target; FI could not work out what it needs. That is not "no fewest number".
+    assert "states no fewest" not in note["note"] and "states no fewest" not in paper_facts.fewer_runs_text(note)
 
 
 # ---- a missed precision target, for a mean too ----------------------------------------------------------------------------
