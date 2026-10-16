@@ -16997,7 +16997,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "[replot_layout] your figure request was NOT applied: two tries at redrawing did not work, so the "
                 "figures are as they were (%s)", "; ".join(n[:120] for n in notes))
         else:
-            done["layout_missed"] = not_drawn
+            # A NOT_DRAWN line restates a note in the model's words; when every note was FI's own, none is a reader's.
+            done["layout_missed"] = not_drawn if persons(notes) else []
             self._log.info("[replot_layout] redrew %d figure(s) from the saved numbers, the experiment was not run again: %s",
                            len(drawn), ", ".join(drawn) or "-")
         shutil.rmtree(backup, ignore_errors=True)
@@ -29292,7 +29293,7 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
     # reader only through the caption.
     gone = [" ".join(str(t).split()) for t in ((record or {}).get("paper_dropped") or []) if str(t).strip()]
     if gone:
-        note += (" — in paper.pdf this figure does not show its title" + ("s " if len(gone) > 1 else " ")
+        note += (" — in a one-column paper.pdf this figure does not show its title" + ("s " if len(gone) > 1 else " ")
                  + "; ".join(f'"{_one_line(t, 120)}"' for t in gone)
                  + ": put in the caption whatever it says that a reader needs")
     return note

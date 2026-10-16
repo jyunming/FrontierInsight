@@ -234,3 +234,8 @@ def test_a_rename_the_redraw_could_not_make_is_not_told_to_the_writer_as_a_reade
     only_fi, _ = _replot(_engine(tmp_path / "b"), "raise SystemExit(3)", notes)
     assert only_fi["layout_missed"] == [] and only_fi["layout_not_redrawn"] == []
     assert eng._route_after_replot({**STATE, **only_fi}) == "check"  # type: ignore[arg-type]
+    # A redraw that answers FI's renames with NOT_DRAWN lines (in its own words) sends nothing back to the writer.
+    declined, _ = _replot(_engine(tmp_path / "c"), "print('NOT_DRAWN: the title is fine')\n"
+                                                    "print('NOT_DRAWN: the legend is fine')", notes)
+    assert declined["layout_missed"] == []
+    assert eng._route_after_replot({**STATE, **declined}) == "check"  # type: ignore[arg-type]

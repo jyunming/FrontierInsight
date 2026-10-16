@@ -232,6 +232,16 @@ def _run_case(tmp_path: Path, name: str, on: bool) -> dict:
             "second": [(root / "out" / f).read_bytes() for f in ("second.png", "second.pdf")]}
 
 
+# Each case is run once with the copy on and once off, however many tests read it (the file runs on one worker).
+_RUNS: dict[tuple[str, bool], dict] = {}
+
+
+def _case(factory: pytest.TempPathFactory, name: str, on: bool) -> dict:
+    if (name, on) not in _RUNS:
+        _RUNS[(name, on)] = _run_case(factory.mktemp(name), name, on)
+    return _RUNS[(name, on)]
+
+
 def _slide_and_paper(run: dict) -> tuple[dict, dict]:
     snaps = run["snaps"]
     slide = next(s["snap"] for s in snaps if s["file"].startswith("figures/") and "/paper/" not in s["file"])
@@ -245,8 +255,9 @@ def _data(snap: dict) -> list:
 
 @pytest.mark.parametrize("name", ["same_label_diff_color", "dup_label_one_legend", "bubble_size_legend",
                                   "errorbar_fill", "axis_equal_datalim", "inset_axes"])
-def test_the_copy_shows_the_same_data_as_the_slide_figure(tmp_path: Path, name: str) -> None:
-    slide, paper = _slide_and_paper(_run_case(tmp_path, name, True))
+def test_the_copy_shows_the_same_data_as_the_slide_figure(tmp_path_factory: pytest.TempPathFactory,
+                                                        name: str) -> None:
+    slide, paper = _slide_and_paper(_case(tmp_path_factory, name, True))
     # The same lines (colour, style, marker, points), the same points and their sizes, images and texts.
     assert _data(paper) == _data(slide)
     # Every legend entry, in the colour (and size) of its key on the slide: a label two series share is kept twice,
@@ -262,8 +273,9 @@ def test_the_copy_shows_the_same_data_as_the_slide_figure(tmp_path: Path, name: 
 
 @pytest.mark.parametrize("name", ["tick_label_size_by_hand", "suptitle_autopos", "layout_engine_tight",
                                   "axis_equal_datalim", "same_label_diff_color", "lambda_formatter_and_pyplot_save"])
-def test_a_second_save_of_the_scripts_figure_is_unchanged(tmp_path: Path, name: str) -> None:
-    on, off = _run_case(tmp_path, name, True), _run_case(tmp_path, name, False)
+def test_a_second_save_of_the_scripts_figure_is_unchanged(tmp_path_factory: pytest.TempPathFactory,
+                                                          name: str) -> None:
+    on, off = _case(tmp_path_factory, name, True), _case(tmp_path_factory, name, False)
     assert (on["root"] / "figures" / "paper").is_dir() and not (off["root"] / "figures" / "paper").exists()
     assert on["second"] == off["second"], "the figure saved again differs from one never copied"
     after_on = next(s for s in on["snaps"] if s["file"] == "after")
@@ -281,10 +293,11 @@ def _paper_info(run: dict) -> dict:
 
 @pytest.mark.parametrize("name", ["layout_engine_tight", "tight_then_colorbar", "colorbar_imshow",
                                   "same_label_diff_color", "bubble_size_legend"])
-def test_every_layout_path_makes_a_copy_no_taller_than_the_cap(tmp_path: Path, name: str) -> None:
+def test_every_layout_path_makes_a_copy_no_taller_than_the_cap(tmp_path_factory: pytest.TempPathFactory,
+                                                               name: str) -> None:
     from generation._pdf_measure import measure_pdf
 
-    run = _run_case(tmp_path, name, True)
+    run = _case(tmp_path_factory, name, True)
     info = _paper_info(run)
     assert "error" not in info, info
     pdf = next((run["root"] / "figures" / "paper").glob("*.pdf"))
@@ -299,10 +312,10 @@ def test_every_layout_path_makes_a_copy_no_taller_than_the_cap(tmp_path: Path, n
         assert info["fit"].startswith("tight") and info.get("layouts_failed")
 
 
-def test_inset_text_is_set_at_the_bodys_size(tmp_path: Path) -> None:
+def test_inset_text_is_set_at_the_bodys_size(tmp_path_factory: pytest.TempPathFactory) -> None:
     from generation._pdf_measure import measure_pdf
 
-    run = _run_case(tmp_path, "inset_axes", True)
+    run = _case(tmp_path_factory, "inset_axes", True)
     page = measure_pdf(run["root"] / "figures" / "paper" / "inset.pdf").pages[0]
     inset_label = [line for line in page.lines if "time t (s)" in line.text]
     assert inset_label and all(line.size <= 9.5 for line in page.lines), [(l.text, l.size) for l in page.lines]
@@ -460,7 +473,7 @@ def test_the_writer_is_told_which_titles_the_paper_copy_does_not_show(tmp_path: 
     read = _read_figure_records(tmp_path, ["scat.png"])["scat.png"]
     assert "paper" not in read and read["paper_dropped"] == record["paper_dropped"]
     note = _figure_record_note(read)
-    assert ('in paper.pdf this figure does not show its titles "All runs at T = 300 K"; '
+    assert ('in a one-column paper.pdf this figure does not show its titles "All runs at T = 300 K"; '
             '"sigma=0.02, n=12: observed r=0.9992": put in the caption') in note
     assert "does not show" not in _figure_record_note({"axes": [{"title": "x", "series": []}]})
 
