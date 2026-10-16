@@ -582,7 +582,8 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     """Both checks on a run's per-setting summary, and what follows from them. A setting where most trials failed is judged
     by the failure check alone (its numbers rest on the trials that survived), so the calibration reads the other settings.
     While a repair is left, any fault is sent back; once they are spent, a calibration fault or a failure in more than half
-    of the settings stops the quest, and failures in at most half of them leave those settings out. With
+    of the settings stops the quest, and failures in at most half of them leave those settings out, but only when every
+    remaining setting's calibration was judged against the truth (and passed): one that was not checked makes it a stop. With
     ``no_calibration`` (the reason), only the failed trials are checked and the record says the calibration was not."""
     fails = failures(cells, reasons, protocol)
     bad = [f for f in fails if f.fault]
@@ -617,6 +618,25 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
                 out.say += "; more than half of the settings would be left out, which leaves too little to report"
             out.tried = ["ran every trial of the study and counted the failed trials of each setting",
                          *[f.says() for f in bad[:2]]]
+        return out
+    # Settings are left out only when what remains is shown sound: every remaining setting's intervals and standard errors
+    # were judged against the truth (and passed, else there was a fault above). "Not checked" is not a pass: the failures
+    # may be the visible part of a wrong code whose other settings merely did not crash.
+    remaining = {f.key for f in run if f.key not in keys}
+    judged = {s.key for q in cal.quantities for s in q.settings}
+    unjudged = sorted(remaining - judged)
+    if unjudged and not no_calibration:  # a search never uses a failed design, so nothing it leaves out is analysed
+        out.action = STOP
+        why = cal.not_checked[0] if not cal.checked and cal.not_checked else (
+            f"{len(unjudged)} of the {len(remaining)} remaining settings had no interval or standard error FI could judge "
+            f"({', '.join(unjudged[:4])}{', ...' if len(unjudged) > 4 else ''})")
+        out.say = (f"in {len(bad)} of {len(run)} settings more than half of the trials failed ({bad[0].says()}); they could "
+                   "be left out only if FI could show that the remaining settings' numbers are sound, and it could not: "
+                   + why)
+        out.tried = ["ran every trial of the study and counted the failed trials of each setting",
+                     *[f.says() for f in bad[:2]],
+                     "looked for a check of the remaining settings' intervals and standard errors against the true values: "
+                     + why]
         return out
     out.action = LEAVE_OUT
     out.left_out = [f.key for f in bad]

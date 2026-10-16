@@ -143,12 +143,27 @@ def test_a_standing_fault_stops_with_its_record_and_partial_failures_run_once_mo
     assert eng._trial_checks_stop({"exec_result": {"returncode": 0, "trial_checks": fault}}) is None
 
 
+def _sound(n: int = 100) -> dict:
+    import random
+
+    rng = random.Random(1)
+    est = [rng.gauss(0.0, 1.0) for _ in range(n)]
+    return {"x_hat": {"values": est, "trials": list(range(n))}, "x_se": {"values": [1.0] * n, "trials": list(range(n))}}
+
+
+KNOWN = {"metrics": [{"id": "x", "estimand": "x", "kind": "mean", "unit": "a trial", "known_value": {
+    "true_value": 0.0, "estimate": "x_hat", "standard_error": "x_se", "level": 0.95}}]}
+
+
 def test_judge_follows_the_repairs():
     cells = [{"key": "a=1", "planned": 100, "failed": 80, "metrics": {}},
-             {"key": "a=2", "planned": 100, "failed": 0, "metrics": {}}]
-    assert trial_checks.judge(cells, repairs_left=True).action == trial_checks.REPAIR
-    v = trial_checks.judge(cells, repairs_left=False)
+             {"key": "a=2", "planned": 100, "failed": 0, "metrics": _sound()}]
+    assert trial_checks.judge(cells, KNOWN, repairs_left=True).action == trial_checks.REPAIR
+    v = trial_checks.judge(cells, KNOWN, repairs_left=False)
     assert v.action == trial_checks.LEAVE_OUT and v.left_out == ["a=1"]
+    # the remaining setting's calibration was not checked (nothing declared): leaving a setting out is not safe
+    v = trial_checks.judge(cells, repairs_left=False)
+    assert v.action == trial_checks.STOP and not v.left_out and "could not" in v.say
     every = [{**c, "failed": 80} for c in cells]
     v = trial_checks.judge(every, repairs_left=False)
     assert v.action == trial_checks.STOP and "every setting" in v.say
@@ -176,3 +191,25 @@ def test_replay_r12_thirteen_of_twenty_five_settings_left_out_is_a_stop_not_a_pa
     v = trial_checks.judge(data["cells"], data.get("protocol"), data.get("thresholds"), repairs_left=False)
     assert v.action == trial_checks.STOP and not v.partial and not v.left_out
     assert "13 of 25 settings" in v.say
+
+
+def test_replay_r12_with_one_more_low_noise_setting_still_stops():
+    # 13 of 26 settings is not more than half; the remaining settings' intervals are judged against the truth, and a
+    # setting where 47% of the trials failed covers the truth in 0.62 of the survivors: a fault, so a stop, not a paper
+    import copy
+    import gzip
+
+    from tests.test_trial_checks import DECLARED, _protocol
+
+    with gzip.open(Path(__file__).parent / "fixtures" / "replay" / "trial_checks" / "r12_kinetics.json.gz", "rt",
+                   encoding="utf-8") as fh:
+        data = json.load(fh)
+    extra = copy.deepcopy(data["cells"][0])
+    extra["key"] = "noise_std_rel=0.0025,n_timepoints=5"
+    cells = data["cells"] + [extra]
+    proto = _protocol(data, DECLARED["r12_kinetics"])
+    v = trial_checks.judge(cells, proto, data["thresholds"], repairs_left=False)
+    assert v.action == trial_checks.STOP and not v.left_out and v.calibration.faults
+    # with nothing declared, the remaining settings are not shown sound either: a stop
+    v = trial_checks.judge(cells, data.get("protocol"), data["thresholds"], repairs_left=False)
+    assert v.action == trial_checks.STOP and not v.left_out and "could not" in v.say
