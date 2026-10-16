@@ -127,3 +127,45 @@ def test_where_the_truth_is_declared_a_trial_with_no_estimate_is_a_miss_of_the_c
     v = tc.judge(cells, {"metrics": [spec]}, None, {}, repairs_left=False)
     assert v.action == tc.STOP and v.calibration.faults, v.say
     assert not v.record()["undefined"], "a value the truth is declared for is not 'undefined': it is a miss"
+
+
+# ---- a setting where most trials failed is left out, without a truth to judge the rest against --------------------------
+
+KINETICS = ["s1_kinetics", "s2_kinetics", "r14b_kinetics", "r6t_kinetics"]
+
+
+def _fail_most_of(cells: list[dict[str, Any]], keys: list[str], share: float = 0.6) -> list[dict[str, Any]]:
+    """The same record with ``share`` of the trials of each setting in ``keys`` failed (their values gone)."""
+    out = json.loads(json.dumps(cells))
+    for c in out:
+        if c.get("level") or c.get("key") not in keys:
+            continue
+        n = int(c.get("planned") or 0)
+        lost = math.ceil(share * n)
+        c["failed"], c["ok"] = lost, n - lost
+        for m in (c.get("metrics") or {}).values():
+            pairs = [(t, v) for t, v in zip(m["trials"], m["values"]) if t >= lost]
+            m["trials"], m["values"] = [t for t, _ in pairs], [v for _, v in pairs]
+    return out
+
+
+def _keys(cells: list[dict[str, Any]]) -> list[str]:
+    return [str(c["key"]) for c in cells if not c.get("level")]
+
+
+@pytest.mark.parametrize("name", KINETICS)
+def test_one_setting_where_most_trials_failed_is_left_out_and_stated(name: str, tmp_path: Path) -> None:
+    d = _load(name)
+    assert not any(m.get("known_value") for m in d["protocol"].get("metrics") or []), "the real plan, no truth declared"
+    one = _keys(d["cells"])[0]
+    v = tc.judge(_fail_most_of(d["cells"], [one]), d["protocol"], d["thresholds"] or None, {}, repairs_left=False)
+    assert v.action == tc.LEAVE_OUT and v.left_out == [one], v.say
+    root = tmp_path / "q"
+    tc.write_record(root, v.record())
+    items = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.SETTING_LEFT_OUT]
+    assert len(items) == 1 and one in items[0].sentence
+    # more than half of the settings: a stop, never a paper
+    keys = _keys(d["cells"])
+    many = keys[: len(keys) // 2 + 1]
+    assert tc.judge(_fail_most_of(d["cells"], many), d["protocol"], d["thresholds"] or None, {},
+                    repairs_left=False).action == tc.STOP

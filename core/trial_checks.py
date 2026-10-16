@@ -721,8 +721,9 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     """Both checks on a run's per-setting summary, and what follows from them. A setting where most trials failed is judged
     by the failure check alone (its numbers rest on the trials that survived), so the calibration reads the other settings.
     While a repair is left, any fault is sent back; once they are spent, a calibration fault or a failure in more than half
-    of the settings stops the quest, and failures in at most half of them leave those settings out, but only when every
-    remaining setting's calibration was judged against the truth (and passed): one that was not checked makes it a stop. With
+    of the settings stops the quest, and failures in at most half of them leave those settings out; where the plan declares
+    a true value, only when every remaining setting's calibration was judged against it (and passed): one that was not
+    checked makes it a stop. With
     ``no_calibration`` (the reason), only the failed trials are checked and the record says the calibration was not."""
     fails = failures(cells, reasons, protocol)
     bad = [f for f in fails if f.fault]
@@ -758,13 +759,16 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
             out.tried = ["ran every trial of the study and counted the failed trials of each setting",
                          *[f.says() for f in bad[:2]]]
         return out
-    # Settings are left out only when what remains is shown sound: every remaining setting's intervals and standard errors
-    # were judged against the truth (and passed, else there was a fault above). "Not checked" is not a pass: the failures
-    # may be the visible part of a wrong code whose other settings merely did not crash.
+    # Where the plan declares a true value, settings are left out only when what remains is shown sound: every remaining
+    # setting's intervals and standard errors were judged against the truth (and passed, else there was a fault above).
+    # "Not checked" is not a pass there: the failures may be the visible part of a wrong code whose other settings merely
+    # did not crash. Without a declared truth there is nothing to judge the rest against, and the settings are left out
+    # (and said in the paper); only more than half of them left out stops the quest (above).
     remaining = {f.key for f in run if f.key not in keys}
     judged = {s.key for q in cal.quantities for s in q.settings}
     unjudged = sorted(remaining - judged)
-    if unjudged and not no_calibration:  # a search never uses a failed design, so nothing it leaves out is analysed
+    declared = any(spec.get("known_value") for spec in _metric_spec.declared(protocol))
+    if unjudged and declared and not no_calibration:  # a search never uses a failed design: nothing it leaves out is analysed
         out.action = STOP
         why = cal.not_checked[0] if not cal.checked and cal.not_checked else (
             f"{len(unjudged)} of the {len(remaining)} remaining settings had no interval or standard error FI could judge "

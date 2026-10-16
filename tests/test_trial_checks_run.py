@@ -161,8 +161,13 @@ def test_judge_follows_the_repairs():
     assert trial_checks.judge(cells, KNOWN, repairs_left=True).action == trial_checks.REPAIR
     v = trial_checks.judge(cells, KNOWN, repairs_left=False)
     assert v.action == trial_checks.LEAVE_OUT and v.left_out == ["a=1"]
-    # the remaining setting's calibration was not checked (nothing declared): leaving a setting out is not safe
+    # nothing declared: there is no truth to judge the rest against, and the setting is left out (the paper says so)
     v = trial_checks.judge(cells, repairs_left=False)
+    assert v.action == trial_checks.LEAVE_OUT and v.left_out == ["a=1"]
+    # a truth declared, and the remaining setting not judged against it (too few trials): leaving a setting out is not safe
+    short = [cells[0], {**cells[1], "planned": 5,
+                        "metrics": {k: {"values": m["values"][:5], "trials": m["trials"][:5]} for k, m in _sound().items()}}]
+    v = trial_checks.judge(short, KNOWN, repairs_left=False)
     assert v.action == trial_checks.STOP and not v.left_out and "could not" in v.say
     every = [{**c, "failed": 80} for c in cells]
     v = trial_checks.judge(every, repairs_left=False)
@@ -210,9 +215,10 @@ def test_replay_r12_with_one_more_low_noise_setting_still_stops():
     proto = _protocol(data, DECLARED["r12_kinetics"])
     v = trial_checks.judge(cells, proto, data["thresholds"], repairs_left=False)
     assert v.action == trial_checks.STOP and not v.left_out and v.calibration.faults
-    # with nothing declared, the remaining settings are not shown sound either: a stop
+    # with nothing declared there is no truth to judge the rest against: the 13 settings are left out (the user's rule:
+    # only more than half of the settings left out stops), and the paper says so
     v = trial_checks.judge(cells, data.get("protocol"), data["thresholds"], repairs_left=False)
-    assert v.action == trial_checks.STOP and not v.left_out and "could not" in v.say
+    assert v.action == trial_checks.LEAVE_OUT and len(v.left_out) == 13
 
 
 GRID_CHECKING_ANALYSIS = """
