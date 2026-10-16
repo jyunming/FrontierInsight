@@ -926,20 +926,71 @@ def _read(path: Path) -> str:
         return ""
 
 
+def _test_prompt(env: Env, issue: dict[str, Any], rel: str, problem: str) -> str:
+    source = _read(env.code / rel)
+    scope = scope_function(issue, source)
+    return env.prompts["code_finding_test"].substitute(
+        topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
+        file=rel, code=(f"### {rel} (the function `{scope}`)\n```python\n{function_source(source, scope)}\n```\n\n"
+                        f"The rest of {rel} offers:\n{signatures(source, scope)}" if scope else
+                        f"### {rel}\n```python\n{source.rstrip()}\n```"),
+        modules=module_names(env.code, env.package), problem=problem or "(none: this is the first try)")
+
+
+def _error_problem(detail: str) -> str:
+    return (f"the test could not show anything: {detail}. It must FAIL BY AN ASSERTION about the values the code "
+            "computes, on the current code; an exception in the test itself shows nothing.")
+
+
+async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -> TestRun | None:
+    """A shown issue's test now errors in its own code (not inside the program): the code model is asked ONCE more, shown
+    the error, for a test written as an assertion about the values the code computes, and it is run twice. Its
+    ``TestRun``: ``fail`` (a failing assertion in both runs; the new test becomes the issue's test), ``pass``, or ``error``;
+    ``None`` when it was asked before for this issue, or no test came back. What happened is kept in ``issue["asked_again"]``.
+    Counted in the record's requests like every other; an error never stops anything."""
+    if issue.get("asked_again"):
+        return None
+    issue["asked_again"] = {"error": error.detail[:300], "at": error.at, "outcome": "no test came back"}
+    env.record["finding_calls"] = int(env.record.get("finding_calls") or 0) + 1
+    env.record["test_calls"] = int(env.record.get("test_calls") or 0) + 1
+    env.save()
+    reply = await _ask(env, _test_prompt(env, issue, rel, _error_problem(error.detail)), "code", "test")
+    text = reply_test(reply)
+    if not text:
+        env.save()
+        return None
+    issue["tests"] = int(issue.get("tests") or 0) + 1
+    while (env.root / test_path(issue)).exists():  # the test that errored is kept as it is
+        issue["tests"] += 1
+    path = test_path(issue)
+    try:
+        (env.root / path).parent.mkdir(parents=True, exist_ok=True)
+        (env.root / path).write_text(text, encoding="utf-8")
+    except OSError as e:
+        issue["asked_again"]["outcome"] = f"the test could not be written: {e!r}"[:200]
+        env.save()
+        return None
+    first = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
+    run = first
+    if first.status == "fail":
+        second = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
+        if second.status != "fail":
+            run = second
+    issue["asked_again"].update(test=path, outcome=run.status, detail=run.detail[:300], at=run.at or error.at)
+    if run.status == "fail":
+        issue.update(test=path, failure=run.detail[:300], failure_kind=_issues.ASSERTION, assertion=run.line[:200],
+                     assertion_at=run.at)
+    env.save()
+    return run
+
+
 async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
     """Ask for a test that fails on the current code because of the finding, and run it. ``True`` when it fails by an
     assertion on two runs (the issue is demonstrated and the test kept); otherwise the issue is ``not demonstrated``."""
-    source = _read(env.code / rel)
-    scope = scope_function(issue, source)
     detail = ""
     last = "no usable test could be made"
     while spend(env, issue, "test"):
-        prompt = env.prompts["code_finding_test"].substitute(
-            topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
-            file=rel, code=(f"### {rel} (the function `{scope}`)\n```python\n{function_source(source, scope)}\n```\n\n"
-                            f"The rest of {rel} offers:\n{signatures(source, scope)}" if scope else
-                            f"### {rel}\n```python\n{source.rstrip()}\n```"),
-            modules=module_names(env.code, env.package), problem=detail or "(none: this is the first try)")
+        prompt = _test_prompt(env, issue, rel, detail)
         reply = await _ask(env, prompt, "code", "test")
         text = reply_test(reply)
         if not text:
@@ -984,8 +1035,7 @@ async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
                                 "shown fault; it goes to the crash repair")
             env.save()
             return False
-        detail = (f"the test could not show anything: {first.detail}. It must FAIL BY AN ASSERTION about the values the "
-                  "code computes, on the current code; an exception in the test itself shows nothing.")
+        detail = _error_problem(first.detail)
         last = first.detail
     issue.update(demonstrated=False, outcome=_issues.NOT_DEMONSTRATED, reason=f"no test showed it ({last[:160]})")
     env.save()

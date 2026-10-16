@@ -968,6 +968,56 @@ class RunChecksMixin:
             return self._code_review_failed_run(message, script=script)  # type: ignore[attr-defined]
         return None
 
+    async def _ask_finding_test_again(self, issue: dict[str, Any], error: Any, record: dict[str, Any],
+                                      state: Any = None) -> Any:
+        """At the evidence gate, a shown issue's test errors in its own code: the code model is asked once more for it,
+        shown the error, as an assertion about values (:func:`core.finding_repair.ask_again`). Its ``TestRun``, or ``None``
+        (asked before, no test came back, or the model could not be asked: an error here never stops anything)."""
+        from . import code_review as _code_review
+        from . import finding_repair as _finding_repair
+        from . import review_pairs as _pairs
+
+        if not isinstance(issue, dict) or issue.get("asked_again"):
+            return None
+        protocol = self._protocol_block(state) if state is not None else None  # type: ignore[attr-defined]
+        protocol = protocol if isinstance(protocol, dict) else None
+        values = _pairs.plan_values(protocol)
+
+        async def ask(prompt: str, who: str, kind: str) -> str:
+            try:
+                return await self._chat(prompt, node="implement.finding_test")  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001 - a request that cannot be made shows nothing and stops nothing
+                self._log.warning("[evidence_gate] the code model could not be asked again for the test of %s: %s",  # type: ignore[attr-defined]
+                                  issue.get("id"), _one(str(exc)))
+                return ""
+
+        async def run_tests(paths: list[str]) -> dict[str, Any]:
+            out: dict[str, Any] = {}
+            for path in paths:
+                if (run := await self._rerun_finding_test(path)) is not None:  # type: ignore[attr-defined]
+                    out[path] = run
+            return out
+
+        async def snapshot() -> dict[str, str]:
+            return {}
+
+        code = self.quest_root / "code"  # type: ignore[attr-defined]
+        env = _finding_repair.Env(
+            root=self.quest_root, code=code, record=record,  # type: ignore[attr-defined]
+            save=lambda: _code_review.save(self.quest_root, record),  # type: ignore[attr-defined]
+            ask=ask, run_tests=run_tests, snapshot=snapshot, static=dict, keeps=lambda *a: "",
+            prompts=self._prompts,  # type: ignore[attr-defined]
+            topic=_pairs.scrub(self._topic_block(), values) or "(not stated)",  # type: ignore[attr-defined]
+            equations=_code_review.equations_view(protocol, values), scrub=lambda text: _pairs.scrub(text, values),
+            log=self._log, package=(self._package_in_use(state) or "") if state is not None else "")  # type: ignore[attr-defined]
+        again = await _finding_repair.ask_again(env, issue, _finding_repair.target_file(issue, code), error)
+        if again is not None:
+            self._log.warning("[evidence_gate] the test of %s errored in its own code; FI asked once more for a test that "  # type: ignore[attr-defined]
+                              "asserts on the values, and it %s", issue.get("id"),
+                              {"fail": "fails on the code that ran", "pass": "passes on the code that ran"}.get(
+                                  again.status, "errors too: it shows nothing"))
+        return again
+
     def _trial_checks_stop(self, state: Any) -> dict[str, Any] | None:
         """When no repair of a fault FI's checks of the trials found is coming (they are spent, or the repair gave up): failed
         trials in some settings only run the study once more with the repairs counted as spent, so those settings are left

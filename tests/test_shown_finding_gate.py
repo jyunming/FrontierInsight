@@ -23,6 +23,22 @@ FAILING = ("import experiment\n\n\ndef test_dose_is_not_typed_in():\n"
 PASSING = "import experiment\n\n\ndef test_dose_is_not_typed_in():\n    assert experiment.dose() >= 0\n"
 STATE: dict[str, Any] = {"exec_result": {"returncode": 0}, "result_json": {"dose": 60.0}}
 
+#: What the code model answers when FI asks it once more for a test (``Engine._chat`` is replaced; no model is called).
+REPLIES: list[str] = []
+ASKED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _no_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    REPLIES.clear()
+    ASKED.clear()
+
+    async def chat(self, prompt, *a, **kw):  # noqa: ANN001, ANN002, ANN003
+        ASKED.append(str(prompt))
+        return REPLIES.pop(0) if REPLIES else "no test"
+
+    monkeypatch.setattr(Engine, "_chat", chat)
+
 
 class _Sink(logging.Handler):
     def __init__(self) -> None:
@@ -389,3 +405,59 @@ async def test_a_left_out_quantity_is_not_said_once_it_is_no_longer_flagged(tmp_
     assert "dose" not in disclosure.run_record(engine.quest_root)
     assert await engine._shown_fault_verdict(TWO_RESULTS) is None  # the gate again: nothing shown, the old mark is gone
     assert "at_gate" not in code_review.load(engine.quest_root)["issues"]["F-1"]
+
+
+# ---- a test that errors in its own code is asked for once more, as an assertion about values ------------------------------
+
+CO_NAMES = "import experiment\n\n\ndef test_x():\n    assert experiment.dose.co_names\n"  # r7's shape: an error in the test
+AS_VALUES = ("```python\nimport experiment\n\n\ndef test_dose_is_computed():\n"
+             "    assert experiment.dose() != 60.0, 'dose is the typed-in 60.0'\n```")
+
+
+@pytest.mark.asyncio
+async def test_a_test_that_errors_in_itself_is_asked_for_once_more_and_a_failing_assertion_stops(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue(), test=CO_NAMES)
+    REPLIES.append(AS_VALUES)
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert len(ASKED) == 1 and "has no attribute 'co_names'" in ASKED[0] and "FAIL BY AN ASSERTION" in ASKED[0]
+    assert verdict and verdict["stuck_reason"] == "shown_fault_open"
+    issue = code_review.load(engine.quest_root)["issues"]["F-1"]
+    assert issue["test"] == ".fi/finding_tests/F-1_2.py" and issue["failure_kind"] == cf.ASSERTION
+    assert issue["asked_again"]["outcome"] == "fail"
+    # the same files give the same answer, and the model is not asked again
+    assert (await engine._shown_fault_verdict(STATE))["stuck_reason"] == "shown_fault_open" and len(ASKED) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_test_asked_for_once_more_that_errors_again_is_recorded_and_stops_nothing(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue(), test=CO_NAMES)
+    REPLIES.append("```python\nimport experiment\n\n\ndef test_x():\n    assert experiment.missing()\n```")
+    assert await engine._shown_fault_verdict(STATE) is None
+    issue = code_review.load(engine.quest_root)["issues"]["F-1"]
+    assert issue["asked_again"]["outcome"] == "error" and issue["gate_error"]["place"] == "test"
+    assert await engine._shown_fault_verdict(STATE) is None and len(ASKED) == 1  # asked once, ever
+
+
+@pytest.mark.asyncio
+async def test_a_test_asked_for_once_more_that_passes_clears_it(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue(), test=CO_NAMES)
+    (engine.quest_root / "code" / "experiment.py").write_text(COMPUTED, encoding="utf-8")
+    REPLIES.append(AS_VALUES)
+    assert await engine._shown_fault_verdict(STATE) is None
+    assert code_review.load(engine.quest_root)["issues"]["F-1"]["asked_again"]["outcome"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_cannot_be_asked_stops_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    _record(engine, _issue(), test=CO_NAMES)
+
+    async def down(self, prompt, *a, **kw):  # noqa: ANN001, ANN002, ANN003
+        raise RuntimeError("the provider is down")
+
+    monkeypatch.setattr(Engine, "_chat", down)
+    assert await engine._shown_fault_verdict(STATE) is None
+    assert code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]["place"] == "test"

@@ -18826,7 +18826,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         try:
             design = state.get("design")
             return await self._shown_fault_check(shown, record, state.get("result_json"),
-                                                 _code_review.headline_names(design, self._protocol_block(state)))
+                                                 _code_review.headline_names(design, self._protocol_block(state)), state)
         except Exception as exc:  # noqa: BLE001 - a broken check must not let a flagged fault through
             flagged = [i for i in shown if _code_findings.flagged_now(i)]
             if not flagged:
@@ -18835,7 +18835,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return self._shown_fault_stop(flagged[0], f"FI could not run its test again ({type(exc).__name__}: {exc})")
 
     async def _shown_fault_check(self, shown: list[dict[str, Any]], record: dict[str, Any] | None = None,
-                                 result: Any = None, headline: list[str] | None = None) -> dict[str, Any] | None:
+                                 result: Any = None, headline: list[str] | None = None,
+                                 state: Any = None) -> dict[str, Any] | None:
         verdicts: list[tuple[dict[str, Any], str]] = []
         errored = False
         for issue in shown:
@@ -18863,6 +18864,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             else:
                 # An error shows nothing, in the code or in the test (core/finding_repair.py): recorded, never a stop.
                 saved = ((record or {}).get("issues") or {}).get(str(issue.get("id")))
+                if not run.crash_in_program and record and isinstance(saved, dict):
+                    # ... but an error in the test's own code is asked for once more, as an assertion about values
+                    again = await self._ask_finding_test_again(saved, run, record, state)
+                    if again is not None and again.status == "fail":
+                        verdicts.append((issue, "a test written again for it, asserting on the values, fails on it"))
+                        continue
+                    if again is not None and again.status == "pass":
+                        continue
                 if isinstance(saved, dict):
                     saved["gate_error"] = {"kind": run.kind, "place": run.place, "at": run.at,
                                            "detail": _one_line(run.detail or "", 300)}
