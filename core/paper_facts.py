@@ -334,7 +334,10 @@ def fewer_runs_text(reduced: dict[str, Any]) -> str:
     ran, asked = _runs(reduced.get("to")), _runs(reduced.get("from"))
     if ran is None or asked is None or ran >= asked:
         return ""
-    if reduced.get("over_topic_limit"):
+    over = reduced.get("over_topic_limit")
+    if over == "cut_still_over":
+        why = "so that the run fits the topic's time limit; timed again, it is still expected to be over that limit"
+    elif over:  # "at_plan_minimum", or True in a record written before the two were told apart
         why = "the plan's minimum, the fewest it allows; the run is still over the topic's time limit"
     elif reduced.get("limit") == "topic":
         why = "so that the run fits the topic's time limit"

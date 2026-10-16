@@ -92,3 +92,20 @@ async def test_a_difference_gone_on_with_under_warn_is_an_item_the_paper_must_na
     assert "leaves out trials of one setting" in record["headline"] and "R0=0.9" in record["headline"]
     items = [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.RUN_DIFFERENCE]
     assert [i.name for i in items] == [paper_facts.RUN_DIFFERENCE_NAME] and record["headline"] in items[0].text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["warn", "block"])
+async def test_a_persons_extension_never_lets_numbers_no_trial_produced_through(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    """A person asked for more than the frozen protocol: the differences they asked for are excused, values no trial
+    produced are not (review N5)."""
+    monkeypatch.setattr(Engine, "_goes_beyond_protocol_by_request", lambda self: ["the R0 grid has 6.0"])
+    monkeypatch.setattr(Engine, "_protocol_drift_not_asked_for", lambda self, protocol: [])
+    calls: list[str] = []
+    _model(monkeypatch, ANALYSIS_MADE_UP, [ANALYSIS_MADE_UP], calls)
+    engine = Engine(_cfg(tmp_path, engine={"run_manifest_check": mode}))
+    artifacts = await engine.run()
+    record = _record(engine)
+    assert record["status"] == "stopped" and calls.count("ExecuteReflect") >= 1, record
+    assert artifacts.paper_md is None

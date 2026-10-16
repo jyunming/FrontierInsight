@@ -215,3 +215,33 @@ def test_timing_the_real_simulation_measures_what_one_trial_costs(name: str, tmp
     wall, analysis = WALL[name]
     assert est is not None and 0.5 * (wall - analysis) < est.seconds < 3 * (wall - analysis), (est.seconds, base)
     assert not (root / "raw").exists(), "the timed trials are not results"
+
+
+@pytest.mark.asyncio
+async def test_a_cut_still_over_the_topics_limit_when_timed_again_is_said_as_such(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """r13 cut below the plan's minimum, and the shorter run timed again three times slower: over the topic's minute, within
+    FI's own limit. The paper's item says the runs were cut for the topic's limit and are still over it, not that the plan's
+    minimum was run (review N4)."""
+    fx = _fixture("r13_fdr")
+    grid, runs, probes = _ledger_probes("r13_fdr")
+    keep = {k: fx["protocol"][k] for k in ("min_runs_per_setting", "precision", "metrics")}
+    eng, _model, runner, _ex = await _sizing(tmp_path, timeout_s=900, grid=grid, runs=runs, **keep)
+    (eng.quest_root / ".fi" / "topic_requirements.json").write_text(
+        json.dumps({"constraints": fx["constraints"]}), encoding="utf-8")
+    timed: list[int] = []
+
+    async def measured(*a: Any, runs: int, **k: Any) -> Any:
+        timed.append(runs)
+        slower = 3.0 if len(timed) > 1 else 1.0
+        return [run_estimate.Probe(p.axis, p.index, p.cell, p.at(runs, int(fx["protocol"]["runs_per_setting"])).seconds * slower,
+                                   fixed_s=(p.fixed_s or 0.0) * slower, per_trial_s=(p.per_trial_s or 0.0) * slower)
+                for p in probes], ""
+
+    monkeypatch.setattr(run_estimate, "measure", measured)
+    assert await eng._size_the_run({"iteration": 0, "topic": R12_TOPIC}, runner, sys.executable, None) is None
+    reduced = run_estimate.read_record(eng.quest_root)["reduced"]
+    assert len(timed) == 2 and reduced["over_topic_limit"] == "cut_still_over" and reduced["below_plan_minimum"]
+    text = paper_facts.fewer_runs_text(reduced)
+    assert "the plan's minimum, the fewest it allows" not in text
+    assert "timed again, it is still expected to be over that limit" in text and "below the plan's minimum of 4096" in text

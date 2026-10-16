@@ -529,7 +529,8 @@ class RunChecksMixin:
                             "measured run time against that limit.")
                     self._log.warning("[execute] %s", over)  # type: ignore[attr-defined]
                     if isinstance(reduced, dict):
-                        reduced = {**reduced, "note": f"{reduced.get('note', '')} {over}".strip(), "over_topic_limit": True}
+                        reduced = {**reduced, "note": f"{reduced.get('note', '')} {over}".strip(),
+                                   "over_topic_limit": "cut_still_over"}
                     self._say_headroom(est, hard_s)
                     _estimate.write_record(self.quest_root, {**base, "reduced": reduced, "fits": False})  # type: ignore[attr-defined]
                     return None
@@ -930,7 +931,10 @@ class RunChecksMixin:
         return {"note": note, "from": {"grid": grid, "runs_per_setting": runs},
                 "to": {"grid": grid, "runs_per_setting": fewer}, "limit": "topic" if topic else "execution.timeout_s",
                 "below_plan_minimum": bool(fit.below_plan), "plan_minimum": fit.plan_floor, "precision": precision,
-                "precision_known": bool(fit.precision_known), "over_topic_limit": bool(over_topic)}
+                "precision_known": bool(fit.precision_known),
+                # why the run is over the topic's limit: sized to the plan's minimum (no fewer runs meet it), or, set when the
+                # cut is timed again, still over it after the cut (_size_the_run)
+                "over_topic_limit": "at_plan_minimum" if over_topic else False}
 
     @staticmethod
     def _too_long_text(est: _estimate.Estimate, limit_s: float, cut: bool = True) -> str:

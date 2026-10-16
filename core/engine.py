@@ -16361,6 +16361,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if by_request and protocol_now is not None and self._protocol_drift_not_asked_for(protocol_now):
                 by_request = []
             if by_request:
+                # A person's request excuses what it added to the protocol, never numbers no trial produced.
+                acting = [f for f in manifest_found if f in fabricated_found]
+            if by_request and not acting:
                 # The person asked for what the frozen protocol does not have; a repair would take it out again.
                 manifest_status = "extended_by_person"
                 self._log.warning(
