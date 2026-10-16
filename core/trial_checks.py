@@ -650,11 +650,12 @@ class Verdict:
 
 
 def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, thresholds: dict[str, Any] | None = None,
-          reasons: dict[str, Counter] | None = None, *, repairs_left: bool) -> Verdict:
+          reasons: dict[str, Counter] | None = None, *, repairs_left: bool, no_calibration: str = "") -> Verdict:
     """Both checks on a run's per-setting summary, and what follows from them. A setting where most trials failed is judged
     by the failure check alone (its numbers rest on the trials that survived), so the calibration reads the other settings.
     While a repair is left, any fault is sent back; once they are spent, a calibration fault or a failure in more than half
-    of the settings stops the quest, and failures in at most half of them leave those settings out."""
+    of the settings stops the quest, and failures in at most half of them leave those settings out. With
+    ``no_calibration`` (the reason), only the failed trials are checked and the record says the calibration was not."""
     fails = failures(cells, reasons)
     bad = [f for f in fails if f.fault]
     run = [f for f in fails if f.planned]
@@ -662,7 +663,8 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     # More than half of the settings left out would leave too little to report: that is a stop, never a paper.
     most = bool(bad) and len(bad) * 2 > len(run)
     keys = {f.key for f in bad}
-    cal = calibration([c for c in cells if not of_settings(c, keys)], protocol, thresholds)
+    cal = (Calibration(not_checked=[no_calibration]) if no_calibration else
+           calibration([c for c in cells if not of_settings(c, keys)], protocol, thresholds))
     out = Verdict(fails, cal)
     if not bad and not cal.faults:
         return out

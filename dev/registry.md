@@ -226,7 +226,7 @@ same PR that adds, splits or renames one.
 - `core/optimise.py` — the engine runs the search for the best design: `OptimisationRunner` (the executor stand-in
   `_node_execute` picks when the design has an `optimisation` block and two scripts, instead of
   `trial_runner.TrialsRunner`; it runs the search, then `experiment.py` with `FI_OPTIMISATION` / `FI_BEST_DESIGN`, and
-  `FI_TRIALS` for the coarse scan), `run_search` (the coarse scan through `trial_runner.run_trials`, each design through
+  `FI_TRIALS` for the coarse scan; after the search `_check_trials` runs `core/trial_checks.judge` on `trial_cells` (each coarse-scan setting by its own trials, the search's evaluations together as one setting) with the calibration not checked, given `repairs_left`, and sets `trial_fault`), `run_search` (the coarse scan through `trial_runner.run_trials`, each design through
   the trial harness in its own process with a nonce, a library method's steps through `.fi/optimisation/optimise_search.py --drive`
   in the quest's Python, the budget and `execution.timeout_s`, the run key cache in `.fi/optimisation/run.json`),
   the record FI alone writes (`raw/optimisation_ledger.jsonl`, `results/best_design.json`; `restore` / `read` put

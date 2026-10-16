@@ -16001,6 +16001,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 # Frozen for its confirm run (or after it): exploration's best design is kept, never searched for again.
                 frozen=lambda: _phased.enabled(self.config) and _phased.stage(self.quest_root) in (
                     _phased.CONFIRM, _phased.CONFIRMED),
+                # FI's check of the failed trials (core/trial_checks.py) sends a fault back only while a repair is left.
+                repairs_left=lambda: (int(state.get("exec_reflect_iter", 0) or 0)
+                                      < self.config.engine.exec_reflect_max_iterations
+                                      and not state.get("exec_give_up_reason")),
             )
         elif split and self._trial_mode:
             runner = _trial_runner.TrialsRunner(
