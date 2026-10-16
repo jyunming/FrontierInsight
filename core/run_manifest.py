@@ -384,8 +384,10 @@ def _values_listed(result_json: Any, metric_id: str) -> bool:
 
 
 def _mapping_counts(mapping: dict[str, Any], metric_id: str) -> tuple[int, int]:
-    """``(real values, undefined)`` one mapping holds for ``metric_id``: the finite numbers and the ``null`` / non-finite
-    entries of its ``<id>_values`` list, plus a number under its ``<id>_undefined``."""
+    """``(real values, undefined)`` one mapping holds for ``metric_id``: the finite numbers of its ``<id>_values`` list, and
+    the trials with no value, given as ``null`` / non-finite entries of that list or as a number under ``<id>_undefined``.
+    Given both ways (as FI's own trials.json gives them), they are the same trials told twice: the larger is taken, not the
+    sum."""
     values_key, undefined_key = f"{metric_id}_values", f"{metric_id}_undefined"
 
     def number(v: Any) -> bool:
@@ -398,7 +400,7 @@ def _mapping_counts(mapping: dict[str, Any], metric_id: str) -> tuple[int, int]:
         undefined = sum(1 for x in listed if x is None or (number(x) and not math.isfinite(float(x))))
     count = mapping.get(undefined_key)
     if number(count) and math.isfinite(float(count)) and count > 0:
-        undefined += int(count)
+        undefined = max(undefined, int(count))
     return defined, undefined
 
 
@@ -432,8 +434,11 @@ def _axis_named(segment: str, grid: dict[str, list[Any]]) -> str | None:
 def _path_cells(path: tuple[Any, ...], grid: dict[str, list[Any]]) -> frozenset[tuple[str, Any]] | None:
     """The setting fragment a list belongs to, read from the WHOLE key path from the root: a segment ``axis=value`` names
     that fragment, and a segment that names a grid axis (:func:`_axis_named`) followed by a segment that is one of that
-    axis's grid values names it too (``by_a`` / ``5`` / ``by_b`` / ``0.1`` is a=5, b=0.1). The fragments along the path
-    combine. ``None`` when the path names no setting, names one axis with two different values, or names an axis or value the grid does not have."""
+    axis's grid values names it too (``by_a`` / ``5`` / ``by_b`` / ``0.1`` is a=5, b=0.1). A segment that is, word for word,
+    a name the grid gives as a value of exactly one axis not yet named on the path names that value too, whatever the key
+    above it is called (``by_method`` / ``bonferroni`` is procedure=bonferroni when ``procedure`` takes the value
+    ``bonferroni``); a number is never read this way, since it may be an index. The fragments along the path combine.
+    ``None`` when the path names no setting, names one axis with two different values, or names an axis or value the grid does not have."""
     found: dict[str, Any] = {}
 
     def put(axis: str, value: Any) -> bool:
@@ -466,8 +471,26 @@ def _path_cells(path: tuple[Any, ...], grid: dict[str, list[Any]]) -> frozenset[
                 return None
             i += 2
             continue
+        named = _value_named(seg, grid, found)
+        if named is not None:
+            found[named[0]] = named[1]
         i += 1
     return frozenset(found.items()) if found else None
+
+
+def _value_named(segment: str, grid: dict[str, list[Any]], found: dict[str, Any]) -> tuple[str, Any] | None:
+    """``(axis, value)`` when ``segment`` is, word for word, a name (not a number) the grid gives as a value of exactly one
+    axis, and that axis is not named yet on the path; ``None`` otherwise."""
+    try:
+        float(segment)
+        return None
+    except ValueError:
+        pass
+    hits = [(axis, v) for axis, values in grid.items() if isinstance(values, list)
+            for v in values if isinstance(v, str) and v == segment]
+    if len({axis for axis, _ in hits}) != 1 or hits[0][0] in found:
+        return None
+    return hits[0]
 
 
 def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]] | None = None) -> tuple[dict[Any, tuple[int, int]],
