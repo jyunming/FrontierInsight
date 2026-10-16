@@ -267,6 +267,46 @@ def test_failed_trials_per_setting():
     assert [(f.key, f.fault, f.stated) for f in fails] == [("a=1", True, True), ("a=2", False, True), ("a=3", False, False)]
 
 
+def test_a_trial_that_returns_nan_for_a_declared_value_counts_as_failed_except_where_the_plan_says_it_has_none():
+    nan = float("nan")
+    cells = [{"key": "d=0", "cell": {"d": 0}, "planned": 20, "failed": 0,
+              "metrics": {"x_hat": {"values": [nan] * 15 + [1.0] * 5, "trials": list(range(20))},
+                          "other": {"values": [1.0] * 20, "trials": list(range(20))}}},
+             {"key": "d=1", "cell": {"d": 1}, "planned": 20, "failed": 2,
+              "metrics": {"x_hat": {"values": [1.0] * 17 + [float("inf")], "trials": list(range(18))},
+                          "other": {"values": [1.0] * 18, "trials": list(range(18))}}}]
+    spec = known("x_hat", 1.0, se="x_se")
+    fails = tc.failures(cells, None, _proto(spec))
+    assert [(f.key, f.failed, f.fault) for f in fails] == [("d=0", 15, True), ("d=1", 3, False)]
+    assert "`x_hat`" in fails[0].reasons[0][0]
+    # a number the plan says has no value where the effect is 0 is not a failure there
+    fails = tc.failures(cells, None, _proto({**spec, "undefined_when": {"d": [0]}}))
+    assert [(f.key, f.failed) for f in fails] == [("d=0", 0), ("d=1", 3)]
+    # without a declaration, as before: only the trials that failed
+    assert [f.failed for f in tc.failures(cells)] == [0, 2]
+    assert "Never return NaN" in tc.failures_directive([fails[1]])
+
+
+def test_replay_r12_a_repair_that_returns_nan_instead_of_failing_still_fails_those_trials():
+    data = _load("r12_kinetics")
+    names = sorted(next(c for c in data["cells"] if c["metrics"])["metrics"])
+    cells = []
+    for c in data["cells"]:
+        c = json.loads(json.dumps(c))
+        n_fail = int(c.get("failed") or 0)
+        c["failed"] = 0
+        for name in names:
+            c["metrics"].setdefault(name, {"values": [], "trials": []})
+        for m in c["metrics"].values():  # the trials that failed now "run" and return NaN
+            m["values"] = list(m["values"]) + [float("nan")] * n_fail
+            m["trials"] = list(m["trials"]) + list(range(10_000, 10_000 + n_fail))
+        cells.append(c)
+    fails = tc.failures(cells, None, _protocol(data, DECLARED["r12_kinetics"]))
+    assert len([f for f in fails if f.fault]) == 13
+    verdict = tc.judge(cells, _protocol(data, DECLARED["r12_kinetics"]), data["thresholds"], repairs_left=False)
+    assert verdict.action == tc.STOP
+
+
 # ---- replay on real quests --------------------------------------------------------------------------------------------
 
 

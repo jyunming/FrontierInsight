@@ -166,9 +166,60 @@ class SettingFailures:
                 + (f" - {why}" if why else ""))
 
 
-def failures(cells: list[dict[str, Any]], reasons: dict[str, Counter] | None = None) -> list[SettingFailures]:
+def _declared_names(protocol: dict[str, Any] | None) -> list[tuple[str, dict[str, list[Any]]]]:
+    """``[(name, undefined_when)]``: every value a trial must return as a number, by the plan: each protocol metric's own
+    id and the names of its ``known_value``, with the settings where the plan says that number has no value. A mean over a
+    subset of the trials (``given``) has no value outside the subset, so its own id is not one."""
+    out: list[tuple[str, dict[str, list[Any]]]] = []
+    for spec in _metric_spec.declared(protocol):
+        when = spec.get("undefined_when") or {}
+        kv = spec.get("known_value") or {}
+        names = ([] if spec.get("given") else [spec["id"]]) + [
+            kv[k] for k in ("estimate", "standard_error", "variance") if kv.get(k)] + list(kv.get("interval") or [])
+        out.extend((n, when) for n in dict.fromkeys(names))
+    return out
+
+
+def _undefined_here(when: dict[str, list[Any]], cell: dict[str, Any]) -> bool:
+    """Whether the plan says a number has no value at this setting (``undefined_when``)."""
+    here = cell.get("cell") or {}
+    for axis, values in when.items():
+        if axis not in here:
+            continue
+        v = here[axis]
+        for u in values:
+            a, b = _number(v), _number(u)
+            if (a is not None and b is not None and math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)) or str(v) == str(u):
+                return True
+    return False
+
+
+def _no_value_trials(records: list[dict[str, Any]], names: list[tuple[str, dict[str, list[Any]]]]) -> dict[int, str]:
+    """``{trial: the first declared name it gave no number for}``: a trial that ran but returned NaN, an infinity, or
+    nothing at all for a value the plan declares, at a setting where the plan does not say it has none."""
+    out: dict[int, str] = {}
+    for rec in records:
+        metrics = rec.get("metrics") or {}
+        ran = {t for m in metrics.values() if isinstance(m, dict) for t in (m.get("trials") or []) if isinstance(t, int)}
+        for name, when in names:
+            m = metrics.get(name)
+            if not isinstance(m, dict) or _undefined_here(when, rec):
+                continue
+            finite = set(_series(rec, name))
+            for trial in sorted(ran - finite):
+                out.setdefault(trial, name)
+    return out
+
+
+def failures(cells: list[dict[str, Any]], reasons: dict[str, Counter] | None = None,
+             protocol: dict[str, Any] | None = None) -> list[SettingFailures]:
     """The failed trials of each setting the trials were run at (a value compared inside a run is not a setting of its
-    own: a run that fails fails for every value). Settings with no failed trial are included, with ``failed == 0``."""
+    own: a run that fails fails for every value). Settings with no failed trial are included, with ``failed == 0``.
+
+    A trial that ran but returned NaN, an infinity or nothing for a value the plan declares (``protocol.metrics``) counts
+    as failed: a repair that hides a failing trial behind a NaN would otherwise turn a setting where most trials fail into
+    one where none do. Only the settings the plan names in a metric's ``undefined_when`` are spared."""
+    names = _declared_names(protocol)
     out = []
     for c in cells:
         if c.get("level"):
@@ -176,7 +227,13 @@ def failures(cells: list[dict[str, Any]], reasons: dict[str, Counter] | None = N
         planned = int(c.get("planned") or 0)
         failed = int(c.get("failed") or 0)
         key = str(c.get("key") or "")
-        got = (reasons or {}).get(key) or Counter()
+        got = Counter((reasons or {}).get(key) or Counter())
+        if names:
+            records = [c] + [r for r in cells if r.get("level") and of_settings(r, {key})]
+            empty = _no_value_trials(records, names)
+            for name in empty.values():
+                got[f"the trial returned no number (NaN, an infinity or nothing) for `{name}`, which the plan declares"] += 1
+            failed = min(planned, failed + len(empty)) if planned else failed
         out.append(SettingFailures(key, planned, failed, got.most_common()))
     return out
 
@@ -186,8 +243,10 @@ def failures_directive(bad: list[SettingFailures]) -> str:
     shown = "\n".join(f"- {s.says()}" for s in bad[:8]) + (f"\n- and {len(bad) - 8} more setting(s)" if len(bad) > 8 else "")
     return ("FI ran the study's trials, and in these settings more than half of the trials failed, so their numbers would "
             "rest on the few trials that happened to survive:\n" + shown + "\n\nRepair the simulation so that a trial "
-            "at these settings runs to the end (the reasons and places above say where it stops). A setting where a trial "
-            "truly has no result may return a value that says so, but it must not fail. Keep everything else as it is.")
+            "at these settings runs to the end and gives its numbers (the reasons and places above say where it stops). "
+            "Never return NaN, an infinity or a made-up value in place of a trial that failed: FI counts such a trial as "
+            "failed. A number the plan says has no value at some settings is the plan's to declare, not the code's. Keep "
+            "everything else as it is.")
 
 
 # ---- calibration against the truth -----------------------------------------------------------------------------------
@@ -525,7 +584,7 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     While a repair is left, any fault is sent back; once they are spent, a calibration fault or a failure in more than half
     of the settings stops the quest, and failures in at most half of them leave those settings out. With
     ``no_calibration`` (the reason), only the failed trials are checked and the record says the calibration was not."""
-    fails = failures(cells, reasons)
+    fails = failures(cells, reasons, protocol)
     bad = [f for f in fails if f.fault]
     run = [f for f in fails if f.planned]
     every = bool(bad) and len(bad) == len(run)

@@ -130,8 +130,9 @@ class SmallRun:
         return ("FI ran the simulation on a small case before the study (a few trials at the middle of the plan's settings "
                 "and at its corners), and most trials failed in these settings:\n" + "\n".join(lines)
                 + (f"\n\nThe last traceback:\n{tb[-1500:]}" if tb else "")
-                + "\n\nRepair the simulation so that a trial at these settings runs to the end. A trial that truly has no "
-                "result may return a value that says so, but it must not fail. Keep everything else as it is.")
+                + "\n\nRepair the simulation so that a trial at these settings runs to the end and gives its numbers. Never "
+                "return NaN, an infinity or a made-up value in place of a trial that failed: FI counts such a trial as "
+                "failed. Keep everything else as it is.")
 
     def for_reader(self, limit: int = 2500) -> str:
         """What the code's reader is shown: each setting's returned values (at most a few per name) and its failures."""
