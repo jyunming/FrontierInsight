@@ -332,6 +332,9 @@ class Built:
     tables: list[Table]
     notes: list[str]
     rows: list[dict[str, Any]]  # one per quantity and distinct setting, every number (for the CSV and the checks)
+    # What FI noticed about its own reading of the code. Never reader text: the caller logs it (run.log), the paper and
+    # the writer's note do not carry it.
+    diagnostics: list[str] = field(default_factory=list)
 
 
 def _quantities(protocol: dict[str, Any] | None, values: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
@@ -365,8 +368,9 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
     unread, why = unread_axes(protocol, files, formula_names)
     found = distinct(summarised, protocol, unread)
     notes = list(found.notes)
+    diagnostics: list[str] = []
     if why and _refs.grid_axes(protocol):
-        notes.append(f"Every grid axis is treated as read: {why}.")
+        diagnostics.append(f"Every grid axis is treated as read: {why}.")
     quantities, left = _quantities(protocol, found.values)
     computed = _refs.compute(protocol, [s.setting for s in found.settings], set(found.values), judged)
     by_metric = {q["metric"]: q for q in computed["quantities"]}
@@ -460,7 +464,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                             caption=caption, columns=cols, align=align, rows=body, value=value))
     if not quantities:
         notes.append("The trials returned no value that varies, so there is nothing to tabulate.")
-    return Built(found, computed, tables, notes, rows)
+    return Built(found, computed, tables, notes, rows, diagnostics)
 
 
 # --- renderings (pure) -------------------------------------------------------------------------------------------------

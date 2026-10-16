@@ -19687,6 +19687,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 by_setting = None
                 # An earlier run's tables must not go into this paper.
                 (self.quest_root / _results_by_setting.PAPER_BLOCK).unlink(missing_ok=True)
+            for d in (by_setting.diagnostics if by_setting else []):  # FI's own reading of the code: the log, not the paper
+                self._log.info("[write] %s", d)
             table_note = _results_by_setting.writer_note(trial_rows, by_setting)
         except Exception as e:  # noqa: BLE001 -- the table is a help to the writer, never a reason to stop
             self._log.warning("[write] FI's table of the trials could not be written (%s)", e)
