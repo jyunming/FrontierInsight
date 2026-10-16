@@ -852,13 +852,19 @@ class TrialsRunner:
 
 
 def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | None) -> None:
-    """Keep the wall time of a run of the trials, how many it ran, and the sum of the per-trial times in ``.fi/run_facts.json``."""
-    from . import run_facts
+    """Keep the wall time of a run of the trials, how many it ran, the sum of the per-trial times and, in a quest run in
+    two stages, which stage the run belongs to (exploring or confirming) in ``.fi/run_facts.json``."""
+    from . import phased, run_facts
 
     rows = [r for c in run.cells for r in c.rows]
     times = [r["duration_s"] for r in rows if isinstance(r.get("duration_s"), (int, float)) and not isinstance(r["duration_s"], bool)]
+    try:
+        stage = phased.stage(quest_root)
+    except Exception:  # noqa: BLE001 -- a record that cannot be read leaves the stage unsaid
+        stage = None
     run_facts.record_trials(quest_root, key=key, wall_s=wall_s, trials=len(rows), cells=len(run.cells),
-                            trial_sum_s=sum(times) if times else None)
+                            trial_sum_s=sum(times) if times else None,
+                            stage=stage if stage in (phased.EXPLORE, phased.CONFIRM) else None)
 
 
 def _note_job(quest_root: Path, record: dict[str, Any], job: dict[str, Any]) -> None:
