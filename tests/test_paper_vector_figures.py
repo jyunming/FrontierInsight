@@ -42,11 +42,14 @@ def test_a_figure_with_a_paper_copy_points_at_it_at_its_share_of_the_line(tmp_pa
     out, n = prefer_paper_figures(md, tmp_path)
     assert n == 3
     assert out == (
-        "![**Figure 1.** Bias [3] and spread.](figures/paper/wide.pdf){width=100%}\n\n"
-        "![Scatter.](figures/paper/single.pdf){width=49%}\n\n"
+        "![**Figure 1.** Bias [3] and spread.](figures/paper/wide.pdf){width=100% height=33%}\n\n"
+        "![Scatter.](figures/paper/single.pdf){width=49% height=33%}\n\n"
         "![No copy.](figures/other.png)\n\n"
         "![Sized by the writer.](figures/paper/wide.pdf){width=80%}\n"
     )
+    # A tall copy is capped at a third of the text height (the templates keep its aspect ratio): each copy FI sizes
+    # says so, and the writer's own attribute block is left as it is.
+    assert out.count("height=33%") == 2
     assert prefer_paper_figures(md, tmp_path, two_column=True) == (md, 0)
     assert prefer_paper_figures(md, tmp_path / "nowhere") == (md, 0)
 
@@ -72,7 +75,7 @@ def test_the_latex_source_uses_the_paper_copy_and_paper_md_keeps_the_png(tmp_pat
     pdf, skip = PaperGenerator(_config(tmp_path))._compile_pdf(md, tmp_path)
     assert skip is None and pdf is not None
     source = (tmp_path / "paper_pdf_source.md").read_text(encoding="utf-8")
-    assert "](figures/paper/wide.pdf){width=100%}" in source and "figures/wide.png" not in source
+    assert "](figures/paper/wide.pdf){width=100% height=33%}" in source and "figures/wide.png" not in source
     assert md.read_text(encoding="utf-8") == text
     # A two-column format keeps the PNG.
     PaperGenerator(_config(tmp_path, paper_format="ieee_access"))._compile_pdf(md, tmp_path)

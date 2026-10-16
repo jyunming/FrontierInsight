@@ -35,11 +35,18 @@ def _width_in(pdf: Path) -> float | None:
     return (x1 - x0) / 72 if x1 > x0 else None
 
 
+#: The most of the page's text height a paper copy is set at: a third, so a tall figure leaves room for its caption
+#: and the text around it.
+PAPER_HEIGHT_SHARE = 33
+
+
 def prefer_paper_figures(markdown: str, root: Path, *, two_column: bool = False) -> tuple[str, int]:
     """``(markdown, n)``: each image of ``figures/<stem>.png`` (or .jpg, .svg) whose paper copy
     ``figures/paper/<stem>.pdf`` exists under ``root``, beside the figure itself, points at that copy instead, with
-    ``{width=NN%}`` of the line width that the copy was drawn at (an attribute block the writer gave is kept as it is);
-    ``n`` is how many were swapped. A two-column paper is returned unchanged."""
+    ``{width=NN% height=33%}``: its share of the line width that the copy was drawn at, and at most a third of the
+    page's text height (the templates keep a figure's aspect ratio, so a tall figure is scaled down to that height and
+    a wide one is set at its width). An attribute block the writer gave is kept as it is. ``n`` is how many were
+    swapped. A two-column paper is returned unchanged."""
     if two_column:
         return markdown, 0
     swapped = 0
@@ -55,7 +62,7 @@ def prefer_paper_figures(markdown: str, root: Path, *, two_column: bool = False)
         if not attributes:
             width = _width_in(pdf)
             share = min(100, max(10, round(100 * width / PAPER_FULL_WIDTH_IN))) if width else 100
-            attributes = f"{{width={share}%}}"
+            attributes = f"{{width={share}% height={PAPER_HEIGHT_SHARE}%}}"
         swapped += 1
         return f"](figures/{PAPER_DIRNAME}/{stem}.pdf){attributes}"
 
