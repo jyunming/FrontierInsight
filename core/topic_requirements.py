@@ -369,7 +369,17 @@ def _covers(values: list[Any], factor: dict[str, Any]) -> str | None:
             return None  # numbers standing for named levels: a reader judges them
         have_tokens = [_tokens(h) for h in have]
         missing = [w for w in wanted if not any(_tokens(w) <= t or t <= _tokens(w) for t in have_tokens if t)]
-        return f"the levels {', '.join(str(m) for m in missing[:6])} are not among its settings" if missing else ""
+        if not missing:
+            return ""
+        # A name cannot tell an abbreviation from another level (``bh`` for Benjamini-Hochberg, ``holm`` for nothing the topic
+        # states): it is a gap here only when no value is left over that could stand for the missing level, and otherwise a
+        # reader judges (the values left over are shown to it with the settings).
+        spare = [h for h, t in zip(have, have_tokens)
+                 if not any(t and (_tokens(w) <= t or t <= _tokens(w)) for w in wanted)]
+        if len(spare) >= len(missing):
+            return None
+        return (f"the levels {', '.join(str(m) for m in missing[:6])} are not among its settings"
+                + (f" (it has {', '.join(sorted(have)[:8])})" if have else ""))
     rng = factor.get("range") or []
     if len(rng) == 2 and not numbers:
         return None
