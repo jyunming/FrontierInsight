@@ -482,6 +482,44 @@ def _accented_letter(match: "re.Match[str]") -> str:
     return "\\ensuremath{" + inner + "}"
 
 
+# A LaTeX command written with a combining mark after it (``\Pi`` + U+0302). NFC would
+# join the mark to the command's last letter (``\P`` + ``î``: the pilcrow and an i-hat,
+# typeset), so a mark with a LaTeX accent becomes that accent over the command first, and
+# one without is kept out of NFC and left as written: the engine then stops on it or
+# reports it missing, and the paper is marked not typeset.
+_COMMAND_MARK_RE = re.compile(r"(\\[A-Za-z]+)([̀-ͯ⃐-⃿]+)")
+
+
+def _command_accents_counted(segment: str, counts, where: str) -> str:
+    """``\\Pi`` + U+0302 as ``\\ensuremath{\\hat{\\Pi}}``; a command whose marks are
+    not all LaTeX accents is left as written."""
+    def one(match: "re.Match[str]") -> str:
+        command, marks = match.group(1), match.group(2)
+        if not all(ord(mark) in _COMBINING_ACCENTS for mark in marks):
+            return match.group(0)
+        inner = command
+        for mark in marks:
+            inner = f"{_COMBINING_ACCENTS[ord(mark)]}{{{inner}}}"
+        out = "\\ensuremath{" + inner + "}"
+        counts[(match.group(0), out, where)] += 1
+        return out
+
+    return _COMMAND_MARK_RE.sub(one, segment)
+
+
+def _nfc_keeping_commands(segment: str) -> str:
+    """``segment`` in NFC, except a LaTeX command and the combining marks after it,
+    which stay exactly as written (NFC must never merge a mark into a command name)."""
+    out: list[str] = []
+    pos = 0
+    for match in _COMMAND_MARK_RE.finditer(segment):
+        out.append(unicodedata.normalize("NFC", segment[pos:match.start()]))
+        out.append(match.group(0))
+        pos = match.end()
+    out.append(unicodedata.normalize("NFC", segment[pos:]))
+    return "".join(out)
+
+
 def _nfc_outside_code(markdown: str) -> str:
     """``markdown`` in Unicode NFC, code left exactly as written. NFC joins a letter and
     its mark into the one character Unicode has for them (``=`` + U+0338 is ``≠``, ``e``
@@ -665,10 +703,23 @@ def _prepare_unicode(
         if is_code and not rewrite_code:
             out.append(segment)
             continue
-        if not is_code:
-            segment = unicodedata.normalize("NFC", segment)
-        segment = _accents_counted(segment, counts, "code" if is_code else "text")
-        for piece, is_math in (_split_math_segments(segment) if not is_code else [(segment, False)]):
+        if is_code:
+            pieces = [(_accents_counted(segment, counts, "code"), False)]
+        else:
+            # A letter or command with a combining mark becomes its accent before NFC
+            # where an accent is meant: in math (``y`` + U+0302 is ``\hat{y}``, not an
+            # upright ``ŷ``) and after a command (never merged into its name). In prose
+            # NFC composes the letter (``e`` + U+0302 is ``ê``), and the rest after it.
+            pieces = []
+            for piece, is_math in _split_math_segments(segment):
+                where = "math" if is_math else "text"
+                piece = _command_accents_counted(piece, counts, where)
+                if is_math:
+                    piece = _nfc_keeping_commands(_accents_counted(piece, counts, where))
+                else:
+                    piece = _accents_counted(_nfc_keeping_commands(piece), counts, where)
+                pieces.append((piece, is_math))
+        for piece, is_math in pieces:
             where = "code" if is_code else "math" if is_math else "text"
             if is_math:
                 piece = _translate_counted(_script_glyph_runs_as_one_script(piece), math_table, counts, where)
