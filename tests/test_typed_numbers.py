@@ -111,3 +111,56 @@ def test_only_fis_own_block_hides_a_typed_number():
     other = "<!-- fi:foo -->the mean was 0.7777<!-- /fi:foo -->"
     assert _typed(own) == []
     assert "0.7777" in _typed(other)
+
+
+# --- an inline enumeration "(1) ... (2) ..." is document structure, not a result ---------------------------------------
+
+LIMITATIONS = (
+    "**Limitations.** (1) The shared noise across σ levels means pooled intervals, the pooled slope of sd against n, and "
+    "cross-n coverage contrasts are overstated in precision. (2) The trial count per setting is below the plan's minimum. "
+    "(3) The run used a single seed set with no replication. (4) The time window was set from the true k, so spread is "
+    "optimistic. (5) The design covers one Ea, one 1/T span and homoscedastic Gaussian noise on exact temperatures, so "
+    "robustness is not shown. (6) No comparison with a linearised ln c versus t fit was made. (7) The checks on tightening "
+    "the tolerance to 1e-12 and rescaling the weights were not reported, so they are not verified. (8) The plan's list of "
+    "simplifications did not name the per-temperature k fit or the Ea–ln A correlation. (9) The topic asked for one "
+    "script; the code is split over several files. (10) The discussion rests on few sources."
+)
+
+
+def _typed_empty_plan(text: str) -> list[str]:
+    return [n.token for n in tn.typed_outside_the_plan(text, frozenset())]
+
+
+def test_enumeration_labels_of_a_real_limitations_paragraph_are_not_numbers():
+    left = _typed_empty_plan(LIMITATIONS)
+    assert not [t for t in left if t in {str(i) for i in range(1, 11)}], left
+    out, taken = tn.remove(LIMITATIONS, frozenset())
+    assert all(f"({i})" in out for i in range(1, 11)), out
+    assert "1e-12" in " ".join(tok for tok, _ in taken)  # a real number of the paragraph is still checked
+
+
+def test_enumeration_blanking_keeps_offsets():
+    assert len(tn.writers_text(LIMITATIONS)) == len(LIMITATIONS)
+
+
+def test_a_fabricated_result_in_parentheses_is_still_caught():
+    assert _typed_empty_plan("Coverage was near nominal (0.93) in every setting.") == ["0.93"]
+
+
+def test_a_lone_parenthesised_count_is_still_checked():
+    assert _typed_empty_plan("The estimator failed in a few runs (6) of the grid.") == ["6"]
+
+
+def test_a_fabricated_number_inside_an_enumeration_item_is_caught():
+    text = "Limits. (1) One seed set. (2) Gaussian noise only. (3) Coverage was 0.871 at n = 5."
+    assert _typed_empty_plan(text) == ["0.871", "5"]
+
+
+def test_a_run_that_is_not_consecutive_is_not_structure():
+    text = "Notes. (1) One seed set. (3) Gaussian noise only. (7) Coverage was low."
+    assert _typed_empty_plan(text) == ["1", "3", "7"]
+
+
+def test_a_label_run_does_not_cross_paragraphs():
+    text = "(1) First point here.\n\nUnrelated text (2) with a count."
+    assert _typed_empty_plan(text) == ["1", "2"]
