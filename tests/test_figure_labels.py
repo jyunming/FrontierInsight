@@ -106,10 +106,15 @@ FDR_LEGEND = {"axes": [{"title": "pi1 = 0.05", "xlabel": "number of tests", "yla
 def test_each_code_name_is_one_sentence_with_the_plans_label_when_it_has_one() -> None:
     found = _figure_label_findings(_state({"fig3.png": SCATTER}, KINETICS))
     assert found == [
+        # The plan's metric is called Ea_hat itself: its label is the new label.
         'figures/fig3.png: the x axis label "Ea_hat (kJ/mol)" shows the code name "Ea_hat"; rename it to '
         '"Activation energy $E_a$ (kJ/mol)" (the plan\'s name for it)',
-        'figures/fig3.png: the y axis label "lnA_hat" shows the code name "lnA_hat"; rename it to '
-        '"Log pre-exponential factor $\\ln A$" (the plan\'s name for it)',
+        # lnA_hat is only made from the plan's lnA: that label is context, not the new label (an estimate of ln A is
+        # not ln A).
+        'figures/fig3.png: the y axis label "lnA_hat" shows the code name "lnA_hat"; rename it to the reader\'s name '
+        'for it: words, its symbol in $...$ and its unit (it is derived from "lnA", which the plan calls "Log '
+        'pre-exponential factor $\\ln A$": name what this one is, for example an estimate or a ratio of it, not that '
+        'quantity itself)',
     ]
     found = _figure_label_findings(_state({"fdr_vs_pi1.png": FDR_FIG}, FDR))
     assert found == [
@@ -117,6 +122,31 @@ def test_each_code_name_is_one_sentence_with_the_plans_label_when_it_has_one() -
         "code name \"pi1\"; rename it to the reader's name for it: words, its symbol in $...$ and its unit"
         for m in (20, 200)
     ]
+
+
+def test_a_derived_name_gets_its_stems_label_as_context_never_as_its_new_label() -> None:
+    """The second review's probe: t_max_over_k was to be renamed "Time $t$ (s)", n_tests_per_run "Number of tests
+    $n$"."""
+    plan = {"grid": {"t": [1, 2], "n": [5, 10]}, "labels": {"t": "Time $t$ (s)", "n": "Number of tests $n$"}}
+    record = {"axes": [{"xlabel": "t_max_over_k (s)", "ylabel": "n_tests_per_run", "series": []}]}
+    found = figure_labels.findings({"f.png": record}, ["f.png"], plan_labels(plan), plan_names(plan))
+    assert [f["rename_to"] for f in found] == [None, None]
+    assert [f["derived_from"] for f in found] == [["t", "Time $t$ (s)"], ["n", "Number of tests $n$"]]
+    text = " ".join(figure_labels.sentence(f) for f in found)
+    assert 'rename it to "Time' not in text and 'rename it to "Number' not in text
+    assert 'derived from "t", which the plan calls "Time $t$ (s)"' in text
+
+
+def test_a_symbol_written_out_with_digits_is_not_flagged_from_the_code_alone() -> None:
+    """mu0, eps0 and log2 are symbols (μ₀, ε₀, a log base): a script that assigns or calls them does not make them code
+    names. pi1 is flagged because the plan names it."""
+    code = figure_labels.code_identifiers(["from math import log2\nmu0 = 1.0\neps0 = 8.85e-12\nz = log2(4)\n"])
+    assert {"mu0", "eps0", "log2"} <= code
+    record = {"axes": [{"xlabel": "mu0 (H/m)", "ylabel": "eps0", "title": "log2 fold change",
+                        "series": [{"label": "pi1 = 0.05"}]}]}
+    found = figure_labels.findings({"f.png": record}, ["f.png"], {}, plan_names(FDR), code)
+    assert [f["code_names"] for f in found] == [["pi1"]]
+    assert figure_labels.code_names("log2 fold change", {"log2"}) == []
 
 
 def test_panel_titles_and_legend_entries_are_read_too() -> None:

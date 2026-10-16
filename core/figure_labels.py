@@ -4,7 +4,9 @@ The figures of real quests labelled their axes "Ea_hat (kJ/mol)" and "lnA_hat", 
 the script gave its variables. The plan can say what each quantity is called for a reader (``label`` of a metric,
 ``protocol.labels`` for a setting; :func:`core.plan.plan_labels`). This module reads each figure's axis labels, panel
 titles and legend entries from the figure record the plot-style bootstrap wrote (``core/plot_style.py``) and names each
-one that shows a code name, with the plan's label to use instead when the plan gives one. The engine sends these to the
+one that shows a code name, with the plan's label to use instead when the plan names that very quantity (a name only
+made from a plan name, ``Ea_hat`` from ``Ea``, gets that label as context: an estimate is not the true value). The
+engine sends these to the
 redraw of the figures from the saved numbers (``replot_layout``): the experiment is not run again.
 
 A name counts only when both hold, so that a symbol a scientist writes is never taken for code:
@@ -12,11 +14,12 @@ A name counts only when both hold, so that a symbol a scientist writes is never 
 - it is FI's to tie to the study: one of the plan's own names (or one extending it, ``lnA_hat``), or a name the
   experiment's code uses (a variable, an argument, a key it stores a value under);
 - it has the shape of code, outside ``$...$`` math: two or more underscores (``t_max_over_k``); one underscore after
-  two or more letters (``Ea_hat``, ``lnA_hat``) or before a part longer than a subscript (``p_value``); or two or more
-  lower-case letters run into digits (``pi1``).
+  two or more letters (``Ea_hat``, ``lnA_hat``) or before a part longer than a subscript (``p_value``); or, for a name
+  the plan itself gives, two or more lower-case letters run into digits (``pi1``).
 
 A letter with a short subscript (``k_B``, ``T_c``, ``E_a``, ``V_max``, ``G_f``), ``log_10``, a symbol with a Greek
-subscript (``Re_lambda``), a letter with digits (``c0``) and a short name (``T``, ``N``, ``dt``) are how a scientist writes
+subscript (``Re_lambda``), a letter with digits (``c0``), a written-out symbol the code assigns (``mu0``, ``eps0``), a log base (``log2``)
+and a short name (``T``, ``N``, ``dt``) are how a scientist writes
 a symbol: never flagged. No topic knowledge: the names come from the plan and the code, the shapes are those of code.
 Pure, never raises.
 """
@@ -30,6 +33,7 @@ from typing import Any
 _MATH = re.compile(r"\$[^$]*\$")
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 _RUN_ON = re.compile(r"^[a-z]{2,}[0-9]+$")
+_LOG_BASE = re.compile(r"^(?:log|ln)[0-9]+$")
 _GREEK = frozenset(
     "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi "
     "chi psi omega".split())
@@ -51,18 +55,24 @@ def code_shaped(word: str) -> bool:
         if sub.lower() in _GREEK and len(base) <= 2:
             return False  # Re_lambda
         return len(base) >= 2 or len(sub) > _SUBSCRIPT_MAX
-    return bool(_RUN_ON.match(word))
+    return bool(_RUN_ON.match(word)) and not _LOG_BASE.match(word)
 
 
-def code_names(label: str, names: set[str]) -> list[str]:
+def code_names(label: str, names: set[str], *, plan: set[str] | None = None) -> list[str]:
     """The code names ``label`` shows, in the order it shows them (each once): words of the shape of code that are
-    in ``names`` (the plan's names and the code's), or extend one of them (``lnA_hat`` from ``lnA``)."""
+    in ``names`` (the plan's names and the code's), or extend one of them (``lnA_hat`` from ``lnA``). Letters run into
+    digits count only for a name the plan itself gives (``plan``; all of ``names`` when not given): ``pi1`` is the
+    plan's setting, while a script's ``mu0`` or ``eps0`` is a symbol written out (μ₀, ε₀)."""
+    plan = set(names) if plan is None else set(plan)
     text = _MATH.sub(" ", str(label or ""))
     found: list[str] = []
     for word in _WORD.findall(text):
         if word in found or not code_shaped(word):
             continue
-        if word in names or any(word.startswith(name + "_") for name in names if name):
+        if "_" not in word:
+            if word in plan:
+                found.append(word)
+        elif word in names or any(word.startswith(name + "_") for name in names if name):
             found.append(word)
     return found
 
@@ -97,11 +107,18 @@ def code_identifiers(sources: list[str]) -> set[str]:
 
 
 def _reader_label(name: str, labels: dict[str, str]) -> str | None:
-    """The plan's label for ``name``: its own, else that of the longest plan name it extends (``Ea_hat`` from ``Ea``)."""
-    if name in labels:
-        return labels[name]
-    stems = [key for key in labels if name.startswith(key + "_")]
-    return labels[max(stems, key=len)] if stems else None
+    """The plan's label for ``name`` itself: only an exact match is the name of the same quantity."""
+    return labels.get(name)
+
+
+def _derived_from(name: str, labels: dict[str, str]) -> tuple[str, str] | None:
+    """``(plan name, its label)`` of the longest plan name ``name`` extends (``Ea_hat`` from ``Ea``, ``t_max_over_k``
+    from ``t``): context for naming the derived quantity, never its name (an estimate is not the true value)."""
+    stems = [key for key in labels if key != name and name.startswith(key + "_")]
+    if not stems:
+        return None
+    stem = max(stems, key=len)
+    return stem, labels[stem]
 
 
 def _texts(ax: dict[str, Any]) -> list[tuple[str, str]]:
@@ -120,7 +137,8 @@ def findings(records: dict[str, Any], figures: list[str], labels: dict[str, str]
     plan's names, ``code`` those of the experiment's code (:func:`code_identifiers`). A figure without a record has
     nothing to read."""
     out: list[dict[str, Any]] = []
-    tied = set(names) | set(labels) | set(code or ())
+    plan = set(names) | set(labels)
+    tied = plan | set(code or ())
     for figure in figures:
         record = records.get(figure) if isinstance(records, dict) else None
         if not isinstance(record, dict):
@@ -132,10 +150,11 @@ def findings(records: dict[str, Any], figures: list[str], labels: dict[str, str]
                 if (where, label) in seen:
                     continue
                 seen.add((where, label))
-                shown = code_names(label, tied)
+                shown = code_names(label, tied, plan=plan)
                 if not shown:
                     continue
                 rename = next((r for r in (_reader_label(n, labels) for n in shown) if r), None)
+                derived = None if rename else next((d for d in (_derived_from(n, labels) for n in shown) if d), None)
                 if rename is not None and " ".join(rename.split()) == " ".join(label.split()):
                     continue
                 title = str(ax.get("title") or "").strip()
@@ -144,6 +163,7 @@ def findings(records: dict[str, Any], figures: list[str], labels: dict[str, str]
                     "panel": f'"{title}"' if title and where != "title" else (
                         f"panel {index + 1}" if len(axes) > 1 else ""),
                     "where": where, "label": label, "code_names": shown, "rename_to": rename,
+                    "derived_from": list(derived) if derived else None,
                 })
     return out
 
@@ -164,4 +184,9 @@ def sentence(finding: dict[str, Any]) -> str:
     else:
         rename = (f'write {names} as the plan names it, "{finding["rename_to"]}"' if finding.get("rename_to") else
                   f"write {names} as a reader would: in words, or as its symbol in $...$")
+    derived = finding.get("derived_from")
+    if derived and not finding.get("rename_to"):
+        # The plan names the quantity this one is made from, not this one: context, never the new name.
+        rename += (f' (it is derived from "{derived[0]}", which the plan calls "{derived[1]}": name what this one is, '
+                   "for example an estimate or a ratio of it, not that quantity itself)")
     return f'figures/{finding["figure"]}: {where}the {what} "{finding["label"]}" {MARK} {names}; {rename}'
