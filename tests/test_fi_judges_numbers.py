@@ -59,8 +59,8 @@ def _quest(tmp_path: Path, body: str = HONEST) -> tuple[Path, list[dict]]:
     sources = dict(code_layout.package_sources(root / "code"))
     sources["simulate.py"] = (root / "code" / "simulate.py").read_text(encoding="utf-8")
     cases = eqt.cases(eqt.example_rows(protocol), eqt.locate(protocol, sources))
-    code_layout.write_check_values(root / "code", protocol)
     eqt.write(root / "code", cases)
+    code_layout.write_check_values(root / "code", protocol)   # a person's copy, delivered at the end
     return root, cases
 
 

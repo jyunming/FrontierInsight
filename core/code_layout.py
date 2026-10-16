@@ -596,8 +596,8 @@ plan each time the code changes.
 
 Each test runs the simulation on the check's small case the way Frontier Insight does before the main run, and compares
 the number with the value the plan fixed (and the tolerance it allows). Those values are not in this folder: Frontier
-Insight keeps them in the quest's `.fi/checks/{values_name}` (next to `code/`), so code written here cannot read them.
-Run the tests inside the quest folder, or name the folder that holds that file: python tests/{test_name} --checks <folder>.
+Insight writes them into the quest's `.fi/checks/{values_name}` (next to `code/`) once the quest's code has run for the
+last time. Run the tests inside the quest folder, or name the folder that holds that file: python tests/{test_name} --checks <folder>.
 """
 import hashlib
 import json
@@ -707,7 +707,8 @@ def _oracle_checks(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 def oracle_values(protocol: dict[str, Any] | None) -> dict[str, dict[str, Any]] | None:
     """What ``tests/test_oracles.py`` compares with, by check name: ``{"expected", "limit"}``. FI writes it outside
-    ``code/`` (:func:`write_check_values`), never into the test file, so code written in ``code/`` cannot read it.
+    ``code/`` (:func:`write_check_values`), never into the test file, and only once the quest's code has run for the
+    last time.
     ``None`` when the plan has no check with a number."""
     checks = _oracle_checks(protocol)
     if not checks:
@@ -769,7 +770,8 @@ def project_files(code_dir: Path, protocol: dict[str, Any] | None, package: str)
 def write_check_values(code_dir: Path, protocol: dict[str, Any] | None) -> list[Path]:
     """Write what the tests of :func:`project_files` compare with (the checks' expected values and tolerances, the worked
     examples' inputs and outputs) into the quest's ``.fi/checks/``, beside ``code/`` and outside it; a file with nothing
-    to hold is removed. The files written."""
+    to hold is removed. Called once the quest's code has run for the last time (``Engine._deliver_check_values``): a
+    person's copy, never what FI judges with. The files written."""
     from . import equation_tests as _eqt
 
     folder = _eqt.checks_dir(code_dir)
@@ -782,12 +784,27 @@ def write_check_values(code_dir: Path, protocol: dict[str, Any] | None) -> list[
         written.append(path)
     else:
         path.unlink(missing_ok=True)
-    # Only written, never removed here: the equation gate (core/equation_tests.write) owns the removal.
     cases = _equation_cases(code_dir, protocol)
-    eq = _eqt.write_values(code_dir, cases) if cases else None
+    eq = _eqt.write_values(code_dir, cases)
     if eq is not None:
         written.append(eq)
     return written
+
+
+def remove_check_values(code_dir: Path) -> list[Path]:
+    """Remove what :func:`write_check_values` wrote: before the quest's code runs, so the expected values are not in a
+    file of the quest that code can open by any path (FI judges with the values it holds in memory). The files
+    removed."""
+    from . import equation_tests as _eqt
+
+    folder = _eqt.checks_dir(code_dir)
+    removed = []
+    for name in (ORACLE_VALUES_NAME, _eqt.VALUES_NAME):
+        path = folder / name
+        if path.is_file():
+            path.unlink(missing_ok=True)
+            removed.append(path)
+    return removed
 
 
 def readme_lines(package: str) -> list[str]:

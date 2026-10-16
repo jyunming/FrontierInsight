@@ -64,11 +64,12 @@ def _quest(tmp_path: Path, model: str = MODEL) -> Path:
     (code / PKG / "model.py").write_text(model, encoding="utf-8")
     (code / "simulate.py").write_text(SIMULATE, encoding="utf-8")
     (code / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
-    cl.write_check_values(code, PROTOCOL)
     code_project.refresh(root, deps=[], protocol=PROTOCOL, title="Decay study", question="How does c decay?",
                          extra_files=cl.project_files(code, PROTOCOL, PKG), readme_files=cl.readme_lines(PKG))
     sources = dict(cl.package_sources(code))
     eqt.write(code, eqt.cases(eqt.example_rows(PROTOCOL), eqt.locate(PROTOCOL, sources)))
+    # Delivered once the last run of the quest's code is over (Engine.run: _deliver_check_values).
+    cl.write_check_values(code, PROTOCOL)
     return root
 
 
@@ -202,3 +203,43 @@ async def test_a_resumed_quest_loses_the_stale_files_when_fi_refreshes_code(tmp_
     (tests / "equation_numbers.json").write_bytes((STALE / "equation_numbers.json").read_bytes())
     await engine._refresh_code_project({"topic": "decay"}, [])
     assert not (tests / "equation_numbers.json").exists()
+
+
+def test_no_value_file_is_on_disk_while_fis_tests_are_written_or_the_code_runs(tmp_path: Path) -> None:
+    """review pass 2 N1: code run without isolation found .fi/checks/equation_values.json from its own interpreter's
+    path (``Path(sys.executable).parents[2]``) and returned the expected value. FI judges with the values it holds in
+    memory; the files a person runs the tests with are written only when the quest's code has run for the last time."""
+    root = _quest(tmp_path)
+    code, folder = root / "code", root / eqt.CHECKS_DIR
+    assert (folder / eqt.VALUES_NAME).is_file() and (folder / cl.ORACLE_VALUES_NAME).is_file()
+    eqt.write(code, _cases_of(code))
+    assert (code / eqt.TEST_PATH).is_file()
+    assert not (folder / eqt.VALUES_NAME).exists()
+    assert cl.remove_check_values(code) == [folder / cl.ORACLE_VALUES_NAME]
+    assert not (folder / cl.ORACLE_VALUES_NAME).exists()
+    # FI's own verdict needs no file.
+    assert [r["status"] for r in fi_verdict(_cases_of(code), root, code="code")] == [eqt.OK]
+
+
+async def test_the_engine_removes_the_values_before_code_runs_and_delivers_them_at_the_end(tmp_path: Path,
+                                                                                           monkeypatch) -> None:
+    from core.config import Config, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+    from core.engine import Engine
+
+    cfg = Config(topic="decay", title="decay", provider=ProviderConfig(name="openai"),
+                 execution=ExecutionConfig(sandbox="venv", timeout_s=120), knowledge=KnowledgeConfig(enabled=False),
+                 output=OutputConfig(output_dir=tmp_path / "outputs"))
+    engine = Engine(cfg)
+    code = engine.quest_root / "code"
+    (code / PKG).mkdir(parents=True)
+    (code / PKG / "__init__.py").write_text('"""Decay."""\n', encoding="utf-8")
+    (code / PKG / "model.py").write_text(MODEL, encoding="utf-8")
+    (code / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    monkeypatch.setattr(Engine, "_package_in_use", lambda self, state: PKG)
+    monkeypatch.setattr(Engine, "_protocol_block", lambda self, state: PROTOCOL)
+    folder = eqt.checks_dir(code)
+    cl.write_check_values(code, PROTOCOL)   # left by an earlier run's delivery
+    await engine._refresh_code_project({"topic": "decay"}, [])
+    assert not (folder / eqt.VALUES_NAME).exists() and not (folder / cl.ORACLE_VALUES_NAME).exists()
+    await engine._deliver_check_values({"topic": "decay"})
+    assert (folder / eqt.VALUES_NAME).is_file() and (folder / cl.ORACLE_VALUES_NAME).is_file()

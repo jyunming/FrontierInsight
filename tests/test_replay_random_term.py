@@ -32,6 +32,7 @@ def _results(tmp_path: Path, source: str, protocol: dict[str, Any] = PROTOCOL, e
     located = {eid: {"module": "pkg.model", "function": "z_statistic", "file": "pkg/model.py"}}
     case_list = eqt.cases(rows, located)
     eqt.write(tmp_path, case_list)
+    eqt.write_values(tmp_path, case_list)   # a person's copy, delivered at the end of a quest
     done = subprocess.run([sys.executable, "-B", str(tmp_path / eqt.TEST_PATH), "--json"], cwd=tmp_path,
                           capture_output=True, text=True, timeout=240)
     found = eqt.parse_results(done.stdout)

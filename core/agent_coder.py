@@ -552,7 +552,8 @@ def _startup_files(dirs: Iterable[Path]) -> dict[str, Any]:
 ISOLATION_UNVERIFIED = "isolation_unverified"
 NO_ISOLATION_WHY = ("the coding agent that wrote the code ran on this computer as the person, without isolation: FI "
                     "gave it a copy of code/ outside the quest folder and watched what changed, which is a tripwire, "
-                    "not a sandbox (it sees writes, never reads)")
+                    "not a sandbox (it sees writes, never reads); code run this way can read the plan's expected "
+                    "values from disk (plan.md and the frozen protocol in the quest folder)")
 
 
 def evidence_settings(quest_root: Path | str) -> dict[str, str]:

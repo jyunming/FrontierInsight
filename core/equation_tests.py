@@ -606,8 +606,8 @@ from the plan's own worked example: the inputs are the plan's, and the output is
     python -m pytest tests/test_equations.py        (or: python tests/test_equations.py)
 
 Each test imports the function labelled with the equation (`# E1`) and calls it with the example's inputs, by name.
-The inputs and the output are not in this folder: Frontier Insight keeps them in the quest's `.fi/checks/{values_name}`
-(next to `code/`), so code written here cannot read them. Run the tests inside the quest folder, or name the folder
+The inputs and the output are not in this folder: Frontier Insight writes them into the quest's
+`.fi/checks/{values_name}` (next to `code/`) once the quest's code has run for the last time. Run the tests inside the quest folder, or name the folder
 that holds that file: python tests/test_equations.py --checks <folder>.
 
 This file is a copy for a person. Frontier Insight does not take its verdict from it: it calls each function in a
@@ -882,10 +882,12 @@ def failure_reason(result: dict[str, Any]) -> str:
 
 
 def write(code_dir: Path, case_list: list[dict[str, Any]]) -> Path | None:
-    """Write ``tests/test_equations.py`` into ``code_dir`` and what it compares with into the quest's ``.fi/checks/``
-    (:func:`write_values`; removing both when there is no case); the test file written."""
+    """Write ``tests/test_equations.py`` into ``code_dir`` (removing it when there is no case); the test file written.
+    What it compares with is not on disk while the quest's code can still run: this removes the quest's
+    ``.fi/checks/`` copy, FI judges with the values it holds (:func:`run_and_judge`), and the person's copy is written
+    once the last run is over (:func:`write_values`, from ``code_layout.write_check_values``)."""
     path = Path(code_dir) / TEST_PATH
-    write_values(code_dir, case_list)
+    (checks_dir(code_dir) / VALUES_NAME).unlink(missing_ok=True)
     if not case_list:
         try:
             path.unlink()

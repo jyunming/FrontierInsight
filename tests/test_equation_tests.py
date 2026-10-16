@@ -100,6 +100,7 @@ def test_an_equation_implemented_wrongly_is_caught_and_a_correct_one_passes(tmp_
     code = tmp_path / "code"
     _write_package(code, CORRECT)
     eqt.write(code, _cases(code))
+    eqt.write_values(code, _cases(code))   # a person's copy, delivered at the end of a quest
     results, _out = _run(code)
     assert [(r["id"], r["status"]) for r in results] == [("E1", "ok")]
     (code / "spring" / "model.py").write_text(WRONG, encoding="utf-8")
@@ -118,6 +119,7 @@ def test_the_generated_file_is_also_a_pytest_file_and_is_fi_s_not_the_model_s(tm
     code = tmp_path / "code"
     _write_package(code, WRONG)
     path = eqt.write(code, _cases(code))
+    eqt.write_values(code, _cases(code))
     text = path.read_text(encoding="utf-8")
     assert "Written by Frontier Insight (never by the model" in text and "def test_e1():" in text
     done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(path)], cwd=code,

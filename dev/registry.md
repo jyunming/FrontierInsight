@@ -547,8 +547,9 @@ same PR that adds, splits or renames one.
   `failure_message` names the function and equation, never the expected value; `failure_reason` gives the run log the
   value got, the expected value and the tolerance from that verdict; `remove_stale` deletes what an older FI left in
   `code/tests/` with values in it (called on resume and by `_refresh_code_project`); the test file holds ids, formulas
-  and functions only, and `values_of` / `write_values` / `checks_dir` keep the inputs, outputs and tolerances in
-  `<quest>/.fi/checks/equation_values.json`, outside `code/` (a person names another folder with `--checks`; no
+  and functions only, and `values_of` / `write_values` / `checks_dir` write the inputs, outputs and tolerances to
+  `<quest>/.fi/checks/equation_values.json`, outside `code/`, only at the end of `Engine.run` (`_deliver_check_values`;
+  `write` and `code_layout.remove_check_values` take them off disk while code can run) (a person names another folder with `--checks`; no
   environment variable is read); `is_random` reads a flag on the equation or
   example, or a formula that says a term follows a distribution (`~N(0,1)`, `~U(a,b)`, "drawn from", "random")). Called
   by `Engine._equation_gate` (in `_node_execute` before the oracle gate; repairs a failing function alone, then returns

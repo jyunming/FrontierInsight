@@ -1000,6 +1000,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                         if stale:
                             self._log.info("[run] removed files an older FI left in code/ with expected values in "
                                            "them: %s", ", ".join(stale))
+                        # The values an earlier run delivered for a person's tests: gone while code runs again.
+                        _code_layout.remove_check_values(self.quest_root / "code")
                     # `values` is empty dict for never-run threads.
                     payload: Any
                     # ``--from <step>``: the first call continues from the checkpoint taken just before that step; every
@@ -1513,6 +1515,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                             clarify_answer_path, self.quest_id,
                         )
                         break
+                    # No more of the quest's code runs in this call: the values its tests compare with are written now.
+                    await self._deliver_check_values(final_state if isinstance(final_state, dict) else {})
             finally:
                 # Guard against early failure: if ``resolve_endpoint_async``
                 # raised (unknown provider / proxy spawn failure / etc.),
@@ -10125,6 +10129,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except Exception as exc:  # noqa: BLE001 -- a convenience file, never a reason to stop
             self._log.warning("[execute] could not compare code/study.json with the protocol: %r", exc)
 
+    async def _deliver_check_values(self, state: QuestState) -> None:
+        """Write the values FI's tests in ``code/tests/`` compare with into ``.fi/checks/`` (a person's copy; FI judged
+        with the values it holds). Only once the quest's code has run for the last time in this call of :meth:`run`:
+        written earlier, code run without isolation could open them by an absolute path. Never stops a quest."""
+        try:
+            package = self._package_in_use(state)
+            if package:
+                await asyncio.to_thread(_code_layout.write_check_values, self.quest_root / "code",
+                                        self._protocol_block(state))
+        except Exception as exc:  # noqa: BLE001 -- a convenience for a person, not part of the result
+            self._log.warning("[code] could not write the values code/tests/ compares with: %s", exc)
+
     async def _refresh_code_project(self, state: QuestState, deps: list[str], note: str = "", *,
                                     category: str = "changed") -> None:
         """Keep ``code/`` a project that runs on its own (README, requirements, run.py) and, with a ``note``, record
@@ -10142,9 +10158,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if stale:
                 self._log.info("[code] removed files an older FI left in code/ with expected values in them: %s",
                                ", ".join(stale))
-            if package:
-                # What the tests FI writes into code/ compare with goes to .fi/checks/, never into code/.
-                await asyncio.to_thread(_code_layout.write_check_values, self.quest_root / "code", protocol)
+            # What the tests FI writes into code/ compare with is not on disk while the code can still run: FI judges
+            # with the values it holds, and a person's copy is written at the end (_deliver_check_values).
+            await asyncio.to_thread(_code_layout.remove_check_values, self.quest_root / "code")
             await asyncio.to_thread(
                 _code_project.refresh,
                 self.quest_root, deps=deps, protocol=protocol,
