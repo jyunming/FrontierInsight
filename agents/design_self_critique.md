@@ -76,7 +76,7 @@ Respond with a single JSON object, no prose, no markdown fence. Print it once: d
   }
 }
 
-(If the draft design carries a `protocol` (its `grid`, `runs_per_setting`, `thresholds`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`, `optimisation`), the amended design keeps it and amends it in place: a fix to checks 6 to 15 belongs there. Keep `study_type` as the draft has it. Never drop a key the draft has.)
+(If the draft design carries a `protocol` (its `grid`, `runs_per_setting`, `thresholds`, `constants`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`, `optimisation`), the amended design keeps it and amends it in place: a fix to checks 6 to 15 belongs there. Keep `study_type` as the draft has it. Never drop a key the draft has.)
 
 ---
 

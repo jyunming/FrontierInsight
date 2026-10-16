@@ -91,6 +91,8 @@ from . import phased as _phased
 from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure
 from . import paper_facts as _paper_facts
+from . import paper_values as _paper_values
+from . import typed_numbers as _typed_numbers
 from . import run_facts as _run_facts
 from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
@@ -372,6 +374,9 @@ class QuestState(TypedDict, total=False):
     run_manifest_analysis_only: bool
     figure_data_repairs: int
     record_rewrites: int
+    #: The draft was written under the rule that FI fills every result number (the writer was given the sheet of keys), so
+    #: the typed-number check holds it to that rule; a draft from an older build, or a study with no trial record, is not.
+    paper_keys: bool
     # Two-stage implement scaffold from ``_node_implement_outline``.
     # Carries ``{scaffold, functions, data_flow, constants,
     # result_json_template, deps}`` for the body node to consume.
@@ -19791,13 +19796,36 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except Exception as e:  # noqa: BLE001 -- the paper's {{seed}} reads the code again when it is filled
             self._log.warning("[write] the code's seed could not be put on record (%s: %s)", type(e).__name__, str(e)[:200])
         try:
-            return _paper_facts.writer_section(
+            section = _paper_facts.writer_section(
                 self.quest_root, topic=str(self.config.topic or ""),
                 fallback_s=(state.get("exec_result") or {}).get("duration_s"))
         except Exception as e:  # noqa: BLE001 -- a record FI cannot read is left out, never a reason to stop
             self._log.warning("[write] FI's record of the run could not be given to the writer (%s: %s)",
                               type(e).__name__, str(e)[:200])
-            return ""
+            section = ""
+        sheet = self._values_sheet(state)
+        return f"{section}\n\n{sheet}".strip() if sheet else section
+
+    def _paper_records(self, state: QuestState) -> Any:
+        """The trial record and plan the paper's result keys are filled from (core/paper_values.py); ``None`` without a
+        trial record or when it cannot be read."""
+        try:
+            return _paper_values.records_of(self.quest_root, self._protocol_block(state))
+        except Exception as e:  # noqa: BLE001 -- the keys then read "not recorded"; the paper is not held to the rule
+            self._log.warning("[write] FI's trial record could not be read for the paper's result numbers (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            return None
+
+    def _values_sheet(self, state: QuestState) -> str:
+        """The "Results you can place" block the writer is given (the rule in plain words and the sheet of keys,
+        core/paper_values.py), and the note that this draft is written under it (``self._sheet_given``). ``""`` for a study
+        with no trial record: its paper is not held to the rule."""
+        sheet = _paper_values.writer_block(self._paper_records(state))
+        self._sheet_given = bool(sheet)
+        if not sheet:
+            self._log.info("[write] this study has no per-setting trial record, so FI fills in no result number and the "
+                           "paper is not held to the rule that the writer types none (QUALITY.md says so)")
+        return sheet
 
     def _render_paper_facts(self, markdown: str, state: QuestState) -> str:
         """``markdown`` with every placeholder of the run's facts filled from FI's records (core/paper_facts.py); a
@@ -19805,7 +19833,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         placeholders as they are, and the review's check then finds them unfilled."""
         try:
             out = _paper_facts.render(markdown, self.quest_root, topic=str(self.config.topic or ""),
-                                      fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+                                      fallback_s=(state.get("exec_result") or {}).get("duration_s"),
+                                      records=self._paper_records(state))
         except Exception as e:  # noqa: BLE001
             self._log.warning("[write] FI could not fill the paper's facts of the run from its records (%s: %s)",
                               type(e).__name__, str(e)[:200])
@@ -19813,6 +19842,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if out.unfilled:
             self._log.warning("[write] FI has no record for %s in the paper; it reads \"not recorded\" there (listed in "
                               "QUALITY.md)", ", ".join("{{" + u + "}}" for u in out.unfilled))
+        _paper_values.write_record(self.quest_root, list(out.values))
+        for v in out.values:
+            if v.hit:
+                self._log.warning("[write] %s", v.hit.text())
         return out.text
 
     def _refresh_paper_facts(self, state: QuestState) -> None:
@@ -19828,7 +19861,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
             if before.rstrip() != after.rstrip() and (
                     _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before
-                    or "fi:fact-" in after):
+                    or "fi:fact-" in after or "fi:v " in before or "fi:v " in after):
                 Path(path).write_text(after, encoding="utf-8")
                 self._log.info("[review] took FI's old blocks out of the paper and filled its facts of the run from the "
                                "records again before checking it")
@@ -19837,20 +19870,66 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _paper_record_hits(self, paper_md: str, state: QuestState) -> list[str]:
         """Must-fix hits for the paper against FI's records (core/paper_facts.py): a required placeholder missing (the seed,
-        the run time, whether the run kept to the topic's limit; each thing the study did not do, in the Limitations), a
-        run time typed outside a placeholder that the measurement contradicts, a limit claim it contradicts. Text-only: the
-        paper is written again, the design is not touched and the quest is not stopped. What is still unmet when the
-        rounds are used up is kept in ``.fi/paper_record_check.json`` (the quality report prints it) and said in the run log."""
-        hits = _paper_facts.check(paper_md, self.quest_root, topic=str(self.config.topic or ""),
-                                  fallback_s=(state.get("exec_result") or {}).get("duration_s"))
-        _paper_facts.keep_check(self.quest_root, hits, paper_md)
+        the run time, whether the run kept to the topic's limit; each thing the study did not do, in the Limitations) and,
+        for a paper written under the rule that FI fills every result number, a result key FI could not fill and a number
+        the writer typed that is not a number of the plan or the topic (core/typed_numbers.py). Text-only: the paper is
+        written again, the design is not touched and the quest is not stopped.
+
+        When no review round is left to write the paper again, each typed number still in it is taken out and replaced by
+        "[number removed]", and listed in ``.fi/paper_record_check.json`` (QUALITY.md prints it): FI does not deliver a
+        number it did not fill and no record backs. What else is still unmet is kept there too, and said in the run log."""
+        keyed = bool(state.get("paper_keys"))
+        topic = str(self.config.topic or "")
+        fallback = (state.get("exec_result") or {}).get("duration_s")
+        protocol = self._protocol_block(state)
+        hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
+                                  protocol=protocol)
+        left = int(self.config.engine.max_iterations) - int(state.get("iteration", 0) or 0) - 1
+        removed: list[tuple[str, str]] = []
+        if keyed and left <= 0 and _paper_facts.typed_hits(
+                paper_md, _paper_facts.plan_protocol(self.quest_root, protocol), topic):
+            removed = self._take_out_typed_numbers(state, protocol)
+            if removed:
+                path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+                paper_md = Path(path).read_text(encoding="utf-8")
+                hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
+                                          protocol=protocol)
+        # A paper not held to the rule says why in QUALITY.md: the study has no trial record to fill from, or the paper
+        # was written before FI filled result numbers.
+        not_filled = "" if keyed else (
+            "older_paper" if (self.quest_root / "raw" / "trials.json").is_file() else "no_records")
+        _paper_facts.keep_check(self.quest_root, hits, paper_md, removed=removed, not_filled=not_filled)
         for hit in hits:
             self._log.warning("[record_check] %s", hit)
-        left = int(self.config.engine.max_iterations) - int(state.get("iteration", 0) or 0) - 1
         if hits and left <= 0:
             self._log.warning("[record_check] %d point(s) of FI's record are still wrong or missing in the paper and no review "
                               "round is left to rewrite it; they are in .fi/paper_record_check.json and QUALITY.md", len(hits))
         return hits
+
+    def _take_out_typed_numbers(self, state: QuestState, protocol: dict[str, Any] | None) -> list[tuple[str, str]]:
+        """The paper with each number the writer typed that is not a number of the plan or the topic replaced by
+        "[number removed]" (core/typed_numbers.py), written to disk: ``(number, sentence)`` for each. The claim check's
+        receipt moves to the new draft, which only lost numbers and added no claim."""
+        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not path or not Path(path).is_file():
+            return []
+        try:
+            before = Path(path).read_bytes()
+            plan = _typed_numbers.plan_numbers(_paper_facts.plan_protocol(self.quest_root, protocol),
+                                               str(self.config.topic or ""))
+            text, taken = _typed_numbers.remove(before.decode("utf-8"), plan)
+            if not taken:
+                return []
+            Path(path).write_text(text, encoding="utf-8")
+            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
+                                 "FI took numbers the writer typed out of the checked draft and added no claim")
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[record_check] the typed numbers could not be taken out of the paper (%s)", e)
+            return []
+        self._log.warning("[record_check] no round is left to write the paper again, so %d number(s) the writer typed that FI "
+                          "did not fill and the plan does not state were replaced by \"%s\" and are listed in QUALITY.md",
+                          len(taken), _typed_numbers.REMOVED)
+        return taken
 
     async def _check_code_project(self) -> None:
         """Run ``code/`` as a person would (clean environment, only requirements.txt) once per version of the code and
@@ -19890,8 +19969,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A request the run could not carry out is told to the whole-paper writer, which the passage editor is not.
         reported = bool(state.get("extend_missed") or state.get("layout_missed"))
         markdown = None if refine_round or reported else await self._patch_flagged_passages(state, persona_block)
+        # A draft edited from an earlier one is under the rule its earlier draft was; a whole paper is under it when the
+        # writer was given the sheet of keys (a study with no trial record has none, and an older paper is never held to it).
+        keyed = bool(state.get("paper_keys")) if markdown is not None else False
         if markdown is None:
+            self._sheet_given = False
             markdown = await self._write_whole_paper(state, persona_block, refine_round=refine_round)
+            keyed = bool(getattr(self, "_sheet_given", False))
         # Whatever the writer put where the engine's paragraph goes is not the paper's text: out before any step reads
         # the draft (its citations, figures and numbers), and the engine's own goes in at the end (core/disclosure.py).
         markdown = _best_report.without_block(_disclosure.without_block(markdown))
@@ -20001,7 +20085,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._maybe_pause_for_user_input(state, "before_review")
         out: QuestState = {
             "paper_md": str(paper_path), "literature": literature,
-            "paper_basis": _paper_basis(state),
+            "paper_basis": _paper_basis(state), "paper_keys": keyed,
             "refine_needs_experiment": needs_experiment,
             "refine_extend": extend if not needs_experiment else [],
             # A layout note waits through an extended run (its figures are drawn again after the paper is written).
@@ -20162,6 +20246,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 state, audience=self.config.output.audience, mark_thin=True, **self._lit_kwargs(state),
             ),
             passages_block=paper_patch.format_passages(passages),
+            values_sheet=(self._values_sheet(state) if state.get("paper_keys") else "") or
+            "(none: this paper was not written with FI's result keys)",
             paper_block=previous,
         )
         self._log.info(
@@ -26281,6 +26367,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
   "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it and keeps every setting; only the topic's own time limit may take them below it (down to 10), and the paper then says so; leave out for a deterministic study>,
   "thresholds": {"<name>": <value>},
+  "constants": {"<name>": <value>},
   "seed_policy": "<how randomness is seeded: one independent stream per setting and run, or say why streams are shared>",
   "failure_policy": "<how a trial that fails (a solver that does not converge, an exception) is treated: counted as a failure, excluded and reported, or retried; every failed trial is listed by the run>",
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
@@ -26297,6 +26384,8 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   },
   "criteria": [{"name": "<short name>", "what": "<one sentence>", "oracle": "<the name of one of the oracles above>", "use": "<error (how far it lands from its expected value, the default) | value (the measured value itself)>", "direction": "<lower | higher | target>", "target": <a number: for lower the most it may be, for higher the least, for target the value aimed at>, "tolerance": <a number: how close to the target counts as met, and how much a later version may change before it counts as worse>}]
 }
+
+`constants` lists every other number the method uses that is neither a grid value nor a threshold nor a setting of the model: a quantile of a distribution (1.96 for a 95% interval), a physical constant (the gas constant R), a conversion factor. Give each a name and its value. The paper may state these numbers and only these (and the plan's own settings and thresholds): any other number in the paper's text must come from FI's records, and FI refuses a number the plan does not state. Leave `constants` out when the method uses none.
 
 `model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead. @@EXAMPLE@@
 
@@ -29152,6 +29241,8 @@ _TEXT_ONLY_HITS = frozenset({
     "paper_record_mismatch",
 })
 _UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
+
+
 # How many times a paper that claims what FI's own records contradict is written again before the quest ends with no paper.
 _RECORD_REWRITES = 2
 

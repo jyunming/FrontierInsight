@@ -1183,26 +1183,26 @@ def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s:
 
 
 def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, removed: list[tuple[str, str]] | None = None,
-               keyed: bool | None = None) -> None:
+               not_filled: str = "") -> None:
     """Keep what the last review found (``.fi/paper_record_check.json``): the hits, the required items the paper does
     not hold, the placeholders that read "not recorded", the typed numbers FI took out when the rewrite rounds were used up
-    (``removed``: ``(number, sentence)``), and whether the paper was written under the rule that FI fills every result
-    number (``keyed``). The quality report prints it, so what is still unmet when the rounds are used up is on record."""
+    (``removed``: ``(number, sentence)``), and why the paper is not held to the rule that FI fills every result number
+    (``not_filled``: ``no_records`` or ``older_paper``). The quality report prints it, so what is still unmet when the rounds are used up is on record."""
     path = Path(quest_root) / RECORD
     try:
         text = _disclosure.without_block(paper_md)
         unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
                  for i in required_items(quest_root) if not _item_placed(text, i)]
         unfilled = unfilled_in(paper_md)
-        if not hits and not unmet and not unfilled and not removed and keyed is not False:
+        if not hits and not unmet and not unfilled and not removed and not not_filled:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         record: dict[str, Any] = {"at": time.time(), "hits": list(hits), "unmet_items": unmet, "unfilled": unfilled}
         if removed:
             record["removed_numbers"] = [{"number": n, "sentence": sent} for n, sent in removed]
-        if keyed is False:
-            record["not_filled_by_fi"] = True
+        if not_filled:
+            record["not_filled_by_fi"] = not_filled
         path.write_text(json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     except (OSError, ValueError):
         pass
