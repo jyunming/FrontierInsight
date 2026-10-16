@@ -77,6 +77,7 @@ def _number(v):
 
 def main():
     import os
+    clock0 = time.perf_counter()
     spec_path = sys.argv[1]
     with open(spec_path, encoding="utf-8") as f:  # closed before it is deleted: Windows refuses to delete an open file
         spec = json.load(f)
@@ -123,14 +124,22 @@ def main():
         out.close()
         sys.exit(3)
     # A check's trials stop when the next one would not fit in the time it is given (``budget_s``): the first always runs.
-    budget, started = spec.get("budget_s"), time.monotonic()
+    # A timing run (core/run_estimate.py) stops once the trials after the first have taken ``stop_after_s``: enough of
+    # them to measure what one costs, however short a trial is.
+    budget, started = spec.get("budget_s"), time.perf_counter()
+    stop_after = spec.get("stop_after_s")
+    later = 0.0
     for index, trial in enumerate(spec["trials"]):
         if budget is not None and index:
-            spent = time.monotonic() - started
+            spent = time.perf_counter() - started
             if spent + spent / index > budget:
                 break
-        t0 = time.monotonic()
-        row = {"nonce": nonce, "trial": trial["trial"], "seed": trial.get("seed")}
+        # perf_counter, not monotonic: on Windows monotonic moves in steps of about 16 ms, so a trial of a few
+        # milliseconds was recorded as 0 or 0.016 s, and a run timed from one such trial was off by a factor of ten.
+        t0 = time.perf_counter()
+        # When the trial started (seconds into this process): from one start to the next is what a trial costs with the
+        # harness's own writing, which a timing run counts.
+        row = {"nonce": nonce, "trial": trial["trial"], "seed": trial.get("seed"), "at_s": round(t0 - clock0, 6)}
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             try:
@@ -150,7 +159,7 @@ def main():
                     raise
                 row.update(status="failed", reason=f"{type(e).__name__}: {e}"[:300],
                            traceback=traceback.format_exc()[-1500:])
-        row["duration_s"] = round(time.monotonic() - t0, 4)
+        row["duration_s"] = round(time.perf_counter() - t0, 6)
         if spec.get("spy_trial"):
             row["trial_calls"] = trial_calls[0]
             row["trial_means"] = {k: t / n for k, (t, n) in trial_sums.items() if n}
@@ -161,6 +170,10 @@ def main():
             sys.stderr.write(f"{w.filename}:{w.lineno}: {w.category.__name__}: {w.message}\n")
         out.write(json.dumps(row, allow_nan=True) + "\n")
         out.flush()
+        if stop_after and index > 0:
+            later += row["duration_s"]
+            if later >= float(stop_after):
+                break
     out.close()
     sys.stdout = real_stdout
 
@@ -275,9 +288,9 @@ def record_cells(runs: list[CellRun]) -> list[CellRun]:
     return out
 
 
-def _append(path: Path, row: dict[str, Any]) -> None:
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, allow_nan=True, default=str) + "\n")
+def _append(fh: Any, row: dict[str, Any]) -> None:
+    # One open file for the whole ledger: opening it again for each of 110,592 trials cost about 26 s on Windows (r13).
+    fh.write(json.dumps(row, allow_nan=True, default=str) + "\n")
 
 
 #: Why a trial the study's time limit cut off has no result: FI's limit, not a fault of the code (core/trial_checks.py
@@ -339,12 +352,21 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
     raw = quest_root / RAW_DIRNAME
     raw.mkdir(parents=True, exist_ok=True)
     ledger = raw / LEDGER_NAME
-    ledger.write_text("", encoding="utf-8")
+    with open(ledger, "w", encoding="utf-8") as fh:
+        runs = _collect_cells(quest_root, plan, results, fh, run_id=run_id, not_reported=not_reported)
+    summary = raw / SUMMARY_NAME
+    summary.write_text(json.dumps(_summary(runs, thresholds), indent=1, allow_nan=True), encoding="utf-8")
+    return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary)
+
+
+def _collect_cells(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, Any], fh: Any, *, run_id: str,
+                   not_reported: str) -> list["CellRun"]:
+    """Each cell's rows (see :func:`_collect`), with the ledger written to ``fh`` as they are read."""
     runs: list[CellRun] = []
     for task in plan:
         key, trials, nonce = task["key"], task["trials"], task["nonce"]
         per_cell = len(trials)
-        _append(ledger, {"event": "planned", "run_id": run_id, "cell": key, "trials": per_cell,
+        _append(fh, {"event": "planned", "run_id": run_id, "cell": key, "trials": per_cell,
                          "entry": task["entry"], "at": time.time()})
         result = results.get(task["index"])
         run = CellRun(key=key, cell=task["cell"], planned=per_cell, levels=list(task.get("levels") or []),
@@ -389,7 +411,7 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
             if t["trial"] in twice:
                 row = {**row, "status": "failed", "reason": "this trial was reported more than once"}
             run.rows.append(row)
-            _append(ledger, {
+            _append(fh, {
                 "event": "trial", "run_id": run_id, "cell": key, "trial": t["trial"], "seed": t["seed"],
                 "status": "ok" if row.get("status") == "ok" else "failed",
                 **({"reason": row["reason"]} if row.get("reason") else {}),
@@ -400,9 +422,7 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
                 "warnings": len(row.get("warnings") or []),
             })
         runs.append(run)
-    summary = raw / SUMMARY_NAME
-    summary.write_text(json.dumps(_summary(runs, thresholds), indent=1, allow_nan=True), encoding="utf-8")
-    return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary)
+    return runs
 
 
 async def run_trials(
@@ -1986,8 +2006,11 @@ def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Count
                     out.setdefault(where, {}).setdefault(str(name), Counter())[key] += 1
     problems = []
     if altered:
-        problems = [f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
-                    f"values: the record was changed after the trials ran, so FI runs the trials again"]
+        from core import run_manifest as _rm
+
+        problems = [_rm.fabricated(
+            f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
+            f"values: the record was changed after the trials ran, so FI runs the trials again")]
         (root / RUN_RECORD).unlink(missing_ok=True)  # the next run cannot reuse it: the trials are run afresh
     return out, problems
 
@@ -2177,11 +2200,11 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
         for name in names:
             if any(not _missing_exact(numbers, form) for form in _derived_counts(per_cell, cells, name, grid)):
                 return
-        out.append(
+        out.append(_rm.fabricated(
             f"the analysis reports `{where}` for `{metric}`, a mean over a subset of the trials, with values FI's trials "
             f"never produced in {'those settings' if len(cells) < len(all_cells) else 'the run'}: "
             + _rm.DERIVED
-        )
+        ))
 
     given_of = {str(m["id"]): str(m["given"]) for m in protocol.get("metrics") or []
                 if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")}
@@ -2255,11 +2278,11 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                             )
                         if exact is not None and isinstance(count, (int, float)) and not isinstance(count, bool) \
                                 and float(count) != exact:
-                            out.append(
+                            out.append(_rm.fabricated(
                                 f"at `{path or 'the top level'}`, `{given}_count` says {count:g}, but FI's trials of "
                                 f"those settings returned `{given}` = 1 for {exact:g} of them: the mean averages "
                                 "every trial in the subset, not a selection"
-                            )
+                            ))
                     elif isinstance(k, str) and stem.match(k) and isinstance(v, list):
                         check(metric, here, v, all_cells)
                     else:
@@ -2283,12 +2306,25 @@ def _half_step(x: Any) -> float:
     return 0.5 * 10 ** (-(places - int(exponent or 0)))
 
 
+#: A value read through float32 (``np.float32(v).tolist()``) moves by at most this much of itself: it is still the
+#: trial's value. A 0 read that way matches a recorded value below float32's smallest normal number.
+_FLOAT32 = 2.0 ** -24
+_FLOAT32_TINY = 1.1754943508222875e-38
+
+
 def _not_among(values: list[Any], recorded: Counter) -> list[float]:
     """The numbers of ``values`` that are not trial values, each trial's value used once. A number printed to fewer
     places than the trial returned (``1.2346`` for ``1.23456789``, ``0.0`` for ``1e-05``, ``3`` for ``2.8``) is that
     value: it matches a recorded value within half its last printed place. The most precise numbers are matched first,
-    each to the nearest value left, so a coarse one cannot take the value a precise one needed."""
-    left = Counter(recorded)
+    each to the nearest value left, so a coarse one cannot take the value a precise one needed. A value within a relative
+    :data:`_FLOAT32` of a recorded one is that value read through float32."""
+    import bisect
+
+    left: Counter = Counter()
+    for k, n in recorded.items():
+        key = k if isinstance(k, str) else _value_key(k)
+        if key is not None:
+            left[key] += n
     pending: list[Any] = []
     for x in values:
         key = _value_key(x)
@@ -2300,45 +2336,142 @@ def _not_among(values: list[Any], recorded: Counter) -> list[float]:
             pending.append(x)
     if not pending:
         return []
-    pool = [float(k) for k, n in left.items() for _ in range(max(n, 0))]
+    pool = sorted(v for v in (_as_float(k) for k, n in left.items() for _ in range(max(n, 0))) if math.isfinite(v))
     extra = []
     for x in sorted(pending, key=_half_step):
         value, half = float(x), _half_step(x)
-        near = [(abs(v - value), i) for i, v in enumerate(pool) if math.isfinite(v) and abs(v - value) <= half * (1 + 1e-9)]
+        if not math.isfinite(value):
+            extra.append(value)
+            continue
+        i = bisect.bisect_left(pool, value)
+        near = [(abs(pool[j] - value), j) for j in (i - 1, i) if 0 <= j < len(pool) and _near(pool[j], value, half)]
         if near:
-            pool.pop(min(near)[1])
+            pool.pop(min(near)[1])  # the nearest value left: the same choice as a search of every value
         else:
             extra.append(value)
     return extra
 
 
+def _near(recorded: float, value: float, half: float) -> bool:
+    """Whether ``value``, printed to within ``half`` of its last place, is the ``recorded`` value (:func:`_not_among`)."""
+    return abs(recorded - value) <= max(half * (1 + 1e-9), _FLOAT32 * max(abs(recorded), abs(value)),
+                                        _FLOAT32_TINY if value == 0 else 0.0)
+
+
+def drawn_from(values: list[Any], recorded: Counter) -> bool:
+    """Whether every number of ``values`` is one of the recorded values, matched as :func:`_not_among` matches one but
+    with the copies not counted: a list drawn from the trials (a bootstrap resample, a subset given twice), not the
+    trials themselves. Such a list is derived from FI's record: it is not numbers no trial produced, and it never counts
+    as the trials (``core.run_manifest._attribute``)."""
+    import bisect
+
+    keys = {k if isinstance(k, str) else _value_key(k) for k, n in recorded.items() if n > 0} - {None}
+    pool = sorted({v for v in map(_as_float, keys) if math.isfinite(v)})
+    for x in values:
+        key = _value_key(x)
+        if key is None or key in keys:
+            continue
+        value = float(x)
+        if not math.isfinite(value):
+            return False
+        i = bisect.bisect_left(pool, value)
+        if not any(_near(pool[j], value, _half_step(x)) for j in (i - 1, i) if 0 <= j < len(pool)):
+            return False
+    return True
+
+
+def _as_float(key: Any) -> float:
+    try:
+        return float(key)
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def held_as(name: str, values: list[Any], recorded: dict[str, Counter], keys: list[Any] | tuple[Any, ...] = ()) -> str:
+    """The name of FI's record a ``<name>_values`` list is held to over all settings: ``name`` when every value is one of
+    its trials'; else a recorded name a key on the list's path gives (``x1_power/power_values``) when every value is one of
+    that name's; else the one other recorded name whose trials hold every value (a list printed under a name of its own);
+    else ``name``. A list held to another name is judged setting by setting in :mod:`core.run_manifest`
+    (``_attribute``), which says it in run.log or calls it fabricated."""
+    if name not in recorded or not _not_among(values, recorded[name]):
+        return name
+    named = [k for k in keys if isinstance(k, str) and k != name and k in recorded]
+    if named and not _not_among(values, recorded[named[-1]]):
+        return named[-1]
+    others = [o for o in recorded if o != name and not _not_among(values, recorded[o])]
+    return others[0] if len(others) == 1 else name
+
+
+def mean_beside(mapping: dict[str, Any], name: str, values: list[Any]) -> str | None:
+    """A sentence when a number printed beside ``<name>_values`` as what they give (``<name>``, ``<name>_mean`` or
+    ``<name>: {"mean": ...}``) is neither the mean of that list's finite values nor their standard deviation (a metric
+    may be the spread of the per-trial values, as ``SD(Ea_hat)/Ea_true`` beside each trial's ``Ea_hat/Ea_true``); ``None``
+    when it is one of them, within what rounding the printed numbers could have moved it (the number's last printed place,
+    each value's, and float32), or when there is none."""
+    import statistics
+
+    finite = [float(x) for x in values if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)]
+    if not finite:
+        return None
+    mean = math.fsum(finite) / len(finite)
+    spreads = [statistics.pstdev(finite)] + ([statistics.stdev(finite)] if len(finite) > 1 else [])
+    slack = max(_half_step(x) for x in finite) + 2 ** -24 * max(abs(x) for x in finite)
+    given = []
+    for key in (name, f"{name}_mean"):
+        v = mapping.get(key)
+        if isinstance(v, dict):
+            v = v.get("mean")
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+            given.append((key, v))
+    for key, v in given:
+        tol = (_half_step(v) + slack) * (1 + 1e-9) + 1e-9 * max(1.0, abs(mean))
+        if all(abs(v - s) > tol for s in [mean, *spreads]):
+            return (f"`{key}` is printed as {v:g} beside `{name}_values`, whose {len(finite)} value(s) have a mean of "
+                    f"{mean:.6g} (and a standard deviation of {spreads[-1]:.6g})")
+    return None
+
+
 def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> list[str]:
     """Each ``<name>_values`` list the analysis printed, for a ``<name>`` FI's trials returned, that holds values those
-    trials never produced (or more copies of one than they did): one sentence each.
+    trials never produced: one sentence each. A list that holds more copies of some trials' values than the trials gave,
+    every value one of theirs (:func:`drawn_from`: a bootstrap resample), is derived from them, not made up; it never
+    counts as the trials (``core.run_manifest``), so one standing in for them leaves them short.
 
     The run-manifest check counts a metric's values against the trials; a script could still print that many numbers
     of its own. Under the trial contract FI holds every trial's value, so a list the analysis says it computed from is
     checked value by value. A list named for something the analysis derived itself (no trial returned that name) is not
     FI's to check here; a mean over a subset of the trials is checked by :func:`given_values_not_run`."""
+    from core import run_manifest as _rm
+
     out: list[str] = []
 
-    def walk(node: Any, path: str) -> None:
+    def walk(node: Any, path: str, keys: tuple[Any, ...] = ()) -> None:
         if isinstance(node, dict):
             for k, v in node.items():
                 here = f"{path}.{k}" if path else str(k)
                 if isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
+                    # the mean printed beside a list is that list's mean (a made-up mean beside honest values is not)
+                    off = mean_beside(node, k[:-7], v)
+                    if off:
+                        out.append(_rm.fabricated(
+                            f"the analysis reports at `{path or 'the top level'}` a mean FI's trials do not give: {off}; "
+                            "a number printed beside its values must be computed from them"))
+                    # a list of another recorded name's values (by its path, or the only one that holds them all) is
+                    # judged setting by setting in core/run_manifest.py
+                    if held_as(k[:-7], v, recorded, keys) != k[:-7]:
+                        continue
                     extra = _not_among(v, recorded[k[:-7]])
-                    if extra:
-                        out.append(
+                    if extra and not drawn_from(v, recorded[k[:-7]]):
+                        out.append(_rm.fabricated(
                             f"the analysis reports `{here}` with {len(extra)} value(s) FI's trials of `{k[:-7]}` never "
                             f"produced (e.g. {extra[0]:g}): experiment.py must print the values FI_TRIALS holds, as they "
                             f"are; a list of something derived from them needs a name of its own"
-                        )
+                        ))
                 else:
-                    walk(v, here)
+                    walk(v, here, keys + (k,))
         elif isinstance(node, list):
             for i, v in enumerate(node[:200]):
-                walk(v, f"{path}[{i}]")
+                walk(v, f"{path}[{i}]", keys)
 
     walk(result_json, "")
     return out

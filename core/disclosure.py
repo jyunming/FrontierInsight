@@ -576,6 +576,9 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
     if isinstance(reduced, dict) and isinstance(reduced.get("note"), str) and reduced["note"].strip():
         parts.append(reduced["note"].strip())
+    over = estimate.get("over_topic_limit") if isinstance(estimate, dict) else None
+    if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip():
+        parts.append(over["note"].strip())
     covered = _read_json(quest_root / ".fi" / "topic_covered.json")
     left = _items(covered.get("left")) if isinstance(covered, dict) else []
     if left:

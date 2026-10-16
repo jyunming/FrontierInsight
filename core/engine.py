@@ -2878,9 +2878,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return "write"
 
     def _precision_shortfalls(self, state: QuestState) -> list[dict[str, Any]]:
-        """The pooled probabilities whose interval is wider than the plan's precision target in this run (the record
-        ``_annotate_precision`` writes), each ``{"name", "half_width", "target", "trials"}``; empty when the plan sets
-        none, the run has no repeats, or all were reached. A mean carries no such record and is never listed."""
+        """The pooled quantities (a probability from its counts, a mean from the values the run lists) whose interval is
+        wider than the plan's precision target in this run (the record ``_annotate_precision`` writes), each ``{"name",
+        "half_width", "target", "trials"}``; empty when the plan sets none, the run has no repeats, or all were reached.
+        A mean the run gives without its values has no interval from the trials and is not listed."""
         try:
             replicates = state.get("result_json_replicates") or []
             if not (len(replicates) > 1 or (replicates and state.get("result_json_trials"))):
@@ -2889,7 +2890,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 replicates, assertions=_replicate_assertions(state), kinds=_replicate_metric_kinds(state))
             self._annotate_precision(state, aggregate)
             return [{"name": k, "half_width": float(v["ci_half_width"]), "target": float(v["target_half_width"]),
-                     "trials": v.get("n_trials")}
+                     "trials": v.get("n_trials") if v.get("n_trials") is not None else v.get("n_values")}
                     for k, v in aggregate.items() if isinstance(v, dict) and v.get("precision_reached") is False]
         except Exception as e:  # noqa: BLE001 -- a record that cannot be read never sends a quest back
             self._log.warning("[precision] the precision record could not be read (%r)", e)
@@ -10767,6 +10768,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         :meth:`_run_cell_randomness` found (``None`` when it was not asked, which holds the run to the protocol's count)."""
         self._manifest_failed_trials: int | None = None  # None: no manifest was read, so nothing corroborates a 0
         self._manifest_analysis_problems: list[str] = []
+        # The findings of numbers FI's trials never produced (core/run_manifest.py FABRICATED): never record-only.
+        self._manifest_fabricated: list[str] = []
         self._manifest_differences: list[dict[str, Any]] = []  # what FI counted: where the analysis lists more than ran
         self._manifest_note = ""  # a plain sentence for the record, when the run was compared in a way worth saying
         if self.config.engine.run_manifest_check == "off":
@@ -10818,6 +10821,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                      + _run_manifest.problems(counted, manifest, result_json=result_json, trial_mode=True,
                                               recorded=recorded, recorded_by_cell=per_cell) + not_run
                      + row_sim)
+            # A list printed under the wrong name that holds another output's values at its setting is counted as that
+            # output, and said once.
+            renamed = _run_manifest.relabelled(counted, result_json, per_cell)
+            if renamed:
+                self._log.info("[run_manifest] %s", "; ".join(renamed))
             derived = _run_manifest.derived_metrics(counted, recorded)
             if derived:
                 # Said plainly, so a person sees which means FI could not count against the trials' own values.
@@ -10839,7 +10847,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             )
             self._manifest_differences = _run_manifest.differences(counted, manifest, result_json, recorded=recorded,
                                                                     recorded_by_cell=per_cell)
-            return ("differs" if found else "ok"), found
+            # The kind each finding was given where it was made; from here on the findings are plain sentences.
+            self._manifest_fabricated = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.FABRICATED]
+            self._manifest_analysis_problems = [str(f) for f in self._manifest_analysis_problems]
+            return ("differs" if found else "ok"), [str(f) for f in found]
         if self.config.rigor_profile == "research":
             # The older contract: the simulation ran its own loop and wrote its own record. Research needs FI's record,
             # so the repair asks for the trial contract, and after it the quest stops.
@@ -10900,7 +10911,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not split or replicates < 2:
             return
         record = _read_json_or_none_path(self.quest_root / "needs" / "RUN_MANIFEST_CHECK.json")
-        if not isinstance(record, dict) or record.get("status") != "ok":
+        # Under warn the first run's difference was recorded, not repaired: the other seeds are compared all the same.
+        if not isinstance(record, dict) or record.get("status") not in ("ok", "warned"):
             return
         protocol = self._protocol_block(state)
         if protocol is None:
@@ -10915,7 +10927,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if found:
                 seeds[str(index)] = found
         if seeds:
-            record = {**record, "status": "differs_in_replicates", "seeds": seeds}
+            record = {**record, "status": "warned" if record.get("status") == "warned" else "differs_in_replicates",
+                      "seeds": seeds}
             self._log.warning(
                 "[run_manifest] %d replicate(s) differ from the frozen protocol: %s", len(seeds),
                 "; ".join(f"seed {k}: {v[0]}" for k, v in seeds.items()),
@@ -12202,15 +12215,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _time_note(self, state: QuestState) -> str:
         """What the plan is told about the topic's own runtime request next to FI's enforced limit (read the way the
-        paper's run record reads it, :func:`core.disclosure._topic_limit`); it never becomes a limit."""
+        paper's run record reads it, :func:`core.disclosure._topic_limit`). FI sizes the run to the shorter of the two
+        (``RunChecksMixin._size_the_run``): over it, the runs per setting are lowered, never the settings."""
         required = _disclosure._read_json(self.quest_root / ".fi" / "topic_requirements.json")
         stated = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
                   for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
         limit = _disclosure._topic_limit([c for c in stated if isinstance(c, str)], str(state.get("topic") or ""))
         asked = (f"The topic asks for a run of at most {_disclosure._plain_seconds(limit)}" if limit is not None
                  else "If the topic asks for a shorter run")
-        return (f"This is the limit FI enforces on one run. {asked}: plan to stay within the shorter of the two where "
-                "the study allows. FI does not enforce the topic's figure and does not refuse a plan over it; the paper "
+        return (f"This is the limit FI enforces on one run. {asked}: plan to stay within the shorter of the two. Before the "
+                "run FI times a few trials; a run over the shorter limit gets fewer runs per setting from FI (never fewer "
+                "settings), below the plan's min_runs_per_setting (down to 10) only for the topic's own limit, and the paper says so. "
+                "Each setting runs in a process of its own, whose start is paid once whatever the runs; the paper "
                 "reports how long the run took.")
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
@@ -13126,24 +13142,40 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return None
 
     def _annotate_precision(self, state: QuestState, aggregate: dict[str, Any]) -> str:
-        """For each probability with a pooled interval, its half-width, and whether the protocol's target was reached.
-        Returns a sentence for the analysis when a target was missed, else an empty string."""
+        """For each quantity with an interval pooled from the trials (a probability from its counts, a mean from the values
+        the run lists), its half-width, and whether the protocol's target was reached. Both are held to the target the same
+        way. Returns a sentence for the analysis when a target was missed, else an empty string.
+
+        Which quantities the target is for: the probabilities, or the one the protocol names (``precision.metric``); a
+        mean only when the target is on it (``run_estimate.precision_metric`` gives a ``mean``: the metric named, or the
+        plan's only metric), since a mean's scale is its own."""
+        from . import run_estimate as _run_estimate
+
         protocol = self._protocol_block(state) or {}
         precision = protocol.get("precision")
         target = precision.get("target_half_width") if isinstance(precision, dict) else None
+        on, kind = _run_estimate.precision_metric(protocol)
+        mean_on = str(on) if on and kind == "mean" else ""
+
+        def is_(key: str, name: str) -> bool:
+            return key == name or key.rsplit(".", 1)[-1] == name
+
         # The target is for the metric the protocol names (``precision.metric``), when it names one: a live quest's
         # target for its outbreak probability was held against every pooled interval in the run.
         named = str(precision.get("metric") or "").strip() if isinstance(precision, dict) else ""
         if named and not any(
-            isinstance(e, dict) and e.get("ci_method") == _CI_WILSON and (k == named or k.rsplit(".", 1)[-1] == named)
+            isinstance(e, dict) and e.get("ci_method") in (_CI_WILSON, _CI_BOOTSTRAP) and is_(k, named)
             for k, e in aggregate.items()
         ):
-            named = ""  # a name that matches no pooled probability (prose, say): every one is held to the target
+            named = ""  # a name that matches no pooled quantity (prose, say): every probability is held to the target
         missed: list[str] = []
         for key, entry in aggregate.items():
-            if not isinstance(entry, dict) or entry.get("ci_method") != _CI_WILSON:
+            if not isinstance(entry, dict):
                 continue
-            if named and key != named and key.rsplit(".", 1)[-1] != named:
+            if entry.get("ci_method") == _CI_BOOTSTRAP:
+                if not (mean_on and is_(key, mean_on)):
+                    continue
+            elif entry.get("ci_method") != _CI_WILSON or (named and not is_(key, named)):
                 continue
             lo, hi = entry.get("ci_lower"), entry.get("ci_upper")
             if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
@@ -13158,8 +13190,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return ""
         return (
             f"The protocol's target 95% half-width of ±{float(target):g} was not reached for {len(missed)} of the "
-            f"probabilities: {', '.join(missed[:6])}. Say so in the limitations and do not claim a precision the trials do "
-            f"not give."
+            f"quantities it is on: {', '.join(missed[:6])}. Say so in the limitations and do not claim a precision the "
+            f"trials do not give."
         )
 
     def _scan_numeric_warnings(self, state: QuestState, stderr: str, result_json: Any) -> list[dict[str, str]]:
@@ -16590,14 +16622,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # (an analysis repair that crashes must not earn a fresh budget when the crash is fixed).
         manifest_attempts_next = manifest_attempts if (result.returncode != 0 or manifest_status in ("not_run", "pending")) else 0
         manifest_analysis_only = False
+        acting: list[str] = []
         if manifest_found:
             mode = self.config.engine.run_manifest_check
+            # What is acted on: every finding under block; under warn only the numbers FI's trials never produced (they
+            # are sent back and stop the quest like under block), the rest being recorded.
+            fabricated_found = set(getattr(self, "_manifest_fabricated", []) or [])
+            acting = [f for f in manifest_found if f in fabricated_found] if mode == "warn" else list(manifest_found)
             budget = int(self.config.engine.run_manifest_repair_attempts)
             by_request = self._goes_beyond_protocol_by_request()
             protocol_now = self._protocol_of(state)
             if by_request and protocol_now is not None and self._protocol_drift_not_asked_for(protocol_now):
                 by_request = []
             if by_request:
+                # A person's request excuses what it added to the protocol, never numbers no trial produced.
+                acting = [f for f in manifest_found if f in fabricated_found]
+            if by_request and not acting:
                 # The person asked for what the frozen protocol does not have; a repair would take it out again.
                 manifest_status = "extended_by_person"
                 self._log.warning(
@@ -16605,28 +16645,28 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     "extended at a person's request (%s); the difference is recorded",
                     "; ".join(manifest_found), "; ".join(by_request),
                 )
-            elif mode == "warn":
+            elif mode == "warn" and not acting:
                 manifest_status = "warned"
                 self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join(manifest_found))
             elif manifest_attempts < _manifest_repair_budget(
-                    budget, set(manifest_found) <= set(self._manifest_analysis_problems)):
+                    budget, set(acting) <= set(self._manifest_analysis_problems)):
                 manifest_status = "repairing"
                 manifest_attempts_next = manifest_attempts + 1
                 # Only what the analysis failed to print is the analysis's to fix; anything else (the simulation swept
                 # another grid, a claimed count its own values do not back) sends simulate.py back, as it always did.
-                analysis_only = set(manifest_found) <= set(self._manifest_analysis_problems)
+                analysis_only = set(acting) <= set(self._manifest_analysis_problems)
                 budget = _manifest_repair_budget(budget, analysis_only)
                 manifest_analysis_only = analysis_only
                 to_fix = _split_run.ANALYSIS_NAME if analysis_only else _split_run.SIMULATE_NAME
                 self._log.warning(
                     "[run_manifest] the run differs from the frozen protocol (%d): %s; sending %s back (%d of %d)",
-                    len(manifest_found), "; ".join(manifest_found), to_fix, manifest_attempts_next, budget,
+                    len(acting), "; ".join(acting), to_fix, manifest_attempts_next, budget,
                 )
                 # The rejected run's numbers must not reach the analysis if the repair gives up: no RESULT_JSON line, no figures.
                 kept = "\n".join(line for line in (result.stdout or "").splitlines() if not line.startswith("RESULT_JSON:"))
                 why = (
-                    _run_manifest.analysis_directive(manifest_found, self._manifest_differences) if analysis_only
-                    else _run_manifest.directive(manifest_found, self._protocol_block(state) or {},
+                    _run_manifest.analysis_directive(acting, self._manifest_differences) if analysis_only
+                    else _run_manifest.directive(acting, self._protocol_block(state) or {},
                                                  # research asks the older contract for run_trial as well
                                                  trial_mode=bool(getattr(self, "_trial_mode", False))
                                                  or self.config.rigor_profile == "research")
@@ -16636,10 +16676,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._clear_stale_figures()
             else:
                 manifest_status = "stopped"
+        # Under warn the difference goes on into the paper, which must say it (core/paper_facts.py): in plain words when
+        # FI counted it (the analysis lists more, or leaves trials out), else its first finding.
+        warned_headline = (_run_manifest.plain_difference(list(getattr(self, "_manifest_differences", None) or []))
+                           if manifest_status == "warned" else "")
         self._run_manifest_record({
             "status": manifest_status, "problems": manifest_found, "attempts": manifest_attempts_next or manifest_attempts,
             "failed_trials": getattr(self, "_manifest_failed_trials", 0) or 0,
             **({"note": self._manifest_note} if getattr(self, "_manifest_note", "") else {}),
+            **({"headline": warned_headline} if warned_headline else {}),
         })
         # The run's data is kept only once the run is accepted: not a crash, a run the manifest sent back or stopped,
         # nor a job still pending (its raw files are half written).
@@ -16651,15 +16696,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if manifest_status == "stopped":
             try:
                 plain_stop = (_run_manifest.plain_difference(self._manifest_differences)
-                              if set(manifest_found) <= set(self._manifest_analysis_problems) else "")
+                              if set(acting) <= set(self._manifest_analysis_problems) else "")
                 manifest_stop.write_text(json.dumps({
-                    "problems": manifest_found, **({"headline": plain_stop, "differences": self._manifest_differences}
+                    "problems": acting, **({"headline": plain_stop, "differences": self._manifest_differences}
                                                    if plain_stop else {})}) + "\n", encoding="utf-8")
             except OSError:
                 pass
             # The rejected run's figures go, as when it is sent back: a stopped quest shows none of its output.
             self._clear_stale_figures()
-            return self._manifest_stop(manifest_found, manifest_attempts_next or manifest_attempts)
+            return self._manifest_stop(acting, manifest_attempts_next or manifest_attempts)
         # What the run reports is compared with what ran; a fault is sent back like a failed run, and what stays is left out
         # (core/result_checks.py).
         result, failed_script = await self._results_match_run(state, result, failed_script, split)
@@ -17602,7 +17647,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _manifest_repair_gave_up(self, state: QuestState, history: list[dict[str, Any]] | None = None) -> QuestState | None:
         """When the repair gives up, or none is left, on a run the run-manifest check sent back
-        (``engine.run_manifest_check: block``): the difference it found still stands, so the quest must stop and name
+        (any difference under ``engine.run_manifest_check: block``; under ``warn`` numbers FI's trials never produced): the
+        difference it found still stands, so the quest must stop and name
         it, as when the repairs run out, and not go on as a run that merely produced no results (which went back to
         design, then wrote a paper from none, the named difference lost). The repairs count as spent and the same
         scripts run once more, so the stop happens in the run step and a resume after fixing them runs them again: the
@@ -17612,7 +17658,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         stop = self._trial_checks_stop(state)  # a fault FI's checks of the trials found stands: the quest stops (no paper)
         if stop is not None:
             return stop
-        if self.config.engine.run_manifest_check != "block" or not int(state.get("run_manifest_failures") or 0):
+        # run_manifest_failures counts repairs the check sent: under block any difference, under warn only numbers FI's
+        # trials never produced.
+        if self.config.engine.run_manifest_check == "off" or not int(state.get("run_manifest_failures") or 0):
             return None
         self._log.warning(
             "[execute_reflect] no repair of the run-manifest difference (it gave up, or none is left); the run is "
@@ -17691,7 +17739,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # The repair of an analysis the run record sent back has a budget of its own (``run_manifest_failures``, at most
         # three): it neither waits for a crash repair to be left nor spends one.
         manifest_turn = (rc != 0 and bool(state.get("run_manifest_failures")) and bool(state.get("run_manifest_analysis_only"))
-                         and self.config.engine.run_manifest_check == "block")
+                         and self.config.engine.run_manifest_check != "off")
         bump = 0 if manifest_turn else 1
         if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn:
             # A run the run-manifest check sent back, with no repair left (earlier crashes spent them, or none are
@@ -26193,7 +26241,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "grid": {"<parameter, named as the code will name it>": [<every value it takes>]},
   "in_each_run": {"<what ONE run goes through all of together: the conditions one fit spans, the methods applied to the same simulated data>": [<all its values>]},
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
-  "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it, never below, and keeps every setting; leave out for a deterministic study>,
+  "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it and keeps every setting; only the topic's own time limit may take them below it (down to 10), and the paper then says so; leave out for a deterministic study>,
   "thresholds": {"<name>": <value>},
   "seed_policy": "<how randomness is seeded: one independent stream per setting and run, or say why streams are shared>",
   "failure_policy": "<how a trial that fails (a solver that does not converge, an exception) is treated: counted as a failure, excluded and reported, or retried; every failed trial is listed by the run>",

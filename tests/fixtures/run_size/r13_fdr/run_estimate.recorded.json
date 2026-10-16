@@ -1,0 +1,12 @@
+{
+ "key": "6b958bfb0a3b5eb5d04b8ee586017fb417a4e44ebdd5b4cfbe70556237bee348|900",
+ "estimate_s": 32.248709999921026,
+ "limit_s": 900.0,
+ "says": "FI estimates the experiment takes about 32 seconds; the limit is 15 minutes",
+ "reduced": null,
+ "at": 1792046040.1912897,
+ "timed": 8,
+ "cells": 27,
+ "trials": 110592,
+ "fits": true
+}

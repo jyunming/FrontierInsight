@@ -495,6 +495,7 @@ async def test_a_run_cell_whose_second_call_differs_is_not_held_to_one_run_throu
 
     monkeypatch.setattr("core.engine.LLMClient.chat", with_repeats)
     engine = Engine(_cfg(tmp_path))
+    engine.config.engine.run_manifest_check = "block"  # the repair this test follows (the default is 'warn')
     await engine.run()
     manifest = _json(engine, "needs/RUN_MANIFEST_CHECK.json")
     assert manifest["status"] in ("stopped", "repairing"), manifest

@@ -408,18 +408,20 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
                             "not fixed" if i == len(retries) and not ended_ok else "fixed",
                             f".fi/audit.jsonl seq {d.get('seq')}"))
     manifest = q.checks("run_manifest")
-    if any(e.get("status") in ("repairing", "stopped") for e in manifest):
-        first = next(e for e in manifest if e.get("status") in ("repairing", "stopped"))
+    # ``warned`` (engine.run_manifest_check: warn, the default) is recorded and not acted on: it is listed as not fixed.
+    if any(e.get("status") in ("repairing", "stopped", "warned") for e in manifest):
+        first = next(e for e in manifest if e.get("status") in ("repairing", "stopped", "warned"))
         last = manifest[-1].get("status")
+        found_by = "FI's run-record check" + (" (recorded only)" if last == "warned" else "")
         out.append(_problem("run", _one((_list(first.get("problems")) or ["the run did not report what the protocol fixed"])[0], 200),
-                            "FI's run-record check", "fixed" if last in ("ok", "pass", "not_applicable") else "not fixed",
+                            found_by, "fixed" if last in ("ok", "pass", "not_applicable") else "not fixed",
                             f".fi/audit.jsonl seq {first.get('seq')}"))
     pilot = q.pilot
     if _list(pilot.get("problems")):
         out.append(_problem("run", _one(str(_list(pilot["problems"])[0]), 200), "FI's pilot check",
                             "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
-    if stop and not any(p["found_by"] == "FI's run-record check" for p in out):
+    if stop and not any(p["found_by"].startswith("FI's run-record check") for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",
                             "FI's run-record check", "not fixed", ".fi/run_manifest_stop.json"))
     return out

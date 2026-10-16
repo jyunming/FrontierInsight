@@ -1,0 +1,106 @@
+{
+ "grid": {
+  "m": [
+   20,
+   200,
+   2000
+  ],
+  "pi1": [
+   0.0,
+   0.05,
+   0.2
+  ],
+  "procedure": [
+   "uncorrected",
+   "bonferroni",
+   "benjamini_hochberg"
+  ]
+ },
+ "runs_per_setting": 4096,
+ "min_runs_per_setting": 2048,
+ "precision": {
+  "target_half_width": 0.015,
+  "metric": "any proportion (complete-null FWER) at 4096 families",
+  "reason": "With 4096 families the 95% half-width of a proportion is at most 0.98/sqrt(4096)=0.015 (about 0.007 near 0.05), enough to separate nominal 0.05 error from the much larger uncorrected FWER at m=200 and 2000; FDR and power half-widths are reported per stratum and the claims are limited to what they resolve."
+ },
+ "thresholds": {
+  "alpha": 0.05,
+  "nonnull_z_shift": 2.5,
+  "bootstrap_resamples": 2000,
+  "bootstrap_ci_level": 0.95
+ },
+ "metrics": [
+  {
+   "id": "fdr",
+   "estimand": "E[V/max(R,1)] across independently simulated families.",
+   "kind": "mean",
+   "unit": "one simulated multiple-testing family",
+   "cluster": null,
+   "paired": false,
+   "family": "All m hypotheses within one simulated family."
+  },
+  {
+   "id": "power",
+   "estimand": "E[S/m1] across families with m1 = m*pi1 nonnull hypotheses.",
+   "kind": "mean",
+   "unit": "one simulated multiple-testing family",
+   "cluster": null,
+   "paired": false,
+   "family": "All nonnull hypotheses within one simulated family."
+  },
+  {
+   "id": "power_diff_bh_minus_bonferroni",
+   "estimand": "E[S_BH/m1 - S_Bonf/m1] across families, both procedures applied to the same family.",
+   "kind": "mean",
+   "unit": "one simulated multiple-testing family",
+   "cluster": null,
+   "paired": true,
+   "family": "All nonnull hypotheses within one simulated family."
+  },
+  {
+   "id": "fwer_any_false_discovery",
+   "estimand": "P(V > 0) when pi1 = 0.",
+   "kind": "proportion",
+   "unit": "one complete-null simulated family",
+   "cluster": null,
+   "paired": false,
+   "family": "All m null hypotheses within one simulated family."
+  },
+  {
+   "id": "bh_reference_fdr",
+   "estimand": "The deterministic BH independence reference pi0*0.05, represented as the same value for every simulated family and averaged for display.",
+   "kind": "mean",
+   "unit": "false-discovery-rate proportion",
+   "cluster": null,
+   "paired": false,
+   "family": "One simulated multiple-testing family."
+  },
+  {
+   "id": "fdr_uncertainty_95",
+   "estimand": "The endpoints and half-width of the fixed-seed percentile-bootstrap 95% interval for the mean family-level FDP (FDR) across repeated simulated families.",
+   "kind": "mean",
+   "unit": "false-discovery-rate proportion",
+   "cluster": null,
+   "paired": false,
+   "family": "All simulated families in one setting."
+  },
+  {
+   "id": "power_uncertainty_95",
+   "estimand": "The endpoints and half-width of the fixed-seed percentile-bootstrap 95% interval for mean family-level power across repeated simulated families, when m1 > 0.",
+   "kind": "mean",
+   "unit": "power proportion",
+   "cluster": null,
+   "paired": false,
+   "family": "All simulated families in one setting."
+  },
+  {
+   "id": "fwer_uncertainty_95",
+   "estimand": "The endpoints and half-width of the two-sided Wilson 95% interval for P(V > 0) across repeated complete-null simulated families.",
+   "kind": "mean",
+   "unit": "family-wise-error proportion",
+   "cluster": null,
+   "paired": false,
+   "family": "All complete-null simulated families in one setting."
+  }
+ ]
+}

@@ -573,12 +573,51 @@ async def test_fi_lowers_the_runs_itself_down_to_the_fewest_the_plan_states_with
     assert f"FI lowered the runs per setting from 1600 to {runs} and kept all 27 setting(s)" in eng._run_checks_note()
 
 
+_K_GRID = {"k": list(range(27))}
+# 27 settings, each 1 s to start its process and 0.02 s per run: at 1600 runs, 27 x 33 = 891 s (1336.5 s with the margin).
+_K_PROBES = [run_estimate.Probe(None, None, {"k": 13}, 1.0 + 1600 * 0.02, fixed_s=1.0, per_trial_s=0.02)]
+
+
+def _fit(protocol: dict[str, Any], limit_s: float, topic: bool = False, deterministic: bool = False) -> Any:
+    return run_estimate.fit_runs(_K_GRID, 1600, deterministic, _K_PROBES, protocol, limit_s=limit_s, topic_limit=topic)
+
+
 def test_the_runs_that_fit_need_a_fewest_the_plan_itself_states() -> None:
-    est = run_estimate.Estimate(seconds=1000.0 / run_estimate.SAFETY, at_least=False, complete=True, cells=27, trials=43200)
-    assert run_estimate.runs_that_fit(est, 900.0, 1600, False, {}) is None, "FI invents no number of runs"
-    assert run_estimate.runs_that_fit(est, 900.0, 1600, False, {"min_runs_per_setting": 100}) == 720
-    assert run_estimate.runs_that_fit(est, 900.0, 1600, False, {"min_runs_per_setting": 1537}) is None
-    assert run_estimate.runs_that_fit(est, 900.0, 1600, True, {"min_runs_per_setting": 1}) is None
+    assert _fit({}, 900.0) is None, "FI invents no number of runs"
+    fit = _fit({"min_runs_per_setting": 100}, 900.0)
+    # The most runs whose estimate with its margin fits: 27 x (1 + 0.02 n) x 1.5 <= 900 -> n = 1061 (the process starts do
+    # not shrink with the runs, so this is fewer than 1600 x 900 / 1336.5 = 1077).
+    assert fit is not None and fit.runs == 1061 and not fit.below_plan and fit.plan_floor == 100
+    assert _fit({"min_runs_per_setting": 1537}, 900.0) is None
+    assert _fit({"min_runs_per_setting": 1}, 900.0, deterministic=True) is None
+
+
+def test_the_topics_own_limit_may_take_the_runs_below_the_plans_minimum_and_says_so() -> None:
+    fit = _fit({"min_runs_per_setting": 1000}, 60.0, topic=True)
+    # 27 x (1 + 0.02 n) x 1.5 <= 60 -> n = 24, below the plan's 1000: allowed for the topic's limit, and marked.
+    assert fit is not None and fit.runs == 24 and fit.below_plan and fit.plan_floor == 1000
+    assert _fit({}, 60.0, topic=True).runs == 24, "the topic's limit needs no stated minimum"
+    # Even 10 runs per setting do not fit 30 s: the process starts alone are 27 s (40.5 s with the margin).
+    assert _fit({"min_runs_per_setting": 1000}, 30.0, topic=True) is None
+    # The same limit, not the topic's: never below the plan's minimum.
+    assert _fit({"min_runs_per_setting": 1000}, 60.0) is None
+
+
+def test_a_probe_without_its_parts_follows_the_runs_in_proportion() -> None:
+    probe = run_estimate.Probe(None, None, {"k": 1}, 100.0)
+    assert probe.at(50, 100).seconds == 50.0
+    split = run_estimate.Probe(None, None, {"k": 1}, 21.0, fixed_s=1.0, per_trial_s=0.2)
+    assert abs(split.at(50, 100).seconds - 11.0) < 1e-9
+
+
+def test_the_precision_a_smaller_run_gives_is_stated() -> None:
+    plan = {"metrics": [{"id": "hit", "kind": "proportion"}], "precision": {"target_half_width": 0.03, "metric": "hit"}}
+    got = run_estimate.expected_precision(plan, 24)
+    assert got["metric"] == "hit" and got["half_width"] == 0.2 and got["target"] == 0.03 and "near 0.5" in got["how"]
+    mean = {"metrics": [{"id": "y", "kind": "mean"}], "precision": {"target_half_width": 0.1, "metric": "y"}}
+    assert run_estimate.expected_precision(mean, 100, {"y": 2.0})["half_width"] == 0.392
+    assert run_estimate.expected_precision(mean, 100, {}) is None, "a mean's spread is not known: nothing is claimed"
+    assert run_estimate.expected_precision({"metrics": [{"id": "hit", "kind": "proportion"}]}, 100)["target"] is None
 
 
 # ---- the coarse scan of a search is counted before it is listed ---------------------------------------------------------
@@ -751,3 +790,20 @@ def test_a_grid_too_large_to_list_ends_the_execute_step_in_the_plain_stop(tmp_pa
     assert isinstance(exc, ValueError)
     patch = eng._stop_too_long(str(exc))
     assert patch["exec_result"]["too_long"] == "the plan asks for 9 settings" and patch["exec_give_up_reason"]
+
+
+_TRIALS_CRITERION = {"criteria": [{"name": "se rate", "trials": "x", "direction": "target", "target": 0.5, "tolerance": 0.1},
+                                  {"name": "se rate 2", "trials": "y", "direction": "target", "target": 0.5, "tolerance": 0.1}]}
+
+
+def test_the_topics_cut_never_goes_below_what_the_plans_checks_need_nor_below_ten() -> None:
+    # 27 settings: the standard-error criterion needs 32 trials per setting (and 256 in all), so 24 is not allowed
+    assert _fit({}, 60.0, topic=True).runs == 24
+    assert _fit(_TRIALS_CRITERION, 60.0, topic=True) is None
+    assert _fit(_TRIALS_CRITERION, 80.0, topic=True).runs == 48
+    assert run_estimate.runs_checks_need(_TRIALS_CRITERION, _K_GRID) == 32
+    assert run_estimate.runs_checks_need({}, _K_GRID) == 0
+    # a plan whose own minimum is 5: the topic's limit still goes no lower than 10 (7 would fit 47 s)
+    assert _fit({"min_runs_per_setting": 5}, 47.0, topic=True) is None
+    # FI's own limit keeps the plan's minimum, and what the checks need
+    assert _fit({**_TRIALS_CRITERION, "min_runs_per_setting": 5}, 60.0) is None
