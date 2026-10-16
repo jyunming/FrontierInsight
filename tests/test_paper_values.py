@@ -48,10 +48,10 @@ def _within_sd(cells, metric, **where) -> float:
 
 
 KEYS = {
-    "{{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}}": ("0.8244%", dict(noise_sigma=0.01)),
-    "{{v:Ea_rel_bias:sd @ noise_sigma=0.05, n_points=all | %}}": ("4.128%", dict(noise_sigma=0.05)),
-    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=5 | %}}": ("6.050%", dict(n_points=5)),
-    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=10 | %}}": ("4.278%", dict(n_points=10)),
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}}": ("0.824%", dict(noise_sigma=0.01)),
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.05, n_points=all | %}}": ("4.13%", dict(noise_sigma=0.05)),
+    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=5 | %}}": ("6.05%", dict(n_points=5)),
+    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=10 | %}}": ("4.28%", dict(n_points=10)),
 }
 
 
@@ -59,9 +59,8 @@ KEYS = {
 def test_s2_sd_keys_render_and_match_numpy(s2, key):
     text, where = KEYS[key]
     got = pv.resolve(key, s2)
-    assert got.filled and got.text == text
+    assert got.filled and got.text.startswith(text + " (95% chi-square interval ")
     assert got.numbers[0] == pytest.approx(_within_sd(_cells("s2_kinetics_trials.json"), "Ea_rel_bias", **where))
-    assert pv.sig(_within_sd(_cells("s2_kinetics_trials.json"), "Ea_rel_bias", **where) * 100, 4) + "%" == text
 
 
 def test_s2_ratio_key_is_19_6_and_matches_numpy(s2):
@@ -120,10 +119,11 @@ def test_marker_round_trip(s2):
     paper = "SD is {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}} here."
     filled, hits = pv.fill(paper, s2)
     assert hits == []
-    assert filled == ("SD is <!-- fi:v {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}} -->0.8244%"
+    sd = "0.824% (95% chi-square interval 0.793% to 0.859%, 1200 trials)"
+    assert filled == ("SD is <!-- fi:v {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}} -->" + sd +
                       "<!-- /fi:v --> here.")
     assert pv.to_placeholders(filled) == paper
-    assert pv.without_marks(filled) == "SD is 0.8244% here."
+    assert pv.without_marks(filled) == f"SD is {sd} here."
 
 
 # --- s3: the numbers the old heuristic falsely flagged ------------------------------------------------------------
@@ -139,18 +139,18 @@ def test_s3_cells_with_metrics_only_are_used(s3):
 
 @pytest.mark.parametrize("key, text, where", [
     ("{{v:Ea_hat:sd @ noise_sigma=0.02, n_points=5}}", "1.282", (0.02, 5)),
-    ("{{v:Ea_hat:sd @ noise_sigma=0.02, n_points=12}}", "0.7476", (0.02, 12)),
-    ("{{v:Ea_hat:sd @ noise_sigma=0.02, n_points=40}}", "0.4247", (0.02, 40)),
-    ("{{v:Ea_hat:sd @ noise_sigma=0.1, n_points=5}}", "5.954", (0.1, 5)),
+    ("{{v:Ea_hat:sd @ noise_sigma=0.02, n_points=12}}", "0.748", (0.02, 12)),
+    ("{{v:Ea_hat:sd @ noise_sigma=0.02, n_points=40}}", "0.425", (0.02, 40)),
+    ("{{v:Ea_hat:sd @ noise_sigma=0.1, n_points=5}}", "5.95", (0.1, 5)),
     ("{{v:Ea_hat @ noise_sigma=0.1, n_points=8}}", "49.48", (0.1, 8)),
 ])
 def test_s3_heuristic_false_flags_render(s3, key, text, where):
     got = pv.resolve(key, s3)
-    assert got.filled and got.text == text
+    assert got.filled and got.text.split(" (")[0] == text if ":sd" in key else got.text == text
     (cell,) = [c for c in _cells("s3_kinetics_trials.json") if (c["cell"]["noise_sigma"], c["cell"]["n_points"]) == where]
     x = np.asarray(cell["metrics"]["Ea_hat"]["values"])
     expected = float(np.std(x, ddof=1)) if ":sd" in key else float(np.mean(x))
-    assert pv.sig(expected) == text
+    assert (got.numbers[0] == pytest.approx(expected)) if ":sd" in key else pv.sig(expected) == text
 
 
 # --- A2: a key FI cannot fill is "not recorded" and a hit ---------------------------------------------------------

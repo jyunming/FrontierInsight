@@ -158,6 +158,12 @@ class Setting:
     cells: list[str]
     metrics: dict[str, dict[str, Any]]
     copies: int = 0  # cells left out of the counts because they gave the very same trials as another
+    level: dict[str, Any] = field(default_factory=dict)  # a value compared inside each run: not a setting of the plan
+
+
+def _run_setting(s: "Setting") -> str:
+    """The setting of the plan a record belongs to: its settings without a value compared inside each run."""
+    return json.dumps({k: v for k, v in s.setting.items() if k not in s.level}, default=str)
 
 
 @dataclass
@@ -166,6 +172,12 @@ class Distinct:
     unread: list[str]
     notes: list[str] = field(default_factory=list)
     values: list[str] = field(default_factory=list)
+
+    @property
+    def n_settings(self) -> int:
+        """How many settings the plan's grid fixes: the settings that differ in more than a value compared inside each
+        run. (A record per such value is a row of a table, not another setting.)"""
+        return len({_run_setting(s) for s in self.settings})
 
 
 def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, unread: list[str]) -> Distinct:
@@ -199,17 +211,20 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
             if len(items) > 1 and _differs(items, whole):
                 apart = True
                 break
-            merged[name] = whole
+            if any(name in c["metrics"] for c in members):  # a record that never returned a value has no row for it
+                merged[name] = whole
         if apart and len(members) > 1:
             kept_apart.append(_label(setting))
             for c in members:
                 own = dict(c.get("cell") or {})
                 out.append(Setting(own, _label(own), [c["key"]], {n: dict(c["metrics"][n]) for n in values
-                                                                  if c["metrics"].get(n)}))
+                                                                  if c["metrics"].get(n)},
+                                   level=dict(c.get("level") or {})))
             continue
         copied += dropped
         joined += len(members) > 1
-        out.append(Setting(setting, _label(setting), [c["key"] for c in members], merged, dropped))
+        out.append(Setting(setting, _label(setting), [c["key"] for c in members], merged, dropped,
+                           dict(members[0].get("level") or {})))
     axes = " and ".join(f"`{a}`" for a in unread)
     if joined:
         notes.append(f"FI found no read of {axes} in the simulation's code, so grid cells that differ only there are one "
@@ -382,7 +397,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                      "from several values of a setting): " + ", ".join(f"`{m}`" for m in left) + ".")
     axes = [a for a in _refs.grid_axes(protocol) if a not in set(found.unread)]
     levels = list(dict.fromkeys(k for s in found.settings for k in s.setting if k not in axes))
-    columns_axes = axes + levels
+    all_levels = levels
     tables: list[Table] = []
     rows: list[dict[str, Any]] = []
     for value, metric in quantities:
@@ -391,6 +406,8 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
         stats = []
         for s in found.settings:
             summary = s.metrics.get(value)
+            if summary is None:  # this record never returned the value: no row for it, not a row of zeros
+                continue
             if summary and summary.get("n"):
                 lower, upper, method = _trial_table.interval(summary)
             else:
@@ -416,6 +433,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                 computed["by_setting"] = [r for r in computed["by_setting"] if r["metric"] != metric]
         binary = all((summary or {}).get("binary", True) for _, summary, *_ in stats if summary and summary.get("n"))
         has_ref = status == "computed"
+        columns_axes = axes + [k for k in all_levels if any(k in s.setting for s, *_ in stats)]  # only the levels this table has
         cols = [*columns_axes, "n", f"{value}", *([] if binary else ["SD"]), *(["reference", "comparison"] if has_ref else [])]
         align = ["r"] * len(columns_axes) + ["r", "r"] + ([] if binary else ["r"]) + (["r", "l"] if has_ref else [])
         body: list[list[str]] = []
@@ -445,7 +463,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                          "ci_lower": lower, "ci_upper": upper, "interval": method, "reference": ref,
                          "reference_kind": kind if ref is not None else "", "comparison": verdict})
         how = " and ".join(sorted(m for m in methods if m)) or "no interval"
-        caption = (f"`{value}` at each of the {len(found.settings)} settings: mean ± half-width of its 95% interval "
+        caption = (f"`{value}` at each of the {len({_run_setting(s) for s, *_ in stats})} settings: mean ± half-width of its 95% interval "
                    f"({how}) over the n trials that returned it.")
         if has_ref:
             ref_q = q or {}
@@ -589,7 +607,7 @@ def writer_note(trial_rows: list[dict[str, Any]], built: Built | None, cap: int 
         return _trial_table.write_note(trial_rows)
     if built is None or not built.tables:
         return ""
-    head = (f"FI's tables of every setting the study computed ({len(built.distinct.settings)} distinct settings; "
+    head = (f"FI's tables of every setting the study computed ({built.distinct.n_settings} distinct settings; "
             "also in paper/results_by_setting.md, every number in paper/results_by_setting.csv). Each value is the mean "
             "± the half-width of its 95% interval; the reference is computed by FI from the frozen plan. Take a number "
             "about these values from here rather than working it out again.")
@@ -621,8 +639,8 @@ def paper_block(built: Built | None, cap: int | None = None) -> str:
     else:
         cut = _slice(built)
         if not 0 < sum(len(t.rows) for t in cut) <= cap:
-            return (f"FI's tables of every setting the study computed ({len(built.distinct.settings)} settings) are too "
-                    f"long for the paper: they are in {files}.\n")
+            return (f"Results for all {built.distinct.n_settings} settings are in the supplementary table "
+                    "`paper/results_by_setting.csv`.\n")
         tables = cut
         lead = [f"FI's tables of every setting have more rows than fit here; the full tables are in {files}."]
     return "\n\n".join([*lead, *notes, *(markdown(t).rstrip("\n") for t in tables)]) + "\n"
