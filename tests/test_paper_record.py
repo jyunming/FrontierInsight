@@ -126,6 +126,8 @@ def test_e1_paper_saying_base_seed_0_is_wrong_and_the_code_s_seed_passes(tmp_pat
     "The generators were seeded with seed 0.",
     "Seed: 0.",
     "We used the random seed 17 for every family.",                            # P1-4: the self-check's seed
+    "![Results of 4,096 trials with seed 0 per setting.](figures/a.png)",       # second review P1-3: a caption
+    "| Quantity | Value |\n|---|---|\n| Base seed | 0 |",                      # and a table row
 ])
 def test_e1_bypass_seed_sentences_are_flagged(tmp_path: Path, text: str) -> None:
     root, _ = _quest(tmp_path, "fdr_e1")
@@ -303,6 +305,14 @@ KINETICS_FAKE = [  # measured 223.2 s
     "The experiment needed 2.3 s in total.",
     "The experiment lasted two seconds.",
     "The experiment required 2.3 s.",
+    # Second review, P1-4: "the simulation" / "the model" with a bare duration is the computer's time.
+    "The simulation took 2.3 s.",
+    "All simulations completed in 2.3 s.",
+    "The model ran in 2.3 s on one core.",
+    # Second review, P1-3: a table row and a figure caption are read too.
+    "| Quantity | Value |\n|---|---|\n| Wall-clock run time | 2.3 s |",
+    "| Setting | Run time |\n|---|---|\n| all | 2.3 s |",
+    "![The full experiment ran in 2.3 s.](figures/a.png)",
 ]
 E1_FAKE = [  # measured 121.3 s, limit 60 s
     "The run had 27 settings with 4,096 trials per setting and took 7.4 s, within the 60 s limit.",
@@ -336,6 +346,16 @@ KINETICS_TRUE = [  # each must pass (finding P1-1, and true statements)
     "The study ran in under four minutes.",
     "The study was run under the constraint that every setting shares its seeds.",
     "The fits took a second look at the residuals in the 1990s literature.",
+    # Second review, P1-2: another study's run time is not this run's.
+    "Smith's solver took 2,230 s for the same problem.",
+    "The original 2019 study ran for 3 hours.",
+    "The reference implementation ran for 600 s on the same machine.",
+    "The code ran in 30 s on a cluster in an earlier study [3].",
+    "Prior work needed 2 hours for one setting [4].",
+    "Our run took 223 s, ten times slower than the 22 s reported by Smith [3].",
+    # The simulated-time cases stay quiet with the simulation as the subject.
+    "The simulation ran from t = 0 to 100 s.",
+    "The reaction ran for 600 s of simulated time.",
 ]
 E1_TRUE = [
     "The experiment took 121 s, over the topic's limit of 60 s.",

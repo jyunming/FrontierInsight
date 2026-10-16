@@ -960,8 +960,9 @@ def check(
     findings += _check_probability_complement(sents, values)
     # The seed FI put in through the paper's {{seed}} is FI's record, not the writer's statement: only what the writer typed
     # is held to the records (core/paper_facts.py).
-    findings += _check_seeds(sentences(normalise(_FACT_SPAN.sub(" ", paper_text))) if "fi:fact-" in paper_text else sents,
-                             seeds, values)
+    # A figure's caption is the writer's text too ("![... with seed 0 per setting.](...)"): read as its words.
+    seed_text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1 ", _FACT_SPAN.sub(" ", paper_text))
+    findings += _check_seeds(sentences(normalise(seed_text)), seeds, values)
 
     seen: set[str] = set()
     for f in findings:

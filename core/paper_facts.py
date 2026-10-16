@@ -657,8 +657,15 @@ _PHYSICAL_BEFORE = re.compile(
     r"\bresidence\b|\buntil\b|\bsimulated\b|\breaction\b|\bphysical\b|\bat\s+t\b|\bsampl\w+)", re.I)
 _PHYSICAL_AFTER = re.compile(r"^\s*(?:of\s+)?(?:\w+\s+)?(?:simulated|simulation|reaction|physical|model|process|virtual)\b"
                              r"|^\s*of\s+(?:\w+\s+)?time\b|^\s*(?:after|into)\b", re.I)
-_PHYSICAL_SUBJECT = re.compile(r"\b(?:simulations?|reactions?|system|integration|ode|trajector(?:y|ies)|particles?|decay|"
-                               r"process|model)\b\W*(?:\w+\W+){0,2}$", re.I)
+# "The simulation" or "the model" as the subject is the computer's run as often as not ("The simulation took 2.3 s"): a
+# clause about simulated time says so itself (``simulated``, ``t =``, checked above). Only a physical subject is physical.
+_PHYSICAL_SUBJECT = re.compile(r"\b(?:reactions?|integration|ode|trajector(?:y|ies)|particles?|decay)\b\W*(?:\w+\W+){0,2}$",
+                               re.I)
+#: Another study's or another implementation's time, not this run's: a citation, a possessive name, "et al.", or a word
+#: that names another work ("the reference implementation", "prior work", "the original 2019 study", "reported by").
+_OTHER_STUDY = re.compile(
+    r"\[\s*@?\w[^\]]*\]|\bet\s+al\b|\b[A-Z][a-z]+['’]s\b|\b(?:reference|baseline|original|prior|previous|earlier|"
+    r"published|their|others?|existing|literature|competing|reported|benchmarked)\b|\b(?:19|20)\d\d\b(?!s)")
 #: A part of the run, or another run: a time per trial or setting, an average, the analysis, a discarded or earlier run.
 _PART_BEFORE = re.compile(
     r"\b(?:(?:each|every|per|one|a\s+single|single|individual|average|mean|median|typical)\s+(?:\w+\s+)?"
@@ -719,16 +726,39 @@ def _seconds(num: str, unit: str) -> float | None:
     return value
 
 
+_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+
+
+def _cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
 def _prose(markdown: str) -> list[str]:
-    """The sentences of the writer's own prose: no code, headings, tables or images; FI's filled values masked."""
+    """The sentences of the writer's own text, with FI's filled values masked: prose, a figure's caption, and each cell of
+    a table read with its column's header ("Run time: 2.3 s"), or a two-column row as "name: value". No code or headings."""
     out: list[str] = []
     fenced = False
+    header: list[str] = []
     for line in mask(_disclosure.without_block(markdown)).splitlines():
-        if line.lstrip().startswith(("```", "~~~")):
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
             fenced = not fenced
             continue
-        if fenced or not line.strip() or line.lstrip().startswith(("#", "|", "![", "<!--", "---")):
+        if stripped.startswith("|") and not fenced:
+            cells = _cells(stripped)
+            if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+                continue  # the line under a table's header
+            if not header:
+                header = cells
+                continue
+            out.extend(f"{h}: {c}." for h, c in zip(header, cells) if h and c)
+            if len(cells) == 2 and cells[0] and cells[1]:
+                out.append(f"{cells[0]}: {cells[1]}.")
             continue
+        header = []
+        if fenced or not stripped or stripped.startswith(("#", "<!--", "---")):
+            continue
+        line = _IMAGE.sub(lambda m: m.group(1) + " ", line)
         out.extend(s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z(\[*`\"])", line) if s.strip())
     return out
 
@@ -797,6 +827,12 @@ def stated_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fallb
                 continue
             anchor = next(iter(_ANCHOR.finditer(clause)), None)
             if anchor is not None and _PHYSICAL_SUBJECT.search(clause[:anchor.start()]):
+                continue
+            # Another study's time: named in the subject ("Smith's solver took", "Prior work needed"), or right after the
+            # number up to the next comma ("the 22 s reported by Smith [3]", "in an earlier study [3]").
+            subject = clause[:anchor.start()] if anchor is not None and anchor.start() < rel else before
+            near_after = re.split(r",|\.\s", after, maxsplit=1)[0]
+            if _OTHER_STUDY.search(subject) or _OTHER_STUDY.search(near_after):
                 continue
             if _attached(before, _PART_BEFORE) or _PART_AFTER.search(after):
                 continue
