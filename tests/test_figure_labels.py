@@ -1,0 +1,438 @@
+"""Figure text that shows the code's names (core/figure_labels.py), the plan's reader-facing labels (core/plan.py), and
+the redraw from the saved numbers that renames them (core/engine.py): the experiment is not run again and no repair
+attempt is spent."""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import string
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from core import figure_labels
+from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+from core.engine import Engine, _figure_label_findings, _figure_overlap_findings
+from core.plan import normalize_protocol, plan_labels, plan_names
+
+# The s1 quests' plans, as far as the figures need them.
+KINETICS = {
+    "grid": {"sigma": [0.005, 0.01], "n_points": [5, 12], "temperature_K": [300], "t_max_over_k": [3]},
+    "metrics": [{"id": "Ea_hat", "kind": "mean", "estimand": "E_a", "unit": "run",
+                 "label": "Activation energy $E_a$ (kJ/mol)"}],
+    "labels": {"lnA": "Log pre-exponential factor $\\ln A$", "sigma": "Noise SD $\\sigma$ (units of $c_0$)"},
+}
+FDR = {"grid": {"m": [20, 200], "pi1": [0.0, 0.05]}, "in_each_run": {"method": ["bh", "bonferroni"]}}
+
+
+def test_the_plan_gives_a_label_per_input_and_output_and_old_plans_give_none() -> None:
+    assert plan_labels(KINETICS) == {
+        "lnA": "Log pre-exponential factor $\\ln A$", "sigma": "Noise SD $\\sigma$ (units of $c_0$)",
+        "Ea_hat": "Activation energy $E_a$ (kJ/mol)",
+    }
+    assert plan_labels(FDR) == {} and plan_labels(None) == {} and plan_labels({"labels": "x"}) == {}
+    assert plan_labels({"labels": {"a": 3, "b": " two  words "}}) == {"b": "two words"}
+    assert plan_names(FDR) == {"m", "pi1", "method"}
+    assert {"sigma", "n_points", "Ea_hat", "lnA"} <= plan_names(KINETICS)
+
+
+def test_labels_survive_the_protocol_check() -> None:
+    fixed, why = normalize_protocol(KINETICS)
+    assert why is None and plan_labels(fixed) == plan_labels(KINETICS)
+
+
+def test_what_counts_as_a_code_name() -> None:
+    names = plan_names(KINETICS) | plan_names(FDR) | {"lnA_hat", "p_value"}
+    assert figure_labels.code_names("Ea_hat (kJ/mol)", names) == ["Ea_hat"]
+    assert figure_labels.code_names("Ea_hat, mean ± SD (kJ/mol)", names) == ["Ea_hat"]
+    assert figure_labels.code_names("lnA_hat", names) == ["lnA_hat"]
+    assert figure_labels.code_names("fraction of real effects, pi1", names) == ["pi1"]
+    assert figure_labels.code_names("pi1 = 0.05", names) == ["pi1"]
+    assert figure_labels.code_names("p_value", names) == ["p_value"]
+    assert figure_labels.code_names("n_points per run", names) == ["n_points"]
+    # Words a reader uses, a symbol in math, a short name, and letters with digits the plan does not name.
+    assert figure_labels.code_names("number of tests, m", names) == []
+    assert figure_labels.code_names("m", names) == []
+    assert figure_labels.code_names("sigma", names) == []
+    assert figure_labels.code_names("noise SD sigma (units of c0)", names) == []
+    assert figure_labels.code_names("Activation energy $E_a$ (kJ/mol)", names) == []
+    assert figure_labels.code_names("CO2 uptake (mol)", names) == []
+    assert figure_labels.code_names("$\\hat{E}_a$ (kJ/mol)", names) == []
+    # The shape alone is not enough: a name neither the plan nor the code uses is left alone.
+    assert figure_labels.code_names("Ea_hat (kJ/mol)", set()) == []
+
+
+# Symbols a scientist writes (the review's false alarms). Each is flagged by nothing even when the plan names the
+# symbol AND the experiment's code assigns it.
+SYMBOLS = [
+    ("k_B T (J)", "k_B"), ("T_c (K)", "T_c"), ("log_10(k)", "log_10"), ("ΔG_f (kJ/mol)", "G_f"),
+    ("E_a (kJ/mol)", "E_a"), ("V_max (m/s)", "V_max"), ("T (K)", "T"), ("N (runs)", "N"), ("dt (s)", "dt"),
+    ("c0 (mol/L)", "c0"), ("initial concentration c0 (mol/L)", "c0"), ("Re_lambda", "Re_lambda"),
+]
+
+
+@pytest.mark.parametrize(("label", "name"), SYMBOLS)
+def test_a_symbol_a_scientist_writes_is_not_taken_for_code(label: str, name: str) -> None:
+    code = figure_labels.code_identifiers([f"{name} = 1.0\nresults = {{'{name}': {name}}}\n"])
+    assert name in code
+    record = {"axes": [{"title": label, "xlabel": label, "ylabel": label, "series": [{"label": label}]}]}
+    assert figure_labels.findings({"a.png": record}, ["a.png"], {}, {name}, code) == []
+
+
+def test_the_code_vouches_for_its_names_but_not_for_a_label_it_only_draws() -> None:
+    code = figure_labels.code_identifiers([
+        "import json\nEa_hat = fit()\nout = {'lnA_hat': 1}\nax.set_xlabel('t_max_over_k')\n"
+        "def run(n_points, *, p_value=0.05):\n    return n_points\n",
+        "this is not python (",
+    ])
+    assert {"Ea_hat", "lnA_hat", "n_points", "p_value", "run"} <= code
+    assert "t_max_over_k" not in code  # only drawn as text: a label never vouches for itself
+
+
+def _state(records: dict, protocol: dict | None) -> dict:
+    return {"figures": list(records), "figure_records": records, "design": {"protocol": protocol} if protocol else {}}
+
+
+SCATTER = {"axes": [{"title": "", "xlabel": "Ea_hat (kJ/mol)", "ylabel": "lnA_hat", "series": []}]}
+FDR_FIG = {"axes": [{"title": f"m = {m}", "xlabel": "fraction of real effects, pi1",
+                     "ylabel": "realised FDR (mean V/max(R,1))", "series": []} for m in (20, 200)]}
+FDR_LEGEND = {"axes": [{"title": "pi1 = 0.05", "xlabel": "number of tests", "ylabel": "realised FDR",
+                        "series": [{"label": "pi1 = 0.05"}, {"label": "BH"}, {"label": "_child0"}]}]}
+
+
+def test_each_code_name_is_one_sentence_with_the_plans_label_when_it_has_one() -> None:
+    found = _figure_label_findings(_state({"fig3.png": SCATTER}, KINETICS))
+    assert found == [
+        # The plan's metric is called Ea_hat itself: its label is the new label.
+        'figures/fig3.png: the x axis label "Ea_hat (kJ/mol)" shows the code name "Ea_hat"; rename it to '
+        '"Activation energy $E_a$ (kJ/mol)" (the plan\'s name for it)',
+        # lnA_hat is only made from the plan's lnA: that label is context, not the new label (an estimate of ln A is
+        # not ln A).
+        'figures/fig3.png: the y axis label "lnA_hat" shows the code name "lnA_hat"; rename it to the reader\'s name '
+        'for it: words, its symbol in $...$ and its unit (it is derived from "lnA", which the plan calls "Log '
+        'pre-exponential factor $\\ln A$": name what this one is, for example an estimate or a ratio of it, not that '
+        'quantity itself)',
+    ]
+    found = _figure_label_findings(_state({"fdr_vs_pi1.png": FDR_FIG}, FDR))
+    assert found == [
+        f'figures/fdr_vs_pi1.png: in the panel "m = {m}", the x axis label "fraction of real effects, pi1" shows the '
+        "code name \"pi1\"; rename it to the reader's name for it: words, its symbol in $...$ and its unit"
+        for m in (20, 200)
+    ]
+
+
+def test_a_derived_name_gets_its_stems_label_as_context_never_as_its_new_label() -> None:
+    """The second review's probe: t_max_over_k was to be renamed "Time $t$ (s)", n_tests_per_run "Number of tests
+    $n$"."""
+    plan = {"grid": {"t": [1, 2], "n": [5, 10]}, "labels": {"t": "Time $t$ (s)", "n": "Number of tests $n$"}}
+    record = {"axes": [{"xlabel": "t_max_over_k (s)", "ylabel": "n_tests_per_run", "series": []}]}
+    found = figure_labels.findings({"f.png": record}, ["f.png"], plan_labels(plan), plan_names(plan))
+    assert [f["rename_to"] for f in found] == [None, None]
+    assert [f["derived_from"] for f in found] == [["t", "Time $t$ (s)"], ["n", "Number of tests $n$"]]
+    text = " ".join(figure_labels.sentence(f) for f in found)
+    assert 'rename it to "Time' not in text and 'rename it to "Number' not in text
+    assert 'derived from "t", which the plan calls "Time $t$ (s)"' in text
+
+
+def test_a_symbol_written_out_with_digits_is_not_flagged_from_the_code_alone() -> None:
+    """mu0, eps0 and log2 are symbols (μ₀, ε₀, a log base): a script that assigns or calls them does not make them code
+    names. pi1 is flagged because the plan names it."""
+    code = figure_labels.code_identifiers(["from math import log2\nmu0 = 1.0\neps0 = 8.85e-12\nz = log2(4)\n"])
+    assert {"mu0", "eps0", "log2"} <= code
+    record = {"axes": [{"xlabel": "mu0 (H/m)", "ylabel": "eps0", "title": "log2 fold change",
+                        "series": [{"label": "pi1 = 0.05"}]}]}
+    found = figure_labels.findings({"f.png": record}, ["f.png"], {}, plan_names(FDR), code)
+    assert [f["code_names"] for f in found] == [["pi1"]]
+    assert figure_labels.code_names("log2 fold change", {"log2"}) == []
+
+
+def test_panel_titles_and_legend_entries_are_read_too() -> None:
+    found = _figure_label_findings(_state({"fdr.png": FDR_LEGEND}, FDR))
+    assert found == [
+        'figures/fdr.png: the title "pi1 = 0.05" shows the code name "pi1"; write "pi1" as a reader would: in words, '
+        "or as its symbol in $...$",
+        'figures/fdr.png: in the panel "pi1 = 0.05", the legend entry "pi1 = 0.05" shows the code name "pi1"; write '
+        '"pi1" as a reader would: in words, or as its symbol in $...$',
+    ]
+
+
+def test_a_label_already_the_plans_or_one_no_plan_or_code_names_is_left_alone(tmp_path: Path) -> None:
+    good = {"axes": [{"xlabel": "Activation energy $E_a$ (kJ/mol)", "ylabel": "count"}]}
+    assert _figure_label_findings(_state({"a.png": good}, KINETICS)) == []
+    # Neither a plan nor code: nothing to tie a name to, so nothing is flagged.
+    assert _figure_label_findings(_state({"fig3.png": SCATTER}, None)) == []
+    assert _figure_label_findings(_state({"fdr_vs_pi1.png": FDR_FIG}, None)) == []
+    # The experiment's code names them: flagged, with no plan label to rename to.
+    (tmp_path / "experiment.py").write_text("Ea_hat, lnA_hat = fit(data)\n", encoding="utf-8")
+    (tmp_path / "replot_layout.py").write_text("pi1 = 0\n", encoding="utf-8")  # FI's own redraw does not count
+    found = _figure_label_findings(_state({"fig3.png": SCATTER, "fdr.png": FDR_LEGEND}, None), tmp_path)
+    assert len(found) == 2 and all("fig3.png" in f for f in found)
+
+
+def test_a_code_name_is_not_sent_to_a_repair_of_the_script() -> None:
+    """It used to ride the one layout repair: the script rewritten and run again, and a repair attempt spent."""
+    assert _figure_overlap_findings(_state({"fig3.png": SCATTER}, KINETICS)) == []
+    layout = {"axes": [], "layout": [{"check": "legend_over_data", "legend": ["a"]}]}
+    assert len(_figure_overlap_findings(_state({"fig3.png": {**SCATTER, **layout}}, KINETICS))) == 1
+
+
+def test_the_code_writer_is_asked_for_the_plans_labels() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for name in ("implement.md", "implement_body.md"):
+        text = (root / "agents" / name).read_text(encoding="utf-8")
+        filled = string.Template(text).safe_substitute()
+        assert "never with a variable name from the code" in filled
+        assert "`Activation energy $E_a$ (kJ/mol)`" in filled
+
+
+# ---- the route: write -> replot_layout (the saved numbers), once per quest ----------------------------------------
+
+
+def _engine(tmp_path: Path) -> Engine:
+    eng = Engine(Config(
+        topic="t", title="t", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(clarify_mode="off", review_loop=True, max_iterations=2),  # type: ignore[arg-type]
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    ))
+    root = eng.quest_root
+    for sub in ("paper", "code", "figures", "data/results"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    (root / "code" / "experiment.py").write_text("print('the experiment')\n", encoding="utf-8")
+    (root / "data" / "results" / "fdr.csv").write_text("m,fdr\n20,0.04\n", encoding="utf-8")
+    (root / "figures" / "fdr.png").write_bytes(b"old")
+    return eng
+
+
+STATE: dict[str, Any] = {"topic": "t", "title": "t", "iteration": 1, **_state({"fdr.png": FDR_LEGEND}, FDR)}
+
+
+def test_the_first_draft_sends_code_names_to_the_redraw_from_the_saved_numbers_once(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+
+    async def chat(prompt: str, **kw: Any) -> str:
+        return "# P\n\nBody.\n"
+
+    eng._chat = chat  # type: ignore[method-assign]
+    out = asyncio.run(eng._node_write(dict(STATE)))  # type: ignore[arg-type]
+    assert out["figure_labels_redrawn"] is True
+    assert len(out["refine_layout"]) == 2 and all(figure_labels.MARK in n for n in out["refine_layout"])
+    assert eng._route_after_write({**STATE, **out}) == "replot"  # type: ignore[arg-type]
+    # A later draft (a revise after the review) does not ask again.
+    again = asyncio.run(eng._node_write({**STATE, **out, "refine_layout": []}))  # type: ignore[arg-type]
+    assert again["refine_layout"] == [] and "figure_labels_redrawn" not in again
+    assert eng._route_after_write({**STATE, **out, **again}) == "check"  # type: ignore[arg-type]
+
+
+_ENVS: list[dict[str, str]] = []
+
+
+def _replot(eng: Engine, script: str, notes: list[str], state: dict | None = None) -> tuple[dict, list]:
+    ran: list = []
+
+    async def chat(prompt: str, *, node: str = "") -> str:
+        return f"```python\n{script}\n```"
+
+    async def execute(cmd: list[str], **kw: Any) -> Any:
+        ran.append(cmd)
+        env = kw.get("env")
+        _ENVS.append(dict(env or {}))
+        # The node's own environment (the plot-style bootstrap, the records folder), as the real executor passes it.
+        proc = subprocess.run([sys.executable, cmd[-1]], cwd=str(kw["cwd"]), capture_output=True, text=True,
+                              env={**os.environ, **env} if env else None)
+        return SimpleNamespace(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, duration_s=0.1,
+                               timed_out=False)
+
+    eng._chat = chat  # type: ignore[method-assign]
+    eng.executor = SimpleNamespace(python_path=lambda q: Path(sys.executable), execute=execute)  # type: ignore[assignment]
+    return asyncio.run(eng._node_replot_layout({**(state or STATE), "refine_layout": notes})), ran  # type: ignore[arg-type]
+
+
+def test_the_redraw_renames_them_without_running_the_experiment(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    notes = _figure_label_findings(STATE)  # type: ignore[arg-type]
+    out, ran = _replot(eng, "open('figures/fdr.png', 'wb').write(b'renamed')\nprint('REPLOTTED: fdr.png')", notes)
+    assert [Path(c[-1]).name for c in ran] == ["replot_layout.py"]  # the experiment did not run
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() == b"renamed"
+    assert out["layout_missed"] == [] and eng._route_after_replot({**STATE, **out}) == "check"  # type: ignore[arg-type]
+
+
+def test_a_rename_the_redraw_could_not_make_is_not_told_to_the_writer_as_a_readers_request(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    notes = _figure_label_findings(STATE)  # type: ignore[arg-type]
+    out, _ = _replot(eng, "raise SystemExit(3)", notes + ["Figure 2 above Figure 1"])
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() == b"old"
+    # The person's own note is still reported; FI's renames are said in run.log only.
+    assert out["layout_missed"] == ["Figure 2 above Figure 1"]
+    assert out["layout_not_redrawn"] == ["Figure 2 above Figure 1"]
+    only_fi, _ = _replot(_engine(tmp_path / "b"), "raise SystemExit(3)", notes)
+    assert only_fi["layout_missed"] == [] and only_fi["layout_not_redrawn"] == []
+    assert eng._route_after_replot({**STATE, **only_fi}) == "check"  # type: ignore[arg-type]
+    # A redraw that answers FI's renames with NOT_DRAWN lines (in its own words) sends nothing back to the writer.
+    declined, _ = _replot(_engine(tmp_path / "c"), "print('NOT_DRAWN: the title is fine')\n"
+                                                    "print('NOT_DRAWN: the legend is fine')", notes)
+    assert declined["layout_missed"] == []
+    assert eng._route_after_replot({**STATE, **declined}) == "check"  # type: ignore[arg-type]
+
+
+# The redraw is recorded and checked as the run's own figures are (review pass 2, P0-A).
+SAVED_FDR = {"axes": [{"title": "pi1 = 0.05", "xlabel": "number of tests", "ylabel": "realised FDR",
+                       "series": [{"label": "pi1 = 0.05", "min": 0.04, "max": 0.04, "shows": "yes"}]}],
+             "file": "fdr.png", "single_seed": 0}
+DRAW = """
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+{values}
+fig, ax = plt.subplots()
+ax.plot(m, fdr, "o", label=r"$\\pi_1$ = 0.05")
+ax.set_title(r"$\\pi_1$ = 0.05"); ax.set_xlabel("number of tests"); ax.set_ylabel("realised FDR"); ax.legend()
+fig.savefig("figures/fdr.png", bbox_inches="tight")
+print("REPLOTTED: fdr.png")
+"""
+FROM_CSV = "import csv\nrows = list(csv.DictReader(open('data/results/fdr.csv')))\n" \
+           "m = [float(r['m']) for r in rows]\nfdr = [float(r['fdr']){scale} for r in rows]"
+
+
+def _recorded(tmp_path: Path) -> tuple[Engine, dict, Path]:
+    """The fdr quest with its figure's record on disk as the run wrote it."""
+    pytest.importorskip("matplotlib")
+    eng = _engine(tmp_path)
+    records = eng.fi_dir / "figure_records"
+    records.mkdir(parents=True, exist_ok=True)
+    (records / "fdr.json").write_text(json.dumps(SAVED_FDR), encoding="utf-8")
+    return eng, {**STATE, "figure_records": {"fdr.png": SAVED_FDR}}, records
+
+
+def test_a_redraw_that_types_in_its_numbers_is_put_back_and_its_records_kept(tmp_path: Path) -> None:
+    """probe_route.py: the redraw renames the legend but plots typed-in values, not the saved 0.04."""
+    eng, state, records = _recorded(tmp_path)
+    notes = _figure_label_findings(state)  # type: ignore[arg-type]
+    _ENVS.clear()
+    out, ran = _replot(eng, DRAW.format(values="m = [20, 200, 2000]\nfdr = [0.30, 0.45, 0.52]"), notes, state)
+    assert [Path(c[-1]).name for c in ran] == ["replot_layout.py", "replot_layout.py"]  # two tries, both typed
+    # Recorded as the run's figures are: the records folder, and no seed's lines written for a redraw.
+    assert all(env.get("FI_FIGURE_RECORDS") == str(records) and env.get("FI_REPLOT") == "1" for env in _ENVS)
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() == b"old"
+    assert not (eng.quest_root / "figures" / "paper" / "fdr.pdf").exists()
+    assert json.loads((records / "fdr.json").read_text(encoding="utf-8")) == SAVED_FDR
+    assert out["figure_records"] == {"fdr.png": SAVED_FDR}
+    assert out["layout_missed"] == [] and eng._route_after_replot({**state, **out}) == "check"  # type: ignore[arg-type]
+    # The script is gone: the next run's typed-number scan never reads it.
+    assert not (eng.quest_root / "code" / "replot_layout.py").exists()
+    assert eng._figure_scripts_with_typed_numbers() == {}
+
+
+def test_a_redraw_from_the_saved_numbers_returns_the_figures_new_records(tmp_path: Path) -> None:
+    eng, state, records = _recorded(tmp_path)
+    notes = _figure_label_findings(state)  # type: ignore[arg-type]
+    out, ran = _replot(eng, DRAW.format(values=FROM_CSV.format(scale="")), notes, state)
+    assert [Path(c[-1]).name for c in ran] == ["replot_layout.py"]
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() != b"old"
+    record = out["figure_records"]["fdr.png"]
+    assert record["axes"][0]["title"] == "$\\pi_1$ = 0.05" and record["single_seed"] == 0
+    assert record["axes"][0]["series"][0]["min"] == 0.04
+    assert json.loads((records / "fdr.json").read_text(encoding="utf-8"))["axes"][0]["title"] == "$\\pi_1$ = 0.05"
+    # The later checks read the fresh record: no code name is left to rename.
+    assert _figure_label_findings({**state, **out}) == []  # type: ignore[arg-type]
+    assert not (eng.quest_root / "code" / "replot_layout.py").exists()
+
+
+def test_a_rename_that_draws_other_numbers_than_the_record_held_is_put_back(tmp_path: Path) -> None:
+    eng, state, records = _recorded(tmp_path)
+    notes = _figure_label_findings(state)  # type: ignore[arg-type]
+    out, _ = _replot(eng, DRAW.format(values=FROM_CSV.format(scale=" * 10")), notes, state)
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() == b"old"
+    assert json.loads((records / "fdr.json").read_text(encoding="utf-8")) == SAVED_FDR
+    assert out["figure_records"] == {"fdr.png": SAVED_FDR} and out["layout_missed"] == []
+
+
+def test_a_figure_drawn_as_the_mean_of_the_seeds_is_renamed_by_fi_not_by_a_model_script(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    eng = _engine(tmp_path)
+    code = eng.quest_root / "code"
+    (code / "replot_figures.py").write_text(
+        (Path(__file__).resolve().parents[1] / "core" / "replot_figures.py").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    panel = {"grid": [1, 1, 0, 1, 0, 1], "title": "", "xlabel": "points per fit", "ylabel": "Ea_hat (kJ/mol)",
+             "xscale": "linear", "yscale": "linear", "legend": False,
+             "lines": [{"kind": "line", "x": [5, 12], "mean": [50.0, 51.0], "lower": [49.0, 50.0],
+                        "upper": [51.0, 52.0], "label": ""}]}
+    (code / "replot_figures.json").write_text(json.dumps({"figures": [{"file": "kin.png", "size": [4, 3],
+                                                                       "suptitle": "", "axes": [panel]}]}),
+                                              encoding="utf-8")
+    (eng.quest_root / "figures" / "kin.png").write_bytes(b"mean")
+    record = {"axes": [{"title": "", "xlabel": "points per fit", "ylabel": "Ea_hat (kJ/mol)", "series": []}],
+              "replicate_mean": {"n": 5}}
+    state = {"topic": "t", "title": "t", "iteration": 1, **_state({"kin.png": record}, KINETICS)}
+    notes = _figure_label_findings(state)  # type: ignore[arg-type]
+    assert len(notes) == 1
+    out, ran = _replot(eng, "raise SystemExit('a model script ran')", notes, state)
+    # No model script: FI's own redraw of the mean of the seeds, from each seed's numbers.
+    assert [Path(c[-1]).name for c in ran] == ["replot_figures.py"]
+    renamed = out["figure_records"]["kin.png"]
+    assert renamed["axes"][0]["ylabel"] == "Activation energy $E_a$ (kJ/mol)"
+    assert renamed["replicate_mean"] == {"n": 5}
+    assert json.loads((code / "replot_figures.json").read_text(encoding="utf-8"))["figures"][0]["axes"][0][
+        "ylabel"] == "Activation energy $E_a$ (kJ/mol)"
+    assert out["layout_missed"] == []
+
+
+def test_fis_own_notes_never_reach_the_writer_as_the_readers_request(tmp_path: Path) -> None:
+    """probe_mixed.py: a person's layout note waits beside FI's renames, and the redraw answers FI's with NOT_DRAWN."""
+    person = "Make the lines in figure fdr thicker"
+    notes = _figure_label_findings(STATE) + [person]  # type: ignore[arg-type]
+    drew = "open('figures/fdr.png', 'wb').write(b'thicker')\nprint('REPLOTTED: fdr.png')\n"
+    out, _ = _replot(_engine(tmp_path), drew + "print('NOT_DRAWN: the legend name pi1 is already clear to a reader')",
+                     notes)
+    assert out["layout_missed"] == []
+    assert _engine(tmp_path)._route_after_replot({**STATE, **out}) == "check"  # type: ignore[arg-type]
+    # A line that names a note by its number: the person's own words reach the writer, FI's never.
+    numbered, _ = _replot(_engine(tmp_path / "b"), drew + "print('NOT_DRAWN: 1: the title is fine')\n"
+                                                          "print('NOT_DRAWN: 3: lines are drawn by the house style')",
+                          notes)
+    assert numbered["layout_missed"] == [person]
+    assert "1. figures/fdr.png" in _prompt_of(tmp_path / "c", notes)
+
+
+def _prompt_of(tmp_path: Path, notes: list[str]) -> str:
+    """The redraw's prompt: the notes are numbered, so its NOT_DRAWN lines can name one."""
+    eng = _engine(tmp_path)
+    seen: list[str] = []
+
+    async def chat(prompt: str, *, node: str = "") -> str:
+        seen.append(prompt)
+        return "```python\nopen('figures/fdr.png', 'wb').write(b'x')\nprint('REPLOTTED: fdr.png')\n```"
+
+    async def execute(cmd: list[str], **kw: Any) -> Any:
+        proc = subprocess.run([sys.executable, cmd[-1]], cwd=str(kw["cwd"]), capture_output=True, text=True)
+        return SimpleNamespace(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, duration_s=0.1,
+                               timed_out=False)
+
+    eng._chat = chat  # type: ignore[method-assign]
+    eng.executor = SimpleNamespace(python_path=lambda q: Path(sys.executable), execute=execute)  # type: ignore[assignment]
+    asyncio.run(eng._node_replot_layout({**STATE, "refine_layout": notes}))  # type: ignore[arg-type]
+    return seen[0]
+
+
+def test_a_redraw_cut_short_leaves_no_script_and_its_records_as_they_were(tmp_path: Path) -> None:
+    eng, state, records = _recorded(tmp_path)
+    backup = eng.fi_dir / "layout_backup"
+    (backup / "figures").mkdir(parents=True)
+    (backup / "records").mkdir()
+    (backup / "figures" / "fdr.png").write_bytes(b"old")
+    (backup / "records" / "fdr.json").write_text(json.dumps(SAVED_FDR), encoding="utf-8")
+    (backup / "listed.json").write_text(json.dumps({"figures": ["fdr.png"], "data": [], "big": [], "stems": ["fdr"]}),
+                                        encoding="utf-8")
+    (eng.quest_root / "figures" / "fdr.png").write_bytes(b"half drawn")
+    (records / "fdr.json").write_text("{}", encoding="utf-8")
+    (eng.quest_root / "code" / "replot_layout.py").write_text("x = 1\n", encoding="utf-8")
+    eng._restore_layout_backup()
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() == b"old"
+    assert json.loads((records / "fdr.json").read_text(encoding="utf-8")) == SAVED_FDR
+    assert not (eng.quest_root / "code" / "replot_layout.py").exists() and not backup.exists()

@@ -260,6 +260,10 @@ class ResultChecksMixin:
             if not others:
                 targets += [folder / f"{stem}.json", self.fi_dir / "figure_records" / f"{stem}.json",  # type: ignore[attr-defined]
                             self.fi_dir / "figure_records" / f"{stem}.seed0.json"]  # type: ignore[attr-defined]
+                # Its paper copy goes too: paper.pdf would otherwise show the figure through it.
+                from .plot_style import remove_paper_copies
+
+                remove_paper_copies(folder, name)
             for target in targets:
                 try:
                     target.unlink(missing_ok=True)
