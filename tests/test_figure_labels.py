@@ -4,6 +4,8 @@ attempt is spent."""
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import string
 import subprocess
 import sys
@@ -227,7 +229,10 @@ def test_the_first_draft_sends_code_names_to_the_redraw_from_the_saved_numbers_o
     assert eng._route_after_write({**STATE, **out, **again}) == "check"  # type: ignore[arg-type]
 
 
-def _replot(eng: Engine, script: str, notes: list[str]) -> tuple[dict, list]:
+_ENVS: list[dict[str, str]] = []
+
+
+def _replot(eng: Engine, script: str, notes: list[str], state: dict | None = None) -> tuple[dict, list]:
     ran: list = []
 
     async def chat(prompt: str, *, node: str = "") -> str:
@@ -235,13 +240,17 @@ def _replot(eng: Engine, script: str, notes: list[str]) -> tuple[dict, list]:
 
     async def execute(cmd: list[str], **kw: Any) -> Any:
         ran.append(cmd)
-        proc = subprocess.run([sys.executable, cmd[-1]], cwd=str(kw["cwd"]), capture_output=True, text=True)
+        env = kw.get("env")
+        _ENVS.append(dict(env or {}))
+        # The node's own environment (the plot-style bootstrap, the records folder), as the real executor passes it.
+        proc = subprocess.run([sys.executable, cmd[-1]], cwd=str(kw["cwd"]), capture_output=True, text=True,
+                              env={**os.environ, **env} if env else None)
         return SimpleNamespace(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, duration_s=0.1,
                                timed_out=False)
 
     eng._chat = chat  # type: ignore[method-assign]
     eng.executor = SimpleNamespace(python_path=lambda q: Path(sys.executable), execute=execute)  # type: ignore[assignment]
-    return asyncio.run(eng._node_replot_layout({**STATE, "refine_layout": notes})), ran  # type: ignore[arg-type]
+    return asyncio.run(eng._node_replot_layout({**(state or STATE), "refine_layout": notes})), ran  # type: ignore[arg-type]
 
 
 def test_the_redraw_renames_them_without_running_the_experiment(tmp_path: Path) -> None:
@@ -269,3 +278,161 @@ def test_a_rename_the_redraw_could_not_make_is_not_told_to_the_writer_as_a_reade
                                                     "print('NOT_DRAWN: the legend is fine')", notes)
     assert declined["layout_missed"] == []
     assert eng._route_after_replot({**STATE, **declined}) == "check"  # type: ignore[arg-type]
+
+
+# The redraw is recorded and checked as the run's own figures are (review pass 2, P0-A).
+SAVED_FDR = {"axes": [{"title": "pi1 = 0.05", "xlabel": "number of tests", "ylabel": "realised FDR",
+                       "series": [{"label": "pi1 = 0.05", "min": 0.04, "max": 0.04, "shows": "yes"}]}],
+             "file": "fdr.png", "single_seed": 0}
+DRAW = """
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+{values}
+fig, ax = plt.subplots()
+ax.plot(m, fdr, "o", label=r"$\\pi_1$ = 0.05")
+ax.set_title(r"$\\pi_1$ = 0.05"); ax.set_xlabel("number of tests"); ax.set_ylabel("realised FDR"); ax.legend()
+fig.savefig("figures/fdr.png", bbox_inches="tight")
+print("REPLOTTED: fdr.png")
+"""
+FROM_CSV = "import csv\nrows = list(csv.DictReader(open('data/results/fdr.csv')))\n" \
+           "m = [float(r['m']) for r in rows]\nfdr = [float(r['fdr']){scale} for r in rows]"
+
+
+def _recorded(tmp_path: Path) -> tuple[Engine, dict, Path]:
+    """The fdr quest with its figure's record on disk as the run wrote it."""
+    pytest.importorskip("matplotlib")
+    eng = _engine(tmp_path)
+    records = eng.fi_dir / "figure_records"
+    records.mkdir(parents=True, exist_ok=True)
+    (records / "fdr.json").write_text(json.dumps(SAVED_FDR), encoding="utf-8")
+    return eng, {**STATE, "figure_records": {"fdr.png": SAVED_FDR}}, records
+
+
+def test_a_redraw_that_types_in_its_numbers_is_put_back_and_its_records_kept(tmp_path: Path) -> None:
+    """probe_route.py: the redraw renames the legend but plots typed-in values, not the saved 0.04."""
+    eng, state, records = _recorded(tmp_path)
+    notes = _figure_label_findings(state)  # type: ignore[arg-type]
+    _ENVS.clear()
+    out, ran = _replot(eng, DRAW.format(values="m = [20, 200, 2000]\nfdr = [0.30, 0.45, 0.52]"), notes, state)
+    assert [Path(c[-1]).name for c in ran] == ["replot_layout.py", "replot_layout.py"]  # two tries, both typed
+    # Recorded as the run's figures are: the records folder, and no seed's lines written for a redraw.
+    assert all(env.get("FI_FIGURE_RECORDS") == str(records) and env.get("FI_REPLOT") == "1" for env in _ENVS)
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() == b"old"
+    assert not (eng.quest_root / "figures" / "paper" / "fdr.pdf").exists()
+    assert json.loads((records / "fdr.json").read_text(encoding="utf-8")) == SAVED_FDR
+    assert out["figure_records"] == {"fdr.png": SAVED_FDR}
+    assert out["layout_missed"] == [] and eng._route_after_replot({**state, **out}) == "check"  # type: ignore[arg-type]
+    # The script is gone: the next run's typed-number scan never reads it.
+    assert not (eng.quest_root / "code" / "replot_layout.py").exists()
+    assert eng._figure_scripts_with_typed_numbers() == {}
+
+
+def test_a_redraw_from_the_saved_numbers_returns_the_figures_new_records(tmp_path: Path) -> None:
+    eng, state, records = _recorded(tmp_path)
+    notes = _figure_label_findings(state)  # type: ignore[arg-type]
+    out, ran = _replot(eng, DRAW.format(values=FROM_CSV.format(scale="")), notes, state)
+    assert [Path(c[-1]).name for c in ran] == ["replot_layout.py"]
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() != b"old"
+    record = out["figure_records"]["fdr.png"]
+    assert record["axes"][0]["title"] == "$\\pi_1$ = 0.05" and record["single_seed"] == 0
+    assert record["axes"][0]["series"][0]["min"] == 0.04
+    assert json.loads((records / "fdr.json").read_text(encoding="utf-8"))["axes"][0]["title"] == "$\\pi_1$ = 0.05"
+    # The later checks read the fresh record: no code name is left to rename.
+    assert _figure_label_findings({**state, **out}) == []  # type: ignore[arg-type]
+    assert not (eng.quest_root / "code" / "replot_layout.py").exists()
+
+
+def test_a_rename_that_draws_other_numbers_than_the_record_held_is_put_back(tmp_path: Path) -> None:
+    eng, state, records = _recorded(tmp_path)
+    notes = _figure_label_findings(state)  # type: ignore[arg-type]
+    out, _ = _replot(eng, DRAW.format(values=FROM_CSV.format(scale=" * 10")), notes, state)
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() == b"old"
+    assert json.loads((records / "fdr.json").read_text(encoding="utf-8")) == SAVED_FDR
+    assert out["figure_records"] == {"fdr.png": SAVED_FDR} and out["layout_missed"] == []
+
+
+def test_a_figure_drawn_as_the_mean_of_the_seeds_is_renamed_by_fi_not_by_a_model_script(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    eng = _engine(tmp_path)
+    code = eng.quest_root / "code"
+    (code / "replot_figures.py").write_text(
+        (Path(__file__).resolve().parents[1] / "core" / "replot_figures.py").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    panel = {"grid": [1, 1, 0, 1, 0, 1], "title": "", "xlabel": "points per fit", "ylabel": "Ea_hat (kJ/mol)",
+             "xscale": "linear", "yscale": "linear", "legend": False,
+             "lines": [{"kind": "line", "x": [5, 12], "mean": [50.0, 51.0], "lower": [49.0, 50.0],
+                        "upper": [51.0, 52.0], "label": ""}]}
+    (code / "replot_figures.json").write_text(json.dumps({"figures": [{"file": "kin.png", "size": [4, 3],
+                                                                       "suptitle": "", "axes": [panel]}]}),
+                                              encoding="utf-8")
+    (eng.quest_root / "figures" / "kin.png").write_bytes(b"mean")
+    record = {"axes": [{"title": "", "xlabel": "points per fit", "ylabel": "Ea_hat (kJ/mol)", "series": []}],
+              "replicate_mean": {"n": 5}}
+    state = {"topic": "t", "title": "t", "iteration": 1, **_state({"kin.png": record}, KINETICS)}
+    notes = _figure_label_findings(state)  # type: ignore[arg-type]
+    assert len(notes) == 1
+    out, ran = _replot(eng, "raise SystemExit('a model script ran')", notes, state)
+    # No model script: FI's own redraw of the mean of the seeds, from each seed's numbers.
+    assert [Path(c[-1]).name for c in ran] == ["replot_figures.py"]
+    renamed = out["figure_records"]["kin.png"]
+    assert renamed["axes"][0]["ylabel"] == "Activation energy $E_a$ (kJ/mol)"
+    assert renamed["replicate_mean"] == {"n": 5}
+    assert json.loads((code / "replot_figures.json").read_text(encoding="utf-8"))["figures"][0]["axes"][0][
+        "ylabel"] == "Activation energy $E_a$ (kJ/mol)"
+    assert out["layout_missed"] == []
+
+
+def test_fis_own_notes_never_reach_the_writer_as_the_readers_request(tmp_path: Path) -> None:
+    """probe_mixed.py: a person's layout note waits beside FI's renames, and the redraw answers FI's with NOT_DRAWN."""
+    person = "Make the lines in figure fdr thicker"
+    notes = _figure_label_findings(STATE) + [person]  # type: ignore[arg-type]
+    drew = "open('figures/fdr.png', 'wb').write(b'thicker')\nprint('REPLOTTED: fdr.png')\n"
+    out, _ = _replot(_engine(tmp_path), drew + "print('NOT_DRAWN: the legend name pi1 is already clear to a reader')",
+                     notes)
+    assert out["layout_missed"] == []
+    assert _engine(tmp_path)._route_after_replot({**STATE, **out}) == "check"  # type: ignore[arg-type]
+    # A line that names a note by its number: the person's own words reach the writer, FI's never.
+    numbered, _ = _replot(_engine(tmp_path / "b"), drew + "print('NOT_DRAWN: 1: the title is fine')\n"
+                                                          "print('NOT_DRAWN: 3: lines are drawn by the house style')",
+                          notes)
+    assert numbered["layout_missed"] == [person]
+    assert "1. figures/fdr.png" in _prompt_of(tmp_path / "c", notes)
+
+
+def _prompt_of(tmp_path: Path, notes: list[str]) -> str:
+    """The redraw's prompt: the notes are numbered, so its NOT_DRAWN lines can name one."""
+    eng = _engine(tmp_path)
+    seen: list[str] = []
+
+    async def chat(prompt: str, *, node: str = "") -> str:
+        seen.append(prompt)
+        return "```python\nopen('figures/fdr.png', 'wb').write(b'x')\nprint('REPLOTTED: fdr.png')\n```"
+
+    async def execute(cmd: list[str], **kw: Any) -> Any:
+        proc = subprocess.run([sys.executable, cmd[-1]], cwd=str(kw["cwd"]), capture_output=True, text=True)
+        return SimpleNamespace(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, duration_s=0.1,
+                               timed_out=False)
+
+    eng._chat = chat  # type: ignore[method-assign]
+    eng.executor = SimpleNamespace(python_path=lambda q: Path(sys.executable), execute=execute)  # type: ignore[assignment]
+    asyncio.run(eng._node_replot_layout({**STATE, "refine_layout": notes}))  # type: ignore[arg-type]
+    return seen[0]
+
+
+def test_a_redraw_cut_short_leaves_no_script_and_its_records_as_they_were(tmp_path: Path) -> None:
+    eng, state, records = _recorded(tmp_path)
+    backup = eng.fi_dir / "layout_backup"
+    (backup / "figures").mkdir(parents=True)
+    (backup / "records").mkdir()
+    (backup / "figures" / "fdr.png").write_bytes(b"old")
+    (backup / "records" / "fdr.json").write_text(json.dumps(SAVED_FDR), encoding="utf-8")
+    (backup / "listed.json").write_text(json.dumps({"figures": ["fdr.png"], "data": [], "big": [], "stems": ["fdr"]}),
+                                        encoding="utf-8")
+    (eng.quest_root / "figures" / "fdr.png").write_bytes(b"half drawn")
+    (records / "fdr.json").write_text("{}", encoding="utf-8")
+    (eng.quest_root / "code" / "replot_layout.py").write_text("x = 1\n", encoding="utf-8")
+    eng._restore_layout_backup()
+    assert (eng.quest_root / "figures" / "fdr.png").read_bytes() == b"old"
+    assert json.loads((records / "fdr.json").read_text(encoding="utf-8")) == SAVED_FDR
+    assert not (eng.quest_root / "code" / "replot_layout.py").exists() and not backup.exists()

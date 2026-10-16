@@ -438,7 +438,7 @@ class QuestState(TypedDict, total=False):
     # cannot lay a figure out is not asked again.
     figure_overlap_repaired: bool
     # Set once figure text that shows the code's name for a quantity was sent to the redraw from the saved numbers
-    # (``_node_write``, core/figure_labels.py): once per quest.
+    # (``_node_write``, core/figure_labels.py): once per script, since a new script starts it over (``_FRESH_SCRIPT``).
     figure_labels_redrawn: bool
     # Set by the execute-repair loop when a script exits 0 but every
     # numeric metric is ~0 (a degenerate run) and the repair attempts
@@ -16822,10 +16822,81 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         drawn again from the numbers the run saved, and the experiment is not run again. A figure the script does not
         write is left as it was, and so is every figure when the script fails. The model is shown what each saved file
         holds (``core.data_shape``); a script that fails, or changes no figure, is written once more with its error, and
-        when that fails too the person is told at the review that their request was not applied."""
+        when that fails too the person is told at the review that their request was not applied.
+
+        The redraw is recorded and checked as the run's own figures are: the plot-style recorder writes each figure's
+        record again, a script that draws numbers typed into it fails its try, and so does one that draws other
+        numbers than a figure's record held for a figure FI asked to rename; the figures, their paper copies and their
+        records are then put back. A figure drawn as the mean of the seeds is never sent to the model, which cannot see
+        each seed's numbers: FI renames its text itself (:meth:`_rename_mean_figures`). ``figure_records`` comes back
+        read again, so every later check reads what the figures now show, and ``code/replot_layout.py`` is removed, so
+        the next run's typed-number scan never reads it."""
+        try:
+            return await self._replot_layout(state)
+        finally:
+            (self.quest_root / "code" / "replot_layout.py").unlink(missing_ok=True)
+
+    async def _replot_layout(self, state: QuestState) -> QuestState:
+        """:meth:`_node_replot_layout`'s work."""
         notes = [str(p).strip() for p in state.get("refine_layout") or [] if str(p).strip()]
         done: QuestState = {"refine_layout": [], "layout_missed": [], "layout_not_redrawn": []}
         self._restore_layout_backup()
+        from .figure_labels import MARK as _LABEL_MARK
+        from .plot_style import RECORDS_DIRNAME, write_boot
+
+        records_dir = self.fi_dir / RECORDS_DIRNAME
+        old_records = {str(k): v for k, v in (state.get("figure_records") or {}).items() if isinstance(v, dict)}
+        means = {f for f, r in old_records.items() if r.get("replicate_mean")}
+
+        def about(note: str) -> str | None:
+            # The figure one of FI's own notes is about (``figures/<name>: ...``); None for a person's note.
+            if _LABEL_MARK not in note or not note.startswith("figures/"):
+                return None
+            return note[len("figures/"):].split(":", 1)[0].strip()
+
+        # A figure drawn as the mean of the seeds: the model sees only the saved files, never each seed's numbers, so it
+        # could only draw other numbers under the figure's caption; FI renames it from its own numbers instead.
+        mean_notes = [n for n in notes if about(n) in means]
+        notes = [n for n in notes if n not in mean_notes]
+        # A PDF saved again with nothing changed has the same bytes only with a fixed creation date; without it, a
+        # redraw that changed nothing would look like one that did. The recorder writes each figure's record again; a
+        # redrawn figure is no seed's, so the seeds' own lines (kept for the mean of the seeds) are left as they are.
+        env: dict[str, str] = {**scrub_secrets(), "SOURCE_DATE_EPOCH": "0"}
+        recorded = False
+        try:
+            env = {**env, "FI_FIGURE_RECORDS": str(records_dir), "FI_REPLOT": "1", "PYTHONPATH": os.pathsep.join(
+                p for p in (str(write_boot(self.fi_dir, self.config.output.paper_style)), os.environ.get("PYTHONPATH", ""))
+                if p)}
+            recorded = True
+        except Exception as exc:  # styling must never stop a redraw
+            self._log.warning("[replot_layout] plot-style bootstrap skipped: %s", exc)
+        if notes:
+            done = {**done, **await self._replot_by_model(
+                notes, env, recorded=recorded, records_dir=records_dir, old_records=old_records, means=means,
+                renamed={f for f in (about(n) for n in notes) if f})}
+        if mean_notes:
+            await self._rename_mean_figures(state, sorted({str(about(n)) for n in mean_notes}), env)
+        fresh = _read_figure_records(records_dir, list(state.get("figures") or []))
+        records: dict[str, Any] = {}
+        for name in [str(f) for f in state.get("figures") or []]:
+            record = fresh.get(name) or old_records.get(name)
+            if not isinstance(record, dict):
+                continue
+            # Which seeds a figure shows is the engine's to say, not the record's: a redraw changes its text, not that.
+            record = {**record, **{k: v for k, v in (old_records.get(name) or {}).items()
+                                   if k in ("replicate_mean", "single_seed")}}
+            records[name] = record
+        if records or old_records:
+            done["figure_records"] = records
+        return done
+
+    async def _replot_by_model(
+        self, notes: list[str], env: dict[str, str], *, recorded: bool, records_dir: Path,
+        old_records: dict[str, Any], means: set[str], renamed: set[str],
+    ) -> QuestState:
+        """The model's redraw of the figures ``notes`` ask for (:meth:`_node_replot_layout`). ``renamed`` are the
+        figures FI's own notes ask to rename: each must draw the numbers its record held."""
+        done: QuestState = {"refine_layout": [], "layout_missed": [], "layout_not_redrawn": []}
         fig_dir = self.quest_root / "figures"
         figures = sorted(f.name for f in fig_dir.iterdir() if f.is_file() and f.suffix.lower() in _FIGURE_SUFFIXES) \
             if fig_dir.is_dir() else []
@@ -16843,10 +16914,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # FI's own requests (figure text that shows a code name, ``_node_write``) are not a reader's: one the
             # redraw could not carry out is said in run.log, and the paper is not written again for it.
             return [n for n in found if _LABEL_MARK not in n]
-        if not notes or not figures or not data:
+
+        if not figures or not data:
             self._log.warning(
                 "[replot_layout] nothing to redraw from (%s); the figures stay as they are",
-                "no layout note" if not notes else "no figure" if not figures else "no saved numbers",
+                "no figure" if not figures else "no saved numbers",
             )
             return {**done, "layout_missed": persons(notes)}
         from .data_shape import describe_data_files
@@ -16857,14 +16929,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         data_block = await asyncio.to_thread(describe_data_files, self.quest_root, data[:200])
         experiment_code = experiment.read_text(encoding="utf-8")[:12000] if experiment.is_file() else "(not saved)"
         script = self.quest_root / "code" / "replot_layout.py"
-        # The script is model-written and can write anywhere: the figures and the saved numbers are put back whenever
-        # it fails, and any saved number it changed is put back even when it does not.
+        # The script is model-written and can write anywhere: the figures, their records and the saved numbers are put
+        # back whenever it fails, and any saved number it changed is put back even when it does not.
         backup = self.fi_dir / "layout_backup"
         shutil.rmtree(backup, ignore_errors=True)
         (backup / "figures").mkdir(parents=True)
+        (backup / "records").mkdir(parents=True)
         big: list[str] = []
         for f in figures:
             shutil.copy2(fig_dir / f, backup / "figures" / f)
+        stems = sorted({Path(f).stem for f in figures})
+        for stem in stems:
+            if (records_dir / f"{stem}.json").is_file():
+                shutil.copy2(records_dir / f"{stem}.json", backup / "records" / f"{stem}.json")
         from .plot_style import PAPER_DIRNAME
 
         if (fig_dir / PAPER_DIRNAME).is_dir():  # the figures' paper copies, put back with them
@@ -16876,7 +16953,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             (backup / d).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.quest_root / d, backup / d)
         # Written last: a backup without it was cut short and is not restored from.
-        (backup / "listed.json").write_text(json.dumps({"figures": figures, "data": data, "big": big}), encoding="utf-8")
+        (backup / "listed.json").write_text(
+            json.dumps({"figures": figures, "data": data, "big": big, "stems": stems}), encoding="utf-8")
 
         def digest(path: Path) -> str:
             if not path.is_file():
@@ -16884,26 +16962,39 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             with path.open("rb") as fh:  # in chunks: a saved-number file can be larger than memory allows
                 return hashlib.file_digest(fh, "sha256").hexdigest()
 
-        before_fig = {f: digest(fig_dir / f) for f in figures}
-        before_big = {d: digest(self.quest_root / d) for d in big}
-        # A PDF saved again with nothing changed has the same bytes only with a fixed creation date; without it, a
-        # redraw that changed nothing would look like one that did.
-        env: dict[str, str] = {**scrub_secrets(), "SOURCE_DATE_EPOCH": "0"}
-        try:
-            from .plot_style import write_boot
+        def put_back_records(names: list[str]) -> None:
+            # A record goes with its figure: the one the figure had, or none when it had none.
+            for stem in sorted({Path(n).stem for n in names}):
+                saved = backup / "records" / f"{stem}.json"
+                if saved.is_file():
+                    records_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(saved, records_dir / f"{stem}.json")
+                else:
+                    (records_dir / f"{stem}.json").unlink(missing_ok=True)
 
-            env = {**env, "PYTHONPATH": os.pathsep.join(
-                p for p in (str(write_boot(self.fi_dir, self.config.output.paper_style)), os.environ.get("PYTHONPATH", "")) if p)}
-        except Exception as exc:  # styling must never stop a redraw
-            self._log.warning("[replot_layout] plot-style bootstrap skipped: %s", exc)
+        def other_numbers(name: str) -> bool:
+            # A figure FI asked to rename must draw what its record held: only its text was to change.
+            old = _record_numbers(old_records.get(name) or _read_json_or_none_path(
+                backup / "records" / f"{Path(name).stem}.json"))
+            if not old or not recorded:
+                return False  # nothing recorded to compare with, or nothing could record the redraw
+            path = records_dir / f"{Path(name).stem}.json"
+            new = _read_json_or_none_path(path) if digest(path) != before_rec.get(Path(name).stem, "") else None
+            return not _same_record_numbers(old, _record_numbers(new))
+
+        before_fig = {f: digest(fig_dir / f) for f in figures}
+        before_rec = {stem: digest(records_dir / f"{stem}.json") for stem in stems}
+        before_big = {d: digest(self.quest_root / d) for d in big}
+        listed = [f"- {f}" + (" (drawn by FI as the mean of the seeds, from each seed's numbers: leave it as it is)"
+                              if f in means else "") for f in figures]
         # Two tries: a script that fails (or runs and changes no figure) is shown its error and written once more. The
         # figures and saved numbers are put back after a failed try, so the second starts from the same files.
         failure_block = ""
         failed, drawn, not_drawn = True, [], []
         for attempt in (1, 2):
             prompt = self._prompts["replot_layout"].substitute(
-                notes_block="\n".join(f"- {n}" for n in notes),
-                figures_block="\n".join(f"- {f}" for f in figures),
+                notes_block="\n".join(f"{i}. {n}" for i, n in enumerate(notes, 1)),
+                figures_block="\n".join(listed),
                 data_block=data_block,
                 failure_block=failure_block,
                 experiment_code=experiment_code,
@@ -16937,16 +17028,38 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             timed_out = bool(getattr(result, "timed_out", False))
             failed = result.returncode != 0 or timed_out
             stderr_tail = (result.stderr or "")[-1500:].strip()
+            typed: list[Any] = []
+            other: list[str] = []
             if failed:
+                what = "ran too long and was stopped" if timed_out else f"stopped with an error (exit code {result.returncode})"
                 self._log.warning("[replot_layout] the redraw failed (try %d of 2, %s); the figures are as they were: %s",
                                   attempt, "it ran too long" if timed_out else f"rc={result.returncode}",
                                   stderr_tail[-300:])
+            else:
+                # Checked as the run's own figure scripts are: a figure drawn from numbers typed into the script, or one
+                # FI asked only to rename that now draws other numbers, is not what the run computed.
+                typed = _figdata.typed_series(script.read_text(encoding="utf-8", errors="replace"), script.name)
+                other = [] if typed else [
+                    f for f in figures if f in renamed and f not in means and digest(fig_dir / f) != before_fig[f]
+                    and other_numbers(f)]
+                if typed:
+                    failed, what = True, "drew numbers typed into the script instead of reading them from the saved files"
+                elif other:
+                    failed, what = True, "drew other numbers than the run saved in " + ", ".join(other)
+                if failed:
+                    self._log.warning("[replot_layout] the redraw %s (try %d of 2); the figures are put back: %s", what,
+                                      attempt, "; ".join(t.says() for t in typed[:4]) or ", ".join(other))
             for f in figures:
-                if failed or (f not in drawn and digest(fig_dir / f) != before_fig[f]):
+                changed = digest(fig_dir / f) != before_fig[f]
+                # A figure drawn as the mean of the seeds is the engine's: the model cannot draw it from the seeds.
+                if failed or (changed and (f not in drawn or f in means)):
                     if not failed:
-                        self._log.warning("[replot_layout] %s was changed without being named; it is put back", f)
+                        self._log.warning("[replot_layout] %s was changed %s; it is put back", f,
+                                          "though FI draws it" if f in means else "without being named")
                     shutil.copy2(backup / "figures" / f, fig_dir / f)
                     _put_back_paper_copies(backup / "figures", fig_dir, f)
+                    if failed or not any(g != f and Path(g).stem == Path(f).stem and g in drawn for g in figures):
+                        put_back_records([f])
             for d in data:
                 if d in before_big:
                     if digest(self.quest_root / d) != before_big[d]:
@@ -16963,15 +17076,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     self._log.warning("[replot_layout] %s was added by the script; it is removed", f)
                     path.unlink(missing_ok=True)
                     if f.startswith("figures/"):
-                        # Its paper copy goes with it (or is the earlier one again, for a file name the run had).
+                        # Its paper copy goes with it (or is the earlier one again, for a file name the run had), and so
+                        # does its record.
                         _put_back_paper_copies(backup / "figures", fig_dir, f)
+                        if failed or not any(Path(g).stem == Path(f).stem and g in drawn for g in figures):
+                            put_back_records([f])
             if failed:
-                what = "ran too long and was stopped" if timed_out else f"stopped with an error (exit code {result.returncode})"
+                pass
             elif (len(not_drawn) < len(notes) and all(digest(fig_dir / f) == before_fig[f] for f in figures)
                   and not self._files_added_since(figures, data, fig_dir)):
                 # It ran, but drew nothing new, and not every note was one it said it cannot draw: a request was not
                 # carried out. (A limit: figures cannot be matched to notes, so any changed figure counts as done.)
                 failed = True
+                put_back_records(figures)  # saved again unchanged, perhaps, which wrote the records again
                 what = "ran without an error but changed no figure"
                 self._log.warning("[replot_layout] the redraw %s (try %d of 2)", what, attempt)
                 failure_block = (
@@ -16984,25 +17101,109 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 break
             failure_block = (
                 f"\n## Your previous script failed\nIt {what}."
-                + (f" The last lines of its error output:\n```\n{stderr_tail}\n```\n" if stderr_tail else "\n")
+                + (f" The last lines of its error output:\n```\n{stderr_tail}\n```\n"
+                   if stderr_tail and not typed and not other else "\n")
+                + ("These plotting calls draw lists of numbers typed into the script:\n"
+                   + "\n".join(f"- {t.says()}" for t in typed[:12])
+                   + "\nRead every number a figure draws from the saved files listed above.\n" if typed else "")
+                + ("Only the text of these figures was to change: draw each from the saved file that holds its "
+                   "numbers, as they are.\n" if other else "")
                 + "Write the script again. Use only the file names and the keys, columns and field names listed above; "
                   "do not guess a name.\n"
             )
+        answered, loose = self._layout_answers(not_drawn, notes)
         if failed:
             done["layout_missed"] = persons(notes)
             # A note the script said is about the text (NOT_DRAWN) goes to the writer, not onto the "not applied" line.
-            declared = {n.casefold() for n in not_drawn}
+            declared = {n.casefold() for n in answered + loose}
             done["layout_not_redrawn"] = persons([n for n in notes if n.casefold() not in declared] or notes)
             self._log.warning(
                 "[replot_layout] your figure request was NOT applied: two tries at redrawing did not work, so the "
                 "figures are as they were (%s)", "; ".join(n[:120] for n in notes))
         else:
-            # A NOT_DRAWN line restates a note in the model's words; when every note was FI's own, none is a reader's.
-            done["layout_missed"] = not_drawn if persons(notes) else []
+            # What the writer is told the reader asked: the person's own notes the redraw could not draw, in their
+            # words. FI's own notes never reach it; a line that names no note counts only when FI sent none.
+            asked = persons(notes)
+            ours = len(asked) < len(notes)
+            told = persons(answered) + [ln for ln in loose if not ours or ln.casefold() in {n.casefold() for n in asked}]
+            done["layout_missed"] = list(dict.fromkeys(told)) if asked else []
             self._log.info("[replot_layout] redrew %d figure(s) from the saved numbers, the experiment was not run again: %s",
                            len(drawn), ", ".join(drawn) or "-")
         shutil.rmtree(backup, ignore_errors=True)
         return done
+
+    @staticmethod
+    def _layout_answers(lines: list[str], notes: list[str]) -> tuple[list[str], list[str]]:
+        """``(notes, loose)``: the notes the redraw's ``NOT_DRAWN: <number>: ...`` lines name by number, as they were
+        written, and the lines that name none."""
+        answered: list[str] = []
+        loose: list[str] = []
+        for line in lines:
+            match = re.match(r"\s*(\d+)\s*[:.)]\s*", line)
+            if match and 1 <= int(match.group(1)) <= len(notes):
+                answered.append(notes[int(match.group(1)) - 1])
+            else:
+                loose.append(line)
+        return answered, loose
+
+    async def _rename_mean_figures(self, state: QuestState, figures: list[str], env: dict[str, str]) -> list[str]:
+        """FI's renames of a figure drawn as the mean of the seeds: each code name the plan has a label for is written as
+        the plan names it in ``code/replot_figures.json``, and ``code/replot_figures.py`` (FI's own, from each seed's
+        numbers) draws the figures again. A code name the plan has no label for is left as it is, and said in
+        run.log. Returns the figures drawn again."""
+        from .plan import plan_labels
+
+        code_dir = self.quest_root / "code"
+        plan_file, script = code_dir / "replot_figures.json", code_dir / "replot_figures.py"
+        labels = plan_labels((state.get("design") or {}).get("protocol"))
+        renames: dict[str, dict[str, str]] = {}
+        left: list[str] = []
+        for found in _figure_label_found(state, code_dir):
+            if found.get("figure") not in figures:
+                continue
+            for name in found.get("code_names") or []:
+                if labels.get(name):
+                    renames.setdefault(found["figure"], {})[name] = labels[name]
+                else:
+                    left.append(f'{found["figure"]}: "{name}"')
+        if left:
+            self._log.warning(
+                "[replot_layout] the mean of the seeds keeps a code name the plan gives no label for (FI draws such "
+                "figures itself and renames only to the plan's own label): %s", "; ".join(dict.fromkeys(left)))
+        plan = _read_json_or_none_path(plan_file)
+        if not renames:
+            return []
+        if not isinstance(plan, dict) or not script.is_file():
+            self._log.warning("[replot_layout] %s cannot be renamed: FI's redraw of the mean of the seeds is not saved",
+                              ", ".join(sorted(renames)))
+            return []
+        before = plan_file.read_text(encoding="utf-8")
+        for figure in plan.get("figures") or []:
+            mapping = renames.get(str(figure.get("file"))) if isinstance(figure, dict) else None
+            if not mapping:
+                continue
+            figure["suptitle"] = _rename_code_names(figure.get("suptitle"), mapping)
+            for panel in figure.get("axes") or []:
+                for key in ("title", "xlabel", "ylabel"):
+                    panel[key] = _rename_code_names(panel.get(key), mapping)
+                for line in panel.get("lines") or []:
+                    line["label"] = _rename_code_names(line.get("label"), mapping)
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        try:
+            result = await self.executor.execute(
+                [str(self.executor.python_path(self.quest_root)), str(script)],
+                cwd=self.quest_root, timeout_s=min(self.config.execution.timeout_s, 300), env=env,
+            )
+        except BaseException:
+            plan_file.write_text(before, encoding="utf-8")
+            raise
+        drawn = [ln.split(":", 1)[1].strip() for ln in (result.stdout or "").splitlines() if ln.startswith("REPLOTTED:")]
+        if result.returncode != 0:
+            self._log.warning("[replot_layout] renaming the mean of the seeds rc=%d: %s", result.returncode,
+                              (result.stderr or "")[-300:])
+        self._log.info("[replot_layout] renamed %s as the plan names it, drawn again as the mean of the seeds",
+                       ", ".join(f for f in drawn if f in renames) or "nothing")
+        return [f for f in drawn if f in renames]
 
     def _files_added_since(self, figures: list[str], data: list[str], fig_dir: Path) -> list[str]:
         """Figure and saved-number files now on disk that were not there when the list was taken (relative to the quest)."""
@@ -17020,8 +17221,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _restore_layout_backup(self) -> None:
         """Put back what a redraw that was cut short (the process was killed, or the run raised) left changed: the
-        figures and saved numbers as they were, and the files it added removed. A backup with no list was cut short
-        while it was being made, and nothing was changed yet."""
+        figures, their records and saved numbers as they were, the files it added removed, and its script removed. A
+        backup with no list was cut short while it was being made, and nothing was changed yet."""
+        (self.quest_root / "code" / "replot_layout.py").unlink(missing_ok=True)
         backup = self.fi_dir / "layout_backup"
         if not backup.is_dir():
             return
@@ -17030,8 +17232,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             figures = [str(f) for f in listed.get("figures") or []]
             data = [str(d) for d in listed.get("data") or []]
             fig_dir = self.quest_root / "figures"
+            from .plot_style import RECORDS_DIRNAME
+
+            records_dir = self.fi_dir / RECORDS_DIRNAME
+            stems = {str(s) for s in listed.get("stems") or []}
             for f in self._files_added_since(figures, data, fig_dir):
                 (self.quest_root / f).unlink(missing_ok=True)
+                if f.startswith("figures/") and Path(f).stem not in stems:
+                    (records_dir / f"{Path(f).stem}.json").unlink(missing_ok=True)
+            for stem in stems:
+                if (backup / "records" / f"{stem}.json").is_file():
+                    records_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(backup / "records" / f"{stem}.json", records_dir / f"{stem}.json")
+                else:
+                    (records_dir / f"{stem}.json").unlink(missing_ok=True)
             for f in figures:
                 if (backup / "figures" / f).is_file():
                     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -19385,8 +19599,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         }
         if not refine_round and not needs_experiment and not extend and not state.get("figure_labels_redrawn"):
             # Figure text that shows the code's name for a quantity (core/figure_labels.py): the figures are drawn
-            # again from the saved numbers, once per quest, by the same redraw as a person's layout note. The
-            # experiment is not run again and no repair attempt is spent.
+            # again from the saved numbers, once per script (a new script starts it over), by the same redraw as a
+            # person's layout note. The experiment is not run again and no repair attempt is spent.
             labels = _figure_label_findings(state, self.quest_root / "code")
             if labels:
                 out["refine_layout"] = list(out["refine_layout"]) + labels
@@ -29138,6 +29352,40 @@ def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
     return records
 
 
+def _record_numbers(record: Any) -> list[tuple[float, ...]]:
+    """The numbers a figure record says its series draw, labels and panels aside: each series' lowest and highest
+    value, each reference line's value, sorted. Empty when the record has none (an old record, or no labelled series),
+    and then there is nothing to compare."""
+    out: list[tuple[float, ...]] = []
+    axes = record.get("axes") if isinstance(record, dict) else None
+    for ax in axes if isinstance(axes, list) else []:
+        for s in (ax.get("series") or []) if isinstance(ax, dict) else []:
+            if not isinstance(s, dict):
+                continue
+            values = [s.get(k) for k in ("min", "max")] if "min" in s or "max" in s else [s.get("y", s.get("x"))]
+            if values and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+                out.append(tuple(float(v) for v in values))
+    return sorted(out)
+
+
+def _same_record_numbers(old: list[tuple[float, ...]], new: list[tuple[float, ...]]) -> bool:
+    """Whether two figures draw the same numbers (:func:`_record_numbers`), to the precision a saved table keeps."""
+    return len(old) == len(new) and all(
+        len(a) == len(b) and all(math.isclose(x, y, rel_tol=1e-3, abs_tol=1e-12) for x, y in zip(a, b))
+        for a, b in zip(old, new))
+
+
+def _rename_code_names(text: Any, renames: dict[str, str]) -> Any:
+    """``text`` with each code name in ``renames`` written as the plan names it, whole words only; a unit the plan's
+    label already carries is not written twice (``Ea_hat (kJ/mol)`` becomes ``Activation energy $E_a$ (kJ/mol)``)."""
+    if not isinstance(text, str) or not text:
+        return text
+    out = text
+    for name, new in renames.items():
+        out = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", lambda _m, new=new: new, out)
+    return re.sub(r"(\([^()]*\))(?:\s*\1)+", r"\1", out) if out != text else out
+
+
 def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """``(axes, series)`` for each labelled series a figure draws flat or not at all."""
     return [
@@ -29204,6 +29452,17 @@ def _figure_label_findings(state: QuestState, code_dir: Path | None = None) -> l
     the redraw from the saved numbers (``_node_write``), not to a repair of the script. Never raises."""
     try:
         from . import figure_labels as _figure_labels
+
+        return [_figure_labels.sentence(f) for f in _figure_label_found(state, code_dir)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _figure_label_found(state: QuestState, code_dir: Path | None = None) -> list[dict[str, Any]]:
+    """The findings behind :func:`_figure_label_findings`, as ``core.figure_labels.findings`` gives them. Never
+    raises."""
+    try:
+        from . import figure_labels as _figure_labels
         from .plan import plan_labels, plan_names
 
         sources: list[str] = []
@@ -29216,10 +29475,9 @@ def _figure_label_findings(state: QuestState, code_dir: Path | None = None) -> l
                 except OSError:
                     continue
         protocol = (state.get("design") or {}).get("protocol")
-        found = _figure_labels.findings(state.get("figure_records") or {}, list(state.get("figures") or []),
-                                        plan_labels(protocol), plan_names(protocol),
-                                        _figure_labels.code_identifiers(sources))
-        return [_figure_labels.sentence(f) for f in found]
+        return _figure_labels.findings(state.get("figure_records") or {}, list(state.get("figures") or []),
+                                       plan_labels(protocol), plan_names(protocol),
+                                       _figure_labels.code_identifiers(sources))
     except Exception:  # noqa: BLE001
         return []
 

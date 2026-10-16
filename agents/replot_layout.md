@@ -20,10 +20,10 @@ $experiment_code
 One Python script. It reads ONLY the saved files listed above (relative to the working directory, which is the quest folder) and draws again the figures the notes are about, over the same file names in `figures/`.
 
 - Use exactly the keys, columns and field names listed above for each file. Never guess a name: a name that is not listed fails the redraw. The script that drew the figures may use other variable names; the saved files are what counts. A name shown in quotes (`'time  (s)'`) is a Python string literal: use it exactly as written. Where a list says names were left out, read the real names in the script (`np.load(f).files`, `list(obj)`, the table's columns) and pick from them.
-- Redraw only the figures the note names or clearly implies. Leave every other figure untouched: do not write to it.
+- Redraw only the figures the note names or clearly implies. Leave every other figure untouched: do not write to it. A figure listed as drawn by FI as the mean of the seeds is never redrawn here: its seeds' numbers are not in the saved files.
 - Do not run the simulation, do not recompute a result, do not change a number. If a figure needs a number that is not in a saved file, leave that figure as it is.
 - Save each figure over its existing file name, `matplotlib.use("Agg")`, with `bbox_inches="tight"`. The house style is applied automatically; do not set colours or fonts of your own.
 - A figure holds at most 3 panels side by side in one row.
-- Print one line per figure you drew, `REPLOTTED: <file name>`. A note this redraw cannot carry out (it is about the paper's text, a caption, or the order of the figures in the paper, not about how a figure is drawn) gets one line, `NOT_DRAWN: <the note in one sentence>`. Print nothing else on stdout.
+- Print one line per figure you drew, `REPLOTTED: <file name>`. A note this redraw cannot carry out (it is about the paper's text, a caption, or the order of the figures in the paper, not about how a figure is drawn) gets one line, `NOT_DRAWN: <its number>: <the note in one sentence>` (the number it has in the list above). Print nothing else on stdout.
 
 Reply with exactly one fenced Python block.
