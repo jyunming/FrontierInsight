@@ -766,6 +766,101 @@ def _listed_counts_detailed(result_json: Any, metric_id: str, grid: dict[str, li
     return a["defined"], a["undefined"], a["excesses"], a["acc_defined"], a["acc_undefined"]
 
 
+#: The names a printed summary of one setting's trials goes by: the statistic FI can compute itself from its record of
+#: those trials (the plain statistical terms, as `core/metric_spec.py` uses them for a `mean` metric), not a name FI invented.
+_SUMMARY_NAMES = {"mean": ("mean",), "se": ("se", "sem", "stderr"), "sd": ("sd", "std"), "n": ("n",)}
+
+
+def _printed_digits_allowance(printed: float) -> float:
+    """Half a unit of the last digit the analysis printed: the rounding the number carries. ``0.0088`` was printed to four
+    places, so it stands for anything within 0.00005; a whole number (a count) is exact. FI's own record keys a value to 12
+    significant digits (:func:`_tr_value_key`), so a mean computed from it carries that much too."""
+    from decimal import Decimal, InvalidOperation
+
+    if isinstance(printed, int):
+        return 0.0
+    try:
+        exponent = Decimal(repr(float(printed))).as_tuple().exponent
+    except (InvalidOperation, ValueError):
+        return 0.0
+    return (0.5 * 10.0 ** int(exponent) if isinstance(exponent, int) else 0.0) + 1e-11 * abs(float(printed))
+
+
+def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[Any]]
+                       ) -> list[tuple[frozenset[frozenset[tuple[str, Any]]], dict[str, Any], str]]:
+    """The summary of ``metric_id`` the analysis prints for one setting, with the settings it names and where it is:
+    ``(cells, {"mean": x, "se": y, "sd": z, "n": k}, where)``. A summary is the mapping under the metric's own name beside
+    the setting's key (``by_setting`` / ``m=20,pi1=0.05`` / ``power_gain`` / ``{mean, se}``), a number under that name (its
+    mean), or ``<metric>_se`` and the like beside it. The setting is read from the key path as a list's is
+    (:func:`_path_cells`); a summary that names no setting, or only a part of the grid (the key may stand for one stratum of it),
+    is not read here."""
+    def number(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+    def read(box: Any, siblings: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for stat, names in _SUMMARY_NAMES.items():
+            for name in names:
+                if isinstance(box, dict) and number(box.get(name)):
+                    out[stat] = box[name]
+                if number(siblings.get(f"{metric_id}_{name}")):
+                    out.setdefault(stat, siblings[f"{metric_id}_{name}"])
+        if number(box):
+            out.setdefault("mean", box)
+        return out
+
+    found: list[tuple[frozenset[frozenset[tuple[str, Any]]], dict[str, Any], str]] = []
+
+    def walk(node: Any, path: tuple[Any, ...]) -> None:
+        if isinstance(node, dict):
+            stats = read(node.get(metric_id), node)
+            pairs = _path_cells(path, grid) if stats else None
+            named = frozenset(c for c in _all_cells(grid) if pairs <= c) if stats and pairs else frozenset()
+            if len(named) == 1:  # one whole setting: a part of the grid may be a stratum of it the key does not name
+                found.append((named, stats, "/".join(_segment_text(x) for x in path + (metric_id,))))
+            for k, v in node.items():
+                walk(v, path + (_grouped_segment(node, k, grid, (f"{metric_id}_values", f"{metric_id}_undefined")),))
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, path)
+
+    walk(result_json, ())
+    return found
+
+
+def _summary_verdict(printed: dict[str, Any], counts: Any) -> str | None:
+    """Whether a printed summary of a setting is that setting's own trials: ``None`` when it prints nothing FI can compute
+    from its record (no mean), ``""`` when every statistic it prints equals the one FI computes from the record of those
+    trials within the rounding its digits carry, else the plain sentence of the first that does not. ``counts``: value ->
+    how many trials returned it (FI's record of the setting)."""
+    values: list[tuple[float, int]] = []
+    for key, n in (counts or {}).items():
+        try:
+            v = float(key)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v):
+            values.append((v, int(n)))
+    n_trials = sum(n for _, n in values)
+    if "mean" not in printed or n_trials < 1:
+        return None
+    mean = math.fsum(v * n for v, n in values) / n_trials
+    mine: dict[str, tuple[float, ...]] = {"mean": (mean,), "n": (float(n_trials),)}
+    if n_trials > 1:
+        ss = math.fsum(n * (v - mean) ** 2 for v, n in values)
+        sd = (math.sqrt(ss / (n_trials - 1)), math.sqrt(ss / n_trials))  # the sample and the population standard deviation
+        mine["sd"] = sd
+        mine["se"] = tuple(x / math.sqrt(n_trials) for x in sd)
+    words = {"mean": "mean", "n": "number of trials", "sd": "standard deviation", "se": "standard error"}
+    for stat in ("mean", "n", "sd", "se"):
+        if stat not in printed or stat not in mine:
+            continue
+        if not any(abs(float(printed[stat]) - c) <= _printed_digits_allowance(printed[stat]) for c in mine[stat]):
+            return (f"its printed {words[stat]} is {printed[stat]:g}, which is not the {words[stat]} of FI's "
+                    f"{n_trials} trial(s) there ({mine[stat][0]:g})")
+    return ""
+
+
 def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recorded: tuple[int, int],
              recorded_by_cell: dict[str, Any] | None) -> dict[str, Any]:
     """What the analysis accounts for of ``metric_id``, counting ONE representation of the trials:
@@ -841,11 +936,35 @@ def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recor
             want = owed(cells)
             if counts[0] < want[0] or counts[1] < want[1]:
                 short.append({"setting": label(under), "listed": (counts[0], counts[1]),
-                              "recorded": _recorded_in_cells(recorded_by_cell or {}, metric_id, cells, grid), "owed": want})
+                              "recorded": _recorded_in_cells(recorded_by_cell or {}, metric_id, cells, grid), "owed": want,
+                              "cells": frozenset(cells)})
     for cell in sorted(set(record) - accepted, key=lambda c: label(("cells", c))):
         want = owed({cell})
         if want[0] or want[1]:
-            short.append({"setting": label(("cells", cell)), "listed": (0, 0), "recorded": of_cell(cell), "owed": want})
+            short.append({"setting": label(("cells", cell)), "listed": (0, 0), "recorded": of_cell(cell), "owed": want,
+                          "cells": frozenset({cell})})
+    # A setting whose per-trial list the analysis did not print but whose summary it did: that summary is held to the same
+    # statistics computed from FI's own record of the setting's trials. Equal (within the rounding its digits carry) and no
+    # undefined trial owed: the analysis used these trials, so the setting is accounted for. Different: a real disagreement,
+    # kept, and said. No summary: the setting stays short as before.
+    summarised = 0
+    if short and record:
+        summaries = _printed_summaries(result_json, metric_id, grid)
+        kept: list[dict[str, Any]] = []
+        for entry in short:
+            verdicts = [(_summary_verdict(stats, _union(record, set(entry["cells"]))), where)
+                        for cells_named, stats, where in summaries if cells_named == entry["cells"]]
+            verdicts = [(v, w) for v, w in verdicts if v is not None]
+            wrong = next((v for v, _ in verdicts if v), None)
+            if wrong:
+                entry["differs"] = wrong
+            elif verdicts and not entry["owed"][1]:
+                summarised += 1
+                continue
+            kept.append(entry)
+        short = kept
+    for entry in short:
+        entry.pop("cells", None)
     defined, undefined = max(per_setting[0], pooled[0]), max(per_setting[1], pooled[1])
     side_by_side = (0, 0)
     for members in families.values():
@@ -859,7 +978,7 @@ def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recor
     owed_total = (recorded[0], sum(u for d, u in (of_cell(c) for c in record) if d > 0) if record else recorded[1])
 
     def complete(i: int) -> bool:
-        if record and strata and not any(s["listed"][i] < s["owed"][i] for s in short):
+        if record and (strata or summarised) and not any(s["listed"][i] < s["owed"][i] for s in short):
             return True
         if not record and per_setting[i] >= owed_total[i]:
             return True
@@ -1440,6 +1559,7 @@ def _value_count_findings(
                     parts.append("; ".join(
                         f"at `{s['setting']}` it lists {s['listed'][0]} value(s) and {s['listed'][1]} undefined where FI's "
                         f"record of that setting has {s['recorded'][0]} with a value and {s['recorded'][1]} with none"
+                        + (f" ({s['differs']})" if s.get("differs") else "")
                         for s in short[:4]) + (f"; and {len(short) - 4} more setting(s)" if len(short) > 4 else ""))
                 if owed_undefined and not accounted_undefined:
                     parts.append("RESULT_JSON has no `" + metric + "_undefined` count and no null entries for them")
