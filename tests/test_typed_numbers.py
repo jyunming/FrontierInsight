@@ -104,3 +104,10 @@ def test_remove_replaces_each_number_and_lists_it():
 
 def test_a_paper_with_only_plan_numbers_has_no_hits():
     assert tn.hits("Noise 0.005 and 0.05, n = 5 and 10, 95% intervals.", _plan()) == []
+
+
+def test_only_fis_own_block_hides_a_typed_number():
+    own = "<!-- fi:fact-seed -->the seed was 4321<!-- /fi:fact-seed -->"
+    other = "<!-- fi:foo -->the mean was 0.7777<!-- /fi:foo -->"
+    assert _typed(own) == []
+    assert "0.7777" in _typed(other)
