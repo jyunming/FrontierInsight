@@ -57,7 +57,7 @@ _LABEL_LIST = re.compile(_LABEL_WORDS + r"(?:\d+[a-z]?[ \t]*(?:,|and|&|or|to|\u2
 _CITE = re.compile(r"\[\s*W?\d+(?:\s*[–-]\s*\d+)?(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*\s*\]")
 
 
-_TAGS = re.compile(r"<!-- /?fi:(?:v \{\{v:.*?\}\}|fact-[\w-]+) -->")
+_TAGS = re.compile(r"<!-- (?:/fi:[\w-]+|fi:v \{\{v:.*?\}\}|fi:fact-[\w-]+) -->")
 
 
 def _plain(sentence: str) -> str:
