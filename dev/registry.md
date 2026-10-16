@@ -26,8 +26,14 @@ same PR that adds, splits or renames one.
   `once_per_setting`: for a `run_cell` with no randomness, `runs_per_setting` is left out of the comparison (one run
   per setting; `Engine._run_cell_randomness` and `trial_runner.run_cell_again` decide there is no randomness).
   The count of what the analysis lists (`_listed_by_group`, `_path_cells`, `_mapping_counts`) reads a list's setting
-  from its key path; `_value_named` reads a bare key that is a name the grid gives as a value of exactly one factor
-  (`by_method`/`bonferroni`), and a trial with no value given both as `null` and as `<id>_undefined` counts once.
+  from its key path: `_grouped_segment` reads a key of a mapping whose keys are all values of one factor as that value;
+  a lone key that is a value's name (`_value_named`) is kept only when the list fits that setting's record
+  (`_read_pairs`, `_fits_record`). `_account` holds each setting to its own record exactly (values; undefined trials
+  where the setting has values; `short` settings), judging the values and the undefined ones apart, each complete by
+  the per-setting copy, the largest pooled list or keys side by side; `_values_of_other_settings` finds a list placed
+  at a setting whose values are another setting's. Findings carry a kind (`Finding`, `fabricated` / `unaccounted`,
+  `kind_of`): `Engine._run_manifest_problems` keeps the fabricated ones in `_manifest_fabricated`, which stop under
+  `warn` too.
   `engine.run_manifest_check` defaults to `warn` (recorded: `needs/RUN_MANIFEST_CHECK.json` status `warned`, QUALITY.md
   "recorded only" via `quality_report._run_problems`); `block` (and `rigor_profile: research`) repairs and stops.
 - `core/oracle_check.py` — an oracle the script must pass before its main run, judged by the engine against the

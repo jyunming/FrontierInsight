@@ -461,15 +461,19 @@ def _axis_named(segment: str, grid: dict[str, list[Any]]) -> str | None:
     return fits[0] if len(fits) == 1 else None
 
 
-def _path_cells(path: tuple[Any, ...], grid: dict[str, list[Any]]) -> frozenset[tuple[str, Any]] | None:
+def _path_cells(path: tuple[Any, ...], grid: dict[str, list[Any]], *, bare: bool = True) -> frozenset[tuple[str, Any]] | None:
     """The setting fragment a list belongs to, read from the WHOLE key path from the root: a segment ``axis=value`` names
     that fragment, and a segment that names a grid axis (:func:`_axis_named`) followed by a segment that is one of that
     axis's grid values names it too (``by_a`` / ``5`` / ``by_b`` / ``0.1`` is a=5, b=0.1). A segment that is, word for word,
     a name the grid gives as a value of exactly one axis not yet named on the path names that value too, whatever the key
     above it is called (``by_method`` / ``bonferroni`` is procedure=bonferroni when ``procedure`` takes the value
-    ``bonferroni``); a number is never read this way, since it may be an index. The fragments along the path combine.
-    ``None`` when the path names no setting, names one axis with two different values, or names an axis or value the grid does not have."""
+    ``bonferroni``); a number is never read this way, since it may be an index. Such a bare name is the weaker reading:
+    an axis the path names explicitly anywhere wins over it, and ``bare=False`` leaves it out (the reading
+    :func:`_listed_by_group` falls back to when the list does not fit that value's record). The fragments along the path
+    combine. ``None`` when the path names no setting, names one axis with two different values, or names an axis or value
+    the grid does not have."""
     found: dict[str, Any] = {}
+    soft: dict[str, Any] = {}
 
     def put(axis: str, value: Any) -> bool:
         if axis in found and found[axis] != value:
@@ -480,6 +484,11 @@ def _path_cells(path: tuple[Any, ...], grid: dict[str, list[Any]]) -> frozenset[
     i = 0
     while i < len(path):
         seg = path[i]
+        if isinstance(seg, tuple) and len(seg) == 3 and seg[0] == GROUPED:
+            if not put(seg[1], seg[2]):
+                return None
+            i += 1
+            continue
         if not isinstance(seg, str):
             i += 1
             continue
@@ -494,18 +503,49 @@ def _path_cells(path: tuple[Any, ...], grid: dict[str, list[Any]]) -> frozenset[
             return None  # names the grid's axes with a value the grid does not have: the path cannot be read
         axis = _axis_named(seg, grid)
         if axis:
-            value = _match_grid_value(path[i + 1], grid[axis]) if i + 1 < len(path) and isinstance(path[i + 1], str) else _NO_MATCH
+            nxt = path[i + 1] if i + 1 < len(path) else None
+            if isinstance(nxt, tuple) and len(nxt) == 3 and nxt[0] == GROUPED:
+                value = nxt[2] if nxt[1] == axis else _NO_MATCH
+            else:
+                value = _match_grid_value(nxt, grid[axis]) if isinstance(nxt, str) else _NO_MATCH
             if value is _NO_MATCH:
                 return None  # a grouping by an axis whose next key is not one of its values: not a path to read
             if not put(axis, value):
                 return None
             i += 2
             continue
-        named = _value_named(seg, grid, found)
+        named = _value_named(seg, grid, soft) if bare else None
         if named is not None:
-            found[named[0]] = named[1]
+            soft[named[0]] = named[1]
         i += 1
+    found.update({axis: value for axis, value in soft.items() if axis not in found})
     return frozenset(found.items()) if found else None
+
+
+#: A path segment that is a key of a mapping grouping by one factor: every key of that mapping (two or more) is a value of
+#: that one factor, as ``by_method: {uncorrected, bonferroni, benjamini_hochberg}``. It names that value as plainly as
+#: ``procedure=bonferroni`` would (:func:`_grouped_segment`).
+GROUPED = "grouped"
+
+
+def _grouped_segment(mapping: dict[str, Any], key: Any, grid: dict[str, list[Any]] | None, skip: tuple[str, ...] = ()) -> Any:
+    """``key`` as a path segment: ``(GROUPED, axis, value)`` when every key of ``mapping`` but ``skip`` (two or more) is a
+    name the grid gives as a value of one and the same factor, else ``key`` itself."""
+    if not grid or not isinstance(key, str):
+        return key
+    keys = [k for k in mapping if k not in skip]
+    if len(keys) < 2:
+        return key
+    axes = set()
+    for k in keys:
+        hit = _value_named(k, grid, {}) if isinstance(k, str) else None
+        if hit is None:
+            return key
+        axes.add(hit[0])
+    if len(axes) != 1:
+        return key
+    hit = _value_named(key, grid, {})
+    return (GROUPED, hit[0], hit[1]) if hit else key
 
 
 def _value_named(segment: str, grid: dict[str, list[Any]], found: dict[str, Any]) -> tuple[str, Any] | None:
@@ -523,8 +563,8 @@ def _value_named(segment: str, grid: dict[str, list[Any]], found: dict[str, Any]
     return hits[0]
 
 
-def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]] | None = None) -> tuple[dict[Any, tuple[int, int]],
-                                                                dict[Any, dict[Any, tuple[int, int]]]]:
+def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]] | None = None,
+                     fits: Any = None) -> tuple[dict[Any, tuple[int, int]], dict[Any, dict[Any, tuple[int, int]]]]:
     """``(real values, undefined)`` the analysis lists for ``metric_id``, per key the lists sit under (``None`` for the top
     level), and the same counts per mapping that holds those keys side by side.
 
@@ -537,17 +577,22 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
     With the protocol's ``grid``, the setting a list belongs to is read from the whole key path from the root
     (:func:`_path_cells`), not only the last key: a list under ``by_a`` / ``5`` / ``by_b`` / ``0.1`` is the setting
     a=5, b=0.1, so the same ``0.1`` under another ``a`` is another setting, not a copy. Such a list is listed under
-    ``("cells", <the pairs>)``; a list whose path names no setting is listed under its last key, as before."""
+    ``("cells", <the pairs>)``; a list whose path names no setting is listed under its last key, as before.
+
+    ``fits(pairs, mapping)`` (when FI holds the record per setting): whether a mapping's list and count fit the record of
+    the settings ``pairs`` names. A key read only as a bare value name (:func:`_path_cells`) is a guess, so the list is
+    placed there only when it fits that setting's record; otherwise it is read without the guess (a summary over three
+    estimators under ``summary/mean`` is the setting's block, not the estimator called mean)."""
     values_key, undefined_key = f"{metric_id}_values", f"{metric_id}_undefined"
     found: dict[tuple[Any, Any], dict[Any, list[int]]] = {}
 
     def number(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool)
 
-    def read(under: Any, path: tuple[Any, ...]) -> Any:
+    def read(under: Any, path: tuple[Any, ...], mapping: dict[str, Any] | None = None) -> Any:
         if not grid:
             return under
-        pairs = _path_cells(path, grid)
+        pairs = _read_pairs(path, grid, fits, mapping)
         if not pairs:
             return under
         alone = _key_pairs(under, grid) if isinstance(under, str) else None
@@ -564,7 +609,8 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
         if isinstance(node, dict):
             listed, undefined = node.get(values_key), node.get(undefined_key)
             if isinstance(listed, list) or number(undefined):
-                add(read(under, path), parent, container if container is not None else id(node), _mapping_counts(node, metric_id))
+                add(read(under, path, node), parent, container if container is not None else id(node),
+                    _mapping_counts(node, metric_id))
             inner = ("inner", id(node))
             # One entry per key, its list and its count read together: the same undefined trials given as ``null`` in the
             # key's list and as the key's count are one account (:func:`_mapping_counts`), not two.
@@ -576,11 +622,11 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
                     one[values_key] = listed[key]
                 if isinstance(undefined, dict) and key in undefined:
                     one[undefined_key] = undefined[key]
-                add(read(key, path + (key,)), id(node), inner, _mapping_counts(one, metric_id))
+                add(read(key, path + (key,), one), id(node), inner, _mapping_counts(one, metric_id))
             for k, v in node.items():
                 if k in (values_key, undefined_key) and isinstance(v, dict):
                     continue  # read above, one entry per key
-                walk(v, k, None, id(node), path + (k,))
+                walk(v, k, None, id(node), path + (_grouped_segment(node, k, grid, (values_key, undefined_key)),))
         elif isinstance(node, list):
             for v in node:
                 walk(v, under, id(node), parent, path)
@@ -594,6 +640,75 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
         seen = by_under.get(under, (0, 0))
         by_under[under] = (max(seen[0], counts[0]), max(seen[1], counts[1]))
     return by_under, families
+
+
+def _read_pairs(path: tuple[Any, ...], grid: dict[str, list[Any]], fits: Any,
+                mapping: dict[str, Any] | None) -> frozenset[tuple[str, Any]] | None:
+    """The setting a list at ``path`` belongs to (:func:`_path_cells`), its bare value names kept only when ``fits`` says
+    the list fits that setting's record (or when there is no record to ask)."""
+    pairs = _path_cells(path, grid)
+    if pairs and fits is not None and mapping is not None:
+        explicit = _path_cells(path, grid, bare=False)
+        if explicit != pairs and not fits(pairs, mapping):
+            return explicit
+    return pairs
+
+
+def _record_by_setting(recorded_by_cell: dict[str, Any] | None, metric_id: str,
+                       grid: dict[str, list[Any]]) -> dict[frozenset[tuple[str, Any]], Any]:
+    """FI's record of ``metric_id`` per setting of ``grid`` (the setting as :func:`_canonicalize_cell` keys it): each value
+    with how many trials returned it."""
+    from collections import Counter
+
+    out: dict[frozenset[tuple[str, Any]], Any] = {}
+    for key, by_name in (recorded_by_cell or {}).items():
+        cell, _why = _canonicalize_cell(key, grid)
+        counts = by_name.get(metric_id) if cell is not None and isinstance(by_name, dict) else None
+        if counts:
+            # keyed as FI's record keys a value (12 significant digits), so a value is found by its key, not by a search
+            mine = out.setdefault(cell, Counter())
+            for value, n in counts.items():
+                mine[value if isinstance(value, str) else (_tr_value_key(value) or value)] += n
+    return out
+
+
+def _tr_value_key(value: Any) -> str | None:
+    from .trial_runner import _value_key
+
+    return _value_key(value)
+
+
+def _finite(values: list[Any]) -> list[float]:
+    return [x for x in values if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(float(x))]
+
+
+def _union(record: dict[frozenset[tuple[str, Any]], Any], cells: set[frozenset[tuple[str, Any]]]) -> Any:
+    from collections import Counter
+
+    out: Counter = Counter()
+    for cell in cells:
+        out.update(record.get(cell) or {})
+    return out
+
+
+def _fits_record(metric_id: str, grid: dict[str, list[Any]], record: dict[frozenset[tuple[str, Any]], Any]) -> Any:
+    """``fits(pairs, mapping)`` for :func:`_listed_by_group`: the mapping's values and undefined trials are no more than the
+    record of the settings ``pairs`` names holds, and each value is one of theirs."""
+    from .trial_runner import _not_among
+
+    cells_all = _all_cells(grid) if grid else set()
+
+    def fits(pairs: frozenset[tuple[str, Any]], mapping: dict[str, Any]) -> bool:
+        cells = {cell for cell in cells_all if pairs <= cell}
+        union = _union(record, cells)
+        have = recorded_counts({metric_id: union}, metric_id) or (0, 0)
+        defined, undefined = _mapping_counts(mapping, metric_id)
+        if defined > have[0] or undefined > have[1]:
+            return False
+        listed = mapping.get(f"{metric_id}_values")
+        return not _not_among(_finite(listed) if isinstance(listed, list) else [], union)
+
+    return fits
 
 
 def _recorded_in_cells(recorded_by_cell: dict[str, Any], metric_id: str, cells: set[frozenset[tuple[str, Any]]],
@@ -620,22 +735,41 @@ def _listed_counts(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
 
 def _listed_counts_detailed(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recorded: tuple[int, int],
                             recorded_by_cell: dict[str, Any] | None) -> tuple[int, int, list[dict[str, Any]], int, int]:
-    """``(real values, undefined, excesses)`` the analysis accounts for, counting ONE representation of the trials. Each
-    excess is ``{"setting", "listed": (values, undefined), "recorded": (values, undefined)}``: a setting the analysis
-    lists more under than FI's record of that setting holds.
+    """``(real values, undefined, excesses, accounted values, accounted undefined)`` of :func:`_account`."""
+    a = _account(result_json, metric_id, grid, recorded, recorded_by_cell)
+    return a["defined"], a["undefined"], a["excesses"], a["acc_defined"], a["acc_undefined"]
 
-    Lists sitting under a setting's key (``R0=1.5,N=500``, or a part of the setting such as ``R0=1.5``) are the per-setting
-    copy: each setting is counted once (the largest list for it, never the sum of two), and each is held, when FI keeps its
-    record per setting, to that setting's own trials (an entry in ``excesses`` when it lists more). Lists sitting anywhere
-    else are pooled copies: never added to the per-setting ones and never to each other (the largest stands for them), each
-    held to the pooled totals. What the analysis accounts for is the larger of the two representations, so a copy of a
-    short list cannot make up the difference.
+
+def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recorded: tuple[int, int],
+             recorded_by_cell: dict[str, Any] | None) -> dict[str, Any]:
+    """What the analysis accounts for of ``metric_id``, counting ONE representation of the trials:
+
+    * ``defined`` / ``undefined``: the values and undefined trials of the larger of the per-setting and pooled copies;
+      ``acc_defined`` / ``acc_undefined`` the same, or the keys side by side in one mapping added up when that is more;
+    * ``excesses``: each setting the analysis lists more under than FI's record of that setting holds
+      (``{"setting", "listed": (values, undefined), "recorded": (values, undefined)}``), checked for every list placed at a
+      setting, the copies too;
+    * ``short``: each setting the per-setting copy lists fewer under than it owes, a setting with no list at all among
+      them (``{"setting", "listed", "recorded", "owed"}``);
+    * ``values_complete`` / ``undefined_complete``: whether every value, and every undefined trial owed, is accounted for
+      by one representation at least: the per-setting copy with no setting short, the largest pooled list, or the keys
+      side by side added up. The two are judged apart, since an analysis may give the values per setting and the undefined
+      trials as one count.
+
+    Lists sitting under a setting's key (``R0=1.5,N=500``, a part of the setting such as ``R0=1.5``, or a path that names
+    it) are the per-setting copy: each setting is counted once, the most specific list for it first (one setting before a
+    part of the grid), never the sum of two. When FI keeps its record per setting the account is exact: a setting owes
+    every trial with a value, and every trial with none where some trial of it has a value; where not one trial has a
+    value (power where there is no effect) its undefined trials are allowed, never owed, and never stand in for another
+    setting's. With no per-setting record the totals are held to FI's pooled record. Lists sitting anywhere else are pooled
+    copies: never added to the per-setting ones or to each other (the largest stands for them).
 
     Keys side by side in one mapping that the grid cannot read as settings (``"1"``, ``"2"``, a setting's own name) are
-    parts of one report, like the rows of one table: for the lower bound (the last two numbers returned) they add up, so
-    an honest report keyed that way is not taken for its largest part. They are never held to the upper bound as a sum,
-    since a pooled copy may sit beside them; each one alone still is."""
-    groups, families = _listed_by_group(result_json, metric_id, grid)
+    parts of one report, like the rows of one table: they add up as a representation of their own. They are never held to
+    the upper bound as a sum, since a pooled copy may sit beside them; each one alone still is."""
+    record = _record_by_setting(recorded_by_cell, metric_id, grid) if recorded_by_cell and grid else {}
+    fits = _fits_record(metric_id, grid, record) if record else None
+    groups, families = _listed_by_group(result_json, metric_id, grid, fits)
 
     def cells_of(under: Any) -> set[frozenset[tuple[str, Any]]] | None:
         if isinstance(under, tuple) and len(under) == 2 and under[0] == "cells":
@@ -647,9 +781,17 @@ def _listed_counts_detailed(result_json: Any, metric_id: str, grid: dict[str, li
             return ",".join(f"{a}={v}" for a, v in sorted(under[1], key=lambda p: list(grid).index(p[0])))
         return str(under)
 
+    def of_cell(cell: frozenset[tuple[str, Any]]) -> tuple[int, int]:
+        return recorded_counts({metric_id: record.get(cell) or {}}, metric_id) or (0, 0)
+
+    def owed(cells: set[frozenset[tuple[str, Any]]]) -> tuple[int, int]:
+        each = [of_cell(c) for c in cells]
+        return sum(d for d, _ in each), sum(u for d, u in each if d > 0)
+
     strata: list[tuple[Any, set[frozenset[tuple[str, Any]]], tuple[int, int]]] = []
     pooled = [0, 0]
     excesses: list[dict[str, Any]] = []
+    short: list[dict[str, Any]] = []
     for under, counts in groups.items():
         cells = cells_of(under)
         if cells:
@@ -658,32 +800,109 @@ def _listed_counts_detailed(result_json: Any, metric_id: str, grid: dict[str, li
             pooled = [max(pooled[0], counts[0]), max(pooled[1], counts[1])]
     accepted: set[frozenset[tuple[str, Any]]] = set()
     per_setting = [0, 0]
-    for under, cells, counts in sorted(strata, key=lambda t: -(t[2][0] + t[2][1])):
-        if cells & accepted:
-            continue  # the same trials already counted under another key
-        accepted |= cells
-        per_setting = [per_setting[0] + counts[0], per_setting[1] + counts[1]]
+    for under, cells, counts in sorted(strata, key=lambda t: (len(t[1]), -(t[2][0] + t[2][1]))):
         if recorded_by_cell:
             have_value, have_none = _recorded_in_cells(recorded_by_cell, metric_id, cells, grid)
             if counts[0] > have_value or counts[1] > have_none or counts[0] + counts[1] > have_value + have_none:
                 excesses.append({"setting": label(under), "listed": (counts[0], counts[1]),
                                  "recorded": (have_value, have_none)})
+        if cells & accepted:
+            continue  # the same trials already counted under another key
+        accepted |= cells
+        per_setting = [per_setting[0] + counts[0], per_setting[1] + counts[1]]
+        if record:
+            want = owed(cells)
+            if counts[0] < want[0] or counts[1] < want[1]:
+                short.append({"setting": label(under), "listed": (counts[0], counts[1]),
+                              "recorded": _recorded_in_cells(recorded_by_cell or {}, metric_id, cells, grid), "owed": want})
+    for cell in sorted(set(record) - accepted, key=lambda c: label(("cells", c))):
+        want = owed({cell})
+        if want[0] or want[1]:
+            short.append({"setting": label(("cells", cell)), "listed": (0, 0), "recorded": of_cell(cell), "owed": want})
     defined, undefined = max(per_setting[0], pooled[0]), max(per_setting[1], pooled[1])
     side_by_side = (0, 0)
     for members in families.values():
-        parts = [c for under, c in members.items()
-                 if not cells_of(under)]
+        parts = [c for under, c in members.items() if not cells_of(under)]
         total = (sum(c[0] for c in parts), sum(c[1] for c in parts))
         if total[0] + total[1] > side_by_side[0] + side_by_side[1]:
             side_by_side = total
+    acc = (defined, undefined)
     if side_by_side[0] + side_by_side[1] > defined + undefined:
-        return defined, undefined, excesses, side_by_side[0], side_by_side[1]
-    return defined, undefined, excesses, defined, undefined
+        acc = side_by_side
+    owed_total = (recorded[0], sum(u for d, u in (of_cell(c) for c in record) if d > 0) if record else recorded[1])
+
+    def complete(i: int) -> bool:
+        if record and strata and not any(s["listed"][i] < s["owed"][i] for s in short):
+            return True
+        if not record and per_setting[i] >= owed_total[i]:
+            return True
+        return pooled[i] >= owed_total[i] or side_by_side[i] >= owed_total[i]
+
+    return {"defined": defined, "undefined": undefined, "excesses": excesses, "acc_defined": acc[0],
+            "acc_undefined": acc[1], "short": short, "owed": owed_total,
+            "values_complete": complete(0), "undefined_complete": complete(1)}
 
 
-#: How much of the trials that measured a metric the analysis's values and undefined ones must account for when FI holds the
-#: record of them (the analysis copies the lists FI_TRIALS holds, so this is a tolerance, not a licence to leave trials out).
-_ACCOUNTED = 0.9
+def _lists_at_settings(result_json: Any, metric_id: str, grid: dict[str, list[Any]], fits: Any) -> list[tuple[str, Any, list[Any]]]:
+    """Each ``<metric_id>_values`` list with where it is and the setting it is read as (:func:`_read_pairs`, ``None`` when
+    its path names none): ``(where, pairs, values)``."""
+    values_key = f"{metric_id}_values"
+    out: list[tuple[str, Any, list[Any]]] = []
+
+    def walk(node: Any, path: tuple[Any, ...]) -> None:
+        if isinstance(node, dict):
+            listed = node.get(values_key)
+            if isinstance(listed, list):
+                out.append(("/".join(_segment_text(s) for s in path + (values_key,)), _read_pairs(path, grid, fits, node), listed))
+            elif isinstance(listed, dict):
+                for key, value in listed.items():
+                    if isinstance(value, list):
+                        out.append(("/".join(_segment_text(s) for s in path + (values_key, key)),
+                                    _read_pairs(path + (key,), grid, fits, {values_key: value}), value))
+            for k, v in node.items():
+                if k != values_key:
+                    walk(v, path + (_grouped_segment(node, k, grid, (values_key, f"{metric_id}_undefined")),))
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, path)
+
+    walk(result_json, ())
+    return out
+
+
+def _segment_text(segment: Any) -> str:
+    return str(segment[2]) if isinstance(segment, tuple) and len(segment) == 3 and segment[0] == GROUPED else str(segment)
+
+
+def _values_of_other_settings(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
+                              recorded_by_cell: dict[str, Any] | None) -> list[Finding]:
+    """Each list placed at a setting that holds values FI's trials produced, but not that setting's trials (another
+    setting's, or another procedure's of the same runs): numbers that setting never produced. A value no trial produced
+    anywhere is :func:`core.trial_runner.reported_values_not_run`'s, and is not told twice."""
+    from .trial_runner import _not_among
+
+    record = _record_by_setting(recorded_by_cell, metric_id, grid) if recorded_by_cell and grid else {}
+    if not record:
+        return []
+    everywhere = _union(record, set(record))
+    fits = _fits_record(metric_id, grid, record)
+    out: list[Finding] = []
+    for where, pairs, values in _lists_at_settings(result_json, metric_id, grid, fits):
+        if not pairs:
+            continue
+        cells = {cell for cell in record if pairs <= cell}
+        if not cells:
+            continue
+        numbers = _finite(values)
+        here = len(_not_among(numbers, _union(record, cells)))
+        anywhere = len(_not_among(numbers, everywhere))
+        if here > anywhere:
+            setting = ",".join(f"{a}={v}" for a, v in sorted(pairs, key=lambda p: list(grid).index(p[0])))
+            out.append(fabricated(
+                f"the analysis reports `{where}` as `{metric_id}` at `{setting}`, but {here - anywhere} of its "
+                f"{len(numbers)} value(s) are not that setting's trials (they are another setting's or another "
+                "procedure's): the list under a setting must be that setting's own values from FI_TRIALS"))
+    return out
 
 
 def recorded_counts(recorded: dict[str, Any] | None, metric_id: str) -> tuple[int, int] | None:
@@ -1013,16 +1232,6 @@ def metric_grid(protocol: dict[str, Any] | None, metric: str,
     return grid
 
 
-def _undefined_where_never_defined(recorded_by_cell: dict[str, Any] | None, metric_id: str) -> int:
-    """The trials of FI's record with no value of ``metric_id`` at the settings where not one trial has a value of it."""
-    total = 0
-    for by_name in (recorded_by_cell or {}).values():
-        counts = recorded_counts(by_name, metric_id) if isinstance(by_name, dict) else None
-        if counts is not None and counts[0] == 0 and counts[1] > 0:
-            total += counts[1]
-    return total
-
-
 def _value_count_findings(
     protocol: dict[str, Any], manifest: dict[str, Any], result_json: Any, *, trial_mode: bool = False,
     recorded: dict[str, Any] | None = None, recorded_by_cell: dict[str, Any] | None = None,
@@ -1060,6 +1269,11 @@ def _value_count_findings(
     expected_total = sum(_num(n) or 0 for n in successful.values()) or runs * len(_all_cells(grid))
     out: list[tuple[str, bool]] = []
     for spec in protocol.get("metrics") or []:
+        if recorded and recorded_by_cell and isinstance(spec, dict) and spec.get("id") and not spec.get("given"):
+            # Each list placed at a setting holds that setting's own values (a copy of another procedure's list under
+            # this one's name has the right count, and every value is among the run's).
+            out.extend((f, True) for f in _values_of_other_settings(
+                result_json, str(spec["id"]), metric_grid(protocol, str(spec["id"]), recorded_by_cell), recorded_by_cell))
         if not isinstance(spec, dict) or spec.get("kind") != "mean" or not spec.get("id"):
             continue
         metric = str(spec["id"])
@@ -1093,16 +1307,17 @@ def _value_count_findings(
                 continue  # derived by the analysis: no per-trial list of it exists to count against
             defined, undefined = counts
             measured = defined + undefined
-            listed_defined, listed_undefined, excesses, accounted_defined, accounted_undefined = _listed_counts(
-                result_json, metric, metric_grid(protocol, metric, recorded_by_cell), (defined, undefined),
-                recorded_by_cell)
+            mgrid = metric_grid(protocol, metric, recorded_by_cell)
+            account = _account(result_json, metric, mgrid, (defined, undefined), recorded_by_cell)
+            listed_defined, listed_undefined = account["defined"], account["undefined"]
+            accounted_defined, accounted_undefined = account["acc_defined"], account["acc_undefined"]
+            excesses = [f"{r['listed'][0]} value(s) and {r['listed'][1]} undefined for `{r['setting']}` where FI's record "
+                        f"has {r['recorded'][0]} with a value and {r['recorded'][1]} with none" for r in account["excesses"]]
             made = (f"in {measured:g} trial(s) of FI's record: {defined:g} with a value and {undefined:g} with none "
                     "(the measurement does not exist there)")
-            # A setting where no trial has a value of the metric (power where there is no real effect) holds nothing to
-            # drop: the analysis may leave its list out. Its undefined trials are not asked for, only allowed, and they
-            # never make up for values missing elsewhere.
-            nowhere = _undefined_where_never_defined(recorded_by_cell, metric)
-            owed_undefined, owed = undefined - nowhere, measured - nowhere
+            # Exact, setting by setting (_account): every value, and every undefined trial of a setting where some trial
+            # has a value; a setting where none has one (power where there is no real effect) holds nothing to drop.
+            owed_undefined = account["owed"][1]
             if not _values_listed(result_json, metric) and not accounted_defined and not accounted_undefined:
                 out.append((
                     f"the metric `{metric}` is a mean over the trials that measured it, {made}, but the analysis's "
@@ -1110,19 +1325,27 @@ def _value_count_findings(
                     "it averaged, so the claimed trial count can be checked against them",
                     True,
                 ))
-            elif (accounted_defined + min(accounted_undefined, owed_undefined) < owed * _ACCOUNTED
-                  or (owed_undefined and not accounted_undefined)):
-                gap = ("RESULT_JSON has no `" + metric + "_undefined` count and no null entries for them"
-                       if owed_undefined and not accounted_undefined else "the rest are not accounted for")
+                continue
+            if not account["values_complete"] or not account["undefined_complete"]:
+                short = [s for s in account["short"] if s["listed"][0] < s["owed"][0] or s["listed"][1] < s["owed"][1]]
+                parts = []
+                if short:
+                    parts.append("; ".join(
+                        f"at `{s['setting']}` it lists {s['listed'][0]} value(s) and {s['listed'][1]} undefined where FI's "
+                        f"record of that setting has {s['recorded'][0]} with a value and {s['recorded'][1]} with none"
+                        for s in short[:4]) + (f"; and {len(short) - 4} more setting(s)" if len(short) > 4 else ""))
+                if owed_undefined and not accounted_undefined:
+                    parts.append("RESULT_JSON has no `" + metric + "_undefined` count and no null entries for them")
+                gap = "; and ".join(parts) or "the rest are not accounted for"
                 out.append((
                     f"the metric `{metric}` is measured {made}; the analysis accounts for {accounted_defined} value(s) + "
                     f"{accounted_undefined} undefined = {accounted_defined + accounted_undefined}, and {gap}: the "
                     "values and the "
-                    "undefined ones together must be the trials that measured it, and the undefined ones are reported, "
-                    "never dropped",
+                    "undefined ones together must be the trials that measured it, setting by setting, and the undefined "
+                    "ones are reported, never dropped",
                     True,
                 ))
-            elif (listed_defined > defined or listed_undefined > undefined
+            if (listed_defined > defined or listed_undefined > undefined
                   or listed_defined + listed_undefined > measured or excesses):
                 # The record is exact: a count above it (a values list longer than the trials that returned a value, an
                 # undefined count above the trials that returned none) is a number FI never recorded, whatever it is for.
@@ -1215,10 +1438,11 @@ def differences(
     protocol: dict[str, Any], manifest: dict[str, Any] | None, result_json: Any, *, recorded: dict[str, Any] | None = None,
     recorded_by_cell: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """The concrete difference behind a finding that the analysis lists MORE values than FI's record holds, one entry per
-    `kind: "mean"` metric: ``{"metric", "measured": (values, undefined), "listed": (values, undefined), "settings": [...]}``
-    where each setting is ``{"setting", "listed": (values, undefined), "recorded": (values, undefined)}`` for a setting the
-    analysis lists more under than the trials of that setting returned. Computed from the counts :func:`problems` compares,
+    """The concrete difference behind a finding that the analysis lists MORE values than FI's record holds, or leaves trials
+    of a setting out, one entry per `kind: "mean"` metric: ``{"metric", "measured": (values, undefined), "listed": (values,
+    undefined), "settings": [...], "short": [...]}`` where each of ``settings`` is ``{"setting", "listed": (values,
+    undefined), "recorded": (values, undefined)}`` for a setting the analysis lists more under than the trials of that
+    setting returned, and each of ``short`` the same for a setting it lists fewer under (:func:`_account`). Computed from the counts :func:`problems` compares,
     never from its sentences. Empty when FI holds no record or the analysis lists no more than was measured."""
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
@@ -1233,13 +1457,16 @@ def differences(
         if counts is None:
             continue
         defined, undefined = counts
-        listed_defined, listed_undefined, excesses, _ad, _au = _listed_counts_detailed(
-            result_json, metric, metric_grid(protocol, metric, recorded_by_cell), (defined, undefined), recorded_by_cell)
+        account = _account(result_json, metric, metric_grid(protocol, metric, recorded_by_cell), (defined, undefined),
+                           recorded_by_cell)
+        listed_defined, listed_undefined, excesses = account["defined"], account["undefined"], account["excesses"]
         measured = defined + undefined
+        short = ([s for s in account["short"] if s["listed"][0] < s["owed"][0] or s["listed"][1] < s["owed"][1]]
+                 if not (account["values_complete"] and account["undefined_complete"]) else [])
         if (listed_defined > defined or listed_undefined > undefined or listed_defined + listed_undefined > measured
-                or excesses):
+                or excesses or short):
             out.append({"metric": metric, "measured": (defined, undefined), "listed": (listed_defined, listed_undefined),
-                        "settings": excesses})
+                        "settings": excesses, "short": short})
     return out
 
 
@@ -1255,6 +1482,12 @@ def plain_difference(found: list[dict[str, Any]]) -> str:
         return ""
     metrics = ", ".join(f"`{d['metric']}`" for d in found[:3]) + (f" and {len(found) - 3} more" if len(found) > 3 else "")
     settings = [s for d in found for s in d["settings"]]
+    short = [s for d in found for s in d.get("short") or []]
+    if short and not settings:
+        many = "several settings" if len(short) > 1 else "one setting"
+        return (f"The analysis leaves out trials of {many} (for {metrics}: their values, or how many had none, are "
+                f"missing), so the paper could not be tied to everything that was measured (settings: "
+                f"{_settings_phrase(short)}).")
     if settings:
         many = "under several settings" if len(settings) > 1 else "under one setting"
         return (f"The analysis lists more values {many} than the trials of those settings returned (for {metrics}: "
@@ -1278,6 +1511,12 @@ def difference_request(found: list[dict[str, Any]], *, limit: int = 10) -> str:
                          f"undefined, but that setting's trials returned {s['recorded'][0]:g} and {s['recorded'][1]:g}")
         if len(d["settings"]) > limit:
             lines.append(f"    - ... and {len(d['settings']) - limit} more settings")
+        for s in (d.get("short") or [])[:limit]:
+            lines.append(f"    - under `{s['setting']}` it lists {s['listed'][0]:g} value(s) and {s['listed'][1]:g} "
+                         f"undefined, but that setting's trials returned {s['recorded'][0]:g} with a value and "
+                         f"{s['recorded'][1]:g} with none: list every one")
+        if len(d.get("short") or []) > limit:
+            lines.append(f"    - ... and {len(d['short']) - limit} more settings")
     return ("\n\nWhat FI found by counting (its own record of the trials against what your analysis prints):\n"
             + "\n".join(lines)
             + "\nThe values listed under a setting must be that setting's own trials, each once: read them from that "
