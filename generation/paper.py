@@ -32,7 +32,11 @@ from core.engine import QuestArtifacts, build_further_reading, cited_references,
 from core.proc_tree import run_tree
 from generation._pandoc import BLANK_LINE_RE, MARKDOWN_READER, MATH_SPAN_RE, find_pandoc
 from generation import _cjk
-from generation._figure_captions import blank_lines_around_figures, numbers_off_figure_captions
+from generation._figure_captions import (
+    blank_lines_around_figures,
+    figures_in_own_paragraph,
+    numbers_off_figure_captions,
+)
 from generation._headings import strip_heading_numbers
 from generation._keywords import extract_keywords
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
@@ -1732,6 +1736,8 @@ class PaperGenerator:
             sanitized_md = _tighten_inline_math(sanitized_md)
             # The template numbers figures, so the writer's "**Figure 2.**"
             # would print as "Figure 2: Figure 2.".
+            # A paper saved before the engine did this still has figures run into a paragraph.
+            sanitized_md, _ = figures_in_own_paragraph(sanitized_md)
             sanitized_md = numbers_off_figure_captions(sanitized_md)
             # The template numbers the sections, so the writer's "## 1. Introduction"
             # would print as "1 1. Introduction".
