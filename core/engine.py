@@ -127,6 +127,8 @@ from . import results_by_setting as _results_by_setting
 from . import plan_ledger as _ledger
 from . import plan_steps as _plan_steps
 from . import equation_tests as _equation_tests
+from . import outside_run as _outside_run
+from . import agent_coder as _agent_coder
 from . import code_reach as _code_reach
 from . import code_review as _code_review
 from . import review_pairs as _pairs
@@ -1000,6 +1002,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     # reused the quest_id; LangGraph still treated the
                     # `initial` payload as a fresh START.
                     prior_snapshot = await graph.aget_state(run_config)
+                    if getattr(prior_snapshot, "values", None):
+                        # A resumed quest: files an older FI left in code/tests/ with expected values in them go first.
+                        stale = _equation_tests.remove_stale(self.quest_root / "code")
+                        if stale:
+                            self._log.info("[run] removed files an older FI left in code/ with expected values in "
+                                           "them: %s", ", ".join(stale))
+                        # The values an earlier run delivered for a person's tests: gone while code runs again.
+                        _code_layout.remove_check_values(self.quest_root / "code")
                     # `values` is empty dict for never-run threads.
                     payload: Any
                     # ``--from <step>``: the first call continues from the checkpoint taken just before that step; every
@@ -1513,6 +1523,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                             clarify_answer_path, self.quest_id,
                         )
                         break
+                    # No more of the quest's code runs in this call: the values its tests compare with are written now.
+                    await self._deliver_check_values(final_state if isinstance(final_state, dict) else {})
             finally:
                 # Guard against early failure: if ``resolve_endpoint_async``
                 # raised (unknown provider / proxy spawn failure / etc.),
@@ -10261,6 +10273,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except Exception as exc:  # noqa: BLE001 -- a convenience file, never a reason to stop
             self._log.warning("[execute] could not compare code/study.json with the protocol: %r", exc)
 
+    async def _deliver_check_values(self, state: QuestState) -> None:
+        """Write the values FI's tests in ``code/tests/`` compare with into ``.fi/checks/`` (a person's copy; FI judged
+        with the values it holds). Only once the quest's code has run for the last time in this call of :meth:`run`:
+        written earlier, code run without isolation could open them by an absolute path. Never stops a quest."""
+        try:
+            package = self._package_in_use(state)
+            if package:
+                await asyncio.to_thread(_code_layout.write_check_values, self.quest_root / "code",
+                                        self._protocol_block(state))
+        except Exception as exc:  # noqa: BLE001 -- a convenience for a person, not part of the result
+            self._log.warning("[code] could not write the values code/tests/ compares with: %s", exc)
+
     async def _refresh_code_project(self, state: QuestState, deps: list[str], note: str = "", *,
                                     category: str = "changed") -> None:
         """Keep ``code/`` a project that runs on its own (README, requirements, run.py) and, with a ``note``, record
@@ -10272,6 +10296,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # git and the file scan block: keep them off the event loop so a --fleet's other quests keep going.
             protocol = self._protocol_block(state)
             package = self._package_in_use(state)
+            # A quest begun by an older FI (a resume) can still hold expected values in code/tests/: removed, and FI's
+            # test files written again below in the current form.
+            stale = await asyncio.to_thread(_equation_tests.remove_stale, self.quest_root / "code")
+            if stale:
+                self._log.info("[code] removed files an older FI left in code/ with expected values in them: %s",
+                               ", ".join(stale))
+            # What the tests FI writes into code/ compare with is not on disk while the code can still run: FI judges
+            # with the values it holds, and a person's copy is written at the end (_deliver_check_values).
+            await asyncio.to_thread(_code_layout.remove_check_values, self.quest_root / "code")
             await asyncio.to_thread(
                 _code_project.refresh,
                 self.quest_root, deps=deps, protocol=protocol,
@@ -10710,7 +10743,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self.executor, python, self.quest_root, f"code/{_split_run.SIMULATE_NAME}",
                 timeout_s=self.config.execution.timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                in_each_run=_in_run.of(protocol),
+                in_each_run=_in_run.of(protocol), log=self._log,
             ), label="calling a setting of simulate.py again")
         except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
             same, why = None, f"{type(e).__name__}: {e}"[:300]
@@ -12045,8 +12078,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 raw_dir = self._raw_root() / "equation_tests"
                 raw_dir.mkdir(parents=True, exist_ok=True)
                 env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
-                _rc, text, _err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
-                for r in _equation_tests.parse_results(text) or []:
+                # Measured from a copy outside the quest, judged here (core/equation_measure.py).
+                results, _rc, _err = await _equation_tests.run_and_judge(self._run_in_env, case_list, timeout_s=300,
+                                                                         env=env, outside=True)
+                for r in results or []:
                     out[f"equation:{r.get('id')}"] = "pass" if r.get("status") == _equation_tests.OK else "fail"
         accepted = [p for p in record.get("accepted_tests") or [] if isinstance(p, str)]
         for path in accepted:  # each test in its own process: one test cannot change what another sees
@@ -12179,19 +12214,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "reports how long the run took.")
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
-                          env: dict[str, str] | None = None) -> tuple[int, str, str]:
+                          env: dict[str, str] | None = None, outside: bool = False) -> tuple[int, str, str]:
         """Run ``python <argv>`` from the quest folder, in the quest's environment (a venv, the shared interpreter, or the
-        Docker container): ``(returncode, stdout, stderr)``."""
+        Docker container): ``(returncode, stdout, stderr)``. ``outside``: from a copy of ``code/`` outside the quest
+        folder (core/outside_run.py), so FI's records are not next to the code that runs."""
         py = self.executor.python_path(self.quest_root)
         # A function rewritten within the same second to the same size would be read from its stale compiled copy.
         for cache in (self.quest_root / "code").glob("**/__pycache__"):
             shutil.rmtree(cache, ignore_errors=True)
+        executor = _outside_run.OutsideExecutor(self.executor, self.quest_root, log=self._log) if outside else self.executor
+        env = {k: v for k, v in env.items() if k != "FI_CHECKS_DIR"} if env is not None else None
         try:
             # From the quest folder with paths relative to it: in Docker that folder is what is mounted as /work.
-            ran = await self.executor.execute([str(py), "-B", *argv], cwd=self.quest_root, timeout_s=timeout_s, env=env)
+            ran = await executor.execute([str(py), "-B", *argv], cwd=self.quest_root, timeout_s=timeout_s, env=env)
         except Exception as e:  # noqa: BLE001 -- a check that could not start is a failed check, said as such
             return -1, "", repr(e)
         return ran.returncode, ran.stdout or "", (ran.stderr or "") + ("\n(timed out)" if ran.timed_out else "")
+
+    async def _run_outside(self, argv: list[str], **kwargs: Any) -> tuple[int, str, str]:
+        """:meth:`_run_in_env` from a copy of ``code/`` outside the quest folder (core/outside_run.py)."""
+        return await self._run_in_env(argv, outside=True, **kwargs)
 
     def _function_steps_partial_note(self) -> str:
         """For the code-writing prompt when the package was kept with functions that still fail their check."""
@@ -12240,7 +12282,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             summary=str(view.get("summary") or ""),
             prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"],
                      "module": self._prompts["implement_module_repair"]},
-            chat=chat, run=self._run_in_env, log=self._log, repairs=_function_steps.REPAIRS,
+            chat=chat, run=self._run_outside, log=self._log, repairs=_function_steps.REPAIRS,
             max_calls=_function_steps.max_calls_for(len(specs)), constants=constants, install=self._install_packages,
             declared=deps, topic_block=self._topic_block(), passages=passages)
 
@@ -12304,12 +12346,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         raw_dir = self._raw_root() / "equation_tests"
         raw_dir.mkdir(parents=True, exist_ok=True)
         env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
-        rc, out, _err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
-        results = _equation_tests.parse_results(out)
-        if results is None:
-            # the tests were written and started but gave no results: the package crashed or hung, which is a failure,
-            # never a pass (a repair that leaves a model the tests cannot even run is not kept)
-            return f"the equation tests gave no results on this code (exit code {rc})"
+        # A run that crashed, hung or printed no result fails every test (equation_tests.judged), never a pass: a repair
+        # that leaves a model the tests cannot even run is not kept.
+        results, _rc, _err = await _equation_tests.run_and_judge(self._run_in_env, case_list, timeout_s=300, env=env,
+                                                                 outside=True)
         return ", ".join(str(r.get("id")) for r in results if r.get("status") != _equation_tests.OK)
 
     async def _second_version_gate(self, state: QuestState, py: Any, exec_env: Any) -> bool:
@@ -12508,17 +12548,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 failures = []
                 break
             _equation_tests.write(self.quest_root / "code", case_list)
-            rc, out, err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
-            results = _equation_tests.parse_results(out)
-            if results is None:
-                self._log.warning("[equations] the tests of the model's equations did not run (%s); going on without them",
-                                  _function_steps.exception_line(err or out, 160) if (err or out).strip() else f"exit code {rc}")
-                record["error"] = _function_steps.traceback_end(err or out, 400)
-                failures = []
-                break
+            # The functions are called in a process of their own, from a copy of code/ outside the quest, given only their
+            # inputs; what they return is compared with the plan's examples here, in FI's process (core/equation_measure.py).
+            results, rc, err = await _equation_tests.run_and_judge(self._run_in_env, case_list, timeout_s=300, env=env,
+                                                                   outside=True)
+            if any(r.get("detail") == _equation_tests.NO_RESULT for r in results):
+                # A crash, a hang or an early exit fails the tests (never "going on without them"); what it printed is kept.
+                self._log.warning("[equations] the run that calls the model's functions gave no result (%s); the tests "
+                                  "count as failed", _function_steps.exception_line(err or "", 160) if (err or "").strip() else f"exit code {rc}")
+                record["error"] = _function_steps.traceback_end(err or "", 400)
             by_id = {c["id"]: c for c in case_list}
-            numbers = _equation_tests.load_numbers(self.quest_root / "code")
-            failures = [{**r, **numbers.get(str(r.get("id")), {}), "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
+            failures = [{**r, "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
                          "module": by_id.get(str(r.get("id")), {}).get("module", "")}
                         for r in results if r.get("status") not in (_equation_tests.OK, _equation_tests.OUTPUTS)]
             # The test could not judge it (one value for outputs returned by name): not tested before the run, said so in the
@@ -13057,6 +13097,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     # --analyze has no experiment to design, so there is no design to audit.
                     "design_audit": "not_applicable" if self.config.engine.analyze_local_first else "on",
                     **(_phased.evidence_settings(self.quest_root) if _phased.enabled(self.config) else {}),
+                    # A coding agent that wrote the code without a container ran without isolation (core/agent_coder.py).
+                    **_agent_coder.evidence_settings(self.quest_root),
                 },
             )
             if not write:
@@ -13335,6 +13377,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                             mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol),
                             proportion_names=_mc_error.proportion_names(protocol),
                             repeated=_mc_error.repeats_trials(protocol),
+                            log=self._log,
                         )
                     except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
                         checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
@@ -14288,7 +14331,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of(protocol),
                     mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol),
                     proportion_names=_mc_error.proportion_names(protocol),
-                    repeated=_mc_error.repeats_trials(protocol),
+                    repeated=_mc_error.repeats_trials(protocol), log=self._log,
                 )
                 problems += found
                 judged = _oracle_with_reader_flags(
@@ -14306,7 +14349,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     base_seed=int(env.get("FI_REPLICATE_SEED") or 0), deterministic="run_trial" not in entries,
                     timeout_s=self.config.execution.timeout_s, env=env, thresholds=thresholds,
                     paired=any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or []),
-                    in_each_run=_in_run.of(protocol),
+                    in_each_run=_in_run.of(protocol), log=self._log,
                 )
                 series = _improve.series_of(run, trial_names)
                 if run.ok_trials == 0:
@@ -14809,7 +14852,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     values, _why = await _trial_runner.run_case(
                         self.executor, py, self.quest_root, rel, cell=cell, timeout_s=timeout, env=case_env,
                         thresholds=thresholds, trial=trial_no, oracle=oracle, in_each_run=_in_run.of(protocol),
-                        paired=_mc_error.paired(protocol))
+                        paired=_mc_error.paired(protocol), log=self._log)
                 except Exception as e:  # noqa: BLE001 -- a look that could not be had never stops a quest
                     self._log.warning("[oracle] an extra run of %r's case could not be made: %r", name, e)
                     return None
@@ -27924,10 +27967,104 @@ def _strip_plan_numbers(protocol: dict[str, Any], *, names_only: bool = False) -
             if names_only and isinstance(inputs, dict):
                 eq["example"] = {"input_names": list(inputs), **({"random": True} if _equation_tests.is_random(
                     {**eq, "example": example}) else {})}
-    for oracle in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
-        if isinstance(oracle, dict):
-            oracle.pop("expected", None)
-            oracle.pop("expected_formula", None)
+    # The value each check compares with, and how close it must be, are not shown: not as the check's fields, not as a
+    # criterion's target built on a check, and not in any prose of the plan (written as words there, so the prose keeps
+    # its meaning). A number the code is given as an input (a grid value, a threshold, a check's setting) stays: the
+    # code cannot run without it, even where it is also what a check recovers.
+    oracles = [o for o in (protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else [])
+               if isinstance(o, dict)]
+    criteria = [c for c in (protocol.get("criteria") if isinstance(protocol.get("criteria"), list) else [])
+                if isinstance(c, dict) and c.get("oracle")]
+    hidden = [o.get(k) for o in oracles for k in ("expected", "tolerance", "limit")]
+    hidden += [c.get(k) for c in criteria for k in ("target", "tolerance")]
+    inputs = _input_numbers(protocol)
+    hidden = [v for v in hidden if isinstance(v, (int, float)) and not isinstance(v, bool) and float(v) not in inputs]
+    for oracle in oracles:
+        for key in _ORACLE_HIDDEN:
+            oracle.pop(key, None)
+    for criterion in criteria:
+        criterion.pop("target", None)
+        criterion.pop("tolerance", None)
+    _mask_prose(protocol, hidden)
+
+
+#: The fields of a check a request that writes or repairs code never sees.
+_ORACLE_HIDDEN = ("expected", "expected_formula", "tolerance", "tolerance_mode", "limit")
+
+
+#: The fields of a protocol that are settings the code runs with: a number written in them, also as text ("q = 0.01"),
+#: is an input and is never masked (with each check's ``case``).
+_SETTING_FIELDS = ("grid", "fixed", "in_each_run")
+
+
+def _input_numbers(protocol: dict[str, Any]) -> set[float]:
+    """The numbers the plan gives the code to run with: every number of the protocol outside its checks, its criteria
+    built on a check and its model's worked examples; and every number, also one written as text, of its settings
+    (:data:`_SETTING_FIELDS`) and of each check's setting (``case``)."""
+    def walk(node: Any, text: bool = False) -> set[float]:
+        if isinstance(node, dict):
+            return set().union(*(walk(v, text) for v in node.values())) if node else set()
+        if isinstance(node, list):
+            return set().union(*(walk(v, text) for v in node)) if node else set()
+        if isinstance(node, (int, float)) and not isinstance(node, bool):
+            return {float(node)}
+        if text and isinstance(node, str):
+            return {_prose_value(m) for m in _PROSE_NUMBER.finditer(node)} - {None}
+        return set()
+
+    found = walk({k: v for k, v in protocol.items() if k not in ("oracles", "criteria", "model")})
+    found |= walk({k: protocol.get(k) for k in _SETTING_FIELDS if protocol.get(k) is not None}, text=True)
+    for o in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
+        if isinstance(o, dict):
+            found |= walk(o.get("case") or {}, text=True)
+    return found
+
+
+def _prose_value(m: re.Match[str]) -> float | None:
+    """The number a match of :data:`_PROSE_NUMBER` writes (a percentage as the fraction it states)."""
+    try:
+        x = float(m.group(0).rstrip("%"))
+    except ValueError:
+        return None
+    return x / 100 if m.group(1) else x
+
+
+def _mask_prose(node: Any, hidden: list[Any]) -> Any:
+    """In place: every string under ``node`` with the ``hidden`` numbers written as words (:func:`_without_numbers`)."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if isinstance(v, str):
+                node[k] = _without_numbers(v, hidden)
+            else:
+                _mask_prose(v, hidden)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            if isinstance(v, str):
+                node[i] = _without_numbers(v, hidden)
+            else:
+                _mask_prose(v, hidden)
+    return node
+#: A number in prose: not part of a word or a longer number; a full stop after it ends the sentence ("is 0.6415.").
+_PROSE_NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?(%?)(?!\w|\.\d)")
+
+
+def _without_numbers(text: str, hidden: list[Any]) -> str:
+    """``text`` with every number that is one of ``hidden`` (a check's expected value or tolerance, also written as a
+    percentage) put as words: what is checked stays readable, the number it is held to does not."""
+    # 0 and 1 stay: every setting is written with them ("sigma=0"), and a check held to 0 says so in its words anyway.
+    values = [float(v) for v in hidden if isinstance(v, (int, float)) and not isinstance(v, bool) and v not in (0, 1)]
+    if not values:
+        return text
+
+    def swap(m: re.Match[str]) -> str:
+        x = _prose_value(m)
+        if x is None:
+            return m.group(0)
+        if any(math.isclose(x, v, rel_tol=1e-9, abs_tol=1e-15) for v in values):
+            return "[the value FI checks it against]"
+        return m.group(0)
+
+    return _PROSE_NUMBER.sub(swap, text)
 
 
 def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:

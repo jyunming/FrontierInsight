@@ -97,6 +97,16 @@ def _returned_values(fn: ast.AST) -> tuple[dict[str, list[ast.AST]], dict[str, l
         return None
 
     for node in ast.walk(fn):
+        if isinstance(node, ast.Assign):
+            # Every name a statement binds depends on its whole right-hand side: ``a, b = f(x)`` (each of a and b comes
+            # from f), ``x = y = f()``, and ``d[key] = v`` (what ``d`` holds comes from v, whatever the key).
+            for target in node.targets:
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    for t in ast.walk(target):
+                        if isinstance(t, ast.Name):
+                            assigned.setdefault(t.id, []).append(node.value)
+                elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                    assigned.setdefault(target.value.id, []).append(node.value)
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
             if isinstance(target, ast.Name):

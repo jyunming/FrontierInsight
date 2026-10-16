@@ -41,6 +41,9 @@ MODEL_NAME = "model.py"
 TESTS_DIR = "tests"
 TEST_NAME = "test_oracles.py"
 TEST_PATH = f"{TESTS_DIR}/{TEST_NAME}"
+#: What the checks of ``tests/test_oracles.py`` compare with (each check's expected value and tolerance): written by FI
+#: into the quest's ``.fi/checks/`` (:func:`core.equation_tests.checks_dir`), outside ``code/``.
+ORACLE_VALUES_NAME = "oracle_values.json"
 METHODS_NAME = "METHODS.md"
 HEADING = "How the code will be laid out"
 
@@ -618,7 +621,9 @@ plan each time the code changes.
     python -m pytest tests          (or, without pytest: python tests/{test_name})
 
 Each test runs the simulation on the check's small case the way Frontier Insight does before the main run, and compares
-the number with the value the plan fixed (and the tolerance it allows).
+the number with the value the plan fixed (and the tolerance it allows). Those values are not in this folder: Frontier
+Insight writes them into the quest's `.fi/checks/{values_name}` (next to `code/`) once the quest's code has run for the
+last time. Run the tests inside the quest folder, or name the folder that holds that file: python tests/{test_name} --checks <folder>.
 """
 import hashlib
 import json
@@ -633,6 +638,22 @@ os.environ.setdefault("FI_THRESHOLDS", {thresholds!r})
 import simulate  # noqa: E402
 
 CHECKS = json.loads({checks!r})
+VALUES_NAME = {values_name!r}
+
+
+def _values():
+    if "--checks" in sys.argv[:-1]:
+        folder = sys.argv[sys.argv.index("--checks") + 1]
+    else:
+        folder = str(Path(__file__).resolve().parent.parent.parent / ".fi" / "checks")
+    try:
+        data = json.loads((Path(folder) / VALUES_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {{}}
+    return data if isinstance(data, dict) else {{}}
+
+
+VALUES = _values()
 
 
 def _seed(case):
@@ -682,35 +703,60 @@ def _measure(check):
 
 def _check(index):
     check = CHECKS[index]
+    values = VALUES.get(check["name"])
+    assert isinstance(values, dict) and "expected" in values and "limit" in values, (
+        f"{{check['name']}}: the value this check compares with is not here (Frontier Insight keeps it in the quest's "
+        f".fi/checks/{{VALUES_NAME}}, outside code/); run the tests inside the quest folder")
+    check = {{**check, "expected": values["expected"], "limit": values["limit"]}}
     value = float(_measure(check))
     assert math.isfinite(value) and abs(value - check["expected"]) <= check["limit"], (
         f"{{check['name']}}: measured {{value}}, the plan expects {{check['expected']}} within {{check['limit']}}")
 '''
 
 
-def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
-    """``tests/test_oracles.py``: one test per check of the plan that has a number to agree with; ``None`` when there is
-    none."""
+def _oracle_checks(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Each check of the plan that has a number to agree with: its public part (name, case, measure) and, under
+    ``expected`` / ``limit``, the values the test compares with."""
     from .trial_runner import is_per_trial
 
-    checks, names = [], []
-    taken: set[str] = set()
+    out = []
     for oracle in _oracle.declared(protocol):
         expected, limit, _mode = _oracle.limit_of(oracle)
         if expected is None or limit is None:
             continue
         own = _oracle.case_of(oracle)
-        name = str(oracle["name"]).strip()
-        checks.append({"name": name, "case": own[0] if own else None, "measure": own[1] if own else None,
-                       "expected": expected, "limit": limit,
-                       "per_trial": is_per_trial(oracle)})
-        names.append(_test_name(name, taken))
+        out.append({"name": str(oracle["name"]).strip(), "case": own[0] if own else None,
+                    "measure": own[1] if own else None, "expected": expected, "limit": limit,
+                    "per_trial": is_per_trial(oracle)})
+    return out
+
+
+def oracle_values(protocol: dict[str, Any] | None) -> dict[str, dict[str, Any]] | None:
+    """What ``tests/test_oracles.py`` compares with, by check name: ``{"expected", "limit"}``. FI writes it outside
+    ``code/`` (:func:`write_check_values`), never into the test file, and only once the quest's code has run for the
+    last time.
+    ``None`` when the plan has no check with a number."""
+    checks = _oracle_checks(protocol)
+    if not checks:
+        return None
+    return {c["name"]: {"expected": c["expected"], "limit": c["limit"]} for c in checks}
+
+
+def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
+    """``tests/test_oracles.py``: one test per check of the plan that has a number to agree with; ``None`` when there is
+    none. The file names each check, its case and its measure; the values it compares with are read when it runs from
+    the quest's ``.fi/checks/`` (:func:`oracle_values`), never written into it."""
+    checks, names = [], []
+    taken: set[str] = set()
+    for check in _oracle_checks(protocol):
+        checks.append({k: v for k, v in check.items() if k not in ("expected", "limit")})
+        names.append(_test_name(check["name"], taken))
     if not checks:
         return None
     thresholds = (protocol or {}).get("thresholds")
     text = _TEST_HEADER.format(test_name=TEST_NAME,
                                thresholds=json.dumps(thresholds if isinstance(thresholds, dict) else {}, sort_keys=True),
-                               checks=json.dumps(checks, default=str))
+                               checks=json.dumps(checks, default=str), values_name=ORACLE_VALUES_NAME)
     for i, (name, check) in enumerate(zip(names, checks)):
         text += f"\n\ndef {name}():\n    {check['name']!r}\n    _check({i})\n"  # the check's name, as a literal
     text += ("\n\nif __name__ == \"__main__\":\n    failed = 0\n    for name, fn in [" +
@@ -721,8 +767,18 @@ def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
     return text
 
 
+def _equation_cases(code_dir: Path, protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+    from . import equation_tests as _eqt
+
+    sources = dict(package_sources(code_dir))
+    if (Path(code_dir) / "simulate.py").is_file():
+        sources["simulate.py"] = (Path(code_dir) / "simulate.py").read_text(encoding="utf-8")
+    return _eqt.cases(_eqt.example_rows(protocol), _eqt.locate(protocol, sources))
+
+
 def project_files(code_dir: Path, protocol: dict[str, Any] | None, package: str) -> dict[str, str]:
-    """What FI writes into ``code/`` for the package layout: the equation list and the checks as unit tests."""
+    """What FI writes into ``code/`` for the package layout: the equation list and the checks as unit tests. The values
+    the tests compare with are not among them: :func:`write_check_values` writes those outside ``code/``."""
     rows = equation_map(protocol, package_sources(code_dir))
     files = {METHODS_NAME: methods_text(protocol, rows, package)}
     tests = oracle_tests(protocol)
@@ -731,18 +787,57 @@ def project_files(code_dir: Path, protocol: dict[str, Any] | None, package: str)
     # One small test per equation, from the plan's own worked example (core/equation_tests.py).
     from . import equation_tests as _eqt
 
-    sources = dict(package_sources(code_dir))
-    if (Path(code_dir) / "simulate.py").is_file():
-        sources["simulate.py"] = (Path(code_dir) / "simulate.py").read_text(encoding="utf-8")
-    cases = _eqt.cases(_eqt.example_rows(protocol), _eqt.locate(protocol, sources))
+    cases = _equation_cases(code_dir, protocol)
     if cases:
         files[_eqt.TEST_PATH] = _eqt.test_source(cases)
     return files
 
 
+def write_check_values(code_dir: Path, protocol: dict[str, Any] | None) -> list[Path]:
+    """Write what the tests of :func:`project_files` compare with (the checks' expected values and tolerances, the worked
+    examples' inputs and outputs) into the quest's ``.fi/checks/``, beside ``code/`` and outside it; a file with nothing
+    to hold is removed. Called once the quest's code has run for the last time (``Engine._deliver_check_values``): a
+    person's copy, never what FI judges with. The files written."""
+    from . import equation_tests as _eqt
+
+    folder = _eqt.checks_dir(code_dir)
+    written: list[Path] = []
+    values = oracle_values(protocol)
+    path = folder / ORACLE_VALUES_NAME
+    if values:
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(values, default=str, indent=1) + "\n", encoding="utf-8")
+        written.append(path)
+    else:
+        path.unlink(missing_ok=True)
+    cases = _equation_cases(code_dir, protocol)
+    eq = _eqt.write_values(code_dir, cases)
+    if eq is not None:
+        written.append(eq)
+    return written
+
+
+def remove_check_values(code_dir: Path) -> list[Path]:
+    """Remove what :func:`write_check_values` wrote: before the quest's code runs, so the expected values are not in a
+    file of the quest that code can open by any path (FI judges with the values it holds in memory). The files
+    removed."""
+    from . import equation_tests as _eqt
+
+    folder = _eqt.checks_dir(code_dir)
+    removed = []
+    for name in (ORACLE_VALUES_NAME, _eqt.VALUES_NAME):
+        path = folder / name
+        if path.is_file():
+            path.unlink(missing_ok=True)
+            removed.append(path)
+    return removed
+
+
 def readme_lines(package: str) -> list[str]:
     return [f"- `{package}/`: the model's equations, one function each (no scenario values); `simulate.py` uses it.",
-            f"- `{TEST_PATH}`: the plan's checks against known answers, as unit tests (`python -m pytest tests`).",
+            f"- `{TEST_PATH}`: the plan's checks against known answers, as unit tests (`python -m pytest tests`). The "
+            "values they compare with are kept by Frontier Insight in the quest's `.fi/checks/`, next to this folder, so "
+            "the tests run inside the quest folder (or with `--checks <that folder>`).",
             f"- `{METHODS_NAME}`: which function computes each equation of the model."]
 
 

@@ -116,11 +116,22 @@ def _run(tmp_path: Path, source: str, example: Any, formula: str = FORMULA) -> d
         line.split("(")[0][4:] for line in source.splitlines() if line.startswith("def ")), "file": "m.py"}})
     assert case_list, rows
     (tmp_path / "m.py").write_text(source, encoding="utf-8")
-    (tmp_path / "t.py").write_text(eqt.test_source(case_list), encoding="utf-8")
-    done = subprocess.run([sys.executable, "-B", "t.py", "--json"], cwd=tmp_path, capture_output=True, text=True)
+    done = _run_t(tmp_path, case_list)
     results = eqt.parse_results(done.stdout)
     assert results, done.stderr
     return results[0]
+
+
+def _run_t(tmp_path: Path, case_list: list[dict[str, Any]]) -> subprocess.CompletedProcess:
+    """``t.py`` written beside the module, with FI's values (kept out of the test file) in a folder of their own."""
+    import json
+
+    (tmp_path / "t.py").write_text(eqt.test_source(case_list), encoding="utf-8")
+    checks = tmp_path / "fi_checks"
+    checks.mkdir(exist_ok=True)
+    (checks / eqt.VALUES_NAME).write_text(json.dumps(eqt.values_of(case_list)), encoding="utf-8")
+    return subprocess.run([sys.executable, "-B", "t.py", "--json", "--checks", str(checks)], cwd=tmp_path,
+                          capture_output=True, text=True)
 
 
 def test_a_function_returning_its_outputs_by_name_for_a_one_value_example_cannot_be_judged(tmp_path: Path) -> None:
@@ -194,12 +205,10 @@ def test_the_numbers_of_a_multi_output_failure_are_per_output_for_the_log(tmp_pa
     rows = eqt.example_rows(_protocol(PER_OUTPUT))
     case_list = eqt.cases(rows, {"E4": {"module": "m", "function": "arrhenius_parameters", "file": "m.py"}})
     (tmp_path / "m.py").write_text(SIGN_ERROR, encoding="utf-8")
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "tests" / "t.py").write_text(eqt.test_source(case_list), encoding="utf-8")
-    done = subprocess.run([sys.executable, "-B", "tests/t.py", "--json"], cwd=tmp_path, capture_output=True, text=True)
-    result = eqt.parse_results(done.stdout)[0]
-    numbers = eqt.load_numbers(tmp_path)["E4"]
-    reason = eqt.failure_reason({**result, **numbers})
+    from tests.equation_judge_helpers import fi_verdict
+
+    result = fi_verdict(case_list, tmp_path)[0]  # FI's verdict carries the numbers for the log itself
+    reason = eqt.failure_reason(result)
     assert reason.startswith("ln_A_hat: got 2, expected 6"), reason
     assert "Ea_hat" not in reason  # only the output that disagrees
 
@@ -246,8 +255,7 @@ def test_a_required_parameter_the_example_does_not_give_is_the_same_rule_at_outl
         planned = bool(eqt.parameter_problems(rows, {"E4": (names, required)}))
         (tmp_path / "m.py").write_text(source, encoding="utf-8")
         case_list = eqt.cases(rows, {"E4": {"module": "m", "function": "f", "file": "m.py"}})
-        (tmp_path / "t.py").write_text(eqt.test_source(case_list), encoding="utf-8")
-        done = subprocess.run([sys.executable, "-B", "t.py", "--json"], cwd=tmp_path, capture_output=True, text=True)
+        done = _run_t(tmp_path, case_list)
         status = eqt.parse_results(done.stdout)[0]["status"]
         assert planned == (status == "contract"), (source, planned, status)
 

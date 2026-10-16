@@ -587,12 +587,44 @@ same PR that adds, splits or renames one.
 - `core/equation_tests.py` — a small test per equation of the plan's model, from the plan's own worked example
   (`example_rows`: FI computes the output with `oracle_forms`' calculator; `request` asks the plan for a missing or
   unusable one; `locate` finds the function labelled `# E<n>`; `cases` / `test_source` / `write` produce
-  `code/tests/test_equations.py`; `failure_message` names the function and equation, never the expected value; `failure_reason` + `load_numbers` give the run log the
-  value got, the expected value and the tolerance from `tests/equation_numbers.json`; `is_random` reads a flag on the equation or
+  `code/tests/test_equations.py` (a person's copy; FI never takes its verdict from it); `run_and_judge` /
+  `measure_argv` / `measure_spec` / `judged` are FI's own verdict: the functions are called in a process given only
+  their inputs (`python -c`, the text of `core/equation_measure.py`, run from a copy outside the quest through
+  `Engine._run_in_env(outside=True)`) and compared with the expected value and tolerance in FI's process;
+  `failure_message` names the function and equation, never the expected value; `failure_reason` gives the run log the
+  value got, the expected value and the tolerance from that verdict; `static_facts` (FI's own `ast` reading of the
+  function, carried by `locate` / `cases` as `static`) alone decides `contract` and `outputs`, and `judged` makes a
+  missing, doubled or forged result line a failure (`NO_RESULT`), never "not tested"; `remove_stale` deletes what an older FI left in
+  `code/tests/` with values in it (called on resume and by `_refresh_code_project`); the test file holds ids, formulas
+  and functions only, and `values_of` / `write_values` / `checks_dir` write the inputs, outputs and tolerances to
+  `<quest>/.fi/checks/equation_values.json`, outside `code/`, only at the end of `Engine.run` (`_deliver_check_values`;
+  `write` and `code_layout.remove_check_values` take them off disk while code can run) (a person names another folder with `--checks`; no
+  environment variable is read); `is_random` reads a flag on the equation or
   example, or a formula that says a term follows a distribution (`~N(0,1)`, `~U(a,b)`, "drawn from", "random")). Called
   by `Engine._equation_gate` (in `_node_execute` before the oracle gate; repairs a failing function alone, then returns
   a failed run for the existing `execute_reflect`), by `_hold_oracle_forms` (missing examples ride in the one request to
   the plan, `_revise_checks_only(equations="example")`) and by `code_layout.project_files`. A test still failing after its repairs, or an outline whose parameters differ from the example's inputs (`parameter_problems`), asks the plan once per equation to work the example out again, unless the example is what the equation as written gives (`equation_value`, recorded as a row's `equation_agrees`; an example its equation does not give is `unusable`) (`rederive_request`; `Engine._rederive_examples`; `with_examples` applies it in `_draft_protocol`; never the code's number). Records: `.fi/equation_tests.json`, `.fi/examples_rederived.json`.
+- `core/equation_measure.py` — standard library only, no annotations (also run whole as `python -c` and embedded in
+  `code/tests/test_equations.py`): `measure(case)` calls one function on its inputs and returns what it computed (one
+  number, named outputs, or fixed-seed draws), never compared with anything; `judge(case, measured)` is the comparison
+  (strict closed-form rule, per-output tolerances, the draws' mean and variance within `SIGMAS` standard errors), run in
+  FI's process only; `main()` measures a spec and prints one `EQUATION_MEASURED: <nonce> {...}` line. Tests:
+  `tests/test_fi_judges_numbers.py` (the review's in-process theft probe: a wrong law that reads the test's memory is a
+  mismatch), `tests/equation_judge_helpers.py`.
+- `core/outside_run.py` — FI runs the quest's code from a copy outside the quest folder: `OutsideCopy` (`<temp>/fi_run/
+  <random id>/` with `code/` minus `.git`/`.venv`/caches/stale value files, the folders the run reads and the paths FI
+  names for the run: `CELL_INPUTS` (`inputs/`, `data/` without `data/results/`) for a cell, a check case or an equation
+  measurement, `ANALYSIS_INPUTS` (every folder but FI's own, never a top-level file) for the analysis; never
+  `needs/`, `.fi/checks/`, `.fi/state.sqlite`; `bring_back` copies back everything the run wrote except into
+  `FI_OWNED` (`needs/`, `.fi/` other than the named paths, `code/`, `paper/`), and writes the copy's paths as the quest's in FI's
+  result files), `named_paths` (paths into the quest on a command line or in an environment), `OutsideExecutor` (an
+  executor whose runs from the quest folder go through a copy; names every dropped path in run.log, through the `log`
+  `run_trials` / `measure_oracles` / `run_case` / `_run_one` are given, else the quest's own logger). Used by
+  `Engine._run_in_env(outside=True)` / `Engine._run_outside` (the equation measuring runs, the function filler),
+  `trial_runner.run_trials`, `trial_runner._run_one` (every oracle case) and `TrialsRunner.execute` (the analysis). Not
+  a sandbox: the interpreter is still the quest's `.venv/`, and a search by absolute path still finds the quest. Not
+  yet used by the finding tests, the second-version comparison, the warm-up/pilot runs, `optimise`, `probes_run`,
+  `run_estimate`, `split_run` or a cluster job. Tests: `tests/test_outside_run.py`, `tests/test_trial_runner.py`.
 - `core/function_steps.py` — the model's package written one function at a time: `model_functions` (the outline's
   `implements` / `depends_on`, dependency order), `replace_function` (splice one function, its imports and helpers into
   `model.py`, parameters and `# E<n>` label kept), `FunctionFiller` (fill, import-check, equation test, repair alone,
@@ -605,7 +637,33 @@ same PR that adds, splits or renames one.
   Step cards (`S<n>`, `core/plan_steps.py`) are functions of the same package: `Spec.kind` / `Spec.card`, written in `model.py` under `# S<n>` labels (a separate `steps.py` would be invisible to `prefilled_block`, the module repair and `improve`), tested by the card's example and `step_static`; `max_calls_for(n)` is `4*n`; `passages` (id -> text) fills the prompts' `$literature_block`, `$example_block` shows a step's example inputs (its expected output only in the repair after a failed example); `untested_by_example` in the record.
 - `core/step_passages.py` — async, no model call: `for_card` finds up to three Axon / pinned-paper hits for a step card or equation (`Knowledge.asearch(top_k=3, sources=[], web=False)`), keeps those that belong to the card's `source`, cuts them with `passages.select_relevant_excerpt` (lexical) to about 1500 characters under the citation line, adds the sourced `definitions` quotes of the metrics the step computes, and caches in `.fi/step_passages.json` (a resume does not retrieve again).
 - `core/step_static.py` — pure ast: `check(source, name)` is a plain reason when a step function returns only numbers written into it or never reads a parameter.
-- `core/step_coverage.py` — pure ast: `check(simulation_source, package_functions, metrics)` warns for each protocol metric `run_cell` / `run_trial` returns as a literal or computes without a call into the package (not wired to any gate).
+- `core/agent_coder.py` — EXPERIMENTAL, not wired into the engine: a coding agent (Claude CLI) writes and fixes `code/`.
+  `ClaudeCliRunner` (`claude -p --output-format stream-json --verbose --safe-mode --strict-mcp-config --tools
+  Read,Edit,Write,Glob,Grep,Bash`, `--session-id` FI chooses / `--resume`, prompt on stdin, CREATE_NO_WINDOW,
+  `parse_stream` reads the session id and the `result` text). `mode="host"` (the normal path, no Docker, NOT isolated:
+  Python the agent runs can read and write anything the person can): the person's own login, `--restricted
+  --permission-mode acceptEdits --permission-prompts none --allowedTools "Bash(python:*)"`, in a scratch copy of `code/`
+  outside the quest (`workdir`: `<temp>/fi_agent_work/<random id>/code`, the id made once by `scratch_id` and kept in
+  `.fi/agent_coder_copy.json`, so `--resume` finds the session and the name never says the quest's). `mode="docker"`
+  (optional, only when `docker_status` finds the daemon running; `make_runner` chooses and logs `NO_DOCKER_LINE`
+  otherwise): image from `docker/agent_coder/Dockerfile`, only the copy and a per-quest session folder mounted, caps
+  dropped, non-root, `-e CLAUDE_CODE_OAUTH_TOKEN` by name only (a `claude setup-token` token). `AgentCoder(quest_root,
+  runner, max_fixes, timeout_s, startup=)`: `write(task)` / `continue_(feedback)`, rounds in `.fi/agent_coder.json`
+  before they start (each with `isolation`: `none` or `docker`). `_copy_round` removes stale value files from `code/`
+  (`equation_tests.remove_stale`), makes the copy fresh (`outside_run.copy_code`: no `.git`, `.venv`, caches), and
+  without a container runs a TRIPWIRE, not a sandbox: it snapshots the whole quest folder (`.venv/` by size and time) and
+  the folders Python starts from (`startup_dirs`: user site and site-packages `.pth` / `sitecustomize.py` /
+  `usercustomize.py`), and records as a cheat any write there or beside the copy and any agent code `reaches_outside`
+  flags (FI's check files, `..`, absolute paths, `.parent.parent`, home); a round with a cheat keeps nothing, otherwise
+  only `.py` and plain text/data files (`TEXT_SUFFIXES`) that are not FI's (`FI_OWNED_FILES` / `tests/`) and not run
+  outputs (`SCRATCH_DIRS`) are copied back; a `.pth`, a startup file or any other kind of file is a cheat.
+  `evidence_settings` tells the evidence ladder `code_writer_isolation` (`isolation_unverified` + `NO_ISOLATION_WHY`
+  when a round ran without a container; merged in `Engine` beside `_phased.evidence_settings`; `core/evidence.py` makes
+  it the gap "the code writer ran without isolation (...)" and `record["code_writer"]`). `TreeSnapshot` /
+  `guarded_round`: one fix round undone whole when it fails a condition. Tests: `tests/test_agent_coder.py` (stand-ins
+  for `claude` and `docker`; the daemon test skips when it is down), `tests/test_agent_sees_no_values.py` (the leak
+  search over everything the writer sees).
+- `core/step_coverage.py` — pure ast: `check(simulation_source, package_functions, metrics)` warns for each protocol metric `run_cell` / `run_trial` returns as a literal or computes without a call into the package (not wired to any gate). A name bound by unpacking (`a, b = pkg.f()`) or a value stored under any key (`d[k] = v`) is followed. Tests: `tests/test_step_coverage.py` (the s1 code raises nothing; the fake-truth cheats of `tests/fixtures/agent_cheats/` are caught; one token package call defeats it). The cheats and what catches each: `tests/fixtures/agent_cheats/README.md`, `tests/test_agent_cheats.py`.
 - `core/second_impl.py` — a second, independently written version of up to 6 key functions (`key_functions`: steps with no example, then those feeding the headline/core metrics, then equations; random ones skipped and said), written from the card/equation, passages, signatures and example INPUTS only (`agents/second_impl_write.md`, saved in `.fi/second_impl/`, never `code/`), and FI's comparison of the two in one subprocess on 4-8 inputs it builds (`build_inputs`, `judge_rows`, `same`). A disagreement goes to a judge (`agents/second_impl_adjudicate.md`): `main_wrong` -> injected `repair_main`, kept only if injected `still_passes` holds; `reference_wrong` -> one rewrite; else `unresolved` with a plain limitation (`limitations(record)`). Model calls via injected `chat(node, messages)` (nodes `second_impl`, `second_impl.adjudicate`); record `.fi/second_impl.json` counts calls before each request (cap `3*cap+6`), resume-safe. Wired by `Engine._second_version_gate` (inside `_gate_pass`, right after `_equation_gate` and before the oracle gate; it reads the model's `DONE` functions back from `.fi/function_steps.json` + `state.implement_outline`, builds a `FunctionFiller` only for `still_passes` / `repair_function`, resolves chat per node through `_chat(node="second_impl" / "second_impl.adjudicate")` so `provider.node_providers` applies with the dot-name fallback, takes `family_of` from `Engine._family_of_node`, and returns whether a repair changed the package so `_gate_pass` reads the code again). An `unresolved` / `unconfirmed` function is the finding of kind `second_version`: `code_review.second_version_sentences` -> `open_findings["second_version"]` -> `findings_block` (printed in QUALITY.md, not in the paper), the claim check, and a QUALITY.md line (`quality_report._code_problems`); the writer is not told of it (`write_note` leaves it out). Never a stop.
 - `Engine._fill_model_functions` / `_new_function_filler` / `_step_passages` — the step cards (inside the `Spec`s from `function_steps.model_functions`) and the passages from `step_passages.for_card` (the quest's `Knowledge`, cached in `.fi/step_passages.json`; a source line with no searchable word, such as "derivation", is not searched) go into `FunctionFiller`, with the call cap `function_steps.max_calls_for(len(specs))`. `Engine._written_steps` -> `code_layout.prefilled_block(steps=...)` tells the simulate.py writer that the package already holds the steps: call them, do not rewrite them.
 - `core/citation_support.py` — the last check before delivery: every (sentence, source) pair the final paper cites is read
@@ -664,7 +722,8 @@ same PR that adds, splits or renames one.
 - `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in
   a package of their own (`code/<package>/`, name from the title via `package_name`, kept in `.fi/code_layout.json`),
   `simulate.py` as the scenario FI still calls, `tests/test_oracles.py` (`oracle_tests`, the plan's checks as unit tests,
-  same seed as `trial_runner.run_case`) and `METHODS.md` (`equation_map` / `methods_text`, each `generates` equation to the
+  same seed as `trial_runner.run_case`; each check's expected value and tolerance, `oracle_values`, go to
+  `<quest>/.fi/checks/oracle_values.json` through `write_check_values`, never into `code/`) and `METHODS.md` (`equation_map` / `methods_text`, each `generates` equation to the
   function carrying its label), both written by FI through `code_project.refresh(extra_files=...)`. The cost over two
   scripts is worked out at plan time (`estimate`), decided against `execution.code_package_max_extra_lines` /
   `code_package_max_extra_calls` (`decide`; the topic's `code_files` never changes the shape, it is kept as

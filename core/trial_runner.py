@@ -49,6 +49,7 @@ from . import mc_error as _mc
 from . import optimise_search as _search
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
+from . import outside_run as _outside
 
 RAW_DIRNAME = "raw"
 LEDGER_NAME = "ledger.jsonl"
@@ -408,7 +409,7 @@ async def run_trials(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
     runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
     run_id: str = "", thresholds: dict[str, Any] | None = None, paired: bool = False, on_plan: Any = None,
-    in_each_run: dict[str, list[Any]] | None = None,
+    in_each_run: dict[str, list[Any]] | None = None, log: Any = None,
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
     the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study. ``on_plan(plan)`` is told the
@@ -425,6 +426,9 @@ async def run_trials(
     if on_plan is not None:
         on_plan(plan)
     results: dict[int, Any] = {}
+    # Each cell runs from a copy of code/ outside the quest folder (core/outside_run.py): FI's records (needs/, .fi/)
+    # are not next to the code; FI's harness, the cell's spec and its results file come and go by FI's own list.
+    executor = _outside.OutsideExecutor(executor, quest_root, log=log)
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
     for task in plan:
         left = int(timeout_s - (time.monotonic() - started))
@@ -822,7 +826,7 @@ class TrialsRunner:
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                paired=paired, on_plan=self._note_plan, in_each_run=inside,
+                paired=paired, on_plan=self._note_plan, in_each_run=inside, log=self.log,
             )
             self._plan_seen = None
             _save_run(self.quest_root, key, run)
@@ -872,7 +876,11 @@ class TrialsRunner:
         summary_path = self._without_left_out(run.summary_path)
         analysis_env = {**(env or {}), RESULTS_ENV: summary_path.relative_to(self.quest_root).as_posix(),
                         "FI_RAW_DIR": run.summary_path.parent.relative_to(self.quest_root).as_posix()}
-        result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
+        # The analysis runs from a copy outside the quest folder too; what it writes under raw/, figures/, results/,
+        # data/ (and FI's figure records) comes back, anything else is said in run.log and dropped.
+        result = await _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
+                                                log=self.log).execute(
+            cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self.failed_script = None if result.returncode == 0 else self.analysis.name
         if result.returncode != 0 and self.left_out_settings and not self.trial_fault:
             # Settings are left out only once the repairs are spent, so no repair of the analysis is coming: an analysis
@@ -1044,11 +1052,18 @@ def _load_run(quest_root: Path, key: str) -> TrialRun | None:
     return TrialRun(cells=[CellRun(**c) for c in record.get("cells") or []], ledger_path=ledger, summary_path=summary)
 
 
+def _outside_executor(executor: Any, quest_root: Path | str, log: Any = None) -> Any:
+    """``executor`` running from a copy of code/ outside the quest folder (core/outside_run.py), wrapped once: a run of
+    the checks wraps its executor at the start, and every batch it starts uses that one."""
+    return executor if isinstance(executor, _outside.OutsideExecutor) else _outside.OutsideExecutor(executor, quest_root,
+                                                                                                    log=log)
+
+
 async def _run_batch(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, entry: str,
                      cell: dict[str, Any], trials: list[dict[str, Any]], timeout_s: int, env: dict[str, str] | None,
                      thresholds: dict[str, Any] | None, spy_trial: bool = False,
                      levels: list[dict[str, Any]] | None = None,
-                     budget_s: float | None = None) -> tuple[list[dict[str, Any]], Any]:
+                     budget_s: float | None = None, log: Any = None) -> tuple[list[dict[str, Any]], Any]:
     """Call one entry function for each of ``trials`` (``trial``, ``seed``) in ONE process: ``(the rows FI's harness
     wrote, in order, the process result)``. ``budget_s``: no trial is started that would not end within it (the first
     always runs); ``timeout_s`` stops the process. A row is a ``load_error``, or a trial with ``status`` ``ok`` (its
@@ -1066,7 +1081,8 @@ async def _run_batch(executor: Any, python: Path | str, quest_root: Path, module
                                 "thresholds": dict(thresholds or {}), "spy_trial": bool(spy_trial),
                                 **({"budget_s": float(budget_s)} if budget_s is not None else {})}, default=str),
                     encoding="utf-8")
-    result = await executor.execute(
+    # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
+    result = await _outside_executor(executor, quest_root, log).execute(
         [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=timeout_s, env=env,
     )
@@ -1096,14 +1112,14 @@ async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: 
                    seed: int | None, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
                    label: str, trial: int = 0, spy_trial: bool = False,
                    spy_out: dict[str, Any] | None = None,
-                   levels: list[dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, str]:
+                   levels: list[dict[str, Any]] | None = None, log: Any = None) -> tuple[dict[str, Any] | None, str]:
     """Call one entry function once in its own process: ``(values, "")``, or ``(None, why)`` when it could not.
     ``spy_trial``: count the calls ``run_cell`` makes to ``run_trial`` and the mean of what they returned, per
     name, in ``spy_out`` (``calls``, ``means``)."""
     quest_root = Path(quest_root)
     rows, result = await _run_batch(executor, python, quest_root, module, entry=entry, cell=cell,
                                     trials=[{"trial": int(trial), "seed": seed}], timeout_s=timeout_s, env=env,
-                                    thresholds=thresholds, spy_trial=spy_trial, levels=levels)
+                                    thresholds=thresholds, spy_trial=spy_trial, levels=levels, log=log)
     for row in rows:
         if row.get("load_error"):
             return None, str(row["load_error"])
@@ -1152,10 +1168,11 @@ def clip_keeping_place(text: str, most: int) -> str:
 
 
 async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,
-                     env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None) -> tuple[dict[str, float] | None, str]:
+                     env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
+                     log: Any = None) -> tuple[dict[str, float] | None, str]:
     """Call the simulation's ``oracle()`` in its own process: ``(values, "")``, or ``(None, why)`` when it could not."""
     return await _run_one(executor, python, quest_root, module, entry="oracle", cell={}, seed=None, timeout_s=timeout_s,
-                          env=env, thresholds=thresholds, label="oracle()")
+                          env=env, thresholds=thresholds, label="oracle()", log=log)
 
 
 def is_per_trial(oracle: dict[str, Any] | None) -> bool:
@@ -1222,7 +1239,7 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                    trial: int = 0, oracle: dict[str, Any] | None = None,
                    per_trial: bool = False,
                    in_each_run: dict[str, list[Any]] | None = None,
-                   paired: bool = False) -> tuple[dict[str, Any] | None, str]:
+                   paired: bool = False, log: Any = None) -> tuple[dict[str, Any] | None, str]:
     """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial ``trial``, 0 unless asked,
     with the seed FI gives that trial of that cell, or ``run_cell``; :func:`oracle_entry` says which): ``(the metrics it
     returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number.
@@ -1237,7 +1254,7 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
     if not inside:
         return await _run_case(executor, python, quest_root, module, cell=dict(cell), timeout_s=timeout_s, env=env,
                                thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
-                               seed_key="" if paired else None)
+                               seed_key="" if paired else None, log=log)
     levels = _in_run.level_cells(inside)
     setting = {k: v for k, v in cell.items() if k not in inside}
     named = {k: v for k, v in cell.items() if k in inside}
@@ -1248,7 +1265,7 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                       "or none of them")
     got, why = await _run_case(executor, python, quest_root, module, cell={**setting, **inside}, timeout_s=timeout_s,
                                env=env, thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
-                               levels=levels, seed_key="" if paired else cell_key(setting))
+                               levels=levels, seed_key="" if paired else cell_key(setting), log=log)
     if got is None:
         return None, why
     return _in_run.for_case(got, levels, named), why
@@ -1257,7 +1274,7 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
 async def _run_case(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
                     timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None, trial: int,
                     oracle: dict[str, Any] | None, per_trial: bool, levels: list[dict[str, Any]] | None = None,
-                    seed_key: str | None = None) -> tuple[dict[str, Any] | None, str]:
+                    seed_key: str | None = None, log: Any = None) -> tuple[dict[str, Any] | None, str]:
     """:func:`run_case` on the cell the run is given (``seed_key``: the setting the seed is FI's for, the cell's own key
     when not given)."""
     path = Path(module) if Path(module).is_absolute() else Path(quest_root) / module
@@ -1270,14 +1287,14 @@ async def _run_case(executor: Any, python: Path | str, quest_root: Path, module:
         spy: dict[str, Any] = {}
         values, why = await _run_one(executor, python, quest_root, module, entry="run_cell", cell=dict(cell), seed=None,
                                      timeout_s=timeout_s, env=env, thresholds=thresholds, label="run_cell()",
-                                     trial=int(trial), spy_trial=True, spy_out=spy, levels=levels)
+                                     trial=int(trial), spy_trial=True, spy_out=spy, levels=levels, log=log)
         if values is None or _built_from_trials(values, spy, oracle):
             return values, why
         entry = "run_trial"  # run_cell never ran a trial: the check is measured on the code the study runs
     key = cell_key(cell) if seed_key is None else seed_key
     seed = trial_seed(base, key, int(trial)) if entry == "run_trial" else None
     return await _run_one(executor, python, quest_root, module, entry=entry, cell=dict(cell), seed=seed, timeout_s=timeout_s,
-                          env=env, thresholds=thresholds, label=f"{entry}()", trial=int(trial), levels=levels)
+                          env=env, thresholds=thresholds, label=f"{entry}()", trial=int(trial), levels=levels, log=log)
 
 
 async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *,
@@ -1371,7 +1388,8 @@ def _same_value(a: Any, b: Any) -> bool:
 
 async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,
                          env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
-                         most: int = 3, in_each_run: dict[str, list[Any]] | None = None) -> tuple[bool | None, str]:
+                         most: int = 3, in_each_run: dict[str, list[Any]] | None = None,
+                         log: Any = None) -> tuple[bool | None, str]:
     """Whether ``run_cell`` returns the same numbers when FI calls it again, each call in a new process, on up to
     ``most`` settings that ran to the end (the fastest first, and only while their first runs together took under a
     tenth of ``timeout_s``; always at least one): ``(True, "")``, ``(False, what differed)``, or ``(None, why it could not
@@ -1406,11 +1424,11 @@ async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, mo
         for _attempt in range(2):  # a new venv's first start can fail before it reaches the code (see the execute step)
             if not inside:
                 again, why = await run_case(executor, python, quest_root, module, cell=dict(cell["cell"]),
-                                            timeout_s=timeout_s, env=env, thresholds=thresholds, trial=0)
+                                            timeout_s=timeout_s, env=env, thresholds=thresholds, trial=0, log=log)
             else:
                 again, why = await _run_case(executor, python, quest_root, module, cell={**cell["cell"], **inside},
                                              timeout_s=timeout_s, env=env, thresholds=thresholds, trial=0, oracle=None,
-                                             per_trial=False, levels=levels, seed_key=cell_key(cell["cell"]))
+                                             per_trial=False, levels=levels, seed_key=cell_key(cell["cell"]), log=log)
             if again is not None or "did not report" not in why:
                 break
         if again is None:
@@ -1591,7 +1609,7 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
 async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, module: Path | str,
                           oracles: list[dict[str, Any]], *, timeout_s: int, env: dict[str, str] | None = None,
                           thresholds: dict[str, Any] | None = None, case_env: dict[str, str] | None = None,
-                          in_each_run: dict[str, list[Any]] | None = None,
+                          in_each_run: dict[str, list[Any]] | None = None, log: Any = None,
                           mean_names: Collection[str] | None = None, most_trials: int | None = None,
                           paired: bool = False, proportion_names: Collection[str] | None = None,
                           repeated: bool | None = None,
@@ -1610,6 +1628,9 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
     checks: list[dict[str, Any]] = []
     problems: list[str] = []
     timed_out = False
+    # Every case, every batch of trials and the script's oracle() run from a copy of code/ outside the quest folder
+    # (core/outside_run.py), as the study's cells do.
+    executor = _outside_executor(executor, quest_root, log)
     # The simulation must not be able to tell it is being checked: a case runs with the environment a trial of the main run
     # has (``case_env``; the engine gives it exactly that), never with the oracle-mode variable ``FI_ORACLE`` set for the script's own oracle().
     cenv = case_env if case_env is not None else {k: v for k, v in (env or {}).items() if k != "FI_ORACLE"}
@@ -1666,7 +1687,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
                         problems.append(problem)
                 continue
         values, why = await run_case(executor, python, quest_root, module, cell=case, timeout_s=timeout_s, env=cenv,
-                                     thresholds=thresholds, oracle=oracle, in_each_run=in_each_run, paired=paired)
+                                     thresholds=thresholds, oracle=oracle, in_each_run=in_each_run, paired=paired, log=log)
         if values is None:
             problems.append(f"the oracle {name!r}: the simulation could not be run on its case "
                             f"({clip_keeping_place(why, 300)})")
@@ -1678,7 +1699,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
         if problem:
             problems.append(problem)
     if any(_oracle.case_of(o) is None for o in oracles):
-        values, why = await run_oracle(executor, python, quest_root, module, timeout_s=timeout_s, env=env, thresholds=thresholds)
+        values, why = await run_oracle(executor, python, quest_root, module, timeout_s=timeout_s, env=env, thresholds=thresholds,
+                                       log=log)
         if values is None:
             problems.append(f"simulate.py's oracle() did not give its values: "
                             f"{clip_keeping_place(why.strip(), 300) or 'no reason given'}")

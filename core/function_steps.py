@@ -734,8 +734,10 @@ class FunctionFiller:
         return ("# What the literature says (passages from the source the plan cites; use them for the method's definition "
                 "and details, do not copy numbers from them)\n\n" + text + "\n")
 
-    def _example_block(self, spec: Spec, *, with_expected: bool = False) -> str:
-        """A step's worked inputs; the output FI computed for them only for the repair that follows a failed example."""
+    def _example_block(self, spec: Spec, *, failed: bool = False) -> str:
+        """A step's worked inputs; for the repair that follows a failed example, that its result did not match. Never the
+        output FI computed for them or the tolerance: FI judges this very case, so a function shown its answer could
+        special-case it."""
         if spec.kind != STEP:
             return ""
         row = self._step_row(spec)
@@ -745,12 +747,9 @@ class FunctionFiller:
         text = f"# A worked case\n\nFI will call the function with: {given}.\n"
         if row.get("random"):
             text += "Its result is a random draw: FI compares the mean of many draws.\n"
-        elif with_expected:
-            shown = (", ".join(f"{k} = {v:.10g}" for k, v in row["expected"].items())
-                     if isinstance(row["expected"], dict) else f"{row['expected']:.10g}")
-            text += (f"FI computed the result for these inputs from the plan's own formula: {shown} "
-                     f"(relative tolerance {row['rel']:g}). The function as it is does not give it; find out why from the "
-                     "step's description, do not write the number into the function.\n")
+        elif failed:
+            text += ("FI worked out the result for these inputs from the plan's own formula, and what the function as it "
+                     "is returns does not match it. Find out why from the step's description.\n")
         return text
 
     # -- one function --
@@ -822,24 +821,30 @@ class FunctionFiller:
                             formula: str) -> str:
         """Run the worked example of ``row`` against the function; ``""`` when it passes or could not be judged (said in the
         record), else the plain problem (never the expected value)."""
-        case_list = _eqt.cases([row], {spec.equation: {"module": module, "function": spec.name, "file": f"{self.package}/model.py"}})
+        rel = f"{self.package}/model.py"
+        try:
+            text = (self.code / rel).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        # FI's own reading of the function (core/equation_tests.static_facts) decides whether it can be called with the
+        # example's inputs and whether it returns its outputs by name; nothing the run prints can claim either.
+        case_list = _eqt.cases([row], {spec.equation: {"module": module, "function": spec.name, "file": rel,
+                                                       "static": _eqt.static_facts(text, spec.name)}})
         _eqt.write(self.code, case_list)
-        results = None
-        out = err = ""
-        for _try in range(2):  # a harness that printed nothing is run once more: it is not the function's fault
-            rc, out, err = await self.run(["code/" + _eqt.TEST_PATH, "--json", "--only", spec.equation])
-            results = _eqt.parse_results(out)
-            if results is not None:
+        results: list[dict[str, Any]] = []
+        for _try in range(2):  # a run that printed no result is run once more; a second time it fails the test
+            # The function is called in a process given only its inputs; FI judges what it returns here, with the
+            # example's expected value that process never had (core/equation_measure.py).
+            nonce = _eqt.new_nonce()
+            _rc, out, _err = await self.run(_eqt.measure_argv(case_list, nonce=nonce, only=[spec.equation]))
+            results = _eqt.judged(case_list, out, nonce=nonce, only=[spec.equation])
+            if not any(r.get("detail") == _eqt.NO_RESULT for r in results):
                 break
-        if results is None:
-            self._unchecked(record, spec, "the equation test could not be run here ("
-                            + exception_line(err or out or "", 120) + ")")
-            return ""
         bad = next((r for r in results if r.get("status") != _eqt.OK), None)
         if bad and bad.get("status") in (_eqt.CONTRACT, _eqt.OUTPUTS):
-            # The plan's example names inputs the outline's function does not take, and its parameters are fixed; or it gives
-            # one value where the function returns its outputs by name: nothing the function could change. FI's own
-            # mismatch with the plan, not the function's; the equation tests before the run ask the plan about it.
+            # FI's own reading: the plan's example names inputs the outline's function does not take, and its parameters
+            # are fixed; or it gives one value where the function returns its outputs by name: nothing the function could
+            # change. FI's own mismatch with the plan, not the function's; the equation tests before the run ask the plan.
             self._unchecked(record, spec, f"the plan's worked example does not fit the outline's function ({bad.get('detail')})")
             return ""
         if not bad:
@@ -983,7 +988,7 @@ class FunctionFiller:
                     function_block=ast.get_source_segment(source, current) if current is not None else spec.signature,
                     problem=problem, related_block=_text_block(related), package=self.package,
                     topic_block=self.topic_block, literature_block=self._literature_block(spec),
-                    example_block=self._example_block(spec, with_expected=spec.equation in self._example_failed))
+                    example_block=self._example_block(spec, failed=spec.equation in self._example_failed))
             try:
                 reply = await self.chat(prompt)
             except Exception as e:  # noqa: BLE001 -- a call that failed is a failed attempt
