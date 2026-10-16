@@ -384,3 +384,34 @@ def test_replay_fdr_quests_have_no_truth_interval_and_say_so(name):
     assert not [f for f in fails if f.fault]
     assert not cal.checked and not cal.faults
     assert cal.not_checked
+
+
+# ---- a coverage the analysis computes itself ----------------------------------------------------------------------------
+
+
+def test_a_coverage_the_analysis_reports_is_recounted_from_the_trials():
+    from statistics import NormalDist
+
+    data = _load("r6t_kinetics")
+    spec = {**known("weighted_ea", "Ea_true_J_mol", se="weighted_ea_se", ident="ea_coverage_95"), "kind": "proportion"}
+    proto = _protocol(data, [spec])
+    with_values = [c for c in data["cells"] if c["metrics"]]
+
+    def coverage(c, z):
+        e = c["metrics"]["weighted_ea"]["values"]
+        s = c["metrics"]["weighted_ea_se"]["values"]
+        return sum(abs(x - 50000.0) <= z * se for x, se in zip(e, s)) / len(e)
+
+    z95, z90 = NormalDist().inv_cdf(0.975), NormalDist().inv_cdf(0.95)
+    right = {c["key"]: {"ea_coverage_95": coverage(c, z95)} for c in with_values}
+    assert tc.reported_coverage_mismatches(data["cells"], proto, right, data["thresholds"]) == []
+    # the analysis used the 90% critical value: about 0.90 where the trials give about 0.95
+    wrong = {c["key"]: {"ea_coverage_95": coverage(c, z90)} for c in with_values}
+    found = tc.reported_coverage_mismatches(data["cells"], proto, wrong, data["thresholds"])
+    assert len(found) == len(with_values) and all(f["fi"] - f["reported"] > 0.03 for f in found)
+    # counts and totals, and a value at the top level (every setting together), are read too
+    top = {"ea_coverage_95_count": 70, "ea_coverage_95_total": 100}
+    assert tc.reported_coverage_mismatches(data["cells"], proto, top, data["thresholds"])[0]["where"] == "the whole study"
+    # a mean metric is not a coverage, and nothing is judged without a declaration
+    assert tc.reported_coverage_mismatches(data["cells"], _protocol(data, [{**spec, "kind": "mean"}]), wrong) == []
+    assert tc.reported_coverage_mismatches(data["cells"], _protocol(data, []), wrong) == []

@@ -450,6 +450,25 @@ def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]])
         q.pooled = _ratio_band(POOLED, sum(n for _k, n, _r in found), pooled, dof)
 
 
+def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[dict[int, float], dict[int, float], list[float]]:
+    """``(estimates, standard errors, hits)`` of one setting for a declared known value: each trial's estimate and standard
+    error by trial, and 1/0 per trial for whether its interval (the declared two ends, else the estimate plus and minus z
+    times the standard error at the declared level) covers ``truth``."""
+    spread = kv.get("standard_error") or kv.get("variance")
+    e = _series(cell, kv["estimate"])
+    s = _series(cell, spread) if spread else {}
+    if spread and "standard_error" not in kv:
+        s = {i: math.sqrt(v) for i, v in s.items() if v >= 0}
+    ends = kv.get("interval")
+    if ends:
+        lo, hi = _series(cell, ends[0]), _series(cell, ends[1])
+        hits = [1.0 if lo[i] <= truth <= hi[i] else 0.0 for i in lo if i in hi]
+    else:
+        z = _z(kv["level"])
+        hits = [1.0 if abs(e[i] - truth) <= z * s[i] else 0.0 for i in e if i in s and s[i] >= 0]
+    return e, s, hits
+
+
 def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None,
                 thresholds: dict[str, Any] | None = None) -> Calibration:
     """What the trials' intervals and standard errors say against the true values the plan declares (see the module's
@@ -479,7 +498,6 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
                        f"the plan's {truth}" + (f" = {_number(thresholds[truth]):g}" if _number(thresholds.get(truth))
                                                 is not None else " (per setting)"))
         spread = kv.get("standard_error") or kv.get("variance")
-        variance = spread is not None and "standard_error" not in kv
         ends = kv.get("interval")
         missing = [n for n in [est, *([spread] if spread else []), *(ends or [])] if n not in returned]
         if missing:
@@ -488,7 +506,6 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
         cover = Quantity("coverage", " .. ".join(ends) if ends else f"{est} +/- z*{spread}",
                          list(ends) if ends else [est, spread], level=level, truth=truth_label)
         ratio = Quantity("se_ratio", est, [est, spread], truth=truth_label) if spread else None
-        z = _z(level)
         cover_per: list[tuple[str, list[float]]] = []
         ratio_per: list[tuple[str, list[float], list[float]]] = []
         for c in cells:
@@ -496,15 +513,7 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
             t = _truth_of(truth, c, thresholds)
             if t is None:
                 continue
-            e = _series(c, est)
-            s = _series(c, spread) if spread else {}
-            if variance:
-                s = {i: math.sqrt(v) for i, v in s.items() if v >= 0}
-            if ends:
-                lo, hi = _series(c, ends[0]), _series(c, ends[1])
-                hits = [1.0 if lo[i] <= t <= hi[i] else 0.0 for i in lo if i in hi]
-            else:
-                hits = [1.0 if abs(e[i] - t) <= z * s[i] else 0.0 for i in e if i in s and s[i] >= 0]
+            e, s, hits = _cell_hits(c, kv, t)
             cover_per.append((key, hits))
             if ratio is not None:
                 pairs = [(e[i], s[i]) for i in e if i in s and s[i] >= 0]
@@ -522,6 +531,83 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
                                        "values (and some spread of the estimate), too few to judge")
     if not out.quantities and not out.not_checked:
         out.not_checked.append(NO_DECLARATION)
+    return out
+
+
+#: How far a coverage the analysis reports may lie from FI's own count of the same trials (an analysis that averages the
+#: settings' coverages instead of pooling their trials, or drops a trial FI kept, differs by a trial or so).
+RECOUNT_TOLERANCE = 0.02
+
+
+def _setting_of(key: str, cell: dict[str, Any]) -> bool:
+    """Whether a stratum key of the analysis's report (``"noise=0.01"``, ``"noise=0.01,n=12"``) names this setting: every
+    axis it names has this setting's value (the same number, or the same text)."""
+    from .run_manifest import _parse_cell
+
+    parsed = _parse_cell(key)
+    here = cell.get("cell") or {}
+    if not parsed or not set(parsed) <= set(here):
+        return False
+    for axis, raw in parsed.items():
+        a, b = _number(here[axis]), None
+        try:
+            b = float(raw)
+        except ValueError:
+            pass
+        if not ((a is not None and b is not None and math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12))
+                or str(here[axis]).strip() == raw.strip()):
+            return False
+    return True
+
+
+def reported_coverage_mismatches(cells: list[dict[str, Any]], protocol: dict[str, Any] | None, result_json: Any,
+                                 thresholds: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Where the analysis reports the coverage of a declared known value and FI, counting the same trials, gets another
+    number. A ``proportion`` metric with a ``known_value`` IS that coverage: its value in the report (the number under its
+    id, or ``<id>_count`` / ``<id>_total``), at the top level (every setting together) or in a stratum keyed like
+    ``noise=0.01`` (the settings it names), is compared with FI's share of those settings' trials whose interval covers the
+    plan's true value. Each mismatch: ``{"id", "where", "reported", "fi", "n"}``. A value that is not a share (outside 0
+    to 1) or a stratum FI cannot place is not judged."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    if thresholds is None:
+        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
+    thresholds = thresholds or {}
+    if not isinstance(result_json, dict):
+        return []
+    walked = _metric_spec._walk(result_json)
+    out: list[dict[str, Any]] = []
+    for spec in _metric_spec.declared(protocol):
+        kv = spec.get("known_value")
+        if not kv or spec["kind"] != "proportion":
+            continue
+        ident = spec["id"]
+        places: dict[tuple[str, ...], float] = {}
+        for path, value in walked.items():
+            leaf, parent = path[-1], path[:-1]
+            if leaf == ident and _number(value) is not None:
+                places[parent] = float(value)
+            elif leaf == f"{ident}_count" and _number(value) is not None:
+                total = _number(walked.get(parent + (f"{ident}_total",)))
+                if total:
+                    places.setdefault(parent, float(value) / total)
+        for parent, reported in sorted(places.items()):
+            if not 0.0 <= reported <= 1.0:
+                continue
+            stratum = parent[-1] if parent else ""
+            chosen = [c for c in cells if not c.get("level") and (not parent or _setting_of(stratum, c))]
+            if parent and not chosen:
+                continue
+            hits: list[float] = []
+            for c in chosen:
+                truth = _truth_of(kv["true_value"], c, thresholds)
+                if truth is not None:
+                    hits.extend(_cell_hits(c, kv, truth)[2])
+            if len(hits) < MIN_TRIALS:
+                continue
+            fi = sum(hits) / len(hits)
+            if abs(fi - reported) > max(RECOUNT_TOLERANCE, 1.5 / len(hits)):
+                out.append({"id": ident, "where": "/".join(parent) or "the whole study", "reported": reported,
+                            "fi": fi, "n": len(hits)})
     return out
 
 
