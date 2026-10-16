@@ -437,7 +437,7 @@ _HIDDEN = re.compile(
     r"|<!--(?!\s*/?fi:fact-).*?-->"
     r"|(?P<ticks>`+)(?:(?!\n[ \t]*\n)[^`])+?(?P=ticks)"
     r"|\$\$.+?\$\$|\\\[.+?\\\]|\\\(.+?\\\)"
-    r"|(?<![\\$])\$[^$\n]+?\$",
+    r"|(?<![\\$])\$(?=\S)[^$\n]+?(?<=\S)\$(?!\d)",
     re.M | re.S)
 #: A double brace right after a LaTeX command or a closing brace is LaTeX (``\textbf{{x}}``), not a placeholder.
 _LATEX_BEFORE = re.compile(r"(?:\\[A-Za-z]+\*?\s*|[}^_])$")

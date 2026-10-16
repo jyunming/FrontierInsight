@@ -277,6 +277,15 @@ def test_a_required_fact_hidden_in_code_or_a_comment_is_not_placed(tmp_path: Pat
     assert any("does not state {{run_time}}" in h for h in hits), hits
 
 
+def test_a_placeholder_between_two_dollar_amounts_is_prose(tmp_path: Path) -> None:
+    """Pandoc's rule: a closing ``$`` right before a digit is no math, so a cost sentence is read as prose."""
+    root, topic = _quest(tmp_path, "kinetics_s1")
+    out = paper_facts.render("# S\n\n## Methods\nA trial cost $5 and {{seed}} was used, $20 in all; it took "
+                             "{{run_time}}, {{time_limit_met}} the limit.\n", root, topic=topic).text
+    assert "<!-- fi:fact-seed -->" in out
+    assert paper_facts.placement_hits(out, root, topic=topic) == []
+
+
 @pytest.mark.parametrize("heading", ["References", "Further reading", "Bibliography"])
 def test_a_required_fact_in_the_source_list_is_not_placed(tmp_path: Path, heading: str) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
