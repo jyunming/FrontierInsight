@@ -6,8 +6,8 @@ the script gave its variables. The plan can say what each quantity is called for
 titles and legend entries from the figure record the plot-style bootstrap wrote (``core/plot_style.py``) and names each
 one that shows a code name, with the plan's label to use instead when the plan names that very quantity (a name only
 made from a plan name, ``Ea_hat`` from ``Ea``, gets that label as context: an estimate is not the true value). The
-engine sends these to the
-redraw of the figures from the saved numbers (``replot_layout``): the experiment is not run again.
+engine sends these to the redraw of the figures from the saved numbers (``replot_layout``): the experiment is not run
+again.
 
 A name counts only when both hold, so that a symbol a scientist writes is never taken for code:
 
@@ -18,9 +18,8 @@ A name counts only when both hold, so that a symbol a scientist writes is never 
   the plan itself gives, two or more lower-case letters run into digits (``pi1``).
 
 A letter with a short subscript (``k_B``, ``T_c``, ``E_a``, ``V_max``, ``G_f``), ``log_10``, a symbol with a Greek
-subscript (``Re_lambda``), a letter with digits (``c0``), a written-out symbol the code assigns (``mu0``, ``eps0``), a log base (``log2``)
-and a short name (``T``, ``N``, ``dt``) are how a scientist writes
-a symbol: never flagged. No topic knowledge: the names come from the plan and the code, the shapes are those of code.
+subscript (``Re_lambda``), a letter with digits (``c0``), a written-out symbol the code assigns (``mu0``, ``eps0``), a
+log base (``log2``) and a short name (``T``, ``N``, ``dt``) are how a scientist writes a symbol: never flagged. No topic knowledge: the names come from the plan and the code, the shapes are those of code.
 Pure, never raises.
 """
 

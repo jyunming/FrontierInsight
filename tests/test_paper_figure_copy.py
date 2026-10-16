@@ -55,12 +55,16 @@ def _legend(leg):
     out = []
     for i, t in enumerate(leg.get_texts()):
         k = keys[i] if i < len(keys) else None
-        colour = size = None
+        colour = size = shape = None
         if k is not None:
             colour = _c(k.get_color()) if hasattr(k, "get_color") else _c(k.get_facecolor())
             if hasattr(k, "get_sizes"):
                 size = [round(float(s), 3) for s in k.get_sizes()]
-        out.append([t.get_text(), colour, size])
+            if hasattr(k, "get_marker"):
+                shape = [str(k.get_marker()), round(float(k.get_linewidth()), 3), k.get_alpha()]
+            elif hasattr(k, "get_paths") and len(k.get_paths()):
+                shape = len(k.get_paths()[0].vertices)
+        out.append([t.get_text(), colour, size, shape])
     return out
 
 def _snap(fig):
@@ -114,6 +118,31 @@ for k in range(10):
 b.plot(x, x, label='RK4'); b.plot(x, 1 - x, label='Euler')
 b.legend(loc='center')
 fig.savefig('figures/swap.png')
+finish(fig)
+""",
+    # The second review's probes: the same name and colour, but another marker (a scatter) or another line width and
+    # alpha. One legend for both panels would key one panel's series in the other's style.
+    "merge_scatter_diff_marker": """
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+rng = np.random.default_rng(1)
+axes[0].scatter(rng.random(300), rng.random(300), color='C0', marker='o', label='trial')
+axes[1].scatter(rng.random(300), rng.random(300), color='C0', marker='^', label='trial')
+for ax in axes:
+    ax.legend(loc='center')
+fig.savefig('figures/sc.png')
+finish(fig)
+""",
+    "merge_same_style_diff_alpha_lw": """
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+x = np.linspace(0, 1, 40)
+for k in range(12):
+    for ax in axes:
+        ax.plot(x, (x * (k + 1)) % 1, color='0.85')
+axes[0].plot(x, 0.5 + 0.4 * np.sin(8 * x), color='C0', lw=1, label='model')
+axes[1].plot(x, 0.5 + 0.4 * np.sin(8 * x), color='C0', lw=4, alpha=0.4, label='model')
+for ax in axes:
+    ax.legend(loc='center')
+fig.savefig('figures/lw.png')
 finish(fig)
 """,
     "dup_label_one_legend": """
@@ -253,7 +282,8 @@ def _data(snap: dict) -> list:
     return [{k: ax[k] for k in ("lines", "colls", "images", "texts", "scales")} for ax in snap["axes"]]
 
 
-@pytest.mark.parametrize("name", ["same_label_diff_color", "dup_label_one_legend", "bubble_size_legend",
+@pytest.mark.parametrize("name", ["same_label_diff_color", "merge_scatter_diff_marker", "merge_same_style_diff_alpha_lw",
+                                  "dup_label_one_legend", "bubble_size_legend",
                                   "errorbar_fill", "axis_equal_datalim", "inset_axes"])
 def test_the_copy_shows_the_same_data_as_the_slide_figure(tmp_path_factory: pytest.TempPathFactory,
                                                         name: str) -> None:

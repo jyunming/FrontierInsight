@@ -1172,8 +1172,9 @@ _PAPER_SOURCE = '''\
                     return str(value)
 
         def _fi_key_style(handle):
-            # How a legend key draws its series: colour, line style and marker (fill, edge and hatch for a patch or
-            # a scatter). A container (error bars, bars) is drawn as its first piece.
+            # How a legend key draws its series: colour, line style and width, marker and its size, and alpha (fill,
+            # edge, hatch, marker shape and size for a patch or a scatter). A container (error bars, bars) is drawn as
+            # its first piece.
             artist, depth = handle, 0
             while isinstance(artist, (tuple, list)) and depth < 4:
                 artist = next((a for a in artist if a is not None), None)
@@ -1181,13 +1182,24 @@ _PAPER_SOURCE = '''\
             if artist is None:
                 return None
             try:
+                alpha = artist.get_alpha()
+                alpha = None if alpha is None else round(float(_fi_np.ravel(alpha)[0]), 3)
                 if hasattr(artist, "get_marker"):
                     return ("line", _fi_key_colour(artist.get_color()), str(artist.get_linestyle()),
-                            str(artist.get_marker()), _fi_key_colour(artist.get_markerfacecolor()))
+                            round(float(artist.get_linewidth()), 3), str(artist.get_marker()),
+                            round(float(artist.get_markersize()), 3), _fi_key_colour(artist.get_markerfacecolor()),
+                            alpha)
                 if hasattr(artist, "get_facecolor"):
                     hatch = artist.get_hatch() if hasattr(artist, "get_hatch") else None
+                    shape = sizes = None
+                    if hasattr(artist, "get_paths") and hasattr(artist, "get_sizes"):
+                        paths = artist.get_paths()
+                        shape = (tuple(round(float(v), 3) for v in paths[0].vertices.flatten()) if len(paths)
+                                 else None)
+                        drawn = _fi_np.asarray(artist.get_sizes(), dtype=float)
+                        sizes = (round(float(drawn.min()), 3), round(float(drawn.max()), 3)) if drawn.size else None
                     return (type(artist).__name__, _fi_key_colour(artist.get_facecolor()),
-                            _fi_key_colour(artist.get_edgecolor()), str(hatch))
+                            _fi_key_colour(artist.get_edgecolor()), str(hatch), shape, sizes, alpha)
             except Exception:
                 pass
             return (type(artist).__name__, id(artist))
