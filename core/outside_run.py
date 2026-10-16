@@ -14,7 +14,7 @@ system's temporary folder, named by a random id (never by the quest's name), wit
 
 and never ``needs/``, ``.fi/checks/`` or the rest of ``.fi/``. After the run FI copies back everything the run wrote,
 created or removed, except into FI's own folders (:data:`FI_OWNED`: ``needs/``, ``.fi/`` other than the paths it named,
-and ``code/``): those are dropped, and each dropped path is said in the run log. Paths that name the copy are written
+``code/`` and ``paper/``): those are dropped, and each dropped path is said in the run log. Paths that name the copy are written
 back as the quest's in what the run printed and in FI's own result files, so a traceback still points at ``code/...``.
 
 This is not a sandbox. Code that searches the disk by absolute path, or starts from its own interpreter (the quest's
@@ -42,14 +42,13 @@ CODE = "code"
 #: the data the quest collected, without what the study writes under ``data/`` (:data:`CELL_SKIP`).
 CELL_INPUTS = ("inputs", "data")
 CELL_SKIP = ("data/results",)
-#: What the analysis is given: every folder of the quest but FI's own (:data:`FI_OWNED`, ``paper/``), so it reads
+#: What the analysis is given: every folder of the quest but FI's own (:data:`FI_OWNED`), so it reads
 #: whatever the cells wrote (``raw/``, ``results/``, a ``cache/`` of their own); never a file at the top of the quest
 #: (``plan.md`` holds the checks' expected values).
 EVERY_FOLDER = "*"
 ANALYSIS_INPUTS = (EVERY_FOLDER,)
-_NOT_FOR_ANALYSIS = ("paper",)
 #: FI's own folders: what a run writes there in its copy never comes back (except a path FI named for the run).
-FI_OWNED = ("needs", ".fi", "code")
+FI_OWNED = ("needs", ".fi", "code", "paper")
 #: Never in a copy and never written back, even when named.
 NEVER = ("needs", ".fi/checks", ".venv", ".git", ".fi/state.sqlite", ".fi/agent_coder.json")
 #: FI's own records inside the folders a harness writes in (core/execution.py keeps them read-only in a container).
@@ -133,7 +132,7 @@ class OutsideCopy:
         inputs = self.inputs
         if EVERY_FOLDER in inputs and self.quest_root.is_dir():
             inputs = tuple(sorted(p.name for p in self.quest_root.iterdir() if p.is_dir() and p.name not in FI_OWNED
-                                  and p.name not in _NOT_FOR_ANALYSIS and p.name not in _SKIP_DIRS))
+                                  and p.name not in _SKIP_DIRS))
 
         def ignore(folder: str, names: list[str]) -> set[str]:
             here = Path(folder).resolve().relative_to(self.quest_root).as_posix()

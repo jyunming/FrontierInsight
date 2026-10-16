@@ -76,6 +76,7 @@ async def test_outputs_come_back_by_fis_list_and_a_traceback_names_the_quests_fi
               "pathlib.Path('needs').mkdir(exist_ok=True)\n"
               "for i in range(8): pathlib.Path('needs/forged%d.json' % i).write_text('{}')\n"
               "pathlib.Path('code/stray.py').write_text('x')\n"
+              "pathlib.Path('paper').mkdir(exist_ok=True); pathlib.Path('paper/paper.md').write_text('x')\n"
               "pathlib.Path('stray.txt').write_text('x')\n"
               "import simulate\n"
               "try:\n    simulate.f()\nexcept ValueError:\n"
@@ -89,15 +90,15 @@ async def test_outputs_come_back_by_fis_list_and_a_traceback_names_the_quests_fi
     assert ran.returncode == 0, ran.stderr
     assert inner.cwd is not None and not inner.cwd.exists()
     assert (root / "raw" / "new.txt").read_text() == "new" and (root / "raw" / "old.txt").exists()
-    # Anything the run wrote comes back, except into FI's own folders (needs/, .fi/, code/): those are dropped, and
-    # every dropped path is in the log.
+    # Anything the run wrote comes back, except into FI's own folders (needs/, .fi/, code/, paper/): those are dropped,
+    # and every dropped path is in the log.
     assert (root / "stray.txt").exists()
     assert not any((root / "needs" / f"forged{i}.json").exists() for i in range(8))
-    assert not (root / "code" / "stray.py").exists()
+    assert not (root / "code" / "stray.py").exists() and not (root / "paper").exists()
     assert str(root.resolve() / "code" / "simulate.py") in ran.stderr
     assert str(root.resolve() / "code" / "simulate.py") in (root / ".fi" / "trials" / "out.txt").read_text()
     said = "\n".join(seen)
-    assert all(f"needs/forged{i}.json" in said for i in range(8)) and "code/stray.py" in said, said
+    assert all(f"needs/forged{i}.json" in said for i in range(8)) and "code/stray.py" in said and "paper/paper.md" in said, said
 
 
 def test_a_path_named_on_the_command_line_or_in_the_environment_is_found(tmp_path: Path) -> None:

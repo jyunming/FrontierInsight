@@ -567,9 +567,9 @@ same PR that adds, splits or renames one.
 - `core/outside_run.py` — FI runs the quest's code from a copy outside the quest folder: `OutsideCopy` (`<temp>/fi_run/
   <random id>/` with `code/` minus `.git`/`.venv`/caches/stale value files, the folders the run reads and the paths FI
   names for the run: `CELL_INPUTS` (`inputs/`, `data/` without `data/results/`) for a cell, a check case or an equation
-  measurement, `ANALYSIS_INPUTS` (every folder but FI's own and `paper/`, never a top-level file) for the analysis; never
+  measurement, `ANALYSIS_INPUTS` (every folder but FI's own, never a top-level file) for the analysis; never
   `needs/`, `.fi/checks/`, `.fi/state.sqlite`; `bring_back` copies back everything the run wrote except into
-  `FI_OWNED` (`needs/`, `.fi/` other than the named paths, `code/`), and writes the copy's paths as the quest's in FI's
+  `FI_OWNED` (`needs/`, `.fi/` other than the named paths, `code/`, `paper/`), and writes the copy's paths as the quest's in FI's
   result files), `named_paths` (paths into the quest on a command line or in an environment), `OutsideExecutor` (an
   executor whose runs from the quest folder go through a copy; names every dropped path in run.log, through the `log`
   `run_trials` / `measure_oracles` / `run_case` / `_run_one` are given, else the quest's own logger). Used by
