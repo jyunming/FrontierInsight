@@ -175,17 +175,26 @@ class SettingFailures:
                 + (f" - {why}" if why else ""))
 
 
-def _declared_names(protocol: dict[str, Any] | None) -> list[tuple[str, dict[str, list[Any]]]]:
-    """``[(name, undefined_when)]``: every value a trial must return as a number, by the plan: each protocol metric's own
-    id and the names of its ``known_value``, with the settings where the plan says that number has no value. A mean over a
-    subset of the trials (``given``) has no value outside the subset, so its own id is not one."""
-    out: list[tuple[str, dict[str, list[Any]]]] = []
+def _truth_names(protocol: dict[str, Any] | None) -> set[str]:
+    """The names a ``known_value`` declares (the estimate, its standard error or variance, its interval's ends): where the
+    truth is declared, a trial with no number for one of them is a miss of the calibration (:func:`calibration`)."""
+    out: set[str] = set()
     for spec in _metric_spec.declared(protocol):
-        when = spec.get("undefined_when") or {}
         kv = spec.get("known_value") or {}
-        names = ([] if spec.get("given") else [spec["id"]]) + [
-            kv[k] for k in ("estimate", "standard_error", "variance") if kv.get(k)] + list(kv.get("interval") or [])
-        out.extend((n, when) for n in dict.fromkeys(names))
+        out.update(str(kv[k]) for k in ("estimate", "standard_error", "variance") if kv.get(k))
+        out.update(str(n) for n in kv.get("interval") or [])
+    return out
+
+
+def _metric_names(protocol: dict[str, Any] | None) -> list[tuple[str, dict[str, list[Any]]]]:
+    """``[(id, undefined_when)]``: the plan's metrics a trial returns under their own id (a mean over a subset of the trials,
+    ``given``, has no value outside the subset, so it is not one), with the settings where the plan says it has no value.
+    A name a ``known_value`` declares is the calibration's (:func:`_truth_names`)."""
+    truth = _truth_names(protocol)
+    out = []
+    for spec in _metric_spec.declared(protocol):
+        if not spec.get("given") and spec["id"] not in truth:
+            out.append((spec["id"], spec.get("undefined_when") or {}))
     return out
 
 
@@ -203,32 +212,59 @@ def _undefined_here(when: dict[str, list[Any]], cell: dict[str, Any]) -> bool:
     return False
 
 
-def _no_value_trials(records: list[dict[str, Any]], names: list[tuple[str, dict[str, list[Any]]]]) -> dict[int, str]:
-    """``{trial: the first declared name it gave no number for}``: a trial that ran but returned NaN, an infinity, or
-    nothing at all for a value the plan declares, at a setting where the plan does not say it has none."""
-    out: dict[int, str] = {}
-    for rec in records:
+def _ran(rec: dict[str, Any]) -> set[int]:
+    """The trials of a summary record that ran to the end (the trial numbers any of its values were returned for)."""
+    return {t for m in (rec.get("metrics") or {}).values() if isinstance(m, dict)
+            for t in (m.get("trials") or []) if isinstance(t, int)}
+
+
+@dataclass
+class Undefined:
+    """A value of the plan that has no number (NaN, an infinity, nothing) in ``trials`` of the ``ran`` trials of a setting
+    (``key``) that ran to the end. Not a failed trial: a power where there is no true effect has no value, by its definition.
+    ``all`` when it has none in any trial there."""
+
+    key: str
+    metric: str
+    trials: int
+    ran: int
+
+    @property
+    def all(self) -> bool:
+        return self.trials >= self.ran
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"key": self.key, "metric": self.metric, "trials": self.trials, "ran": self.ran, "all": self.all}
+
+
+def undefined(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None) -> list[Undefined]:
+    """Where a value the plan declares has no number in trials that ran to the end, per setting (and per value compared
+    inside a run) and metric. A setting the plan names in the metric's ``undefined_when`` is not listed (the plan said so).
+    The names a ``known_value`` declares are not here: a missing estimate of a known truth is a miss of the calibration."""
+    names = _metric_names(protocol)
+    out: list[Undefined] = []
+    if not names:
+        return out
+    for rec in cells:
         metrics = rec.get("metrics") or {}
-        ran = {t for m in metrics.values() if isinstance(m, dict) for t in (m.get("trials") or []) if isinstance(t, int)}
+        ran = _ran(rec)
         for name, when in names:
             m = metrics.get(name)
-            if not isinstance(m, dict) or _undefined_here(when, rec):
+            if not isinstance(m, dict) or not ran or _undefined_here(when, rec):
                 continue
-            finite = set(_series(rec, name))
-            for trial in sorted(ran - finite):
-                out.setdefault(trial, name)
+            empty = len(ran - set(_series(rec, name)))
+            if empty:
+                out.append(Undefined(str(rec.get("key") or ""), name, empty, len(ran)))
     return out
 
 
 def failures(cells: list[dict[str, Any]], reasons: dict[str, Counter] | None = None,
              protocol: dict[str, Any] | None = None) -> list[SettingFailures]:
-    """The failed trials of each setting the trials were run at (a value compared inside a run is not a setting of its
-    own: a run that fails fails for every value). Settings with no failed trial are included, with ``failed == 0``.
-
-    A trial that ran but returned NaN, an infinity or nothing for a value the plan declares (``protocol.metrics``) counts
-    as failed: a repair that hides a failing trial behind a NaN would otherwise turn a setting where most trials fail into
-    one where none do. Only the settings the plan names in a metric's ``undefined_when`` are spared."""
-    names = _declared_names(protocol)
+    """The failed trials of each setting the trials were run at, as FI's own record has them (a trial that raised, returned
+    nothing, or ran out of time; a value compared inside a run is not a setting of its own: a run that fails fails for every
+    value). Settings with no failed trial are included, with ``failed == 0``. A trial that ran to the end and returned NaN
+    for a value is not a failed trial: see :func:`undefined` and, where the truth is declared, :func:`calibration`.
+    ``protocol`` is not read (kept for the callers)."""
     out = []
     for c in cells:
         if c.get("level"):
@@ -242,12 +278,6 @@ def failures(cells: list[dict[str, Any]], reasons: dict[str, Counter] | None = N
         if late:
             got = Counter({r: n for r, n in got.items() if not r.startswith(_OUT_OF_TIME)})
             failed = max(0, failed - late)
-        if names:
-            records = [c] + [r for r in cells if r.get("level") and of_settings(r, {key})]
-            empty = _no_value_trials(records, names)
-            for name in empty.values():
-                got[f"the trial returned no number (NaN, an infinity or nothing) for `{name}`, which the plan declares"] += 1
-            failed = min(planned, failed + len(empty)) if planned else failed
         out.append(SettingFailures(key, planned, failed, got.most_common(), out_of_time=late))
     return out
 
@@ -258,8 +288,8 @@ def failures_directive(bad: list[SettingFailures]) -> str:
     return ("FI ran the study's trials, and in these settings more than half of the trials failed, so their numbers would "
             "rest on the few trials that happened to survive:\n" + shown + "\n\nRepair the simulation so that a trial "
             "at these settings runs to the end and gives its numbers (the reasons and places above say where it stops). "
-            "Never return NaN, an infinity or a made-up value in place of a trial that failed: FI counts such a trial as "
-            "failed. A number the plan says has no value at some settings is the plan's to declare, not the code's. Keep "
+            "Never return NaN, an infinity or a made-up value in place of a trial that failed: let the trial raise, so FI "
+            "counts it as failed. A number the plan says has no value at some settings is the plan's to declare, not the code's. Keep "
             "everything else as it is.")
 
 
@@ -474,12 +504,19 @@ def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[
     if spread and "standard_error" not in kv:
         s = {i: math.sqrt(v) for i, v in s.items() if v >= 0}
     ends = kv.get("interval")
+    # Every trial that ran to the end is judged: one with no number for the estimate or its interval misses the truth (a
+    # repair that returns NaN in place of a failing fit must not drop those trials from the count).
+    # ... in a record that returns these values at all (a value compared inside a run may be kept in its own records only).
+    held = cell.get("metrics") or {}
+    if not all(n in held for n in [kv["estimate"], *(ends or ([spread] if spread else []))]):
+        return e, s, []
+    ran = sorted(_ran(cell))
     if ends:
         lo, hi = _series(cell, ends[0]), _series(cell, ends[1])
-        hits = [1.0 if lo[i] <= truth <= hi[i] else 0.0 for i in lo if i in hi]
+        hits = [1.0 if i in lo and i in hi and lo[i] <= truth <= hi[i] else 0.0 for i in ran]
     else:
         z = _z(kv["level"])
-        hits = [1.0 if abs(e[i] - truth) <= z * s[i] else 0.0 for i in e if i in s and s[i] >= 0]
+        hits = [1.0 if i in e and i in s and s[i] >= 0 and abs(e[i] - truth) <= z * s[i] else 0.0 for i in ran]
     return e, s, hits
 
 
@@ -525,7 +562,7 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
         for c in cells:
             key = str(c.get("key"))
             t = _truth_of(truth, c, thresholds)
-            if t is None:
+            if t is None or _undefined_here(spec.get("undefined_when") or {}, c):
                 continue
             e, s, hits = _cell_hits(c, kv, t)
             cover_per.append((key, hits))
@@ -671,10 +708,12 @@ class Verdict:
     #: The fault is failed trials in some settings only (no calibration fault): once the repairs are spent those settings
     #: are left out, never a stop.
     partial: bool = False
+    #: Values of the plan with no number in some trials of a setting (not failures: recorded, and said in the paper).
+    undefined: list[Undefined] = field(default_factory=list)
 
     def record(self) -> dict[str, Any]:
         return {**summary(self.fails, self.calibration), "action": self.action, "left_out_settings": list(self.left_out),
-                **({"say": self.say} if self.say else {})}
+                "undefined": [u.as_dict() for u in self.undefined], **({"say": self.say} if self.say else {})}
 
 
 def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, thresholds: dict[str, Any] | None = None,
@@ -694,7 +733,7 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     keys = {f.key for f in bad}
     cal = (Calibration(not_checked=[no_calibration]) if no_calibration else
            calibration([c for c in cells if not of_settings(c, keys)], protocol, thresholds))
-    out = Verdict(fails, cal)
+    out = Verdict(fails, cal, undefined=undefined(cells, protocol))
     if not bad and not cal.faults:
         return out
     if cal.faults or most or repairs_left:

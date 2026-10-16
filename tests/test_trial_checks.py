@@ -267,27 +267,30 @@ def test_failed_trials_per_setting():
     assert [(f.key, f.fault, f.stated) for f in fails] == [("a=1", True, True), ("a=2", False, True), ("a=3", False, False)]
 
 
-def test_a_trial_that_returns_nan_for_a_declared_value_counts_as_failed_except_where_the_plan_says_it_has_none():
+def test_a_trial_that_returns_nan_is_not_a_failed_trial_it_has_no_value_there_or_misses_a_declared_truth():
     nan = float("nan")
     cells = [{"key": "d=0", "cell": {"d": 0}, "planned": 20, "failed": 0,
               "metrics": {"x_hat": {"values": [nan] * 15 + [1.0] * 5, "trials": list(range(20))},
-                          "other": {"values": [1.0] * 20, "trials": list(range(20))}}},
+                          "x_se": {"values": [0.01] * 20, "trials": list(range(20))},
+                          "other": {"values": [nan] * 4 + [1.0] * 16, "trials": list(range(20))}}},
              {"key": "d=1", "cell": {"d": 1}, "planned": 20, "failed": 2,
               "metrics": {"x_hat": {"values": [1.0] * 17 + [float("inf")], "trials": list(range(18))},
+                          "x_se": {"values": [0.01] * 18, "trials": list(range(18))},
                           "other": {"values": [1.0] * 18, "trials": list(range(18))}}}]
+    other = {"id": "other", "estimand": "other", "kind": "mean", "unit": "one trial"}
     spec = known("x_hat", 1.0, se="x_se")
-    fails = tc.failures(cells, None, _proto(spec))
-    assert [(f.key, f.failed, f.fault) for f in fails] == [("d=0", 15, True), ("d=1", 3, False)]
-    assert "`x_hat`" in fails[0].reasons[0][0]
-    # a number the plan says has no value where the effect is 0 is not a failure there
-    fails = tc.failures(cells, None, _proto({**spec, "undefined_when": {"d": [0]}}))
-    assert [(f.key, f.failed) for f in fails] == [("d=0", 0), ("d=1", 3)]
-    # without a declaration, as before: only the trials that failed
-    assert [f.failed for f in tc.failures(cells)] == [0, 2]
-    assert "Never return NaN" in tc.failures_directive([fails[1]])
+    # only the trials FI's record says failed
+    fails = tc.failures(cells, None, _proto(spec, other))
+    assert [(f.key, f.failed, f.fault) for f in fails] == [("d=0", 0, False), ("d=1", 2, False)]
+    # a plain value of the plan with no number is recorded as having none there; the estimate of a declared truth is not
+    # (it is the calibration's)
+    assert [u.as_dict() for u in tc.undefined(cells, _proto(spec, other))] == [
+        {"key": "d=0", "metric": "other", "trials": 4, "ran": 20, "all": False}]
+    assert tc.undefined(cells, _proto(spec, {**other, "undefined_when": {"d": [0]}})) == []
+    assert "let the trial raise" in tc.failures_directive([fails[1]])
 
 
-def test_replay_r12_a_repair_that_returns_nan_instead_of_failing_still_fails_those_trials():
+def test_replay_r12_a_repair_that_returns_nan_instead_of_failing_is_caught_where_the_truth_is_declared():
     data = _load("r12_kinetics")
     names = sorted(next(c for c in data["cells"] if c["metrics"])["metrics"])
     cells = []
@@ -301,10 +304,13 @@ def test_replay_r12_a_repair_that_returns_nan_instead_of_failing_still_fails_tho
             m["values"] = list(m["values"]) + [float("nan")] * n_fail
             m["trials"] = list(m["trials"]) + list(range(10_000, 10_000 + n_fail))
         cells.append(c)
-    fails = tc.failures(cells, None, _protocol(data, DECLARED["r12_kinetics"]))
-    assert len([f for f in fails if f.fault]) == 13
+    # the NaN trials ran to the end, so they are not failed trials; with the truth declared they are misses of the
+    # calibration, and the quest stops
+    assert not [f for f in tc.failures(cells, None, _protocol(data, DECLARED["r12_kinetics"])) if f.failed]
     verdict = tc.judge(cells, _protocol(data, DECLARED["r12_kinetics"]), data["thresholds"], repairs_left=False)
-    assert verdict.action == tc.STOP
+    assert verdict.action == tc.STOP and verdict.calibration.faults
+    bad = {s.key for q in verdict.calibration.faults for s in q.settings if s.gross}
+    assert len(bad) >= 13, bad
 
 
 # ---- replay on real quests --------------------------------------------------------------------------------------------

@@ -64,6 +64,7 @@ _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_
 NOT_DONE, LEFT_OUT, NOT_COMPUTED, PRECISION = "not_done", "left_out", "not_computed", "precision"
 SECOND_VERSION, UNTESTED, CODE_FINDING, FAILED_TRIALS = "second_version", "untested", "code_finding", "failed_trials"
 SETTING_LEFT_OUT, CALIBRATION, TRIALS_UNCHECKED = "setting_left_out", "calibration", "trials_unchecked"
+UNDEFINED = "undefined"
 _KIND_WORDS = {
     NOT_DONE: "a part of the topic the study did not do",
     LEFT_OUT: "a quantity left out of the results because a test showed the code computes it wrongly",
@@ -76,10 +77,12 @@ _KIND_WORDS = {
     SETTING_LEFT_OUT: "a setting left out of the results because most of its trials failed",
     CALIBRATION: "reported intervals or standard errors that were not measured against the true values, or are off",
     TRIALS_UNCHECKED: "trials FI did not run itself, so it did not check them",
+    UNDEFINED: "a value of the plan that has no number at some settings",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
-              SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked"}
+              SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
+              UNDEFINED: "undefined"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -314,6 +317,26 @@ def required_items(quest_root: Path | str) -> list[Item]:
     return items
 
 
+def _undefined_items(rec: dict[str, Any], add: Any) -> None:
+    """Each value of the plan with no number in some trials of a setting (core/trial_checks.py:undefined), one item per value:
+    the settings where it has none at all (a power where there is no true effect), and where only some trials have one."""
+    by: dict[str, list[dict[str, Any]]] = {}
+    for u in rec.get("undefined") or []:
+        if isinstance(u, dict) and u.get("metric"):
+            by.setdefault(str(u["metric"]), []).append(u)
+    for metric, rows in by.items():
+        whole = [str(u.get("key") or "the one setting") for u in rows if u.get("all")]
+        some = [u for u in rows if not u.get("all")]
+        said = f"`{metric}` has no value"
+        if whole:
+            said += f" at {', '.join(whole[:8])}{', ...' if len(whole) > 8 else ''} (in every trial there)"
+        if some:
+            said += ("; and" if whole else "") + " in " + "; ".join(
+                f"{u.get('trials')} of {u.get('ran')} trials at {u.get('key') or 'the one setting'}" for u in some[:6]) + (
+                f"; and at {len(some) - 6} more settings" if len(some) > 6 else "")
+        add(UNDEFINED, metric, _sentence(said), key=metric)
+
+
 def _planned_runs(root: Path) -> int:
     """The trials per setting the frozen plan asks for (0 when there is no frozen plan or it gives none)."""
     from . import frozen_protocol as _frozen
@@ -347,6 +370,7 @@ def _trial_check_items(root: Path, add: Any) -> None:
     rec = _trial_checks.read_record(root)
     if not rec:
         return
+    _undefined_items(rec, add)
     if rec.get("not_run"):
         if _planned_runs(root) <= 1:
             return
