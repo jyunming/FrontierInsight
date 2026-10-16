@@ -533,6 +533,40 @@ async def test_e_the_gate_sends_a_biased_random_simulation_to_repair(tmp_path: P
     assert record["status"] == "ok", record.get("problems")
 
 
+#: Every tenth trial on the case of ``mean_wait`` (``b``) crashes, so its trials do not decide it; ``double`` is
+#: deterministic and gives ``YVALUE``.
+SOME_CRASH = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    if "b" in cell and trial_id % 10 == 3:
+        raise OverflowError("blew up")
+    return {"y": YVALUE, "x": random.Random(seed).expovariate(1.0)}
+'''
+WAIT = {"name": "mean_wait", "kind": "special_case", "expected": 1.0, "tolerance": 0.2, "case": {"b": 1},
+        "measure": "x", "reference": "derivation: an exponential with rate 1 has mean 1"}
+DOUBLE = {"name": "double", "kind": "special_case", "expected": 2.0, "tolerance": 1e-9, "case": {"a": 1},
+          "measure": "y", "reference": "derivation: 2 * 1"}
+
+
+@pytest.mark.asyncio
+async def test_the_gate_asks_no_repair_for_a_check_its_trials_did_not_decide(tmp_path: Path) -> None:
+    """Review pass 2, P1-1: the only problem is a check its trials did not decide. It is set aside, not the script's to
+    fix: no repair is asked for (its "was not decided" sentence was left in what the repair was told to fix)."""
+    from core.engine import Engine
+    from tests.test_known_answer_self_checks import _config, _gate, _Model, _record
+
+    engine = Engine(_config(tmp_path))
+    model = _Model()
+    engine._client = model
+    await _gate(engine, [WAIT], SOME_CRASH.replace("YVALUE", "2.0"))
+    record = _record(engine)
+    judged = {j["name"]: j for j in record["attempts"][-1]["judged"]}
+    assert judged["mean_wait"].get("undecided"), judged
+    assert model.repairs == [], "no repair is asked for a check the trials did not decide"
+    assert len(record["attempts"]) == 1 and record["status"] != "ok"
+
+
 DET = '''
 import time
 

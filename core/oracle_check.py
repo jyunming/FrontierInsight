@@ -1124,11 +1124,12 @@ def with_run_problems(run_problems: list[str], found: list[str], oracles: list[d
 
 
 def undisputed(found: list[str], disputed: Any) -> list[str]:
-    """The problems in ``found`` that a repair may still fix: all but a disputed check's value judged outside its
-    tolerance (named in ``disputed``, a check a repair has called wrong). A dispute is about the expected value, so any
-    other problem with a disputed check (not measured, not a number, the simulation failing on its case) and a problem
-    that names no oracle (a crash, no ORACLE_JSON line) is the script's to fix."""
-    heads = tuple(f"the oracle {str(n).strip()!r} failed:" for n in disputed or [])
+    """The problems in ``found`` that a repair may still fix: all but a disputed or set-aside check's value judged
+    outside its tolerance or not decided by its trials (named in ``disputed``: a check a repair has called wrong, or one
+    FI set aside). A dispute is about the expected value, so any other problem with such a check (not measured, not a
+    number, the simulation failing on its case) and a problem that names no oracle (a crash, no ORACLE_JSON line) is
+    the script's to fix."""
+    heads = tuple(f"the oracle {str(n).strip()!r} {how}:" for n in disputed or [] for how in ("failed", "was not decided"))
     return [f for f in found if not (heads and f.startswith(heads))]
 
 
