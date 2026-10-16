@@ -545,7 +545,9 @@ same PR that adds, splits or renames one.
   their inputs (`python -c`, the text of `core/equation_measure.py`, run from a copy outside the quest through
   `Engine._run_in_env(outside=True)`) and compared with the expected value and tolerance in FI's process;
   `failure_message` names the function and equation, never the expected value; `failure_reason` gives the run log the
-  value got, the expected value and the tolerance from that verdict; `remove_stale` deletes what an older FI left in
+  value got, the expected value and the tolerance from that verdict; `static_facts` (FI's own `ast` reading of the
+  function, carried by `locate` / `cases` as `static`) alone decides `contract` and `outputs`, and `judged` makes a
+  missing, doubled or forged result line a failure (`NO_RESULT`), never "not tested"; `remove_stale` deletes what an older FI left in
   `code/tests/` with values in it (called on resume and by `_refresh_code_project`); the test file holds ids, formulas
   and functions only, and `values_of` / `write_values` / `checks_dir` write the inputs, outputs and tolerances to
   `<quest>/.fi/checks/equation_values.json`, outside `code/`, only at the end of `Engine.run` (`_deliver_check_values`;

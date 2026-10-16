@@ -28,6 +28,7 @@ def _results(tmp_path: Path, protocol: dict[str, Any], source: str, function: st
     rows = eqt.example_rows(protocol)
     located = {rows[0]["id"]: {"module": "pkg.model", "function": function, "file": "pkg/model.py"}}
     eqt.write(tmp_path, eqt.cases(rows, located))
+    eqt.write_values(tmp_path, eqt.cases(rows, located))   # a person's copy, delivered at the end
     done = subprocess.run([sys.executable, "-B", str(tmp_path / eqt.TEST_PATH), "--json"], cwd=tmp_path,
                           capture_output=True, text=True, timeout=240)
     found = eqt.parse_results(done.stdout)

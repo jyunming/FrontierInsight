@@ -91,7 +91,9 @@ def _run(code: Path) -> tuple[list[dict[str, Any]], str]:
 def _cases(code: Path) -> list[dict[str, Any]]:
     sources = {"spring/model.py": (code / "spring" / "model.py").read_text(encoding="utf-8")}
     located = eqt.locate(PROTOCOL, sources)
-    assert located["E1"] == {"module": "spring.model", "function": "quality", "file": "spring/model.py"}
+    assert {k: located["E1"][k] for k in ("module", "function", "file")} == {
+        "module": "spring.model", "function": "quality", "file": "spring/model.py"}
+    assert [p["name"] for p in located["E1"]["static"]["params"]] == ["m", "k", "c"], "FI's own reading of it"
     assert located["E2"] is None and located["E3"] is None
     return eqt.cases(eqt.example_rows(PROTOCOL), located)
 

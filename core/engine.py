@@ -12172,12 +12172,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         raw_dir = self._raw_root() / "equation_tests"
         raw_dir.mkdir(parents=True, exist_ok=True)
         env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
-        results, rc, _err = await _equation_tests.run_and_judge(self._run_in_env, case_list, timeout_s=300, env=env,
-                                                                outside=True)
-        if results is None:
-            # the tests were written and started but gave no results: the package crashed or hung, which is a failure,
-            # never a pass (a repair that leaves a model the tests cannot even run is not kept)
-            return f"the equation tests gave no results on this code (exit code {rc})"
+        # A run that crashed, hung or printed no result fails every test (equation_tests.judged), never a pass: a repair
+        # that leaves a model the tests cannot even run is not kept.
+        results, _rc, _err = await _equation_tests.run_and_judge(self._run_in_env, case_list, timeout_s=300, env=env,
+                                                                 outside=True)
         return ", ".join(str(r.get("id")) for r in results if r.get("status") != _equation_tests.OK)
 
     async def _second_version_gate(self, state: QuestState, py: Any, exec_env: Any) -> bool:
@@ -12380,13 +12378,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # inputs; what they return is compared with the plan's examples here, in FI's process (core/equation_measure.py).
             results, rc, err = await _equation_tests.run_and_judge(self._run_in_env, case_list, timeout_s=300, env=env,
                                                                    outside=True)
-            out = ""
-            if results is None:
-                self._log.warning("[equations] the tests of the model's equations did not run (%s); going on without them",
-                                  _function_steps.exception_line(err or out, 160) if (err or out).strip() else f"exit code {rc}")
-                record["error"] = _function_steps.traceback_end(err or out, 400)
-                failures = []
-                break
+            if any(r.get("detail") == _equation_tests.NO_RESULT for r in results):
+                # A crash, a hang or an early exit fails the tests (never "going on without them"); what it printed is kept.
+                self._log.warning("[equations] the run that calls the model's functions gave no result (%s); the tests "
+                                  "count as failed", _function_steps.exception_line(err or "", 160) if (err or "").strip() else f"exit code {rc}")
+                record["error"] = _function_steps.traceback_end(err or "", 400)
             by_id = {c["id"]: c for c in case_list}
             failures = [{**r, "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
                          "module": by_id.get(str(r.get("id")), {}).get("module", "")}

@@ -554,9 +554,10 @@ def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str]
 # --- finding the function that implements an equation -----------------------------------------------------------------
 
 
-def locate(protocol: dict[str, Any] | None, sources: dict[str, str]) -> dict[str, dict[str, str] | None]:
+def locate(protocol: dict[str, Any] | None, sources: dict[str, str]) -> dict[str, dict[str, Any] | None]:
     """For each equation that gets an example: the importable top-level function labelled ``# E<n>`` (a comment on or
-    above it, or in its docstring), as ``{"module", "function", "file"}``; ``None`` when there is none. ``sources``:
+    above it, or in its docstring), as ``{"module", "function", "file", "static"}`` (``static``: FI's own reading of
+    it, :func:`static_facts`); ``None`` when there is none. ``sources``:
     ``{"<package>/model.py": text, "simulate.py": text}`` (a script that runs when imported, ``experiment.py``, is
     never one of them). A package is preferred to ``simulate.py``."""
     from . import code_layout as _layout
@@ -569,7 +570,8 @@ def locate(protocol: dict[str, Any] | None, sources: dict[str, str]) -> dict[str
         for rel, items in labelled.items():
             for _line, text, fn in items:
                 if fn and "." not in fn and _oracle._labelled_in(eid, text):
-                    found = {"module": module_of(rel), "function": fn, "file": rel}
+                    found = {"module": module_of(rel), "function": fn, "file": rel,
+                             "static": static_facts(sources[rel], fn)}
                     break
             if found:
                 break
@@ -585,7 +587,7 @@ def module_of(rel: str) -> str:
     return path.replace("/", ".")
 
 
-def cases(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None]) -> list[dict[str, Any]]:
+def cases(rows: list[dict[str, Any]], located: dict[str, dict[str, Any] | None]) -> list[dict[str, Any]]:
     """The tests to write: one per equation whose example is ``ok`` and whose function is found."""
     out = []
     for r in rows:
@@ -594,7 +596,7 @@ def cases(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None])
             out.append({"id": r["id"], "formula": r["formula"], "module": where["module"], "function": where["function"],
                         "inputs": r["inputs"], "expected": r["expected"], "rel": r["rel"], "abs": r["abs"],
                         "method": r["method"], "random": bool(r.get("random")), "variance": r.get("variance"),
-                        "outputs": list(r.get("outputs") or [])})
+                        "outputs": list(r.get("outputs") or []), "static": where.get("static")})
     return out
 
 
@@ -670,7 +672,7 @@ def test_source(case_list: list[dict[str, Any]]) -> str:
     """``tests/test_equations.py`` for ``case_list`` (:func:`cases`): a test per equation, and a runner. The file holds
     each equation's id, formula and function; the example's inputs, output and tolerance (:func:`values_of`) are read
     when it runs from the quest's ``.fi/checks/`` (:func:`write_values`), never written into it."""
-    public = [{k: v for k, v in c.items() if k not in _HIDDEN} for c in case_list]
+    public = [{k: v for k, v in c.items() if k not in _HIDDEN and k != "static"} for c in case_list]
     text = _TEMPLATE.format(cases=json.dumps(public, default=str), values_name=VALUES_NAME)
     text = text.replace("@@MEASURE@@", _measure_body())
     names = []
@@ -739,39 +741,143 @@ def new_nonce() -> str:
     return secrets.token_hex(12)
 
 
+#: What a failed test says when the measuring process printed no result (it stopped early, was ended, ran past its time
+#: or printed more than one result line): a failure of the test, never "not tested".
+NO_RESULT = ("the run that calls the function gave no result FI can take (it stopped early, was ended, ran past its "
+             "time, or printed more than one result)")
+
+
+def _returns_by_name(fn: Any) -> bool:
+    """Whether FI's reading of ``fn`` (an ``ast`` function) finds it returning its outputs by name: a dict, or an object
+    of a class (a namedtuple, a dataclass), directly or through a name assigned one."""
+    import ast
+
+    def named(node: Any) -> bool:
+        if isinstance(node, (ast.Dict, ast.DictComp)):
+            return True
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            return name in ("dict", "OrderedDict", "namedtuple") or name[:1].isupper()
+        return False
+
+    nodes, stack = [], list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        nodes.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    held = {t.id for n in nodes if isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None and named(n.value)
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]) if isinstance(t, ast.Name)}
+    return any(isinstance(n, ast.Return) and n.value is not None
+               and (named(n.value) or (isinstance(n.value, ast.Name) and n.value.id in held)) for n in nodes)
+
+
+def static_facts(source: str, function: str) -> dict[str, Any] | None:
+    """FI's own reading of the top-level function ``function`` in ``source``, made in FI's process before anything
+    runs: its parameters (``{"name", "default", "kind"}``), whether it takes ``*args`` / ``**kwargs``, and whether it
+    returns its outputs by name. ``None`` when it cannot be read (no such function, a decorator that may change the
+    signature, text that does not parse)."""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    fn = next((n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == function),
+              None)
+    if fn is None or fn.decorator_list:
+        return None
+    a = fn.args
+    positional = [*a.posonlyargs, *a.args]
+    firsts = len(positional) - len(a.defaults)
+    params = [{"name": p.arg, "default": i >= firsts, "kind": "positional_only" if p in a.posonlyargs else "positional"}
+              for i, p in enumerate(positional)]
+    params += [{"name": p.arg, "default": d is not None, "kind": "keyword_only"} for p, d in zip(a.kwonlyargs, a.kw_defaults)]
+    return {"params": params, "varargs": a.vararg is not None, "varkw": a.kwarg is not None,
+            "by_name": _returns_by_name(fn)}
+
+
+def _contract_here(case: dict[str, Any]) -> str:
+    """Why the function cannot be called with the example's inputs, by FI's own reading (:func:`static_facts`): the
+    same rule the measuring process applies, decided here so nothing it prints can claim it. ``""`` when it can, or when
+    FI could not read the function."""
+    static = case.get("static")
+    if not isinstance(static, dict):
+        return ""
+    names = {p["name"] for p in static["params"]}
+    inputs = list(case.get("inputs") or {})
+    if not static["varkw"]:
+        missing = [n for n in inputs if n not in names]
+        if missing:
+            return "the function must take " + ", ".join(missing) + " as arguments, named so"
+    if static["varargs"] or static["varkw"]:
+        return ""
+    given = set(inputs) | ((set(RNG_PARAMS) | {SEED_PARAM}) if case.get("random") else set())
+    required = [p["name"] for p in static["params"] if not p["default"] and p["name"] not in given]
+    if required:
+        return ("the parameter " + ", ".join(required) + (" has" if len(required) == 1 else " have")
+                + " no default and is not one of the example's inputs; give it a default or take it out of this function")
+    return ""
+
+
+def _judge_here(case: dict[str, Any], measured: Any) -> tuple[str, str, Any, Any, Any]:
+    """:func:`equation_measure.judge`, with the statuses that mean "FI could not judge this" decided by FI alone: a
+    contract from FI's own reading of the function, and outputs returned by name only when the formula defines several
+    and FI's reading finds the function returning them by name. The measuring process saying either is otherwise a
+    failure (``error``)."""
+    want = case["expected"]
+    contract = _contract_here(case)
+    if contract:
+        return CONTRACT, contract, None, None, want
+    status = measured.get("status") if isinstance(measured, dict) else None
+    if status == CONTRACT:
+        return (ERROR, "the run that calls the function said it could not be called with the example's inputs, which "
+                "FI's own reading of the function does not confirm", None, None, want)
+    if status == OUTPUTS:
+        static = case.get("static")
+        if len(case.get("outputs") or []) >= 2 and isinstance(static, dict) and static.get("by_name"):
+            return OUTPUTS, str(measured.get("detail") or ""), None, None, want
+        return (ERROR, "the run that calls the function said it returns its outputs by name, which FI's own reading "
+                "of the function does not confirm", None, None, want)
+    return _measure.judge(case, measured)
+
+
 def judged(case_list: list[dict[str, Any]], stdout: str, *, nonce: str,
-           only: list[str] | None = None) -> list[dict[str, Any]] | None:
-    """FI's verdict on each case, from what the measuring process printed (its line with ``nonce``): ``{"id",
+           only: list[str] | None = None) -> list[dict[str, Any]]:
+    """FI's verdict on each case, from what the measuring process printed (its one line with ``nonce``): ``{"id",
     "function", "status", "detail", "got", "expected", "tolerance"}`` per case, judged here, in FI's own process, with
-    the expected value and the tolerance that process never had. ``None`` when it printed no such line (it crashed or
-    hung)."""
-    found = None
+    the expected value and the tolerance that process never had. No such line, or more than one, is a failure of every
+    case (:data:`NO_RESULT`), never "not tested"."""
+    found: list[Any] = []
     head = _measure.MEASURED_MARK + " " + nonce + " "
     for line in (stdout or "").splitlines():
         if line.startswith(head):
             try:
-                value = json.loads(line[len(head):])
+                found.append(json.loads(line[len(head):]))
             except ValueError:
-                continue
-            if isinstance(value, dict):
-                found = value
-    if found is None:
-        return None
+                found.append(None)
+    taken = found[0] if len(found) == 1 and isinstance(found[0], dict) else None
     out = []
     for c in case_list:
         if only and str(c["id"]) not in only:
             continue
         case = {**c, "names": list(c["expected"]) if isinstance(c.get("expected"), dict) else None}
-        status, detail, got, tol, want = _measure.judge(case, found.get(str(c["id"])))
+        if taken is None:
+            contract = _contract_here(case)
+            status, detail, got, tol, want = (CONTRACT if contract else ERROR), (contract or NO_RESULT), None, None, c["expected"]
+        else:
+            status, detail, got, tol, want = _judge_here(case, taken.get(str(c["id"])))
         out.append({"id": str(c["id"]), "function": c["function"], "status": status, "detail": detail,
                     "got": got, "expected": want, "tolerance": tol})
     return out
 
 
 async def run_and_judge(run: Any, case_list: list[dict[str, Any]], *, only: list[str] | None = None,
-                        **run_kwargs: Any) -> tuple[list[dict[str, Any]] | None, int, str]:
+                        **run_kwargs: Any) -> tuple[list[dict[str, Any]], int, str]:
     """Measure ``case_list`` with ``run(argv, **run_kwargs) -> (returncode, stdout, stderr)`` (python's arguments, run
-    from the quest folder or a copy of it) and judge it here: ``(results or None, returncode, stderr)``."""
+    from the quest folder or a copy of it) and judge it here: ``(results, returncode, stderr)``."""
     nonce = new_nonce()
     rc, out, err = await run(measure_argv(case_list, nonce=nonce, only=only), **run_kwargs)
     return judged(case_list, out, nonce=nonce, only=only), rc, err

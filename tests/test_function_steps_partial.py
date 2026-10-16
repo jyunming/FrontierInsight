@@ -140,14 +140,16 @@ async def test_a_check_that_cannot_run_is_run_again_and_then_left_out_without_co
 
     async def silent(argv: list[str]) -> tuple[int, str, str]:
         if argv[:1] == ["-c"] and "EQUATION_MEASURED" in argv[1]:  # FI's measuring run
-            return 0, "", ""  # the harness printed nothing, every time
+            return 0, "", ""  # the run printed nothing, every time (an early exit, a hang)
         return await _run(argv, silent_root)
 
-    model = _ModuleModel({k: [v] for k, v in GOOD.items()}, module_replies=[""])
-    outcome = await _filler(silent_root, model, run=silent).run_all(_specs())
-    assert outcome.status == "done" and len(model.prompts) == 3, "a harness that prints nothing costs no repair"
+    # review pass 2 N2: a run that prints no result twice fails the test (the function is repaired); it is never left
+    # out as "not tested" (before: done, 3 requests, "could not be run here").
+    model = _ModuleModel({k: [v] * 4 for k, v in GOOD.items()}, module_replies=[""])
+    await _filler(silent_root, model, run=silent).run_all(_specs())
     record = fs.load(silent_root)
-    assert "could not be run here" in record["unchecked"]["frequency"] and "E1" in record["untested"]
+    assert len(model.prompts) > 3, "the failed test asked for a repair"
+    assert "frequency" not in (record.get("unchecked") or {}) and "E1" not in (record.get("untested") or {})
 
 
 @pytest.mark.asyncio
