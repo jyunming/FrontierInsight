@@ -92,9 +92,8 @@ def test_replay_r12_most_noisy_trials_fail_sent_back_then_left_out(tmp_path: Pat
     items = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.SETTING_LEFT_OUT]
     assert [i.name for i in items] == ["noise_std_rel=0.08,n_timepoints=12"]
     assert items[0].id.startswith("setting-left-out-") and "is left out of the results" in items[0].sentence
-    # the paper must place it in its Limitations; placed there, nothing is missing
-    hits = paper_facts.placement_hits("# T\n\n## Limitations\n\nNone.\n", root)
-    assert any("{{not_done:" + items[0].id + "}}" in h for h in hits)
+    # a paper that does not hold it gets it from FI; placed in its Limitations, nothing is missing
+    assert "{{not_done:" + items[0].id + "}}" in paper_facts.place_items("# T\n\n## Limitations\n\nNone.\n", root)
     placed = paper_facts.placement_hits(
         paper_facts.render("# T\n\n## Limitations\n\n{{not_done:" + items[0].id + "}}\n", root).text, root)
     assert not any(items[0].id in h for h in placed), placed

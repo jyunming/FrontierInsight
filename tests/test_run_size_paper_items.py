@@ -186,5 +186,5 @@ def test_a_warned_difference_is_an_item_in_plain_words(tmp_path: Path) -> None:
     assert "does not match what the analysis reports" in paper_facts.render(placed, root).text
     # Without a plain sentence, the first finding stands for it; an ok record gives no item.
     first = _quest(tmp_path / "b", manifest={"status": "warned", "problems": ["one", "two"]})
-    assert "one (and 1 more)" in paper_facts.required_items(first)[0].text
+    assert "reports: one; two." in paper_facts.required_items(first)[0].text
     assert not paper_facts.required_items(_quest(tmp_path / "c", manifest={"status": "ok", "problems": []}))
