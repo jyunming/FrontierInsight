@@ -887,12 +887,14 @@ class EngineConfig(BaseModel):
     # What the finished simulation says it did (``run_manifest.json`` in its raw-data folder: the grid it swept, the trials
     # it attempted and completed per setting, the failures, the thresholds) is compared with the frozen protocol
     # (``core/run_manifest.py``); it needs the two-script layout (``execution.split_analysis``), because that is where the
-    # simulation is a script of its own. ``block`` (default) sends the simulation back for up to
+    # simulation is a script of its own. ``warn`` (default) records what differs (run.log, QUALITY.md, the evidence level,
+    # which names it as a gap) and goes on: a difference in what was counted is not by itself a wrong number, and a
+    # quest stopped on it delivered correct numbers when resumed with ``warn``. ``block`` sends the simulation back for up to
     # ``run_manifest_repair_attempts`` repairs (each is a full run again, so the default is one; a difference only in the
     # analysis is sent back up to three times, since its repair reruns no experiment) and, if it still differs, stops
-    # the quest with what differs; ``warn`` only records it; ``off`` does not look. Every check is in
+    # the quest with what differs (``rigor_profile: research`` sets it); ``off`` does not look. Every check is in
     # ``needs/RUN_MANIFEST_CHECK.json``.
-    run_manifest_check: Literal["block", "warn", "off"] = "block"
+    run_manifest_check: Literal["block", "warn", "off"] = "warn"
     run_manifest_repair_attempts: int = Field(default=1, ge=0, le=3)
     # How far apart consecutive replicates' seeds sit. Replicate i is handed
     # ``FI_REPLICATE_SEED = i * replicate_seed_stride``, so the seeds it can

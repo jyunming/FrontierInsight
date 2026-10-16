@@ -314,7 +314,9 @@ def _cfg(tmp_path: Path, *, split: bool | str = True, engine: dict[str, Any] | N
     return Config(
         topic="smoke topic for the run manifest", title="manifest-smoke", provider=ProviderConfig(name="openai"),
         engine=EngineConfig(**{"max_iterations": 1, "review_loop": False, "auto_accept_on_pass": True, "execute_replicates": 1,
-                               "pilot_run": False, "oracle_check": "off", **(engine or {})}),
+                               "pilot_run": False, "oracle_check": "off",
+                               # these tests follow the repair and the stop: the check's 'block' mode (the default is 'warn')
+                               "run_manifest_check": "block", **(engine or {})}),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=split, **(execution or {})),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
         pauses=PausesConfig(review="off"),
