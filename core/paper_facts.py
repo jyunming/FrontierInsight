@@ -901,7 +901,9 @@ def place_items(markdown: str, quest_root: Path | str, heading: str = "Limitatio
     one of its own, before the sources. An item the writer placed itself stays where it is, wherever that is: FI places
     what is missing instead of checking where the writer put it. :func:`render` then fills it."""
     text = markdown or ""
-    todo = [i for i in required_items(quest_root) if not _item_placed(text, i)]
+    # A problem the second reading of the code left open is the writer's to state or not (the check of the draft asks for
+    # it); FI does not put it in the paper itself: left alone it is in QUALITY.md only (core/code_review.py findings_block).
+    todo = [i for i in required_items(quest_root) if i.kind != CODE_FINDING and not _item_placed(text, i)]
     if not todo:
         return text
     lines = text.split("\n")
