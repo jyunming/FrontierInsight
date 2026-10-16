@@ -109,6 +109,7 @@
     "Fit ln k against 1/T with 1/T centred and each point weighted by the variance of its ln k."
   ],
   "stated_results": [],
+  "code_files": 1,
   "reviewer": "claude-sonnet-5-5",
   "planner": "claude-sonnet-5-5",
   "same_model": true,

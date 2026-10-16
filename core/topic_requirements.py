@@ -133,8 +133,23 @@ def parse(obj: Any) -> dict[str, Any] | None:
                if _text(r, 200)]
     if not (factors or quantities or formulas or comparisons):
         return None
+    files = code_files(obj)
     return {"factors": factors[:20], "quantities": quantities[:30], "formulas": formulas[:12],
-            "comparisons": comparisons[:12], "constraints": constraints[:30], "stated_results": results[:20]}
+            "comparisons": comparisons[:12], "constraints": constraints[:30], "stated_results": results[:20],
+            **({"code_files": files} if files is not None else {})}
+
+
+def code_files(req: Any) -> int | None:
+    """How many files of code the topic asks for (the reader's ``code_files``: a whole number, ``1`` for one script),
+    or ``None`` when it does not say. Read from the reader's structured answer only, never from the topic's prose."""
+    value = req.get("code_files") if isinstance(req, dict) else None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return value if isinstance(value, int) and 1 <= value <= 1000 else None
 
 
 def is_empty(req: Any) -> bool:

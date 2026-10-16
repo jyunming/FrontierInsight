@@ -101,6 +101,7 @@
     "Say when a result is only a check of the code."
   ],
   "stated_results": [],
+  "code_files": 1,
   "reviewer": "claude-sonnet-5-5",
   "planner": "gpt-5.6-terra",
   "same_model": false,

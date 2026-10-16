@@ -11518,15 +11518,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         ex = self.config.execution
         package = str((record or {}).get("package") or "") or _code_layout.package_name(
             str(self.config.title or self.config.topic or ""))
-        # The topic's own request for one script wins over FI's default package (core/code_layout.py::one_file_sentence).
+        # How many code files the topic asks for (the topic reader's structured answer, never a reading of its prose):
+        # kept and said, never a reason to turn FI's checks of the code off (core/code_layout.py::decide).
         required = _disclosure._read_json(self.quest_root / ".fi" / "topic_requirements.json")
-        constraints = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
-                       for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
-        one_file = _code_layout.one_file_sentence(str(state.get("topic") or self.config.topic or ""), constraints)
         decision = _code_layout.decide(protocol if isinstance(protocol, dict) else None, enabled=ex.code_package,
                                        max_extra_lines=ex.code_package_max_extra_lines,
                                        max_extra_calls=ex.code_package_max_extra_calls, package=package,
-                                       one_file=one_file)
+                                       code_files=_topic_req.code_files(required))
         # A quest laid out as a package stays one: a later redesign that adds equations does not switch it back to two
         # scripts (``code_package: false`` still does, and a plan written again decides again). Two scripts are decided
         # again each time, so raising the limit, as plan.md says, takes effect on a resume.
@@ -11547,6 +11545,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 layout["extra_calls_spent"] = 0  # no code yet (a new quest, or a restart from the plan): a new budget
             _code_layout.save(self.quest_root, layout)
             self._log.info("[plan] %s", _code_layout.summary(layout))
+            files = _code_layout.files_note(layout)
+            if files:
+                self._log.info("[plan] %s", files)
+            # The topic's request for fewer code files than FI keeps is an item the paper must name.
+            self._note_not_done([{"name": "code in the files the topic asked for", "sentence": files,
+                                  "kind": "code_files"}] if files else [], kind="code_files")
             return _code_layout.plan_lines(layout)
         except Exception as e:  # noqa: BLE001 -- how the code is laid out must never stop the plan
             self._log.warning("[plan] could not work out how the code will be laid out: %r", e)
