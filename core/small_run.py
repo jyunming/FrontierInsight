@@ -187,6 +187,8 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
     started = time.monotonic()
     out: list[Setting] = []
     load_error = ""
+    # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
+    executor = _trials._outside_executor(executor, quest_root)
     for i, cell in enumerate(settings(grid)):
         sub = folder / f"s{i}"
         sub.mkdir(parents=True, exist_ok=True)
