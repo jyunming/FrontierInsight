@@ -1210,6 +1210,91 @@ def value_hits(paper_md: str, quest_root: Path | str) -> list[str]:
     return out
 
 
+#: A bold run-in heading that opens a paragraph (``**Power.** ...``): kept when the sentence after it is taken out.
+_RUN_IN = re.compile(r"\A\s*\*\*[^*\n]+\*\*")
+#: A line that is not running prose (a table row, heading, figure, list item, quote): a sentence in it is never cut out.
+_NOT_PROSE = re.compile(r"^\s*(\||#|!\[|[-+*]\s|\d+[.)]\s|>)")
+REPLACED = _typed.REMOVED
+_TOKEN = re.compile(r"\x00\d+\x00")
+
+
+def _whole_sentence(sentence: str) -> bool:
+    """Whether ``sentence`` reads as a sentence by itself: it opens with a capital, a digit, a mark or a formula, ends with a
+    full stop and closes every bracket it opens (so ``e.g.``, an abbreviation or a split inside brackets is not one)."""
+    t = sentence.strip()
+    return bool(t) and t.endswith(".") and (t[0].isupper() or t[0] in "*_$(0123456789") and all(
+        t.count(a) == t.count(b) for a, b in ("()", "[]", "{}"))
+
+
+def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
+    """``markdown`` without the result keys FI could not fill (they read "not recorded"), for a paper no round is left to
+    rewrite: ``(text, taken_out)``, ``taken_out`` having ``key``, ``sentence`` (as it read) and ``how`` for each.
+
+    A running sentence whose every result key is unfilled states nothing FI can stand behind, so the sentence is removed (a
+    bold run-in heading before it stays). Any other place (a key beside filled ones, a table row, a figure caption, a list, a
+    clause that does not read as a sentence by itself) keeps its text and the key is replaced by the same visible marker
+    that replaces a number the writer typed. Nothing is filled with a guess, and no filled key is touched."""
+    marks = list(_values._MARK.finditer(markdown or ""))
+    if not any(m.group(2).strip() == _values.NOT_RECORDED for m in marks):
+        return markdown, []
+    # The text with each mark made one token, so a sentence is found as it reads: (token start, end, original start, end).
+    parts: list[str] = []
+    spans: list[tuple[int, int, int, int]] = []
+    last = size = 0
+    for i, m in enumerate(marks):
+        before = markdown[last:m.start()]
+        token = f"\x00{i}\x00"
+        parts += [before, token]
+        spans.append((size + len(before), size + len(before) + len(token), m.start(), m.end()))
+        size += len(before) + len(token)
+        last = m.end()
+    parts.append(markdown[last:])
+    flat = "".join(parts)
+
+    def original(p: int) -> int:  # a position of the token text that is outside every token
+        shift = 0
+        for _bs, be, _os, oe in spans:
+            if be <= p:
+                shift = oe - be
+        return p + shift
+
+    groups: dict[tuple[int, int], list[int]] = {}
+    for i, m in enumerate(marks):
+        if m.group(2).strip() == _values.NOT_RECORDED:
+            groups.setdefault(_typed._sentence(flat, spans[i][0], spans[i][1]), []).append(i)
+    edits: list[tuple[int, int, str]] = []
+    taken: list[dict[str, str]] = []
+    for (a, b), idx in groups.items():
+        if b > a and flat[b - 1] == "\n":
+            b -= 1  # the sentence ends its line: the line break is not its own
+        inside = [i for i, sp in enumerate(spans) if a <= sp[0] and sp[1] <= b]
+        line_start = flat.rfind("\n", 0, a + 1) + 1
+        line_end = flat.find("\n", b)
+        line = flat[line_start:line_end if line_end != -1 else len(flat)]
+        sentence = re.sub(r"\s+", " ", _values.without_marks(markdown[original(a):original(b)])).strip()
+        lead = _RUN_IN.match(flat[a:b])
+        body_at = a + (lead.end() if lead else 0)
+        drop = (all(i in idx for i in inside if spans[i][0] >= body_at) and not _NOT_PROSE.match(line)
+                and _whole_sentence(_TOKEN.sub("x", flat[body_at:b])))
+        if drop:
+            start, end = original(body_at), original(b)
+            if flat[line_start:body_at].strip() == "":  # it opened its line: the space it leaves goes with it
+                while end < len(markdown) and markdown[end] in " \t":
+                    end += 1
+                if not lead and (line_end == -1 or end >= original(line_end)):  # nothing is left of the line
+                    start, end = original(line_start), min(end + 1, len(markdown))
+            edits.append((start, end, ""))
+        for i in idx:
+            if not drop:
+                edits.append((marks[i].start(), marks[i].end(), REPLACED))
+            taken.append({"key": marks[i].group(1).strip(), "sentence": sentence,
+                          "how": "sentence removed" if drop else f"replaced by {REPLACED}"})
+    out = markdown
+    for start, end, text in sorted(edits, reverse=True):
+        out = out[:start] + text + out[end:]
+    return out, taken
+
+
 def typed_hits(paper_md: str, protocol: dict[str, Any] | None, topic: str = "") -> list[str]:
     """Rule R1 (:mod:`core.typed_numbers`) on the writer's own text: a hit for each sentence that types a number which is not
     a number of the plan or the topic, or a label. Run only on a paper written under the rule."""
@@ -1237,10 +1322,11 @@ def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s:
 
 
 def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, removed: list[tuple[str, str]] | None = None,
-               not_filled: str = "") -> None:
+               not_filled: str = "", dropped: list[dict[str, str]] | None = None) -> None:
     """Keep what the last review found (``.fi/paper_record_check.json``): the hits, the required items the paper does
     not hold, the placeholders that read "not recorded", the typed numbers FI took out when the rewrite rounds were used up
-    (``removed``: ``(number, sentence)``), and why the paper is not held to the rule that FI fills every result number
+    (``removed``: ``(number, sentence)``), the result keys FI could not fill that were taken out the same way (``dropped``:
+    ``key``, ``sentence``, ``how``), and why the paper is not held to the rule that FI fills every result number
     (``not_filled``: ``no_records`` or ``older_paper``). The quality report prints it, so what is still unmet when the rounds are used up is on record."""
     path = Path(quest_root) / RECORD
     try:
@@ -1248,13 +1334,15 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, remove
         unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
                  for i in required_items(quest_root) if not _item_placed(text, i)]
         unfilled = unfilled_in(paper_md)
-        if not hits and not unmet and not unfilled and not removed and not not_filled:
+        if not hits and not unmet and not unfilled and not removed and not not_filled and not dropped:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         record: dict[str, Any] = {"at": time.time(), "hits": list(hits), "unmet_items": unmet, "unfilled": unfilled}
         if removed:
             record["removed_numbers"] = [{"number": n, "sentence": sent} for n, sent in removed]
+        if dropped:
+            record["taken_out_values"] = [dict(d) for d in dropped]
         if not_filled:
             record["not_filled_by_fi"] = not_filled
         path.write_text(json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")

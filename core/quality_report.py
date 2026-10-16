@@ -546,6 +546,11 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("paper", f"the number {r.get('number')} was typed by the writer, not filled by FI from its records, "
                             f"and was taken out: {_one(r.get('sentence'), 200)}",
                             "FI's check of the paper's numbers", "left out", ".fi/paper_record_check.json"))
+    for r in _list(q.paper_check.get("taken_out_values")):
+        r = _dict(r)
+        out.append(_problem("paper", f"FI could not fill the value {r.get('key')} from its records ({r.get('how')}): "
+                            f"{_one(r.get('sentence'), 200)}",
+                            "FI's check of the paper's numbers", "left out", ".fi/paper_record_check.json"))
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
@@ -1048,6 +1053,7 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
                               "unmet_items": [_dict(i) for i in _list(kept.get("unmet_items"))],
                               "unfilled": [str(u) for u in _list(kept.get("unfilled"))],
                               "removed": [_dict(r) for r in _list(kept.get("removed_numbers"))],
+                              "taken_out": [_dict(r) for r in _list(kept.get("taken_out_values"))],
                               "not_filled": str(kept.get("not_filled_by_fi") or "")}
     except Exception:  # noqa: BLE001 -- a record that cannot be read leaves its part out
         pass
@@ -1209,8 +1215,9 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     hits = [h for h in check.get("hits") or [] if h]
     unfilled = [u for u in check.get("unfilled") or [] if u]
     removed = [r for r in check.get("removed") or [] if isinstance(r, dict)]
+    taken_out = [r for r in check.get("taken_out") or [] if isinstance(r, dict)]
     not_filled = str(check.get("not_filled") or "")
-    if not parts and not unmet and not hits and not unfilled and not removed and not not_filled:
+    if not parts and not unmet and not hits and not unfilled and not removed and not taken_out and not not_filled:
         return []
     lines = ["", "## What FI recorded that the paper does not carry", "",
              "These are FI's records of the run. The paper's seed, measured run time, time limit, trial counts and the "
@@ -1232,6 +1239,14 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
                   "review rounds ended before the writer fixed them, so each is replaced by \"[number removed]\" in the paper:",
                   ""]
         lines += [f"- {_cell(str(r.get('number')))}: {_cell(_one(r.get('sentence'), 240))}" for r in removed]
+        lines.append("")
+    if taken_out:
+        lines += ["### Values taken out of the paper", "",
+                  "The paper asked for these values, but FI has no record that fills them and the review rounds ended before "
+                  "the writer fixed the key. FI put no number in their place: where a sentence carried only such values it "
+                  "is removed, and anywhere else the value is replaced by \"[number removed]\":", ""]
+        lines += [f"- {_cell(str(r.get('how')))}: {_cell(_one(r.get('sentence'), 240))} (`{_cell(str(r.get('key')))}`)"
+                  for r in taken_out]
         lines.append("")
     if not_filled:
         lines += ["### Result numbers in this paper", "",

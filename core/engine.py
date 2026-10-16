@@ -19911,11 +19911,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 paper_md = Path(path).read_text(encoding="utf-8")
                 hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
                                           protocol=protocol)
+        # A result key FI could not fill is no better than a typed number once no round is left to fix it: it is taken out
+        # the same way (a sentence that carried only such keys goes, any other place reads the same marker) and listed.
+        dropped: list[dict[str, str]] = []
+        if keyed and left <= 0 and _paper_values.unfilled_in(paper_md):
+            dropped = self._take_out_unfilled_keys(state)
+            if dropped:
+                path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+                paper_md = Path(path).read_text(encoding="utf-8")
+                hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
+                                          protocol=protocol)
         # A paper not held to the rule says why in QUALITY.md: the study has no trial record to fill from, or the paper
         # was written before FI filled result numbers.
         not_filled = "" if keyed else (
             "older_paper" if (self.quest_root / "raw" / "trials.json").is_file() else "no_records")
-        _paper_facts.keep_check(self.quest_root, hits, paper_md, removed=removed, not_filled=not_filled)
+        _paper_facts.keep_check(self.quest_root, hits, paper_md, removed=removed, not_filled=not_filled, dropped=dropped)
         for hit in hits:
             self._log.warning("[record_check] %s", hit)
         if hits and left <= 0:
@@ -19946,6 +19956,29 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._log.warning("[record_check] no round is left to write the paper again, so %d number(s) the writer typed that FI "
                           "did not fill and the plan does not state were replaced by \"%s\" and are listed in QUALITY.md",
                           len(taken), _typed_numbers.REMOVED)
+        return taken
+
+    def _take_out_unfilled_keys(self, state: QuestState) -> list[dict[str, str]]:
+        """The paper with each result key FI could not fill taken out (core/paper_facts.py::take_out_unfilled), written to
+        disk: ``key``, ``sentence`` and ``how`` for each. Nothing is put in their place, so no number is invented, and the
+        claim check's receipt moves to the new draft, which only lost text and added no claim."""
+        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not path or not Path(path).is_file():
+            return []
+        try:
+            before = Path(path).read_bytes()
+            text, taken = _paper_facts.take_out_unfilled(before.decode("utf-8"))
+            if not taken:
+                return []
+            Path(path).write_text(text, encoding="utf-8")
+            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
+                                 "FI took out values it could not fill and added no claim")
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[record_check] the values FI could not fill could not be taken out of the paper (%s)", e)
+            return []
+        self._log.warning("[record_check] no round is left to write the paper again, so %d value(s) FI could not fill were "
+                          "taken out (%d sentence(s) removed, the rest replaced by \"%s\") and are listed in QUALITY.md",
+                          len(taken), sum(1 for t in taken if t["how"] == "sentence removed"), _paper_facts.REPLACED)
         return taken
 
     async def _check_code_project(self) -> None:
