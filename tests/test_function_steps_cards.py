@@ -174,7 +174,10 @@ async def test_the_literature_and_example_blocks_are_in_the_prompts_and_empty_wh
 
 
 @pytest.mark.asyncio
-async def test_a_steps_expected_output_is_hidden_in_the_first_fill_and_shown_after_it_failed_its_example(tmp_path: Path) -> None:
+async def test_a_steps_expected_output_is_never_shown_not_even_after_it_failed_its_example(tmp_path: Path) -> None:
+    """review pass 2 N6: the repair after a failed example showed "FI computed the result ...: 3 (relative tolerance
+    ...)", so the function could special-case the very example FI then judged. It is told the case did not match, and
+    its inputs, only."""
     specs, _ = fs.model_functions(OUTLINE, PROTOCOL)
     wrong = "# S1\ndef mean_quality(q1, q2):\n    return q1 + q2\n"  # 6.0, not 3.0
     model = _Model({**{k: [v] for k, v in GOOD.items()}, "mean_quality": [wrong, GOOD["mean_quality"]]})
@@ -184,7 +187,9 @@ async def test_a_steps_expected_output_is_hidden_in_the_first_fill_and_shown_aft
     first, repair = mine
     shown = first.split("# A worked case")[1].split("# The function")[0]
     assert "q1 = 2" in shown and "q2 = 4" in shown and "FI computed the result" not in shown and "3" not in shown
-    assert "FI computed the result for these inputs from the plan's own formula: 3 " in repair.split("# A worked case")[1]
+    again = repair.split("# A worked case")[1].split("# The function")[0]
+    assert "q1 = 2" in again and "q2 = 4" in again and "does not match" in again, again
+    assert "FI computed the result" not in again and "3" not in again and "tolerance" not in again, again
     assert "implements step S1 of the method" in repair, "the failure is worded for a step"
     problem = repair.split("# What is wrong with it")[1].split("# Functions of the package")[0]
     assert "(3" not in problem, "the problem text itself never carries the expected value, as for an equation"

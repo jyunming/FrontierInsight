@@ -734,8 +734,10 @@ class FunctionFiller:
         return ("# What the literature says (passages from the source the plan cites; use them for the method's definition "
                 "and details, do not copy numbers from them)\n\n" + text + "\n")
 
-    def _example_block(self, spec: Spec, *, with_expected: bool = False) -> str:
-        """A step's worked inputs; the output FI computed for them only for the repair that follows a failed example."""
+    def _example_block(self, spec: Spec, *, failed: bool = False) -> str:
+        """A step's worked inputs; for the repair that follows a failed example, that its result did not match. Never the
+        output FI computed for them or the tolerance: FI judges this very case, so a function shown its answer could
+        special-case it."""
         if spec.kind != STEP:
             return ""
         row = self._step_row(spec)
@@ -745,12 +747,9 @@ class FunctionFiller:
         text = f"# A worked case\n\nFI will call the function with: {given}.\n"
         if row.get("random"):
             text += "Its result is a random draw: FI compares the mean of many draws.\n"
-        elif with_expected:
-            shown = (", ".join(f"{k} = {v:.10g}" for k, v in row["expected"].items())
-                     if isinstance(row["expected"], dict) else f"{row['expected']:.10g}")
-            text += (f"FI computed the result for these inputs from the plan's own formula: {shown} "
-                     f"(relative tolerance {row['rel']:g}). The function as it is does not give it; find out why from the "
-                     "step's description, do not write the number into the function.\n")
+        elif failed:
+            text += ("FI worked out the result for these inputs from the plan's own formula, and what the function as it "
+                     "is returns does not match it. Find out why from the step's description.\n")
         return text
 
     # -- one function --
@@ -989,7 +988,7 @@ class FunctionFiller:
                     function_block=ast.get_source_segment(source, current) if current is not None else spec.signature,
                     problem=problem, related_block=_text_block(related), package=self.package,
                     topic_block=self.topic_block, literature_block=self._literature_block(spec),
-                    example_block=self._example_block(spec, with_expected=spec.equation in self._example_failed))
+                    example_block=self._example_block(spec, failed=spec.equation in self._example_failed))
             try:
                 reply = await self.chat(prompt)
             except Exception as e:  # noqa: BLE001 -- a call that failed is a failed attempt
