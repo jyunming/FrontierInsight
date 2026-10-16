@@ -212,7 +212,7 @@ def test_a_hit_the_engine_wrote_about_a_figure_still_rewrites_the_paper(
 
 def test_a_flaw_in_the_design_no_check_confirms_is_stated_not_redesigned(tmp_path: Path) -> None:
     """A reviewer's objection to the design that no check of FI's confirms does not re-run the experiment or change the
-    design: the paper is written again with the objection stated in its limitations."""
+    design: the paper is written again with the objection kept in FI's record (QUALITY.md)."""
     review = {**XG3_REVIEW, "must_flag_hits": ["[methodologist] circular_evaluation"]}
     assert _review_sends_the_experiment_back(review, _state(review)) == ""  # type: ignore[arg-type]
     assert _engine(tmp_path)._route_after_review(_state(review)) == "rewrite"  # type: ignore[arg-type]

@@ -3415,8 +3415,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         #    the human-feedback node so the user gets a final say.
         # 3. Otherwise fall through to the legacy verdict-driven routing.
         review = state.get("review") or {}
-        # An objection to the design that the paper's limitations already state (FI's record of it) is not raised again:
-        # a rewrite cannot answer it, and the design is not changed for it.
+        # An objection to the design that FI's record already keeps (.fi/review_objections.json, printed in QUALITY.md) is
+        # not raised again: a rewrite cannot answer it, and the design is not changed for it.
         repeated = set(review.get("objections_repeated") or [])
         must_flag = [h for h in review.get("must_flag_hits") or [] if _objection_key(h) not in repeated]
         # The draft is over the page limit and nothing else is to be fixed:
@@ -3478,12 +3478,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 )
                 return "rewrite"
             # An objection to the design (circular evaluation, a single-point evaluation, a name the reviewer made up)
-            # that no check of FI's confirms: the paper is written again with it stated in the limitations (FI's record,
-            # core/disclosure.py:run_record), and the design is not changed for it. A redesign for it used to cost a
-            # whole round and recorded the new design as one made after the results were seen.
+            # that no check of FI's confirms: the paper is written again with the review in hand, the objection is kept
+            # in FI's record (.fi/review_objections.json, printed in QUALITY.md; core/disclosure.py:run_record), and the
+            # design is not changed for it. A redesign for it used to cost a whole round and recorded the new design as
+            # one made after the results were seen.
             self._log.info(
                 "[route] must_flag_hits=%s include objections to the design that no check of FI's confirms — writing "
-                "the paper again with them stated in its limitations; the design is not changed", must_flag,
+                "the paper again; the objections are kept in QUALITY.md and the design is not changed", must_flag,
             )
             return "rewrite"
         if self.config.pauses.review == "ask":
@@ -3493,9 +3494,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         verdict = review.get("verdict", "accept")
         if verdict == "revise" and state.get("iteration", 0) < self.config.engine.max_iterations:
             # The reviewer's own judgement, with no check of FI's behind it: the paper is written again with the review
-            # in hand and the reviewer's reason stated in the limitations; the design is not changed for it.
+            # in hand, the reviewer's reason is kept in FI's record (printed in QUALITY.md), and the design is not changed.
             self._log.info("[route] the review asks for a revision that no check of FI's confirms — writing the paper "
-                           "again with the reviewer's reason stated in its limitations; the design is not changed")
+                           "again; the reviewer's reason is kept in QUALITY.md and the design is not changed")
             return "rewrite"
         return "done"
 
@@ -21433,9 +21434,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         An objection is a hit that names no problem FI checks in the text (circular evaluation, a single-point evaluation,
         a name the reviewer made up) or, for a revise verdict, the reviewer's own reason (``blocking``): no check of FI's
         confirms it, so the design is not changed for it. When the paper is written again after this review, they go into
-        FI's record (``.fi/review_objections.json``), which the quality report prints (core/disclosure.py:run_record).
-        One the record already holds is in ``review["objections_repeated"]`` and is not counted: a rewrite cannot answer
-        it. Best-effort: a record FI cannot read or write counts every hit, as before."""
+        FI's record (``.fi/review_objections.json``), which the quality report prints (core/disclosure.py:run_record);
+        the paper is not required to carry them (the writer may name one that is a real limit of the study, in its own
+        words). One the record already holds is in ``review["objections_repeated"]`` and is not counted: a rewrite cannot
+        answer it. Best-effort: a record FI cannot read or write counts every hit, as before."""
         hits = [h for h in review.get("must_flag_hits") or [] if _hit_name(h) != _PAGE_LIMIT_HIT]
         objections = [h for h in hits if _hit_name(h) not in _TEXT_ONLY_HITS]
         try:
@@ -21443,8 +21445,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             repeated = sorted({_objection_key(h) for h in objections} & stated)
             if repeated:
                 review["objections_repeated"] = repeated
-                self._log.info("[review] objections the paper's limitations already state, not counted again: %s",
-                               ", ".join(repeated))
+                self._log.info("[review] objections FI's record already keeps (QUALITY.md), not counted again — a "
+                               "rewrite cannot answer them: %s", ", ".join(repeated))
             counted = [h for h in hits if _objection_key(h) not in set(repeated)]
             new = [(_objection_key(h), _one_line(str(h), 300)) for h in objections if _objection_key(h) not in stated]
             said = str(review.get("blocking") or "").strip() if review.get("verdict") == "revise" else ""
@@ -28801,8 +28803,9 @@ def _format_review_for_writer(state: QuestState, *, refine_round: bool = False) 
     blocking = str(review.get("blocking") or "").strip() if review.get("verdict") == "revise" else ""
     if objections or blocking:
         lines += [
-            "Objections to the design that no check of FI's confirms (the study is not changed for them, and FI states "
-            "them in the limitations itself; never write that the study answers them):",
+            "Objections to the design that no check of FI's confirms (the study is not changed for them; FI keeps them "
+            "in its quality report, not in the paper. Where one names a real limit of this study, say so in the "
+            "Limitations in your own words; never write that the study answers them):",
             *(f"  - {item}" for item in [*objections, *([blocking] if blocking else [])]),
         ]
     unsupported = _review_items((state.get("claim_grounding") or {}).get("unsupported"))

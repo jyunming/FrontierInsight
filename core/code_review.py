@@ -15,7 +15,8 @@ setting, that a step the plan's model names is not skipped, that nothing reporte
 is the plan's. Its findings go to a repair request of their own, each naming the place and the fault, never a value;
 whatever value of the plan's checks a reviewer quotes is replaced in the findings (:func:`core.review_pairs.without_values`). A finding the run's own results
 confirm (a quantity the reviewer calls constant that the results hold at one value, :func:`constant_in`) about a headline quantity
-ends in the honest stop after the run; every other open finding is said in the paper's limitations as unresolved.
+ends in the honest stop after the run; every other open finding is said in the paper's limitations as unresolved (one that
+can change a reported result as an item FI fills in and checks is there, :mod:`core.paper_facts`).
 
 * A reader that is the model that wrote the code is not a second reader: nothing is asked, and ``.fi/code_review.json``
   and ``run.log`` say that the code was not read by another model.
@@ -34,7 +35,9 @@ ends in the honest stop after the run; every other open finding is said in the p
   read, and the record says whether it was (``final_read``), the open findings per reading and whether the repairs
   converged. A version that a repair of the run itself (a crash, a result the protocol's contract refuses) changed after
   that reading is read again before its results are used, within :data:`RUN_REPAIR_READS` more readings.
-* What is still open afterwards is said in the paper's limitations, by the writer (:func:`write_note`) and checked by FI. A high-severity finding about
+* What is still open afterwards is said in the paper's limitations by the writer (:func:`write_note`); an open finding that
+  can change a reported result is also an item FI fills into the Limitations itself and checks is there
+  (:mod:`core.paper_facts`, ``{{not_done:<id>}}``). A high-severity finding about
   a headline quantity (the first dependent variable, the metric the precision target is for) that is still open in the
   final version ends in the honest stop (``stuck_no_findings``, no paper) after the run, unless the run's own results
   contradict it (a quantity the reviewer calls missing that the results hold, one it calls constant that they show

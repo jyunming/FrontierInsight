@@ -61,7 +61,7 @@ def test_an_objection_to_the_design_rewrites_the_paper_and_keeps_the_design(tmp_
 
 
 def test_an_objection_is_recorded_stated_in_the_paper_and_not_counted_again(tmp_path: Path) -> None:
-    """The first review's objection goes into FI's record, which the limitations state; the next review raising it
+    """The first review's objection goes into FI's record (printed in QUALITY.md); the next review raising it
     again is not counted, so it neither costs a round nor sends the paper back once more."""
     from core import disclosure
 
