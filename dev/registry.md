@@ -33,8 +33,8 @@ same PR that adds, splits or renames one.
   the per-setting copy, the largest pooled list or keys side by side. `_attribute` (via `_values_of_other_settings`)
   holds each list to the trials of the setting its key path names: a lone key that is a value's name must hold that
   value's trials, or the coarser setting's whole record (a summary), never fall back to the coarser setting; a list that
-  holds, at its setting, the values of the recorded output a key on its path names is counted as that output
-  (`relabelled`, logged by the engine); anything else is fabricated. `trial_runner.held_as` hands such lists over from
+  holds, at its setting, the values of another recorded output (the one a key on its path names, or the only one
+  that holds them all) is counted as that output (`relabelled`, one run.log line from `Engine._run_manifest_problems`); anything else is fabricated. `trial_runner.held_as` hands such lists over from
   the pooled check, and `trial_runner.mean_beside` (in `reported_values_not_run`) calls a `<m>` / `<m>_mean` printed
   beside `<m>_values` fabricated when it is neither the list's mean nor its standard deviation. Findings carry a kind (`Finding`, `fabricated` / `unaccounted`,
   `kind_of`): `Engine._run_manifest_problems` keeps the fabricated ones in `_manifest_fabricated`, which stop under

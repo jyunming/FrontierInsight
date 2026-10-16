@@ -10643,6 +10643,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                      + _run_manifest.problems(counted, manifest, result_json=result_json, trial_mode=True,
                                               recorded=recorded, recorded_by_cell=per_cell) + not_run
                      + row_sim)
+            # A list printed under the wrong name that holds another output's values at its setting is counted as that
+            # output, and said once.
+            renamed = _run_manifest.relabelled(counted, result_json, per_cell)
+            if renamed:
+                self._log.info("[run_manifest] %s", "; ".join(renamed))
             derived = _run_manifest.derived_metrics(counted, recorded)
             if derived:
                 # Said plainly, so a person sees which means FI could not count against the trials' own values.

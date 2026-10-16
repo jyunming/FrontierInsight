@@ -1934,14 +1934,16 @@ def _as_float(key: Any) -> float:
 def held_as(name: str, values: list[Any], recorded: dict[str, Counter], keys: list[Any] | tuple[Any, ...] = ()) -> str:
     """The name of FI's record a ``<name>_values`` list is held to over all settings: ``name`` when every value is one of
     its trials'; else a recorded name a key on the list's path gives (``x1_power/power_values``) when every value is one of
-    that name's; else ``name``. A list held to another name is judged setting by setting in :mod:`core.run_manifest`
+    that name's; else the one other recorded name whose trials hold every value (a list printed under a name of its own);
+    else ``name``. A list held to another name is judged setting by setting in :mod:`core.run_manifest`
     (``_attribute``), which says it in run.log or calls it fabricated."""
     if name not in recorded or not _not_among(values, recorded[name]):
         return name
     named = [k for k in keys if isinstance(k, str) and k != name and k in recorded]
     if named and not _not_among(values, recorded[named[-1]]):
         return named[-1]
-    return name
+    others = [o for o in recorded if o != name and not _not_among(values, recorded[o])]
+    return others[0] if len(others) == 1 else name
 
 
 def mean_beside(mapping: dict[str, Any], name: str, values: list[Any]) -> str | None:

@@ -886,8 +886,10 @@ def _attribute(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
     * A key that is only a value's name (``stats/benjamini_hochberg``, or ``by_method/benjamini_hochberg`` beside a key
       such as ``notes``) names that value: the list must be its trials, never the coarser setting's, unless it is
       exactly the coarser setting's whole record (a summary over every procedure under ``summary/mean``).
-    * A list whose values are, at its setting, every one of the recorded output a key on its path names is that
-      output's: a note, not a finding.
+    * A list whose values are, at its setting, every one of another recorded output's (the one a key on its path names,
+      or the only one that holds them all) is that output's, printed under the wrong name: a note for run.log, not a
+      finding (r13's probe printed ``x1_power``'s values as ``power_values``). The same output's values of another
+      setting or procedure stay fabricated.
     * Anything else is numbers that setting never produced: fabricated. Values no trial of ``metric_id`` produced at any
       setting are :func:`core.trial_runner.reported_values_not_run`'s to tell, and are not told twice."""
     from collections import Counter
@@ -927,7 +929,9 @@ def _attribute(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
             coarse = at(metric_id, firm)
             if len(numbers) == _defined_count(coarse) and not _not_among(numbers, coarse):
                 continue  # the coarser setting's whole record under a value's name: a summary over all of it
-        candidates = [named] if named else []
+        # Another recorded output's values at this setting (the one a key on the path names, or the only one that holds
+        # them all): that output, printed under the wrong name. Another setting's values of it are not.
+        candidates = [named] if named else [o for o in everywhere if o != metric_id]
         holds = [o for o in candidates if not _not_among(numbers, at(o, full))]
         if len(holds) == 1:
             notes.append(f"`{where}` holds `{holds[0]}`'s values at `{setting(full)}`, not `{metric_id}`'s: FI counts it "
