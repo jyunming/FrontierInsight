@@ -202,7 +202,10 @@ def summary_cells(run_cell, run_key, planned, rows, levels):
     if levels:
         first["compared_in_each_run"] = [level_key(level) for level in levels]
     out: list = [first]
-    if levels:
+    # A value gets a record of its own only when the run returned a number per value. A run that returned none (every
+    # number is one per run) has nothing to record per value: an empty record would be a setting that never ran,
+    # claiming the run's trials.
+    if levels and any(split(r.get("values"))[1] for r in good):
         for level in levels:
             lk = level_key(level)
             out.append(dict(head, cell=dict(run_cell, **level), key=record_key(run_key, lk), level=dict(level),

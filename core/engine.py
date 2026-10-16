@@ -6951,8 +6951,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if part == "per_trial":
                     lines.append("FI asked the plan's model whether each check on an average over trials holds in every "
                                  "single trial or only on average, and "
-                                 + ("a check still does not say (it is judged as its kind is: a rule on every trial, a "
-                                    "quantity on the average)" if part in left else "every such check says it now") + ".")
+                                 + ("a check still does not say (it is read as an average over trials)" if part in left else "every such check says it now") + ".")
                 elif part in _LEDGER_PARTS:
                     lines.append(f"FI asked the plan's model to write `protocol.{part}` again, and "
                                  + ("it still has gaps (the experiment goes on; the paper says so)" if part in left
@@ -16646,8 +16645,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     "; ".join(manifest_found), "; ".join(by_request),
                 )
             elif mode == "warn" and not acting:
-                manifest_status = "warned"
-                self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join(manifest_found))
+                # What the analysis does not print of trials FI holds whole is not a difference in the record: the log has
+                # it, the paper (core/paper_facts.py) and the quality report do not.
+                unprinted = [f for f in manifest_found if _run_manifest.kind_of(f) == _run_manifest.UNPRINTED]
+                manifest_found = [f for f in manifest_found if f not in unprinted]
+                manifest_status = "warned" if manifest_found else "ok"
+                self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join([*manifest_found, *unprinted]))
             elif manifest_attempts < _manifest_repair_budget(
                     budget, set(acting) <= set(self._manifest_analysis_problems)):
                 manifest_status = "repairing"
@@ -19687,6 +19690,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 by_setting = None
                 # An earlier run's tables must not go into this paper.
                 (self.quest_root / _results_by_setting.PAPER_BLOCK).unlink(missing_ok=True)
+            for d in (by_setting.diagnostics if by_setting else []):  # FI's own reading of the code: the log, not the paper
+                self._log.info("[write] %s", d)
             table_note = _results_by_setting.writer_note(trial_rows, by_setting)
         except Exception as e:  # noqa: BLE001 -- the table is a help to the writer, never a reason to stop
             self._log.warning("[write] FI's table of the trials could not be written (%s)", e)
@@ -19819,9 +19824,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return
         try:
             before = Path(path).read_text(encoding="utf-8")
-            after = self._render_paper_facts(_disclosure.without_block(before), state)
+            after = self._render_paper_facts(
+                _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
             if before.rstrip() != after.rstrip() and (
-                    _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before):
+                    _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before
+                    or "fi:fact-" in after):
                 Path(path).write_text(after, encoding="utf-8")
                 self._log.info("[review] took FI's old blocks out of the paper and filled its facts of the run from the "
                                "records again before checking it")
@@ -19975,6 +19982,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # FI's tables of every setting (core/results_by_setting.py): where the writer put {{results_table}}, else before
         # the discussion; filled from FI's records with the facts below, so no number of them is typed by a model.
         markdown = _paper_facts.place_blocks(markdown, self.quest_root)
+        # A new draft is not yet measured against the page limit: an earlier draft's measurement is not this one's.
+        (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
+        # What the study did not do (core/paper_facts.py): each item the writer did not place is put in the Limitations by FI.
+        markdown = _paper_facts.place_items(markdown, self.quest_root)
         # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
         # placeholder (core/paper_facts.py).
         markdown = self._render_paper_facts(markdown, state)
@@ -21936,6 +21947,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._log.info("[page_limit] the draft is still over the limit after %d sentences were taken out", len(taken))
         return None
 
+    async def _state_page_overrun(self, state: QuestState, paper_path: Path, limit: int, pages: int) -> int:
+        """The paper stays over its page limit: FI's measurement goes on record (``.fi/page_limit.json``), FI puts the
+        sentence that says so in the Limitations (core/paper_facts.py ``PAGE_LIMIT``), and the paper that now carries it is
+        measured again, since the sentence is a few lines of its own. Returns the page count of the paper as it stands,
+        which is the one the sentence states (twice at most: a sentence that tips the paper onto one more page is stated
+        with that page)."""
+        for _ in range(2):
+            _paper_facts.write_page_record(self.quest_root, pages, limit, final=True)
+            try:
+                before = paper_path.read_text(encoding="utf-8")
+                after = self._render_paper_facts(
+                    _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
+                if after != before:
+                    paper_path.write_text(after, encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                self._log.warning("[page_limit] the paper could not be given its sentence on the page limit (%s)", e)
+                break
+            again = await self._measure_draft_pages(paper_path, state)
+            if again is None or int(again["pages"]) == pages:
+                break
+            pages = int(again["pages"])
+        if pages <= limit:  # the sentence was the only thing over: nothing to state
+            _paper_facts.write_page_record(self.quest_root, pages, limit, final=False)
+        return pages
+
     async def _page_limit_review(
         self, state: QuestState, paper_path: str | Path | None,
     ) -> tuple[list[str], dict[str, Any] | None]:
@@ -21990,6 +22026,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 )
         if pages <= limit:
             self._log.info("[page_limit] the draft renders to %d pages; the limit is %d", pages, limit)
+            _paper_facts.write_page_record(self.quest_root, pages, limit, final=False)
             return [], record
         if done >= _PAGE_LIMIT_REWRITES:
             record["exceeded_after_rewrites"] = True
@@ -21997,6 +22034,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "[page_limit] the draft renders to %d pages, over the limit of %d, after %d shortening "
                 "rewrites; recorded in the review, not forced again", pages, limit, done,
             )
+            record["pages"] = await self._state_page_overrun(state, Path(paper_path), limit, pages)
             return [], record
         words = _words_to_cut(pages, limit, float(measured.get("last_page_empty") or 0.0))
         record["words_to_cut"] = words
@@ -26262,7 +26300,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 
 `model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead. @@EXAMPLE@@
 
-Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. On a random simulation FI runs each check's case many times: an `invariant`, a `symmetry` or a `second_implementation` must hold in every run (the worst run counts), and any other check is judged on the average over the runs; a rule that holds only on average over repeats (a false discovery rate at most q, an error rate at most alpha) says `"per_trial": false`, and a quantity that must hold in every single run says `"per_trial": true`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
+Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. On a random simulation FI runs each check's case many times: a check that says nothing of `per_trial` is judged on the average over the runs (a false discovery rate at most q and an error rate at most alpha are averages, and one run's proportion can be anything); a check that must hold in every single run, the worst run counting (a conserved quantity), says `"per_trial": true`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
 `criteria` are how a later version of the code will be judged better or worse: two to five checks of correctness that FI computes itself after every run, never the study's own finding. A criterion on a number in `metrics` or `precision` is refused, because judging the code by its result would reward bending the code towards the result. Each takes its number from exactly one of: an oracle above, by its name (`"use": "error"` for how far it lands from its expected value, such as the gap between an observed and a claimed convergence order; `"use": "value"` for the measured value, such as the worst drift of a conserved quantity), best one with a `case` so that FI runs it itself (a number the script's own `oracle()` reports is shown but never counts); or `"trials": "<a number every trial returns>"` in place of `oracle`, whose value is how fast the standard error of its mean shrinks as trials are added (use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more). Give each its own `tolerance`, from the method's known error or the noise of the measurement. Leave `criteria` out only when nothing FI can compute says whether the code is right.
 
@@ -29752,6 +29790,13 @@ def _figure_list_for_prompt(state: QuestState) -> str:
             )
         else:
             lines.append(f"- figures/{f}" + _figure_record_note(records.get(f), n_seeds=n_seeds))
+    if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
+           if isinstance(ax, dict)):
+        lines.append(
+            "Where a panel sits (left, right, top, bottom) is FI's record of the saved figure: a caption or sentence "
+            "that points to a panel by place uses these words, and one that does not need them names the panel by "
+            "what it shows."
+        )
     if any((records.get(f) or {}).get("replicate_mean") for f in figs):
         lines.append(
             "A figure drawn as the mean of several seeds shows each line at its mean, "
@@ -30053,6 +30098,26 @@ def _figure_overlap_directive(findings: list[str]) -> str:
     )
 
 
+_PANEL_ROWS = {2: ("top", "bottom"), 3: ("top", "middle", "bottom")}
+_PANEL_COLS = {2: ("left", "right"), 3: ("left", "centre", "right")}
+
+
+def _panel_place(grid: Any) -> str:
+    """Where a panel sits on its figure, in a caption's words ("left", "top right", "row 2 of 4"), from the cell of the
+    subplot grid the saved figure put it in (``[rows, cols, row start, row stop, col start, col stop]``, recorded on
+    savefig by core/plot_style.py); "" for a figure's only panel, a panel that spans the grid, or no grid recorded."""
+    if not (isinstance(grid, list) and len(grid) == 6 and all(isinstance(v, int) for v in grid)):
+        return ""
+    rows, cols, r0, r1, c0, c1 = grid
+
+    def axis(n: int, start: int, stop: int, named: dict[int, tuple[str, ...]], kind: str) -> str:
+        if n <= 1 or (start == 0 and stop >= n) or not 0 <= start < n:
+            return ""
+        return named[n][start] if n in named else f"{kind} {start + 1} of {n}"
+
+    return " ".join(w for w in (axis(rows, r0, r1, _PANEL_ROWS, "row"), axis(cols, c0, c1, _PANEL_COLS, "column")) if w)
+
+
 def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None) -> str:
     """What a figure draws, for the writer: each panel's title, y axis and series.
     ``n_seeds`` is how many replicate seeds ran, when known."""
@@ -30061,6 +30126,9 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
         if not isinstance(ax, dict):
             continue
         bits = [f'"{ax["title"]}"'] if ax.get("title") else []
+        where = _panel_place(ax.get("grid"))
+        if where:
+            bits.insert(0, f"{where} panel")
         ylim = ax.get("ylim") or []
         if len(ylim) == 2:
             bits.append(

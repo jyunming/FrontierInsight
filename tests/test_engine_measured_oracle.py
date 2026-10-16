@@ -313,10 +313,15 @@ def test_a_run_cell_with_a_formula_of_its_own_does_not_hide_a_bug_in_run_trial(t
     assert checks[0]["value"] == 0.9 and found, "the check reads the code the study runs, and fails on it"
 
 
-def test_an_explicit_per_trial_check_and_an_invariant_are_measured_on_one_trial(tmp_path: Path) -> None:
-    for i, extra in enumerate(({"per_trial": True}, {"kind": "invariant"})):
-        checks, problems, _ = _measure(tmp_path / str(i), BUILT_FROM_TRIALS, [{**MEAN_CHECK, **extra}])
-        assert not problems and checks[0]["value"] in (0.0, 0.1), (extra, checks, problems)
+def test_an_explicit_per_trial_check_is_measured_on_one_trial(tmp_path: Path) -> None:
+    checks, problems, _ = _measure(tmp_path, BUILT_FROM_TRIALS, [{**MEAN_CHECK, "per_trial": True}])
+    assert not problems and checks[0]["value"] in (0.0, 0.1), (checks, problems)
+
+
+def test_an_invariant_that_says_nothing_of_per_trial_is_about_the_mean(tmp_path: Path) -> None:
+    """The default reading does not depend on the kind: an unset ``per_trial`` is the mean over trials."""
+    checks, problems, _ = _measure(tmp_path, BUILT_FROM_TRIALS, [{**MEAN_CHECK, "kind": "invariant"}])
+    assert not problems and abs(checks[0]["value"] - 0.05) <= 0.01 and checks[0]["mc"]["read_as"] == "mean", checks
 
 
 _BUGGY_TRIAL = "def run_trial(cell, trial_id, seed):\n    return {'rate': 0.9}\n\n"

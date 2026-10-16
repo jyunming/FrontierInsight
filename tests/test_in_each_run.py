@@ -262,3 +262,17 @@ def test_the_topic_check_writes_a_factor_compared_inside_each_run_back_to_its_li
     assert in_list is not None and in_list["protocol"]["in_each_run"] == {"T": [300, 400]}
     plain = {"protocol": {"grid": {"m": [10]}, "metrics": []}}
     assert "in_each_run" not in (topic_requirements.merge(plain, {"protocol": {"grid": {"m": [10], "n": [1, 2]}}}, []) or {})["protocol"]
+
+
+def test_a_value_compared_inside_each_run_gets_no_record_when_the_run_returned_no_number_per_value() -> None:
+    """s3 kinetics: 25 settings and 1000 empty records (5 temperatures x 4 interval types x 2 centrings), each claiming
+    400 ok trials with no metrics, because every number the run returned was one per run."""
+    levels = in_run.level_cells({"t": [1.0, 2.0], "kind": ["a", "b"]})
+    rows = [{"trial": i, "status": "ok", "values": {"x": float(i)}} for i in range(3)]
+    cells = in_run.summary_cells({"n": 5}, "n=5", 3, rows, levels)
+    assert [c["key"] for c in cells] == ["n=5"] and cells[0]["metrics"]["x"]["count"] == 3
+    # a run that does return a number per value still gets one record per value
+    per_value = [{"trial": i, "status": "ok", "values": {"x": float(i), "k": {in_run.level_key(lv): 1.0 for lv in levels}}}
+                 for i in range(3)]
+    kept = in_run.summary_cells({"n": 5}, "n=5", 3, per_value, levels)
+    assert len(kept) == 1 + len(levels) and all(c["metrics"]["k"]["count"] == 3 for c in kept[1:])

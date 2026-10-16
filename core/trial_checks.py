@@ -477,17 +477,21 @@ def _coverage_check(key: str, hits: list[float], level: float, z: float = _Z95) 
     return SettingCheck(key, n, k / n, lo, hi, gross=hi < level - COVERAGE_GAP, below=hi < level, above=lo > level)
 
 
-def _ratio_of(est: list[float], se: list[float]) -> tuple[float, int] | None:
+def _ratio_of(est: list[float], se: list[float], constant_ok: bool = False) -> tuple[float, int] | None:
     """``(spread of the estimates / root mean square of their errors, degrees of freedom)``, or ``None`` when there is no
-    spread to judge (a setting without noise) or no error reported."""
+    spread to judge (a setting without noise; with ``constant_ok``, estimates that do not vary against an error the trials
+    report read 0) or no error reported."""
     n = len(est)
     if n < MIN_TRIALS:
         return None
     mean = sum(est) / n
     sd = math.sqrt(sum((x - mean) ** 2 for x in est) / (n - 1))
     rms = math.sqrt(sum(s * s for s in se) / n)
-    if rms <= 0 or sd <= 1e-12 * max(abs(mean), 1e-300):
+    floor = 1e-12 * max(abs(mean), 1e-300)
+    if rms <= floor:
         return None
+    if sd <= floor:
+        return (0.0, n - 1) if constant_ok else None
     return sd / rms, n - 1
 
 
@@ -555,6 +559,11 @@ def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]])
     ratio weighted by each setting's degrees of freedom)."""
     found = [(key, len(e), _ratio_of(e, s)) for key, e, s in per]
     found = [(key, n, r) for key, n, r in found if r is not None]
+    if not found:
+        # No setting shows any spread while the trials report an error: the estimates never vary, anywhere (a simulation
+        # that ignores its seed). One setting without noise among settings that have some is only a setting without noise
+        # (a correct estimator reports a small error there): it is skipped as before.
+        found = [(key, len(e), r) for key, e, s in per if (r := _ratio_of(e, s, constant_ok=True)) is not None]
     z = _z_family(len(found))
     for key, n, (ratio, dof) in found:
         q.settings.append(_ratio_band(key, n, ratio, dof, z))
