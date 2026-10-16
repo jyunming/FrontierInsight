@@ -352,6 +352,9 @@ def required_items(quest_root: Path | str) -> list[Item]:
     return items
 
 
+_MAX_DIFFERENCE_CHARS = 500
+
+
 def run_difference_text(record: dict[str, Any]) -> str:
     """The sentence FI puts in the Limitations for a difference it recorded and went on with
     (``needs/RUN_MANIFEST_CHECK.json``): the plain sentence FI made of it, or its first finding, and that the numbers rest
@@ -360,15 +363,17 @@ def run_difference_text(record: dict[str, Any]) -> str:
     problems = [str(p) for p in record.get("problems") or [] if str(p).strip()]
     seeds = record.get("seeds") if isinstance(record.get("seeds"), dict) else {}
     if not headline and problems:
-        headline = problems[0][:300] + ("..." if len(problems[0]) > 300 else "")
-        if len(problems) > 1:
-            headline += f" (and {len(problems) - 1} more)"
+        # Whole findings, never a cut one: every finding when they fit a line or two, else how many there are and the first
+        # one in full.
+        said = [p.rstrip(". ") for p in problems]
+        headline = (said[0] if len(said) == 1 else "; ".join(said) if sum(map(len, said)) <= _MAX_DIFFERENCE_CHARS
+                    else f"it differs in {len(said)} places, the first being that {said[0]}")
     if not headline and seeds:
         seed, found = next(iter(seeds.items()))
         first = str(found[0]) if isinstance(found, list) and found else "it differs"
-        headline = f"the run with seed {seed} differs from the plan: {first[:300]}"
+        headline = f"the run with seed {seed} differs from the plan: {first.rstrip(chr(46) + chr(32))}"
     return ("FI's record of the trials that ran does not match what the analysis reports: "
-            + (headline.rstrip(".") or "the difference is in the quality report")
+            + (headline.rstrip(".") or "the two differ")
             + ". The numbers reported here rest on that analysis")
 
 

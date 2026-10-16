@@ -378,8 +378,8 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
     for r in computed["by_setting"]:
         at[(r["metric"], json.dumps(r["setting"], default=str))] = r
     if left:
-        notes.append("Not in these tables, because no trial returns them (they are computed from several values): "
-                     + ", ".join(f"`{m}`" for m in left) + ".")
+        notes.append("These quantities have no table of their own, because no single trial returns them (each is worked out "
+                     "from several values of a setting): " + ", ".join(f"`{m}`" for m in left) + ".")
     axes = [a for a in _refs.grid_axes(protocol) if a not in set(found.unread)]
     levels = list(dict.fromkeys(k for s in found.settings for k in s.setting if k not in axes))
     columns_axes = axes + levels
@@ -398,7 +398,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                 method = ""
             stats.append((s, summary, lower, upper, method))
         status = (q or {}).get("status", "no reference")
-        why_none = (q or {}).get("why") or ("the plan declares no metric for it" if not metric else "")
+        why_none = (q or {}).get("why") or ""
         if q and status == "computed":
             raw: Any = next((m.get("reference") for m in metrics or [] if isinstance(m, dict) and m.get("id") == metric),
                             {})
@@ -459,7 +459,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
             caption += (f" `{TOO_FEW}`: fewer than {MIN_TRIALS_TO_JUDGE} trials, or an interval wider than "
                         f"{MAX_HALF_WIDTH_SHARE:.0%} of the reference either side.")
         else:
-            caption += f" No reference: {why_none}."
+            caption += " It has no reference value to compare with" + (f": {why_none}." if why_none else ".")
         tables.append(Table(label=f"fi-results-{re.sub(r'[^A-Za-z0-9]+', '-', value).strip('-').lower()}",
                             caption=caption, columns=cols, align=align, rows=body, value=value))
     if not quantities:
