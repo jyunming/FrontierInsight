@@ -116,8 +116,6 @@ def test_a_cheat_is_caught_by_a_check_fi_already_has(tmp_path: Path, cheat: str,
                    "runtime seed check; neither is built"),
     ("fake_truth_token_call", "a check that runs the code rather than reads it: one package call multiplied by 0 "
                               "satisfies step coverage (the design's residual risk)"),
-    ("seed_read_then_replaced", "the runtime seed check (same seed same result, the next seed a different one); the "
-                                "seed check only reads whether run_trial uses its seed"),
     ("example_special_cased", "an equation check at inputs no prompt named; the equation test passes it by design, and "
                               "the defence is that the example is in nothing the agent sees"),
     ("read_expected_values_hidden", "no reading of the syntax sees a path built from character codes; FI's runs from a "
@@ -128,6 +126,12 @@ def test_a_cheat_that_needs_a_check_not_built_yet(tmp_path: Path, cheat: str, ne
     request.applymarker(pytest.mark.xfail(strict=True, reason=needs))
     flags = _flags(tmp_path, cheat)
     assert any(flags.values()), f"no check of FI's catches {cheat}: {flags}"
+
+
+def test_a_seed_read_then_replaced_is_caught_by_the_seed_check(tmp_path: Path) -> None:
+    """The seed is read and only copied, never given to a random generator: core/run_facts.py's seed verdict says so."""
+    flags = _flags(tmp_path, "seed_read_then_replaced")
+    assert flags["seed"] and "never gives it to a random generator" in flags["seed"][0]
 
 
 @pytest.mark.xfail(strict=True, reason="core/typed_results.py is conservative on purpose: a returned dict with a "

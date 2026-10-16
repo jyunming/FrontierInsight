@@ -907,12 +907,13 @@ def test_the_checks_share_one_time_budget(tmp_path: Path) -> None:
     assert all(j["passed_by_engine"] is not True for j in judged)
 
 
+# The count is kept outside the quest folder: every case runs from a copy of code/ outside it (core/outside_run.py), and a
+# file the copy writes at the top of the quest is brought back as written in that one run, not added to.
 COUNTED = '''
 import random
-from pathlib import Path
 
 def run_trial(cell, trial_id, seed):
-    with open(Path(__file__).resolve().parent.parent / "calls.txt", "a") as fh:
+    with open(CALLS, "a") as fh:
         fh.write("x\\n")
     rng = random.Random(seed)
     return {"rate": sum(rng.random() < 0.05 for _ in range(100)) / 100}
@@ -920,7 +921,7 @@ def run_trial(cell, trial_id, seed):
 
 
 def _calls(root: Path) -> int:
-    path = root / "calls.txt"
+    path = root.parent / "calls.txt"
     return len(path.read_text(encoding="utf-8").splitlines()) if path.is_file() else 0
 
 
@@ -929,7 +930,7 @@ def test_two_checks_on_one_case_share_their_trials_in_one_run_of_the_checks_and_
     """Two checks on the same case, in one run of the checks, share its trials (each trial is run once). A second run of
     the checks runs them again: trials are never kept from one run of the checks to the next, since no key can name
     everything a trial reads (a data file, an environment variable, an installed package)."""
-    root = _synth(tmp_path, COUNTED)
+    root = _synth(tmp_path, f"CALLS = {str(tmp_path / 'calls.txt')!r}\n" + COUNTED)
     _c, _p, alone, _f = _plain(root, [RATE_CHECK], timeout_s=60)
     once = _calls(root)
     assert once >= mc.PILOT_TRIALS
