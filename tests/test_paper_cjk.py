@@ -20,6 +20,7 @@ from generation import _cjk
 from generation import paper as paper_mod
 from generation._pandoc import find_pandoc
 from generation.paper import PaperGenerator
+from tests.paper_fakes import fake_pandoc
 
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = sorted((REPO / "templates" / "paper").glob("*/template.tex"))
@@ -57,7 +58,7 @@ def _fake_tools(monkeypatch, *, xelatex=("xelatex", "/fake/xelatex"), font="Micr
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
     return calls
 
 

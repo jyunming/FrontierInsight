@@ -30,6 +30,7 @@ from generation._figure_captions import blank_lines_around_figures, numbers_off_
 from generation._headings import strip_heading_numbers
 from generation._keywords import keywords_block
 from generation._pandoc import HTML_MARKDOWN_READER
+from core.proc_tree import run_tree
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "templates" / "paper" / "_html"
 _CSS_PATH = _ASSETS_DIR / "latexlike.css"
@@ -41,6 +42,13 @@ _THEMES: dict[str, Path] = {
     "latexlike": _ASSETS_DIR / "latexlike.css",
     "briefing": _ASSETS_DIR / "briefing.css",
 }
+
+
+def _run(cmd: list[str], *, timeout: float, cwd: str | None = None) -> "subprocess.CompletedProcess[str]":
+    """Run pandoc or the headless browser. A timeout stops it and every process it
+    started (the browser's helpers would otherwise keep its output open, and the
+    wait for that output had no limit)."""
+    return run_tree(cmd, timeout=timeout, cwd=cwd)
 
 
 def theme_css_path(theme: str) -> Path:
@@ -272,10 +280,7 @@ def render_paper_html_pdf(
         "-o", html_path.name,
     ]
     try:
-        pr = subprocess.run(
-            pandoc_cmd, capture_output=True, text=True,
-            cwd=str(work), timeout=timeout_s,
-        )
+        pr = _run(pandoc_cmd, timeout=timeout_s, cwd=str(work))
     except subprocess.TimeoutExpired:
         return None, "pandoc (markdown→HTML) timed out"
     except OSError as e:
@@ -298,8 +303,7 @@ def render_paper_html_pdf(
             html_path.as_uri(),
         ]
         try:
-            br = subprocess.run(
-                browser_cmd, capture_output=True, text=True, timeout=timeout_s)
+            br = _run(browser_cmd, timeout=timeout_s)
         except subprocess.TimeoutExpired:
             return None, f"{browser_name} print-to-pdf timed out"
         except OSError as e:

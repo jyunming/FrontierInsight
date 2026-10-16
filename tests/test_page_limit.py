@@ -39,6 +39,7 @@ from core.engine import (
 )
 from generation import paper as paper_mod
 from generation.paper import PaperGenerator, small_source_lists
+from tests.paper_fakes import fake_pandoc
 
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "templates" / "paper"
@@ -276,18 +277,13 @@ def _fake_toolchain(monkeypatch) -> list[list[str]]:  # noqa: ANN001
     # The host's own XeLaTeX would otherwise be used (and its fonts looked up).
     monkeypatch.setattr(PaperGenerator, "_find_unicode_engine", lambda self, engine: None)
     commands: list[list[str]] = []
-    real_run = paper_mod.subprocess.run
 
     def fake_run(cmd, **_kw):  # noqa: ANN001
-        if isinstance(cmd, str) or not cmd or cmd[0] != "/fake/pandoc":
-            # Not the paper's pandoc: the first import of the PDF reader asks
-            # Windows for its version (``ver``) through the same subprocess.run.
-            return real_run(cmd, **_kw)
         commands.append(list(cmd))
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
     return commands
 
 

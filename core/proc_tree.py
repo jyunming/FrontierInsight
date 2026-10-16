@@ -30,7 +30,7 @@ import subprocess
 import time
 from typing import Any
 
-__all__ = ["AsyncProcessTree", "ProcessTree"]
+__all__ = ["AsyncProcessTree", "ProcessTree", "run_tree"]
 
 _log = logging.getLogger("frontier_insight.proc_tree")
 
@@ -504,3 +504,29 @@ class AsyncProcessTree:
 def _is_real(proc: Any) -> bool:
     """A process asyncio started, not a test's stand-in (``MagicMock(spec=Process)`` passes ``isinstance``)."""
     return issubclass(type(proc), asyncio.subprocess.Process)
+
+
+# Windows: start a console program without a console window of its own.
+_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def run_tree(argv: list[str], *, timeout: float, cwd: str | None = None) -> subprocess.CompletedProcess:
+    """``subprocess.run(argv, capture_output=True, timeout=timeout)`` whose timeout stops everything the program
+    started, its output decoded as UTF-8 (a character the system code page lacks is replaced, never an error).
+
+    ``subprocess.run`` kills only the program on a timeout, then on Windows waits with no limit for its output to
+    end; a child that inherited the output handles (pandoc's xelatex and that one's dvipdfmx, a headless browser's
+    helpers) keeps it open as long as it runs, so a hung child hung the caller for ever. Here the whole tree is
+    stopped and ``subprocess.TimeoutExpired`` raised, as ``subprocess.run`` raises it."""
+    with ProcessTree(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                     cwd=cwd, creationflags=_NO_WINDOW) as tree:
+        try:
+            out, err = tree.proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            tree.kill()
+            tree.proc.communicate()
+            raise
+        return subprocess.CompletedProcess(
+            argv, tree.proc.returncode,
+            (out or b"").decode("utf-8", "replace"), (err or b"").decode("utf-8", "replace"),
+        )

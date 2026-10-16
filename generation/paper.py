@@ -28,6 +28,7 @@ from pathlib import Path
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config, resolve_page_limit
 from core.engine import QuestArtifacts, build_further_reading, cited_references, further_reading_listed
+from core.proc_tree import run_tree
 from generation._pandoc import BLANK_LINE_RE, MARKDOWN_READER, MATH_SPAN_RE, find_pandoc
 from generation import _cjk
 from generation._figure_captions import blank_lines_around_figures, numbers_off_figure_captions
@@ -1355,13 +1356,13 @@ class PaperGenerator:
 
     @staticmethod
     def _run_pandoc(cmd: list[str], out_dir: Path, timeout_s: int) -> "subprocess.CompletedProcess[str]":
-        # UTF-8 with replacement: the log of a glyph that stopped LaTeX holds that
-        # glyph, and the platform's code page (cp1252 on Windows) cannot decode it,
-        # which used to leave the error text empty.
-        return subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=str(out_dir), timeout=timeout_s,
-        )
+        """The one place pandoc (and the LaTeX engine it starts) runs. A timeout stops
+        pandoc, the engine and the engine's own helpers (XeLaTeX's dvipdfmx) together:
+        ``subprocess.run`` killed pandoc alone and then waited, with no limit, on output
+        the hung engine still held, so a LaTeX loop or a blocked MiKTeX helper hung the
+        quest. Output is UTF-8 with replacement: the log of a glyph that stopped LaTeX
+        holds that glyph, and the Windows code page cannot decode it."""
+        return run_tree(cmd, timeout=timeout_s, cwd=str(out_dir))
 
     def _compile_pdf(
         self, paper_md: Path, out_dir: Path, *, extra_lines: int = 0, smaller_tables: bool = False,

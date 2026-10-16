@@ -21,6 +21,7 @@ from generation.paper import (
     _tighten_inline_math,
     float_barrier_before_references,
 )
+from tests.paper_fakes import fake_pandoc
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +245,7 @@ def test_pandoc_rc_nonzero_no_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     def fake_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         return SimpleNamespace(returncode=1, stdout="", stderr="LaTeX error: missing.sty")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     # html_pdf_fallback OFF — isolate the LaTeX-error skip from the fallback
     # (the fallback-on-error behaviour has its own test below).
@@ -268,8 +269,8 @@ def test_latex_compile_error_falls_back_to_html(
         PaperGenerator, "_find_pdf_engine", lambda self: ("pdflatex", "/fake/pdflatex"),
     )
     # pdflatex errors on bad LLM-emitted LaTeX (a bare \command in text mode).
-    monkeypatch.setattr(
-        paper_mod.subprocess, "run",
+    fake_pandoc(
+        monkeypatch,
         lambda *_a, **_k: SimpleNamespace(
             returncode=1, stdout="", stderr="! Missing $ inserted.",
         ),
@@ -318,7 +319,7 @@ def test_pandoc_happy_path_emits_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyP
         Path(cmd[out_idx]).write_bytes(b"%PDF-1.4 fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
@@ -351,7 +352,7 @@ def test_missing_template_falls_back_to_pandoc_default(
         Path(cmd[out_idx]).write_bytes(b"%PDF\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"], paper_format="neurips")
     art = _make_artifacts(tmp_path)
@@ -372,7 +373,7 @@ def test_pandoc_filenotfound_after_which_truthy(
     def fake_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise FileNotFoundError(2, "No such file", "pandoc")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
@@ -389,7 +390,7 @@ def test_pandoc_timeout_skips_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     def fake_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise subprocess.TimeoutExpired(cmd="pandoc", timeout=120)
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
@@ -564,7 +565,7 @@ def test_no_pdf_engine_skips_pdf_with_clear_message(
         fake_run_called["n"] += 1
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     cfg.output.html_pdf_fallback = False  # strict LaTeX-only path
@@ -600,7 +601,7 @@ def test_tectonic_fallback_when_pdflatex_missing(
         Path(cmd[out_idx]).write_bytes(b"%PDF\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
@@ -633,7 +634,7 @@ def test_pdflatex_preferred_over_tectonic_when_both_present(
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     PaperGenerator(
         _make_config(tmp_path, ["paper_md", "paper_pdf"])
@@ -673,7 +674,7 @@ def test_repo_local_tectonic_picked_when_nothing_on_path(
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     PaperGenerator(
         _make_config(tmp_path, ["paper_md", "paper_pdf"])
@@ -778,7 +779,7 @@ def test_paper_pdf_skipped_md_carries_engine_stderr_on_compile_failure(
             returncode=1, stdout="",
             stderr="! LaTeX Error: File `missing.sty' not found.\n",
         )
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     PaperGenerator(cfg).generate(_make_artifacts(tmp_path), tmp_path / "out")
@@ -850,7 +851,7 @@ def test_paper_pdf_skipped_md_removed_when_subsequent_run_succeeds(
         out_idx = cmd.index("-o") + 1
         Path(cmd[out_idx]).write_bytes(b"%PDF-1.4 fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     result = PaperGenerator(cfg).generate(_make_artifacts(tmp_path), out_dir)
@@ -934,7 +935,7 @@ def test_require_pdf_raises_when_pandoc_invocation_fails_post_preflight(
 
     def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise FileNotFoundError("pandoc")
-    monkeypatch.setattr(paper_mod.subprocess, "run", boom)
+    fake_pandoc(monkeypatch, boom)
 
     cfg = _make_config_strict(tmp_path)
     art = _make_artifacts(tmp_path)
@@ -961,7 +962,7 @@ def test_require_pdf_raises_on_compile_timeout(
 
     def fake_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise subprocess.TimeoutExpired(cmd="pandoc", timeout=300)
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config_strict(tmp_path)
     art = _make_artifacts(tmp_path)
@@ -981,8 +982,8 @@ def test_require_pdf_raises_on_nonzero_latex_rc(
     def fake_which(name):  # type: ignore[no-untyped-def]
         return "/fake/pandoc" if name == "pandoc" else "/fake/pdflatex"
     monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(
-        paper_mod.subprocess, "run",
+    fake_pandoc(
+        monkeypatch,
         lambda *_a, **_kw: SimpleNamespace(
             returncode=1, stdout="", stderr="! Undefined control sequence.",
         ),
@@ -1007,8 +1008,8 @@ def test_require_pdf_false_keeps_silent_skip_behavior(
     def fake_which(name):  # type: ignore[no-untyped-def]
         return "/fake/pandoc" if name == "pandoc" else "/fake/pdflatex"
     monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(
-        paper_mod.subprocess, "run",
+    fake_pandoc(
+        monkeypatch,
         lambda *_a, **_kw: SimpleNamespace(
             returncode=1, stdout="", stderr="! LaTeX error.",
         ),
@@ -1414,7 +1415,7 @@ def test_compile_pdf_writes_sanitized_md_alongside_paper(
         out_idx = cmd.index("-o") + 1
         Path(cmd[out_idx]).write_bytes(b"%PDF\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
@@ -1454,7 +1455,7 @@ def test_compile_pdf_takes_the_writers_figure_number_off_the_caption(
     def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
@@ -1498,7 +1499,7 @@ def test_compile_pdf_keeps_code_as_written_and_declares_its_glyphs_for_pdflatex(
         out_idx = cmd.index("-o") + 1
         Path(cmd[out_idx]).write_bytes(b"%PDF\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
@@ -1567,7 +1568,7 @@ def test_compile_pdf_preserves_source_md_on_post_sanitize_failure(
             stdout="",
             stderr="! Missing number, treated as zero.\nl.417 \\begin",
         )
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
@@ -1633,7 +1634,7 @@ def _capture_pandoc_call(monkeypatch: pytest.MonkeyPatch) -> dict:
         Path(cmd[out_idx]).write_bytes(b"%PDF\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
     return state
 
 

@@ -23,6 +23,7 @@ from generation import _pptx_math
 from generation import paper as paper_mod
 from generation._pandoc import MATH_SPAN_RE, TEX_MATH_DOLLARS
 from generation.paper import PaperGenerator, _sanitize_unicode_for_latex as sanitize
+from tests.paper_fakes import fake_pandoc
 
 REPO = Path(__file__).resolve().parent.parent
 FORMATS = sorted(p.parent.name for p in (REPO / "templates" / "paper").glob("*/template.tex"))
@@ -170,7 +171,7 @@ def test_the_pdf_source_carries_the_text_dash_and_paper_md_is_left_as_written(
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
     md = tmp_path / "paper.md"
     written = f"# Title\n\n## Abstract\n\nSurvival was 0.33 (95% CI $0.322{EN}0.338$).\n\n## Results\n\nAlso 1{EN}2 runs.\n"
     md.write_text(written, encoding="utf-8")
