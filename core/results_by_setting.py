@@ -6,11 +6,11 @@ the analysis. This module builds, from FI's own records and with no model in bet
 
 * **The distinct settings.** A grid cell is not always a distinct setting: a grid axis the simulation never reads
   (a quest's ``temperature_K``: each run fits all five temperatures, so the axis only copied every setting five times)
-  gives cells that differ in nothing the simulation sees. :func:`unread_axes` reads the code with ``ast``
-  (:func:`core.grid_keys.reads`, which follows a read inside a closure or a lambda; FI's own runner, ``code/run.py``,
-  is not the study's code) and returns the grid axes it found no read of. Only when the reading is sure: when the code
-  uses a setting in a way that cannot be followed (passes it whole to an unknown function, spreads it with ``**``,
-  reads it with a computed key) or a file does not parse, every axis counts as read. :func:`distinct` pools the cells
+  gives cells that differ in nothing the simulation sees. :func:`unread_axes` asks FI's one reader of the settings the
+  code reads, :func:`core.unread_settings.setting_reads` (the simulation and the analysis, read with ``ast``; FI's own
+  runner, ``code/run.py``, is not the study's code), and returns the grid axes it found no read of. Only when the
+  reading is sure: when the code uses a setting in a way that cannot be followed (passes it whole to code it cannot
+  place, spreads it with ``**``, reads it with a computed key) or a file does not parse, every axis counts as read. :func:`distinct` pools the cells
   that differ only in unread axes -- only when their means, their spread and their shares of failed runs also agree
   within the pooled uncertainty (a read the reading missed shows up there), and counting cells that gave the very same
   trials (the same seeds) once.
@@ -32,7 +32,6 @@ the analysis. This module builds, from FI's own records and with no model in bet
 
 from __future__ import annotations
 
-import ast
 import csv
 import io
 import json
@@ -46,6 +45,7 @@ from . import grid_keys as _grid_keys
 from . import oracle_forms as _forms
 from . import reference_values as _refs
 from . import trial_table as _trial_table
+from . import unread_settings as _unread
 
 #: A cell whose mean is further than this many standard errors from the pooled mean is not pooled with the others: the
 #: reading of the code said the axis is not read, the numbers say it matters.
@@ -53,7 +53,6 @@ POOL_Z = 5.0
 #: FI's own scripts at the top of code/: they run the study, they are not the study's code (a file of the same name in a
 #: package of the study is).
 _FI_SCRIPTS = frozenset({"run.py", "fi_search.py"})
-_HARMLESS_CALLS = frozenset({"print", "repr", "str", "isinstance", "len", "id", "type", "bool", "sorted"})
 #: The most table rows FI puts into the paper itself (:func:`paper_block`); a longer table goes in as its slice.
 PAPER_MAX_ROWS = 60
 #: The tables as they go into the paper, written beside FI's other records for core/paper_facts.py to fill in.
@@ -63,88 +62,23 @@ PAPER_BLOCK = Path(".fi") / "results_table.md"
 # --- which grid axes the simulation reads ----------------------------------------------------------------------------
 
 
-def _followed(node: ast.AST, parents: dict[int, ast.AST], defs: dict[str, list[str]],
-              shared: frozenset[str] = frozenset()) -> bool:
-    """Whether a use of a setting is one the reading of the code follows: a read by a literal key, a copy into a
-    name of the function's own (not one in ``shared``, declared ``global`` or ``nonlocal``: other functions read it), a
-    hand-over to the trial contract's entry point or to a function whose parameter is a setting, or a use that
-    reads no value (printed, a presence test)."""
-    parent = parents.get(id(node))
-    if isinstance(parent, ast.Subscript) and parent.value is node:
-        return isinstance(parent.slice, ast.Constant) and isinstance(parent.slice.value, str)
-    if isinstance(parent, ast.Attribute) and parent.value is node:
-        call = parents.get(id(parent))
-        if parent.attr in ("get", "pop", "setdefault") and isinstance(call, ast.Call) and call.func is parent:
-            return bool(call.args) and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)
-        if parent.attr == "copy" and isinstance(call, ast.Call):
-            return isinstance(parents.get(id(call)), ast.Assign)
-        return False
-    if isinstance(parent, ast.Call) and node in parent.args:
-        callee = parent.func.id if isinstance(parent.func, ast.Name) else None
-        if callee == "dict":
-            return isinstance(parents.get(id(parent)), ast.Assign)
-        if callee in _HARMLESS_CALLS or callee in _grid_keys.ENTRIES:
-            return True
-        params = defs.get(callee or "")
-        index = parent.args.index(node)  # type: ignore[arg-type]
-        return params is not None and index < len(params) and params[index] in _grid_keys.SETTING_NAMES
-    if isinstance(parent, ast.Assign) and parent.value is node:
-        return all(isinstance(t, ast.Name) and t.id not in shared for t in parent.targets)
-    if isinstance(parent, ast.Compare):
-        return all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)
-    return isinstance(parent, (ast.FormattedValue, ast.Expr))
-
-
-def opaque_uses(source: str, script: str) -> list[str]:
-    """Where ``source`` uses a setting in a way :func:`core.grid_keys.reads` cannot follow (``script line N``)."""
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        return []
-    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    defs = {n.name: [a.arg for a in (*n.args.posonlyargs, *n.args.args)]
-            for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    shared = frozenset(name for n in ast.walk(tree) if isinstance(n, (ast.Global, ast.Nonlocal)) for name in n.names)
-    out: list[str] = []
-    for scope, names in _grid_keys._scopes(tree):
-        names = set(names)
-        nodes = sorted(_grid_keys._own_nodes(scope), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)))
-        for node in nodes:
-            if isinstance(node, ast.Assign) and _grid_keys._setting_like(node.value, names):
-                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-            elif isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id in _grid_keys.SETTING_NAMES:
-                names.add(node.target.id)
-        for node in nodes:
-            holder = (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in names) \
-                or _grid_keys._is_record_get(node)
-            if holder and not _followed(node, parents, defs, shared):
-                out.append(f"{script} line {getattr(node, 'lineno', 0)}")
-    return out
-
-
 def unread_axes(protocol: dict[str, Any] | None, files: dict[str, str],
                 also_read: set[str] | None = None) -> tuple[list[str], str]:
     """``(the grid axes FI found no read of, why every axis counts as read when it is empty)``. ``files``: the study's
     code (:func:`core.grid_keys.code_files`); FI's own scripts at the top of code/ are skipped. ``also_read``: names that
-    count as read anyway (an axis a reference formula uses)."""
+    count as read anyway (an axis a reference formula uses). The reading is FI's one reader of the settings the code
+    reads, :func:`core.unread_settings.setting_reads` (the simulation and the analysis): when it cannot be sure, every
+    axis counts as read."""
     axes = list(_refs.grid_axes(protocol))
     if not axes:
         return [], "the plan has no grid"
     study = {k: v for k, v in files.items() if Path(k).as_posix() not in _FI_SCRIPTS}
     if not study:
         return [], "there is no code to read"
-    for script, text in study.items():
-        try:
-            ast.parse(text)
-        except (SyntaxError, ValueError):
-            return [], f"FI could not read {script}"
-    opaque = [where for script, text in study.items() for where in opaque_uses(text, script)]
-    if opaque:
-        return [], f"the code uses a setting in a way FI cannot follow ({', '.join(opaque[:3])})"
-    read: set[str] = set(also_read or ())
-    for script, text in study.items():
-        for r in _grid_keys.reads(text, script):
-            read.update(r.keys)
+    read, why = _unread.setting_reads(study)
+    if read is None:
+        return [], why
+    read = set(read) | set(also_read or ())
     return [a for a in axes if a not in read], ""
 
 

@@ -324,18 +324,23 @@ def test_cells_whose_means_disagree_are_not_pooled_although_the_axis_is_unread()
     assert len(found.settings) == 1 and found.settings[0].metrics["y"]["n"] == 200
 
 
-@pytest.mark.parametrize("source, followed", [
-    ("def run_trial(cell, i, seed):\n    return {'y': cell['s'] + cell.get('k', 0)}\n", True),
-    ("def run_trial(cell, i, seed):\n    return helper(cell)\n\ndef helper(cell):\n    return {'y': cell['s']}\n", True),
-    ("def run_trial(cell, i, seed):\n    return simulate(**cell)\n", False),
-    ("def run_trial(cell, i, seed):\n    return model(cell)\n\ndef model(params):\n    return {'y': params['t']}\n", False),
-    ("def run_trial(cell, i, seed):\n    k = 't'\n    return {'y': cell[k]}\n", False),
-    ("def run_trial(cell, i, seed):\n    return {'y': sum(v for v in cell.values())}\n", False),
+@pytest.mark.parametrize("source, unread_expected", [
+    ("def run_trial(cell, i, seed):\n    return {'y': cell['s'] + cell.get('k', 0)}\n", ["t"]),
+    ("def run_trial(cell, i, seed):\n    return helper(cell)\n\ndef helper(cell):\n    return {'y': cell['s']}\n", ["t"]),
+    ("def run_trial(cell, i, seed):\n    return simulate(**cell)\n", None),
+    # FI's one reader (core/unread_settings.py) follows the setting into a function of the code, whatever its
+    # parameter is called.
+    ("def run_trial(cell, i, seed):\n    return model(cell)\n\ndef model(params):\n    return {'y': params['t']}\n", ["s"]),
+    ("def run_trial(cell, i, seed):\n    k = 't'\n    return {'y': cell[k]}\n", None),
+    ("def run_trial(cell, i, seed):\n    return {'y': sum(v for v in cell.values())}\n", None),
 ])
-def test_a_use_of_the_setting_fi_cannot_follow_makes_every_axis_read(source: str, followed: bool) -> None:
+def test_a_use_of_the_setting_fi_cannot_follow_makes_every_axis_read(source: str, unread_expected: Any) -> None:
     protocol = {"grid": {"s": [1, 2], "t": [1, 2]}}
     unread, why = rbs.unread_axes(protocol, {"simulate.py": source})
-    assert (unread == ["t"]) is followed and (bool(why) is not followed)
+    if unread_expected is None:  # not followed: every axis counts as read, and the reason is said
+        assert unread == [] and why
+    else:
+        assert unread == unread_expected and not why
 
 
 def test_an_axis_a_reference_formula_uses_is_never_pooled() -> None:
@@ -764,7 +769,7 @@ def test_a_setting_put_in_a_global_makes_every_axis_read() -> None:
     source = ("CFG = None\ndef run_trial(cell, i, seed):\n    global CFG\n    CFG = cell\n"
               "    return {'y': model() + cell['n']}\ndef model():\n    return CFG['sigma']\n")
     unread, why = rbs.unread_axes({"grid": {"sigma": [0.01, 0.1], "n": [5, 50]}}, {"simulate.py": source})
-    assert unread == [] and "cannot follow" in why and "simulate.py line 4" in why
+    assert unread == [] and "CFG" in why and "line 4" in why
 
 
 def test_code_fi_cannot_parse_makes_every_axis_read() -> None:
