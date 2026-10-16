@@ -100,6 +100,7 @@ from . import trial_runner as _trial_runner
 from . import goal_coverage
 from . import citation_support as _cs
 from . import paper_patch
+from . import paper_sections as _paper_sections
 from . import paper_trim
 from . import plan as _plan
 from . import criteria as _criteria
@@ -19929,6 +19930,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             markdown, unreported, reasked = await self._report_what_the_extension_added(state, persona_block, markdown)
         from generation._keywords import keep_one_keywords_form
 
+        # A scientific paper has an Abstract, whichever pass wrote this draft (first, revise or shortening): its structure is
+        # checked here, not its wording, and a draft without one has it written from the draft itself.
+        if not persona_block:
+            markdown = await self._ensure_abstract(state, markdown)
         # A scientific paper shows its keywords; a persona's paper keeps them
         # in a comment. A writer that gave both keeps the one its format uses.
         markdown = keep_one_keywords_form(markdown, visible=not persona_block)
@@ -20096,6 +20101,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "[write] %s, also after the writer was asked again; the values are in the run's results", said(still)[0],
         )
         return markdown, said(still), True
+
+    async def _ensure_abstract(self, state: QuestState, markdown: str) -> str:
+        """``markdown`` with an ``## Abstract`` (core/paper_sections.py). A draft without one is not sent whole again: the
+        Abstract alone is asked for, from the draft, once; a reply that is empty or fails leaves the draft as it was and the
+        log says so."""
+        if not _paper_sections.missing_abstract(markdown):
+            return markdown
+        self._log.warning("[write] the draft has no Abstract; asking for it from the draft")
+        try:
+            reply = await self._chat(self._prompts["write_abstract"].substitute(
+                topic=state.get("topic") or self.config.topic, paper=markdown), node="write.abstract")
+        except Exception as exc:  # noqa: BLE001 -- the draft that exists is kept
+            self._log.warning("[write] the Abstract could not be written (%s); the draft is kept without one", exc)
+            return markdown
+        lines = [ln for ln in str(reply).strip().splitlines() if not ln.lstrip().startswith("#")]
+        text = " ".join(" ".join(lines).split())
+        if len(text.split()) < 40:
+            self._log.warning("[write] the reply was not an Abstract; the draft is kept without one")
+            return markdown
+        return _paper_sections.with_abstract(markdown, text)
 
     async def _patch_flagged_passages(self, state: QuestState, persona_block: str) -> str | None:
         """The earlier draft with the passages the review named edited, or
@@ -25025,6 +25050,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "write", "review",
         "write_patch",      # a revise for flagged passages: edits, not a new paper
         "write_trim",       # a draft a little over its page limit: sentences to take out
+        "write_abstract",   # a scientific paper whose draft has no Abstract: the Abstract alone, from the draft
         "replot_layout",    # a refine that only asks for the figures arranged again: redraw from saved data
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
