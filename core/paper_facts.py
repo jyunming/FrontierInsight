@@ -13,6 +13,10 @@ flagged. So the writer no longer types these facts at all:
   wall time of the run whose trials are reported), ``{{time_limit}}`` and ``{{time_limit_met}}`` ("within" / "over"),
   ``{{trials_per_setting}}``, ``{{settings}}`` and ``{{trials_failed}}``. Each thing the study did not do is placed with
   ``{{not_done:<id>}}`` (:func:`required_items`), which FI turns into one plain sentence from its record.
+* **Blocks.** ``{{results_table}}`` (:data:`BLOCK_NAMES`) is a whole block FI writes: its tables of every setting with
+  each value's interval and reference (core/results_by_setting.py, saved in ``.fi/results_table.md``). The writer puts
+  it on a line of its own in the Results; when it does not, FI places it before the discussion (:func:`place_blocks`).
+  The checks of the writer's own text leave it out (:func:`without_blocks`, :func:`mask`).
 * **Rendering.** :func:`render` fills each placeholder from the records when the paper is saved, between markers
   (``<!-- fi:fact-run_time -->223.2 s<!-- /fi:fact-run_time -->``), so ``paper.md`` and every check that reads it hold the
   values, never a raw placeholder. The markers let FI put the values back after any step that edits the text (the passage
@@ -57,6 +61,10 @@ _FACT_WORDS = {
     "settings": "how many settings (combinations of the plan's parameters) were run",
     "trials_failed": "how many trials failed",
 }
+#: FI's blocks a placeholder can name: a whole block of the paper FI writes from its records, on a line of its own.
+#: Not a fact: its numbers are accounted for setting by setting (core/results_by_setting.py), never as FI's record.
+BLOCK_NAMES = ("results_table",)
+_BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.results_by_setting.PAPER_BLOCK
 _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_time", "limit": "time_limit",
             "runtime_limit": "time_limit", "limit_met": "time_limit_met", "within_limit": "time_limit_met",
             "trials_each_setting": "trials_per_setting", "failed_trials": "trials_failed", "random_seed": "seed"}
@@ -654,6 +662,41 @@ def without_marks(markdown: str) -> str:
     return _TAG.sub("", markdown or "")
 
 
+def block_text(quest_root: Path | str, name: str) -> str:
+    """FI's block ``name`` (:data:`BLOCK_NAMES`) as it goes into the paper, from its file; ``""`` when there is none."""
+    rel = _BLOCK_FILES.get(name)
+    if rel is None:
+        return ""
+    try:
+        return (Path(quest_root) / rel).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def place_blocks(markdown: str, quest_root: Path | str) -> str:
+    """``markdown`` with the placeholder of each of FI's blocks that has a file and that the writer did not place put in
+    on a line of its own, before the discussion that follows the results (else the conclusions, the limitations, the
+    references; else at the end). :func:`render` then fills it."""
+    text = markdown or ""
+    for name in BLOCK_NAMES:
+        if not block_text(quest_root, name):
+            continue
+        if any(_norm_name(m.group(1)) == name for m in _PLACEHOLDER.finditer(text)) or any(
+                m.group(1) == name for m in _MARK.finditer(text)):
+            continue
+        from . import best_design_report as _best
+
+        text = _best.insert_before_discussion(text, ["{{" + name + "}}"])
+    return text
+
+
+def without_blocks(markdown: str) -> str:
+    """``markdown`` with each of FI's blocks (:data:`BLOCK_NAMES`) taken out, markers and all: what the checks of the
+    writer's own text read (the block is FI's record, printed, not a claim of the writer's)."""
+    names = "|".join(re.escape(n) for n in BLOCK_NAMES)
+    return re.sub(r"\n?<!-- fi:fact-(" + names + r") -->.*?<!-- /fi:fact-\1 -->\n?", "\n", markdown or "", flags=re.S)
+
+
 def mask(markdown: str, token: str = " FI-FACT ") -> str:
     """``markdown`` with each value FI filled in replaced by ``token``: what the writer typed, and nothing of FI's."""
     return _MARK.sub(token, _PLACEHOLDER.sub(token, markdown or ""))
@@ -691,6 +734,14 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
             if item is None:
                 unfilled.append(f"not_done:{_slug(ident)}")
             return f"<!-- fi:fact-{key} -->{item.sentence if item else NOT_RECORDED}<!-- /fi:fact-{key} -->"
+        if name in BLOCK_NAMES:
+            if plain:
+                return m.group(0)
+            block = block_text(root, name)
+            if not block:
+                unfilled.append(name)
+                return f"<!-- fi:fact-{name} -->{NOT_RECORDED}<!-- /fi:fact-{name} -->"
+            return f"<!-- fi:fact-{name} -->\n{block}\n<!-- /fi:fact-{name} -->"
         if name in FACT_NAMES:
             fact = known.get(name)
             if fact is None:
@@ -748,7 +799,8 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
     reduced_note = (_one(reduced["note"]) if isinstance(reduced, dict) and isinstance(reduced.get("note"), str)
                     and reduced["note"].strip() else "")
-    if not known and not items and not reduced_note:
+    has_table = bool(block_text(root, "results_table"))
+    if not known and not items and not reduced_note and not has_table:
         return ""
     lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. Do not type them: write the "
                  "placeholder (double braces, exactly as shown) where the fact goes, and FI puts the value in from its "
@@ -772,6 +824,11 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
             lines.append(f"Required: the paper must hold {', '.join(needed)} (in the Methods, or where the run is described).")
     if reduced_note:
         lines.append(f"Reduced size: {reduced_note} Say this in the paper, with the numbers.")
+    if has_table:
+        lines.append("{{results_table}}: FI's tables of every setting the study computed (each value with its 95% "
+                     "interval beside the reference FI worked out from the plan). Put the placeholder on a line of its "
+                     "own in the Results, where the tables belong; left out, FI puts it at the end of the Results. Discuss "
+                     "the tables, but do not copy them into a table of your own.")
     if items:
         lines.append("In the Limitations section (a section headed \"Limitations\"), put each of these placeholders on its "
                      "own, as a sentence; FI replaces it with the plain sentence shown, from its record. You may add your "
@@ -843,7 +900,7 @@ def _unknown_hits(markdown: str, quest_root: Path | str, known: dict[str, Fact])
                 hits.append(f"{HIT}: {{{{not_done:{key[len(_ITEM_KEY):]}}}}} is not one of the parts FI recorded as not "
                             "done, so the paper reads \"not recorded\" there. "
                             + (f"Use one of {listed}, or take it out." if listed else "Take it out."))
-        elif key not in FACT_NAMES:
+        elif key not in FACT_NAMES and key not in BLOCK_NAMES:
             hits.append(f"{HIT}: {{{{{key}}}}} is not one of FI's placeholders, so the paper reads \"not recorded\" there. "
                         f"Use one of {names}, or write it in your own words without double braces.")
     return hits

@@ -379,6 +379,13 @@ def mark_paper(markdown: str, text: str) -> str:
     markdown = without_block(markdown)
     if not text:
         return markdown
+    return insert_before_discussion(markdown, [BEGIN, text.rstrip("\n"), END])
+
+
+def insert_before_discussion(markdown: str, block: list[str]) -> str:
+    """``markdown`` with the lines ``block`` as a paragraph of their own before the discussion that follows the results
+    (else the conclusions, the limitations, the references), else at the end. Also where FI's table of every setting
+    goes (core/paper_facts.py ``place_blocks``)."""
     lines = markdown.split("\n")
     headings = _headings(lines)
     level = heading_level(markdown)
@@ -402,7 +409,6 @@ def mark_paper(markdown: str, text: str) -> str:
     tail = lines[at:]
     while tail and not tail[0].strip():
         tail.pop(0)
-    block = [BEGIN, text.rstrip("\n"), END]
     return "\n".join([*head, *([""] if head else []), *block, *([""] if tail else []), *tail]) + (
         "" if tail else "\n")
 

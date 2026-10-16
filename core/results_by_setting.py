@@ -24,7 +24,8 @@ the analysis. This module builds, from FI's own records and with no model in bet
   values (an SD, a correlation) is not a value of the trials and is named in a note.
 * **Renderings** (pure functions): :func:`markdown` for the checks and the writer, :func:`latex` (booktabs) for the
   PDF, :func:`csv_text` for every row, :func:`reference_section` / :func:`reference_section_latex` for the paragraph
-  of reference values in Methods.
+  of reference values in Methods, :func:`paper_block` for the tables FI puts into the paper (``{{results_table}}``,
+  core/paper_facts.py).
 * **What the writer gets** (:func:`writer_note`): the full trial table while it fits; otherwise these tables while they
   fit; otherwise a slice (the first, middle and last value of each axis) with the file named; otherwise only the file.
 """
@@ -53,6 +54,10 @@ POOL_Z = 5.0
 #: package of the study is).
 _FI_SCRIPTS = frozenset({"run.py", "fi_search.py"})
 _HARMLESS_CALLS = frozenset({"print", "repr", "str", "isinstance", "len", "id", "type", "bool", "sorted"})
+#: The most table rows FI puts into the paper itself (:func:`paper_block`); a longer table goes in as its slice.
+PAPER_MAX_ROWS = 60
+#: The tables as they go into the paper, written beside FI's other records for core/paper_facts.py to fill in.
+PAPER_BLOCK = Path(".fi") / "results_table.md"
 
 
 # --- which grid axes the simulation reads ----------------------------------------------------------------------------
@@ -662,6 +667,29 @@ def writer_note(trial_rows: list[dict[str, Any]], built: Built | None, cap: int 
             "from those files." + ("\n\n" + extra if extra else ""))
 
 
+def paper_block(built: Built | None, cap: int | None = None) -> str:
+    """The tables as they go into the paper, in Markdown: every row while they have at most ``cap`` rows (default
+    :data:`PAPER_MAX_ROWS`); otherwise their slice at the first, middle and last value of each setting, naming the files
+    with every row; otherwise one sentence naming those files. ``""`` when there is nothing to tabulate. FI puts it
+    where the paper has ``{{results_table}}`` (core/paper_facts.py), so no number of it is typed by the writer."""
+    if built is None or not built.tables:
+        return ""
+    cap = PAPER_MAX_ROWS if cap is None else cap
+    files = "`paper/results_by_setting.md`, every number in `paper/results_by_setting.csv`"
+    total = sum(len(t.rows) for t in built.tables)
+    notes = [n for n in built.notes if n.strip()]
+    if total <= cap:
+        tables, lead = built.tables, []
+    else:
+        cut = _slice(built)
+        if not 0 < sum(len(t.rows) for t in cut) <= cap:
+            return (f"FI's tables of every setting the study computed ({len(built.distinct.settings)} settings) are too "
+                    f"long for the paper: they are in {files}.\n")
+        tables = cut
+        lead = [f"FI's tables of every setting have more rows than fit here; the full tables are in {files}."]
+    return "\n\n".join([*lead, *notes, *(markdown(t).rstrip("\n") for t in tables)]) + "\n"
+
+
 # --- the files, and the pools for the provenance check -----------------------------------------------------------------
 
 
@@ -681,6 +709,13 @@ def write(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[s
     """Build from the quest's records and write ``paper/results_by_setting.md`` / ``.tex`` / ``.csv`` and
     ``paper/reference_values.json``; ``None`` without a trial record."""
     _rows, built = from_quest(quest_root, protocol, judged)
+    block_path = Path(quest_root) / PAPER_BLOCK
+    block = paper_block(built)
+    if block:
+        block_path.parent.mkdir(parents=True, exist_ok=True)
+        block_path.write_text(block, encoding="utf-8")
+    else:  # no table this time: an earlier run's must not reach the paper
+        block_path.unlink(missing_ok=True)
     if built is None:
         return None
     paper = Path(quest_root) / "paper"

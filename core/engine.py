@@ -121,6 +121,7 @@ from . import oracle_forms as _forms
 from . import oracle_review as _review
 from . import topic_requirements as _topic_req
 from . import trial_table as _trial_table
+from . import reference_values as _reference_values
 from . import results_by_setting as _results_by_setting
 from . import plan_ledger as _ledger
 from . import plan_steps as _plan_steps
@@ -10499,7 +10500,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         found" section is left out (it is FI's record, printed). Never raises: a check that cannot be made flags nothing."""
         try:
             recs = _best_report.records(self.quest_root)
-            text = _best_report.strip_for_checks(paper_md, self._best_design_section(state, paper_md))
+            text = _paper_facts.without_blocks(
+                _best_report.strip_for_checks(paper_md, self._best_design_section(state, paper_md)))
             figures: set[str] | None = None
             if (self.quest_root / "figures").is_dir():  # no figures folder at all: which figures the run drew is not known
                 figures = _figure_files_on_disk(self.quest_root)
@@ -19397,6 +19399,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             except Exception as e:  # noqa: BLE001 -- the same: a help, never a reason to stop
                 self._log.warning("[write] FI's table of every setting could not be written (%s)", e)
                 by_setting = None
+                # An earlier run's tables must not go into this paper.
+                (self.quest_root / _results_by_setting.PAPER_BLOCK).unlink(missing_ok=True)
             table_note = _results_by_setting.writer_note(trial_rows, by_setting)
         except Exception as e:  # noqa: BLE001 -- the table is a help to the writer, never a reason to stop
             self._log.warning("[write] FI's table of the trials could not be written (%s)", e)
@@ -19682,6 +19686,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # (QUALITY.md) holds the records themselves. A block an earlier draft carried was taken out above.
         # A search for the best design: the engine's "Best design found" section, from FI's own records.
         markdown = self._mark_best_design(state, markdown)
+        # FI's tables of every setting (core/results_by_setting.py): where the writer put {{results_table}}, else before
+        # the discussion; filled from FI's records with the facts below, so no number of them is typed by a model.
+        markdown = _paper_facts.place_blocks(markdown, self.quest_root)
         # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
         # placeholder (core/paper_facts.py).
         markdown = self._render_paper_facts(markdown, state)
@@ -19911,6 +19918,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         paper_raw = Path(paper_md).read_text(encoding="utf-8")
         # Nor is the "Best design found" section, when it is exactly FI's (core/best_design_report.py).
         paper_raw = _best_report.strip_for_checks(paper_raw, self._best_design_section(state, paper_raw))
+        # Nor are FI's tables of every setting (core/paper_facts.py ``{{results_table}}``).
+        paper_raw = _paper_facts.without_blocks(paper_raw)
         paper_text = _paper_for_prompt(_disclosure.strip_for_checks(paper_raw), "claim_check", self._log)
         literature = state.get("literature") or []
         audience = self.config.output.audience
@@ -21107,7 +21116,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     state, replicates, max_effect_sizes=10**9, assertions=_replicate_assertions(state),
                 )
             report = stat_claims.check(
-                paper_md,
+                _paper_facts.without_blocks(paper_md),
                 result_json=state.get("result_json") or {},
                 intervals=_replicate_result_intervals(state),
                 comparison_stats=comparison_stats,
@@ -21222,6 +21231,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         replicates and their aggregates, the figures, the configuration, the design and the known-answer checks."""
         from core import number_provenance
 
+        # FI's own tables of every setting are its record, printed: the check reads the writer's text.
+        text = _paper_facts.without_blocks(text)
         replicates = list(state.get("result_json_replicates") or [])
         assertions = _replicate_assertions(state)
         comparison_stats: dict[str, Any] = {}
@@ -25950,7 +25961,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
   "labels": {"<each grid parameter and each other quantity a figure plots, named as the code names it>": "<the reader's name for it: words, its symbol in $...$ and its unit, for example Activation energy $E_a$ (kJ/mol)>"},
-  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "label": "<the reader's name for the number, written the same way>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every grid setting uses the same random numbers, so settings are compared trial by trial; false otherwise (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>", "known_value": {"true_value": <the true value the simulation generates the data with, on the estimate's own scale: a number, or the name of the threshold or of the grid parameter that holds it>, "estimate": "<the name run_trial returns for the trial's estimate of it>", "standard_error": "<the name run_trial returns for that estimate's standard error>", "interval": ["<the name of the lower end of the trial's interval>", "<the name of its upper end>"], "level": <the interval's level, for example 0.95>}, "undefined_when": {"<grid parameter>": [<the values where this number truly has no value, so a trial returns none there>]}}],
+  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "label": "<the reader's name for the number, written the same way>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every grid setting uses the same random numbers, so settings are compared trial by trial; false otherwise (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>", "known_value": {"true_value": <the true value the simulation generates the data with, on the estimate's own scale: a number, or the name of the threshold or of the grid parameter that holds it>, "estimate": "<the name run_trial returns for the trial's estimate of it>", "standard_error": "<the name run_trial returns for that estimate's standard error>", "interval": ["<the name of the lower end of the trial's interval>", "<the name of its upper end>"], "level": <the interval's level, for example 0.95>}, "undefined_when": {"<grid parameter>": [<the values where this number truly has no value, so a trial returns none there>]}, @@REFERENCE_FIELD@@}],
   "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "expected_formula": "<for a check that is not an invariant, a symmetry or a second implementation: @@FORMULA@@>", "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<how the number is computed from what that run returns: one name the simulation function returns, or a formula of them, e.g. abs(P_out - P_in) / P_in>"}],
   "model": {
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
@@ -25991,6 +26002,8 @@ Mistakes that stop a run, each seen in real quests:
 
 `labels` and each metric's `label` are what a reader sees on a figure's axes and in its tables: the code's names (`Ea_hat`, `pi1`) are not, and a figure axis that shows one is sent back to be renamed to its label.
 
+@@REFERENCE_RULE@@
+
 Every number the topic sets (a set in braces, a count of runs, a threshold) must appear in `protocol` exactly as the topic gives it, and the design's method must use those values. Add values the topic does not name only when the method needs them, and say why in `method`. Leave out the keys that do not apply (an analytical study has no grid).
 """
 
@@ -25998,6 +26011,9 @@ _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@FORMULA@@", _forms.EXPECTED_FORMULA
 _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@LEDGER@@", _ledger.DIRECTIVE_TEXT)
 _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@STEPS@@", _plan_steps.DIRECTIVE_TEXT)
 _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@EXAMPLE@@", _equation_tests.EXAMPLE_RULE)
+# A metric's reference value, a formula FI computes at every setting and prints beside the result (core/reference_values.py).
+_PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@REFERENCE_FIELD@@", _reference_values.PLAN_FIELD)
+_PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@REFERENCE_RULE@@", _reference_values.PLAN_RULE)
 
 # The kind of study, and the block of a search for the best design (core/optimisation_plan.py). Added after the plan
 # directive, so the rules above stay as they are for a measurement.
