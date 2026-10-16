@@ -394,6 +394,15 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         # Last, so a cut of the protocol (the claim check shows its first few thousand characters) keeps the grid and
         # the checks, which a long list of equations would push out.
         out["model"] = model
+    if isinstance(out.get("metrics"), list) and any(isinstance(m, dict) and m.get("reference") is not None
+                                                    for m in out["metrics"]):
+        # A metric's reference value is computed from the grid, the fixed settings and the thresholds, and must agree
+        # with the plan's own known-answer checks: all in reach only now (core/reference_values.py).
+        from . import reference_values
+
+        found = reference_values.problems(out)
+        if found:
+            return None, found[0]
     return out, None
 
 
@@ -679,6 +688,14 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
         if key not in out:
             return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
         if key == "metrics":
+            # A reference value that cannot be used is left out, not the metric it belongs to.
+            from . import reference_values
+
+            without, note = reference_values.without_bad_reference(out, why)
+            if without is not None:
+                out = without
+                notes.append(note)
+                continue
             # One metric the check refuses is left out, not the list it is in.
             from . import metric_spec
 

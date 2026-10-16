@@ -93,6 +93,14 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
         paired = item.get("paired")
         if paired is not None and not isinstance(paired, bool):
             return None, f"`protocol.metrics` entry `{ident}`: `paired` must be true or false"
+        # The value the number should take at each setting, as a formula FI computes itself (core/reference_values.py).
+        # Its shape here; what it computes, with the grid and the checks in reach, in core/plan.py.
+        if item.get("reference") is not None:
+            from . import reference_values
+
+            shape = reference_values.shape_problem(item["reference"])
+            if shape:
+                return None, f"`protocol.metrics` entry `{ident}`: its `reference` {shape}"
         # No `given` (left out, null or empty) is a mean over every trial. A live plan wrote `"given": null` on every
         # metric, the key survived into the spec, and every entry then read as declaring a subset: the list was dropped.
         given = item.get("given")

@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
+from statistics import NormalDist
 from typing import Any, Callable
 
 from . import oracle_check as _oracle
@@ -97,12 +98,38 @@ def _bessel(n: int) -> Callable[[float], float]:
     return j
 
 
+_STANDARD_NORMAL = NormalDist()
+
+
+def _ndtr(x: float) -> float:
+    """The standard normal distribution function, SciPy's ``scipy.special.ndtr(x)`` = P(Z <= x)."""
+    return 0.5 * math.erfc(-x / math.sqrt(2.0))
+
+
+def _ndtri(p: float) -> float:
+    """The inverse of :func:`_ndtr`, SciPy's ``scipy.special.ndtri(p)``: the x with P(Z <= x) = p, for 0 < p < 1."""
+    if not 0.0 < p < 1.0:
+        raise ValueError("ndtri(p) needs 0 < p < 1")
+    return _STANDARD_NORMAL.inv_cdf(p)
+
+
+def _erfinv(y: float) -> float:
+    """The inverse error function, SciPy's ``scipy.special.erfinv(y)``, for -1 < y < 1. Odd by construction, and worked
+    out from the tail ``(1 - |y|) / 2``, which is exact in floats (``(y + 1) / 2`` near y = 1 is not)."""
+    if not -1.0 < y < 1.0:
+        raise ValueError("erfinv(y) needs -1 < y < 1")
+    if y == 0.0:
+        return 0.0
+    return math.copysign(-_ndtri((1.0 - abs(y)) / 2.0) / math.sqrt(2.0), y)
+
+
 #: Functions only FI's own working-out of a derivation may use (core/oracle_triage.py::calculate), never a check's
 #: formula: a plan writes its expected value with them, a simulation's returned names are never passed through them.
 #: General mathematics, no field's own formulas.
 SPECIAL_FUNCTIONS: dict[str, Callable[..., float]] = {
     "ellipk": _ellipk, "erf": math.erf, "erfc": math.erfc, "gamma": math.gamma, "lgamma": math.lgamma,
     "j0": _bessel(0), "j1": _bessel(1), "J0": _bessel(0), "J1": _bessel(1),
+    "ndtr": _ndtr, "ndtri": _ndtri, "erfinv": _erfinv,
 }
 #: The special functions a working written in prose (a check's derivation, a paper's formula) is worked out with. Only
 #: ``expected_formula`` is written in a language FI states (:data:`EXPECTED_FORMULA_LANGUAGE`); in prose ``gamma(T)`` or
@@ -533,7 +560,8 @@ def request(requests: list[str], *, last: bool = True) -> str:
 EXPECTED_FORMULA_LANGUAGE = (
     "the expected value as one formula FI can compute itself: numbers, + - * / ** %, parentheses, pi, the functions "
     f"{FUNCTION_LIST}, the special functions erf(x), erfc(x), gamma(x), lgamma(x) (the log of |gamma(x)|), j0(x) and "
-    "j1(x) (also J0(x), J1(x): the Bessel functions of the first kind, not the spherical ones) and ellipk(m) with m = k**2 (all "
+    "j1(x) (also J0(x), J1(x): the Bessel functions of the first kind, not the spherical ones), ellipk(m) with m = k**2, "
+    "ndtr(x) (the standard normal distribution function, P(Z <= x)), ndtri(p) (its inverse) and erfinv(y) (all "
     "as SciPy names them, so ellipk(sin(a/2)**2) for amplitude a), and the settings of the check's `case` by name; "
     "angles in radians (30 degrees is 30*pi/180)"
 )
