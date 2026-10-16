@@ -11725,7 +11725,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 prompt = self._prompts["code_review"].substitute(
                     topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
                     plan=plan_text, code=sources, previous=earlier,
-                    small_run=getattr(self, "_small_run_note", "") or "(FI did not run the simulation before this reading)"
+                    small_run=_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
+                    or "(FI did not run the simulation before this reading)"
                 ) + again
                 reply = await self._ask_reader(prompt, review_node)
                 parsed = _parse_json_lenient(reply, node=review_node)

@@ -45,6 +45,18 @@ def test_only_the_plans_own_values_are_taken_out_of_what_a_reviewer_says() -> No
     assert pairs.scrub("anything 0.25", None) == "anything 0.25"
 
 
+def test_the_small_run_note_is_scrubbed_at_the_precision_it_was_printed() -> None:
+    # r6t: the small run's note printed k_true_2=0.1036 while the plan's check expects 0.1035560610989359
+    values = [0.1035560610989359, 0.0125]
+    note = "Setting noise=0.01: k_true_2=0.1036, k_true_3=0.10356, k_hat=0.1041, a share 1.25%, n=12, T=350"
+    assert "k_true_2=0.1036," in pairs.scrub(note, values)  # the plain scrub leaves a rounded value
+    got = pairs.scrub(note, values, printed=True)
+    assert got == (f"Setting noise=0.01: k_true_2={pairs.PLACEHOLDER}, k_true_3={pairs.PLACEHOLDER}, k_hat=0.1041, "
+                   f"a share {pairs.PLACEHOLDER}, n=12, T=350")
+    # two significant digits are too few to tell a plan value from any other number
+    assert pairs.scrub("about 0.10", values, printed=True) == "about 0.10"
+
+
 def test_the_plans_values_are_its_checks_expected_values_and_tolerances_and_its_examples() -> None:
     from tests.test_oracle_review import PROTOCOL
 
