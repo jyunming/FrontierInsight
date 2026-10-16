@@ -1,12 +1,17 @@
-"""A setting of the grid the simulation never reads is found before the run (core/unread_settings.py::unread_axes).
+"""A setting of the grid FI's reading of the code finds no use of (core/unread_settings.py::unread_axes) is said, never
+taken out: FI keeps every setting and runs it.
 
 The real case (rounds s1 and r13, first-order kinetics): five temperatures sat in `protocol.grid` beside the noise level and
 the number of time points, but run_trial builds its own five temperatures and never reads `temperature_K`: every (noise,
-points) setting ran five times over, 125 settings instead of 25, and the paper said there was no replication.
+points) setting ran five times over, 125 settings instead of 25. An earlier version took such a setting out of the grid;
+a second review found ordinary code (an import under another name, a wrapped helper, ...) that the reading misses, so a
+setting the code does read was taken out. A reading of code can be wrong, and a setting taken out is a study not run: the
+grid is now always kept, and only a setting the study compares sends the code back.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -60,53 +65,58 @@ def _quest(tmp_path: Path, quest: str, sim_patch=None):
 
 
 @pytest.mark.parametrize("quest", ["s1_kinetics", "r13_kinetics"])
-def test_replay_the_unread_setting_leaves_the_grid_before_the_run(tmp_path: Path, quest: str) -> None:
+def test_replay_the_unread_setting_is_said_and_every_setting_is_kept(tmp_path: Path, quest: str) -> None:
     eng = _quest(tmp_path, quest)
     state = {"topic": "t", "iteration": 0, "design": _plan.load_design(eng.quest_root)[0]}
-    assert run_estimate.cell_count(eng._draft_protocol(state)["grid"]) == 125
-    assert eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py") is None
+    design_before = json.dumps(state["design"], sort_keys=True)
+    assert eng._check_unread_settings(state, eng.quest_root / "code" / "simulate.py") is None
     grid = eng._draft_protocol(state)["grid"]
-    assert "temperature_K" not in grid and run_estimate.cell_count(grid) == 25
-    assert "temperature_K" not in state["design"]["protocol"]["grid"]
-    text = _plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
-    assert "nothing in the code reads it" in text and "runs 25 setting(s), not 125" in text
-    log = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert "nothing in the code reads it" in log and "`temperature_K` (5 values" in log
-    note = eng._run_checks_note()
-    assert "runs 25 setting(s), not 125" in note and "Do not describe `temperature_K` as a setting" in note
-    # An item the paper must name, checked, and said in the run record (QUALITY.md).
-    items = paper_facts.required_items(eng.quest_root)
-    assert [i.name for i in items if i.kind == paper_facts.NOT_DONE] == ["temperature_K not varied"]
-    assert "temperature_K" in paper_facts.writer_section(eng.quest_root)
-    assert "runs 25 setting(s), not 125" in disclosure.run_record(eng.quest_root)
-    # Done once: a second pass finds nothing more to take out and writes nothing.
+    assert "temperature_K" in grid and run_estimate.cell_count(grid) == 125
+    assert json.dumps(state["design"], sort_keys=True) == design_before
+    assert run_estimate.cell_count(_plan.load_design(eng.quest_root)[0]["protocol"]["grid"]) == 125
+    line = "FI's reading of the code finds no use of `temperature_K`; every setting is kept and run."
+    assert line in _plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    assert line in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+    # Nothing the paper must state, no writer's note, no run-record line, no record file.
+    assert not [i for i in paper_facts.required_items(eng.quest_root) if i.kind == paper_facts.NOT_DONE]
+    assert "temperature_K" not in eng._run_checks_note()
+    assert "not 125" not in disclosure.run_record(eng.quest_root)
+    assert not (eng.fi_dir / "unread_settings.json").exists()
+    # Said once: a second pass writes nothing more.
     versions = len(_plan.history(eng.quest_root))
-    eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
+    eng._check_unread_settings(state, eng.quest_root / "code" / "simulate.py")
     assert len(_plan.history(eng.quest_root)) == versions
-
-
-def test_the_state_handed_on_carries_the_smaller_grid_and_a_resume_catches_up(tmp_path: Path) -> None:
-    eng = _quest(tmp_path, "s1_kinetics")
-    design = _plan.load_design(eng.quest_root)[0]
-    state = {"topic": "t", "iteration": 0, "design": design}
-    eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
-    assert eng._unread_dropped is True  # _node_execute puts state["design"] in its patch
-    # A resume after the step stopped: plan.md has the smaller grid, the saved state still the plan's 125 settings.
-    stale = {"topic": "t", "iteration": 0, "design": design}
-    assert "temperature_K" in stale["design"]["protocol"]["grid"]
-    eng._drop_unread_settings(stale, eng.quest_root / "code" / "simulate.py")
-    assert eng._unread_dropped is True and "temperature_K" not in stale["design"]["protocol"]["grid"]
-    assert run_estimate.cell_count(stale["design"]["protocol"]["grid"]) == 25
-    # Nothing left to take out: nothing to hand on.
-    eng._drop_unread_settings(stale, eng.quest_root / "code" / "simulate.py")
-    assert eng._unread_dropped is False
+    assert _plan.plan_path(eng.quest_root).read_text(encoding="utf-8").count(line) == 1
 
 
 def test_a_frozen_protocol_or_a_redesign_is_left_alone(tmp_path: Path) -> None:
     eng = _quest(tmp_path, "s1_kinetics")
+    before = _plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     state = {"topic": "t", "iteration": 1, "design": _plan.load_design(eng.quest_root)[0]}
-    eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
-    assert "temperature_K" in _plan.load_design(eng.quest_root)[0]["protocol"]["grid"]
+    eng._check_unread_settings(state, eng.quest_root / "code" / "simulate.py")
+    assert _plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
+
+
+def test_the_reviews_alias_case_keeps_the_setting_the_code_reads(tmp_path: Path) -> None:
+    """The second review's case: simulate.py imports `scale_full as scale`, `scale_full` reads `temperature_K`, and the
+    package also defines a `scale` that does not. The reading follows the wrong `scale`; before, FI took `temperature_K`
+    out of the grid and the run failed on it. Now the grid is unchanged."""
+    def patch(s: str) -> str:
+        s = s.replace("from kinetics_parameter_recovery import model",
+                      "from kinetics_parameter_recovery import model\n"
+                      "from kinetics_parameter_recovery.model import scale_full as scale")
+        return s.replace('sigma = float(cell["sigma"])', 'sigma = float(cell["sigma"]) * scale(cell)')
+
+    eng = _quest(tmp_path, "s1_kinetics", patch)
+    model = eng.quest_root / "code" / "kinetics_parameter_recovery" / "model.py"
+    model.write_text(model.read_text(encoding="utf-8") + "\n\ndef scale(c):\n    return 1.0\n\n\n"
+                     "def scale_full(c):\n    return float(c['temperature_K']) / 300.0\n", encoding="utf-8")
+    state = {"topic": "t", "iteration": 0, "design": _plan.load_design(eng.quest_root)[0]}
+    assert eng._check_unread_settings(state, eng.quest_root / "code" / "simulate.py") is None
+    for grid in (eng._draft_protocol(state)["grid"], _plan.load_design(eng.quest_root)[0]["protocol"]["grid"],
+                 state["design"]["protocol"]["grid"]):
+        assert "temperature_K" in grid and run_estimate.cell_count(grid) == 125
+    assert "nothing in the code reads it" not in _plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
 
 
 def _one(source: str) -> tuple[set[str] | None, str]:
@@ -212,7 +222,7 @@ def test_s1_with_a_misspelt_noise_level_keeps_every_setting(tmp_path: Path) -> N
     eng = _quest(tmp_path, "s1_kinetics",
                  lambda s: s.replace('sigma = float(cell["sigma"])', 'sigma = float(cell.get("sigma_noise", 0.02))'))
     state = {"topic": "t", "iteration": 0, "design": _plan.load_design(eng.quest_root)[0]}
-    assert eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py") is None
+    assert eng._check_unread_settings(state, eng.quest_root / "code" / "simulate.py") is None
     grid = eng._draft_protocol(state)["grid"]
     assert "sigma" in grid and "temperature_K" in grid and run_estimate.cell_count(grid) == 125
     assert "the code reads a name the plan does not give" in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
@@ -220,18 +230,17 @@ def test_s1_with_a_misspelt_noise_level_keeps_every_setting(tmp_path: Path) -> N
 
 def test_s1_with_the_noise_level_ignored_sends_the_code_back(tmp_path: Path) -> None:
     """The simulation uses a constant noise: `sigma`, which the topic compares, is unread. The code goes back to be
-    repaired, naming it; the grid stays as the plan wrote it (before: sigma was removed)."""
+    repaired, naming it; the grid stays as the plan wrote it."""
     eng = _quest(tmp_path, "s1_kinetics", lambda s: s.replace('sigma = float(cell["sigma"])', 'sigma = 0.02'))
     state = {"topic": "t", "iteration": 0, "design": _plan.load_design(eng.quest_root)[0], "exec_reflect_iter": 0}
-    back = eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
+    back = eng._check_unread_settings(state, eng.quest_root / "code" / "simulate.py")
     assert back is not None and back["exec_result"]["returncode"] == 1
     assert "`sigma`" in back["exec_result"]["stderr_tail"] and "the topic compares noise level" in back["exec_result"]["stderr_tail"]
     grid = eng._draft_protocol(state)["grid"]
     assert "sigma" in grid and "temperature_K" in grid
-    assert not (eng.fi_dir / "unread_settings.json").exists()
-    # The repairs used up: the grid is kept, nothing is taken out.
+    # The repairs used up: the grid is kept.
     spent = {**state, "exec_reflect_iter": eng.config.engine.exec_reflect_max_iterations}
-    assert eng._drop_unread_settings(spent, eng.quest_root / "code" / "simulate.py") is None
+    assert eng._check_unread_settings(spent, eng.quest_root / "code" / "simulate.py") is None
     assert "sigma" in eng._draft_protocol(spent)["grid"]
 
 
@@ -250,21 +259,31 @@ def test_an_ignored_method_the_topic_compares_is_not_taken_out(tmp_path: Path) -
     assert "check" in found["sigma"]  # s1's checks run at values of sigma
 
 
-def test_a_later_plan_that_puts_the_setting_back_wins(tmp_path: Path) -> None:
+def test_a_not_done_item_the_plan_no_longer_supports_is_taken_away_before_the_run(tmp_path: Path) -> None:
+    """A plan changed after the plan step (an approved change, a person's edit) that now has a usable `in_each_run`: the
+    entry recorded when it could not be used is taken away, so the paper is not made to state it."""
     eng = _quest(tmp_path, "s1_kinetics")
+    eng._note_not_done([{"name": "comparison inside each run", "sentence": "x has one value", "kind": "in_each_run"},
+                        {"name": "old", "sentence": "an entry of a kind no longer written", "kind": "unread_setting"}])
     design = _plan.load_design(eng.quest_root)[0]
-    eng._drop_unread_settings({"topic": "t", "iteration": 0, "design": design}, eng.quest_root / "code" / "simulate.py")
-    # The plan is changed again (an approved amendment) and has temperature_K: the old record does not take it away.
-    shutil_copy = __import__("shutil").copy
-    shutil_copy(FIX / "s1_kinetics" / "plan.md", _plan.plan_path(eng.quest_root))
-    state = {"topic": "t", "iteration": 1, "design": _plan.load_design(eng.quest_root)[0]}
-    eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
-    assert "temperature_K" in state["design"]["protocol"]["grid"] and eng._unread_dropped is False
+    state = {"topic": "t", "iteration": 0, "design": design}
+    eng._refresh_not_done(state)  # the plan still lacks it: kept; the unknown kind goes
+    assert [e["kind"] for e in eng._topic_covered_read()["not_done"]] == ["in_each_run"]
+    # A person's edit of plan.md (the protocol's source before the freeze) gives a usable in_each_run.
+    from core import in_run
+
+    path = _plan.plan_path(eng.quest_root)
+    path.write_text(_plan.edit_design_block(path.read_text(encoding="utf-8"), lambda d: {
+        **d, "protocol": {**d["protocol"], "in_each_run": {"wall": ["a", "b"]}}}), encoding="utf-8")
+    assert in_run.of(eng._draft_protocol(state))
+    eng._refresh_not_done(state)
+    assert eng._topic_covered_read()["not_done"] == []
+    assert not [i for i in paper_facts.required_items(eng.quest_root) if i.kind == paper_facts.NOT_DONE]
 
 
-def test_the_setting_leaves_only_after_the_checks_of_the_code_and_before_the_timing():
+def test_the_check_runs_after_the_checks_of_the_code_and_before_the_timing():
     source = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
     gate = source.index("stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)")
-    drop = source.index("self._drop_unread_settings(state, simulate_path)")
+    drop = source.index("self._check_unread_settings(state, simulate_path)")
     size = source.index("too_long = await self._size_the_run(state, runner, py, exec_env)")
     assert gate < drop < size

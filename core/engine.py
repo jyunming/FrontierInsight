@@ -6150,6 +6150,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if new != old:
             self._topic_covered_write(not_done=new)
 
+    def _refresh_not_done(self, state: QuestState) -> None:
+        """Before the run: take away each ``not_done`` entry the plan as it now stands no longer supports (an approved
+        change, a person's edit of plan.md), so the paper is never made to state a limitation the study does not have.
+        Every entry has a ``kind``; an entry of an unknown kind (none is written any more) is taken away too."""
+        entries = [e for e in self._topic_covered_read().get("not_done") or [] if isinstance(e, dict)]
+        if not entries:
+            return
+        from . import in_run as _in_run
+
+        protocol = self._draft_protocol(state) or {}
+        layout = _code_layout.load(self.quest_root)
+        still = {
+            "in_each_run": not _in_run.of(protocol),
+            "code_files": bool(_code_layout.files_note(layout)),
+        }
+        kept = [e for e in entries if still.get(str(e.get("kind")), False)]
+        if kept != entries:
+            self._topic_covered_write(not_done=kept)
+            gone = ", ".join(str(e.get("name")) for e in entries if e not in kept)
+            self._log.info("[execute] the plan as it now stands does what was recorded as not done (%s); taken away", gone)
+
     def _in_each_run_not_done(self, why: Any, *, asked_again: bool) -> None:
         """``protocol.in_each_run`` could not be used (``why``, the reader's reason; ``None``: it can be, or there is none):
         an item the paper must name. Said as what FI recorded, not as what the code did (the code may compare those values
@@ -6872,6 +6893,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # the study not done: kept for the writer (core/topic_requirements.py::write_note), so the paper says it.
             if "in_each_run" in {*asked, *before}:
                 self._in_each_run_not_done(left.get("in_each_run"), asked_again=True)
+            elif "in_each_run" not in left:
+                self._note_not_done([], kind="in_each_run")  # a plan written anew that no longer lacks it
             # What is still wrong with the ledger parts is said under *What the topic asks for*, and kept for the writer.
             gaps = [f"`protocol.{part}` is incomplete: {why}" for part, why in left.items() if part in _LEDGER_PARTS]
             self._note_the_ledger_for_the_writer(design, gaps)
@@ -16197,13 +16220,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
         if stop is not None:
             return stop
-        # A setting of the grid nothing in the code reads, once the checks of the code are clean (a misspelt read is the
-        # code's fault, found by them): taken out of the grid when the plan is wrong, the code sent back when the study
-        # compares it (core/run_checks.py). Before the run is timed, so the timing reads the plan as FI changed it.
-        self._unread_dropped = False
+        # A setting of the grid FI's reading finds no use of, once the checks of the code are clean (a misspelt read is the
+        # code's fault, found by them): the code sent back when the study compares it, else one line in plan.md and
+        # run.log; the grid is always kept (core/run_checks.py).
         if split and self._trial_mode and not searching:
-            if (back := self._drop_unread_settings(state, simulate_path)) is not None:
+            if (back := self._check_unread_settings(state, simulate_path)) is not None:
                 return back
+        self._refresh_not_done(state)
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,
@@ -16841,8 +16864,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
         patch["figure_data_repairs"] = figure_repairs
-        if getattr(self, "_unread_dropped", False):
-            patch["design"] = state["design"]  # a setting the simulation never reads, taken out of the grid (core/run_checks.py)
         if (sized_design := self._design_after_sizing(state)) is not None:
             patch["design"] = sized_design  # the plan's smaller run (core/run_estimate.py)
         if figure_rewrote and code_path.is_file():
