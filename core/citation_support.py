@@ -498,10 +498,11 @@ def settle(site: Site, labels: set[str], own_numbers: Any, claim_unsupported: bo
 _POINTS_BACK = frozenset({"neither", "either", "both", "none", "this", "that", "these", "those", "such", "it", "they"})
 
 
-#: Words a sentence cannot end on (articles, prepositions, conjunctions, auxiliaries): a sentence ending on one has lost the
+#: Words a sentence cannot end on (articles, prepositions, conjunctions, auxiliaries; not "a", which ends sentences as a
+#: symbol: "at per-test level a."): a sentence ending on one has lost the
 #: noun it was about. The class is closed (it does not grow with the wording of a paper); it is used for the one question
 #: a citation taken out leaves, whether the bracket was the object of the sentence ("against the text of [3].").
-_CANNOT_END = frozenset("""a an the of in on at by for to from with without within into onto over under between among against
+_CANNOT_END = frozenset("""an the of in on at by for to from with without within into onto over under between among against
     toward towards through during about after before as than via per and or but nor if whether that which who whose whom
     is are was were be been being has have had do does did will would can could may might shall should must not""".split())
 
@@ -723,7 +724,8 @@ async def check_paper(
                 and cut_off(site.text) is False):
             # The citation was the object of the sentence's last words: without it the sentence stops mid-phrase and
             # cannot be repaired by taking a word out, so it goes whole when it holds no result of the study.
-            if site.kind == "prose" and not any(n in own_numbers for n in _numbers(site.text)):
+            if (site.kind in ("prose", "list") and not any(n in own_numbers for n in _numbers(site.text))
+                    and keeps_shape(site, "")):
                 plan, new_text = {"action": "drop_sentence", "text": ""}, ""
                 note = note or "the sentence was about the source itself and could not stand without it"
             else:

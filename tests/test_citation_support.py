@@ -235,3 +235,14 @@ def test_a_sentence_that_cannot_stand_without_its_citation_is_not_left_cut_off()
 def test_a_cited_sentence_that_reads_whole_without_it_keeps_its_words() -> None:
     out = _drop_citation_run("BH power exceeds Bonferroni power in this run [3]. Next.\n", "drop_citation")
     assert out.paper.strip() == "BH power exceeds Bonferroni power in this run. Next."
+
+
+def test_a_cut_off_sentence_inside_a_bullet_goes_but_a_bullet_that_is_only_it_stays_a_bullet() -> None:
+    """The s6 sentence stood in a bullet, after two sentences of the same bullet."""
+    inside = ("- The BH FDR reference is a bound. BH's proof of FDR control is in [2]. We did not verify the equality "
+              "itself against the text of [3].\n- BH power has no reference line.\n")
+    out = _drop_citation_run(inside, "drop_citation")
+    assert "text of." not in out.paper and "- BH power has no reference line." in out.paper
+    alone = "Intro [2].\n- We did not verify the equality itself against the text of [3].\n- Next point.\n"
+    out2 = _drop_citation_run(alone, "drop_citation")
+    assert "text of." not in out2.paper and "- Next point." in out2.paper and "\n- \n" not in out2.paper
