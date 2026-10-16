@@ -686,19 +686,57 @@ def run_trial(cell, trial_id, seed):
 '''
 
 
-def test_an_unchanged_simulation_reuses_the_trials_it_already_ran(tmp_path: Path) -> None:
-    """P1-6. The same code on the same case (improve rounds, the hidden check) reuses the trials FI stored, and runs
-    again once the code changes."""
+def _calls(root: Path) -> int:
+    path = root / "calls.txt"
+    return len(path.read_text(encoding="utf-8").splitlines()) if path.is_file() else 0
+
+
+def test_two_checks_on_one_case_share_their_trials_in_one_run_of_the_checks_and_never_across_runs(
+        tmp_path: Path) -> None:
+    """Two checks on the same case, in one run of the checks, share its trials (each trial is run once). A second run of
+    the checks runs them again: trials are never kept from one run of the checks to the next, since no key can name
+    everything a trial reads (a data file, an environment variable, an installed package)."""
     root = _synth(tmp_path, COUNTED)
-    calls = root / "calls.txt"
-    _c, _p, first, _f = _plain(root, [RATE_CHECK], timeout_s=60)
-    ran = len(calls.read_text(encoding="utf-8").splitlines())
-    _c, _p, again, _f = _plain(root, [RATE_CHECK], timeout_s=60)
-    assert len(calls.read_text(encoding="utf-8").splitlines()) == ran, "no trial is run again"
-    assert again[0]["value"] == first[0]["value"] and again[0]["passed_by_engine"] is first[0]["passed_by_engine"]
-    (root / "code" / "simulate.py").write_text(COUNTED + "\n# changed\n", encoding="utf-8")
-    _plain(root, [RATE_CHECK], timeout_s=60)
-    assert len(calls.read_text(encoding="utf-8").splitlines()) > ran, "changed code is run again"
+    _c, _p, alone, _f = _plain(root, [RATE_CHECK], timeout_s=60)
+    once = _calls(root)
+    assert once >= mc.PILOT_TRIALS
+    two = [RATE_CHECK, {**RATE_CHECK, "name": "null_rate_again", "measure": "rate * 1.0"}]
+    _c, _p, both, _f = _plain(root, two, timeout_s=60)
+    assert _calls(root) == 2 * once, "the second run of the checks runs its trials again, and the two checks share them"
+    assert both[0]["value"] == both[1]["value"] == alone[0]["value"]
+
+
+STALE = '''
+import json, os, random
+from pathlib import Path
+
+def run_trial(cell, trial_id, seed):
+    params = Path("data") / "params.json"
+    p = json.loads(params.read_text())["p"] if params.is_file() else float(os.environ.get("MY_P", "0.05"))
+    rng = random.Random(seed)
+    return {"rate": sum(rng.random() < p for _ in range(100)) / 100}
+'''
+
+
+@pytest.mark.parametrize("changed", ["a data file", "an environment variable"])
+def test_a_simulation_whose_input_changed_is_run_again_not_read_from_earlier_trials(tmp_path: Path, changed: str) -> None:
+    """Review pass 2, P0-1 (input J): the simulation reads its rate from ``data/params.json`` (outside ``code/``) or an
+    environment variable that is not FI's. Right (0.05), the check passes; changed to 0.20, the check is measured again
+    and fails. It was read from the trials kept from the first run, and passed."""
+    root = _synth(tmp_path, STALE)
+    params = root / "data" / "params.json"
+    if changed == "a data file":
+        params.parent.mkdir(parents=True)
+        params.write_text('{"p": 0.05}', encoding="utf-8")
+    _c, problems, judged, _f = _plain(root, [RATE_CHECK], timeout_s=60)
+    assert judged[0]["passed_by_engine"] is True, (judged, problems)
+    env = None
+    if changed == "a data file":
+        params.write_text('{"p": 0.20}', encoding="utf-8")
+    else:
+        env = {"MY_P": "0.20"}
+    _c, problems, judged, found = _plain(root, [RATE_CHECK], timeout_s=60, env=env)
+    assert judged[0]["passed_by_engine"] is False and found, (judged, problems)
 
 
 ECHO = '''

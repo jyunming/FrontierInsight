@@ -1193,7 +1193,8 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
                           cell: dict[str, Any], trials: list[int], timeout_s: int, env: dict[str, str] | None = None,
                           thresholds: dict[str, Any] | None = None, in_each_run: dict[str, list[Any]] | None = None,
                           budget_s: float | None = None, paired: bool = False,
-                          reuse: bool = True) -> tuple[list[dict[str, Any]], str, list[str], int]:
+                          store: dict[str, dict[str, dict[str, Any]]] | None = None,
+                          ) -> tuple[list[dict[str, Any]], str, list[str], int]:
     """The trials ``trials`` of ``run_trial`` on one case, all in ONE process, each with the seed FI gives that trial of
     that setting (trial 0 gets the seed :func:`run_case` gives it; ``paired``: the seed the paired study gives trial
     ``t`` of every setting, ``key=""``): ``(the values of each trial that finished, in order; why the first trial gave
@@ -1201,9 +1202,10 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
     started that would not end within it (:func:`_run_batch`). With values compared inside each run (``in_each_run``)
     each trial's values are read as :func:`run_case` reads them.
 
-    ``reuse``: a trial FI already ran on the same code (every file under ``code/``), the same case, seed and settings is
-    read from FI's store (:data:`CHECK_STORE`) instead of being run again, so the gate, the improve rounds and the
-    hidden check do not repeat the same trials of an unchanged simulation."""
+    ``store``: the trials already run in this one run of the checks (:func:`measure_oracles` makes it), by case, seed
+    and settings: a trial in it is read from it instead of being run again, so two checks on the same case share their
+    trials. It lives only as long as that one run of the checks: no trial is ever kept from one run of the checks to
+    the next, since no key can name everything a trial reads (a data file, an environment variable, a package)."""
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     levels: list[dict[str, Any]] | None = None
     named: dict[str, Any] = {}
@@ -1221,8 +1223,10 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
     plan = [{"trial": int(t), "seed": trial_seed(base, key, int(t))} for t in trials]
     if not plan:
         return [], "no trial was asked for", [], 0
-    store_key = _check_store_key(quest_root, module, given, levels, key, base, thresholds, env) if reuse else ""
-    stored = _check_store_load(quest_root, store_key) if store_key else {}
+    store_key = json.dumps({"module": str(module), "cell": given, "levels": levels, "key": key, "base": base,
+                            "thresholds": thresholds or {}, "env": dict(sorted((env or {}).items()))},
+                           sort_keys=True, default=str) if store is not None else ""
+    stored = dict(store.get(store_key) or {}) if store is not None else {}
     todo = [p for p in plan if str(p["trial"]) not in stored]
     result: Any = None
     if todo:
@@ -1239,9 +1243,9 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
                 where = last_frame(str(row.get("traceback") or ""), quest_root)
                 fresh[str(row["trial"])] = {"status": "failed", "reason": str(row.get("reason") or "run_trial() failed")
                                             + (f" (at {where})" if where else "")}
-        if fresh and store_key:
-            _check_store_save(quest_root, store_key, {**stored, **fresh})
         stored = {**stored, **fresh}
+        if fresh and store is not None:
+            store[store_key] = stored
     values: list[dict[str, Any]] = []
     failed: list[str] = []
     started = 0
@@ -1262,64 +1266,6 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
         return [], ("run_trial() ran out of time" if getattr(result, "timed_out", False)
                     else f"run_trial() did not report (exit code {getattr(result, 'returncode', None)})"), failed, started
     return values, "", failed, started
-
-
-#: Where FI keeps the trials it ran for the known-answer checks, by code version and case (:func:`run_case_trials`).
-CHECK_STORE = Path(".fi") / "trials" / "check_store"
-
-
-def _code_hash(quest_root: Path, module: Path | str) -> str:
-    """One hash of every file under ``code/`` (FI's compiled copies left out) and of the module's own file."""
-    root = Path(quest_root)
-    digest = hashlib.sha256()
-    paths = sorted(p for p in (root / "code").rglob("*") if p.is_file()
-                   and "__pycache__" not in p.parts and p.suffix.lower() != ".pyc") if (root / "code").is_dir() else []
-    own = Path(module) if Path(module).is_absolute() else root / module
-    if own.is_file() and own not in paths:
-        paths.append(own)
-    for path in paths:
-        try:
-            digest.update(path.relative_to(root).as_posix().encode("utf-8") if path.is_relative_to(root)
-                          else str(path).encode("utf-8"))
-            digest.update(b"\0" + path.read_bytes() + b"\0")
-        except OSError:
-            return ""
-    return digest.hexdigest()
-
-
-def _check_store_key(quest_root: Path, module: Path | str, given: dict[str, Any], levels: Any, key: str, base: int,
-                     thresholds: dict[str, Any] | None, env: dict[str, str] | None) -> str:
-    code = _code_hash(quest_root, module)
-    if not code:
-        return ""
-    fi_env = {k: v for k, v in sorted((env or {}).items()) if str(k).startswith("FI_")}
-    text = json.dumps({"code": code, "module": str(module).replace("\\", "/"), "cell": given, "levels": levels,
-                       "key": key, "base": int(base), "thresholds": thresholds or {}, "env": fi_env,
-                       "harness": hashlib.sha256(HARNESS_SOURCE.encode("utf-8")).hexdigest()},
-                      sort_keys=True, default=str)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _check_store_load(quest_root: Path, store_key: str) -> dict[str, dict[str, Any]]:
-    path = Path(quest_root) / CHECK_STORE / f"{store_key[:32]}.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict) or data.get("key") != store_key or not isinstance(data.get("trials"), dict):
-        return {}
-    return {str(k): v for k, v in data["trials"].items() if isinstance(v, dict)}
-
-
-def _check_store_save(quest_root: Path, store_key: str, trials: dict[str, dict[str, Any]]) -> None:
-    folder = Path(quest_root) / CHECK_STORE
-    try:
-        folder.mkdir(parents=True, exist_ok=True)
-        tmp = folder / f"{store_key[:32]}.json.tmp"
-        tmp.write_text(json.dumps({"key": store_key, "trials": trials}, allow_nan=True, default=str), encoding="utf-8")
-        tmp.replace(folder / f"{store_key[:32]}.json")
-    except OSError:
-        pass  # a store that cannot be written only means the trials are run again next time
 
 
 def _same_value(a: Any, b: Any) -> bool:
@@ -1428,7 +1374,8 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
                         oracle: dict[str, Any], case: dict[str, Any], measure: str, timeout_s: int,
                         budget_s: float, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
                         in_each_run: dict[str, list[Any]] | None, means: Collection[str], paired: bool,
-                        most_trials: int) -> tuple[dict[str, Any] | None, str, bool] | None:
+                        most_trials: int, store: dict[str, Any] | None = None,
+                        ) -> tuple[dict[str, Any] | None, str, bool] | None:
     """An oracle whose number is a mean over trials (:func:`core.mc_error.reads_a_mean`), decided on trials of
     ``run_trial`` (core/mc_error.py): a first batch, then more trials, sized from their spread, until three standard
     errors put the mean inside or outside the tolerance, ``budget_s`` is spent or ``most_trials`` are run (then it is not
@@ -1442,7 +1389,7 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     rows, why, failed, ran = await run_case_trials(
         executor, python, quest_root, module, cell=case, trials=list(range(min(_mc.PILOT_TRIALS, most))),
         timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run,
-        budget_s=budget_s * _mc.PILOT_SHARE, paired=paired)
+        budget_s=budget_s * _mc.PILOT_SHARE, paired=paired, store=store)
     if not rows:
         return None, why, True
     first = rows[0]
@@ -1480,7 +1427,7 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
         more, _why, more_failed, more_ran = await run_case_trials(
             executor, python, quest_root, module, cell=case, trials=list(range(ran, ran + max(1, wanted - len(rows)))),
             timeout_s=max(1, int(math.ceil(left)) + 1), env=env, thresholds=thresholds, in_each_run=in_each_run,
-            budget_s=left, paired=paired)
+            budget_s=left, paired=paired, store=store)
         rows, failed, ran = rows + more, failed + more_failed, ran + more_ran
         if not more:
             why_open = "time"
@@ -1510,7 +1457,8 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
                          oracle: dict[str, Any], case: dict[str, Any], measure: str, timeout_s: int,
                          budget_s: float, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
                          in_each_run: dict[str, list[Any]] | None, paired: bool,
-                         most_trials: int) -> tuple[dict[str, Any] | None, str, bool] | None:
+                         most_trials: int, store: dict[str, Any] | None = None,
+                         ) -> tuple[dict[str, Any] | None, str, bool] | None:
     """A rule every trial keeps (core/mc_error.py), judged on a first batch of ``run_trial`` trials (trial 0 among them,
     with the seed :func:`run_case` gives it, so it is never weaker than trial 0 alone): the trial furthest from the
     expected value decides. Same return as :func:`_measure_mean`. Trials that all give the same number are judged as
@@ -1519,7 +1467,8 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
     expected, limit, _mode = _oracle.limit_of(oracle)
     rows, why, failed, ran = await run_case_trials(
         executor, python, quest_root, module, cell=case, trials=list(range(min(_mc.PILOT_TRIALS, max(1, most_trials)))),
-        timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run, budget_s=budget_s, paired=paired)
+        timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run, budget_s=budget_s, paired=paired,
+        store=store)
     if not rows:
         return None, why, True
     first = rows[0]
@@ -1592,6 +1541,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
 
     left_checks = sum(1 for o in oracles if on_trials(o))
     began = time.monotonic()
+    store: dict[str, Any] = {}  # the trials run in this one run of the checks, shared by the checks on one case
     for oracle in oracles:
         own = _oracle.case_of(oracle)
         if own is None:
@@ -1603,7 +1553,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
             share = max(1.0, (timeout_s - (time.monotonic() - began)) / max(left_checks, 1))
             left_checks -= 1
             kw = dict(oracle=oracle, case=case, measure=measure, timeout_s=timeout_s, budget_s=share, env=cenv,
-                      thresholds=thresholds, in_each_run=in_each_run, paired=paired, most_trials=most)
+                      thresholds=thresholds, in_each_run=in_each_run, paired=paired, most_trials=most,
+                      store=store)
             got = (await _measure_mean(executor, python, quest_root, module, means=means, **kw) if how == "mean"
                    else await _measure_every(executor, python, quest_root, module, **kw))
             if got is not None:
