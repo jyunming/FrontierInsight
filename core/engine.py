@@ -10596,7 +10596,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self.executor, python, self.quest_root, f"code/{_split_run.SIMULATE_NAME}",
                 timeout_s=self.config.execution.timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                in_each_run=_in_run.of(protocol),
+                in_each_run=_in_run.of(protocol), log=self._log,
             ), label="calling a setting of simulate.py again")
         except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
             same, why = None, f"{type(e).__name__}: {e}"[:300]
@@ -12048,7 +12048,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A function rewritten within the same second to the same size would be read from its stale compiled copy.
         for cache in (self.quest_root / "code").glob("**/__pycache__"):
             shutil.rmtree(cache, ignore_errors=True)
-        executor = _outside_run.OutsideExecutor(self.executor, self.quest_root) if outside else self.executor
+        executor = _outside_run.OutsideExecutor(self.executor, self.quest_root, log=self._log) if outside else self.executor
         env = {k: v for k, v in env.items() if k != "FI_CHECKS_DIR"} if env is not None else None
         try:
             # From the quest folder with paths relative to it: in Docker that folder is what is mounted as /work.
@@ -13199,6 +13199,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                             run_oracles, timeout_s=limit_s, env=env,
                             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
                             case_env=dict(_replicate_env(exec_env, 0, stride)), in_each_run=_in_run.of(protocol),
+                            log=self._log,
                         )
                     except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
                         checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
@@ -14143,7 +14144,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 checks, found, _timed_out = await _trial_runner.measure_oracles(
                     self.executor, py, root, simulate, oracles,
                     timeout_s=max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)),
-                    env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of(protocol),
+                    env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of(protocol), log=self._log,
                 )
                 problems += found
                 judged = _oracle_with_reader_flags(
@@ -14161,7 +14162,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     base_seed=int(env.get("FI_REPLICATE_SEED") or 0), deterministic="run_trial" not in entries,
                     timeout_s=self.config.execution.timeout_s, env=env, thresholds=thresholds,
                     paired=any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or []),
-                    in_each_run=_in_run.of(protocol),
+                    in_each_run=_in_run.of(protocol), log=self._log,
                 )
                 series = _improve.series_of(run, trial_names)
                 if run.ok_trials == 0:
@@ -14645,7 +14646,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 try:
                     values, _why = await _trial_runner.run_case(
                         self.executor, py, self.quest_root, rel, cell=cell, timeout_s=timeout, env=case_env,
-                        thresholds=thresholds, trial=trial_no, oracle=oracle, in_each_run=_in_run.of(protocol))
+                        thresholds=thresholds, trial=trial_no, oracle=oracle, in_each_run=_in_run.of(protocol),
+                        log=self._log)
                 except Exception as e:  # noqa: BLE001 -- a look that could not be had never stops a quest
                     self._log.warning("[oracle] an extra run of %r's case could not be made: %r", name, e)
                     return None

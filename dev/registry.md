@@ -565,11 +565,14 @@ same PR that adds, splits or renames one.
   `tests/test_fi_judges_numbers.py` (the review's in-process theft probe: a wrong law that reads the test's memory is a
   mismatch), `tests/equation_judge_helpers.py`.
 - `core/outside_run.py` — FI runs the quest's code from a copy outside the quest folder: `OutsideCopy` (`<temp>/fi_run/
-  <random id>/` with `code/` minus `.git`/`.venv`/caches/stale value files, the output folders `OUTPUT_DIRS` and the
-  paths FI names for the run; never `needs/`, `.fi/checks/`, `.fi/state.sqlite`; `bring_back` copies back only what the
-  run wrote under the output folders and the named paths, and writes the copy's paths as the quest's in FI's result
-  files), `named_paths` (paths into the quest on a command line or in an environment), `OutsideExecutor` (an executor
-  whose runs from the quest folder go through a copy; says in run.log what it dropped). Used by
+  <random id>/` with `code/` minus `.git`/`.venv`/caches/stale value files, the folders the run reads and the paths FI
+  names for the run: `CELL_INPUTS` (`inputs/`, `data/` without `data/results/`) for a cell, a check case or an equation
+  measurement, `ANALYSIS_INPUTS` (every folder but FI's own and `paper/`, never a top-level file) for the analysis; never
+  `needs/`, `.fi/checks/`, `.fi/state.sqlite`; `bring_back` copies back everything the run wrote except into
+  `FI_OWNED` (`needs/`, `.fi/` other than the named paths, `code/`), and writes the copy's paths as the quest's in FI's
+  result files), `named_paths` (paths into the quest on a command line or in an environment), `OutsideExecutor` (an
+  executor whose runs from the quest folder go through a copy; names every dropped path in run.log, through the `log`
+  `run_trials` / `measure_oracles` / `run_case` / `_run_one` are given, else the quest's own logger). Used by
   `Engine._run_in_env(outside=True)` / `Engine._run_outside` (the equation measuring runs, the function filler),
   `trial_runner.run_trials`, `trial_runner._run_one` (every oracle case) and `TrialsRunner.execute` (the analysis). Not
   a sandbox: the interpreter is still the quest's `.venv/`, and a search by absolute path still finds the quest. Not

@@ -6,15 +6,16 @@ from the quest folder, it could open ``needs/FROZEN_PROTOCOL.json`` (the checks'
 system's temporary folder, named by a random id (never by the quest's name), with:
 
 * a copy of ``code/`` (no ``.git`` history, no ``.venv``, no caches, no value file an older FI left in ``code/tests/``),
-* the output folders the experiment reads back and adds to (:data:`OUTPUT_DIRS`: ``raw/``, ``figures/``, ``results/``,
-  ``data/``),
+* the folders the run reads: for a cell of the study, a check case or an equation measurement only ``inputs/`` and
+  ``data/`` (:data:`CELL_INPUTS`, without the results written under ``data/results/``); for the analysis every folder
+  of the quest but FI's own (:data:`ANALYSIS_INPUTS`: ``raw/``, ``results/`` and whatever else the cells wrote),
 * the files and folders FI itself names for this one run, on the command line or in the environment (its harness, the
   spec of a setting, the file a result goes to);
 
-and never ``needs/``, ``.fi/checks/`` or the rest of ``.fi/``. After the run FI copies back, by its own list, what the
-run wrote under those output folders and those named paths, and nothing else (a file the run wrote anywhere else in the
-copy, or into ``code/``, is dropped with the copy). Paths that name the copy are written back as the quest's in what
-the run printed and in FI's own result files, so a traceback still points at ``code/...``.
+and never ``needs/``, ``.fi/checks/`` or the rest of ``.fi/``. After the run FI copies back everything the run wrote,
+created or removed, except into FI's own folders (:data:`FI_OWNED`: ``needs/``, ``.fi/`` other than the paths it named,
+and ``code/``): those are dropped, and each dropped path is said in the run log. Paths that name the copy are written
+back as the quest's in what the run printed and in FI's own result files, so a traceback still points at ``code/...``.
 
 This is not a sandbox. Code that searches the disk by absolute path, or starts from its own interpreter (the quest's
 ``.venv/`` stays in the quest folder), can still find the quest; the copy only stops reads and writes by relative path.
@@ -26,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
@@ -36,8 +38,18 @@ from typing import Any
 #: The folder under the system's temporary folder that holds every copy (one sub-folder per run, a random id).
 SCRATCH_DIR = "fi_run"
 CODE = "code"
-#: Folders of the quest the experiment reads back and adds to: copied in, and what the run wrote there copied back.
-OUTPUT_DIRS = ("raw", "figures", "results", "data")
+#: What a cell of the study, a check case or an equation measurement is given besides ``code/``: the person's inputs and
+#: the data the quest collected, without what the study writes under ``data/`` (:data:`CELL_SKIP`).
+CELL_INPUTS = ("inputs", "data")
+CELL_SKIP = ("data/results",)
+#: What the analysis is given: every folder of the quest but FI's own (:data:`FI_OWNED`, ``paper/``), so it reads
+#: whatever the cells wrote (``raw/``, ``results/``, a ``cache/`` of their own); never a file at the top of the quest
+#: (``plan.md`` holds the checks' expected values).
+EVERY_FOLDER = "*"
+ANALYSIS_INPUTS = (EVERY_FOLDER,)
+_NOT_FOR_ANALYSIS = ("paper",)
+#: FI's own folders: what a run writes there in its copy never comes back (except a path FI named for the run).
+FI_OWNED = ("needs", ".fi", "code")
 #: Never in a copy and never written back, even when named.
 NEVER = ("needs", ".fi/checks", ".venv", ".git", ".fi/state.sqlite", ".fi/agent_coder.json")
 #: FI's own records inside the folders a harness writes in (core/execution.py keeps them read-only in a container).
@@ -104,10 +116,11 @@ class OutsideCopy:
     this run (copied in when they are there, written back when the run changed them)."""
 
     def __init__(self, quest_root: Path | str, *, named: list[str] | tuple[str, ...] = (), base: Path | str | None = None,
-                 outputs: tuple[str, ...] = OUTPUT_DIRS) -> None:
+                 inputs: tuple[str, ...] = CELL_INPUTS, skip: tuple[str, ...] = CELL_SKIP) -> None:
         self.quest_root = Path(quest_root).resolve()
         self.named = sorted({n.strip("/") for n in named if n and not _never(n.strip("/"))})
-        self.outputs = tuple(outputs)
+        self.inputs = tuple(inputs)
+        self.skip = tuple(skip)
         self._base = base
         self.root: Path | None = None
         self._before: dict[str, Any] = {}
@@ -117,12 +130,21 @@ class OutsideCopy:
     def make(self) -> Path:
         root = self.root = new_scratch(self._base)
         copy_code(self.quest_root / CODE, root / CODE)
-        for rel in (*self.outputs, *self.named):
+        inputs = self.inputs
+        if EVERY_FOLDER in inputs and self.quest_root.is_dir():
+            inputs = tuple(sorted(p.name for p in self.quest_root.iterdir() if p.is_dir() and p.name not in FI_OWNED
+                                  and p.name not in _NOT_FOR_ANALYSIS and p.name not in _SKIP_DIRS))
+
+        def ignore(folder: str, names: list[str]) -> set[str]:
+            here = Path(folder).resolve().relative_to(self.quest_root).as_posix()
+            return {n for n in names if n in _SKIP_DIRS or n.endswith(".pyc") or f"{here}/{n}" in self.skip}
+
+        for rel in (*inputs, *self.named):
             src = self.quest_root / rel
-            if rel == CODE or rel.startswith(CODE + "/") or _never(rel):
+            if rel == CODE or rel.startswith(CODE + "/") or _never(rel) or rel in self.skip:
                 continue
             if src.is_dir():
-                shutil.copytree(src, root / rel, ignore=shutil.ignore_patterns(*_SKIP_DIRS, "*.pyc"), dirs_exist_ok=True)
+                shutil.copytree(src, root / rel, ignore=ignore, dirs_exist_ok=True)
             elif src.is_file():
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, root / rel)
@@ -132,11 +154,11 @@ class OutsideCopy:
         return root
 
     def _comes_back(self, rel: str) -> bool:
-        if _never(rel) or rel == CODE or rel.startswith(CODE + "/"):
+        if _never(rel):
             return False
-        if rel.split("/", 1)[0] in self.outputs:
-            return True
-        return any(rel == n or rel.startswith(n + "/") for n in self.named)
+        if any(rel == n or rel.startswith(n + "/") for n in self.named):
+            return not (rel == CODE or rel.startswith(CODE + "/"))
+        return rel.split("/", 1)[0] not in FI_OWNED
 
     def _forms(self) -> list[tuple[str, str]]:
         assert self.root is not None
@@ -154,8 +176,9 @@ class OutsideCopy:
         return text
 
     def bring_back(self) -> list[str]:
-        """Copy into the quest what the run wrote (created, changed, removed) under the output folders and the named
-        paths; anything else it wrote is left out (and listed in :attr:`left_out`). The paths written back."""
+        """Copy into the quest what the run wrote (created, changed, removed), except into FI's own folders
+        (:data:`FI_OWNED`, other than the named paths): those are left out and listed in :attr:`left_out`. The paths
+        written back."""
         assert self.root is not None
         now = _files(self.root)
         back: list[str] = []
@@ -219,12 +242,14 @@ class OutsideExecutor:
     on the command line and in the environment are written as the copy's."""
 
     def __init__(self, inner: Any, quest_root: Path | str, *, base: Path | str | None = None,
-                 outputs: tuple[str, ...] = OUTPUT_DIRS, log: Any = None) -> None:
+                 inputs: tuple[str, ...] = CELL_INPUTS, skip: tuple[str, ...] = CELL_SKIP, log: Any = None) -> None:
         self.inner = inner
         self.quest_root = Path(quest_root).resolve()
         self._base = base
-        self._outputs = outputs
-        self._log = log
+        self._inputs = inputs
+        self._skip = skip
+        # Without a log of its own, the quest's run log (core/engine.py names it frontier_insight.<quest id>).
+        self._log = log if log is not None else logging.getLogger(f"frontier_insight.{self.quest_root.name}")
         self.last: OutsideCopy | None = None
 
     def __getattr__(self, name: str) -> Any:
@@ -243,7 +268,7 @@ class OutsideExecutor:
         if Path(cwd).resolve() != self.quest_root:
             return await self.inner.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
         named = named_paths(self.quest_root, [*cmd[1:], *(env or {}).values()])
-        box = OutsideCopy(self.quest_root, named=named, base=self._base, outputs=self._outputs)
+        box = OutsideCopy(self.quest_root, named=named, base=self._base, inputs=self._inputs, skip=self._skip)
         root = await asyncio.to_thread(box.make)
         self.last = box
         try:
@@ -252,11 +277,10 @@ class OutsideExecutor:
             result = await self.inner.execute(argv, cwd=root, timeout_s=timeout_s, env=run_env)
             await asyncio.to_thread(box.bring_back)
             dropped = [r for r in box.left_out if not r.endswith(".pyc") and "/__pycache__/" not in f"/{r}"]
-            if dropped and self._log is not None:
-                self._log.warning("[run] the code ran from a copy outside the quest folder and wrote %s there, outside "
-                                  "the folders FI keeps (%s); not kept", ", ".join(dropped[:6])
-                                  + (f" and {len(dropped) - 6} more" if len(dropped) > 6 else ""),
-                                  ", ".join(f"{d}/" for d in self._outputs))
+            if dropped:
+                self._log.warning("[run] the code ran from a copy outside the quest folder and wrote into FI's own "
+                                  "folders (%s), which is not kept: %s", ", ".join(f"{d}/" for d in FI_OWNED),
+                                  ", ".join(dropped))
             if dataclasses.is_dataclass(result):
                 return dataclasses.replace(result, stdout=box.to_quest(result.stdout or ""),
                                            stderr=box.to_quest(result.stderr or ""))

@@ -480,3 +480,52 @@ def test_each_cell_runs_from_a_copy_outside_the_quest_and_its_outputs_come_back(
                                   for r in rows), rows
     assert (root / "raw" / "trial0.txt").is_file() and (root / "raw" / "trial1.txt").is_file()
     assert not (root / "needs" / "forged.json").exists()
+
+
+WRITES_ANYWHERE = '''
+from pathlib import Path
+
+def run_trial(cell, trial_id, seed):
+    for rel in ("cache/traj_%d.txt" % trial_id, "outputs/table.csv", "needs/forged.json", ".fi/x.txt", "code/stray.py"):
+        Path(rel).parent.mkdir(parents=True, exist_ok=True)
+        Path(rel).write_text("x", encoding="utf-8")
+    return {"sees_raw": float(Path("raw/old.txt").is_file()), "sees_results": float(Path("data/results").is_dir()),
+            "sees_inputs": float(Path("inputs/table.csv").is_file())}
+'''
+
+
+def test_a_cell_keeps_what_it_writes_outside_fis_folders_gets_only_inputs_and_every_drop_is_logged(
+        tmp_path: Path) -> None:
+    """review pass 2 N5 + N7: a trial that wrote cache/ or outputs/ lost it silently (only raw/ figures/ results/ data/
+    came back, and run_trials logged nothing), and every cell copied all of raw/ data/ figures/ results/ in (12.4 s a
+    cell with 1500 files). Now everything it writes comes back except FI's own folders (needs/, .fi/, code/), each
+    dropped path is in the log, and a cell is given code/, inputs/ and data/ (not data/results/, raw/ or results/)."""
+    import logging
+
+    root = tmp_path / "quest"
+    for rel in ("raw/old.txt", "data/results/r.csv", "inputs/table.csv"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("x", encoding="utf-8")
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(WRITES_ANYWHERE, encoding="utf-8")
+    seen: list[str] = []
+
+    class _Catch(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record.getMessage())
+
+    log = logging.getLogger("test-cell-drops")
+    log.addHandler(_Catch())
+    run = asyncio.run(trial_runner.run_trials(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"),
+        sys.executable, root, "code/simulate.py", {"k": [1.0]}, runs_per_setting=2, base_seed=0, deterministic=False,
+        timeout_s=60, run_id="r1", log=log))
+    rows = [r for c in run.cells for r in c.rows if r.get("status") == "ok"]
+    assert len(rows) == 2 and all(r["values"] == {"sees_raw": 0.0, "sees_results": 0.0, "sees_inputs": 1.0}
+                                  for r in rows), rows
+    assert (root / "cache" / "traj_0.txt").is_file() and (root / "cache" / "traj_1.txt").is_file()
+    assert (root / "outputs" / "table.csv").is_file()
+    assert not (root / "needs").exists() and not (root / ".fi" / "x.txt").exists()
+    assert not (root / "code" / "stray.py").exists()
+    said = "\n".join(seen)
+    assert all(p in said for p in ("needs/forged.json", ".fi/x.txt", "code/stray.py")), said
