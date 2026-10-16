@@ -340,3 +340,57 @@ def test_the_sheet_does_not_offer_a_pooled_theory_and_says_how_to_compare(s5):
 
 def test_a_study_with_no_such_value_gets_no_extra_sheet_line(s2):
     assert "Compare with a value each setting sets" not in pv.sheet(s2)
+
+
+# --- FI words the comparison with a theory value itself (`| vs`) ----------------------------------------------------
+# A writer who typed "above" beside a correct per-setting key flipped it on the s5 record (n = 40 reads below or level with
+# theory at every noise level). With `| vs <theory>` the direction word comes from FI's record, setting by setting, decided
+# by the measured value's own 95% interval, so the writer has no word to flip.
+
+
+def test_vs_words_the_direction_per_setting_from_the_interval(s5):
+    five = pv.resolve("Ea_hat:sd @ sigma=each, n_points=5 | vs Ea_sd_theory", s5)
+    assert five.filled and five.text.startswith("above Ea_sd_theory at all 5 values of sigma")
+    assert "(1.20 to 1.26 times it)" in five.text
+    forty = pv.resolve("Ea_hat:sd @ sigma=each, n_points=40 | vs Ea_sd_theory", s5)
+    assert forty.filled and "above" not in forty.text  # the original wrong word cannot come out
+    assert forty.text.startswith("consistent with Ea_sd_theory (inside the measured 95% interval) at all 5 values of sigma")
+    assert "(0.914 to 0.927 times it)" in forty.text
+
+
+def test_vs_counts_a_mixed_outcome(s5):
+    got = pv.resolve("Ea_hat:sd @ sigma=each, n_points=each | vs Ea_sd_theory", s5)
+    assert got.filled and "of 25 settings" in got.text and "consistent with it at" in got.text
+
+
+def test_vs_below_when_the_whole_interval_is_under_the_reference(s5):
+    got = pv.resolve("Ea_hat @ sigma=each, n_points=40 | vs Ea_sd_theory", s5)  # mean Ea ~50 vs a reference far smaller
+    assert got.filled and got.text.startswith("above Ea_sd_theory at all 5")
+    cells = [{"cell": {"h": h}, "key": f"h={h}", "planned": 4, "ok": 4, "failed": 0,
+              "metrics": {"err": {"values": [1.0, 1.1, 0.9, 1.0]}, "want": {"values": [5.0] * 4}}} for h in (1, 2)]
+    low = pv.resolve("err @ h=each | vs want", pv.from_cells(cells))
+    assert low.filled and low.text.startswith("below want at all 2 values of h")
+
+
+def test_vs_refuses_what_it_cannot_judge(s5):
+    for key, why in (
+        ("Ea_hat:se @ sigma=each, n_points=40 | vs Ea_true", "has none"),
+        ("Ea_hat @ sigma=each, n_points=40 | vs Ea_hat", "measured, not set by the setting"),
+        ("Ea_hat:sd @ sigma=each, n_points=40 | vs Ea_sd_theory | range", "add no reducer"),
+        ("Ea_hat:sd @ sigma=0.1, n_points=40 | vs Ea_sd_theory", "mark at least one axis =each"),
+        ("Ea_hat:sd @ sigma=each, n_points=40 | vs @ sigma=0.1, n_points=40", "not with another setting"),
+    ):
+        got = pv.resolve(key, s5)
+        assert not got.filled and why in got.hit.reason, key
+
+
+def test_vs_leaves_the_existing_ratio_and_range_forms_alone(s5):
+    assert pv.resolve("Ea_hat:sd @ sigma=each, n_points=40 | ratio Ea_sd_theory | range", s5).text == "0.914 to 0.927"
+    assert pv.resolve("Ea_hat:sd @ sigma=each, n_points=5 | ratio Ea_sd_theory | range", s5).text == "1.20 to 1.26"
+    assert pv.resolve("Ea_sd_theory @ sigma=0.1, n_points=40", s5).text == "2.168"
+
+
+def test_the_sheet_and_the_rules_tell_the_writer_to_use_vs(s5):
+    assert "| vs " in pv.sheet(s5).split("Compare with a value each setting sets")[1]
+    rules = " ".join(pv.WRITER_RULES.split())
+    assert "| vs <theory value>" in rules and "Do not type above, below" in rules

@@ -16,6 +16,9 @@ The grammar::
     <op>       diff (A - B) | ratio (A / B) | rel_diff (A / B - 1); the operand is ``ref``, ``@ <where2>`` (the same
                metric and form there) or ``<metric2>[:<form2>]`` (at the same where)
     <reducer>  min | max | range | max_abs | argmin | argmax | count_where:<word> (over the ``each`` axes)
+    vs         ``| vs ref`` or ``| vs <metric2>`` (a value the plan or each setting sets): the comparison itself, worded by
+               FI setting by setting, e.g. ``below <metric2> at all 5 values of sigma (0.914 to 0.927 times <metric2>)``;
+               "within" means the reference lies inside the measured value's 95% interval at that setting
 
 Naming every axis is deliberate: a key that left one out would render a pooled number that reads like a per-setting
 one. Pooling is defined once: the trials of the matching settings are concatenated (Wilson interval for a 0/1 value,
@@ -47,6 +50,10 @@ NOT_RECORDED = "not recorded"
 FORMS = ("mean", "mean_ci", "ci", "pm", "sd", "sd_ci", "se", "n", "count", "failed", "ref", "corr", "corr_ci")
 OPS = ("diff", "ratio", "rel_diff")
 REDUCERS = ("min", "max", "range", "max_abs", "argmin", "argmax", "count_where")
+VS = "vs"
+#: The forms ``vs`` can judge, and the interval form it judges them by (a comparison is decided by the interval, never by a
+#: fixed tolerance).
+_VS_INTERVAL = {"mean": "mean_ci", "sd": "sd_ci", "corr": "corr_ci"}
 #: Forms that are one number, so an op or a reducer can work on them.
 _SCALAR = frozenset({"mean", "sd", "se", "n", "failed", "ref", "corr"})
 _INTERVAL_FORMS = frozenset({"mean_ci", "ci", "pm", "sd_ci", "corr_ci"})
@@ -246,7 +253,7 @@ def parse(text: str) -> Key:
             kw["percent"] = True
             continue
         word, _, rest = seg.partition(" ")
-        if word in OPS:
+        if word in OPS or word == VS:
             if kw.get("op"):
                 raise _Unfilled("at most one op")
             kw["op"] = word
@@ -269,7 +276,11 @@ def parse(text: str) -> Key:
                 raise _Unfilled("count_where takes a word (count_where:<word>), no other reducer does")
             kw.update(reducer=name.strip(), word=arg2.strip())
             continue
-        raise _Unfilled(f"unknown part '{seg}' (an op {', '.join(OPS)}; a reducer {', '.join(REDUCERS)}; or %)")
+        raise _Unfilled(f"unknown part '{seg}' (an op {', '.join(OPS)}, {VS}; a reducer {', '.join(REDUCERS)}; or %)")
+    if kw.get("op") == VS and (kw.get("reducer") or kw.get("percent")):
+        raise _Unfilled("vs already gives the whole comparison in words; add no reducer and no %")
+    if kw.get("op") == VS and kw.get("operand") == "where":
+        raise _Unfilled("vs compares with ref or with a value each setting sets (vs ref, vs <metric>), not with another setting")
     return Key(text=body, **kw)
 
 
@@ -653,6 +664,64 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
     return Measured(xs[pick], "words", words=f"at {_setting_words(settings[pick])}"), r
 
 
+def _plural(k: int, unit: str) -> str:
+    return "at that setting" if k == 1 else f"at all {k} {unit}"
+
+
+def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
+    """The words for ``| vs <reference>``: FI judges the measured value against the reference at each setting kept apart by
+    =each, by that setting's own 95% interval (above: the whole interval over the reference; below: under it; otherwise the
+    reference is inside it), and counts the outcomes. Nothing is left to the writer's choice of word."""
+    each = [a for a, p in key.where.items() if p.kind == "each"]
+    if not each:
+        raise _Unfilled("vs compares setting by setting; mark at least one axis =each")
+    if key.form not in _VS_INTERVAL:
+        raise _Unfilled(f"vs judges a mean, an sd or a corr by the 95% interval of the measured value; {key.form} has none "
+                        f"(use form {', '.join(_VS_INTERVAL)})")
+    combos: list[tuple[Any, ...]] = []
+    for c in rec.cells:
+        combo = tuple(c["cell"].get(a) for a in each)
+        if key.metric in c["metrics"] and combo not in combos:
+            combos.append(combo)
+    if not combos:
+        raise _Unfilled(f"no trials of {key.metric}")
+    verdicts: list[str] = []
+    ratios: list[float] = []
+    for combo in combos:
+        fixed = {a: (Pick("value", combo[each.index(a)]) if a in each else p) for a, p in key.where.items()}
+        here = _setting_words(dict(zip(each, combo)))
+        try:
+            got = _measure(rec, key.metric, _VS_INTERVAL[key.form], key.form_arg, fixed)
+            ref = (_reference(rec, key.metric, _matching(rec, fixed, key.metric))[0] if key.operand == "ref"
+                   else _measure(rec, key.operand_metric, "mean", "", fixed).value)
+            if key.operand == "metric":
+                if _setting_values(_matching(rec, fixed, key.operand_metric), key.operand_metric) is None:
+                    raise _Unfilled(f"{key.operand_metric} is measured, not set by the setting, so it has no single value to "
+                                    f"compare with")
+        except _Unfilled as why:
+            raise _Unfilled(f"not computable at {here}: {why}") from None
+        assert got.lower is not None and got.upper is not None
+        verdicts.append("above" if got.lower > ref else "below" if got.upper < ref else "within")
+        if ref != 0:
+            ratios.append(got.value / ref)
+    name = "the plan's reference" if key.operand == "ref" else key.operand_metric
+    unit = f"values of {each[0]}" if len(each) == 1 else "settings"
+    k = len(verdicts)
+    count = {v: verdicts.count(v) for v in ("above", "within", "below")}
+    said = {"above": "above", "below": "below", "within": "consistent with"}
+    present = [v for v in ("above", "within", "below") if count[v]]
+    if len(present) == 1:
+        v = present[0]
+        head = f"{said[v]} {name}" + (" (inside the measured 95% interval)" if v == "within" else "") + f" {_plural(k, unit)}"
+    else:
+        first, rest = present[0], present[1:]
+        head = (f"{said[first]} {name} at {count[first]} of {k} {unit}, "
+                + ", ".join(f"{said[v]} it at {count[v]}" for v in rest))
+    if len(ratios) == k:
+        head += f" ({sig(min(ratios), 3)} to {sig(max(ratios), 3)} times it)"
+    return head, ([min(ratios), max(ratios)] if len(ratios) == k else [])
+
+
 def _inputs(rec: Records, key: Key) -> dict[str, Any]:
     """What a filled key was computed from: the value's name, how many settings and trials it pools (the settings it
     averages over; a key with ``each`` lists none)."""
@@ -680,8 +749,11 @@ def resolve(text: str, rec: Records | None) -> Value:
         _check_where(rec, key.where)
         if key.percent and key.form in ("n", "count", "failed"):
             raise _Unfilled("% does not apply to a count")
-        if not key.reducer and any(p.kind == "each" for p in key.where.values()):
+        if not key.reducer and key.op != VS and any(p.kind == "each" for p in key.where.values()):
             raise _Unfilled("=each keeps settings apart for a reducer (min, max, range, ...); this key has none")
+        if key.op == VS:
+            words, nums = _versus(rec, key)
+            return Value(shown, words, numbers=nums, inputs=_inputs(rec, key))
         if key.reducer:
             measured, how = _reduce(rec, key)
             tail = "%" if key.percent else ""
@@ -817,7 +889,7 @@ def without_marks(markdown: str) -> str:
 SHEET_MAX_LINES = 150
 SHEET_GRAMMAR = (
     "Any key of this form can be placed, even one whose value is not listed here; FI fills it from its records: "
-    "{{v:<value>[:<form>] @ axis=<value>|all, ...}}. Forms: " + ", ".join(FORMS) + ". Ops: " + ", ".join(OPS) +
+    "{{v:<value>[:<form>] @ axis=<value>|all, ...}}. Forms: " + ", ".join(FORMS) + ". Ops: " + ", ".join(OPS) + ". Comparison with a reference or theory value, worded by FI: | vs ref  or  | vs <value>" +
     ". Reducers over axes marked =each: " + ", ".join(REDUCERS) + ". Add | % for a percent. Name every axis.")
 
 
@@ -860,8 +932,9 @@ def _set_by_setting_line(rec: Records, varied: list[str]) -> str:
     where = ", ".join(f"{a}=each" if i == 0 else f"{a}=<value>|all" for i, a in enumerate(varied))
     return ("Compare with a value each setting sets (" + ", ".join(names) + "): it has no value over several settings, and "
             "a pooled measured value is not comparable to it. Compare setting by setting: "
-            "{{v:<measured>:sd @ " + where + " | ratio " + names[0] + " | range}}; write above or below only for what that "
-            "range shows (all of it over 1, or all of it under 1).\n")
+            "{{v:<measured>:sd @ " + where + " | vs " + names[0] + "}}; FI words the comparison itself (above, below or "
+            "consistent with it, at how many settings, and the ratio range), so type no comparison word beside it. "
+            "{{... | ratio " + names[0] + " | range}} gives only the range.\n")
 
 
 def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
@@ -935,9 +1008,11 @@ write a percent. Examples: {{v:coverage @ noise=0.05, n=all}}, {{v:coverage:mean
 {{v:bias @ noise=each, n=each | range | %}}.
 If FI cannot fill a key (a value the study did not record, a setting it did not run, a varied setting left out), it is sent back
 to you. Write the key; FI computes the number, so never work one out yourself from the list.
-A comparison word (above, below, larger, smaller, at every setting) is only as good as the numbers under it. Compare a
-measured value with a theory or reference value setting by setting (a ratio or a difference with =each and a range), never
-one pooled number with another, and write above or below only for what the numbers of every setting you name show.
+To say how a measured value compares with a theory or reference value, place {{v:<value>:<form> @ <axis>=each, ... | vs
+<theory value>}} (or | vs ref for the plan's reference) as the comparison itself: FI writes the words ("below ... at all 5
+values of sigma (0.914 to 0.927 times ...)", or "consistent with" where the value's 95% interval holds it), setting by setting.
+Do not type above, below, larger, smaller, exceeds, within or equal for such a comparison; never set one pooled number beside
+another.
 Numbers that are not available: a number that only the analysis script computed, and that no key on this list gives, is not
 available. The Analysis block above shows such numbers; do not copy any of them as digits. Use the key for the same quantity
 when the list has one, otherwise say it in words or leave it out."""
