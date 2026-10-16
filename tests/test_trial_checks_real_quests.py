@@ -203,6 +203,8 @@ def test_a_correct_study_that_reports_only_a_standard_error_passes_at_any_number
     assert v.action == tc.OK, v.say
     kinds = {q.kind for q in v.calibration.quantities}
     assert "coverage" not in kinds and {"se_ratio", "bias"} <= kinds, kinds
+    # and nothing for the paper: a correct study's estimates are not "off the truth" (its worst setting is 0.12 spreads)
+    assert all(q.below == 0 for q in v.calibration.quantities if q.kind == "bias")
 
 
 def test_with_only_a_standard_error_a_biased_estimate_still_stops() -> None:
@@ -264,3 +266,5 @@ def test_the_full_records_of_the_clean_kinetics_quests_pass_with_their_declarati
     v = tc.judge(data["cells"], proto, data.get("thresholds"), tc.ledger_reasons(root), repairs_left=False)
     assert v.action == tc.OK, v.say
     assert v.calibration.checked and not v.calibration.faults
+    # no paper item says a correct study's estimates are off the truth (their worst settings: 0.16 spreads or less)
+    assert all(q.below == 0 for q in v.calibration.quantities if q.kind == "bias")
