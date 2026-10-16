@@ -13,7 +13,7 @@ import pytest
 
 from core import unread_settings
 from core import plan as _plan
-from core import run_estimate
+from core import disclosure, paper_facts, run_estimate
 
 FIX = Path(__file__).parent / "fixtures" / "plan_fidelity"
 
@@ -42,7 +42,7 @@ def test_the_kinetics_simulations_never_read_temperature(quest, read):
     assert run_estimate.cell_count(kept) == 25
 
 
-def _quest(tmp_path: Path, quest: str):
+def _quest(tmp_path: Path, quest: str, sim_patch=None):
     import shutil
 
     from tests.test_plan_optimisation import _engine
@@ -51,6 +51,11 @@ def _quest(tmp_path: Path, quest: str):
     eng.quest_root.mkdir(parents=True, exist_ok=True)
     shutil.copy(FIX / quest / "plan.md", _plan.plan_path(eng.quest_root))
     shutil.copytree(FIX / quest / "code", eng.quest_root / "code")
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(FIX / quest / "topic_requirements.json", eng.fi_dir / "topic_requirements.json")
+    if sim_patch:
+        path = eng.quest_root / "code" / "simulate.py"
+        path.write_text(sim_patch(path.read_text(encoding="utf-8")), encoding="utf-8")
     return eng
 
 
@@ -59,16 +64,21 @@ def test_replay_the_unread_setting_leaves_the_grid_before_the_run(tmp_path: Path
     eng = _quest(tmp_path, quest)
     state = {"topic": "t", "iteration": 0, "design": _plan.load_design(eng.quest_root)[0]}
     assert run_estimate.cell_count(eng._draft_protocol(state)["grid"]) == 125
-    eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
+    assert eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py") is None
     grid = eng._draft_protocol(state)["grid"]
     assert "temperature_K" not in grid and run_estimate.cell_count(grid) == 25
     assert "temperature_K" not in state["design"]["protocol"]["grid"]
     text = _plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
-    assert "the simulation never reads it" in text and "runs 25 setting(s), not 125" in text
+    assert "nothing in the code reads it" in text and "runs 25 setting(s), not 125" in text
     log = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert "never reads it" in log and "`temperature_K` (5 values" in log
+    assert "nothing in the code reads it" in log and "`temperature_K` (5 values" in log
     note = eng._run_checks_note()
     assert "runs 25 setting(s), not 125" in note and "Do not describe `temperature_K` as a setting" in note
+    # An item the paper must name, checked, and said in the run record (QUALITY.md).
+    items = paper_facts.required_items(eng.quest_root)
+    assert [i.name for i in items if i.kind == paper_facts.NOT_DONE] == ["temperature_K not varied"]
+    assert "temperature_K" in paper_facts.writer_section(eng.quest_root)
+    assert "runs 25 setting(s), not 125" in disclosure.run_record(eng.quest_root)
     # Done once: a second pass finds nothing more to take out and writes nothing.
     versions = len(_plan.history(eng.quest_root))
     eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
@@ -180,3 +190,81 @@ def test_no_entry_point_and_one_value_settings_are_left_alone():
     source = "def run_trial(cell, trial_id, seed):\n    return {'x': cell['a']}\n"
     assert unread_settings.unread_axes({"simulate.py": source}, {"grid": {"a": [1, 2], "b": [7]}}) == ([], "")
     assert unread_settings.unread_axes({"simulate.py": source}, {"grid": {"a": [1, 2], "b": [7, 8]}}) == (["b"], "")
+
+
+# ---- the review's probes: a setting the code should read is the code's fault, never taken out -------------------------
+
+def test_a_misspelt_read_of_a_swept_setting_is_left_to_the_code_check():
+    """grid {rate, n}; the code reads `rate_hz` with a fallback: the code check sends it back. Nothing is named unread,
+    so `rate` is never taken out (before: `rate` was removed and the misspelling was no longer caught)."""
+    from core import grid_keys
+
+    protocol = {"grid": {"rate": [10.0, 20.0, 40.0], "n": [100, 1000]}, "runs_per_setting": 20}
+    for sim in ("def run_trial(cell, trial_id, seed):\n    return {'x': cell['n'] * cell.get('rate_hz', 80.0)}\n",
+                "def run_trial(cell, trial_id, seed):\n    return {'x': cell['n'] * cell['rate_hz']}\n"):
+        files = {"simulate.py": sim}
+        assert grid_keys.problems(files, protocol)
+        unread, why = unread_settings.unread_axes(files, protocol)
+        assert unread == [] and "rate_hz" in why
+
+
+def test_s1_with_a_misspelt_noise_level_keeps_every_setting(tmp_path: Path) -> None:
+    eng = _quest(tmp_path, "s1_kinetics",
+                 lambda s: s.replace('sigma = float(cell["sigma"])', 'sigma = float(cell.get("sigma_noise", 0.02))'))
+    state = {"topic": "t", "iteration": 0, "design": _plan.load_design(eng.quest_root)[0]}
+    assert eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py") is None
+    grid = eng._draft_protocol(state)["grid"]
+    assert "sigma" in grid and "temperature_K" in grid and run_estimate.cell_count(grid) == 125
+    assert "the code reads a name the plan does not give" in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+def test_s1_with_the_noise_level_ignored_sends_the_code_back(tmp_path: Path) -> None:
+    """The simulation uses a constant noise: `sigma`, which the topic compares, is unread. The code goes back to be
+    repaired, naming it; the grid stays as the plan wrote it (before: sigma was removed)."""
+    eng = _quest(tmp_path, "s1_kinetics", lambda s: s.replace('sigma = float(cell["sigma"])', 'sigma = 0.02'))
+    state = {"topic": "t", "iteration": 0, "design": _plan.load_design(eng.quest_root)[0], "exec_reflect_iter": 0}
+    back = eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
+    assert back is not None and back["exec_result"]["returncode"] == 1
+    assert "`sigma`" in back["exec_result"]["stderr_tail"] and "the topic compares noise level" in back["exec_result"]["stderr_tail"]
+    grid = eng._draft_protocol(state)["grid"]
+    assert "sigma" in grid and "temperature_K" in grid
+    assert not (eng.fi_dir / "unread_settings.json").exists()
+    # The repairs used up: the grid is kept, nothing is taken out.
+    spent = {**state, "exec_reflect_iter": eng.config.engine.exec_reflect_max_iterations}
+    assert eng._drop_unread_settings(spent, eng.quest_root / "code" / "simulate.py") is None
+    assert "sigma" in eng._draft_protocol(spent)["grid"]
+
+
+def test_an_ignored_method_the_topic_compares_is_not_taken_out(tmp_path: Path) -> None:
+    """A setting the plan's checks run at, or the topic compares by name, is part of the study: never taken out."""
+    eng = _quest(tmp_path, "s1_kinetics")
+    state = {"topic": "t", "iteration": 0, "design": _plan.load_design(eng.quest_root)[0]}
+    protocol = eng._draft_protocol(state)
+    req = {"factors": [{"name": "temperature", "compared": True, "levels": [], "range": []}], "comparisons": []}
+    assert eng._settings_the_study_compares({**state, "design": state["design"]}, protocol, ["temperature_K"]) == {}
+    import json
+
+    (eng.fi_dir / "topic_requirements.json").write_text(json.dumps(req), encoding="utf-8")
+    found = eng._settings_the_study_compares(state, protocol, ["temperature_K", "sigma"])
+    assert found["temperature_K"] == "the topic compares temperature"
+    assert "check" in found["sigma"]  # s1's checks run at values of sigma
+
+
+def test_a_later_plan_that_puts_the_setting_back_wins(tmp_path: Path) -> None:
+    eng = _quest(tmp_path, "s1_kinetics")
+    design = _plan.load_design(eng.quest_root)[0]
+    eng._drop_unread_settings({"topic": "t", "iteration": 0, "design": design}, eng.quest_root / "code" / "simulate.py")
+    # The plan is changed again (an approved amendment) and has temperature_K: the old record does not take it away.
+    shutil_copy = __import__("shutil").copy
+    shutil_copy(FIX / "s1_kinetics" / "plan.md", _plan.plan_path(eng.quest_root))
+    state = {"topic": "t", "iteration": 1, "design": _plan.load_design(eng.quest_root)[0]}
+    eng._drop_unread_settings(state, eng.quest_root / "code" / "simulate.py")
+    assert "temperature_K" in state["design"]["protocol"]["grid"] and eng._unread_dropped is False
+
+
+def test_the_setting_leaves_only_after_the_checks_of_the_code_and_before_the_timing():
+    source = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    gate = source.index("stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)")
+    drop = source.index("self._drop_unread_settings(state, simulate_path)")
+    size = source.index("too_long = await self._size_the_run(state, runner, py, exec_env)")
+    assert gate < drop < size

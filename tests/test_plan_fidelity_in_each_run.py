@@ -51,7 +51,7 @@ async def test_an_in_each_run_with_one_value_is_asked_again_once_and_the_answer_
     after = _design(eng)["protocol"]
     assert after["in_each_run"] == TWO_VALUES and after["grid"] == GOOD_GRID
     assert "`protocol.in_each_run` again, and it is now in the plan" in _text(eng)
-    assert not _covered(eng).get("in_each_run_left")
+    assert not _covered(eng).get("not_done")
 
 
 @pytest.mark.asyncio
@@ -77,12 +77,38 @@ async def test_still_unusable_after_one_ask_is_a_requirement_not_done_and_the_pa
         assert "Your last answer was not used" in model.asked[1] and "has one value" in model.asked[1]
     asked = len(model.asked)
     assert "in_each_run" not in _design(eng)["protocol"]
-    left = _covered(eng).get("in_each_run_left")
-    assert left and "has one value" in left and "asked the plan's model to write it again once" in left
+    (left,) = _covered(eng).get("not_done")
+    assert left["name"] == "comparison inside each run" and left["kind"] == "in_each_run"
+    assert "has one value" in left["sentence"] and "asked the plan's model to write it again once" in left["sentence"]
+    # Said as what FI recorded, not as what the code did (the code may compare those values in each run anyway).
+    assert "FI did not record a comparison of those values inside each run" in left["sentence"]
+    assert "no run compares" not in left["sentence"]
     assert "still not readable (the experiment goes on without it)" in _text(eng)
-    note = tr.write_note(eng.quest_root)
-    assert "planned and not done" in note and "has one value" in note
+    # An item the paper must name, checked, and said in the run record (QUALITY.md).
+    from core import disclosure, paper_facts
+
+    items = paper_facts.required_items(eng.quest_root)
+    assert [i.name for i in items if i.kind == paper_facts.NOT_DONE] == ["comparison inside each run"]
+    assert "comparison inside each run" in paper_facts.writer_section(eng.quest_root)
+    assert "has one value" in disclosure.run_record(eng.quest_root)
     # A resume asks no more.
     design, sha = eng._design_from_plan()
     await eng._ask_plan_for_the_parts({"topic": TOPIC, "iteration": 0}, design, sha)
     assert len(model.asked) == asked
+
+
+def test_with_nobody_to_ask_an_unusable_in_each_run_is_still_recorded(tmp_path: Path) -> None:
+    """The early return (no model to ask): the unusable part is not dropped in silence."""
+    eng = _engine(tmp_path, [])
+    eng._client = None
+    fixed, notes = plan.repair_protocol({"grid": GOOD_GRID, "in_each_run": ONE_VALUE, "runs_per_setting": 5})
+    assert "in_each_run" not in fixed
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Plan\n\n" + "\n".join(f"- {n}" for n in notes) + "\n", encoding="utf-8")
+    import asyncio
+
+    asyncio.run(eng._ask_plan_for_the_parts({"topic": TOPIC, "iteration": 0}, {"protocol": fixed}, "sha"))
+    (left,) = _covered(eng).get("not_done")
+    assert left["name"] == "comparison inside each run" and "has one value" in left["sentence"]
+    assert "asked the plan's model" not in left["sentence"]

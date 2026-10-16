@@ -6137,6 +6137,37 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except OSError as e:
             self._log.warning("[plan] couldn't record how far the plan covers the topic: %r", e)
 
+    def _note_not_done(self, entries: list[dict[str, Any]], *, kind: str = "") -> None:
+        """Keep what the study did not do as the plan wrote it in ``topic_covered.json`` ``not_done`` (``{name, sentence,
+        kind}``): each is an item the paper's limitations must name (core/paper_facts.py checks it) and the run record says
+        (core/disclosure.py, QUALITY.md). With ``kind``, the entries of that kind are replaced by ``entries`` (none: taken
+        away); without, an entry replaces the one of the same name. Unlike ``left``, the plan and design checks do not
+        rewrite it."""
+        old = [e for e in self._topic_covered_read().get("not_done") or [] if isinstance(e, dict)]
+        names = {str(e.get("name")) for e in entries}
+        kept = [e for e in old if (e.get("kind") != kind if kind else str(e.get("name")) not in names)]
+        new = [*kept, *entries]
+        if new != old:
+            self._topic_covered_write(not_done=new)
+
+    def _in_each_run_not_done(self, why: Any, *, asked_again: bool) -> None:
+        """``protocol.in_each_run`` could not be used (``why``, the reader's reason; ``None``: it can be, or there is none):
+        an item the paper must name. Said as what FI recorded, not as what the code did (the code may compare those values
+        in each run without the protocol saying so)."""
+        if not why:
+            self._note_not_done([], kind="in_each_run")
+            return
+        reason = str(why).split("; " + _plan.ASK_MARK)[0].strip().rstrip(".")
+        again = ", even when FI asked the plan's model to write it again once" if asked_again else ""
+        sentence = (f"{reason}{again}. So FI did not record a comparison of those values inside each run, and there is no "
+                    "result per value of them")
+        before = [e for e in self._topic_covered_read().get("not_done") or [] if isinstance(e, dict)
+                  and e.get("kind") == "in_each_run"]
+        self._note_not_done([{"name": "comparison inside each run", "sentence": sentence, "kind": "in_each_run"}],
+                            kind="in_each_run")
+        if not before or before[0].get("sentence") != sentence:
+            self._log.warning("[plan] %s; the paper must say so", sentence)
+
     def _topic_block(self) -> str:
         """The topic and the formulas it states, as every request that writes or repairs code is shown them
         (:func:`core.topic_requirements.code_block`): a sentence that states a result is left out."""
@@ -6771,6 +6802,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         limitations say it (:func:`core.topic_requirements.write_note`)."""
         if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
                 or not plan_sha):
+            # Nobody is asked here: what each run was to compare inside it and could not be read is still not silently
+            # dropped (repair_protocol has taken it out of the protocol already).
+            if self._runs_code(state) and _frozen.load(self.quest_root) is None:
+                self._in_each_run_not_done(self._unread_parts(design).get("in_each_run"), asked_again=False)
             return design, plan_sha
         passages = self._literature_passages(state)
         iteration = int(state.get("iteration", 0) or 0)
@@ -6835,15 +6870,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                     if part in left else "now in the plan") + ".")
             # What each run was meant to compare inside it and could not be used, even when asked again, is a requirement of
             # the study not done: kept for the writer (core/topic_requirements.py::write_note), so the paper says it.
-            inside_left = ""
-            if "in_each_run" in left and "in_each_run" in {*asked, *before}:
-                why = left["in_each_run"].split("; " + _plan.ASK_MARK)[0].strip().rstrip(".")
-                inside_left = (f"{why}, even when FI asked the plan's model to write it again once. So no run compares "
-                               "those values inside it and nothing is recorded per value of them")
-            if inside_left != str(self._topic_covered_read().get("in_each_run_left") or ""):
-                self._topic_covered_write(in_each_run_left=inside_left)
-                if inside_left:
-                    self._log.warning("[plan] %s; the paper says so", inside_left)
+            if "in_each_run" in {*asked, *before}:
+                self._in_each_run_not_done(left.get("in_each_run"), asked_again=True)
             # What is still wrong with the ledger parts is said under *What the topic asks for*, and kept for the writer.
             gaps = [f"`protocol.{part}` is incomplete: {why}" for part, why in left.items() if part in _LEDGER_PARTS]
             self._note_the_ledger_for_the_writer(design, gaps)
@@ -16159,17 +16187,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # The oracles the plan's protocol declares are answered before anything is run for real (or a quest
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
         # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
-        # A setting of the grid the simulation never reads would only run the same simulation once per value: it leaves the
-        # grid first, so every check after it (and the timing of the run) reads the plan as FI changed it (core/run_checks.py).
-        self._unread_dropped = False
-        if split and self._trial_mode and not searching:
-            self._drop_unread_settings(state, simulate_path)
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
         # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
         stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
         if stop is not None:
             return stop
+        # A setting of the grid nothing in the code reads, once the checks of the code are clean (a misspelt read is the
+        # code's fault, found by them): taken out of the grid when the plan is wrong, the code sent back when the study
+        # compares it (core/run_checks.py). Before the run is timed, so the timing reads the plan as FI changed it.
+        self._unread_dropped = False
+        if split and self._trial_mode and not searching:
+            if (back := self._drop_unread_settings(state, simulate_path)) is not None:
+                return back
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,

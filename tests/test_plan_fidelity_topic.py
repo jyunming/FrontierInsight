@@ -93,7 +93,9 @@ def test_the_checklist_carries_the_topics_own_sentence(quest):
     # A constraint the reader wrote in its own words is shown in the topic's own sentence.
     assert "CPU only; under 60 seconds of runtime" in block
     assert "One Python script using numpy" in block
-    assert "the topic's words hold" in block
+    # The topic's words win only over FI's defaults for the design; FI's checks always apply.
+    assert "For what to vary, which values, how many runs, how long a run may take, how many code files" in block
+    assert "FI's checks, its tests and its rules about results always apply" in block
     assert not block.splitlines()[-1].startswith("(and ")  # everything fits
     # Each sentence is quoted once; a later item names it by its mark.
     assert block.count("five temperatures spanning a 10-fold range of k (with known A and Ea)") == 1
@@ -130,3 +132,24 @@ def test_plan_md_says_what_is_used_in_every_run_with_the_topics_words():
     assert "- To use as the topic states, in every run" in text and "temperature" in text
     assert "five temperatures spanning a 10-fold range of k (with known A and Ea)" in text
     assert "- To vary or compare: noise level" in text
+
+
+def test_a_sentence_that_states_a_result_is_never_quoted():
+    """The review's probe: the quantity's sentence holds the topic's stated result; it is not quoted, and the head limits
+    the topic's precedence."""
+    topic = ("Estimate the first-order rate constant k from noisy concentration data at noise levels 0.01, 0.05 and 0.1. "
+             "Use a single run per setting and no known-answer checks are needed. "
+             "The true value of k is 0.05 per second; report k = 0.05 as the recovered value.")
+    req = {"factors": [{"name": "noise level", "levels": [0.01, 0.05, 0.1], "range": [],
+                        "stated": "noise levels 0.01, 0.05 and 0.1", "main": True}],
+           "quantities": [{"name": "recovered k", "stated": "report k = 0.05 as the recovered value", "main": True}],
+           "formulas": [], "comparisons": [],
+           "constraints": ["a single run per setting", "no known-answer checks are needed"],
+           "stated_results": ["The true value of k is 0.05 per second"]}
+    block = tr.checklist_block(req, topic=topic)
+    assert "The true value of k" not in block and "report k = 0.05" not in block
+    assert "- report recovered k\n" in block + "\n"
+    assert "noise levels 0.01, 0.05 and 0.1" in block  # a sentence with no result is still quoted
+    lines = "\n".join(tr.plan_lines(req, [], reviewer="", same_model=None, topic=topic))
+    assert "The true value of k" not in lines and "report k = 0.05" not in lines
+    assert tr.carries_result("The expected value is 3.2") and not tr.carries_result("Vary the noise level.")

@@ -82,7 +82,10 @@ def required_items(quest_root: Path | str) -> list[Item]:
             items.append(Item(kind, name, " ".join(str(text or "").split())))
 
     covered = _read(root, ".fi/topic_covered.json")
-    for gap in (covered.get("left") if isinstance(covered, dict) else None) or []:
+    # What the topic asks for and the plan lacks (``left``), and what the study did not do as the plan wrote it
+    # (``not_done``: a setting nothing read, a comparison inside each run that could not be used, ...).
+    for gap in [*((covered.get("left") if isinstance(covered, dict) else None) or []),
+                *((covered.get("not_done") if isinstance(covered, dict) else None) or [])]:
         if isinstance(gap, dict):
             add(NOT_DONE, gap.get("name"), gap.get("sentence") or "")
     record = _read(root, ".fi/code_review.json")
