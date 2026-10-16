@@ -494,7 +494,8 @@ def _truth_of(truth: Any, cell: dict[str, Any], thresholds: dict[str, Any]) -> f
         return _number(truth)
     if truth in thresholds:
         return _number(thresholds[truth])
-    return _number((cell.get("cell") or {}).get(truth))
+    here = _number((cell.get("cell") or {}).get(truth))
+    return here if here is not None else _metric_spec.fixed_value(truth, thresholds)
 
 
 #: What the record says when the plan declares nothing FI can measure the reported uncertainty against.
@@ -696,9 +697,8 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
     notes). Only the protocol's ``known_value`` declarations are read."""
     out = Calibration()
     protocol = protocol if isinstance(protocol, dict) else {}
-    if thresholds is None:
-        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
-    thresholds = thresholds or {}
+    # What the plan fixes by name: its constants and thresholds (the true value of a study is among them).
+    thresholds = _metric_spec.fixed_numbers(protocol, thresholds)
     axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
     known = [s for s in _metric_spec.declared(protocol) if s.get("known_value")]
     if not known:
@@ -724,13 +724,13 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
                 out.not_checked.append(f"`{mult.label}` ({ident}): no setting had {MIN_TRIALS} or more trials with an "
                                        "interval and a standard error, too few to judge the multiplier of the standard error "
                                        "in the interval")
-        if isinstance(truth, str) and truth not in thresholds and truth not in axes:
-            out.not_checked.append(f"`{ident}`: its true value `{truth}` is neither a threshold nor a grid parameter of the "
-                                   "plan")
+        if isinstance(truth, str) and truth not in axes and _metric_spec.fixed_value(truth, thresholds) is None:
+            out.not_checked.append(f"`{ident}`: its true value `{truth}` is neither a threshold, a constant nor a grid "
+                                   "parameter of the plan")
             continue
+        fixed_truth = _metric_spec.fixed_value(truth, thresholds)
         truth_label = (f"the plan's {truth} = {float(truth):g}" if not isinstance(truth, str) else
-                       f"the plan's {truth}" + (f" = {_number(thresholds[truth]):g}" if _number(thresholds.get(truth))
-                                                is not None else " (per setting)"))
+                       f"the plan's {truth}" + (f" = {fixed_truth:g}" if fixed_truth is not None else " (per setting)"))
         spread = kv.get("standard_error") or kv.get("variance")
         ends = kv.get("interval")
         missing = [n for n in [est, *([spread] if spread else []), *(ends or [])] if n not in returned]
@@ -814,9 +814,8 @@ def reported_coverage_mismatches(cells: list[dict[str, Any]], protocol: dict[str
     plan's true value. Each mismatch: ``{"id", "where", "reported", "fi", "n"}``. A value that is not a share (outside 0
     to 1) or a stratum FI cannot place is not judged."""
     protocol = protocol if isinstance(protocol, dict) else {}
-    if thresholds is None:
-        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
-    thresholds = thresholds or {}
+    # What the plan fixes by name: its constants and thresholds (the true value of a study is among them).
+    thresholds = _metric_spec.fixed_numbers(protocol, thresholds)
     if not isinstance(result_json, dict):
         return []
     walked = _metric_spec._walk(result_json)

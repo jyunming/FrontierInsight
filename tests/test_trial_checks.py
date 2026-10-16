@@ -137,7 +137,7 @@ def test_the_plan_says_when_a_true_value_names_nothing_or_nothing_is_declared():
     proto = {"runs_per_setting": 100, "thresholds": {"x_true": 1.0}, "grid": {"n": [5, 10]},
              "metrics": [known("x_hat", "x_ture", se="x_se")]}
     notes = protocol_check.metric_notes(proto)
-    assert any("`x_ture`" in n and "neither a threshold nor a grid parameter" in n for n in notes)
+    assert any("`x_ture`" in n and "neither a threshold, a constant nor a grid parameter" in n for n in notes)
     proto["metrics"] = [{"id": "x_hat", "estimand": "x", "kind": "mean", "unit": "a trial"}]
     assert any("No metric declares a known true value" in n for n in protocol_check.metric_notes(proto))
     proto["metrics"] = [known("x_hat", "n", se="x_se")]  # a grid parameter holds the truth
@@ -264,7 +264,7 @@ def test_a_true_value_that_names_nothing_is_not_checked_and_says_why():
     rng = random.Random(10)
     cells = _cells({"s": {"x_hat": [rng.gauss(0, 1) for _ in range(50)], "x_se": [1.0] * 50}})
     cal = tc.calibration(cells, _proto(known("x_hat", "x_ture", se="x_se")))
-    assert not cal.quantities and "neither a threshold nor a grid parameter" in cal.not_checked[0]
+    assert not cal.quantities and "neither a threshold, a constant nor a grid parameter" in cal.not_checked[0]
 
 
 def test_too_few_trials_are_not_checked_and_the_reason_says_so():
