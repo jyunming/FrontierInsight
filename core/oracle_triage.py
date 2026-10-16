@@ -508,6 +508,27 @@ def seeds_entry(oracle: dict[str, Any], result: dict[str, Any]) -> dict[str, Any
             **{k: v for k, v in result.items() if k != "verdict"}, "tried": tried, "cause": cause}
 
 
+def trials_entry(oracle: dict[str, Any], judged: dict[str, Any]) -> dict[str, Any]:
+    """A check the trials FI could run did not decide (core/mc_error.py: three standard errors around its mean lie
+    neither inside nor outside its tolerance in the time it had, or too many of its trials failed): it points to neither
+    the script nor the check, so the script is not rewritten for it, and it stays unconfirmed."""
+    from . import mc_error as _mc
+
+    name = str(oracle.get("name") or "").strip()
+    expected, limit, _mode = _oracle.limit_of(oracle)
+    mc = _oracle.mc_of(judged) or {}
+    how = _mc.words(mc)
+    why = _mc.undecided_words(mc, limit)
+    # Points to neither side: an undecided check says nothing about whether the check or the simulation is wrong.
+    return {"check": name, "kind": "trials", "verdict": "undecided", "points_to": "",
+            "trials": mc.get("trials"), "se": mc.get("se"), "value": judged.get("value"),
+            "tried": f"FI judged `{name}` on {how}.",
+            "cause": {"text": f"`{name}` was not decided: {why}. The script is not rewritten for it, and the result is "
+                              "not validated against it.",
+                      "evidence": f"measured {_fmt(_num(judged.get('value')))} ({how}); expected {_fmt(expected)} "
+                                  f"within {_fmt(limit)}."}}
+
+
 # --- the arithmetic a derivation writes out ------------------------------------------------------------------------------
 #
 # A derivation often ends in numbers: "T = T0 * (2/pi) * K(sin(45deg)) = 2*pi*sqrt(1/9.81) * (2/pi) * 1.85407 => 1.18034".
