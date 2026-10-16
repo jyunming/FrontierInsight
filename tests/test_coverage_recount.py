@@ -1,7 +1,8 @@
 """A coverage the analysis computes itself is recounted by FI from the trials (core/trial_checks.reported_coverage_mismatches,
 ``ResultChecksMixin._coverage_recount_findings``): a plan's `proportion` metric with a `known_value` is the coverage of
 that interval, and an analysis that reports another number than FI's count of the same trials is sent back to be repaired
-like a failed run, then left out. The trials are r6t's real record (tests/fixtures/replay/trial_checks/)."""
+like a failed run, then left out. The trials are r6t's real record (tests/fixtures/replay/trial_checks/), with each
+trial's 95% interval ends made from its own estimate and standard error (FI counts only an interval a trial reports)."""
 
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from core.engine import Engine, ExecutionResult
 FIX = Path(__file__).parent / "fixtures" / "replay" / "trial_checks" / "r6t_kinetics.json.gz"
 SPEC = {"id": "ea_coverage_95", "estimand": "coverage of the true activation energy", "kind": "proportion",
         "unit": "one trial", "known_value": {"true_value": "Ea_true_J_mol", "estimate": "weighted_ea",
-                                             "standard_error": "weighted_ea_se", "level": 0.95}}
+                                             "interval": ["ea_lo", "ea_hi"], "level": 0.95}}
 
 
 def _data() -> dict[str, Any]:
@@ -38,6 +39,12 @@ def _engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Engine, di
     eng._trial_mode = True
     data = _data()
     data["cells"] = [c for c in data["cells"] if c["metrics"]]
+    z95 = NormalDist().inv_cdf(0.975)
+    for c in data["cells"]:
+        m = c["metrics"]
+        e, se, trials = m["weighted_ea"]["values"], m["weighted_ea_se"]["values"], m["weighted_ea"]["trials"]
+        m["ea_lo"] = {"values": [x - z95 * v for x, v in zip(e, se)], "trials": trials}
+        m["ea_hi"] = {"values": [x + z95 * v for x, v in zip(e, se)], "trials": trials}
     (eng.quest_root / "raw").mkdir(parents=True, exist_ok=True)
     (eng.quest_root / "raw" / "trials.json").write_text(json.dumps({"schema": "fi.trials/v1", "thresholds":
                                                                     data["thresholds"], "cells": data["cells"]}),

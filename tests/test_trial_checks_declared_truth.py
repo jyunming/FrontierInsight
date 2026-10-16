@@ -4,8 +4,9 @@ anything the code says about itself.
 Real code (r6t kinetics, tests/fixtures/replay/r6t_code/, copied from the quest's ``code/``: a correct weighted Arrhenius
 fit whose own 0/1 coverage flags were right) is run through FI's own trial harness. With the true activation energy typed
 wrong inside the code (52000 where the plan says 50000), the code's data, its estimates and its own coverage flags all
-agree with each other, and all are wrong: the old check read those flags and passed it. FI now computes the coverage of
-the plan's true value from the estimate and its standard error, and the quest stops."""
+agree with each other, and all are wrong: the old check read those flags and passed it. The code reports a standard
+error, not an interval, so FI makes no coverage claim of its own: it measures how far the estimates lie from the plan's
+true value in units of their own spread, and the quest stops."""
 
 from __future__ import annotations
 
@@ -52,14 +53,14 @@ def test_real_code_with_the_true_value_typed_wrong_inside_it_stops(tmp_path: Pat
     pytest.importorskip("scipy")
     verdict = _judge(tmp_path, ("EA_TRUE_J_MOL = 50000.0", "EA_TRUE_J_MOL = 52000.0"))
     assert verdict.action == trial_checks.STOP
-    cover = next(q for q in verdict.calibration.faults if q.kind == "coverage")
-    assert max(s.value for s in cover.settings) == 0.0
-    assert "Ea_true_J_mol = 50000" in cover.truth and "grossly wrong" in verdict.say
+    bias = next(q for q in verdict.calibration.faults if q.kind == "bias")
+    assert min(s.value for s in bias.settings) > 1.0
+    assert "Ea_true_J_mol = 50000" in bias.truth and "grossly wrong" in verdict.say
 
 
 def test_the_same_real_code_as_delivered_passes(tmp_path: Path) -> None:
     pytest.importorskip("scipy")
     verdict = _judge(tmp_path, None)
     assert verdict.action == trial_checks.OK and verdict.calibration.checked
-    cover = next(q for q in verdict.calibration.quantities if q.kind == "coverage")
-    assert min(s.value for s in cover.settings) >= 0.85
+    bias = next(q for q in verdict.calibration.quantities if q.kind == "bias")
+    assert max(abs(s.value) for s in bias.settings) < 0.5

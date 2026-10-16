@@ -149,7 +149,7 @@ def test_a_standard_error_far_too_small_is_a_fault_and_a_right_one_is_not():
     proto = _proto(known("x_hat", "x_true", se="x_se"), thresholds={"x_true": 5.0})
     cells = _cells({f"s{i}": {"x_hat": [5 + rng.gauss(0, 1) for _ in range(100)], "x_se": [0.2] * 100} for i in range(4)})
     cal = tc.calibration(cells, proto)
-    assert {q.kind for q in cal.faults} == {"coverage", "se_ratio"}
+    assert {q.kind for q in cal.faults} == {"se_ratio"}, "only a standard error: no coverage FI would build itself"
     cells = _cells({f"s{i}": {"x_hat": [5 + rng.gauss(0, 1) for _ in range(100)], "x_se": [1.0] * 100} for i in range(4)})
     assert not tc.calibration(cells, proto).faults
 
@@ -161,19 +161,21 @@ def test_coverage_is_computed_by_fi_from_the_interval_and_the_true_value_never_f
     cells = _cells({f"s{i}": {"x_hat": e, "x_lo": [x - 1.96 for x in e], "x_hi": [x + 1.96 for x in e],
                               "x_covered": [1.0] * 100} for i, e in enumerate(est)})
     cal = tc.calibration(cells, _proto(known("x_hat", 5.0, interval=("x_lo", "x_hi"))))
-    assert [q.kind for q in cal.faults] == ["coverage"]
+    assert [q.kind for q in cal.faults] == ["coverage", "bias"]
     assert max(s.value for s in cal.faults[0].settings) < 0.3
     # without a declaration nothing is guessed from the names, and the record says why
     cal = tc.calibration(cells, _proto())
     assert not cal.quantities and cal.not_checked == [tc.NO_DECLARATION]
 
 
-def test_coverage_from_the_estimate_and_its_standard_error_at_the_declared_level():
+def test_with_only_a_standard_error_fi_judges_it_against_the_spread_and_the_estimates_against_the_truth():
+    # no coverage: the trial reports no interval, and a z interval FI built would misjudge a fit with few degrees of freedom
     rng = random.Random(6)
     cells = _cells({f"s{i}": {"x_hat": [rng.gauss(0, 1) for _ in range(400)], "x_se": [1.0] * 400} for i in range(3)})
     cal = tc.calibration(cells, _proto(known("x_hat", 0.0, se="x_se", level=0.9)))
-    cover = next(q for q in cal.quantities if q.kind == "coverage")
-    assert cover.level == 0.9 and all(0.85 < s.value < 0.95 for s in cover.settings) and not cal.faults
+    assert [q.kind for q in cal.quantities] == ["se_ratio", "bias"] and not cal.faults
+    bias = cal.quantities[1]
+    assert all(abs(s.value) < 0.2 for s in bias.settings) and "0 when the estimate is right" in bias.says()
 
 
 def test_a_true_value_held_by_a_grid_parameter_is_read_per_setting():
@@ -213,8 +215,8 @@ def test_one_grossly_missed_setting_is_a_fault_at_a_family_level_that_spares_a_c
                                  "x_se": [1.0] * 200} for i in range(settings)})
 
     cal = tc.calibration(run(3.0, 1), proto)  # one corner of the grid 3 standard errors off
-    cover = next(q for q in cal.faults if q.kind == "coverage")
-    assert cover.gross == 1 and cover.judged == 25
+    bias = next(q for q in cal.faults if q.kind == "bias")
+    assert bias.gross == 1 and bias.judged == 25
     # 25 clean settings: each interval is at 1 - 0.05/25, so an unlucky setting does not stop a right code
     assert not tc.calibration(run(0.0, 0), proto).faults
 
@@ -345,8 +347,9 @@ def test_replay_r12_a_plan_truth_the_code_does_not_generate_with_is_caught():
     # plan's truth, every interval misses, which is what a typed true value looks like
     _f, cal = _checks("r12_kinetics_noise_fixed", [
         known("weighted_ln_A_hat", "ln_A_true", interval=("weighted_ln_A_lower", "weighted_ln_A_upper"))])
-    assert [q.kind for q in cal.faults] == ["coverage"] and max(s.value for s in cal.faults[0].settings) == 0.0
-    assert "ln_A_true = 9.45" in cal.faults[0].truth
+    cover = next(q for q in cal.faults if q.kind == "coverage")
+    assert max(s.value for s in cover.settings) == 0.0 and "ln_A_true = 9.45" in cover.truth
+    assert "bias" in [q.kind for q in cal.faults], "the estimates are off the plan's truth by many of their spreads"
 
 
 def test_replay_r2_wrong_two_step_errors_are_caught():
@@ -399,7 +402,16 @@ def test_a_coverage_the_analysis_reports_is_recounted_from_the_trials():
     from statistics import NormalDist
 
     data = _load("r6t_kinetics")
-    spec = {**known("weighted_ea", "Ea_true_J_mol", se="weighted_ea_se", ident="ea_coverage_95"), "kind": "proportion"}
+    z95 = NormalDist().inv_cdf(0.975)
+    # the trials report their 95% interval's two ends (here made from r6t's own estimates and standard errors)
+    for c in data["cells"]:
+        m = c["metrics"]
+        if "weighted_ea" in m:
+            e, se = m["weighted_ea"]["values"], m["weighted_ea_se"]["values"]
+            m["ea_lo"] = {"values": [x - z95 * v for x, v in zip(e, se)], "trials": m["weighted_ea"]["trials"]}
+            m["ea_hi"] = {"values": [x + z95 * v for x, v in zip(e, se)], "trials": m["weighted_ea"]["trials"]}
+    spec = {**known("weighted_ea", "Ea_true_J_mol", interval=("ea_lo", "ea_hi"), ident="ea_coverage_95"),
+            "kind": "proportion"}
     proto = _protocol(data, [spec])
     with_values = [c for c in data["cells"] if c["metrics"]]
 
@@ -408,7 +420,7 @@ def test_a_coverage_the_analysis_reports_is_recounted_from_the_trials():
         s = c["metrics"]["weighted_ea_se"]["values"]
         return sum(abs(x - 50000.0) <= z * se for x, se in zip(e, s)) / len(e)
 
-    z95, z90 = NormalDist().inv_cdf(0.975), NormalDist().inv_cdf(0.95)
+    z90 = NormalDist().inv_cdf(0.95)
     right = {c["key"]: {"ea_coverage_95": coverage(c, z95)} for c in with_values}
     assert tc.reported_coverage_mismatches(data["cells"], proto, right, data["thresholds"]) == []
     # the analysis used the 90% critical value: about 0.90 where the trials give about 0.95
@@ -421,6 +433,9 @@ def test_a_coverage_the_analysis_reports_is_recounted_from_the_trials():
     # a mean metric is not a coverage, and nothing is judged without a declaration
     assert tc.reported_coverage_mismatches(data["cells"], _protocol(data, [{**spec, "kind": "mean"}]), wrong) == []
     assert tc.reported_coverage_mismatches(data["cells"], _protocol(data, []), wrong) == []
+    # a trial that reports only a standard error makes no interval FI could count: nothing is recounted
+    se_only = {**known("weighted_ea", "Ea_true_J_mol", se="weighted_ea_se", ident="ea_coverage_95"), "kind": "proportion"}
+    assert tc.reported_coverage_mismatches(data["cells"], _protocol(data, [se_only]), wrong, data["thresholds"]) == []
 
 
 def test_trials_the_time_limit_cut_off_are_not_failures_of_the_code():

@@ -119,3 +119,13 @@ def test_one_trial_a_setting_or_no_plan_gives_no_trial_item(tmp_path: Path) -> N
         assert _items(root, paper_facts.CALIBRATION) == []
     # no record at all (a quest that predates it): nothing
     assert _items(_root(tmp_path / "no_record"), paper_facts.TRIALS_UNCHECKED) == []
+
+
+def test_estimates_off_the_truth_beyond_chance_are_an_item(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    q = {"kind": "bias", "label": "Ea_hat", "names": ["Ea_hat"], "judged": 4, "below": 2, "fault": False, "gross": 0,
+         "settings": [{"key": f"n={i}", "value": v} for i, v in enumerate([0.1, -0.2, 0.62, 0.7])]}
+    _checks(root, {"settings": 4, "calibration": {"quantities": [q], "checked": True, "not_checked": []}})
+    [item] = _items(root, paper_facts.CALIBRATION)
+    assert item.sentence == ("The estimates of `Ea_hat` lie off the true value in 2 of 4 settings, by more than chance "
+                             "explains (by -0.20 to +0.70 of their own spread).")

@@ -169,3 +169,98 @@ def test_one_setting_where_most_trials_failed_is_left_out_and_stated(name: str, 
     many = keys[: len(keys) // 2 + 1]
     assert tc.judge(_fail_most_of(d["cells"], many), d["protocol"], d["thresholds"] or None, {},
                     repairs_left=False).action == tc.STOP
+
+
+# ---- coverage only from the interval the trial reports ------------------------------------------------------------------
+
+#: The reviewer's declaration for s2 kinetics: the estimate and its reported variance, the truth from the plan's threshold.
+S2_DECLARED = {"id": "Ea_hat", "estimand": "the activation energy", "kind": "mean", "unit": "one trial",
+               "known_value": {"true_value": "Ea_true_J_per_mol", "estimate": "Ea_hat", "variance": "Ea_var_reported",
+                               "level": 0.95}}
+
+
+def _repeated(cells: list[dict[str, Any]], r: int) -> list[dict[str, Any]]:
+    """The same trials r times over: the same code run with r times more trials (the coverage stays, its band narrows)."""
+    out = json.loads(json.dumps(cells))
+    for c in out:
+        for m in (c.get("metrics") or {}).values():
+            n = len(m["values"])
+            trials = m.get("trials") or list(range(n))
+            m["values"] = m["values"] * r
+            m["trials"] = [t + k * 100_000 for k in range(r) for t in trials]
+        c["planned"] = int(c.get("planned") or 0) * r
+    return out
+
+
+@pytest.mark.parametrize("r", [1, 10])
+def test_a_correct_study_that_reports_only_a_standard_error_passes_at_any_number_of_trials(r: int) -> None:
+    """s2 kinetics reports a t-based interval of its own and a variance; FI judged a z interval it built itself, which a
+    fit with about 3 degrees of freedom under-covers, and at 3000 trials a setting stopped. With only a standard error
+    reported, FI judges the standard error against the spread, and the estimates against the truth, never a coverage."""
+    d = _load("s2_kinetics_full")
+    proto = {**d["protocol"], "metrics": list(d["protocol"].get("metrics") or []) + [S2_DECLARED]}
+    v = tc.judge(_repeated(d["cells"], r), proto, d["thresholds"], {}, repairs_left=False)
+    assert v.action == tc.OK, v.say
+    kinds = {q.kind for q in v.calibration.quantities}
+    assert "coverage" not in kinds and {"se_ratio", "bias"} <= kinds, kinds
+
+
+def test_with_only_a_standard_error_a_biased_estimate_still_stops() -> None:
+    """The truth typed wrong inside a code: the estimates, their errors and the code's own flags agree with each other, and
+    the estimates are off the plan's truth by several of their own spreads."""
+    import random
+
+    rng = random.Random(3)
+    cells = []
+    for i in range(6):
+        est = [52000 + rng.gauss(0, 600) for _ in range(40)]
+        cells.append({"key": f"s={i}", "cell": {"s": i}, "planned": 40, "failed": 0,
+                      "metrics": {"Ea_hat": {"values": est, "trials": list(range(40))},
+                                  "Ea_se": {"values": [600.0] * 40, "trials": list(range(40))}}})
+    spec = {"id": "Ea", "estimand": "Ea", "kind": "mean", "unit": "one trial",
+            "known_value": {"true_value": 50000.0, "estimate": "Ea_hat", "standard_error": "Ea_se", "level": 0.95}}
+    v = tc.judge(cells, {"metrics": [spec]}, None, {}, repairs_left=False)
+    assert v.action == tc.STOP and [q.kind for q in v.calibration.faults] == ["bias"], v.say
+    # the same with the right truth: no fault
+    ok = json.loads(json.dumps(cells))
+    for c in ok:
+        c["metrics"]["Ea_hat"]["values"] = [x - 2000 for x in c["metrics"]["Ea_hat"]["values"]]
+    assert tc.judge(ok, {"metrics": [spec]}, None, {}, repairs_left=False).action == tc.OK
+
+
+def test_with_only_a_standard_error_trials_with_no_estimate_are_misses() -> None:
+    nan = float("nan")
+    est = [1.0 + 0.01 * ((i % 7) - 3) for i in range(40)]
+    bad = {"x_hat": [nan] * 30 + est[:10], "x_se": [nan] * 30 + [0.02] * 10}
+    good = {"x_hat": est, "x_se": [0.02] * 40}
+    cells = _cells({f"s={i}": (bad if i < 2 else good) for i in range(6)}, {f"s={i}": {"s": i} for i in range(6)})
+    spec = {"id": "x", "estimand": "x", "kind": "mean", "unit": "one trial",
+            "known_value": {"true_value": 1.0, "estimate": "x_hat", "standard_error": "x_se", "level": 0.95}}
+    v = tc.judge(cells, {"metrics": [spec]}, None, {}, repairs_left=False)
+    assert v.action == tc.STOP and "no_estimate" in [q.kind for q in v.calibration.faults], v.say
+
+
+FULL_KINETICS = {
+    "s1_kinetics": r"C:\fi_runs\suite\rounds\s1\first_order_kinetics\out\*",
+    "r6t_kinetics": r"C:\fi_runs\suite\rounds\r6t\first_order_kinetics\out\*",
+    "r14b_kinetics": r"C:\fi_runs\suite\rounds\r14b\first_order_kinetics\out\*",
+    "r8_kinetics": r"C:\fi_runs\suite\rounds\r8\first_order_kinetics\out\*",
+    "s2_kinetics": r"C:\fi_runs\suite\rounds\s2\first_order_kinetics\out\*",
+}
+
+
+@pytest.mark.parametrize("name", sorted(FULL_KINETICS))
+def test_the_full_records_of_the_clean_kinetics_quests_pass_with_their_declarations(name: str) -> None:
+    from tests.test_trial_checks import DECLARED
+
+    found = glob.glob(FULL_KINETICS[name])
+    if not found:
+        pytest.skip(f"the quest folder of {name} is not on this machine")
+    root = Path(found[0])
+    data = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))
+    proto = json.loads((root / "needs" / "FROZEN_PROTOCOL.json").read_text(encoding="utf-8"))["protocol"]
+    decl = DECLARED.get(name) or [S2_DECLARED]
+    proto = {**proto, "metrics": list(proto.get("metrics") or []) + decl}
+    v = tc.judge(data["cells"], proto, data.get("thresholds"), tc.ledger_reasons(root), repairs_left=False)
+    assert v.action == tc.OK, v.say
+    assert v.calibration.checked and not v.calibration.faults

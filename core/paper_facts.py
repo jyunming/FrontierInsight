@@ -403,6 +403,12 @@ def _trial_check_items(root: Path, add: Any) -> None:
             said = (f"The {pct} intervals reported for `{label}` contain the true value less often than {pct} in {n} of "
                     f"{of} settings, by more than chance explains"
                     + (f" (lowest coverage {min(vals):.2f})" if vals else ""))
+        elif q.get("kind") == "bias":
+            said = (f"The estimates of `{label}` lie off the true value in {n} of {of} settings, by more than chance "
+                    "explains" + (f" (by {min(vals):+.2f} to {max(vals):+.2f} of their own spread)" if vals else ""))
+        elif q.get("kind") == "no_estimate":
+            said = (f"`{label}`, the estimate of a known true value, has no number in some trials at {n} settings"
+                    + (f" (up to {max(vals):.0%} of a setting's trials)" if vals else ""))
         else:
             said = (f"The standard error reported for `{label}` differs from the spread of the estimates over the trials "
                     f"in {n} of {of} settings, by more than chance explains"

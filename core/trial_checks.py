@@ -18,10 +18,12 @@ names the code happens to use. A metric of the protocol with a ``known_value``
 (:func:`core.metric_spec.normalize`) says the true value the simulation is given (a number, or the threshold or grid
 parameter that holds it, on the estimate's own scale), the name run_trial returns for the estimate, the name for its
 standard error (or variance) and/or the names of its interval's two ends, and the interval's level. FI computes the rest
-itself from the trials: whether each trial's interval covers the true value (from its two ends, or the estimate plus and
-minus z times its standard error at the declared level), and the ratio of the estimates' standard deviation over the
-trials to the typical reported standard error (the root of the mean squared one). It never reads a coverage flag the
-code computed. A metric whose declared names the trials do not return is a fault (the code does not keep the plan's
+itself from the trials: how far the mean estimate lies from the true value in units of the estimates' own spread
+(``bias``), the ratio of the estimates' standard deviation over the trials to the typical reported standard error (the
+root of the mean squared one), and, only when the trial reports its interval's two ends, whether each trial's interval
+covers the true value. FI never builds a z interval of its own from a standard error: a fit with few degrees of freedom
+reports a wider interval, and a z interval would under-cover by design (more visibly the more trials). A trial that ran
+but gave no number for the estimate is a miss (``no_estimate``). It never reads a coverage flag the code computed. A metric whose declared names the trials do not return is a fault (the code does not keep the plan's
 contract). Without any declaration the calibration is "not checked", and the paper and ``QUALITY.md`` say so.
 
 For each setting with at least :data:`MIN_TRIALS` trials: the coverage with its Wilson interval, and the ratio with its
@@ -69,6 +71,11 @@ RATIO_HIGH = 1.5
 FAMILY_ALPHA = 0.05
 #: The fewest trials of a setting that are judged.
 MIN_TRIALS = 10
+#: An estimate is grossly biased when the whole sampling band of (mean estimate - true value) / spread of the estimates lies
+#: beyond this many spreads (a bias of 1.1 spreads takes a right-width 95% interval down to about 0.80, the coverage line).
+BIAS_GROSS = 1.0
+#: ... and reported (not a fault) beyond this many.
+BIAS_REPORTED = 0.5
 #: The reason FI's harness gives a trial its time limit cut off (core/trial_runner.OUT_OF_TIME).
 _OUT_OF_TIME = "the study's time (execution.timeout_s) ran out"
 #: Where FI keeps what the checks found on the last run of the trials (QUALITY.md and the paper's required items read it).
@@ -344,6 +351,17 @@ class Quantity:
         return sum(1 for s in self.settings if s.above)
 
     def says(self) -> str:
+        if self.kind == "bias":
+            vals = [s.value for s in self.settings]
+            rng = f"{min(vals):+.2f} to {max(vals):+.2f}" if vals else "no value"
+            return (f"(mean of `{self.label}` - the true value) / the spread of the estimates: {rng} over {self.judged} "
+                    f"setting(s){self._pool('+.2f')} (0 when the estimate is right); beyond {BIAS_GROSS:g} beyond sampling "
+                    f"error in {self.gross}")
+        if self.kind == "no_estimate":
+            vals = [s.value for s in self.settings]
+            return (f"trials that ran but gave no number for `{self.label}`, the estimate of a declared true value: up to "
+                    f"{max(vals):.0%} of a setting's trials, in {sum(1 for v in vals if v > 0)} setting(s); more than "
+                    f"{FAULT_FRACTION:.0%} in {self.gross}")
         if self.kind == "missing":
             return (f"the trials do not return {', '.join(f'`{n}`' for n in self.names)}, which the plan declares for "
                     f"`{self.label}` (its estimate and its uncertainty), so FI could not measure them against the true "
@@ -373,6 +391,8 @@ class Quantity:
     def worst(self, n: int = 4) -> list[SettingCheck]:
         if self.kind == "coverage":
             return sorted(self.settings, key=lambda s: s.value)[:n]
+        if self.kind in ("bias", "no_estimate"):
+            return sorted(self.settings, key=lambda s: -abs(s.value))[:n]
         return sorted(self.settings, key=lambda s: -abs(math.log(max(s.value, 1e-300))))[:n]
 
 
@@ -468,6 +488,43 @@ def _ratio_band(key: str, n: int, ratio: float, dof: int, z: float = _Z95) -> Se
 POOLED = "all settings together"
 
 
+def _bias_band(key: str, n: int, b: float, z: float = _Z95) -> SettingCheck:
+    half = z / math.sqrt(n)
+    lo, hi = b - half, b + half
+    return SettingCheck(key, n, b, lo, hi, gross=lo > BIAS_GROSS or hi < -BIAS_GROSS,
+                        below=lo > BIAS_REPORTED or hi < -BIAS_REPORTED)
+
+
+def _judge_bias(q: "Quantity", per: list[tuple[str, list[float], float]]) -> None:
+    """Each setting's (mean estimate - truth) / spread of the estimates at the family level, and pooled at 95%. A setting
+    with no spread (no noise) is not judged."""
+    found = []
+    for key, est, truth in per:
+        n = len(est)
+        if n < MIN_TRIALS:
+            continue
+        mean = sum(est) / n
+        sd = math.sqrt(sum((x - mean) ** 2 for x in est) / (n - 1))
+        if sd <= 1e-12 * max(abs(mean), 1e-300):
+            continue
+        found.append((key, n, (mean - truth) / sd))
+    z = _z_family(len(found))
+    for key, n, b in found:
+        q.settings.append(_bias_band(key, n, b, z))
+    if len(found) > 1:
+        total = sum(n for _k, n, _b in found)
+        q.pooled = _bias_band(POOLED, total, sum(n * b for _k, n, b in found) / total)
+
+
+def _judge_no_estimate(q: "Quantity", per: list[tuple[str, int, int]]) -> None:
+    """Each setting's share of the trials that ran to the end and gave no number for the estimate of a declared truth: more
+    than :data:`FAULT_FRACTION` is a gross miss (they are misses of the truth, not values that have no meaning there)."""
+    for key, ran, none in per:
+        if ran and none:
+            share = none / ran
+            q.settings.append(SettingCheck(key, ran, share, share, share, gross=share > FAULT_FRACTION, below=True))
+
+
 def _judge_coverage(q: "Quantity", per: list[tuple[str, list[float]]]) -> None:
     """Each setting's coverage at the family level, and the pooled coverage at 95%."""
     judged = [(key, hits) for key, hits in per if len(hits) >= MIN_TRIALS]
@@ -496,8 +553,9 @@ def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]])
 
 def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[dict[int, float], dict[int, float], list[float]]:
     """``(estimates, standard errors, hits)`` of one setting for a declared known value: each trial's estimate and standard
-    error by trial, and 1/0 per trial for whether its interval (the declared two ends, else the estimate plus and minus z
-    times the standard error at the declared level) covers ``truth``."""
+    error by trial, and 1/0 per trial for whether the interval the trial reports (the declared two ends) covers ``truth``.
+    A trial that reports only a standard error makes no coverage claim FI could judge: FI does not build a z interval of
+    its own (a fit with few degrees of freedom would under-cover it by design), so ``hits`` is empty."""
     spread = kv.get("standard_error") or kv.get("variance")
     e = _series(cell, kv["estimate"])
     s = _series(cell, spread) if spread else {}
@@ -508,15 +566,10 @@ def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[
     # repair that returns NaN in place of a failing fit must not drop those trials from the count).
     # ... in a record that returns these values at all (a value compared inside a run may be kept in its own records only).
     held = cell.get("metrics") or {}
-    if not all(n in held for n in [kv["estimate"], *(ends or ([spread] if spread else []))]):
+    if not ends or not all(n in held for n in [kv["estimate"], *ends]):
         return e, s, []
-    ran = sorted(_ran(cell))
-    if ends:
-        lo, hi = _series(cell, ends[0]), _series(cell, ends[1])
-        hits = [1.0 if i in lo and i in hi and lo[i] <= truth <= hi[i] else 0.0 for i in ran]
-    else:
-        z = _z(kv["level"])
-        hits = [1.0 if i in e and i in s and s[i] >= 0 and abs(e[i] - truth) <= z * s[i] else 0.0 for i in ran]
+    lo, hi = _series(cell, ends[0]), _series(cell, ends[1])
+    hits = [1.0 if i in lo and i in hi and lo[i] <= truth <= hi[i] else 0.0 for i in sorted(_ran(cell))]
     return e, s, hits
 
 
@@ -554,25 +607,36 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
         if missing:
             out.quantities.append(Quantity("missing", ident, missing, level=level, truth=truth_label))
             continue
-        cover = Quantity("coverage", " .. ".join(ends) if ends else f"{est} +/- z*{spread}",
-                         list(ends) if ends else [est, spread], level=level, truth=truth_label)
+        cover = Quantity("coverage", " .. ".join(ends), list(ends), level=level, truth=truth_label) if ends else None
         ratio = Quantity("se_ratio", est, [est, spread], truth=truth_label) if spread else None
+        bias = Quantity("bias", est, [est], truth=truth_label)
+        empty = Quantity("no_estimate", est, [est], truth=truth_label)
         cover_per: list[tuple[str, list[float]]] = []
         ratio_per: list[tuple[str, list[float], list[float]]] = []
+        bias_per: list[tuple[str, list[float], float]] = []
+        empty_per: list[tuple[str, int, int]] = []
         for c in cells:
             key = str(c.get("key"))
             t = _truth_of(truth, c, thresholds)
-            if t is None or _undefined_here(spec.get("undefined_when") or {}, c):
+            if t is None or _undefined_here(spec.get("undefined_when") or {}, c) or est not in (c.get("metrics") or {}):
                 continue
             e, s, hits = _cell_hits(c, kv, t)
             cover_per.append((key, hits))
+            bias_per.append((key, list(e.values()), t))
+            ran = _ran(c)
+            empty_per.append((key, len(ran), len(ran - set(e))))
             if ratio is not None:
                 pairs = [(e[i], s[i]) for i in e if i in s and s[i] >= 0]
                 ratio_per.append((key, [x for x, _ in pairs], [v for _, v in pairs]))
-        _judge_coverage(cover, cover_per)
+        if cover is not None:
+            _judge_coverage(cover, cover_per)
         if ratio is not None:
             _judge_ratio(ratio, ratio_per)
-        for q in (cover, ratio):
+        _judge_bias(bias, bias_per)
+        _judge_no_estimate(empty, empty_per)
+        if empty.settings:
+            out.quantities.append(empty)
+        for q in (cover, ratio, bias):
             if q is None:
                 continue
             if q.judged:
