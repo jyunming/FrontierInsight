@@ -60,3 +60,28 @@ def test_a_paper_over_its_page_limit_after_the_rewrites_says_so_with_the_measure
     out = paper_facts.render(paper_facts.place_items(paper, root), root).text
     assert "The paper is 7 pages long, over the topic's limit of 4" in out
     assert out.index("## Limitations") < out.index("The paper is 7 pages") < out.index("## References")
+
+
+async def test_the_review_puts_the_page_overrun_in_the_paper_and_measures_the_paper_that_carries_it(tmp_path: Path) -> None:
+    """The last review of a paper still over the limit: the record, the sentence in the Limitations (the paper's bold
+    "Limitations." paragraph is no section), and the page count the sentence states is the final paper's."""
+    from tests.test_plan_optimisation import _engine
+
+    eng = _engine(tmp_path, [])
+    root = eng.quest_root
+    (root / ".fi").mkdir(parents=True, exist_ok=True)
+    paper = root / "paper.md"
+    paper.write_text("# T\n\n## Methods\nM.\n\n## Discussion\n**Limitations.** Few.\n\n## References\n1. A.\n",
+                     encoding="utf-8")
+    seen: list[str] = []
+
+    async def measure(path: Path, state: dict) -> dict:
+        seen.append(Path(path).read_text(encoding="utf-8"))
+        return {"pages": 7 if "pages long" in seen[-1] else 6}  # the sentence tips the paper onto one more page
+
+    eng._measure_draft_pages = measure  # type: ignore[method-assign]
+    pages = await eng._state_page_overrun({}, paper, 4, 6)
+    text = paper.read_text(encoding="utf-8")
+    assert pages == 7 and "The paper is 7 pages long, over the topic's limit of 4" in text
+    assert json.loads((root / ".fi" / "page_limit.json").read_text()) == {"pages": 7, "limit": 4, "final": True}
+    assert text.count("pages long") == 1  # re-stated, not added again
