@@ -71,6 +71,27 @@ CASES = {
     "str_split_is_no_seeder": ("import numpy as np\ndef run_trial(cell, trial_id, seed):\n"
                                "    parts = str(cell).split(str(seed))\n    rng = np.random.default_rng(1)\n"
                                "    return rng.normal()\n", {}, "does_not_reach", 1),
+    # Second review (P1-1): a draw from numpy's global generator, stdlib random, or scipy's .rvs with no random_state is
+    # unseeded unless FI's seed reaches that global's seed call.
+    "numpy_global_draw": ("import numpy as np\ndef run_trial(cell, trial_id, seed):\n    rng = np.random.default_rng(seed)\n"
+                          "    return rng.normal() * 0 + np.random.normal()\n", {}, "does_not_reach", None),
+    "stdlib_random_draw": ("import random, numpy as np\ndef run_trial(cell, trial_id, seed):\n"
+                           "    rng = np.random.default_rng(seed)\n    return random.random() + 0 * rng.random()\n",
+                           {}, "does_not_reach", None),
+    "scipy_rvs_without_random_state": ("import numpy as np\nfrom scipy import stats\ndef run_trial(cell, trial_id, seed):\n"
+                                       "    _ = np.random.default_rng(seed)\n    return float(stats.norm.rvs(size=3).mean())\n",
+                                       {}, "does_not_reach", None),
+    "global_draw_in_model": ("from model import draw\nimport numpy as np\ndef run_trial(cell, trial_id, seed):\n"
+                             "    rng = np.random.default_rng(seed)\n    return draw(cell, rng)\n",
+                             {"model.py": "import numpy as np\ndef draw(cell, rng):\n    return rng.normal() + np.random.poisson(3)\n"},
+                             "does_not_reach", None),
+    "numpy_seeded_global": ("import numpy as np\ndef run_trial(cell, trial_id, seed):\n    np.random.seed(seed)\n"
+                            "    return np.random.normal()\n", {}, "reaches", None),
+    "stdlib_seeded_global": ("import random\ndef run_trial(cell, trial_id, seed):\n    random.seed(seed)\n"
+                             "    return random.random()\n", {}, "reaches", None),
+    "scipy_rvs_with_random_state": ("import numpy as np\nfrom scipy import stats\ndef run_trial(cell, trial_id, seed):\n"
+                                    "    rng = np.random.default_rng(seed)\n"
+                                    "    return float(stats.norm.rvs(size=3, random_state=rng).mean())\n", {}, "reaches", None),
     "torch_manual_seed": ("import torch\ndef run_trial(cell, trial_id, seed):\n    torch.manual_seed(seed)\n"
                           "    return float(torch.rand(1))\n", {}, "reaches", None),
 }

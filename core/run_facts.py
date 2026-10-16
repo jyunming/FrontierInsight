@@ -598,6 +598,58 @@ def _unseeded_where(code: _Code, reach: list[tuple[_Module, ast.AST]]) -> list[s
     return out
 
 
+#: Calls on a random module that seed it, build a generator, or read its state: not draws.
+_NOT_DRAWS = frozenset({"seed", "default_rng", "RandomState", "SeedSequence", "Generator", "PCG64", "PCG64DXSM", "Philox",
+                        "MT19937", "SFC64", "BitGenerator", "get_state", "set_state", "getstate", "setstate", "Random",
+                        "SystemRandom", "get_bit_generator", "set_bit_generator"})
+
+
+def _module_of(mod: _Module, expr: ast.AST) -> str:
+    """The module outside ``code/`` that ``expr`` names (``numpy.random`` for ``np.random`` after ``import numpy as np``),
+    ``""`` otherwise."""
+    if isinstance(expr, ast.Name):
+        target = mod.imported.get(expr.id)
+        if not target:
+            return ""
+        return f"{target[0]}.{target[1]}" if target[1] else target[0]
+    if isinstance(expr, ast.Attribute):
+        head = _module_of(mod, expr.value)
+        return f"{head}.{expr.attr}" if head else ""
+    return ""
+
+
+def _global_draws(reach: list[tuple[_Module, ast.AST]], seeded: list[str]) -> list[str]:
+    """``code/x.py:7 (np.random.normal())`` for each draw the trial's code makes from numpy's global generator or from
+    stdlib ``random`` that FI's seed does not seed (it reaches no ``np.random.seed`` / ``random.seed``), and each scipy
+    ``.rvs(...)`` given no ``random_state``: random numbers drawn without the seed FI gives the trial."""
+    numpy_seeded = any(re.search(r"(?:^|\.)(?:np|numpy)\.random\.seed$", s) for s in seeded)
+    stdlib_seeded = any(s == "random.seed" for s in seeded)
+    out: list[str] = []
+    for m, f in reach:
+        nodes = list(ast.walk(f)) if isinstance(f, ast.ClassDef) else _own_nodes(f)
+        for node in nodes:
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node)
+            if name == "rvs" and not any(k.arg == "random_state" for k in node.keywords):
+                out.append(f"{m.rel}:{node.lineno} ({ast.unparse(node.func)}(...) with no random_state)")
+                continue
+            if name in _NOT_DRAWS:
+                continue
+            func = node.func
+            where = (_module_of(m, func.value) if isinstance(func, ast.Attribute)
+                     else ".".join(p for p in _imported_from(m, func)) if isinstance(func, ast.Name) else "")
+            if (where == "numpy.random" and not numpy_seeded) or (where == "random" and not stdlib_seeded):
+                out.append(f"{m.rel}:{node.lineno} ({ast.unparse(func)}())")
+    return list(dict.fromkeys(out))
+
+
+def _imported_from(mod: _Module, name: ast.Name) -> tuple[str, ...]:
+    """The module a plain name was imported from (``("numpy.random",)`` after ``from numpy.random import normal``)."""
+    target = mod.imported.get(name.id)
+    return (target[0],) if target and target[1] else ()
+
+
 def _module_generators(code: _Code, reach: list[tuple[_Module, ast.AST]]) -> list[tuple[str, str, int | None]]:
     """``(code/x.py:2, the name, its seed or None)`` for each generator made when a module is loaded
     (``code_layout.module_level_randomness``) that the trial's code reads by name."""
@@ -665,7 +717,8 @@ def seed_verdict(quest_root: Path | str) -> dict[str, Any]:
     reach = _reachable(code, mod, fn)
     unseeded = _unseeded_where(code, reach)
     module_rngs = _module_generators(code, reach)
-    out["unseeded"] = unseeded
+    global_draws = _global_draws(reach, flow.seeded)
+    out["unseeded"] = unseeded + global_draws
     driving: list[tuple[str, int]] = []
     for cmod, cfn in flow.chain:
         driving += _seeder_literals(cfn, code.modules[cmod].rel)
@@ -689,6 +742,9 @@ def seed_verdict(quest_root: Path | str) -> dict[str, Any]:
                    + ", a generator made when the module is loaded")
     if unseeded:
         why.append("the trial's code builds a random generator without a seed (" + "; ".join(unseeded[:3]) + ")")
+    if global_draws:
+        why.append("the trial's code draws random numbers that the seed FI gives it does not seed ("
+                   + "; ".join(global_draws[:3]) + ")")
     fixed = [f"{v}, at {w}" for w, v in dict.fromkeys(driving)]
     if why:
         out.update(verdict=DOES_NOT_REACH, fi_seed_reaches=False, why="; ".join(why))
