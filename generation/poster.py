@@ -46,6 +46,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
+from core import paper_facts as _paper_facts
 from core.config import Config
 from core.engine import (
     QuestArtifacts,
@@ -960,7 +961,7 @@ class PosterGenerator:
         output = self.config.output
         sheet = _SHEETS.get(output.poster_size, _SHEETS["a1_portrait"])
 
-        paper_md = art.paper_md.read_text(encoding="utf-8")
+        paper_md = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8"))  # FI's values stay, its markers go
         figures = _figure_files(art.figures_dir)
         captions = _paper_captions(paper_md)
         literature = art.raw_state.get("literature") or []

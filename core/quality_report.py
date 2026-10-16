@@ -950,8 +950,13 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
     engine = _dict(q.config.get("engine"))
     topic = str(q.config.get("topic") or "")
     out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "paper_check": {}}
+    # The study as the quest resolved it (clarify can decide a quest needs no simulation, or is a survey, when the YAML did
+    # not say so): the last design route records both. A quest with no such record falls back to the YAML.
+    resolved = next((_dict(e.get("facts")) for e in reversed(q.decisions("design")) if _dict(e.get("facts"))), {})
+    no_sim = bool(resolved.get("no_simulation", engine.get("no_simulation")))
+    survey = bool(resolved.get("survey_mode", engine.get("survey_mode")))
     try:
-        out["how_reached"] = _d.paragraph(root, no_simulation=bool(engine.get("no_simulation"))).replace(_d.LEAD + " ", "")
+        out["how_reached"] = _d.paragraph(root, no_simulation=no_sim, survey=survey).replace(_d.LEAD + " ", "")
         wall, least = _pf.measured_run_time(root, None)
         out["run_record"] = _d.run_record(root, topic=topic, duration_s=wall).replace(_d._RECORD_LEAD + " ", "")
         if wall is None and least is not None:
@@ -961,7 +966,8 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
             "**Open points in the code that produced these results.** ", "")
         kept = _pf.kept_check(root)
         out["paper_check"] = {"hits": [str(h) for h in _list(kept.get("hits"))],
-                              "unmet_items": [_dict(i) for i in _list(kept.get("unmet_items"))]}
+                              "unmet_items": [_dict(i) for i in _list(kept.get("unmet_items"))],
+                              "unfilled": [str(u) for u in _list(kept.get("unfilled"))]}
     except Exception:  # noqa: BLE001 -- a record that cannot be read leaves its part out
         pass
     return out
@@ -1109,21 +1115,28 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     check = records.get("paper_check") or {}
     unmet = [i for i in check.get("unmet_items") or [] if isinstance(i, dict)]
     hits = [h for h in check.get("hits") or [] if h]
-    if not parts and not unmet and not hits:
+    unfilled = [u for u in check.get("unfilled") or [] if u]
+    if not parts and not unmet and not hits and not unfilled:
         return []
     lines = ["", "## What FI recorded that the paper does not carry", "",
-             "These are FI's records of the run. The paper itself states the seed, the measured run time and the parts the "
-             "study did not do in its own words, and FI checks those statements against these records; the records are kept "
-             "here, not pasted into the paper.", ""]
+             "These are FI's records of the run. The paper's seed, measured run time, time limit, trial counts and the "
+             "parts the study did not do are filled in by FI from these records; the full records are kept here, not "
+             "pasted into the paper.", ""]
     for title, text in parts:
         lines += [f"### {title}", "", str(text).strip(), ""]
     if unmet or hits:
         lines += ["### Where the paper still disagrees with these records", "",
                   "FI sent the paper back to be rewritten for these and the review rounds ended before they were settled:", ""]
-        lines += [f"- Not named in the paper: \"{_cell(str(i.get('name')))}\" ({_cell(str(i.get('text') or i.get('kind') or ''))})"
-                  for i in unmet]
-        named = {str(i.get("name")) for i in unmet}
-        lines += [f"- {_cell(_one(h, 300))}" for h in hits if not any(f'"{n}"' in h for n in named)]
+        lines += [f"- Not in the paper's Limitations: {_cell(str(i.get('text') or i.get('name') or ''))} "
+                  f"(record `{_cell(str(i.get('id') or i.get('kind') or ''))}`)" for i in unmet]
+        ids = {str(i.get("id")) for i in unmet}
+        lines += [f"- {_cell(_one(h, 300))}" for h in hits if not any(i and i in h for i in ids)]
+        lines.append("")
+    if unfilled:
+        lines += ["### Values FI could not fill in", "",
+                  "The paper asks for these values, but FI has no record of them, so the paper reads \"not recorded\" there:",
+                  ""]
+        lines += [f"- `{_cell(u)}`" for u in unfilled]
         lines.append("")
     return lines
 

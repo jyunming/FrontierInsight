@@ -91,6 +91,7 @@ from . import phased as _phased
 from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure
 from . import paper_facts as _paper_facts
+from . import run_facts as _run_facts
 from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
@@ -19181,13 +19182,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return markdown
 
     def _paper_record_section(self, state: QuestState) -> str:
-        """FI's facts about the run and the items the limitations must name, for the writer (core/paper_facts.py). The
-        precision record is kept first: it is one of the items. A record FI cannot read leaves its part out."""
+        """The placeholders the paper's facts of the run go through, and the ``not_done`` ones the Limitations must hold,
+        for the writer (core/paper_facts.py). The precision record is kept first (it is one of the items), and the code's
+        seed verdict is put on record (``.fi/run_facts.json``). A record FI cannot read leaves its part out."""
         try:
             _disclosure.write_precision_record(self.quest_root, self._precision_shortfalls(state))
         except Exception as e:  # noqa: BLE001 -- the rest of the record is still given
             self._log.warning("[write] the record of the precision reached could not be kept (%s: %s)",
                               type(e).__name__, str(e)[:200])
+        try:
+            verdict = _run_facts.record_seed(self.quest_root)
+            if verdict.get("verdict") in (_run_facts.DOES_NOT_REACH, _run_facts.UNKNOWN):
+                self._log.warning("[write] the seed FI gives each trial %s: %s",
+                                  "does not reach the simulation" if verdict["verdict"] == _run_facts.DOES_NOT_REACH
+                                  else "may not reach the simulation (FI cannot tell)", verdict.get("why"))
+        except Exception as e:  # noqa: BLE001 -- the paper's {{seed}} reads the code again when it is filled
+            self._log.warning("[write] the code's seed could not be put on record (%s: %s)", type(e).__name__, str(e)[:200])
         try:
             return _paper_facts.writer_section(
                 self.quest_root, topic=str(self.config.topic or ""),
@@ -19197,10 +19207,45 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                               type(e).__name__, str(e)[:200])
             return ""
 
+    def _render_paper_facts(self, markdown: str, state: QuestState) -> str:
+        """``markdown`` with every placeholder of the run's facts filled from FI's records (core/paper_facts.py); a
+        placeholder FI cannot fill reads "not recorded" and is said in the run log. Never raises: a failure leaves the
+        placeholders as they are, and the review's check then finds them unfilled."""
+        try:
+            out = _paper_facts.render(markdown, self.quest_root, topic=str(self.config.topic or ""),
+                                      fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+        except Exception as e:  # noqa: BLE001
+            self._log.warning("[write] FI could not fill the paper's facts of the run from its records (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            return markdown
+        if out.unfilled:
+            self._log.warning("[write] FI has no record for %s in the paper; it reads \"not recorded\" there (listed in "
+                              "QUALITY.md)", ", ".join("{{" + u + "}}" for u in out.unfilled))
+        return out.text
+
+    def _refresh_paper_facts(self, state: QuestState) -> None:
+        """Before a paper is checked: a paper on disk that still carries FI's old blocks (a quest resumed from before they
+        left the paper) or a placeholder not filled is cleaned and filled again from the records, so the checks read what
+        a reader will. Nothing is written when nothing changes."""
+        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not path or not Path(path).is_file():
+            return
+        try:
+            before = Path(path).read_text(encoding="utf-8")
+            after = self._render_paper_facts(_disclosure.without_block(before), state)
+            if before.rstrip() != after.rstrip() and (
+                    _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before):
+                Path(path).write_text(after, encoding="utf-8")
+                self._log.info("[review] took FI's old blocks out of the paper and filled its facts of the run from the "
+                               "records again before checking it")
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[review] the paper's facts of the run could not be filled again (%s)", e)
+
     def _paper_record_hits(self, paper_md: str, state: QuestState) -> list[str]:
-        """Must-fix hits for what the paper states about the run against FI's records (core/paper_facts.py): a run time or a
-        limit claim the measurement contradicts, and a part the study did not do that the paper does not name. Text-only: the
-        paper is written again, the design is not touched and the quest is not stopped. What is still missing when the
+        """Must-fix hits for the paper against FI's records (core/paper_facts.py): a required placeholder missing (the seed,
+        the run time, whether the run kept to the topic's limit; each thing the study did not do, in the Limitations), a
+        run time typed outside a placeholder that the measurement contradicts, a limit claim it contradicts. Text-only: the
+        paper is written again, the design is not touched and the quest is not stopped. What is still unmet when the
         rounds are used up is kept in ``.fi/paper_record_check.json`` (the quality report prints it) and said in the run log."""
         hits = _paper_facts.check(paper_md, self.quest_root, topic=str(self.config.topic or ""),
                                   fallback_s=(state.get("exec_result") or {}).get("duration_s"))
@@ -19335,11 +19380,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
         if _phased.enabled(self.config):
             markdown = _phased.mark_paper(markdown, _phased.load(self.quest_root))
-        # The design history, the run record and the code's open findings are not in the paper: the writer states what the
-        # study did not do from FI's record section (core/paper_facts.py), the review checks it, and the quality report
+        # The design history, the run record and the code's open findings are not in the paper: the writer places what the
+        # study did not do with FI's placeholders (core/paper_facts.py), the review checks it, and the quality report
         # (QUALITY.md) holds the records themselves. A block an earlier draft carried was taken out above.
         # A search for the best design: the engine's "Best design found" section, from FI's own records.
         markdown = self._mark_best_design(state, markdown)
+        # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
+        # placeholder (core/paper_facts.py).
+        markdown = self._render_paper_facts(markdown, state)
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -19465,6 +19513,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 previous = Path(_rerun_from.in_quest(state["paper_md"], self.quest_root)).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             previous = ""
+        # The editor works on the writer's placeholders, not on the values FI filled in: an edit cannot change a value of
+        # FI's record, and the write step fills every placeholder again from the records (core/paper_facts.py).
+        previous = _paper_facts.to_placeholders(previous)
         grounding = state.get("claim_grounding") or {}
         claims = [
             {"claim": str(c.get("claim") or ""), "evidence": str(c.get("evidence") or "")}
@@ -19546,6 +19597,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._write_receipt("claim_check", "unknown", started_at=_receipts.now(), error="there is no paper to check")
             return {}
         started = _receipts.now()
+        # A paper from before FI's facts were placeholders (a resumed quest) is cleaned and filled first.
+        self._refresh_paper_facts(state)
         checked_bytes = Path(paper_md).read_bytes()
         # The engine's paragraph on how the result was reached is not a claim of the paper's (core/disclosure.py).
         paper_raw = Path(paper_md).read_text(encoding="utf-8")
@@ -19756,6 +19809,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not paper_md or not Path(paper_md).is_file():
             return out  # type: ignore[return-value]
         path = Path(paper_md)
+        # The paper this check reads and leaves is the one a reader gets: FI's old blocks out and its facts of the run
+        # filled (the claim check it runs again would otherwise change the paper after this check's receipt).
+        self._refresh_paper_facts(state)
         started = _receipts.now()
         paper = path.read_text(encoding="utf-8")
         sha = _cs.paper_hash(paper)
@@ -20889,12 +20945,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             n_seeds=len(replicates),
             optimisation=(_best_report.records(self.quest_root)
                           if _optimise.block_of(self._protocol_block(state)) is not None else None),
-            run_facts={k: v for k, v in {
-                "duration_s": _paper_facts.measured_run_time(
-                    self.quest_root, (state.get("exec_result") or {}).get("duration_s"))[0]}.items()
-                       if isinstance(v, (int, float)) and not isinstance(v, bool)},
+            run_facts=self._run_fact_numbers(state),
             trial_table=_trial_table.traceable(_trial_table.rows(self.quest_root)),
         )
+
+    def _run_fact_numbers(self, state: QuestState) -> dict[str, float]:
+        """The numbers FI's own record of the run accounts for: the measured run time, and every number FI fills into the
+        paper through a placeholder (the code's seed and where it is, the trial counts, the topic's limit, the sentences of
+        what the study did not do). They are FI's record, not results; a paper that quotes them quotes the record."""
+        fallback = (state.get("exec_result") or {}).get("duration_s")
+        out: dict[str, float] = {}
+        try:
+            wall = _paper_facts.measured_run_time(self.quest_root, fallback)[0]
+            if wall is not None:
+                out["duration_s"] = float(wall)
+            out.update(_paper_facts.fact_numbers(self.quest_root, topic=str(self.config.topic or ""), fallback_s=fallback))
+        except Exception as e:  # noqa: BLE001 -- a record FI cannot read accounts for nothing
+            self._log.warning("[numbers] FI's record of the run could not be read (%s: %s)", type(e).__name__, str(e)[:200])
+        return out
 
     def _analysis_numbers_note(self, state: QuestState) -> str:
         """The numbers of the analysis that nothing in this run accounts for, for the writer, who copies its numbers
@@ -21425,6 +21493,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         ``provider.node_models["review_panel.<name>"]``.
         """
         self._log.info("[review] judging paper")
+        # A paper from before FI's facts were placeholders (a resumed quest) is cleaned and filled first.
+        self._refresh_paper_facts(state)
         paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
         # With a page limit, this draft is rendered the way paper.pdf will be
         # and its pages counted, for both review paths below. Without one,
@@ -25853,9 +25923,13 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
     # FI's run record (core/disclosure.py:run_record; printed in QUALITY.md, not in the paper): a sentence of the paper
     # that states a seed or the run time is grounded in it, with the measured run time (core/run_facts.py).
     try:
-        run = _disclosure.run_record(
-            quest_root, topic=str(state.get("topic") or ""),
-            duration_s=_paper_facts.measured_run_time(quest_root, (state.get("exec_result") or {}).get("duration_s"))[0])
+        wall, least = _paper_facts.measured_run_time(quest_root, (state.get("exec_result") or {}).get("duration_s"))
+        run = _disclosure.run_record(quest_root, topic=str(state.get("topic") or ""), duration_s=wall)
+        if wall is None and least is not None:
+            # A quest whose trials ran before FI recorded the run's wall time: the ledger still says how long the trials
+            # alone took, so a paper's "ran in under a minute" can be weighed against it.
+            run += (f" FI did not record how long the whole experiment took; the trials alone took at least "
+                    f"{_disclosure._plain_seconds(least)}.")
     except Exception as e:  # noqa: BLE001 -- evidence FI cannot read is left out
         logging.getLogger("frontier_insight.engine").warning(
             "[claim_check] FI's record of the run could not be read (%s: %s)", type(e).__name__, str(e)[:200])

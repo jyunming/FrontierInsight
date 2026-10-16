@@ -47,7 +47,7 @@ $literature_block
 $passages_block
 
 ## The draft
-(A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI from its records. Never edit it or its markers: any change to it is undone. The seed, the run time and the parts of the topic the study did not do are the paper's own sentences: keep them as they are unless a passage above names them, and then state them as FI's record says.)
+(A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI from its records. Never edit it or its markers: any change to it is undone. A placeholder in double braces, such as `{{seed}}`, `{{run_time}}`, `{{time_limit_met}}` or `{{not_done:topic-temperature}}`, stands for a value FI fills in from its records: keep each one exactly as it is written, in its sentence; never replace one with a number or a sentence of your own, and never type the seed or the run time yourself.)
 
 <draft>
 $paper_block

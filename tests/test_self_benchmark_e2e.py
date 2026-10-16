@@ -48,9 +48,9 @@ PROTO = {
                   "tolerance": 0.001}],
 }
 SIM = SIM_TRIAL + '\n\ndef oracle():\n    return {"half": 0.5004}\n'
-PAPER = ("# Final size of a toy epidemic\n\nWe ran 300 outbreaks per setting.\n\n## Results\n\n"
+PAPER = ("# Final size of a toy epidemic\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
          "The headline score was 0.987 across the settings. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n")
-CITING = ("# What earlier work says\n\nWe ran 300 outbreaks per setting.\n\n## Results\n\n"
+CITING = ("# What earlier work says\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
           "The headline score was 0.987 across the settings. ![r](figures/result.png)\n\n"
           "Earlier work reports on the exposure and the outcome in children [1].\n\n## References\n1. The source.\n")
 TASK = {

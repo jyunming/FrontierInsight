@@ -338,11 +338,13 @@ def _seed_sentence(quest_root: Path, rows: Any) -> str:
     verdict = _run_facts.seed_verdict(quest_root)
     if verdict["fi_seed_reaches"] is False:
         used: dict[int, list[str]] = {}
-        for lit in verdict["code_seeds"]:
+        for lit in verdict.get("driving_seeds") or []:
             used.setdefault(lit["value"], []).append(lit["where"])
         written = "; ".join(f"{v} ({', '.join(w[:3])})" for v, w in list(used.items())[:4])
-        return (f"The seed FI gives each trial does not reach the simulation ({verdict['why']}); its generators are seeded "
-                f"from numbers written in the code: {written or 'FI found no seed number in the code'}.")
+        return (f"The seed FI gives each trial does not reach the simulation: {verdict['why']}. The trials' generators are "
+                f"seeded from numbers written in the code: {written or 'FI found none'}.")
+    if verdict.get("verdict") == _run_facts.UNKNOWN:
+        return f"FI could not tell from the code whether the seed it gives each trial reaches the simulation ({verdict['why']})."
     study = _read_json(Path(quest_root) / "code" / "study.json")
     base = _whole(study.get("base_seed")) if isinstance(study, dict) else None
     if base is None:
@@ -456,7 +458,8 @@ PRECISION_RECORD = Path(".fi") / "precision_missed.json"
 
 
 def write_precision_record(quest_root: Path, missed: list[dict[str, Any]]) -> None:
-    """Keep ``missed`` for the paper's limitations and the claim check (both read it); no record when none was missed."""
+    """Keep ``missed`` for FI's record: the item FI fills into the paper's Limitations (:mod:`core.paper_facts`), the
+    quality report and the claim check read it; no record when none was missed."""
     path = Path(quest_root) / PRECISION_RECORD
     if missed:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -556,7 +559,8 @@ def _untested_sentence(notes: list[str]) -> str:
 
 
 def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = None) -> str:
-    """One paragraph (no heading) of what FI recorded about the run, for the paper's limitations: the seeds, the run
+    """One paragraph (no heading) of what FI recorded about the run, for the quality report and the claim check (the
+    paper does not carry it: its facts go into the paper through placeholders FI fills, :mod:`core.paper_facts`): the seeds, the run
     time against any limit the topic states, the trial counts, a reduced size, the topic's requirements that were not
     done and the equations not tested before the run. Each sentence is written only from a record that exists and can
     be read; a missing record leaves its sentence out. ``duration_s`` is the measured wall time of the experiment
@@ -627,6 +631,10 @@ _RECORD_ANY = re.compile(r"\n*[ \t]*" + _RECORD_OPEN + r".*?" + re.escape(RUN_RE
 _RECORD_STRAY = re.compile(r"(?:" + _RECORD_OPEN + "|" + re.escape(RUN_RECORD_END) + r")")
 _RECORD_BLOCK = re.compile(
     r"<!-- fi:run-record:([0-9a-f]{12}) -->[ \t]*\r?\n(.*?)\r?\n[ \t]*" + re.escape(RUN_RECORD_END), re.S)
+
+
+#: The markers around a value FI filled in for a placeholder (core/paper_facts.py).
+_FACT_TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->")
 
 
 def findings_checksum(text: str) -> str:
@@ -877,7 +885,11 @@ def strip_for_checks(text: str) -> str:
     """``text`` with the engine's paragraph taken out, for the checks that hold the paper's numbers to the results and
     for the claim check. Only a block whose every word is the engine's grammar is taken out; anything else between
     the markers stays and is checked. The open code findings block is left out while its text matches the checksum in
-    its opening marker (:func:`findings_checksum`); so is the run record block (:func:`run_record`)."""
+    its opening marker (:func:`findings_checksum`); so is the run record block (:func:`run_record`). The markers around a
+    value FI filled into the paper from its records (``core/paper_facts.py``) are taken out and the value is kept: the
+    checks read the values, never a placeholder or a marker."""
+    if "fi:fact-" in text:
+        text = _FACT_TAG.sub("", text)
     if "fi:code-findings:" in text:
         text = _FINDINGS_BLOCK.sub(
             lambda m: " " if findings_checksum(m.group(2)) == m.group(1) else m.group(0), text)

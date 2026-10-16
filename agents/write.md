@@ -110,7 +110,7 @@ Cite only labels that appear in the prior-work block:
 - An entry whose header is a placeholder label (`[4] item-4`, `[4] (no title)`, `Item-N`, `Reference N`, `Source N`) is not a usable source; do not cite it, and do not turn its label into an author or a title.
 - When the prior-work block is empty (`(no prior work surfaced from the knowledge base)`), cite nothing. Discuss earlier work in prose without naming a specific source.
 
-**Forbidden placeholder words.** When the text names an author, the name comes from the prior-work block. Never write a stand-in: `Placeholder`, `Example`, `Author unspecified`, `Date unspecified`, `Venue unspecified`, `Smith, J.`, `Doe, J.`, `Lee, M.`, or any surname the block does not give.
+**Forbidden placeholder words.** When the text names an author, the name comes from the prior-work block. Never write a stand-in: `Placeholder`, `Example`, `Author unspecified`, `Date unspecified`, `Venue unspecified`, `Smith, J.`, `Doe, J.`, `Lee, M.`, or any surname the block does not give. (The double-brace placeholders of FI's record section, such as `{{seed}}`, are not stand-ins: use them exactly as that section says.)
 
 **No URL or DOI fabrication.** Write a URL, DOI or arXiv id only as the prior-work block gives it. Never make one up: no `frontierinsight.internal/...` link, no `https://example.com/...` URL, no `10.xxxx/xxxxx`-shaped DOI.
 

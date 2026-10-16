@@ -51,7 +51,8 @@ _TRIMMABLE_SECTION_RE = re.compile(
 )
 _HEADING_LINE_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$", re.MULTILINE)
 _MIN_WORDS = 6  # a shorter sentence is not worth a place in the list
-# A note the engine writes into the paper (core/phased.py, core/best_design_report.py), markers included: never offered.
+# A note the engine writes into the paper (core/phased.py, core/best_design_report.py), and each value FI fills in for a
+# placeholder (core/paper_facts.py: `<!-- fi:fact-NAME -->value<!-- /fi:fact-NAME -->`), markers included: never offered.
 # (A paper of an earlier version may still carry the blocks of core/disclosure.py; the write step takes them out.)
 _ENGINE_NOTE_RE = re.compile(r"<!-- fi:([\w-]+)(?::[0-9a-f]+)? -->.*?<!-- /fi:\1 -->", re.S)
 _CITE_BRACKET_RE = re.compile(r"\[((?:W?\d+(?:\s*[–-]\s*\d+)?)(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*)\]")

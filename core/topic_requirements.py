@@ -644,8 +644,8 @@ def write_note(quest_root: Any) -> str:
     if left:
         sentences = "; ".join(str(g.get("sentence") or "").rstrip(".") for g in left if isinstance(g, dict))
         parts.append(f"The topic asked for more than this study did: {sentences}. Say in the limitations that the study did not "
-                     "do each of them, by the short name FI's record of this run (below) gives it; do not write a result "
-                     "for them.")
+                     "do each of them, through the not_done placeholders listed under FI's record of this run (below); "
+                     "do not write a result for them.")
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")

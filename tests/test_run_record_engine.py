@@ -45,7 +45,10 @@ def test_the_paper_has_no_run_record_and_the_writer_gets_the_facts(tmp_path: Pat
     paper = Path(out["paper_md"]).read_text(encoding="utf-8")
     assert "seed 42" not in paper and "fi:run-record" not in paper and "What FI recorded about this run" not in paper
     assert "The grid is coarse." in paper
-    assert any("FI'S RECORD OF THIS RUN" in p and "base seed 0" in p for p in prompts), "the writer is given the facts"
+    # The writer is given the facts as placeholders FI fills; this fixture has no simulation code, so FI names no seed
+    # (it cannot tell from the code whether the seeds it passed were used) and never claims a base seed.
+    assert any("FI'S RECORD OF THIS RUN" in p and "{{run_time}}" in p for p in prompts), "the writer is given the facts"
+    assert not any("- {{seed}}:" in p for p in prompts)
     held = quality_report.build(root, running=False)["paper_records"]["run_record"]
     assert "base seed 0" in held
     # The numbers of the paper are read as before; FI's record has nothing in the paper to leave out.

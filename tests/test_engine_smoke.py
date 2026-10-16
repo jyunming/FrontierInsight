@@ -110,7 +110,7 @@ _FAKE_RESPONSES = {
         "claims_unsupported": [],
         "limitations": ["toy data"],
     }),
-    "write": "# fake-paper\n\nMethods. Results. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n",
+    "write": "# fake-paper\n\nMethods. The experiment took {{run_time}}, using {{seed}}. Results. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n",
     "claim_check": json.dumps({"claims": [], "summary": "no substantive claims found"}),
     "evidence_gate": json.dumps({"verdict": "sufficient", "rationale": "fake: evidence looks fine", "gaps": []}),
     "review": json.dumps({

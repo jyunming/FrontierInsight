@@ -52,7 +52,11 @@ def _literature() -> list[dict]:
 def _paper(tmp_path: Path) -> Path:
     path = tmp_path / "paper" / "paper.md"
     path.parent.mkdir(parents=True)
-    path.write_text((FIXTURE / "paper.md").read_text(encoding="utf-8"), encoding="utf-8")
+    # The replayed paper is from before FI's blocks left the paper: as FI leaves a paper now, without them (the checks
+    # take them out before they read it).
+    from core.disclosure import without_block
+
+    path.write_text(without_block((FIXTURE / "paper.md").read_text(encoding="utf-8")), encoding="utf-8")
     return path
 
 
