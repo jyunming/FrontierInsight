@@ -118,7 +118,7 @@ def test_a_value_with_no_number_in_some_trials_is_counted_and_is_a_required_item
     # only where SOME trials have no value is it a required item; where none has one it is the value's definition there
     assert [i.id for i in items] == ["undefined-power"]
     said = items[0].sentence
-    assert said == "`power` has no value in 3 of 20 trials at d=1." and "d=0" not in said
+    assert said == "\"power\" has no value in 3 of 20 trials at d=1." and "d=0" not in said
     assert tc.Undefined("d=0", "power", 20, 20).says() == "`power` has no value at d=0 by its definition: every trial there"
     # a number the plan says has no value there is not said again
     proto["metrics"][0]["undefined_when"] = {"d": [0]}
@@ -295,4 +295,4 @@ def test_a_real_fdr_record_with_3_of_40_trials_undefined_at_one_setting_still_re
     root = tmp_path / "q"
     tc.write_record(root, v.record())
     [item] = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.UNDEFINED]
-    assert item.sentence == f"`power` has no value in 3 of 40 trials at {target['key']}."
+    assert item.sentence == f"\"power\" has no value in 3 of 40 trials at {target['key']}."
