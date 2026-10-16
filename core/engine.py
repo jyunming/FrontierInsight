@@ -29816,8 +29816,50 @@ def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
             # What the paper copy changed (sizes in inches, text sizes in pt) stays in the file for a person: its
             # numbers are not the figure's, and the number check would otherwise trace a paper's "6.3" or "15" to them.
             data.pop("paper", None)
+            _attach_unlabelled_lines(data, folder / f"{Path(name).stem}.seed0.json")
             records[name] = data
     return records
+
+
+#: matplotlib's names for a line style that is not a solid line, as a reader calls it.
+_NOT_SOLID = {"--": "dashed", "dashed": "dashed", ":": "dotted", "dotted": "dotted", "-.": "dash-dotted",
+              "dashdot": "dash-dotted"}
+
+
+def _attach_unlabelled_lines(record: dict[str, Any], lines_path: Path) -> None:
+    """Add to each panel of ``record`` the dashed, dotted or dash-dotted lines the figure draws that its legend does not
+    name, as ``unlabelled_lines`` (``style``, ``count``, ``min``, ``max`` of their y values), from the full line list the
+    recorder keeps next to it (``<stem>.seed0.json``). The series list holds the labelled series only, so a theory or
+    reference line drawn without a label was nowhere in the record, and a caption could deny it unchecked. A solid
+    unlabelled line (a family of runs), a marker or an error-bar cap is not one. Nothing is added when the line list is
+    missing or does not match the panels."""
+    try:
+        full = json.loads(lines_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    panels, drawn = record.get("axes"), full.get("axes") if isinstance(full, dict) else None
+    if not isinstance(panels, list) or not isinstance(drawn, list) or len(panels) != len(drawn):
+        return
+    for panel, got in zip(panels, drawn):
+        if not isinstance(panel, dict) or not isinstance(got, dict):
+            continue
+        groups: dict[str, dict[str, Any]] = {}
+        for line in got.get("lines") or []:
+            if not isinstance(line, dict) or not str(line.get("label") or "").startswith("_"):
+                continue
+            style = _NOT_SOLID.get(str(line.get("linestyle")))
+            if style is None or str(line.get("marker") or "None").lower() not in ("none", "", " ") \
+                    or len(line.get("x") or []) < 2:
+                continue
+            ys = [float(v) for v in line.get("y") or []
+                  if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+            if not ys:
+                continue
+            group = groups.setdefault(style, {"style": style, "count": 0, "min": min(ys), "max": max(ys)})
+            group["count"] += 1
+            group["min"], group["max"] = min(group["min"], min(ys)), max(group["max"], max(ys))
+        if groups:
+            panel["unlabelled_lines"] = list(groups.values())
 
 
 def _record_numbers(record: Any) -> list[tuple[float, ...]]:
@@ -30029,6 +30071,10 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
             series.append(f"{s.get('label')} {span}{tail}")
         if series:
             bits.append("series: " + "; ".join(series))
+        for group in ax.get("unlabelled_lines") or []:
+            k = int(group["count"])
+            bits.append(f'also draws {k} {group["style"]} line{"s" if k > 1 else ""} with no legend label '
+                        f'({group["min"]:.3g} to {group["max"]:.3g})')
         if bits:
             panels.append(", ".join(bits))
     note = (" — " + " | ".join(panels)) if panels else ""

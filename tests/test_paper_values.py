@@ -268,3 +268,75 @@ def test_sheet_cap_keeps_the_grammar_and_the_pooled_lines(s2):
 
 def test_sheet_without_records_says_so():
     assert "none" in pv.sheet(None)
+
+
+# --- a value each setting sets (a theory line) has no pooled value -------------------------------------------------
+# A paper compared the pooled empirical SD of Ea at n = 40 (1.024) with the mean over noise levels of the theory SD
+# (0.8023) and wrote "the empirical sd lay above theory at both". Setting by setting, the SD at n = 40 is 0.914 to
+# 0.927 of theory, below it at every noise level. The pooled SD is an RMS over the noise levels and the theory's mean
+# is an arithmetic mean of values that differ ten-fold, so the pooled comparison reads "above" by construction.
+
+GRID = "sigma={s}, n_points={n}"
+
+
+@pytest.fixture()
+def s5(tmp_path):
+    return _records("s5_kinetics_trials.json", tmp_path)
+
+
+def test_a_value_each_setting_sets_has_no_pooled_mean(s5):
+    for form in ("", ":mean_ci", ":sd", ":se"):
+        got = pv.resolve(f"Ea_sd_theory{form} @ sigma=all, n_points=40", s5)
+        assert not got.filled, form
+        assert "differs between the settings" in got.hit.reason and "ratio" in got.hit.reason
+
+
+def test_a_ratio_to_the_pooled_theory_is_not_filled_either(s5):
+    for key in ("Ea_hat:sd @ sigma=all, n_points=40 | ratio Ea_sd_theory",
+                "Ea_hat:sd @ sigma=all, n_points=40 | diff Ea_sd_theory",
+                "Ea_hat:sd @ sigma=0.1, n_points=all | ratio Ea_sd_theory",
+                "Ea_sd_theory @ sigma=each, n_points=all | max"):
+        assert not pv.resolve(key, s5).filled, key
+
+
+def test_the_theory_at_one_setting_and_the_ratio_over_the_settings_fill(s5):
+    one = pv.resolve("Ea_sd_theory @ sigma=0.1, n_points=40", s5)
+    assert one.filled and one.text == "2.168"
+    rng = pv.resolve("Ea_hat:sd @ sigma=each, n_points=40 | ratio Ea_sd_theory | range", s5)
+    assert rng.filled and rng.text == "0.914 to 0.927"  # below theory at every noise level
+    five = pv.resolve("Ea_hat:sd @ sigma=each, n_points=5 | ratio Ea_sd_theory | range", s5)
+    assert five.filled and five.text == "1.20 to 1.26"  # above it at every noise level
+    assert pv.resolve("Ea_hat:sd @ sigma=0.05, n_points=40 | ratio Ea_sd_theory", s5).filled
+
+
+def test_a_value_that_is_the_same_at_every_setting_still_has_a_pooled_mean(s5):
+    assert pv.resolve("Ea_true @ sigma=all, n_points=all", s5).text == "50.00"
+    assert pv.resolve("corr_b0_b1_theory @ sigma=all, n_points=40", s5).filled
+    # A count of trials is not a mean of references.
+    assert pv.resolve("Ea_sd_theory:n @ sigma=all, n_points=40", s5).filled
+
+
+def test_a_measured_value_with_one_trial_per_setting_is_not_taken_for_a_reference():
+    cells = [{"cell": {"h": h}, "key": f"h={h}", "planned": 1, "ok": 1, "failed": 0,
+              "metrics": {"err": {"values": [h * 2.0]}}} for h in (0.1, 0.2, 0.4)]
+    rec = pv.from_cells(cells)
+    got = pv.resolve("err @ h=all", rec)
+    assert got.filled and got.text == "0.4667"
+
+
+def test_a_measured_value_that_varies_between_trials_is_not_a_reference(s5):
+    assert pv.resolve("Ea_hat @ sigma=all, n_points=40", s5).filled
+    assert pv.resolve("cover_Ea @ sigma=all, n_points=40", s5).filled
+
+
+def test_the_sheet_does_not_offer_a_pooled_theory_and_says_how_to_compare(s5):
+    text = pv.sheet(s5, max_lines=10_000)
+    assert "{{v:Ea_sd_theory:mean_ci @ sigma=all" not in text and "{{v:Ea_sd_theory @ sigma=all" not in text
+    assert "{{v:Ea_sd_theory @ sigma=0.1, n_points=40}} -> 2.168" in text  # no interval around a value a setting sets
+    assert "Ea_sd_theory" in text.split("Compare with a value each setting sets")[1]
+    keys = [k for k in __import__("re").findall(r"\{\{v:[^{}]+\}\}", text) if "<" not in k]
+    assert all(pv.resolve(k, s5).filled for k in keys)
+
+
+def test_a_study_with_no_such_value_gets_no_extra_sheet_line(s2):
+    assert "Compare with a value each setting sets" not in pv.sheet(s2)
