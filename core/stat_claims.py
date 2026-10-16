@@ -729,6 +729,8 @@ class SeedRecords:
     driving_seeds: tuple[tuple[str, int], ...] = ()
     #: Why it does not reach, in plain words.
     why: str = ""
+    #: The verdict itself (``reaches`` / ``does_not_reach`` / ``partly`` / ``unknown`` / ``no_entry``).
+    verdict: str = ""
 
 
 def seed_records(quest_root: Path) -> SeedRecords:
@@ -754,7 +756,31 @@ def seed_records(quest_root: Path) -> SeedRecords:
     return SeedRecords(base_seed=base, trial_seeds=trials, code_seeds=tuple(code),
                        fi_seed_reaches=verdict["fi_seed_reaches"],
                        driving_seeds=tuple((d["where"], d["value"]) for d in verdict.get("driving_seeds") or []),
-                       why=str(verdict.get("why") or ""))
+                       why=str(verdict.get("why") or ""), verdict="" if verdict.get("verdict") == "no_entry" else str(verdict.get("verdict") or ""))
+
+
+def _check_unknown_seeds(sents: list[str], seeds: SeedRecords) -> list[StatFinding]:
+    """FI cannot tell from the code whether the seed it gives each trial reaches the simulation: a sentence saying the
+    trials are seeded from FI's base seed (or from FI's seeds: the base seed, a trial seed) claims what nobody knows."""
+    fi_numbers = set(seeds.trial_seeds) | ({seeds.base_seed} if seeds.base_seed is not None else set())
+    out: list[StatFinding] = []
+    for s in sents:
+        hit = next((m for m in _FI_SEED.finditer(s)), None)
+        if hit is None:
+            hit = next((m for m in [*_BASE_SEED.finditer(s), *_ONE_SEED.finditer(s)]
+                        if int(m.group(1)) in fi_numbers), None)
+        if hit is None:
+            continue
+        out.append(StatFinding(
+            kind="seed_not_recorded",
+            message=(
+                f"the paper says the trials are seeded from FI's seeds, but FI could not tell from the code whether the "
+                f"seed it gives each trial reaches the simulation ({seeds.why or 'FI cannot follow it'}). Write "
+                f"{{{{seed}}}} and FI puts in what it knows."
+            ),
+            context=_ctx(s, hit.start()),
+        ))
+    return out
 
 
 def _check_seeds(sents: list[str], seeds: SeedRecords | None, values: dict[str, float]) -> list[StatFinding]:
@@ -768,6 +794,8 @@ def _check_seeds(sents: list[str], seeds: SeedRecords | None, values: dict[str, 
     where: dict[int, str] = {}
     for loc, value in seeds.code_seeds:
         where.setdefault(value, loc)
+    if seeds.verdict == "unknown":
+        return _check_unknown_seeds(sents, seeds)
     # The seed FI gives each trial does not reach the code: only the seeds written into the code that seed the trials'
     # generators are the run's (a self-check's own seed elsewhere in the code is not).
     ignored = seeds.fi_seed_reaches is False
