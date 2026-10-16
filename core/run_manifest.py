@@ -1566,6 +1566,25 @@ def differences(
     return out
 
 
+def confirmed(suspects: list[Any], differences: list[dict[str, Any]]) -> list[str]:
+    """Which of the grid values the analysis MAY leave out (``suspects``: :func:`core.protocol_check.analysis_suspects`) FI
+    counted as left out of what the analysis reports (``differences``: :func:`differences`, the settings whose trials the
+    analysis lists fewer of than FI's record holds). One sentence each; empty when FI's record shows every one of those
+    settings reported. A value the analysis names a subset without is not a difference until FI's own count says so."""
+    short = [str(s.get("setting")) for d in differences for s in d.get("short") or []]
+    out: list[str] = []
+    for suspect in suspects:
+        axis, left_out = str(suspect.name), list(suspect.left_out())
+        hit = [v for v in left_out if any(
+            (cell := _parse_cell(key)) is not None and axis in cell
+            and (n := _num(_coerce_number(cell[axis]))) is not None and math.isclose(n, float(v), rel_tol=1e-9, abs_tol=1e-12)
+            for key in short)]
+        if hit:
+            out.append(f"the analysis names {axis} as {_fmt(suspect.found)} and FI's record shows it reports no trials "
+                       f"for {axis} = {_fmt(hit)}")
+    return out
+
+
 def _settings_phrase(settings: list[dict[str, Any]], *, limit: int = 4) -> str:
     names = [f"`{s['setting']}`" for s in settings]
     shown = ", ".join(names[:limit])
