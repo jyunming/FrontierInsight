@@ -94,3 +94,73 @@ def test_the_browser_fallback_runs_stop_a_hung_browser_at_their_timeout(tmp_path
     while _alive(child) and time.monotonic() < deadline:
         time.sleep(0.2)
     assert not _alive(child)
+
+
+# ---------------------------------------------------------------------------
+# After a timeout, or an exit 0 with no PDF, the paper is made by the browser, marked
+
+
+def _generator_with_a_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_run):  # noqa: ANN001, ANN202
+    import generation._html_pdf as html_mod
+    import generation.paper as paper_mod
+    from core.config import Config
+    from generation.paper import PaperGenerator
+    from tests.paper_fakes import fake_pandoc
+
+    monkeypatch.setattr(paper_mod, "find_pandoc", lambda _root: "/fake/pandoc")
+    monkeypatch.setattr(PaperGenerator, "_find_pdf_engine", lambda self: ("pdflatex", "/fake/pdflatex"))
+    monkeypatch.setattr(PaperGenerator, "_find_unicode_engine", lambda self, engine: None)
+    monkeypatch.setattr(html_mod, "find_html_browser", lambda: ("edge", "/fake/edge"))
+    banners: list[str] = []
+
+    def fake_html_render(paper_md, out_pdf, **kw):  # noqa: ANN001, ANN003
+        banners.append(kw.get("not_typeset") or "")
+        out_pdf.write_bytes(b"%PDF-1.4 fallback")
+        return out_pdf, ""
+
+    monkeypatch.setattr(html_mod, "render_paper_html_pdf", fake_html_render)
+    fake_pandoc(monkeypatch, fake_run)
+    cfg = Config.model_validate({"topic": "t", "title": "t", "output": {"output_dir": str(tmp_path / "o")}})
+    md = tmp_path / "paper.md"
+    md.write_text("# A Paper\n\n## Abstract\n\nShort.\n\n## Results\n\nOne result.\n", encoding="utf-8")
+    return PaperGenerator(cfg), md, banners
+
+
+def test_a_latex_timeout_leaves_a_browser_made_paper_marked_not_typeset(tmp_path: Path, monkeypatch) -> None:
+    def hung(cmd, **_kw):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=300)
+
+    gen, md, banners = _generator_with_a_browser(tmp_path, monkeypatch, hung)
+    out = tmp_path / "out"
+    out.mkdir()
+    pdf, skip = gen._compile_pdf(md, out)
+    assert skip is None and pdf is not None and pdf.read_bytes().startswith(b"%PDF")
+    record = gen.last_render
+    assert record["typeset"] is False and "did not finish within 300 s" in record["reason"]
+    assert banners and "did not finish" in banners[0]
+
+
+def test_latex_exiting_0_without_a_pdf_leaves_a_browser_made_paper_marked_not_typeset(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    gen, md, _banners = _generator_with_a_browser(
+        tmp_path, monkeypatch, lambda cmd, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    pdf, skip = gen._compile_pdf(md, out)
+    assert skip is None and pdf is not None
+    assert gen.last_render["typeset"] is False and "wrote no PDF" in gen.last_render["reason"]
+
+
+def test_a_latex_timeout_still_gives_the_page_check_a_count(tmp_path: Path, monkeypatch) -> None:
+    def hung(cmd, **_kw):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=300)
+
+    gen, md, _banners = _generator_with_a_browser(tmp_path, monkeypatch, hung)
+    scratch = tmp_path / "count"
+    scratch.mkdir()
+    pdf, why, record = gen.compile_for_page_count(md, scratch)
+    assert pdf is not None and why == "" and record["typeset"] is False

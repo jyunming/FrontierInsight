@@ -1816,8 +1816,17 @@ class PaperGenerator:
                 ),
             )
         except subprocess.TimeoutExpired:
+            # The engine and everything it started are stopped (``_run_pandoc``). The
+            # paper is then made by the browser, marked not typeset, like any other
+            # LaTeX failure, so a hung engine still leaves a paper and a page count.
+            why = f"{engine_name} did not finish within {timeout_s} s"
+            _log.warning("paper.pdf: %s; the paper is not typeset", why)
+            pdf = self._try_html_pdf_fallback(paper_md, out_dir, pandoc_exe, why=why)
+            if pdf is not None:
+                return pdf, None
             msg = f"{engine_name} timeout (>{timeout_s}s); paper.pdf skipped"
             _log.warning(msg)
+            self._note("none", typeset=False, reason=why)
             return None, _PdfSkipReason(
                 code=f"{engine_name}_timeout",
                 summary=msg,
@@ -1914,11 +1923,17 @@ class PaperGenerator:
                 ),
             )
         if not out_pdf.exists():
+            why = f"{engine_name} exited 0 but wrote no PDF"
+            _log.warning("paper.pdf: %s; the paper is not typeset", why)
+            pdf = self._try_html_pdf_fallback(paper_md, out_dir, pandoc_exe, why=why, rc=0)
+            if pdf is not None:
+                return pdf, None
             msg = (
                 f"{engine_name} rc=0 but {out_pdf.name} not on disk; "
                 f"paper.pdf skipped."
             )
             _log.warning(msg)
+            self._note("none", typeset=False, rc=0, reason=why)
             return None, _PdfSkipReason(
                 code="output_missing_after_success",
                 summary=msg,
