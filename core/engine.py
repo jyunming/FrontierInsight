@@ -29752,6 +29752,13 @@ def _figure_list_for_prompt(state: QuestState) -> str:
             )
         else:
             lines.append(f"- figures/{f}" + _figure_record_note(records.get(f), n_seeds=n_seeds))
+    if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
+           if isinstance(ax, dict)):
+        lines.append(
+            "Where a panel sits (left, right, top, bottom) is FI's record of the saved figure: a caption or sentence "
+            "that points to a panel by place uses these words, and one that does not need them names the panel by "
+            "what it shows."
+        )
     if any((records.get(f) or {}).get("replicate_mean") for f in figs):
         lines.append(
             "A figure drawn as the mean of several seeds shows each line at its mean, "
@@ -30053,6 +30060,26 @@ def _figure_overlap_directive(findings: list[str]) -> str:
     )
 
 
+_PANEL_ROWS = {2: ("top", "bottom"), 3: ("top", "middle", "bottom")}
+_PANEL_COLS = {2: ("left", "right"), 3: ("left", "centre", "right")}
+
+
+def _panel_place(grid: Any) -> str:
+    """Where a panel sits on its figure, in a caption's words ("left", "top right", "row 2 of 4"), from the cell of the
+    subplot grid the saved figure put it in (``[rows, cols, row start, row stop, col start, col stop]``, recorded on
+    savefig by core/plot_style.py); "" for a figure's only panel, a panel that spans the grid, or no grid recorded."""
+    if not (isinstance(grid, list) and len(grid) == 6 and all(isinstance(v, int) for v in grid)):
+        return ""
+    rows, cols, r0, r1, c0, c1 = grid
+
+    def axis(n: int, start: int, stop: int, named: dict[int, tuple[str, ...]], kind: str) -> str:
+        if n <= 1 or (start == 0 and stop >= n) or not 0 <= start < n:
+            return ""
+        return named[n][start] if n in named else f"{kind} {start + 1} of {n}"
+
+    return " ".join(w for w in (axis(rows, r0, r1, _PANEL_ROWS, "row"), axis(cols, c0, c1, _PANEL_COLS, "column")) if w)
+
+
 def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None) -> str:
     """What a figure draws, for the writer: each panel's title, y axis and series.
     ``n_seeds`` is how many replicate seeds ran, when known."""
@@ -30061,6 +30088,9 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
         if not isinstance(ax, dict):
             continue
         bits = [f'"{ax["title"]}"'] if ax.get("title") else []
+        where = _panel_place(ax.get("grid"))
+        if where:
+            bits.insert(0, f"{where} panel")
         ylim = ax.get("ylim") or []
         if len(ylim) == 2:
             bits.append(
