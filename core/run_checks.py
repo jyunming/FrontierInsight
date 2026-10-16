@@ -547,7 +547,8 @@ class RunChecksMixin:
                 # so the plan's minimum stands and the run is nearest the limit there, over it (said in the paper). Only a
                 # run over FI's own limit stops.
                 floor = _estimate.runs_floor(protocol, runs, est.spreads) if _estimate.floor_is_stated(protocol) else runs
-                least = min(_estimate.MIN_RUNS_FOR_LIMIT, runs)
+                floor = min(runs, max(floor, _estimate.runs_checks_need(protocol, grid)))  # what the plan's checks need
+                least = _estimate.fewest_for_topic(protocol, grid, runs)
                 fewest = _estimate.seconds_at(grid, least, runs, runner.deterministic, probes) or 0.0
                 at_floor = _estimate.seconds_at(grid, floor, runs, runner.deterministic, probes) or est.seconds
                 if at_floor * _estimate.SAFETY <= hard_s:
@@ -916,7 +917,7 @@ class RunChecksMixin:
                      "not fully done.")
         elif not _estimate.floor_is_stated(protocol) and topic and not over_topic:
             note += (" The plan states no fewest number of runs per setting; for the topic's own limit FI goes down to "
-                     f"{_estimate.MIN_RUNS_FOR_LIMIT} at the least.")
+                     f"{_estimate.fewest_for_topic(protocol, grid, runs)} at the least.")
         precision = _estimate.expected_precision(protocol, fewer, est.spreads) if fit.precision_known else None
         if precision is not None:
             note += (f" With {fewer} runs per setting, the 95% interval of `{precision['metric']}` is about "

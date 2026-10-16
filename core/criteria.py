@@ -236,6 +236,15 @@ def declared(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     return repair(items, protocol)[0] if items not in (None, "", []) else []
 
 
+def runs_per_setting_needed(protocol: dict[str, Any] | None, cells: int) -> int:
+    """The fewest runs per setting the plan's criteria need to be judged at all (0 when none needs any): a ``trials``
+    criterion counts only settings of :data:`MIN_PER_SETTING` trials or more, and :data:`MIN_TRIALS` such trials in all,
+    over ``cells`` settings. A run made smaller for time never goes below it (``core.run_estimate.fit_runs``)."""
+    if not any(c.get("trials") for c in declared(protocol)):
+        return 0
+    return max(MIN_PER_SETTING, math.ceil(MIN_TRIALS / max(1, int(cells))))
+
+
 def from_checks(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Criteria made from the plan's own checks against known answers, without asking a model: one per check FI runs
     itself (a ``case`` and a ``measure``) that can be judged, in the order the plan declares them, at most :data:`MAX`.

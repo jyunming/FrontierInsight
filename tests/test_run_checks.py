@@ -790,3 +790,20 @@ def test_a_grid_too_large_to_list_ends_the_execute_step_in_the_plain_stop(tmp_pa
     assert isinstance(exc, ValueError)
     patch = eng._stop_too_long(str(exc))
     assert patch["exec_result"]["too_long"] == "the plan asks for 9 settings" and patch["exec_give_up_reason"]
+
+
+_TRIALS_CRITERION = {"criteria": [{"name": "se rate", "trials": "x", "direction": "target", "target": 0.5, "tolerance": 0.1},
+                                  {"name": "se rate 2", "trials": "y", "direction": "target", "target": 0.5, "tolerance": 0.1}]}
+
+
+def test_the_topics_cut_never_goes_below_what_the_plans_checks_need_nor_below_ten() -> None:
+    # 27 settings: the standard-error criterion needs 32 trials per setting (and 256 in all), so 24 is not allowed
+    assert _fit({}, 60.0, topic=True).runs == 24
+    assert _fit(_TRIALS_CRITERION, 60.0, topic=True) is None
+    assert _fit(_TRIALS_CRITERION, 80.0, topic=True).runs == 48
+    assert run_estimate.runs_checks_need(_TRIALS_CRITERION, _K_GRID) == 32
+    assert run_estimate.runs_checks_need({}, _K_GRID) == 0
+    # a plan whose own minimum is 5: the topic's limit still goes no lower than 10 (7 would fit 47 s)
+    assert _fit({"min_runs_per_setting": 5}, 47.0, topic=True) is None
+    # FI's own limit keeps the plan's minimum, and what the checks need
+    assert _fit({**_TRIALS_CRITERION, "min_runs_per_setting": 5}, 60.0) is None

@@ -74,8 +74,8 @@ MAX_AXES = 6
 #: most :data:`TIMING_TRIALS` in all: one short trial on a coarse clock measured nothing (r12: 0 or 16 ms for a 4 ms trial).
 TIMING_LATER_S = 1.0
 TIMING_TRIALS = 2000
-#: The fewest runs per setting FI goes down to for the topic's own time limit: below the plan's minimum when the plan states
-#: one, and the floor when it states none. The paper names every such cut (``core.paper_facts.FEWER_RUNS``).
+#: The fewest runs per setting FI goes down to for the topic's own time limit, whatever the plan states (and never below what
+#: the plan's checks need, :func:`runs_checks_need`). The paper names every such cut (``core.paper_facts.FEWER_RUNS``).
 MIN_RUNS_FOR_LIMIT = 10
 RECORD = Path(".fi") / "run_estimate.json"
 
@@ -849,6 +849,20 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
     return min(int(before_runs), floor)
 
 
+def runs_checks_need(protocol: dict[str, Any] | None, grid: dict[str, list[Any]]) -> int:
+    """The most runs per setting any check of the plan needs to be judged (``core.criteria.runs_per_setting_needed``: a
+    standard-error criterion needs 32 per setting); 0 when none needs any."""
+    from .criteria import runs_per_setting_needed
+
+    return runs_per_setting_needed(protocol, cell_count(grid) if grid else 1)
+
+
+def fewest_for_topic(protocol: dict[str, Any] | None, grid: dict[str, list[Any]], runs: int) -> int:
+    """The fewest runs per setting the topic's own limit may take a run down to: :data:`MIN_RUNS_FOR_LIMIT`, or what the
+    plan's checks need when that is more (:func:`runs_checks_need`), never more than the run already has."""
+    return min(int(runs), max(MIN_RUNS_FOR_LIMIT, runs_checks_need(protocol, grid)))
+
+
 def floor_is_stated(protocol: dict[str, Any] | None) -> bool:
     """Whether the plan itself states how few runs per setting it may have (`protocol.min_runs_per_setting`, or a precision
     target): only then may FI lower the runs to fit its own limit (``execution.timeout_s``). The topic's own time limit is
@@ -893,7 +907,8 @@ def fit_runs(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
     states one: FI invents no number of runs for its own limit, and with a target on a mean whose spread is not known it
     does not cut at all). For the limit the topic itself states (``topic_limit``) the runs may go down to
     :data:`MIN_RUNS_FOR_LIMIT`, below the plan's minimum or with none stated: the topic's limit comes before the plan's
-    runs, and the paper names the cut with its numbers. The result is timed again before it is used."""
+    runs, and the paper names the cut with its numbers. Neither goes below the runs the plan's checks need to be judged
+    (:func:`runs_checks_need`). The result is timed again before it is used."""
     if deterministic or int(runs) <= 1 or not probes:
         return None
     known = precision_known(protocol, spreads)
@@ -908,7 +923,11 @@ def fit_runs(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
         floor = min(int(runs), stated) if stated is not None else None
         if not topic_limit:
             return None  # FI's own limit never cuts below a precision it cannot work out
-    lowest = min(MIN_RUNS_FOR_LIMIT, floor or MIN_RUNS_FOR_LIMIT) if topic_limit else floor
+    need = runs_checks_need(protocol, grid)
+    if topic_limit:
+        lowest: int | None = max(MIN_RUNS_FOR_LIMIT, need)
+    else:
+        lowest = None if floor is None else max(floor, need)
     if lowest is None or lowest >= int(runs):
         return None
 
