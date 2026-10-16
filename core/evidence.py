@@ -1,14 +1,14 @@
 """How much of a quest's result has been checked against something other than itself.
 
 A run used to end in one green state. The three stored SIR runs of one topic show why that misleads: each passed its number
-audit, its statistics audit and its provenance audit, and one of them had swept a different grid than the topic asked for, so a
-pass meant the paper copied the script's output faithfully and nothing more. The levels below are ordered, each needs the one
+and statistics audits, and one of them had swept a different grid than the topic asked for, so a pass meant the paper copied
+the script's output faithfully and nothing more. The levels below are ordered, each needs the one
 before it, and each says what it guarantees and what it does not (its *blind spots*), so a label never claims more than the
 checks behind it prove:
 
 * ``executed`` — the experiment ran to the end and printed results;
-* ``internally_reconciled`` — and the audits that compare the paper with those results (numbers, statistics, provenance) found
-  nothing: the paper says what the script printed;
+* ``internally_reconciled`` — and the checks that compare the paper with those results (the statistics it names and the
+  numbers it states, against FI's own records) found nothing: the paper says what the script printed;
 * ``protocol_runtime_matched`` — and the protocol was frozen before the run and is intact, the script held to it, the run's own
   manifest says it did what the protocol fixed, and no warning from its own numerics was accepted;
 * ``independently_validated`` — and the engine ran the simulation on each oracle's case and judged what it measured against
@@ -57,9 +57,9 @@ INFO: dict[str, dict[str, Any]] = {
         "artifacts": ["code/experiment.py"],
     },
     "internally_reconciled": {
-        "assurance_claim": "The number, statistics and provenance audits found the paper faithful to what the script printed.",
-        "known_blind_spots": ["The script itself may be wrong: the audits compare the paper with the script's output, not with reality."],
-        "artifacts": ["paper/numeric_audit.json", "paper/statistics_audit.json", "paper/provenance_audit.json"],
+        "assurance_claim": "FI's checks of the paper's numbers and statistics found the paper faithful to what the script printed.",
+        "known_blind_spots": ["The script itself may be wrong: the checks compare the paper with the script's output, not with reality."],
+        "artifacts": ["paper/statistics_audit.json", ".fi/paper_record_check.json"],
     },
     "protocol_runtime_matched": {
         "assurance_claim": (
@@ -156,38 +156,27 @@ def _json(path: Path) -> Any:
         return None
 
 
-def _audit_gaps(paper_dir: Path) -> tuple[bool, list[str]]:
-    """Whether the paper-vs-results audits all ran and passed, and what they found.
+def _audit_gaps(quest_root: Path) -> tuple[bool, list[str]]:
+    """Whether the paper-vs-results checks ran and passed, and what they found.
 
-    Each of the three writes its report even when it finds nothing (a clean run leaves evidence the check ran), and marks
-    itself ``skipped`` when there was nothing for it to check (a survey with no numeric results, say) — that is a legitimate
-    outcome, not a gap. A report missing altogether means its check never ran (it crashed before it could write one): when
-    none of the three ran, that is simply a quest that has not reached this stage yet, said once, plainly; when only SOME
-    are missing, that is the suspicious pattern (one audit's clean report standing in for two that never ran), named for
-    each one that is missing.
+    The statistics check writes its report on every review, even when it finds nothing (a clean run leaves evidence the check
+    ran), and marks itself ``skipped`` when there was nothing for it to check; that is a legitimate outcome, not a gap, but
+    not a pass either. The check of the paper's numbers against FI's records (core/paper_facts.py) keeps what it found in
+    ``.fi/paper_record_check.json`` and removes it when the paper is clean: what remains in it after the last review is a point
+    of the paper that still disagrees with FI's records (a typed number no record backs, a key FI could not fill).
+    A report that is missing altogether means the review has not checked this paper yet, said once, plainly.
     """
-    ran = present = 0
+    report = _json(quest_root / "paper" / "statistics_audit.json")
+    if not isinstance(report, dict):
+        return False, ["the paper has not been checked against the results yet"]
     gaps: list[str] = []
-    missing: list[str] = []
-    for name, label in (("numeric_audit", "the number check"), ("statistics_audit", "the statistics check"),
-                        ("provenance_audit", "the provenance check")):
-        report = _json(paper_dir / f"{name}.json")
-        if not isinstance(report, dict):
-            missing.append(label)
-            continue
-        present += 1
-        if report.get("skipped"):
-            continue
-        ran += 1
-        if report.get("ok") is False:
-            findings = report.get("findings") or []
-            gaps.append(f"{label} reported {len(findings)} finding(s)")
-    if missing:
-        if present == 0:
-            gaps.append("the paper has not been checked against the results yet")
-        else:
-            gaps.extend(f"{label} did not run, or its report could not be read" for label in missing)
-    return ran > 0 and not gaps and not missing, gaps
+    if not report.get("skipped") and report.get("ok") is False:
+        gaps.append(f"the statistics check reported {len(report.get('findings') or [])} finding(s)")
+    record = _json(quest_root / ".fi" / "paper_record_check.json")
+    hits = record.get("hits") if isinstance(record, dict) else None
+    if isinstance(hits, list) and hits:
+        gaps.append(f"the check of the paper's numbers against FI's records reported {len(hits)} finding(s)")
+    return not report.get("skipped") and not gaps, gaps
 
 
 #: Steps a finished quest that wrote a paper has completed; a seal without them sealed an incomplete run.
@@ -352,7 +341,7 @@ def assess(
         gaps["executed"].append("the experiment has not produced results (it has not run, or it failed)")
 
     # internally reconciled
-    audits_ok, audit_gaps = _audit_gaps(quest_root / "paper")
+    audits_ok, audit_gaps = _audit_gaps(quest_root)
     reconciled = executed and audits_ok
     if executed and not audits_ok:
         gaps["internally_reconciled"] += audit_gaps or ["the paper has not been checked against the results yet"]

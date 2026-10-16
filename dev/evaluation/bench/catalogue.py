@@ -63,7 +63,7 @@ CATALOGUE: dict[str, Error] = {e.id: e for e in (
           note="FI runs every trial itself, so a script cannot run fewer; it can only drop some of FI's values, which "
                "the trial record and the declared estimators see"),
     Error("S2", "multiple comparisons: the best of 20 groups with an uncorrected p-value", "answer", "the write answer",
-          ("numbers",), note="core/stat_claims.py; Holm within each family"),
+          ("numbers",), note="the claim check and core/stat_claims.py; Holm within each family"),
     Error("S3", "the design changed after the results were seen (a threshold moved)", "redesign",
           "a design answer inside cross_check -> design or review -> design", ("protocol", "trace"),
           note="not by --from design: the rerun itself records the replaced protocol as a post-hoc amendment, which "
@@ -84,9 +84,9 @@ CATALOGUE: dict[str, Error] = {e.id: e for e in (
           "literature", note="sources are data, not instructions; a hidden instruction is flagged"),
     # --- the paper against the run -------------------------------------------------------------------------------
     Error("R1", "a number in the paper that is not the run's", "edit", "paper/paper.md", ("numbers",), "claims",
-          planter=True, note="number_provenance, numeric_oracle"),
+          planter=True, note="the paper types no result number: a typed one is found by core/typed_numbers.py"),
     Error("R2", "a number the results have no source for", "answer", "the write answer", ("numbers",), "writing",
-          planter=True, note="number_provenance"),
+          planter=True, note="core/typed_numbers.py"),
     Error("R3", "a textbook value presented as the run's result", "answer", "the write answer", ("numbers",), "writing",
           note="number_provenance: whether it can tell is not yet known"),
     # --- a search for the best design ----------------------------------------------------------------------------

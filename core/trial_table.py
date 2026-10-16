@@ -12,8 +12,7 @@ and its truth, a power from two counts) is not here; the table covers what the t
 that is the same in every trial of every setting (a setting echoed back, a constant) and a trial index are left out:
 they have no spread to report.
 
-Written to ``paper/results_table.md`` beside the paper, given to the writer while it is short enough, and read by
-the provenance check as numbers the run computed.
+Written to ``paper/results_table.md`` beside the paper and given to the writer while it is short enough.
 """
 
 from __future__ import annotations
@@ -133,12 +132,6 @@ def rows(quest_root: Path) -> list[dict[str, Any]]:
     return rows_of(summaries(_record(quest_root)))
 
 
-def settings(table: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Each row's setting label with its settings (``{"m=20,pi1=0.2": {"m": 20, "pi1": 0.2}}``), for the provenance
-    check's reading of which setting a sentence or a table row names."""
-    return {r["setting"]: dict(r.get("cell") or {}) for r in table}
-
-
 def _num(x: Any) -> str:
     return "" if x is None else f"{x:.6g}"
 
@@ -173,16 +166,9 @@ def write(quest_root: Path) -> list[dict[str, Any]]:
     return table
 
 
-def traceable(table: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """The rows by ``setting.value``, for the provenance check: numbers the run computed."""
-    return {f"{r['setting']}.{r['metric']}": {k: r[k] for k in ("n", "mean", "sd", "ci_lower", "ci_upper")
-                                               if r[k] is not None}
-            for r in table}
-
-
 def write_note(table: list[dict[str, Any]]) -> str:
     """The writer's note: the table itself, while it has at most ``WRITER_MAX_ROWS`` rows; ``""`` otherwise (a longer
-    one stays in its file and in the provenance check)."""
+    one stays in its file)."""
     if not table or len(table) > WRITER_MAX_ROWS:
         return ""
     return ("FI's table of what every trial gave, per setting (also in paper/results_table.md). Take a number about "

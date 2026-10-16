@@ -39,7 +39,7 @@ import yaml
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterator, TypedDict, get_args
+from typing import Any, Awaitable, Callable, TypedDict, get_args
 
 # User-supplied async function that collects answers to clarify-node
 # questions. Receives the ``clarify_questions`` dict and must return
@@ -10682,12 +10682,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     figures = None  # the run drew none: a paper citing one is not judged here
             hits = _record_claims.contradictions(
                 text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
-                oracle=self._oracle_record_read(), figures_on_disk=figures,
-                left_out=(checked := _read_json_or_none_path(self.quest_root / "needs" / "RESULT_CHECK.json") or {}).get(
-                    "removed_values"),
-                left_out_why=checked.get("removed_why"),
-                left_out_typed=(_read_json_or_none_path(self.quest_root / "needs" / "TYPED_RESULTS_CHECK.json") or {}).get(
-                    "removed_values"))
+                oracle=self._oracle_record_read(), figures_on_disk=figures)
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
             self._log.warning("[record_check] could not compare the paper with FI's records (%r)", exc)
             return []
@@ -19684,8 +19679,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             evidence_note = f"{evidence_note}\n\n{run_note}".strip()
         if drafted_note := self._drafted_parts_note():
             evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
-        if numbers_note := self._analysis_numbers_note(state):
-            evidence_note = f"{evidence_note}\n\n{numbers_note}".strip()
         try:
             trial_rows = _trial_table.write(self.quest_root)
             try:  # every setting with its reference value (core/results_by_setting.py), for a table too long to give
@@ -21384,84 +21377,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             )
         return found
 
-    def _numeric_oracle_hits(
-        self, paper_md: str, state: QuestState,
-    ) -> list[str]:
-        """Deterministic number check; returns one advisory string per finding.
-
-        Runs on the FULL paper text, not the 16 000-character slice the
-        review prompt gets — a wrong number in a late results table is
-        exactly the kind this is here to catch.
-
-        Writes ``paper/numeric_audit.json`` either way, so a clean run
-        leaves evidence that the check ran rather than silence that could
-        equally mean it was skipped. Best-effort throughout: an oracle
-        failure must never be quest-fatal, because it would block a paper
-        over a bug in the checker rather than a bug in the paper.
-        """
+    def _reference_check_hits(self, state: QuestState) -> list[str]:
+        """A reference quantity of the results that is exactly 0 at every setting of a sweep (core/numeric_oracle.py): what a
+        root finder returning the trivial root of its bracket looks like. A check on the results, not on the paper; one
+        advisory string per finding, kept in the review as ``numeric_oracle_warnings``. Never raises."""
         try:
             from core import numeric_oracle
 
-            # A paper reports the mean over the seeds and its interval, which
-            # seed 0's RESULT_JSON does not hold.
-            intervals = _replicate_result_intervals(state)
-            results = {**(state.get("result_json") or {})}
-            if intervals:
-                results["mean_over_seeds"] = intervals
-            # The settings the run was given (the topic's grid, the design's
-            # variables and method): a paper that prints ``R0 = 1.5`` is
-            # quoting its setup, not a result that happens to sit near one.
-            report = numeric_oracle.check(
-                paper_md, results,
-                declared=numeric_oracle.declared_numbers(
-                    state.get("design"), state.get("topic"),
-                ),
-            )
+            findings = numeric_oracle.trivial_reference_findings(state.get("result_json"))
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
             self._log.warning("[numeric_oracle] check failed (%s); skipping", e)
             return []
-
-        try:
-            paper_dir = self.quest_root / "paper"
-            paper_dir.mkdir(parents=True, exist_ok=True)
-            (paper_dir / "numeric_audit.json").write_text(
-                json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as e:
-            self._log.warning("[numeric_oracle] could not write audit: %s", e)
-
-        if report.skipped:
-            self._log.info("[numeric_oracle] skipped — %s", report.skip_reason)
-            return []
-        if report.ok:
-            self._log.info(
-                "[numeric_oracle] %d paper numbers vs %d results: all consistent",
-                report.paper_numbers, report.result_numbers,
-            )
-            return []
-
-        for f in report.findings:
+        for f in findings:
             self._log.warning("[numeric_oracle] %s: %s", f.kind, f.describe())
-        # One hit per contradicted number, each naming the value and the
-        # result path, so the rewrite has something specific to act on
-        # instead of "a number is wrong somewhere".
-        #
-        # Labelled by the finding's OWN kind — ``transposed``,
-        # ``formula_slip`` (the paper's own arithmetic; no result path),
-        # ``near_miss``, ``trivial_reference`` — rather than one blanket
-        # ``unverified_number:`` prefix over all of them. That prefix
-        # argues with the trivial-reference finding it is pasted onto:
-        # "unverified_number: `deterministic_final_size` is exactly 0 at
-        # every one of its settings" describes a number that was in fact
-        # computed and exported correctly. What is unverified there is not
-        # the number but the bracket the root finder was handed, which is
-        # exactly what the finding's own text says. A label that
-        # contradicts the sentence under it makes the reader decide which
-        # half to believe, and the label is the half they read first.
-        return [
-            f"{f.kind}: {f.describe()}" for f in report.findings
-        ]
+        return [f"{f.kind}: {f.describe()}" for f in findings]
 
     def _statistics_claim_hits(
         self, paper_md: str, state: QuestState,
@@ -21472,8 +21401,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         whether it is the QUANTITY the paper says it is — a Bonferroni
         threshold printed as a p-value, an effect-size claim the run's own
         comparisons contradict, a t-interval labelled "exact binomial", a
-        figure's axis limit printed as a bin count, a major-outbreak
-        probability called the chance the disease vanishes.
+        major-outbreak probability called the chance the disease vanishes.
 
         Forced, unlike the numeric oracle: every finding is a recomputation
         against this run's own replicates that can NAME the contradiction,
@@ -21490,22 +21418,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             from core import stat_claims
 
             replicates = list(state.get("result_json_replicates") or [])
-            comparison_stats: dict[str, Any] = {}
-            if len(replicates) >= stat_claims.MIN_SEEDS:
-                # Uncapped, unlike the analyze aggregate: "for ALL pairwise
-                # comparisons" is a claim about every comparison, and the
-                # cap of 24 hid 12 of the 36 one real quest made.
-                comparison_stats = self._comparison_stats(
-                    state, replicates, max_effect_sizes=10**9, assertions=_replicate_assertions(state),
-                )
             report = stat_claims.check(
                 _paper_facts.without_blocks(paper_md),
                 result_json=state.get("result_json") or {},
                 intervals=_replicate_result_intervals(state),
-                comparison_stats=comparison_stats,
-                figure_records=state.get("figure_records") or {},
                 n_seeds=len(replicates),
-                seeds=stat_claims.seed_records(self.quest_root),
             )
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
             self._log.warning("[stat_claims] check failed (%s); skipping", e)
@@ -21608,150 +21525,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return _optimise_refine.hint(block)
         except Exception:  # noqa: BLE001 -- a hint
             return ""
-
-    def _provenance_report(self, text: str, state: QuestState) -> Any:
-        """``number_provenance.check`` of ``text`` against everything this run can account for: the results, the
-        replicates and their aggregates, the figures, the configuration, the design and the known-answer checks."""
-        from core import number_provenance
-
-        # FI's own tables of every setting are its record, printed: the check reads the writer's text.
-        text = _paper_facts.without_blocks(text)
-        replicates = list(state.get("result_json_replicates") or [])
-        assertions = _replicate_assertions(state)
-        comparison_stats: dict[str, Any] = {}
-        aggregate: dict[str, Any] = {}
-        if replicates:
-            aggregate = _aggregate_result_json_replicates(
-                replicates, assertions=assertions, kinds=_replicate_metric_kinds(state),
-            )
-        if len(replicates) >= 2:
-            comparison_stats = self._comparison_stats(
-                state, replicates, max_effect_sizes=10**9, assertions=assertions,
-            )
-        try:
-            config_dump: Any = self.config.model_dump(mode="json")
-        except Exception:  # noqa: BLE001 - the config is a convenience here
-            config_dump = None
-        try:  # FI's per-setting numbers, named by setting, and its own reference values (core/results_by_setting.py)
-            per_setting = _results_by_setting.provenance_inputs(
-                *_results_by_setting.from_quest(self.quest_root, self._protocol_block(state), self._judged_checks()))
-        except Exception as e:  # noqa: BLE001 - fall back to the trial table alone
-            self._log.warning("[number_provenance] FI's table of every setting could not be read (%s)", e)
-            per_setting = {"trial_table": _trial_table.traceable(_trial_table.rows(self.quest_root))}
-        return number_provenance.check(
-            text,
-            result_json=state.get("result_json") or {},
-            replicates=replicates,
-            intervals=_replicate_result_intervals(state),
-            aggregate=aggregate,
-            figure_records=state.get("figure_records") or {},
-            comparison_stats=comparison_stats,
-            config=config_dump,
-            design=state.get("design") or {},
-            oracle_checks=self._judged_checks(),
-            n_seeds=len(replicates),
-            optimisation=(_best_report.records(self.quest_root)
-                          if _optimise.block_of(self._protocol_block(state)) is not None else None),
-            run_facts=self._run_fact_numbers(state),
-            **per_setting,
-        )
-
-    def _run_fact_numbers(self, state: QuestState) -> dict[str, float]:
-        """The numbers FI's own record of the run accounts for: the measured run time, and every number FI fills into the
-        paper through a placeholder (the code's seed and where it is, the trial counts, the topic's limit, the sentences of
-        what the study did not do). They are FI's record, not results; a paper that quotes them quotes the record."""
-        fallback = (state.get("exec_result") or {}).get("duration_s")
-        out: dict[str, float] = {}
-        try:
-            wall = _paper_facts.measured_run_time(self.quest_root, fallback)[0]
-            if wall is not None:
-                out["duration_s"] = float(wall)
-            out.update(_paper_facts.fact_numbers(self.quest_root, topic=str(self.config.topic or ""), fallback_s=fallback))
-        except Exception as e:  # noqa: BLE001 -- a record FI cannot read accounts for nothing
-            self._log.warning("[numbers] FI's record of the run could not be read (%s: %s)", type(e).__name__, str(e)[:200])
-        return out
-
-    def _analysis_numbers_note(self, state: QuestState) -> str:
-        """The numbers of the analysis that nothing in this run accounts for, for the writer, who copies its numbers
-        from the analysis: the same check the paper gets, run before the paper is written. A real quest's analysis gave
-        an SD of 1,920 where the run computed 1,849.0, and the paper printed it. ``""`` when every number traces, the
-        run recorded nothing, or the check fails."""
-        texts = [s for s in _strings_of(state.get("analysis")) if any(ch.isdigit() for ch in s)]
-        if not texts:
-            return ""
-        from core import number_provenance
-
-        try:
-            report = self._provenance_report("\n\n".join(texts), state)
-        except Exception as e:  # noqa: BLE001 - a note, never a reason to stop
-            self._log.warning("[number_provenance] the analysis could not be checked (%s); skipping", e)
-            return ""
-        if report.skipped or report.ok:
-            return ""
-        listed = "; ".join(f"{f.token} (\u201c{f.context[:120]}\u201d)" for f in report.findings)
-        # The check lists at most MAX_FINDINGS distinct numbers; a full list means there may be more.
-        more = "; and others like them" if len(report.findings) >= number_provenance.MAX_FINDINGS else ""
-        self._log.warning("[number_provenance] the analysis gives number(s) nothing in this run accounts for: %s",
-                          listed[:600])
-        return ("FI checked the numbers of the analysis against everything this run recorded. These match nothing it "
-                f"computed: {listed}{more}. Do not print them; give the value the run computed for that quantity, or "
-                "leave the sentence out.")
-
-    def _number_provenance_hits(
-        self, paper_md: str, state: QuestState,
-    ) -> list[str]:
-        """Numbers the paper prints that nothing in this run accounts for.
-
-        The numeric oracle asks whether a number is NEAR a result and ignores
-        one that is far from every result; this asks whether the number came
-        from anywhere at all. A graded paper's Table 1 printed eight cells
-        matching no value the run computed, no replicate and none of the
-        three-seed aggregates, and every existing check passed it.
-
-        The aggregates are the reason this is possible rather than a machine
-        for flagging correct papers: a paper reports the MEAN over the seeds
-        and its interval, and seed 0's ``RESULT_JSON`` holds neither. Measured
-        on that paper, checking against ``RESULT_JSON`` alone makes all eleven
-        of its *correct* headline numbers untraceable too.
-
-        Forced, and text-only (``_TEXT_ONLY_HITS``): the experiment ran and
-        recorded its results, so the route is ``rewrite`` and an unsourced
-        number never sends the experiment back to be run again.
-
-        Writes ``paper/provenance_audit.json`` either way, so a clean run
-        leaves evidence the check ran. Best-effort throughout: a bug in the
-        checker must never block a paper.
-        """
-        try:
-            report = self._provenance_report(paper_md, state)
-        except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
-            self._log.warning("[number_provenance] check failed (%s); skipping", e)
-            return []
-
-        try:
-            paper_dir = self.quest_root / "paper"
-            paper_dir.mkdir(parents=True, exist_ok=True)
-            (paper_dir / "provenance_audit.json").write_text(
-                json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as e:
-            self._log.warning("[number_provenance] could not write audit: %s", e)
-
-        if report.skipped:
-            self._log.info("[number_provenance] skipped — %s", report.skip_reason)
-            return []
-        if report.ok:
-            self._log.info(
-                "[number_provenance] all %d paper numbers trace to this run "
-                "(%d values it can account for)",
-                report.paper_numbers, report.traceable_values,
-            )
-            return []
-
-        for f in report.findings:
-            self._log.warning("[number_provenance] %s", f.describe())
-        return [f"unsourced_number: {f.describe()}" for f in report.findings]
 
     def _figure_caption_hits(self, paper_md: str, state: QuestState) -> list[str]:
         """Captions naming a series their figure draws flat or not at all.
@@ -22349,7 +22122,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # correct one is worse, so the findings are surfaced to the human
             # (log, paper/numeric_audit.json, and the human-review panel in all
             # three interfaces) and the verdict is left to the reviewer.
-            numeric_warnings = self._numeric_oracle_hits(paper_md, state)
+            numeric_warnings = self._reference_check_hits(state)
             if numeric_warnings:
                 review["numeric_oracle_warnings"] = numeric_warnings
             figure_warnings = self._figure_caption_hits(paper_md, state)
@@ -22364,11 +22137,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # paper mislabels is caught by recomputing it, so the finding can
             # name the contradiction instead of guessing at one.
             review["must_flag_hits"] += self._statistics_claim_hits(paper_md, state)
-            # Forced too, and for the same reason: a number that matches
-            # nothing the run computed, nothing it configured and nothing it
-            # drew is a set membership test, not a reading of prose. It goes
-            # quiet on a run that recorded no results.
-            review["must_flag_hits"] += self._number_provenance_hits(paper_md, state)
             # A figure the design planned and the run drew that the paper
             # leaves out is a set difference, not a reading of prose, so it
             # cannot misfire the way the number check can: it is forced.
@@ -22552,7 +22320,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # The same advisory arithmetic check as the single-reviewer path, and
         # kept out of must_flag_hits for the same reason: the iteration bump
         # below reads only must_flag_hits, so a finding costs no budget.
-        numeric_warnings = self._numeric_oracle_hits(paper_md, state)
+        numeric_warnings = self._reference_check_hits(state)
         if numeric_warnings:
             review["numeric_oracle_warnings"] = numeric_warnings
         figure_warnings = self._figure_caption_hits(paper_md, state)
@@ -22566,13 +22334,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         stat_hits = self._statistics_claim_hits(paper_md, state)
         if stat_hits:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *stat_hits]
-        # Forced on this path as well: panel mode once skipped the numeric
-        # oracle entirely, so asking for more reviewers meant fewer checks.
-        provenance_hits = self._number_provenance_hits(paper_md, state)
-        if provenance_hits:
-            review["must_flag_hits"] = [
-                *(review.get("must_flag_hits") or []), *provenance_hits,
-            ]
         # Forced, as on the single-reviewer path.
         missing_figures = _missing_planned_figures(paper_md, state)
         for hit in missing_figures:
@@ -28560,18 +28321,6 @@ def _series_at(
     return vals
 
 
-def _strings_of(value: Any) -> Iterator[str]:
-    """Every string a JSON value holds, at any depth (not its keys)."""
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _strings_of(v)
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            yield from _strings_of(v)
-
-
 def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, Any]]:
     """Each result's mean and 95% CI over the seeds, by dotted path, for the
     checks that compare the paper with the results: a paper reports the mean
@@ -29227,10 +28976,6 @@ _TEXT_ONLY_HITS = frozenset({
     # the numbers are right and the words around them are wrong, so the paper
     # is written again and the experiment is left alone.
     "mislabelled_statistic",
-    # A number the paper prints that nothing in the run accounts for. The
-    # experiment ran and recorded its results; the paper quotes a figure none
-    # of them holds, so what needs rewriting is the prose, not the experiment.
-    "unsourced_number",
     # A person's refine point the paper does not answer: the writer said it needs no new experiment (a point that
     # does goes to the design from the writing step), so the paper is written again.
     "user_feedback_unaddressed",

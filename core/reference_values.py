@@ -430,14 +430,3 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
             value, why = value_at(ref, s, given)
             rows.append({"metric": ident, "value": name, "setting": dict(s), "reference": value, "why": why})
     return {"quantities": quantities, "by_setting": rows}
-
-
-def pool(computed: dict[str, Any]) -> dict[str, float]:
-    """The reference values computed, by ``metric.setting``, for the provenance check (a pool of their own)."""
-    out: dict[str, float] = {}
-    for r in computed.get("by_setting") or []:
-        value = _num(r.get("reference"))
-        if value is not None:
-            label = ",".join(f"{k}={v}" for k, v in (r.get("setting") or {}).items())
-            out[f"{r['metric']}.{label}"] = value
-    return out

@@ -48,6 +48,25 @@ _COUNTER = "typed_results.json"
 #: How many crashes inside the code, shown by a finding's test during the code review, go to the crash repair in a quest.
 REVIEW_CRASHES = 2
 
+# A number is written precisely enough to be recognised as a value (so that a note never repeats a left-out one): three
+# significant digits, or two written to four decimals ("0.0068"). Below that a number is a round figure, a setting or a label.
+_MIN_SIG_DIGITS = 3
+_LOW_PRECISION_SIG_DIGITS = 2
+_LOW_PRECISION_MIN_DECIMALS = 4
+
+
+def _carries_enough_precision(token: str) -> bool:
+    """Is this number written precisely enough to be recognised as a value?"""
+    t = token.lstrip("-+").replace(",", "")
+    decimals = len(t.split(".", 1)[1]) if "." in t else 0
+    if "." in t:
+        whole, frac = t.split(".", 1)
+        whole = whole.lstrip("0")
+        sig = len(whole) + len(frac) if whole else len(frac.lstrip("0")) or len(frac)
+    else:
+        sig = len(t.strip("0")) or 1
+    return sig >= _MIN_SIG_DIGITS or (sig >= _LOW_PRECISION_SIG_DIGITS and decimals >= _LOW_PRECISION_MIN_DECIMALS)
+
 #: FI's own behaviour checks (core/probes.py) are RECORD ONLY for now: a core check that does not hold is written down (the
 #: record, needs/PROBES.json, QUALITY.md, a sentence in the paper's limitations) and nothing else happens. Turning on
 #: ``REPAIR_ENABLED`` sends the simulation back once per allowed repair with the finding; turning on ``STOP_ENABLED`` stops the
@@ -368,8 +387,6 @@ class RunChecksMixin:
     def _withhold_left_out_values(self, text: str) -> str:
         """``text`` (a note a model reads) with any number written precisely enough to be recognised that equals a value of a
         quantity left out of the results replaced by plain words: a note that says why a quantity is out never repeats it."""
-        from .number_provenance import _carries_enough_precision
-
         values: list[float] = []
         for name in (TYPED_RECORD, "RESULT_CHECK.json"):
             removed = _read_json(self.quest_root / "needs" / name).get("removed_values")  # type: ignore[attr-defined]

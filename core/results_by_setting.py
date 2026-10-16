@@ -628,7 +628,7 @@ def paper_block(built: Built | None, cap: int | None = None) -> str:
     return "\n\n".join([*lead, *notes, *(markdown(t).rstrip("\n") for t in tables)]) + "\n"
 
 
-# --- the files, and the pools for the provenance check -----------------------------------------------------------------
+# --- the files ------------------------------------------------------------------------------------------------------
 
 
 def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
@@ -668,42 +668,3 @@ def write(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[s
     (paper / "reference_values.json").write_text(json.dumps(built.references, indent=2, default=str) + "\n",
                                                  encoding="utf-8")
     return built
-
-
-def traceable(built: Built) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """``(the pooled settings' numbers by ``label.value``, each label's settings that tell it apart)`` for the
-    provenance check's per-setting table pool (:func:`core.number_provenance.check` ``trial_table`` and
-    ``trial_settings``)."""
-    numbers: dict[str, dict[str, Any]] = {}
-    for r in built.rows:
-        if r.get("mean") is None:
-            continue
-        numbers[f"{r['setting']}.{r['value']}"] = {k: r[k] for k in ("n", "mean", "sd", "ci_lower", "ci_upper")
-                                                   if r.get(k) is not None}
-    return numbers, varying_settings({s.label: s.setting for s in built.distinct.settings})
-
-
-def provenance_inputs(trial_rows: list[dict[str, Any]], built: Built | None) -> dict[str, Any]:
-    """The keyword arguments of :func:`core.number_provenance.check` that hold FI's own per-setting numbers:
-    ``trial_table`` (every grid cell, and every pooled setting), ``trial_settings`` (each label's settings that tell it
-    apart) and ``references`` (the reference values FI computed)."""
-    table = _trial_table.traceable(trial_rows)
-    settings = varying_settings(_trial_table.settings(trial_rows))
-    references: dict[str, float] = {}
-    if built is not None:
-        numbers, pooled_settings = traceable(built)
-        table = {**table, **numbers}
-        settings = {**settings, **pooled_settings}
-        references = _refs.pool(built.references)
-    return {"trial_table": table, "trial_settings": settings, "references": references}
-
-
-def varying_settings(settings: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Each label's settings, cut to those that take more than one value across ``settings`` (only they tell a row
-    apart)."""
-    values: dict[str, set[str]] = {}
-    for s in settings.values():
-        for k, v in s.items():
-            values.setdefault(k, set()).add(json.dumps(v, default=str))
-    varying = {k for k, vs in values.items() if len(vs) > 1}
-    return {label: {k: v for k, v in s.items() if k in varying} for label, s in settings.items()}

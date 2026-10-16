@@ -116,8 +116,8 @@ _DELIVERED = ["slides.md", "slides.html", "slides.pdf", "slides.pptx", "poster.t
 _PAPER = ["paper", "paper.md", "paper.pdf", "paper.html", "paper_html_body.md", "paper_html_source.html",
           "paper_html_theme.css", "paper_pdf_source.md", ".fi/paper_record_check.json", *_DELIVERED]
 # What the claim check writes into paper/ (the folder itself is the writing step's), and its receipt.
-_CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.json", "paper/numeric_audit.json",
-                "paper/statistics_audit.json", "paper/provenance_audit.json", "needs/receipts/claim_check.json"]
+_CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.json",
+                "paper/statistics_audit.json", "needs/receipts/claim_check.json"]
 # What the citation check, the last step before delivery, leaves: its record, its ledger in paper/, and its receipt.
 _CITATION_CHECK = [".fi/citation_check.json", "paper/citations.json", "paper/CITATIONS.md", "needs/receipts/citation_check.json"]
 # What the evidence gate writes.

@@ -2,95 +2,48 @@
 
 Why this exists
 ===============
-Two checks already stand between a run and its paper, and neither asks this
-question. The **numeric oracle** (``core/numeric_oracle.py``) asks whether a
-number in the prose matches a number the run computed — arithmetic, but blind
-to what the number *means*. The **claim check** asks a model whether a cited
-sentence is supported by evidence — meaning, but with no arithmetic anywhere.
+The claim check asks a model whether a cited sentence is supported by evidence: meaning, but with no arithmetic anywhere.
+Between that and the rule that the writer types no result (``core/typed_numbers.py``) sits a gap that shipped in delivered
+papers:
 
-Between them sits a gap that shipped in five delivered papers:
-
-* a paper printed the Bonferroni *threshold* ``0.001388`` as if it were a
-  computed **p-value**, and claimed "Cohen's d > 16 for all pairwise
-  comparisons" when 17 of the run's 36 pairwise effect sizes were below it;
-* another claimed "Cohen's d > 39" with 6 of 12 below;
 * a paper labelled its three-seed **t-intervals** "exact binomial 95% CI";
-* a paper printed a figure's **y-axis limits** (231/240/280, which matplotlib
-  pads 5% above the tallest bar) as the **modal bin counts** (220/229/267);
-* a paper called the **major-outbreak probability** (~34%) the probability the
-  disease would "simply vanish" — the extinction probability is its
-  complement (~66%). The numeric oracle matched the number and could not see
-  the reversed meaning.
+* a paper called the **major-outbreak probability** (~34%) the probability the disease would "simply vanish": the
+  extinction probability is its complement (~66%). The number matched a result and the reversed meaning was invisible.
 
-Every one of those numbers is either correct-but-mislabelled or contradicted
-by a quantity the run *did* compute. So this module reads what a number is
-**said to be** and tests that claim against the run.
+Both numbers are correct but mislabelled. So this module reads what a number is **said to be** and tests that claim
+against the run. (The checks that read the paper's numbers against the run's, for an effect size, a threshold printed as
+a p-value, an axis limit printed as a count and a seed the paper states, are gone: a result is a key FI fills in from its
+records, and a number the writer types that is not a number of the plan is found by ``core/typed_numbers.py``.)
 
 The design rule: say nothing unless the contradiction can be NAMED
 =================================================================
-False positives are the failure mode that matters here. FI has already paid
-for two checks that cried wolf — the bounds gate calling a correct ``0``
-"trivial", and the claim check's budget — and a spurious flag costs a whole
-rewrite. So every check below is a **recomputation**, not a pattern match:
-each one fires only when it can point at the run's own numbers and say what
-the paper called them instead. A claim this module cannot recompute is a
-claim it stays silent about.
+False positives are the failure mode that matters here. A spurious flag costs a whole rewrite. So every check below is a
+**recomputation**, not a pattern match: each one fires only when it can point at the run's own numbers and say what the
+paper called them instead. A claim this module cannot recompute is a claim it stays silent about.
 
-Six checks, each independently gated
+Two checks, each independently gated
 ------------------------------------
-``effect_size_overstated``
-    A universally-quantified effect-size claim ("Cohen's d > 16 for *all*
-    pairwise comparisons") against every pairwise Cohen's d the run's
-    replicates actually support. Needs the quantifier: a single "d = 16.2" is
-    one number and the numeric oracle's business.
-
-``threshold_as_pvalue``
-    A number presented as a p-value (``p < x``) that equals this run's
-    Bonferroni-corrected threshold ``0.05/n``, when the run computed no
-    p-value at all. Matched to one unit in the paper's own last decimal,
-    because ``0.05/36 = 0.0013888…`` is written ``0.001388`` by truncation
-    and would *miss* a rounding comparison.
-
 ``interval_method_mismatch``
-    An interval labelled with a named method (exact binomial, Clopper-Pearson,
-    Wilson, bootstrap, …) whose endpoints reproduce FI's own t-interval over
-    the replicate seeds. The contradiction is not "this interval is wrong" —
-    it is "this interval IS the k-seed t-interval, under another name", so no
-    second interval estimator has to be implemented to prove it.
-
-``axis_limit_as_count``
-    A number presented as a count of runs that equals a recorded figure's
-    y-axis upper limit and appears nowhere in the results. An axis limit is a
-    property of the drawing, not a measurement.
+    An interval labelled with a named method (exact binomial, Clopper-Pearson, Wilson, bootstrap, ...) whose endpoints
+    reproduce FI's own t-interval over the replicate seeds. The contradiction is not "this interval is wrong" but "this
+    interval IS the k-seed t-interval, under another name", so no second interval estimator has to be implemented to
+    prove it.
 
 ``probability_complement``
-    A sentence giving the probability that the disease/outbreak dies out,
-    whose number matches a result named for the *opposite* event (a major
-    outbreak) and matches no result named for extinction.
+    A sentence giving the probability that the disease/outbreak dies out, whose number matches a result named for the
+    *opposite* event (a major outbreak) and matches no result named for extinction.
 
-``seed_not_recorded``
-    A seed the paper gives that the run's records contradict: a "base seed N"
-    when the study record holds another base seed, or a "seed N" that is
-    neither the base seed, a trial seed in FI's ledger nor a seed written in
-    the code. A paper once called the seed of its bootstrap intervals the base
-    seed every trial was derived from; the claim check had only a model to ask
-    and marked the sentence unsupported, with no repair.
-
-All six are recorded through ``StatReport`` with the contradiction spelled
-out, so the paper's writer is told which number to relabel rather than "a
-statistic is wrong somewhere".
+Both are recorded through ``StatReport`` with the contradiction spelled out, so the paper's writer is told which number to
+relabel rather than "a statistic is wrong somewhere".
 """
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Iterator
 
-from core.disclosure import recorded_seeds, strip_for_checks
-from core.run_facts import seed_verdict
+from core.disclosure import strip_for_checks
 from core.numeric_oracle import flatten_numbers
 
 # A replicated run needs at least this many seeds before its spread means
@@ -107,12 +60,6 @@ HEDGED_REL_TOL = 0.10
 _SPAN = 100
 
 _CONTEXT_CHARS = 170
-
-# A number has to carry at least this many significant digits before equalling
-# ``0.05/n`` means anything. The conventional cutoffs (0.05, 0.01, 0.001) carry
-# one, and a paper writing "p < 0.01" is quoting a convention, not this run's
-# correction — matching those would flag ordinary, correct sentences.
-MIN_THRESHOLD_SIG_DIGITS = 3
 
 
 @dataclass(frozen=True)
@@ -216,16 +163,6 @@ def _decimals(token: str) -> int:
     return len(token.split(".", 1)[1]) if "." in token else 0
 
 
-def _significant_digits(token: str) -> int:
-    """Significant digits in the number as the paper wrote it."""
-    t = token.lstrip("-+").replace(",", "")
-    if "." in t:
-        whole, frac = t.split(".", 1)
-        whole = whole.lstrip("0")
-        return len(whole) + len(frac) if whole else len(frac.lstrip("0")) or len(frac)
-    return len(t.strip("0")) or 1
-
-
 _NUM = re.compile(r"(?<![\w.])(-?[0-9]+(?:\.[0-9]+)?)(?![\w])")
 
 
@@ -262,145 +199,7 @@ def _ctx(text: str, at: int = 0) -> str:
     return " ".join(text[lo: lo + _CONTEXT_CHARS].split())
 
 
-# --- 1. effect size claimed for ALL comparisons -------------------------------
-
-_COHEN_CLAIM = re.compile(
-    r"\bd\b\s*(>=|<=|>|<|\u2265|\u2264)\s*([0-9]+(?:\.[0-9]+)?)"
-)
-_EFFECT_WORD = re.compile(r"cohen|effect size", re.I)
-_UNIVERSAL = re.compile(r"\ball\b|\bevery\b|\beach\b", re.I)
-_PAIRWISE = re.compile(r"pairwise|comparison|contrast|\bpairs?\b", re.I)
-
-
-def _check_effect_sizes(
-    sents: list[str], comparison_stats: dict[str, Any],
-) -> list[StatFinding]:
-    """"Cohen's d > 16 for all pairwise comparisons" against every pairwise d
-    the replicates support.
-
-    The universal quantifier is required. Without it the sentence quotes one
-    effect size, which is a single number and already the numeric oracle's
-    job; with it the sentence makes a statement about the whole comparison
-    set, and that set is something this run computed in full.
-    """
-    effects = [
-        e for e in (comparison_stats.get("effect_sizes") or [])
-        if isinstance(e, dict) and isinstance(e.get("cohens_d"), (int, float))
-    ]
-    if not effects:
-        return []
-    out: list[StatFinding] = []
-    for s in sents:
-        if not (_EFFECT_WORD.search(s) and _UNIVERSAL.search(s) and _PAIRWISE.search(s)):
-            continue
-        m = _COHEN_CLAIM.search(s)
-        if not m:
-            continue
-        op, token = m.group(1), m.group(2)
-        thr, dec = float(token), _decimals(token)
-        lower_bound = op in (">", ">=", "\u2265")
-        # Rounded to the paper's own precision, so a computed 15.94 does not
-        # contradict "d > 16": only a shortfall the paper's own rounding
-        # cannot explain counts.
-        if lower_bound:
-            bad = [e for e in effects if round(abs(e["cohens_d"]), dec) < thr]
-        else:
-            bad = [e for e in effects if round(abs(e["cohens_d"]), dec) > thr]
-        if not bad:
-            continue
-        bad.sort(key=lambda e: abs(e["cohens_d"]), reverse=not lower_bound)
-        worst = ", ".join(
-            f"|d|={abs(e['cohens_d']):.2f} ({e.get('factor')}/{e.get('metric')}: "
-            f"{e.get('a')} vs {e.get('b')})"
-            for e in bad[:2]
-        )
-        side = "below" if lower_bound else "above"
-        out.append(StatFinding(
-            kind="effect_size_overstated",
-            message=(
-                f"the paper claims Cohen's d {op} {token} for all pairwise "
-                f"comparisons, but {len(bad)} of {len(effects)} pairwise effect "
-                f"sizes this run computed are {side} it — smallest: {worst}. "
-                f"Report the range of d, or restrict the claim to the "
-                f"comparisons that meet it."
-            ),
-            context=_ctx(s),
-        ))
-    return out
-
-
-# --- 2. a correction threshold printed as a p-value ----------------------------
-
-_PVALUE = re.compile(
-    r"\bp\b\s*(?:-?\s*value\s*)?(<=|<|=|\u2264)\s*([0-9]*\.?[0-9]+)", re.I
-)
-# When the number is introduced AS a threshold the paper is right to print it;
-# only a number asserted as the observed statistic is the defect.
-_NAMED_AS_THRESHOLD = re.compile(
-    r"(?:threshold|alpha|significance level|criterion|cut-?off|corrected level)"
-    r"[^.]{0,24}$",
-    re.I,
-)
-_PVALUE_PATH = re.compile(r"p_?values?$|^p_?values?|pvalue", re.I)
-
-
-def _check_pvalue_threshold(
-    sents: list[str], comparison_stats: dict[str, Any], values: dict[str, float],
-) -> list[StatFinding]:
-    """A p-value that is really this run's Bonferroni threshold.
-
-    ``0.05/36 = 0.0013888…``; the observed paper wrote ``0.001388``, a
-    truncation. ``round(0.00138888, 6) = 0.001389`` so a rounding comparison
-    misses it — the match is therefore one unit in the paper's last decimal.
-    Gated on the run having computed no p-value of its own: if it had, an
-    equal number could be a coincidence rather than a mislabel.
-    """
-    comps = comparison_stats.get("comparisons") or {}
-    n = comps.get("n")
-    alpha = comps.get("bonferroni_alpha")
-    if not isinstance(n, int) or n < 2 or not isinstance(alpha, (int, float)):
-        return []
-    if any(_PVALUE_PATH.search(p.rsplit(".", 1)[-1]) for p in values):
-        return []
-    out: list[StatFinding] = []
-    for s in sents:
-        for m in _PVALUE.finditer(s):
-            token = m.group(2)
-            try:
-                value = float(token)
-            except ValueError:
-                continue
-            if _NAMED_AS_THRESHOLD.search(s[: m.start()]):
-                continue
-            if _significant_digits(token) < MIN_THRESHOLD_SIG_DIGITS:
-                continue
-            # The number must BE the threshold at the precision the paper
-            # wrote it, under rounding OR truncation — 0.05/36 = 0.0013888…
-            # was written 0.001388, which a rounding comparison alone misses.
-            # Compared at integer scale so no float tolerance is involved: a
-            # tolerance that scales with the paper's precision let "p < 0.01"
-            # match a threshold of 0.00139.
-            scale = 10.0 ** _decimals(token)
-            scaled, want = float(alpha) * scale, round(value * scale)
-            if round(scaled) != want and math.floor(scaled) != want:
-                continue
-            out.append(StatFinding(
-                kind="threshold_as_pvalue",
-                message=(
-                    f"the paper reports p {m.group(1)} {token} as a p-value, but "
-                    f"{token} is this run's Bonferroni-corrected significance "
-                    f"threshold (0.05/{n} = {float(alpha):.8g} for its {n} "
-                    f"pairwise comparisons) and no p-value was computed anywhere "
-                    f"in the results. A significance threshold is not evidence "
-                    f"of significance — either report the p-values the test "
-                    f"produced, or say this is the corrected threshold."
-                ),
-                context=_ctx(s),
-            ))
-    return out
-
-
-# --- 3. an interval labelled as a method that did not produce it ---------------
+# --- 1. an interval labelled as a method that did not produce it ---------------
 
 _METHOD_LABEL = re.compile(
     r"exact binomial|binomial exact|clopper[-\s]?pearson|wilson|bootstrap|"
@@ -513,95 +312,7 @@ def _check_interval_method(
     return out
 
 
-# --- 4. a figure's axis limit printed as a count ------------------------------
-
-_COUNT_NOUN = r"runs?|realizations?|realisations?|observations?|samples?|simulations?|trials?"
-_COUNT_SENTENCE = re.compile(rf"\b(?:{_COUNT_NOUN})\b", re.I)
-_COUNT_DENOM = re.compile(rf"^\s*(?:of\s+)?(?:{_COUNT_NOUN})\b", re.I)
-
-# How close a number must sit to the noun it counts before the paper can be
-# said to present it AS that count. The real mislabels sat 10-24 characters
-# from "runs"; a citation index in a long methods sentence that happens to
-# mention runs sat 161 away.
-COUNT_PROXIMITY = 40
-
-
-def _axis_limits(figure_records: dict[str, Any]) -> list[tuple[float, str, str]]:
-    """``(upper_limit, figure, panel)`` for every recorded panel."""
-    out: list[tuple[float, str, str]] = []
-    for name, rec in (figure_records or {}).items():
-        if not isinstance(rec, dict):
-            continue
-        for ax in rec.get("axes") or []:
-            if not isinstance(ax, dict):
-                continue
-            ylim = ax.get("ylim")
-            if isinstance(ylim, list) and len(ylim) == 2:
-                try:
-                    out.append((float(ylim[1]), str(name), str(ax.get("title") or "")))
-                except (TypeError, ValueError):
-                    continue
-    return out
-
-
-def _check_axis_limit_counts(
-    sents: list[str], figure_records: dict[str, Any], values: dict[str, float],
-    series_values: set[float],
-) -> list[StatFinding]:
-    """A count of runs that is really a y-axis limit.
-
-    matplotlib leaves headroom above the tallest bar (5% by default), so an
-    axis limit sits just above a real bin count and reads like one: the
-    observed paper printed 231/240/280 where the bins held 220/229/267, and
-    87 where the bin held 83. The number is only reported when it appears
-    nowhere in the results and matches no plotted series value — an axis
-    limit is a property of the drawing, never a measurement.
-    """
-    limits = _axis_limits(figure_records)
-    if not limits:
-        return []
-    out: list[StatFinding] = []
-    for s in sents:
-        at_nouns = [m.start() for m in _COUNT_SENTENCE.finditer(s)]
-        if not at_nouns:
-            continue
-        for value, token, at, pct in _numbers(s):
-            if pct or "." in token or value <= 1:
-                continue
-            # The number must sit NEXT TO the thing it counts. A number
-            # elsewhere in a long methods sentence is not "a count of runs"
-            # merely because the sentence mentions runs somewhere.
-            if min(abs(p - at) for p in at_nouns) > COUNT_PROXIMITY:
-                continue
-            # "300 runs" is the denominator the counts are out of, not a count.
-            if _COUNT_DENOM.match(s[at + len(token):]):
-                continue
-            if any(_close(value, v, token, hedged=False) for v in values.values()):
-                continue
-            if any(_close(value, v, token, hedged=False) for v in series_values):
-                continue
-            hit = next(
-                (lim for lim in limits if _close(value, lim[0], token, hedged=False)), None,
-            )
-            if hit is None:
-                continue
-            limit, fig, panel = hit
-            out.append(StatFinding(
-                kind="axis_limit_as_count",
-                message=(
-                    f"the paper reports {token} as a count of runs, but {token} "
-                    f"is the y-axis upper limit ({limit:.6g}) of "
-                    f"{'panel “' + panel + '” of ' if panel else ''}`{fig}`, and "
-                    f"no result this run computed equals it. An axis limit is "
-                    f"padding above the tallest bar, not the bar's height — read "
-                    f"the count off the data, not the axis."
-                ),
-                context=_ctx(s),
-            ))
-    return out
-
-
-# --- 5. a probability described as its own complement -------------------------
+# --- 2. a probability described as its own complement -------------------------
 
 _OPPOSITE_EVENT = re.compile(r"outbreak|p_?major|\bmajor\b|epidemic|invasion", re.I)
 _EXTINCTION_NAME = re.compile(r"extinct|p_?minor|\bminor\b|die|fade|fizzl", re.I)
@@ -686,266 +397,17 @@ def _check_probability_complement(
 
 # --- entry point ---------------------------------------------------------------
 
-# --- 6. a seed the run's records do not hold ------------------------------------
-
-# A seed written as a number in the code: ``default_rng(N)``, ``np.random.seed(N)``, ``random.Random(N)``,
-# ``torch.manual_seed(N)``, ``seed=N``, ``random_state=N``, ``BASE_SEED = N``.
-_CODE_SEED = re.compile(
-    r"\b(?:default_rng|RandomState|seed|manual_seed|PRNGKey|Random|SeedSequence)\s*\(\s*(-?[0-9]+)\s*\)"
-    r"|\b(?i:(?:base_|random_|rng_|global_|master_|root_)?seed|random_state)\s*=\s*(-?[0-9]+)\b"
-)
-_SEED_VERB = r"(?:\s*(?:value\s+)?(?:of|=|:|was|is|equal\s+to|set\s+to|with|from|at|to|using))?\s*"
-# The number must end there: "seed of 1,537 trials" is not seed 1, and "seed 3 of 10" is the third of ten seeds.
-_SEED_NUMBER = r"(-?[0-9]+)(?![0-9]|[.,][0-9])(?!\s*(?:of|out\s+of|/)\s*[0-9])"
-_BASE_SEED = re.compile(
-    rf"\b(?:base|master|root|global)[\s_-]+(?:random[\s_-]+)?seed\b{_SEED_VERB}{_SEED_NUMBER}", re.I,
-)
-# One seed, never "seeds" (a list or range of trial numbers) and never a count ("10 seeds"); "seeded with 0" is one.
-_ONE_SEED = re.compile(rf"(?<![\w-])(?:random[\s_-]+)?seed(?:ed)?\b{_SEED_VERB}{_SEED_NUMBER}", re.I)
-# A value FI filled into the paper from its records (core/paper_facts.py), with its markers.
-_FACT_SPAN = re.compile(r"<!-- fi:fact-([\w-]+) -->.*?<!-- /fi:fact-\1 -->", re.S)
-# A statement that the trials' seeds come from FI's base seed, with or without a number: wrong when the code never uses
-# the seed FI gives each trial.
-_FI_SEED = re.compile(
-    r"\b(?:base|master|root|global)[\s_-]+(?:random[\s_-]+)?seeds?\b|\bFI['’]?s\s+(?:\w+\s+)?seeds?\b"
-    r"|\bseeds?\s+(?:that\s+|which\s+)?FI\s+(?:gives|gave|assigns|assigned|passes|passed|provides|provided|derives|derived)\b",
-    re.I)
-
-
-@dataclass(frozen=True)
-class SeedRecords:
-    """The seeds the run's records hold: the study record's base seed, FI's ledger of trial seeds, and each seed
-    written as a number in the code with where it is (``("code/experiment.py:291", 20261013)``)."""
-
-    base_seed: int | None = None
-    trial_seeds: frozenset[int] = frozenset()
-    code_seeds: tuple[tuple[str, int], ...] = ()
-    #: Whether the seed FI gives each trial reaches the simulation (``core/run_facts.py:seed_verdict``): ``False`` when
-    #: it does not, so the base seed and the trial seeds in the records are not the code's seeds; ``None`` when FI cannot
-    #: tell (or there is no ``run_trial``).
-    fi_seed_reaches: bool | None = None
-    #: When it does not reach: the seeds written into the code that seed the trials' generators, with where they are
-    #: (``("code/simulate.py:106", 20261015)``). Not every seed in the code: a self-check's own seed is not the run's.
-    driving_seeds: tuple[tuple[str, int], ...] = ()
-    #: Why it does not reach, in plain words.
-    why: str = ""
-    #: The verdict itself (``reaches`` / ``does_not_reach`` / ``partly`` / ``unknown`` / ``no_entry``).
-    verdict: str = ""
-
-
-def seed_records(quest_root: Path) -> SeedRecords:
-    """Read the seeds a quest's records hold; a missing record is an empty part, never an error."""
-    root = Path(quest_root)
-    base, trials = recorded_seeds(root)
-    code: list[tuple[str, int]] = []
-    code_dir = root / "code"
-    for path in sorted(code_dir.rglob("*.py")) if code_dir.is_dir() else []:
-        rel = path.relative_to(root)
-        if any(part.startswith(".") or part in {"__pycache__", "site-packages"} for part in rel.parts):
-            continue
-        try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        for no, line in enumerate(lines, 1):
-            for m in _CODE_SEED.finditer(line.split("#", 1)[0]):
-                code.append((f"{rel.as_posix()}:{no}", int(m.group(1) or m.group(2))))
-    verdict = seed_verdict(root)
-    have = set(code)
-    code += [(lit["where"], lit["value"]) for lit in verdict["code_seeds"] if (lit["where"], lit["value"]) not in have]
-    return SeedRecords(base_seed=base, trial_seeds=trials, code_seeds=tuple(code),
-                       fi_seed_reaches=verdict["fi_seed_reaches"],
-                       driving_seeds=tuple((d["where"], d["value"]) for d in verdict.get("driving_seeds") or []),
-                       why=str(verdict.get("why") or ""), verdict="" if verdict.get("verdict") == "no_entry" else str(verdict.get("verdict") or ""))
-
-
-def _check_unknown_seeds(sents: list[str], seeds: SeedRecords) -> list[StatFinding]:
-    """FI cannot tell from the code whether the seed it gives each trial reaches the simulation: a sentence saying the
-    trials are seeded from FI's base seed (or from FI's seeds: the base seed, a trial seed) claims what nobody knows."""
-    fi_numbers = set(seeds.trial_seeds) | ({seeds.base_seed} if seeds.base_seed is not None else set())
-    out: list[StatFinding] = []
-    for s in sents:
-        hit = next((m for m in _FI_SEED.finditer(s)), None)
-        if hit is None:
-            hit = next((m for m in [*_BASE_SEED.finditer(s), *_ONE_SEED.finditer(s)]
-                        if int(m.group(1)) in fi_numbers), None)
-        if hit is None:
-            continue
-        out.append(StatFinding(
-            kind="seed_not_recorded",
-            message=(
-                f"the paper says the trials are seeded from FI's seeds, but FI could not tell from the code whether the "
-                f"seed it gives each trial reaches the simulation ({seeds.why or 'FI cannot follow it'}). Write "
-                f"{{{{seed}}}} and FI puts in what it knows."
-            ),
-            context=_ctx(s, hit.start()),
-        ))
-    return out
-
-
-def _check_seeds(sents: list[str], seeds: SeedRecords | None, values: dict[str, float]) -> list[StatFinding]:
-    """A seed the paper gives that the run's records contradict.
-
-    Silent unless FI holds the run's real seeds: a "base seed N" is checked only against a study record's base seed,
-    and a "seed N" only when FI's ledger holds every trial's seed. A seed is accepted when it is the base seed, a
-    trial seed, a seed written in the code or a result named for a seed."""
-    if seeds is None or (seeds.base_seed is None and not seeds.trial_seeds and seeds.fi_seed_reaches is not False):
-        return []
-    where: dict[int, str] = {}
-    for loc, value in seeds.code_seeds:
-        where.setdefault(value, loc)
-    if seeds.verdict == "unknown":
-        return _check_unknown_seeds(sents, seeds)
-    # The seed FI gives each trial does not reach the code: only the seeds written into the code that seed the trials'
-    # generators are the run's (a self-check's own seed elsewhere in the code is not).
-    ignored = seeds.fi_seed_reaches is False
-    if ignored:
-        driving: dict[int, str] = {}
-        for loc, value in seeds.driving_seeds:
-            driving.setdefault(value, loc)
-        written = ", ".join(f"{v} ({loc})" for v, loc in list(driving.items())[:3]) or "none that FI found"
-        why = seeds.why or "run_trial does not use it"
-        out_ignored: list[StatFinding] = []
-        said: set[tuple[str, int]] = set()
-        for s in sents:
-            numbered: list[tuple[int, int]] = []
-            for m in list(_BASE_SEED.finditer(s)) + list(_ONE_SEED.finditer(s)):
-                n = int(m.group(1))
-                numbered.append((m.start(), n))
-                if n in driving or (s, n) in said:
-                    continue
-                said.add((s, n))
-                out_ignored.append(StatFinding(
-                    kind="seed_not_recorded",
-                    message=(
-                        f"the paper gives seed {n} as the run's seed, but the seed FI gives each trial does not reach the "
-                        f"code ({why}), so FI's base seed and trial seeds are not the run's seeds. The seeds the code's "
-                        f"trials are drawn with are: {written}. Write {{{{seed}}}} and FI puts in the seed the code used."
-                    ),
-                    context=_ctx(s, m.start()),
-                ))
-            # Said without a number that is the code's ("derived from FI's base seed"): as wrong.
-            for m in _FI_SEED.finditer(s):
-                if any(n in driving for _p, n in numbered) or (s, -1) in said:
-                    continue
-                said.add((s, -1))
-                out_ignored.append(StatFinding(
-                    kind="seed_not_recorded",
-                    message=(
-                        f"the paper says the run's seeds come from FI's base seed, but the seed FI gives each trial does "
-                        f"not reach the code ({why}). The seeds the code's trials are drawn with are: {written}. Write "
-                        f"{{{{seed}}}} and FI puts in the seed the code used."
-                    ),
-                    context=_ctx(s, m.start()),
-                ))
-        return out_ignored
-    recorded = set(seeds.trial_seeds) | set(where)
-    if seeds.base_seed is not None:
-        recorded.add(seeds.base_seed)
-    recorded |= {int(v) for path, v in values.items() if "seed" in path.lower() and float(v).is_integer()}
-
-    def _elsewhere(n: int) -> str:
-        return f"; {n} is the seed written at {where[n]}, which seeds something there, not the trials" if n in where else ""
-
-    out: list[StatFinding] = []
-    for s in sents:
-        base_spans: list[tuple[int, int]] = []
-        for m in _BASE_SEED.finditer(s):
-            base_spans.append(m.span())
-            n = int(m.group(1))
-            if seeds.base_seed is None or n == seeds.base_seed:
-                continue
-            out.append(StatFinding(
-                kind="seed_not_recorded",
-                message=(
-                    f"the paper gives base seed {n}, but the study record (code/study.json) has base seed "
-                    f"{seeds.base_seed}, from which every trial's seed is derived{_elsewhere(n)}. Give the base seed "
-                    f"as recorded, and say what any other seed is used for."
-                ),
-                context=_ctx(s, m.start()),
-            ))
-        if not seeds.trial_seeds:
-            continue
-        for m in _ONE_SEED.finditer(s):
-            if any(a <= m.start() < b for a, b in base_spans):
-                continue
-            n = int(m.group(1))
-            if n in recorded:
-                continue
-            out.append(StatFinding(
-                kind="seed_not_recorded",
-                message=(
-                    f"the paper gives seed {n}, but no seed this run recorded is {n}: not the base seed"
-                    f"{'' if seeds.base_seed is None else f' ({seeds.base_seed})'}, not one of the "
-                    f"{len(seeds.trial_seeds):,} trial seeds in FI's ledger, and not a seed written in the code. "
-                    f"Give the seeds as recorded."
-                ),
-                context=_ctx(s, m.start()),
-            ))
-    return out
-
-
-def _series_extremes(figure_records: dict[str, Any]) -> set[float]:
-    """Every min/max a recorded figure's series reaches, so a count that really
-    is plotted data is never mistaken for an axis limit."""
-    out: set[float] = set()
-    for rec in (figure_records or {}).values():
-        if not isinstance(rec, dict):
-            continue
-        for ax in rec.get("axes") or []:
-            if not isinstance(ax, dict):
-                continue
-            for series in ax.get("series") or []:
-                if not isinstance(series, dict):
-                    continue
-                for key in ("min", "max"):
-                    v = series.get(key)
-                    if isinstance(v, (int, float)) and not isinstance(v, bool):
-                        out.add(float(v))
-    return out
-
-
-def _tables_as_words(text: str) -> str:
-    """``text`` with each Markdown table row read as sentences: every cell with its column's header ("Seed: 5."), and a
-    two-column row also as "name: value." The line under the header row is dropped."""
-    out: list[str] = []
-    header: list[str] = []
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            header = []
-            out.append(line)
-            continue
-        cells = [c.strip() for c in stripped.strip("|").split("|")]
-        if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
-            continue
-        if not header:
-            header = cells
-            continue
-        said = [f"{h}: {c}." for h, c in zip(header, cells) if h and c]
-        if len(cells) == 2 and all(cells):
-            said.append(f"{cells[0]}: {cells[1]}.")
-        out.append(" ".join(said))
-    return "\n".join(out)
-
-
 def check(
     paper_text: str,
     *,
     result_json: Any = None,
     intervals: dict[str, dict[str, float]] | None = None,
-    comparison_stats: dict[str, Any] | None = None,
-    figure_records: dict[str, Any] | None = None,
     n_seeds: int = 0,
-    seeds: SeedRecords | None = None,
 ) -> StatReport:
     """Test what the paper says its numbers ARE against what the run computed.
 
-    ``intervals`` and ``comparison_stats`` are the engine's own replicate
-    aggregates (``_replicate_result_intervals`` and ``_result_comparison_stats``)
-    — passed in rather than recomputed here so this module stays free of
-    ``core.engine`` and can be tested without one. ``seeds`` is what the
-    quest's records hold (``seed_records``).
+    ``intervals`` are the engine's own replicate aggregates (``_replicate_result_intervals``), passed in rather than
+    recomputed here so this module stays free of ``core.engine`` and can be tested without one.
     """
     report = StatReport()
     if not paper_text.strip():
@@ -953,15 +415,13 @@ def check(
         report.skip_reason = "paper text is empty"
         return report
 
-    comparison_stats = comparison_stats or {}
     intervals = intervals or {}
-    figure_records = figure_records or {}
 
     values: dict[str, float] = {
         path: value for path, value in flatten_numbers(result_json or {})
     }
-    # The mean over the seeds is what a paper reports, so it — not seed 0's
-    # value — is what a claim about a quantity should be matched against.
+    # The mean over the seeds is what a paper reports, so it, not seed 0's
+    # value, is what a claim about a quantity should be matched against.
     for path, stat in intervals.items():
         if isinstance(stat.get("mean"), (int, float)):
             values[path] = float(stat["mean"])
@@ -969,25 +429,10 @@ def check(
     text = normalise(paper_text)
     sents = sentences(text)
 
-    report.checks_run = [
-        "effect_size_overstated", "threshold_as_pvalue",
-        "interval_method_mismatch", "axis_limit_as_count",
-        "probability_complement", "seed_not_recorded",
-    ]
+    report.checks_run = ["interval_method_mismatch", "probability_complement"]
     findings: list[StatFinding] = []
-    findings += _check_effect_sizes(sents, comparison_stats)
-    findings += _check_pvalue_threshold(sents, comparison_stats, values)
     findings += _check_interval_method(text, sents, intervals, n_seeds)
-    findings += _check_axis_limit_counts(
-        sents, figure_records, values, _series_extremes(figure_records),
-    )
     findings += _check_probability_complement(sents, values)
-    # The seed FI put in through the paper's {{seed}} is FI's record, not the writer's statement: only what the writer typed
-    # is held to the records (core/paper_facts.py).
-    # A figure's caption is the writer's text too ("![... with seed 0 per setting.](...)"): read as its words.
-    # A table's cell is read with its column's header ("Seed: 5."), a two-column row as "name: value".
-    seed_text = _tables_as_words(re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1 ", _FACT_SPAN.sub(" ", paper_text)))
-    findings += _check_seeds(sentences(normalise(seed_text)), seeds, values)
 
     seen: set[str] = set()
     for f in findings:
