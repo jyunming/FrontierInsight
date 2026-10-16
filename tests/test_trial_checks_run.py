@@ -4,7 +4,9 @@ trials failed are left out of what the analysis reads, and a grossly wrong inter
 
 The live part runs the code a real quest delivered (r12: a noise level typed into the fitting function, and a solver
 tolerance that fails most noisy trials; tests/fixtures/replay/r12_code/, copied from study 2's ``orig/``) through FI's own
-trial harness at two of its settings, 40 trials each."""
+trial harness at two of its settings, 40 trials each. Its run_trial is made to return each fit's interval ends as well
+(``weighted_Ea_lower`` / ``_upper``), the names the plan's ``known_value`` declares: FI measures the coverage of the true
+value itself and never reads the code's own 0/1 coverage flag."""
 
 from __future__ import annotations
 
@@ -24,6 +26,10 @@ R12 = Path(__file__).parent / "fixtures" / "replay" / "r12_code"
 
 THRESHOLDS = {"Ea_true_J_mol": 50000.0, "ln_A_true": 9.451858239, "nominal_coverage": 0.95}
 
+DECLARED = {"id": "weighted_Ea", "estimand": "the activation energy", "kind": "mean", "unit": "one trial", "paired": True,
+            "known_value": {"true_value": "Ea_true_J_mol", "estimate": "weighted_Ea_hat",
+                            "interval": ["weighted_Ea_lower", "weighted_Ea_upper"], "level": 0.95}}
+
 ANALYSIS = """
 import json, os
 data = json.load(open(os.environ["FI_TRIALS"]))
@@ -40,6 +46,11 @@ def _quest(tmp_path: Path, *, relaxed: bool = False) -> Path:
         assert "abs(float(gradient[0])) >= solver_gtol" in text
         model.write_text(text.replace("abs(float(gradient[0])) >= solver_gtol", "abs(float(gradient[0])) >= 1e-6"),
                          encoding="utf-8")
+    sim = root / "code" / "simulate.py"
+    text = sim.read_text(encoding="utf-8")
+    assert text.count('f"{label}_Ea_hat": ea_hat,') == 1
+    sim.write_text(text.replace('f"{label}_Ea_hat": ea_hat,', 'f"{label}_Ea_hat": ea_hat, f"{label}_Ea_lower": ea_low, '
+                                'f"{label}_Ea_upper": ea_high,'), encoding="utf-8")
     (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
     return root
 
@@ -48,7 +59,7 @@ def _run(root: Path, noise: list[float], *, repairs_left: bool, trials: int = 40
     runner = trial_runner.TrialsRunner(
         SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=root,
         protocol={"grid": {"noise_std_rel": noise, "n_timepoints": [12]}, "runs_per_setting": trials,
-                  "thresholds": THRESHOLDS, "metrics": [{"id": "weighted_Ea_coverage", "paired": True}]},
+                  "thresholds": THRESHOLDS, "metrics": [DECLARED]},
         deterministic=False, simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
         repairs_left=lambda: repairs_left,
     )
@@ -97,7 +108,7 @@ def test_replay_r12_with_the_crashes_repaired_a_grossly_wrong_interval_is_sent_b
     runner, result = _run(root, [0.04, 0.08], repairs_left=True)
     assert result.returncode == 1 and runner.trial_fault["action"] == trial_checks.REPAIR
     assert not runner.trial_fault["partial"]
-    assert "weighted_Ea_coverage" in result.stderr and "grossly wrong" in result.stderr
+    assert "weighted_Ea_lower .. weighted_Ea_upper" in result.stderr and "grossly wrong" in result.stderr
     runner, result = _run(root, [0.04, 0.08], repairs_left=False)
     assert result.returncode == 1 and runner.trial_fault["action"] == trial_checks.STOP
     assert "grossly wrong" in runner.trial_fault["say"]

@@ -13,29 +13,24 @@ to be repaired with the reasons the trials gave; if the repairs end with it, the
 analysis is given and the paper says so; if more than half of the settings are so, the quest stops (too little would be
 left to report). A setting where more than :data:`STATE_FRACTION` failed is recorded and the paper states it.
 
-**Calibration against the truth (:func:`calibration`).** Read from the names the trials return, and only when they pair up
-without doubt (anything else is "not checked", with the reason):
+**Calibration against the truth (:func:`calibration`).** Read only from what the plan declares, never from the
+names the code happens to use. A metric of the protocol with a ``known_value``
+(:func:`core.metric_spec.normalize`) says the true value the simulation is given (a number, or the threshold or grid
+parameter that holds it, on the estimate's own scale), the name run_trial returns for the estimate, the name for its
+standard error (or variance) and/or the names of its interval's two ends, and the interval's level. FI computes the rest
+itself from the trials: whether each trial's interval covers the true value (from its two ends, or the estimate plus and
+minus z times its standard error at the declared level), and the ratio of the estimates' standard deviation over the
+trials to the typical reported standard error (the root of the mean squared one). It never reads a coverage flag the
+code computed. A metric whose declared names the trials do not return is a fault (the code does not keep the plan's
+contract). Without any declaration the calibration is "not checked", and the paper and ``QUALITY.md`` say so.
 
-* an *estimate* and its *standard error*: two names that differ by one word, ``se`` (or ``var``, a variance, whose square
-  root is used); e.g. ``theta_hat`` and ``theta_se``, ``rate_hat_0`` and ``rate_var_0``;
-* an *interval*: two names that differ by ``lower``/``upper`` (or ``lo``/``hi``); e.g. ``theta_t_lower`` and ``theta_t_upper``;
-* a *coverage indicator*: a name with ``covered`` or ``coverage`` whose every value is 0 or 1 (the trial's interval
-  covered the truth, or not);
-* the *true value*: a protocol threshold, or a value every trial of a setting returns alike, whose name says ``true``
-  and shares a word with the estimate's (``theta_true_units`` for ``weighted_theta``), and that lies within the range of the
-  estimates (or of the interval's ends) in at least half the settings;
-* the *level* of the intervals: a number in the name (``coverage_95``), else the one level the plan states (a threshold
-  named ``level``, ``confidence`` or ``nominal``, or a percentage in a metric's description of an interval). None, or
-  several that differ: the coverage is not checked.
-
-For each setting with at least :data:`MIN_TRIALS` trials: the coverage (from the indicator, or of the true value by the
-interval), with its Wilson 95% interval; and the ratio of the estimates' standard deviation over the trials to the typical
-reported standard error (the root of the mean squared one), with its sampling interval. A setting is a **gross miss** when
-the whole Wilson interval lies more than :data:`COVERAGE_GAP` below the level, or the whole interval of the ratio lies
-outside [:data:`RATIO_LOW`, :data:`RATIO_HIGH`]. A quantity grossly missed in at least :data:`GROSS_SHARE` of the
-settings it was judged in is a **fault FI owns**: it is sent to repair with the numbers, and if it stays the quest stops (a wrong code must never
-reach a paper). A smaller miss is not a fault (an interval of the wrong form can truly under-cover: a normal interval with
-three degrees of freedom covers about 0.86): it is recorded and reported.
+For each setting with at least :data:`MIN_TRIALS` trials: the coverage with its Wilson 95% interval, and the ratio with its
+sampling interval. A setting is a **gross miss** when the whole Wilson interval lies more than :data:`COVERAGE_GAP` below
+the level, or the whole interval of the ratio lies outside [:data:`RATIO_LOW`, :data:`RATIO_HIGH`]. A quantity grossly
+missed in at least :data:`GROSS_SHARE` of the settings it was judged in is a **fault FI owns**: it is sent to repair with
+the numbers, and if it stays the quest stops (a wrong code must never reach a paper). A smaller miss is not a fault (an
+interval of the wrong form can truly under-cover: a normal interval with three degrees of freedom covers about 0.86): it is
+recorded and reported, and so is a coverage above the level beyond its sampling error (intervals wider than they need be).
 
 Pure functions over FI's per-setting trial summary (``raw/trials.json`` cells, :func:`core.trial_runner._summary`); nothing
 here knows a field of science, and no name of a quantity is written into it.
@@ -45,12 +40,13 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any, Iterable
 
+from . import metric_spec as _metric_spec
 from . import stats as _stats
 
 #: A setting where more than this share of the trials failed is a fault (its numbers rest on the trials that survived).
@@ -74,47 +70,6 @@ MIN_TRIALS = 10
 RECORD = Path(".fi") / "trial_checks.json"
 
 _Z95 = 1.959963984540054
-
-# The words that give a name its part (statistics words, not a field's): what is left of the name is the quantity.
-_ESTIMATE = {"hat", "est", "estimate", "estimated", "fitted"}
-_SE = {"se", "stderr", "sem"}
-_SE_TWO = {("std", "err"), ("std", "error"), ("standard", "error")}
-_VAR = {"var", "variance"}
-_TRUE = {"true", "truth"}
-_COVER = {"covered", "coverage", "cover", "covers"}
-_LOWER = {"lower", "lo", "lb"}
-_UPPER = {"upper", "hi", "ub"}
-_LEVEL_WORDS = {"level", "confidence", "nominal"}
-_NOT_A_LEVEL = {"limit", "lower", "upper", "min", "max", "minimum", "maximum", "cutoff", "tolerance", "threshold", "bootstrap"}
-
-
-def tokens(name: Any) -> list[str]:
-    """The words of a name, lower case: ``weighted_Theta_hat`` -> ``weighted, theta, hat``; ``lnB`` -> ``ln, b``;
-    ``x0`` -> ``x, 0``."""
-    return [p.lower() for p in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+(?:\.\d+)?", str(name or ""))]
-
-
-def _role(name: str) -> tuple[str, tuple[str, ...]]:
-    """``(part, the quantity's words)``: the part a name plays (``estimate``, ``se``, ``var``, ``true``, ``cover``,
-    ``lower``, ``upper``, or ``""`` for a plain name) and its words without the part's word."""
-    words = tokens(name)
-    for a, b in _SE_TWO:
-        for i in range(len(words) - 1):
-            if words[i] == a and words[i + 1] == b:
-                return "se", tuple(words[:i] + words[i + 2:])
-    found = [(role, w) for w in words for role, group in (("se", _SE), ("var", _VAR), ("true", _TRUE), ("cover", _COVER),
-                                                          ("lower", _LOWER), ("upper", _UPPER), ("estimate", _ESTIMATE))
-             if w in group]
-    roles = {r for r, _w in found}
-    if len(roles) > 1:
-        # one name in two parts (``k_hat_var``): read as the part that is not ``estimate`` when there is exactly one
-        roles.discard("estimate")
-    if len(roles) != 1:
-        return "", tuple(words)
-    role = roles.pop()
-    drop = {w for r, w in found if r == role or r == "estimate"}
-    return role, tuple(w for w in words if w not in drop)
-
 
 def _number(v: Any) -> float | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -244,12 +199,14 @@ class SettingCheck:
     high: float
     gross: bool
     below: bool  # a coverage below the level, or a ratio outside [1/1.25, 1.25], beyond its sampling error
+    above: bool = False  # a coverage above the level beyond its sampling error: wider intervals than need be, not a fault
 
 
 @dataclass
 class Quantity:
-    """One reported uncertainty FI judged: ``kind`` is ``coverage`` or ``se_ratio``; ``names`` the trial values it is read
-    from; ``level`` the intervals' level (coverage); ``truth`` how the true value was found."""
+    """One reported uncertainty FI judged: ``kind`` is ``coverage`` or ``se_ratio`` (or ``missing``: the trials do not
+    return the names the plan declares, ``names``, for the metric ``label``, which is a fault of its own); ``names`` the
+    trial values it is read from; ``level`` the intervals' level (coverage); ``truth`` the declared true value."""
 
     kind: str
     label: str
@@ -268,20 +225,30 @@ class Quantity:
 
     @property
     def fault(self) -> bool:
-        return self.gross > 0 and self.gross >= GROSS_SHARE * self.judged
+        return self.kind == "missing" or self.gross > 0 and self.gross >= GROSS_SHARE * self.judged
 
     @property
     def below(self) -> int:
         return sum(1 for s in self.settings if s.below)
 
+    @property
+    def above(self) -> int:
+        return sum(1 for s in self.settings if s.above)
+
     def says(self) -> str:
+        if self.kind == "missing":
+            return (f"the trials do not return {', '.join(f'`{n}`' for n in self.names)}, which the plan declares for "
+                    f"`{self.label}` (its estimate and its uncertainty), so FI could not measure them against the true "
+                    "value")
         if self.kind == "coverage":
             vals = [s.value for s in self.settings]
             what = (f"coverage of the true value by `{self.label}` at the {self.level:.0%} level" if self.level is not None
                     else f"coverage `{self.label}`")
             rng = f"{min(vals):.3f} to {max(vals):.3f}" if vals else "no value"
             return (f"{what}: {rng} over {self.judged} setting(s); grossly low (more than {COVERAGE_GAP:g} below the level, "
-                    f"beyond sampling error) in {self.gross}")
+                    f"beyond sampling error) in {self.gross}"
+                    + (f"; above the level beyond sampling error in {self.above} (wider than need be, not a fault)"
+                       if self.above else ""))
         vals = [s.value for s in self.settings]
         rng = f"{min(vals):.3g} to {max(vals):.3g}" if vals else "no value"
         return (f"spread of `{self.names[0]}` over the trials / its reported standard error `{self.names[1]}`: {rng} over "
@@ -323,111 +290,25 @@ def _series(cell: dict[str, Any], name: str) -> dict[int, float]:
     return out
 
 
-def _levels(protocol: dict[str, Any] | None, thresholds: dict[str, Any]) -> set[float]:
-    """The levels of the intervals the plan states: a threshold named for a level, or a percentage in the description of a
-    metric that is about an interval."""
-    found: set[float] = set()
-    for name, value in (thresholds or {}).items():
-        words = set(tokens(name))
-        v = _number(value)
-        if v is not None and words & _LEVEL_WORDS and not words & _NOT_A_LEVEL and 0.5 < v < 1.0:
-            found.add(round(v, 6))
-    metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
-    for m in metrics if isinstance(metrics, list) else []:
-        text = str((m or {}).get("estimand") or "") if isinstance(m, dict) else ""
-        if not re.search(r"\binterval|\bcover|\bcontain", text, re.I):
-            continue
-        for pct in re.findall(r"(\d{2}(?:\.\d+)?)\s*%", text):
-            p = float(pct) / 100.0
-            if 0.5 < p < 1.0:
-                found.add(round(p, 6))
-    return found
+def _z(level: float) -> float:
+    """The two-sided normal critical value of a level (1.96 at 0.95)."""
+    return NormalDist().inv_cdf(0.5 + level / 2.0)
 
 
-def _name_level(name: str) -> float | None:
-    for w in tokens(name):
-        try:
-            p = float(w)
-        except ValueError:
-            continue
-        if 50.0 <= p < 100.0:
-            return round(p / 100.0, 6)
-    return None
+def _truth_of(truth: Any, cell: dict[str, Any], thresholds: dict[str, Any]) -> float | None:
+    """The declared true value in one setting: the number itself, a threshold's value, or the setting's own value of a grid
+    parameter (``None`` when it is not a number there)."""
+    if not isinstance(truth, str):
+        return _number(truth)
+    if truth in thresholds:
+        return _number(thresholds[truth])
+    return _number((cell.get("cell") or {}).get(truth))
 
 
-def _truths(cells: list[dict[str, Any]], names: list[str], thresholds: dict[str, Any]) -> list[tuple[str, tuple[str, ...], Any]]:
-    """Every true value on offer: ``(its name, its words, value)``; ``value`` is a number (a threshold) or ``{setting key:
-    number}`` (a value that every trial of a setting returns alike)."""
-    out: list[tuple[str, tuple[str, ...], Any]] = []
-    for name, value in (thresholds or {}).items():
-        role, stem = _role(name)
-        v = _number(value)
-        if role == "true" and v is not None and stem:
-            out.append((f"the plan's {name} = {v:g}", stem, v))
-    for name in names:
-        role, stem = _role(name)
-        if role != "true" or not stem:
-            continue
-        per: dict[str, float] = {}
-        alike = True
-        for c in cells:
-            vals = list(_series(c, name).values())
-            if not vals:
-                continue
-            if max(vals) - min(vals) > 1e-9 * max(1.0, abs(vals[0])):
-                alike = False
-                break
-            per[str(c.get("key"))] = vals[0]
-        if alike and per:
-            out.append((f"the trials' `{name}`", stem, per))
-    return out
-
-
-def _truth_for(stem: tuple[str, ...], truths: list[tuple[str, tuple[str, ...], Any]]) -> tuple[str, Any] | None | str:
-    """The one true value for a quantity: the truth that shares the most words with it (at least one that is not a number,
-    and every number the truth's name has); ``None`` when there is none, ``"ambiguous"`` when two differ and tie."""
-    best: list[tuple[int, str, Any]] = []
-    have = set(stem)
-    for label, tstem, value in truths:
-        words = set(tstem)
-        digits = {w for w in words if w[0].isdigit()}
-        if not digits <= have:
-            continue
-        shared = words & have
-        if not any(not w[0].isdigit() for w in shared):
-            continue
-        best.append((len(shared), label, value))
-    if not best:
-        return None
-    top = max(s for s, _l, _v in best)
-    tied = [(label, v) for s, label, v in best if s == top]
-    values = {json.dumps(v, sort_keys=True) for _l, v in tied}
-    if len(values) > 1:
-        return "ambiguous"
-    return tied[0]
-
-
-def _truth_in(value: Any, key: str) -> float | None:
-    if isinstance(value, dict):
-        return _number(value.get(key))
-    return _number(value)
-
-
-def _plausible(truth: Any, cells: list[dict[str, Any]], spans: dict[str, tuple[float, float]]) -> bool:
-    """Whether the true value lies within the range of what was reported for it (the estimates, or the ends of the
-    intervals) in at least half the settings that reported it."""
-    seen = inside = 0
-    for c in cells:
-        key = str(c.get("key"))
-        if key not in spans:
-            continue
-        t = _truth_in(truth, key)
-        if t is None:
-            continue
-        lo, hi = spans[key]
-        seen += 1
-        inside += lo <= t <= hi
-    return seen > 0 and inside * 2 >= seen
+#: What the record says when the plan declares nothing FI can measure the reported uncertainty against.
+NO_DECLARATION = ("the plan declares no metric with a known true value (`known_value`: the true value, the names run_trial "
+                  "returns for the estimate and its standard error or interval, and the interval's level), so FI could "
+                  "not measure the reported intervals and standard errors against the truth")
 
 
 def _coverage_check(key: str, hits: list[float], level: float) -> SettingCheck | None:
@@ -439,7 +320,7 @@ def _coverage_check(key: str, hits: list[float], level: float) -> SettingCheck |
     if ci is None:
         return None
     lo, hi = ci
-    return SettingCheck(key, n, k / n, lo, hi, gross=hi < level - COVERAGE_GAP, below=hi < level)
+    return SettingCheck(key, n, k / n, lo, hi, gross=hi < level - COVERAGE_GAP, below=hi < level, above=lo > level)
 
 
 def _ratio_check(key: str, est: list[float], se: list[float]) -> SettingCheck | None:
@@ -460,142 +341,75 @@ def _ratio_check(key: str, est: list[float], se: list[float]) -> SettingCheck | 
 
 def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None,
                 thresholds: dict[str, Any] | None = None) -> Calibration:
-    """What the trials' intervals and standard errors say against the true values (see the module's notes)."""
+    """What the trials' intervals and standard errors say against the true values the plan declares (see the module's
+    notes). Only the protocol's ``known_value`` declarations are read."""
     out = Calibration()
+    protocol = protocol if isinstance(protocol, dict) else {}
     if thresholds is None:
-        thresholds = (protocol or {}).get("thresholds") if isinstance((protocol or {}).get("thresholds"), dict) else {}
+        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
     thresholds = thresholds or {}
-    names = sorted({n for c in cells for n in (c.get("metrics") or {})})
-    roles = {n: _role(n) for n in names}
-    truths = _truths(cells, names, thresholds)
-    plan_levels = _levels(protocol, thresholds)
-
-    def level_of(name: str) -> tuple[float | None, str]:
-        own = _name_level(name)
-        if own is not None:
-            return own, ""
-        if len(plan_levels) == 1:
-            return next(iter(plan_levels)), ""
-        if not plan_levels:
-            return None, "the plan states no level for its intervals"
-        return None, "the plan states several levels (" + ", ".join(f"{p:g}" for p in sorted(plan_levels)) + ")"
-
-    # coverage indicators: 0/1 in every trial
-    for name in names:
-        if roles[name][0] != "cover":
+    axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
+    known = [s for s in _metric_spec.declared(protocol) if s.get("known_value")]
+    if not known:
+        out.not_checked.append(NO_DECLARATION)
+        return out
+    returned = {n for c in cells for n in (c.get("metrics") or {})}
+    if not returned:
+        out.not_checked.append("no setting has trials to judge, so the calibration was not checked")
+        return out
+    for spec in known:
+        kv, ident = spec["known_value"], spec["id"]
+        truth, level, est = kv["true_value"], kv["level"], kv["estimate"]
+        if isinstance(truth, str) and truth not in thresholds and truth not in axes:
+            out.not_checked.append(f"`{ident}`: its true value `{truth}` is neither a threshold nor a grid parameter of the "
+                                   "plan")
             continue
-        values = [v for c in cells for v in _series(c, name).values()]
-        if not values or any(v not in (0.0, 1.0) for v in values):
+        truth_label = (f"the plan's {truth} = {float(truth):g}" if not isinstance(truth, str) else
+                       f"the plan's {truth}" + (f" = {_number(thresholds[truth]):g}" if _number(thresholds.get(truth))
+                                                is not None else " (per setting)"))
+        spread = kv.get("standard_error") or kv.get("variance")
+        variance = spread is not None and "standard_error" not in kv
+        ends = kv.get("interval")
+        missing = [n for n in [est, *([spread] if spread else []), *(ends or [])] if n not in returned]
+        if missing:
+            out.quantities.append(Quantity("missing", ident, missing, level=level, truth=truth_label))
             continue
-        level, why = level_of(name)
-        if level is None:
-            out.not_checked.append(f"`{name}`: {why}")
-            continue
-        q = Quantity("coverage", name, [name], level=level, truth="the run's own record of whether each interval covered it")
-        for c in cells:
-            got = _coverage_check(str(c.get("key")), list(_series(c, name).values()), level)
-            if got is not None:
-                q.settings.append(got)
-        out.quantities.append(q)
-
-    # intervals: lower and upper of one quantity
-    stems: dict[tuple[str, ...], dict[str, str]] = {}
-    for name in names:
-        role, stem = roles[name]
-        if role in ("lower", "upper") and stem:
-            stems.setdefault(stem, {}).setdefault(role, name)
-    for stem, ends in sorted(stems.items()):
-        if set(ends) != {"lower", "upper"}:
-            continue
-        lo_name, hi_name = ends["lower"], ends["upper"]
-        label = f"{lo_name} .. {hi_name}"
-        level, why = level_of(lo_name)
-        if level is None:
-            level, why2 = level_of(hi_name)
-            why = why2 if level is None else ""
-        if level is None:
-            out.not_checked.append(f"the interval `{label}`: {why}")
-            continue
-        found = _truth_for(stem, truths)
-        if found is None:
-            out.not_checked.append(f"the interval `{label}`: no true value the plan declares shares its name")
-            continue
-        if found == "ambiguous":
-            out.not_checked.append(f"the interval `{label}`: two true values fit its name equally")
-            continue
-        truth_label, truth = found
-        spans: dict[str, tuple[float, float]] = {}
-        for c in cells:
-            lo_s, hi_s = _series(c, lo_name), _series(c, hi_name)
-            if lo_s and hi_s:
-                spans[str(c.get("key"))] = (min(lo_s.values()), max(hi_s.values()))
-        if not _plausible(truth, cells, spans):
-            out.not_checked.append(f"the interval `{label}`: {truth_label} lies outside the intervals' range in most settings, "
-                                   "so it is not this quantity's true value")
-            continue
-        q = Quantity("coverage", label, [lo_name, hi_name], level=level, truth=truth_label)
+        cover = Quantity("coverage", " .. ".join(ends) if ends else f"{est} +/- z*{spread}",
+                         list(ends) if ends else [est, spread], level=level, truth=truth_label)
+        ratio = Quantity("se_ratio", est, [est, spread], truth=truth_label) if spread else None
+        z = _z(level)
         for c in cells:
             key = str(c.get("key"))
-            t = _truth_in(truth, key)
-            lo_s, hi_s = _series(c, lo_name), _series(c, hi_name)
+            t = _truth_of(truth, c, thresholds)
             if t is None:
                 continue
-            hits = [1.0 if lo_s[i] <= t <= hi_s[i] else 0.0 for i in lo_s if i in hi_s]
+            e = _series(c, est)
+            s = _series(c, spread) if spread else {}
+            if variance:
+                s = {i: math.sqrt(v) for i, v in s.items() if v >= 0}
+            if ends:
+                lo, hi = _series(c, ends[0]), _series(c, ends[1])
+                hits = [1.0 if lo[i] <= t <= hi[i] else 0.0 for i in lo if i in hi]
+            else:
+                hits = [1.0 if abs(e[i] - t) <= z * s[i] else 0.0 for i in e if i in s and s[i] >= 0]
             got = _coverage_check(key, hits, level)
             if got is not None:
-                q.settings.append(got)
-        out.quantities.append(q)
-
-    # an estimate and its standard error (or variance)
-    plain: dict[tuple[str, ...], list[str]] = {}
-    for name in names:
-        role, stem = roles[name]
-        if role in ("", "estimate") and stem:
-            plain.setdefault(stem, []).append(name)
-    for name in names:
-        role, stem = roles[name]
-        if role not in ("se", "var") or not stem:
-            continue
-        estimates = plain.get(stem) or []
-        if not estimates:
-            continue
-        if len(estimates) > 1:
-            out.not_checked.append(f"`{name}`: more than one estimate has its name ({', '.join(estimates)})")
-            continue
-        est = estimates[0]
-        found = _truth_for(stem, truths)
-        if found is None:
-            out.not_checked.append(f"`{est}` with `{name}`: the plan declares no true value that shares its name, so FI cannot "
-                                   "tell whether the trials of a setting all estimate the same value")
-            continue
-        if found == "ambiguous":
-            out.not_checked.append(f"`{est}` with `{name}`: two true values fit its name equally")
-            continue
-        truth_label, truth = found
-        spans = {}
-        for c in cells:
-            e = _series(c, est)
-            if e:
-                spans[str(c.get("key"))] = (min(e.values()), max(e.values()))
-        if not _plausible(truth, cells, spans):
-            out.not_checked.append(f"`{est}` with `{name}`: {truth_label} lies outside the estimates' range in most settings, "
-                                   "so it is not this quantity's true value")
-            continue
-        q = Quantity("se_ratio", est, [est, name], truth=truth_label)
-        for c in cells:
-            e, s = _series(c, est), _series(c, name)
-            pairs = [(e[i], s[i]) for i in e if i in s and (s[i] >= 0)]
-            if role == "var":
-                pairs = [(x, math.sqrt(v)) for x, v in pairs]
-            got = _ratio_check(str(c.get("key")), [x for x, _ in pairs], [v for _, v in pairs])
-            if got is not None:
-                q.settings.append(got)
-        out.quantities.append(q)
-    out.quantities = [q for q in out.quantities if q.judged]
-    if not out.quantities:
-        out.not_checked.append("the run reports no interval or standard error that FI could pair with a true value the "
-                               "plan declares (an estimate with `_se` or `_var`, an interval with `_lower`/`_upper`, or a "
-                               "0/1 `covered` value), so the calibration was not checked")
+                cover.settings.append(got)
+            if ratio is not None:
+                pairs = [(e[i], s[i]) for i in e if i in s and s[i] >= 0]
+                got = _ratio_check(key, [x for x, _ in pairs], [v for _, v in pairs])
+                if got is not None:
+                    ratio.settings.append(got)
+        for q in (cover, ratio):
+            if q is None:
+                continue
+            if q.judged:
+                out.quantities.append(q)
+            else:
+                out.not_checked.append(f"`{q.label}` ({ident}): no setting had {MIN_TRIALS} or more trials with these "
+                                       "values (and some spread of the estimate), too few to judge")
+    if not out.quantities and not out.not_checked:
+        out.not_checked.append(NO_DECLARATION)
     return out
 
 
@@ -605,7 +419,8 @@ def calibration_directive(faults: list[Quantity]) -> str:
     lines = []
     for q in faults[:6]:
         worst = "; ".join(f"{s.key}: {s.value:.3g} (n={s.n})" for s in q.worst())
-        lines.append(f"- {q.says()}. Worst settings: {worst}")
+        lines.append(f"- {q.says()}." + (f" Worst settings: {worst}" if worst else
+                                         " Return them from run_trial under exactly these names."))
     return ("FI measured the intervals and standard errors the simulation reports against the true values it was given, "
             "over the trials of each setting, and found them grossly wrong:\n" + "\n".join(lines)
             + "\n\nA reported standard error must be about the spread of the estimate over repeated trials, and a 95% "
@@ -706,7 +521,8 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
         "settings": len(fails),
         "calibration": None if cal is None else {
             "quantities": [{"kind": q.kind, "label": q.label, "names": q.names, "level": q.level, "truth": q.truth,
-                            "judged": q.judged, "gross": q.gross, "below": q.below, "fault": q.fault, "says": q.says(),
+                            "judged": q.judged, "gross": q.gross, "below": q.below, "above": q.above, "fault": q.fault,
+                            "says": q.says(),
                             "settings": [{"key": s.key, "n": s.n, "value": round(s.value, 6), "low": round(s.low, 6),
                                           "high": round(s.high, 6), "gross": s.gross} for s in q.settings]}
                            for q in cal.quantities],

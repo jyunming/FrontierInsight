@@ -613,7 +613,16 @@ def metric_notes(protocol: dict[str, Any] | None) -> list[str]:
         return []
     metrics = protocol.get("metrics")
     if isinstance(metrics, list) and metrics:
-        return []
+        from . import metric_spec
+
+        notes = metric_spec.known_value_problems(protocol)
+        if isinstance(protocol.get("runs_per_setting"), (int, float)) and not any(
+                m.get("known_value") for m in metric_spec.declared(protocol)):
+            notes.append("No metric declares a known true value (`known_value`), so FI will not measure the reported "
+                         "intervals and standard errors against the truth, and the paper will say that their calibration "
+                         "was not checked; declare one for each number the simulation estimates and knows the true "
+                         "value of, while the plan is a draft.")
+        return notes
     if not isinstance(protocol.get("runs_per_setting"), (int, float)) and not isinstance(protocol.get("precision"), dict):
         return []
     return [

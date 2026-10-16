@@ -489,7 +489,8 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
     for x in quantities:
         state = ("grossly wrong (a fault)" if x.get("fault") else
                  f"below the level in {_int(x.get('below'))} setting(s): reported, not a fault" if _int(x.get("below"))
-                 else "as it should be")
+                 else f"above the level in {_int(x.get('above'))} setting(s) (wider than need be): reported, not a fault"
+                 if _int(x.get("above")) else "as it should be")
         lines.append(f"{_one(x.get('says'), 300)} - {state}")
     not_checked = [str(n) for n in _list(cal.get("not_checked"))]
     if not cal.get("checked"):
