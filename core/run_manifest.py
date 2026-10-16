@@ -564,7 +564,8 @@ def _value_named(segment: str, grid: dict[str, list[Any]], found: dict[str, Any]
 
 
 def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]] | None = None,
-                     fits: Any = None) -> tuple[dict[Any, tuple[int, int]], dict[Any, dict[Any, tuple[int, int]]]]:
+                     fits: Any = None, derived: set[int] | frozenset[int] = frozenset(),
+                     ) -> tuple[dict[Any, tuple[int, int]], dict[Any, dict[Any, tuple[int, int]]]]:
     """``(real values, undefined)`` the analysis lists for ``metric_id``, per key the lists sit under (``None`` for the top
     level), and the same counts per mapping that holds those keys side by side.
 
@@ -582,7 +583,10 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
     ``fits(pairs, mapping)`` (when FI holds the record per setting): whether a mapping's list and count fit the record of
     the settings ``pairs`` names. A key read only as a bare value name (:func:`_path_cells`) is a guess, so the list is
     placed there only when it fits that setting's record; otherwise it is read without the guess (a summary over three
-    estimators under ``summary/mean`` is the setting's block, not the estimator called mean)."""
+    estimators under ``summary/mean`` is the setting's block, not the estimator called mean).
+
+    ``derived``: the ids of the lists drawn from the record rather than being it (:func:`_attribute`: a bootstrap
+    resample, a subset given twice). They never count as trials."""
     values_key, undefined_key = f"{metric_id}_values", f"{metric_id}_undefined"
     found: dict[tuple[Any, Any], dict[Any, list[int]]] = {}
 
@@ -608,17 +612,21 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
     def walk(node: Any, under: Any, container: Any, parent: Any, path: tuple[Any, ...] = ()) -> None:
         if isinstance(node, dict):
             listed, undefined = node.get(values_key), node.get(undefined_key)
+            view = node
+            if isinstance(listed, list) and id(listed) in derived:
+                listed, view = None, {k: v for k, v in node.items() if k != values_key}
             if isinstance(listed, list) or number(undefined):
-                add(read(under, path, node), parent, container if container is not None else id(node),
-                    _mapping_counts(node, metric_id))
+                add(read(under, path, view), parent, container if container is not None else id(node),
+                    _mapping_counts(view, metric_id))
             inner = ("inner", id(node))
             # One entry per key, its list and its count read together: the same undefined trials given as ``null`` in the
             # key's list and as the key's count are one account (:func:`_mapping_counts`), not two.
-            by_key = {**({k: None for k, v in listed.items() if isinstance(v, list)} if isinstance(listed, dict) else {}),
+            by_key = {**({k: None for k, v in listed.items() if isinstance(v, list) and id(v) not in derived}
+                         if isinstance(listed, dict) else {}),
                       **({k: None for k in undefined} if isinstance(undefined, dict) else {})}
             for key in by_key:
                 one = {}
-                if isinstance(listed, dict) and isinstance(listed.get(key), list):
+                if isinstance(listed, dict) and isinstance(listed.get(key), list) and id(listed[key]) not in derived:
                     one[values_key] = listed[key]
                 if isinstance(undefined, dict) and key in undefined:
                     one[undefined_key] = undefined[key]
@@ -769,7 +777,8 @@ def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recor
     the upper bound as a sum, since a pooled copy may sit beside them; each one alone still is."""
     record = _record_by_setting(recorded_by_cell, metric_id, grid) if recorded_by_cell and grid else {}
     fits = _fits_record(metric_id, grid, record) if record else None
-    groups, families = _listed_by_group(result_json, metric_id, grid, fits)
+    derived = _attribute(result_json, metric_id, grid, recorded_by_cell)[2] if record else set()
+    groups, families = _listed_by_group(result_json, metric_id, grid, fits, derived)
 
     def cells_of(under: Any) -> set[frozenset[tuple[str, Any]]] | None:
         if isinstance(under, tuple) and len(under) == 2 and under[0] == "cells":
@@ -878,9 +887,9 @@ def _defined_count(counts: Any) -> int:
 
 
 def _attribute(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
-               recorded_by_cell: dict[str, Any] | None) -> tuple[list[Finding], list[str]]:
+               recorded_by_cell: dict[str, Any] | None) -> tuple[list[Finding], list[str], set[int]]:
     """Each ``<metric_id>_values`` list held to the trials of the setting its key path names: ``(fabricated findings,
-    notes for run.log)``.
+    notes for run.log, the ids of the lists derived from the record)``.
 
     * A list is that setting's trials when every value is one of them.
     * A key that is only a value's name (``stats/benjamini_hochberg``, or ``by_method/benjamini_hochberg`` beside a key
@@ -890,15 +899,20 @@ def _attribute(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
       or the only one that holds them all) is that output's, printed under the wrong name: a note for run.log, not a
       finding (r13's probe printed ``x1_power``'s values as ``power_values``). The same output's values of another
       setting or procedure stay fabricated.
+    * A list whose every value is one of that setting's recorded values, some given more often than the trials gave them
+      (a bootstrap resample, a subset given twice), is derived from the record: never fabricated, and never counted as
+      the trials (:func:`_listed_by_group`), so one standing in for a setting's list leaves that setting short. One that
+      is exactly another setting's or procedure's whole record is that one's values, and stays fabricated. A list that
+      names no setting is held the same way to the record of every setting.
     * Anything else is numbers that setting never produced: fabricated. Values no trial of ``metric_id`` produced at any
       setting are :func:`core.trial_runner.reported_values_not_run`'s to tell, and are not told twice."""
     from collections import Counter
 
-    from .trial_runner import _not_among, held_as, pooled
+    from .trial_runner import _not_among, drawn_from, held_as, pooled
 
     record = _record_by_setting(recorded_by_cell, metric_id, grid) if recorded_by_cell and grid else {}
     if not record:
-        return [], []
+        return [], [], set()
     everywhere = pooled(recorded_by_cell or {})
     records: dict[str, dict[frozenset[tuple[str, Any]], Any]] = {metric_id: record}
 
@@ -911,8 +925,13 @@ def _attribute(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
     def setting(pairs: frozenset[tuple[str, Any]] | None) -> str:
         return ",".join(f"{a}={v}" for a, v in sorted(pairs or (), key=lambda p: list(grid).index(p[0]))) or "every setting"
 
+    def another_whole_record(numbers: list[float], full: frozenset[tuple[str, Any]] | None) -> bool:
+        return any(not (full is None or full <= cell) and len(numbers) == _defined_count(counts)
+                   and not _not_among(numbers, counts) for cell, counts in record.items())
+
     findings: list[Finding] = []
     notes: list[str] = []
+    derived: set[int] = set()
     for where, path, values in _lists_with_paths(result_json, metric_id, grid):
         numbers = _finite(values)
         if not numbers:
@@ -921,7 +940,11 @@ def _attribute(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
         named = next((k for k in reversed(keys) if k != metric_id and k in everywhere), None)
         full, firm = _path_cells(path, grid), _path_cells(path, grid, bare=False)
         if full is None and named is None:
-            continue  # a list that names no setting: pooled, judged over all settings by trial_runner
+            # a list that names no setting: pooled, judged over all settings by trial_runner; one drawn from them is derived
+            mine = everywhere.get(metric_id) or Counter()
+            if _not_among(numbers, mine) and drawn_from(numbers, mine):
+                derived.add(id(values))
+            continue
         own = at(metric_id, full)
         if not _not_among(numbers, own):
             continue
@@ -937,6 +960,9 @@ def _attribute(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
             notes.append(f"`{where}` holds `{holds[0]}`'s values at `{setting(full)}`, not `{metric_id}`'s: FI counts it "
                          f"as `{holds[0]}`")
             continue
+        if drawn_from(numbers, own) and not another_whole_record(numbers, full):
+            derived.add(id(values))  # drawn from this setting's record (a resample): derived, not counted as its trials
+            continue
         told = (len(_not_among(numbers, everywhere.get(metric_id) or Counter()))
                 if held_as(metric_id, values, everywhere, keys) == metric_id else 0)
         here = len(_not_among(numbers, own))
@@ -945,7 +971,7 @@ def _attribute(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
                 f"the analysis reports `{where}` as `{metric_id}` at `{setting(full)}`, but {here - told} of its "
                 f"{len(numbers)} value(s) are not that setting's trials (they are another setting's or another "
                 "procedure's): the list under a setting must be that setting's own values from FI_TRIALS"))
-    return findings, notes
+    return findings, notes, derived
 
 
 def _values_of_other_settings(result_json: Any, metric_id: str, grid: dict[str, list[Any]],

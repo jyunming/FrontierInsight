@@ -1088,7 +1088,8 @@ def test_values_the_trials_never_produced_are_found_value_by_value(tmp_path: Pat
     near = {"final_size_values": [honest["R0=1.5"]["final_size_values"][0] + 0.01]}
     assert trial_runner.reported_values_not_run(recorded, near), "a different value is not a rounding"
     twice = {"final_size_values": honest["R0=1.5"]["final_size_values"] * 2}
-    assert trial_runner.reported_values_not_run(recorded, twice), "each trial's value counts once"
+    assert trial_runner.reported_values_not_run(recorded, twice) == [], (
+        "each value one of the trials': drawn from them (a resample), not made up; it never counts as the trials")
     # A run record edited after the trials ran no longer matches the ledger's hashes, and says so.
     record_path = root / ".fi" / "trials" / "run.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))

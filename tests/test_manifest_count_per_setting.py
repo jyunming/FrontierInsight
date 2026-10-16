@@ -75,9 +75,15 @@ def test_the_same_list_under_a_second_key_of_its_setting_is_not_counted_twice() 
     e = rj["by_m"]["20"]["by_pi1"]["0.05"]
     e["cells"] = {"m=20,pi1=0.05,procedure=bonferroni": {"fdr_values": list(e["by_method"]["bonferroni"]["fdr_values"])}}
     assert _found(protocol, manifest, rj, per_cell) == []
+    # Each value given twice is drawn from the setting's record (derived), never made up and never counted as its
+    # trials: the copy under cells/ still accounts for the setting; without it the setting is short.
     e["by_method"]["bonferroni"]["fdr_values"] = e["by_method"]["bonferroni"]["fdr_values"] * 2
+    assert _found(protocol, manifest, rj, per_cell) == []
+    del e["cells"]
     found = _found(protocol, manifest, rj, per_cell, "fdr")
-    assert found and any(rm.kind_of(s) == rm.FABRICATED for s in _raw(protocol, manifest, rj, per_cell)), found
+    raw = _raw(protocol, manifest, rj, per_cell)
+    assert found and "m=20,pi1=0.05,procedure=bonferroni" in found[0], found
+    assert not any(rm.kind_of(s) == rm.FABRICATED for s in raw), raw
 
 
 def _raw(protocol: dict[str, Any], manifest: dict[str, Any], rj: Any, per_cell: dict[str, Any]) -> list[Any]:

@@ -1922,14 +1922,40 @@ def _not_among(values: list[Any], recorded: Counter) -> list[float]:
             extra.append(value)
             continue
         i = bisect.bisect_left(pool, value)
-        near = [(abs(pool[j] - value), j) for j in (i - 1, i) if 0 <= j < len(pool)
-                and abs(pool[j] - value) <= max(half * (1 + 1e-9), _FLOAT32 * max(abs(pool[j]), abs(value)),
-                                                _FLOAT32_TINY if value == 0 else 0.0)]
+        near = [(abs(pool[j] - value), j) for j in (i - 1, i) if 0 <= j < len(pool) and _near(pool[j], value, half)]
         if near:
             pool.pop(min(near)[1])  # the nearest value left: the same choice as a search of every value
         else:
             extra.append(value)
     return extra
+
+
+def _near(recorded: float, value: float, half: float) -> bool:
+    """Whether ``value``, printed to within ``half`` of its last place, is the ``recorded`` value (:func:`_not_among`)."""
+    return abs(recorded - value) <= max(half * (1 + 1e-9), _FLOAT32 * max(abs(recorded), abs(value)),
+                                        _FLOAT32_TINY if value == 0 else 0.0)
+
+
+def drawn_from(values: list[Any], recorded: Counter) -> bool:
+    """Whether every number of ``values`` is one of the recorded values, matched as :func:`_not_among` matches one but
+    with the copies not counted: a list drawn from the trials (a bootstrap resample, a subset given twice), not the
+    trials themselves. Such a list is derived from FI's record: it is not numbers no trial produced, and it never counts
+    as the trials (``core.run_manifest._attribute``)."""
+    import bisect
+
+    keys = {k if isinstance(k, str) else _value_key(k) for k, n in recorded.items() if n > 0} - {None}
+    pool = sorted({v for v in map(_as_float, keys) if math.isfinite(v)})
+    for x in values:
+        key = _value_key(x)
+        if key is None or key in keys:
+            continue
+        value = float(x)
+        if not math.isfinite(value):
+            return False
+        i = bisect.bisect_left(pool, value)
+        if not any(_near(pool[j], value, _half_step(x)) for j in (i - 1, i) if 0 <= j < len(pool)):
+            return False
+    return True
 
 
 def _as_float(key: Any) -> float:
@@ -1985,7 +2011,9 @@ def mean_beside(mapping: dict[str, Any], name: str, values: list[Any]) -> str | 
 
 def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> list[str]:
     """Each ``<name>_values`` list the analysis printed, for a ``<name>`` FI's trials returned, that holds values those
-    trials never produced (or more copies of one than they did): one sentence each.
+    trials never produced: one sentence each. A list that holds more copies of some trials' values than the trials gave,
+    every value one of theirs (:func:`drawn_from`: a bootstrap resample), is derived from them, not made up; it never
+    counts as the trials (``core.run_manifest``), so one standing in for them leaves them short.
 
     The run-manifest check counts a metric's values against the trials; a script could still print that many numbers
     of its own. Under the trial contract FI holds every trial's value, so a list the analysis says it computed from is
@@ -2011,7 +2039,7 @@ def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> l
                     if held_as(k[:-7], v, recorded, keys) != k[:-7]:
                         continue
                     extra = _not_among(v, recorded[k[:-7]])
-                    if extra:
+                    if extra and not drawn_from(v, recorded[k[:-7]]):
                         out.append(_rm.fabricated(
                             f"the analysis reports `{here}` with {len(extra)} value(s) FI's trials of `{k[:-7]}` never "
                             f"produced (e.g. {extra[0]:g}): experiment.py must print the values FI_TRIALS holds, as they "

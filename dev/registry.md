@@ -34,7 +34,10 @@ same PR that adds, splits or renames one.
   holds each list to the trials of the setting its key path names: a lone key that is a value's name must hold that
   value's trials, or the coarser setting's whole record (a summary), never fall back to the coarser setting; a list that
   holds, at its setting, the values of another recorded output (the one a key on its path names, or the only one
-  that holds them all) is counted as that output (`relabelled`, one run.log line from `Engine._run_manifest_problems`); anything else is fabricated. `trial_runner.held_as` hands such lists over from
+  that holds them all) is counted as that output (`relabelled`, one run.log line from `Engine._run_manifest_problems`);
+  a list whose every value is one of the setting's recorded values, some given more often (`trial_runner.drawn_from`: a
+  bootstrap resample, a subset given twice), is derived: not fabricated (here or in `reported_values_not_run`) and
+  left out of `_listed_by_group`'s counts, unless it is exactly another setting's whole record; anything else is fabricated. `trial_runner.held_as` hands such lists over from
   the pooled check, and `trial_runner.mean_beside` (in `reported_values_not_run`) calls a `<m>` / `<m>_mean` printed
   beside `<m>_values` fabricated when it is neither the list's mean nor its standard deviation. Findings carry a kind (`Finding`, `fabricated` / `unaccounted`,
   `kind_of`): `Engine._run_manifest_problems` keeps the fabricated ones in `_manifest_fabricated`, which stop under
