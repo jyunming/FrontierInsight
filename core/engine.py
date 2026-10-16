@@ -21428,16 +21428,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         )
 
     def _note_design_objections(self, state: QuestState, review: dict[str, Any]) -> list[Any]:
-        """The review's must-fix hits that count (a page-limit hit aside, and an objection the paper already states),
+        """The review's must-fix hits that count (a page-limit hit aside, and an objection FI's record already keeps),
         and FI's record of the reviewer's objections to the design.
 
         An objection is a hit that names no problem FI checks in the text (circular evaluation, a single-point evaluation,
         a name the reviewer made up) or, for a revise verdict, the reviewer's own reason (``blocking``): no check of FI's
-        confirms it, so the design is not changed for it. When the paper is written again after this review, they go into
-        FI's record (``.fi/review_objections.json``), which the quality report prints (core/disclosure.py:run_record);
-        the paper is not required to carry them (the writer may name one that is a real limit of the study, in its own
-        words). One the record already holds is in ``review["objections_repeated"]`` and is not counted: a rewrite cannot
-        answer it. Best-effort: a record FI cannot read or write counts every hit, as before."""
+        confirms it, so the design is not changed for it. Every one goes into FI's record (``.fi/review_objections.json``),
+        which the quality report prints (core/disclosure.py:run_record), the last round's too; the paper is not required
+        to carry them (the writer may name one that is a real limit of the study, in its own words). One the record
+        already holds is in ``review["objections_repeated"]`` and is not counted: a rewrite cannot answer it. A review
+        that sends the experiment back to be run again records no reason of its own (it names a wrong number, not the
+        design). Best-effort: a record FI cannot read or write counts every hit, as before."""
         hits = [h for h in review.get("must_flag_hits") or [] if _hit_name(h) != _PAGE_LIMIT_HIT]
         objections = [h for h in hits if _hit_name(h) not in _TEXT_ONLY_HITS]
         try:
@@ -21451,16 +21452,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             new = [(_objection_key(h), _one_line(str(h), 300)) for h in objections if _objection_key(h) not in stated]
             said = str(review.get("blocking") or "").strip() if review.get("verdict") == "revise" else ""
             if said and not counted and (self.config.pauses.review == "ask" or not self.config.engine.review_loop):
-                said = ""  # a person decides, or nothing is rewritten: the reason is not an objection the paper states
+                said = ""  # a person decides, or no review loop runs: the reason alone is no objection FI keeps
             rerun = (_review_sends_the_experiment_back(review, state)
                      and int(state.get("code_reexecutes") or 0) + 1 <= _CODE_REEXECUTES)
-            # The paper is written again after this review: within the rounds, or for a claim FI's records contradict
-            # (those rewrites have their own count, outside the rounds).
-            rewritten = int(state.get("iteration", 0) or 0) + 1 < self.config.engine.max_iterations or (
-                any(_hit_name(h) == _record_claims.HIT for h in hits)
-                and int(state.get("record_rewrites") or 0) + 1 <= _RECORD_REWRITES)
-            if (new or said) and not rerun and rewritten:
-                _disclosure.add_objections(self.quest_root, new, said)
+            # Kept whether or not the paper is written again after this review: an objection raised only in the last
+            # round is in QUALITY.md too.
+            if new or (said and not rerun):
+                _disclosure.add_objections(self.quest_root, new, "" if rerun else said)
             return counted
         except Exception as e:  # noqa: BLE001 -- FI's record is a help, never a reason to stop
             self._log.warning("[review] the record of the reviewer's objections could not be kept (%r)", e)
