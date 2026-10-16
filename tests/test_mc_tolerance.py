@@ -609,6 +609,29 @@ def test_f_a_number_that_is_the_same_in_every_trial_is_judged_at_once(tmp_path: 
     assert time.monotonic() - t0 < 8 and (checks[0].get("mc") or {}).get("trials", 1) <= mc.PILOT_TRIALS
 
 
+FIRST_TWO = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    if trial_id < 2:
+        return {"hits": 2.0}
+    return {"hits": float(sum(random.Random(seed).random() < 0.75 for _ in range(2)))}
+'''
+
+
+def test_two_equal_trials_of_a_random_number_are_not_taken_for_a_constant(tmp_path: Path) -> None:
+    """Review pass 2, P1-3 (input M): the number is random (its mean is 1.5, the check expects 2 within 0.3), but the
+    only two trials there was time for both gave 2. Fewer than MIN_TRIALS trials that agree do not show a constant: the
+    check is not decided. It was judged at once on trial 0, and passed."""
+    check = {"name": "mean_hits", "kind": "special_case", "expected": 2.0, "tolerance": 0.3, "case": {"n": 1},
+             "measure": "hits", "reference": "derivation: two hits"}
+    _c, problems, judged, found = _plain(_synth(tmp_path, FIRST_TWO), [check], timeout_s=60, most_trials=2)
+    (j,) = judged
+    assert j["passed_by_engine"] is None and j.get("undecided"), (j, problems)
+    assert j["mc"]["why"] == "most_trials" and j["mc"]["trials"] == 2, j["mc"]
+    assert "mean_hits" not in oc.engine_passed(judged) and any("was not decided" in f for f in found), found
+
+
 CRASH = '''
 import random
 

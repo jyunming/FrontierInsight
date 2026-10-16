@@ -1381,7 +1381,8 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     errors put the mean inside or outside the tolerance, ``budget_s`` is spent or ``most_trials`` are run (then it is not
     decided). ``(check or None, problem or "", whether the case could not be run at all)``, or ``None`` when its measure
     is not a number per trial of the names ``run_trial`` returns (then it is measured as any other check, which says what
-    is wrong). A number that is the same in every trial of the first batch is judged at once on trial 0's number."""
+    is wrong). A number that is the same in every trial of a first batch of at least ``MIN_TRIALS`` is judged at once on
+    trial 0's number."""
     name = str(oracle["name"]).strip()
     expected, limit, _mode = _oracle.limit_of(oracle)
     most = max(1, int(most_trials))
@@ -1400,7 +1401,9 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     if stat is None:
         return None
     rare = False
-    if len(rows) >= 2 and not stat["varies"]:
+    # A number is taken for a constant only when at least MIN_TRIALS trials agree: two or three equal draws of a random
+    # number are not a constant (a starved first batch of a 0/1/2 count agreed so, and was judged on trial 0 alone).
+    if len(rows) >= _mc.MIN_TRIALS and not stat["varies"]:
         rare = _mc.rare_outcome(stat, expected, rows)
         if not rare:
             # The check's own number did not move: judged at once on trial 0's number, as a deterministic check is.

@@ -34,8 +34,9 @@ judges with them. The first rule is that a check the trials cannot decide is nev
   left out quietly. More than :data:`FAULT_SHARE` of the check's trials failing is a failure of the check (a fault, sent
   to repair); any failed trial at all makes a check that would pass not decided, since the trials that finished cannot
   stand for the case (a wrong mean whose largest draws crash would pass on the survivors).
-* **A number that does not move** in the first batch is judged at once on trial 0's number, as a deterministic check
-  is, so a constant quantity never runs to the time limit; the one exception is a 0/1 outcome that has not happened yet
+* **A number that does not move** in a first batch of at least :data:`MIN_TRIALS` trials is judged at once on trial
+  0's number, as a deterministic check is, so a constant quantity never runs to the time limit (fewer trials that
+  agree show no constant, and leave it not decided); the one exception is a 0/1 outcome that has not happened yet
   (or always happened) whose expected value lies strictly between 0 and 1, in a simulation whose other numbers do
   vary: it is sized with the spread a proportion at the expected value has (:func:`rare_se`).
 """
@@ -346,15 +347,14 @@ def _centre(stat: dict[str, Any], expected: float) -> tuple[float | None, str]:
 
 def mean_verdict(stat: dict[str, Any], expected: float | None, limit: float | None, *, rare: bool = False) -> str | None:
     """:func:`decide` for a mean check's ``stat`` (``rare``: a 0/1 outcome that did not move yet, :func:`rare_se`);
-    ``None`` while it is not decided, and always with fewer than :data:`MIN_TRIALS` trials of a number that moves."""
+    ``None`` while it is not decided, and always with fewer than :data:`MIN_TRIALS` trials (moving or not)."""
     if expected is None or limit is None:
         return None
     centre, shape = _centre(stat, float(expected))
     se, n = stat.get("se"), int(stat.get("trials") or 0)
     if centre is None or not _number(se):
         return None
-    moves = bool(stat.get("varies")) or rare
-    if moves and n < MIN_TRIALS:
+    if n < MIN_TRIALS:  # fewer trials than this show neither a spread nor a constant
         return None
     if rare:
         se = max(float(se), rare_se(n, float(expected)))
