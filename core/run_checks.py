@@ -40,6 +40,7 @@ from . import typed_results as _typed
 #: How many times, in all, a simulation that returns typed-in numbers is sent back.
 TYPED_RESULT_REPAIRS = 2
 TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
+#: In ``.fi/``: the settings FI took out of the grid because the simulation never reads them.
 NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
 #: How many crashes inside the code, shown by a finding's test during the code review, go to the crash repair in a quest.
@@ -409,6 +410,141 @@ class RunChecksMixin:
             parts.append(f"{reduced['note']} Say this in the paper with the numbers (it is among FI's facts about this run, "
                          "given below), and write no result for what was left out.")
         return "\n\n".join(parts)
+
+    # ---- the topic's own run-time limit ---------------------------------------------------------------------------------
+    # The same helper as fix/run-size's (core/run_checks.py there): at the merge one copy is kept.
+
+    def _topic_limit_s(self, state: Any) -> float | None:
+        """The one run-time limit the topic states (in seconds), read as the paper's run record reads it, or ``None``."""
+        from . import disclosure as _disclosure
+
+        limit = _disclosure.topic_limit(self.quest_root, str(state.get("topic") or ""))  # type: ignore[attr-defined]
+        return float(limit) if isinstance(limit, (int, float)) and limit > 0 else None
+
+    # ---- a setting of the grid the code never reads ----------------------------------------------------------------------
+
+    def _check_unread_settings(self, state: Any, simulate: Path) -> dict[str, Any] | None:
+        """After the checks of the code before the run (the static gate is clean) and before the run is timed and the
+        protocol frozen: a setting of ``protocol.grid`` (two values or more) that FI's reading of the code
+        (:func:`core.unread_settings.unread_axes`) finds no use of. FI never takes a setting out of the grid on its own
+        reading: a reading of code can be wrong, and a setting taken out is a study that was not run.
+
+        * The study compares the setting (a factor the topic compares, as the plan's own topic map or a name match places
+          it; a key of a check's case, of ``in_each_run``, or named by a metric or a comparison) and the simulation never
+          reads it: a fault of the code. The simulation goes back to be repaired (a failed run, at most
+          ``engine.exec_reflect_max_iterations`` times), naming the setting; after that the grid is kept as written.
+        * Otherwise: one plain line in plan.md and run.log says FI's reading finds no use of it, and every setting is kept
+          and run.
+
+        Nothing is said when the reading is not certain or the code reads a name the plan does not give (a misspelt read
+        is a fault of the code: core/grid_keys.py sends it back), after the freeze, or for a redesign. No model is asked.
+        Returns the failed run for the repair, or ``None`` to go on."""
+        from . import engine as _e
+        from . import grid_keys as _grid_keys
+        from . import unread_settings as _unread
+
+        if _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
+            return None
+        protocol = self._draft_protocol(state) or {}  # type: ignore[attr-defined]
+        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        if len(grid) < 1:
+            return None
+        files = {rel: text for rel, text in _grid_keys.code_files(simulate.parent).items()
+                 if rel not in ("run.py", _trial_runner.SUBMIT_NAME)}
+        misread = _grid_keys.problems(files, protocol, state.get("design"))
+        if misread:
+            self._log.info("[execute] the code reads a name the plan does not give (%s); left to the check of the code",  # type: ignore[attr-defined]
+                           ", ".join(f"`{k}`" for r in misread for k in r.keys) or "a fixed number of runs")
+            return None
+        # A setting the study compares and the simulation itself never reads is the simulation's fault, even when the
+        # analysis reads it (then it groups results that differ in nothing but their seeds).
+        swept = [str(a) for a, v in grid.items() if isinstance(v, list) and len(v) >= 2]
+        simulated, _why = _unread.setting_reads(files, analysis=False)
+        if simulated is not None and any(a in simulated for a in swept):
+            compared = self._settings_the_study_compares(state, protocol, [a for a in swept if a not in simulated])
+            if compared:
+                return self._unread_compared_setting(state, grid, compared, simulate)
+        unread, why = _unread.unread_axes(files, protocol)
+        if not unread:
+            if why:
+                self._log.info("[execute] FI could not tell whether the code reads every setting of the grid (%s); "  # type: ignore[attr-defined]
+                               "every setting is kept and run", why)
+            return None
+        compared = self._settings_the_study_compares(state, protocol, unread)
+        if compared:
+            return self._unread_compared_setting(state, grid, compared, simulate)
+        line = (f"FI's reading of the code finds no use of {', '.join(f'`{k}`' for k in unread)}; every setting is kept "
+                "and run.")
+        self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
+        path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
+        try:
+            text = path.read_text(encoding="utf-8")
+            if line not in text:
+                edited = _plan.add_to_section(text, _e._PART_HEADING, ["", f"- {line}"])
+                _plan.note_edit(self.quest_root, text)  # type: ignore[attr-defined]
+                path.write_text(edited, encoding="utf-8")
+                _plan.record_version(self.quest_root, edited, by="engine",  # type: ignore[attr-defined]
+                                     note="FI's reading of the code finds no use of a setting; every setting is kept")
+        except OSError as e:
+            self._log.warning("[execute] FI could not add that line to plan.md: %r", e)  # type: ignore[attr-defined]
+        return None
+
+    def _settings_the_study_compares(self, state: Any, protocol: dict[str, Any], axes: list[str]) -> dict[str, str]:
+        """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records: a
+        factor the topic compares (:func:`core.topic_requirements.compared_axes`), a key of a check's case, of
+        ``in_each_run``, or a name a metric or the plan's comparisons use."""
+        from . import in_run as _in_run
+        from . import oracle_check as _oracle
+        from . import topic_requirements as _tr
+
+        out: dict[str, str] = {}
+        req = _read_json(self.fi_dir / _tr.FILE)  # type: ignore[attr-defined]
+        if isinstance(req, dict) and isinstance(req.get("factors"), list):
+            for axis, factor in _tr.compared_axes(req, state.get("design") or {}, protocol).items():
+                out.setdefault(axis, f"the topic compares {factor}")
+        for oracle in _oracle.declared(protocol):
+            own = _oracle.case_of(oracle)
+            for axis in (own[0] or {}) if own else {}:
+                out.setdefault(str(axis), f"the check `{oracle.get('name')}` runs at a value of it")
+        for axis in _in_run.of(protocol) or {}:
+            out.setdefault(str(axis), "each run compares its values")
+
+        def names(value: Any) -> set[str]:
+            if isinstance(value, str):
+                return {value}
+            if isinstance(value, dict):
+                return {n for v in value.values() for n in names(v)}
+            if isinstance(value, list):
+                return {n for v in value for n in names(v)}
+            return set()
+
+        for metric in protocol.get("metrics") or []:
+            for axis in names({k: v for k, v in metric.items() if k not in ("id", "description", "kind")}
+                              if isinstance(metric, dict) else {}):
+                out.setdefault(axis, f"the metric `{metric.get('id')}` is given per value of it")
+        design = state.get("design") if isinstance(state.get("design"), dict) else {}
+        for axis in names(protocol.get("comparisons")) | names(design.get("comparisons")):
+            out.setdefault(axis, "the plan compares its values")
+        return {axis: why for axis, why in out.items() if axis in axes}
+
+    def _unread_compared_setting(self, state: Any, grid: dict[str, Any], compared: dict[str, str],
+                                 simulate: Path) -> dict[str, Any] | None:
+        """A setting the study compares and the code never reads: a fault of the code. Sent back to be repaired a bounded
+        number of times; after that the grid is kept as written (the run then shows the setting changed nothing)."""
+        said = "; ".join(f"`{axis}` ({why})" for axis, why in compared.items())
+        if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+            self._log.warning("[execute] the code still never reads %s; the repairs are used up, so FI keeps the grid as the "  # type: ignore[attr-defined]
+                              "plan wrote it", said)
+            return None
+        self._log.warning("[execute] nothing in the code reads %s, a setting the study compares: sending the simulation back "  # type: ignore[attr-defined]
+                          "to be repaired, not taking the setting out of the plan", said)
+        print("[FI] the code never reads a setting the study compares; sending the simulation back to be repaired")
+        values = "; ".join(f"`{axis}` takes {', '.join(str(v) for v in grid[axis][:6])}" for axis in compared)
+        return self._code_review_failed_run(  # type: ignore[attr-defined]
+            f"FI read the code before the run: nothing in it reads {said}. The plan's grid gives each run its own value "
+            f"({values}), and the study compares the results across those values, so the simulation must use the value it is "
+            "given (`cell[\"<name>\"]`, the name exactly as the grid spells it) where the plan's model uses it. Do not fix "
+            "the value inside the code.", script=simulate.name)
 
     # ---- the run fits the time it is allowed ---------------------------------------------------------------------------
 

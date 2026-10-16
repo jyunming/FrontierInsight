@@ -211,6 +211,11 @@ def required_items(quest_root: Path | str) -> list[Item]:
     for gap in (covered.get("left") if isinstance(covered, dict) else None) or []:
         name, said = _topic_sentence(gap)
         add(NOT_DONE, name, said)
+    # What the study did not do as the plan wrote it (``not_done``, kept by the engine with a ``kind``: a comparison
+    # inside each run that could not be used, code not in the files the topic asked for): its sentence is FI's own.
+    for gap in (covered.get("not_done") if isinstance(covered, dict) else None) or []:
+        if isinstance(gap, dict) and _one(gap.get("sentence")):
+            add(NOT_DONE, gap.get("name"), _sentence(_one(gap.get("sentence")).rstrip(".")))
     record = _read(root, ".fi/code_review.json")
     issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
     from . import code_findings as _code_findings

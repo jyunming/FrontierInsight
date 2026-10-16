@@ -38,7 +38,7 @@ def test_checklist_replay_stable_and_small():
     for name in TOPICS:
         req = json.loads((FIX / f"{name}.json").read_text(encoding="utf-8"))
         out = tr.checklist_block(req)
-        assert 0 < len(out) < 2048
+        assert 0 < len(out) <= tr.CHECKLIST_LIMIT
         assert out == tr.checklist_block(json.loads(json.dumps(req)))
         for result in req.get("stated_results") or []:
             assert result not in out

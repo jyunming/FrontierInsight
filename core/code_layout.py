@@ -122,14 +122,21 @@ def estimate(protocol: dict[str, Any] | None) -> dict[str, int]:
 
 
 def decide(protocol: dict[str, Any] | None, *, enabled: bool, max_extra_lines: int, max_extra_calls: int,
-           package: str) -> dict[str, Any]:
+           package: str, code_files: int | None = None) -> dict[str, Any]:
     """The shape of this quest's code: ``package`` (the default) or ``single`` (two scripts alone), with the estimate and,
     for ``single``, why, in plain words. The line limit decides at plan time; the request limit is a budget spent while
-    the code is written (once it is spent, the quest keeps the code it has and says so)."""
+    the code is written (once it is spent, the quest keeps the code it has and says so).
+
+    ``code_files``: how many files of code the topic asks for (:func:`core.topic_requirements.code_files`). It does not
+    change the shape: FI's checks of the code (the step-by-step functions, the unit tests, the equation list) need the
+    package and are never turned off by the topic. It is kept (``topic_code_files``) so plan.md and run.log say the
+    code has more files than the topic asked for (:func:`files_note`), and the paper says it."""
     cost = estimate(protocol)
     decision: dict[str, Any] = {"shape": PACKAGE, "package": package, "estimate": cost,
                                 "limits": {"extra_lines": int(max_extra_lines), "extra_calls": int(max_extra_calls)},
                                 "reason": ""}
+    if code_files is not None:
+        decision["topic_code_files"] = int(code_files)
     if not enabled:
         decision.update(shape=SINGLE, reason="execution.code_package is off")
         return decision
@@ -138,6 +145,23 @@ def decide(protocol: dict[str, Any] | None, *, enabled: bool, max_extra_lines: i
             f"it would add about {cost['extra_lines']} lines of code, over the limit of {max_extra_lines} "
             "(execution.code_package_max_extra_lines)"))
     return decision
+
+
+def files_note(decision: dict[str, Any] | None) -> str:
+    """The sentence saying the code has more files than the topic asked for (``topic_code_files``), or ``""``. FI always
+    runs the simulation and the analysis as two scripts (simulate.py and experiment.py), and with the package layout
+    keeps the model's functions and their tests beside them."""
+    asked = (decision or {}).get("topic_code_files")
+    fewest = 4 if (decision or {}).get("shape") == PACKAGE else 2  # the two scripts, and the package and its tests
+    if not isinstance(asked, int) or asked >= fewest:
+        return ""
+    files = ("the simulation (simulate.py), the analysis (experiment.py), the model's functions in a package and their "
+             "unit tests" if decision.get("shape") == PACKAGE else
+             "the simulation (simulate.py) and the analysis (experiment.py)")
+    asked_text = "one file" if asked == 1 else f"{asked} files"
+    return (f"The topic asks for the code in {asked_text}; FI keeps more: {files}, because it runs the simulation and "
+            "the analysis apart and checks the code function by function. The paper says the code is not in "
+            f"{asked_text}.")
 
 
 def calls_left(quest_root: Path, limit: int) -> int:
@@ -199,6 +223,8 @@ def plan_lines(decision: dict[str, Any] | None) -> list[str]:
         ]
         if "limit" in str(decision.get("reason") or ""):
             lines += [f"A small research tool would cost {what}. Raise the limit to get it.", ""]
+    if files_note(decision):
+        lines += [files_note(decision), ""]
     return lines
 
 

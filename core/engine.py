@@ -4967,7 +4967,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not isinstance(req, dict) or req.get("error"):
             return ""
         try:
-            return _topic_req.checklist_block(req)
+            return _topic_req.checklist_block(req, topic=state.get("topic") or self.config.topic)
         except Exception as e:  # noqa: BLE001 -- a block that cannot be built leaves the prompt as it was
             self._log.warning("[plan] the list of what the topic asks for could not be built: %r", e)
             return ""
@@ -6146,6 +6146,58 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except OSError as e:
             self._log.warning("[plan] couldn't record how far the plan covers the topic: %r", e)
 
+    def _note_not_done(self, entries: list[dict[str, Any]], *, kind: str = "") -> None:
+        """Keep what the study did not do as the plan wrote it in ``topic_covered.json`` ``not_done`` (``{name, sentence,
+        kind}``): each is an item the paper's limitations must name (core/paper_facts.py checks it) and the run record says
+        (core/disclosure.py, QUALITY.md). With ``kind``, the entries of that kind are replaced by ``entries`` (none: taken
+        away); without, an entry replaces the one of the same name. Unlike ``left``, the plan and design checks do not
+        rewrite it."""
+        old = [e for e in self._topic_covered_read().get("not_done") or [] if isinstance(e, dict)]
+        names = {str(e.get("name")) for e in entries}
+        kept = [e for e in old if (e.get("kind") != kind if kind else str(e.get("name")) not in names)]
+        new = [*kept, *entries]
+        if new != old:
+            self._topic_covered_write(not_done=new)
+
+    def _refresh_not_done(self, state: QuestState) -> None:
+        """Before the run: take away each ``not_done`` entry the plan as it now stands no longer supports (an approved
+        change, a person's edit of plan.md), so the paper is never made to state a limitation the study does not have.
+        Every entry has a ``kind``; an entry of an unknown kind (none is written any more) is taken away too."""
+        entries = [e for e in self._topic_covered_read().get("not_done") or [] if isinstance(e, dict)]
+        if not entries:
+            return
+        from . import in_run as _in_run
+
+        protocol = self._draft_protocol(state) or {}
+        layout = _code_layout.load(self.quest_root)
+        still = {
+            "in_each_run": not _in_run.of(protocol),
+            "code_files": bool(_code_layout.files_note(layout)),
+        }
+        kept = [e for e in entries if still.get(str(e.get("kind")), False)]
+        if kept != entries:
+            self._topic_covered_write(not_done=kept)
+            gone = ", ".join(str(e.get("name")) for e in entries if e not in kept)
+            self._log.info("[execute] the plan as it now stands does what was recorded as not done (%s); taken away", gone)
+
+    def _in_each_run_not_done(self, why: Any, *, asked_again: bool) -> None:
+        """``protocol.in_each_run`` could not be used (``why``, the reader's reason; ``None``: it can be, or there is none):
+        an item the paper must name. Said as what FI recorded, not as what the code did (the code may compare those values
+        in each run without the protocol saying so)."""
+        if not why:
+            self._note_not_done([], kind="in_each_run")
+            return
+        reason = str(why).split("; " + _plan.ASK_MARK)[0].strip().rstrip(".")
+        again = ", even when FI asked the plan's model to write it again once" if asked_again else ""
+        sentence = (f"{reason}{again}. So FI did not record a comparison of those values inside each run, and there is no "
+                    "result per value of them")
+        before = [e for e in self._topic_covered_read().get("not_done") or [] if isinstance(e, dict)
+                  and e.get("kind") == "in_each_run"]
+        self._note_not_done([{"name": "comparison inside each run", "sentence": sentence, "kind": "in_each_run"}],
+                            kind="in_each_run")
+        if not before or before[0].get("sentence") != sentence:
+            self._log.warning("[plan] %s; the paper must say so", sentence)
+
     def _topic_block(self) -> str:
         """The topic and the formulas it states, as every request that writes or repairs code is shown them
         (:func:`core.topic_requirements.code_block`): a sentence that states a result is left out."""
@@ -6340,7 +6392,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         gaps, unjudged = await self._topic_gaps(req, design)
         text = path.read_text(encoding="utf-8")
         lines = _topic_req.plan_lines(req, gaps, reviewer=str(req.get("reviewer") or ""), same_model=req.get("same_model"),
-                                      unjudged=unjudged)
+                                      unjudged=unjudged, topic=str(state.get("topic") or self.config.topic or ""))
         asked, calls = self._search_record(sha, _TOPIC_ASKED)
         if asked:
             lines += ["", "- FI asked the plan's model to add what was missing" + (
@@ -6626,7 +6678,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 continue
             if new_protocol.get(part) is None:
                 continue
-            fixed, why = _plan.normalize_protocol({**merged, part: new_protocol[part]})
+            moved: list[str] = []
+            if part == "in_each_run" and isinstance(new_protocol[part], dict) and isinstance(merged.get("grid"), dict):
+                # A factor every run goes through together is not also a setting run on its own: it leaves the grid (the
+                # request says so), or each run would be repeated once per value.
+                moved = [str(k) for k in new_protocol[part] if str(k) in merged["grid"]]
+            if moved:
+                kept_grid = {k: v for k, v in merged["grid"].items() if k not in moved}
+                candidate = {**{k: v for k, v in merged.items() if k != "grid"}, **({"grid": kept_grid} if kept_grid else {}),
+                             part: new_protocol[part]}
+            else:
+                candidate = {**merged, part: new_protocol[part]}
+            fixed, why = _plan.normalize_protocol(candidate)
             if fixed is None or part not in fixed:
                 self._log.warning("[plan] the plan's model wrote `protocol.%s` again but it still cannot be read: %s", part, why)
                 entry = _plan.offending_entry({part: new_protocol[part]}, why)
@@ -6640,6 +6703,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     reasons.append(f"`protocol.{part}` as you wrote it is not complete: {problems}")
                     continue
             merged[part] = fixed[part]
+            if moved:
+                if fixed.get("grid"):
+                    merged["grid"] = fixed["grid"]
+                else:
+                    merged.pop("grid", None)
+                self._log.warning("[plan] %s now go%s through every run together (`protocol.in_each_run`), so FI took "
+                                  "%s out of the settings run one by one (`protocol.grid`)", ", ".join(moved),
+                                  "es" if len(moved) == 1 else "", "it" if len(moved) == 1 else "them")
             taken.append(part)
         if not taken:
             if reasons:  # the reader's exact reason goes back to the model with the next request
@@ -6684,7 +6755,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return {}
         for part, problems in (("simplifications", p_sims), ("definitions", p_defs), ("steps", p_steps)):
             if problems:
-                found[part] = "; ".join(problems)[:1200]
+                found[part] = "; ".join(problems)[:1200].rstrip()
         return found
 
     def _ledger_uncovered(self, design: Any) -> list[str]:
@@ -6712,7 +6783,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         found = self._ledger_problems(protocol, passages)
         uncovered = self._ledger_uncovered(design)
         if uncovered:
-            found["simplifications"] = "; ".join(filter(None, [found.get("simplifications"), *uncovered]))[:1600]
+            # Cut at its limit without a trailing blank: plan.md holds the line without one, and a resume looks for it there
+            # (one cut right after a blank was written again at every resume, changing plan.md and restarting its counts).
+            found["simplifications"] = "; ".join(filter(None, [found.get("simplifications"), *uncovered]))[:1600].rstrip()
         return found
 
     @staticmethod
@@ -6759,6 +6832,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         limitations say it (:func:`core.topic_requirements.write_note`)."""
         if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
                 or not plan_sha):
+            # Nobody is asked here: what each run was to compare inside it and could not be read is still not silently
+            # dropped (repair_protocol has taken it out of the protocol already).
+            if self._runs_code(state) and _frozen.load(self.quest_root) is None:
+                self._in_each_run_not_done(self._unread_parts(design).get("in_each_run"), asked_again=False)
             return design, plan_sha
         passages = self._literature_passages(state)
         iteration = int(state.get("iteration", 0) or 0)
@@ -6799,7 +6876,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 design, plan_sha, lacks=lacks, request=request, keep=keep, file=_PART_ASKED,
                 what="settings the experiment needs", short="the protocol",
                 note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts,
-                ask_limit=1 if all(p in _LEDGER_PARTS for p in asked) else None)
+                # What each run compares inside it is asked again once, like the ledger parts: what is still unusable is
+                # said in the paper, never a stop.
+                ask_limit=1 if all(p in _LEDGER_PARTS or p == "in_each_run" for p in asked) else None)
             if ledger_asked:  # what the answer left is the problem it was asked about: not asked about again
                 after = unread(design)
                 self._ledger_seen_write(iteration, {**seen, **{p: digest(after[p]) for p in ledger_asked if p in after},
@@ -6819,6 +6898,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     lines.append(f"FI asked the plan's model to write `protocol.{part}` again, and it is "
                                  + (f"still not readable ({'; the quest stops' if part == 'grid' else 'the experiment goes on without it'})"
                                     if part in left else "now in the plan") + ".")
+            # What each run was meant to compare inside it and could not be used, even when asked again, is a requirement of
+            # the study not done: kept for the writer (core/topic_requirements.py::write_note), so the paper says it.
+            if "in_each_run" in {*asked, *before}:
+                self._in_each_run_not_done(left.get("in_each_run"), asked_again=True)
+            elif "in_each_run" not in left:
+                self._note_not_done([], kind="in_each_run")  # a plan written anew that no longer lacks it
             # What is still wrong with the ledger parts is said under *What the topic asks for*, and kept for the writer.
             gaps = [f"`protocol.{part}` is incomplete: {why}" for part, why in left.items() if part in _LEDGER_PARTS]
             self._note_the_ledger_for_the_writer(design, gaps)
@@ -9820,7 +9905,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state, names_only=True),
                 clarify_block=_format_clarify(state),
-                timeout_s=str(self.config.execution.timeout_s),
+                timeout_s=self._planning_limit(state),
                 skills_block=(self._outline_skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(),
@@ -9888,7 +9973,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 design_block=self._code_design_block(state),
                 clarify_block=_format_clarify(state),
                 outline_block=json.dumps(outline, indent=2),
-                timeout_s=str(self.config.execution.timeout_s),
+                timeout_s=self._planning_limit(state),
                 skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(state),
@@ -9914,7 +9999,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             prompt = self._prompts["implement"].substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state),
-                timeout_s=str(self.config.execution.timeout_s),
+                timeout_s=self._planning_limit(state),
                 skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(state),
@@ -11442,6 +11527,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._log.warning("[implement] could not ask for the equation labels: %r", e)
             return None
 
+    def _planning_limit(self, state: QuestState) -> str:
+        """The run time the code-writing prompts are given (their ``$timeout_s``): the topic's own limit when it states a
+        shorter one than ``execution.timeout_s`` (the topic's constraints win over FI's default), else FI's. The design
+        prompt keeps FI's limit beside :meth:`_time_note`, which states the topic's."""
+        own = int(self.config.execution.timeout_s)
+        limit = self._topic_limit_s(state)
+        if limit is None or not limit < own:
+            return str(own)
+        return (f"{_disclosure._plain_seconds(limit).removesuffix(' s')} (the topic's own limit, which the code is written "
+                f"for; FI stops a run that takes longer than {own} s, its execution.timeout_s)")
+
     def _code_layout(self, state: QuestState, protocol: Any = None) -> dict[str, Any] | None:
         """How this quest's code is laid out (:mod:`core.code_layout`): a small research tool or two scripts, with what
         that costs. ``None`` for a quest that keeps no simulation of its own in two scripts (the no-simulation path, a
@@ -11457,9 +11553,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         ex = self.config.execution
         package = str((record or {}).get("package") or "") or _code_layout.package_name(
             str(self.config.title or self.config.topic or ""))
+        # How many code files the topic asks for (the topic reader's structured answer, never a reading of its prose):
+        # kept and said, never a reason to turn FI's checks of the code off (core/code_layout.py::decide).
+        required = _disclosure._read_json(self.quest_root / ".fi" / "topic_requirements.json")
         decision = _code_layout.decide(protocol if isinstance(protocol, dict) else None, enabled=ex.code_package,
                                        max_extra_lines=ex.code_package_max_extra_lines,
-                                       max_extra_calls=ex.code_package_max_extra_calls, package=package)
+                                       max_extra_calls=ex.code_package_max_extra_calls, package=package,
+                                       code_files=_topic_req.code_files(required))
         # A quest laid out as a package stays one: a later redesign that adds equations does not switch it back to two
         # scripts (``code_package: false`` still does, and a plan written again decides again). Two scripts are decided
         # again each time, so raising the limit, as plan.md says, takes effect on a resume.
@@ -11480,6 +11580,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 layout["extra_calls_spent"] = 0  # no code yet (a new quest, or a restart from the plan): a new budget
             _code_layout.save(self.quest_root, layout)
             self._log.info("[plan] %s", _code_layout.summary(layout))
+            files = _code_layout.files_note(layout)
+            if files:
+                self._log.info("[plan] %s", files)
+            # The topic's request for fewer code files than FI keeps is an item the paper must name.
+            self._note_not_done([{"name": "code in the files the topic asked for", "sentence": files,
+                                  "kind": "code_files"}] if files else [], kind="code_files")
             return _code_layout.plan_lines(layout)
         except Exception as e:  # noqa: BLE001 -- how the code is laid out must never stop the plan
             self._log.warning("[plan] could not work out how the code will be laid out: %r", e)
@@ -16152,6 +16258,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
         if stop is not None:
             return stop
+        # A setting of the grid FI's reading finds no use of, once the checks of the code are clean (a misspelt read is the
+        # code's fault, found by them): the code sent back when the study compares it, else one line in plan.md and
+        # run.log; the grid is always kept (core/run_checks.py).
+        if split and self._trial_mode and not searching:
+            if (back := self._check_unread_settings(state, simulate_path)) is not None:
+                return back
+        self._refresh_not_done(state)
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,

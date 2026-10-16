@@ -576,13 +576,18 @@ _PROTOCOL_KEY = re.compile(r"`protocol\.([A-Za-z_]+)")
 
 #: The parts of the protocol that change what is measured: when one cannot be read, FI asks the plan's model to write it
 #: (``Engine._ask_plan_for_the_parts``), and the note says so in these words.
-ASKED_PARTS = ("grid", "metrics", "runs_per_setting", "precision")
+ASKED_PARTS = ("grid", "in_each_run", "metrics", "runs_per_setting", "precision")
 ASK_MARK = "FI asks the plan's model to write"
 PART_RULES = {
     "grid": "`protocol.grid`: the settings the experiment varies, as a mapping from each setting's name to the list of "
             "values it takes. Each list is non-empty and holds only numbers, or only names (text), never a mix: numbers "
             "such as [0.1, 0.2, 0.4], or names such as [euler, rk4]. Take the settings to vary from `variables.independent`, "
             "the method and the topic.",
+    "in_each_run": "`protocol.in_each_run`: what every run goes through together, all its values in one run on the same "
+                   "random numbers (one fit across all of them, every method applied to the same simulated data), as a "
+                   "mapping from each such factor's name to the list of ALL its values: at least two, each listed once, "
+                   "only numbers or only names. A factor listed here is not also a setting of `protocol.grid` (FI takes it "
+                   "out of the grid: a grid setting is run on its own, once per value).",
     "metrics": "`protocol.metrics`: a list; each entry has an `id` (the name the script gives the number), a `kind` "
                "(`proportion` or `mean`), an `estimand` (text: what the number estimates), a `unit` (text: what one "
                "independent observation is) and, optionally, a `label` (the reader's name for the number: words, its "

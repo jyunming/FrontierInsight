@@ -580,6 +580,9 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     left = _items(covered.get("left")) if isinstance(covered, dict) else []
     if left:
         parts.append(_listed("FI did not do all of the topic's requirements.", left))
+    not_done = _items(covered.get("not_done")) if isinstance(covered, dict) else []
+    if not_done:
+        parts.append(_listed("The study did not do all it was asked to, as written.", not_done))
     parts.append(_code_faults_sentence(quest_root))
     tests = _read_json(quest_root / ".fi" / "equation_tests.json")
     untested = _items(tests.get("not_tested")) if isinstance(tests, dict) else []
