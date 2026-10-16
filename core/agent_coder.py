@@ -5,22 +5,27 @@ tries again. Its own report counts for nothing: FI runs its own checks on the fi
 the failure text goes back to the same agent session (:meth:`AgentCoder.continue_`). This module holds the parts that do
 not depend on how the engine uses them:
 
-* :class:`ClaudeCliRunner`, the agent: ``claude -p``. The normal path needs no Docker (``mode="host"``): the CLI runs on
-  this computer, with the person's own login, in a scratch COPY of ``code/`` placed outside the quest (its working
-  folder, nothing else added), with only file tools and Python allowed. Docker is an optional extra used only when its
-  daemon is running (``mode="docker"``): a throwaway container that has only ``code/`` (and a per-quest folder for the
-  agent's session files) mounted. :func:`make_runner` chooses, :func:`docker_status` says whether Docker is running.
+* :class:`ClaudeCliRunner`, the agent: ``claude -p``. The normal path (``mode="host"``) runs the CLI directly on this
+  computer, as the person, with their own login. **It is not isolated**: there is no sandbox, and Python run by the
+  agent can read and write anything the person can. It works in a scratch COPY of ``code/`` outside the quest, in a
+  folder named by a random id (:func:`scratch_id`), with only file tools and Python allowed. Docker is an optional
+  extra used only when its daemon is running (``mode="docker"``): a throwaway container that has only that copy (and
+  a per-quest folder for the agent's session files) mounted. :func:`make_runner` chooses, :func:`docker_status` says
+  whether Docker is running.
 * :class:`AgentCoder`: the rounds (a write, then a bounded number of fixes), recorded in ``.fi/agent_coder.json`` before
-  each starts, and the guard. Without Docker: the copy is made fresh from ``code/`` before each round; after it, FI
-  compares the copy with ``code/``, keeps its own files as they were (a change to one is recorded), treats any write
-  outside the copy (the quest folder, or beside the copy) as a cheat that is put back, and any code that reaches for
-  FI's check values or outside its folder (:func:`reaches_outside`) as a cheat too; a round with a cheat changes
-  nothing in ``code/``. Otherwise only the files the agent may change are copied back. With Docker the agent works in
-  ``code/`` itself and FI's own files are put back after each round.
+  each starts. The copy is made fresh from ``code/`` before each round (no ``.git`` history, no ``.venv``, no value file
+  an older FI left there); after it FI compares the copy with ``code/``, keeps its own files as they were (a change to
+  one is recorded) and copies back only the agent's own files, by FI's list (Python, and plain text or data files).
+  Without a container a TRIPWIRE watches for writes: any write into the quest folder (``.venv/`` included), beside the
+  copy, or into the folders Python starts from (a ``.pth``, ``sitecustomize.py``) is a cheat that is put back, and the
+  agent's code is read for reaches toward FI's check values (:func:`reaches_outside`). A round with a cheat changes
+  nothing in ``code/``. The tripwire is not the defence: it never sees a read, and a determined program can get round
+  it. The defence is that nothing the agent can see holds a value FI checks with: the values live in the quest's
+  ``.fi/checks/`` (:mod:`core.equation_tests`), FI compares every number in its own process
+  (:mod:`core.equation_measure`), and FI runs the agent's code from a copy outside the quest
+  (:mod:`core.outside_run`). The quest's evidence record says the code writer ran without isolation
+  (:func:`evidence_settings`).
 * :class:`TreeSnapshot` / :func:`guarded_round`: one fix round that is undone whole when it fails a condition.
-
-The values FI's tests compare with are never in ``code/`` (they live in the quest's ``.fi/checks/``,
-:mod:`core.equation_tests`), so neither the copy nor the container holds them.
 
 **The login.** Without Docker the CLI uses the person's normal login on this computer: nothing is copied and nothing is
 printed. In a container nothing secret is copied into the image, the container's folders or a log: the container is
@@ -59,7 +64,24 @@ from .execution import scrub_secrets
 from .proc_tree import AsyncProcessTree
 
 RECORD = Path(".fi") / "agent_coder.json"
+#: The random id that names this quest's copy of ``code/`` outside the quest (kept so a resume finds the same copy).
+SCRATCH_ID = Path(".fi") / "agent_coder_copy.json"
 _TAIL = 2000
+
+
+def scratch_id(quest_root: Path | str) -> str:
+    """This quest's random copy id (:data:`SCRATCH_ID`), made the first time it is asked for."""
+    path = Path(quest_root) / SCRATCH_ID
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get("id")
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value):
+            return value
+    except (OSError, ValueError, AttributeError):
+        pass
+    value = uuid.uuid4().hex
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"id": value}) + "\n", encoding="utf-8")
+    return value
 
 #: Files of ``code/`` FI writes itself (so the agent must not change them) when they are there, and folders whose whole
 #: content is FI's. Relative to ``code/``.
@@ -67,8 +89,9 @@ FI_OWNED_FILES = ("run.py", "study.json", "fi_search.py", "README.md", "requirem
 FI_OWNED_DIRS = ("tests",)
 #: Outside ``code/`` (host mode only) FI watches the rest of the quest folder: a CLI's own sandbox does not keep its
 #: file-writing tool inside the working folder on Windows (checked on the Codex CLI: it wrote `../escape.txt` and a file
-#: in `.fi/`). Not watched: the environment and caches, and the files FI itself writes while a round runs.
-_SKIP_DIRS = {".venv", ".git", "__pycache__", "node_modules", ".pytest_cache"}
+#: in `.fi/`). The quest's ``.venv/`` is watched too (by size and time). Not watched: history and caches, and the files
+#: FI itself writes while a round runs. This is a tripwire, not a sandbox: it sees writes, never reads.
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".pytest_cache"}
 _SKIP_FILES = {".fi/run.log", ".fi/state.sqlite", ".fi/state.sqlite-wal", ".fi/state.sqlite-shm", ".fi/state.sqlite-journal"}
 _KEEP_BYTES = 2_000_000          # a file this small is kept in memory to put back; a larger one is only recorded
 _KEEP_TOTAL = 64_000_000
@@ -200,21 +223,22 @@ def parse_stream(stdout: str) -> dict[str, Any]:
 class ClaudeCliRunner:
     """``claude -p`` as the coding agent.
 
-    ``mode="docker"`` (the default): a throwaway container (image :data:`IMAGE`, ``docker/agent_coder/Dockerfile``)
-    whose only mounts are ``code/`` (``/work/code``, read-write) and ``home_dir`` (the CLI's own folder, which holds the
-    session files ``--resume`` needs and nothing secret: the login comes in by environment variable, see the module
-    docstring). It has no capabilities, cannot gain privileges, runs as a user that is not root, has memory, CPU and
-    process limits, and is stopped (``docker kill``) at the wall-clock cap. Its network is on, because the CLI must reach
-    the model's API; Docker cannot limit it to one host, so the mount is the wall: the agent cannot read or write
-    anything of the computer but ``code/``. Inside, the CLI runs with ``--permission-mode bypassPermissions`` (the
-    container is the sandbox), ``--safe-mode --strict-mcp-config`` (no person's settings, plugins or MCP servers).
+    ``mode="host"`` (the normal path): the CLI on this computer with the person's own login, in the scratch copy of
+    ``code/`` outside the quest (:meth:`workdir`; :class:`AgentCoder` makes and compares the copy), ``--restricted``
+    (the CLI's own file tools kept to the working folder, command tools only as named, no ``--add-dir``), ``--tools``
+    without any web tool, ``--permission-mode acceptEdits``, Python allowed (:data:`HOST_COMMANDS`) and every other
+    request refused (``--permission-prompts none``). NOT isolated: ``python`` (``python -c`` included) can read and
+    write anything the person can. FI's snapshot of the quest folder around the round and its reading of the agent's
+    code (:func:`reaches_outside`) are a tripwire for writes, not a sandbox.
 
-    ``mode="host"`` (the normal path, no Docker): the CLI on this computer with the person's own login, in a scratch copy
-    of ``code/`` outside the quest (:meth:`workdir`; :class:`AgentCoder` makes and compares the copy), ``--restricted``
-    (file tools kept to the working folder, command tools only as named, no ``--add-dir``), ``--tools`` without any web
-    tool, ``--permission-mode acceptEdits``, Python allowed (:data:`HOST_COMMANDS`) and every other request refused
-    (``--permission-prompts none``). Python itself can still open any file the person can, which is why FI snapshots the
-    quest folder around the round and reads the agent's code for reaches outside its folder (:func:`reaches_outside`).
+    ``mode="docker"`` (optional, only when the daemon runs): a throwaway container (image :data:`IMAGE`,
+    ``docker/agent_coder/Dockerfile``) whose only mounts are the copy of ``code/`` (``/work/code``, read-write; no
+    ``.git``) and ``home_dir`` (the CLI's own folder, which holds the session files ``--resume`` needs and nothing
+    secret: the login comes in by environment variable, see the module docstring). It has no capabilities, cannot gain
+    privileges, runs as a user that is not root, has memory, CPU and process limits, and is stopped (``docker kill``) at
+    the wall-clock cap. Its network is on, because the CLI must reach the model's API. Inside, the CLI runs with
+    ``--permission-mode bypassPermissions``, ``--safe-mode --strict-mcp-config`` (no person's settings, plugins or MCP
+    servers).
 
     A round starts a new session with an id FI chooses (``--session-id``) and continues one with ``--resume``. The
     prompt goes on stdin, never on the command line. ``launcher`` replaces the ``claude`` program, ``docker`` the
@@ -247,15 +271,15 @@ class ClaudeCliRunner:
 
     @property
     def works_on_copy(self) -> bool:
-        """The agent works on a scratch copy of ``code/`` (no Docker): :class:`AgentCoder` makes and compares it."""
-        return self.mode == "host"
+        """The agent works on a scratch copy of ``code/`` outside the quest (in a container, that copy is what is
+        mounted): :class:`AgentCoder` makes and compares it, and only its own list of files comes back."""
+        return True
 
     def workdir(self, quest_root: Path) -> Path:
-        """The copy's folder for this quest: outside the quest, the same every round (the CLI files a session under its
-        working folder, so ``--resume`` needs the same one), named from the quest's folder name and a hash of its path."""
-        resolved = Path(quest_root).resolve()
-        tag = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:10]
-        return self.work_root / f"{resolved.name[:40]}-{tag}" / "code"
+        """The copy's folder for this quest: outside the quest, the same every round and after a resume (the CLI files a
+        session under its working folder, so ``--resume`` needs the same one), named by a random id made once for the
+        quest and kept in its ``.fi/`` (:data:`SCRATCH_ID`), never by the quest's name or path."""
+        return self.work_root / scratch_id(quest_root) / "code"
 
     # -- the command --
 
@@ -416,7 +440,9 @@ class ClaudeCliRunner:
 
 
 #: The one line said when the agent runs without Docker (information, not a warning).
-NO_DOCKER_LINE = "ran without Docker: the coding agent worked on a copy of code/"
+NO_DOCKER_LINE = ("the coding agent runs on this computer without isolation (no sandbox): it works on a copy of code/ "
+                  "outside the quest, FI watches for writes outside that copy (a tripwire, not a sandbox), and the "
+                  "quest's record says the code writer ran without isolation")
 
 
 async def make_runner(quest_root: Path | str, *, model: str = "", effort: str = "", use_docker: bool = True,
@@ -445,7 +471,8 @@ _FI_CHECK_NAMES = ("fi_checks", "oracle_values", "equation_values", "equation_nu
                    "test_oracles", "test_equations", "frozen_protocol", "FROZEN_PROTOCOL", "agent_coder.json")
 _PARENT_PART = re.compile(r"(^|[\\/])\.\.([\\/]|$)")
 _FI_FOLDER = re.compile(r"(^|[\\/])\.fi([\\/]|$)")
-_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/(?:home|Users|root|tmp|work|mnt|etc|var|c|d)\b|~[\\/])")
+#: A path that starts at a drive, a share, a home or the root (``/c`` alone is cmd's switch, not a path: not here).
+_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/(?:home|Users|root|tmp|work|mnt|etc|var)(?:/|$)|~[\\/])")
 
 
 def reaches_outside(source: str, rel: str = "") -> list[str]:
@@ -491,6 +518,59 @@ def reaches_outside(source: str, rel: str = "") -> list[str]:
     return sorted(set(found), key=found.index)
 
 
+def startup_dirs() -> list[Path]:
+    """The folders where a file makes every later Python run do something on start (a ``.pth``, ``sitecustomize.py``,
+    ``usercustomize.py``): the person's user site and this interpreter's site folders. FI's own engine starts from
+    them, so a file left there would run inside FI."""
+    import site
+
+    found: list[Path] = []
+    with contextlib.suppress(Exception):
+        found.append(Path(site.getusersitepackages()))
+    with contextlib.suppress(Exception):
+        found += [Path(p) for p in site.getsitepackages()]
+    return [p for p in dict.fromkeys(found)]
+
+
+def _startup_files(dirs: Iterable[Path]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for folder in dirs:
+        try:
+            names = [p for p in Path(folder).iterdir() if p.is_file()]
+        except OSError:
+            continue
+        for path in names:
+            if path.suffix.lower() == ".pth" or path.name.lower() in _STARTUP_NAMES:
+                with contextlib.suppress(OSError):
+                    st = path.stat()
+                    out[str(path)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+#: What the evidence record says about how the code writer ran (core/evidence.py), the way core/phased_isolation.py
+#: marks held-back rows: without a container nothing kept the agent from the rest of the computer.
+ISOLATION_UNVERIFIED = "isolation_unverified"
+NO_ISOLATION_WHY = ("the coding agent that wrote the code ran on this computer as the person, without isolation: FI "
+                    "gave it a copy of code/ outside the quest folder and watched what changed, which is a tripwire, "
+                    "not a sandbox (it sees writes, never reads)")
+
+
+def evidence_settings(quest_root: Path | str) -> dict[str, str]:
+    """What the evidence ladder is told about the code writer (``settings["code_writer_isolation"]``): ``{}`` when no
+    coding agent wrote this quest's code, ``isolation_unverified`` with the reason when any round ran without a
+    container, ``docker`` when every round ran in one."""
+    try:
+        record = json.loads((Path(quest_root) / RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    rounds = [r for r in (record.get("rounds") or []) if isinstance(r, dict)] if isinstance(record, dict) else []
+    if not rounds:
+        return {}
+    if all(r.get("isolation") == "docker" for r in rounds):
+        return {"code_writer_isolation": "docker"}
+    return {"code_writer_isolation": ISOLATION_UNVERIFIED, "code_writer_isolation_why": NO_ISOLATION_WHY}
+
+
 # ---- the coder -----------------------------------------------------------------------------------------------------
 
 
@@ -504,7 +584,9 @@ class AgentCoder:
     """
 
     def __init__(self, quest_root: Path | str, runner: AgentRunner, *, max_fixes: int = 3, timeout_s: float = 1800.0,
-                 owned: Callable[[], Iterable[str]] | None = None, log: logging.Logger | None = None) -> None:
+                 owned: Callable[[], Iterable[str]] | None = None, log: logging.Logger | None = None,
+                 startup: Iterable[Path] | None = None) -> None:
+        self._startup = [Path(p) for p in startup] if startup is not None else None
         self.quest_root = Path(quest_root)
         self.code_dir = self.quest_root / "code"
         self.runner = runner
@@ -623,7 +705,11 @@ class AgentCoder:
                     continue
                 try:
                     st = path.stat()
-                    if st.st_size <= _KEEP_BYTES and kept + st.st_size <= _KEEP_TOTAL:
+                    if rel.startswith(".venv/"):
+                        # The quest's Python environment, which FI later runs its own checks with: watched by size and
+                        # time (a change is a cheat), never kept in memory.
+                        files[rel] = ((st.st_size, st.st_mtime_ns), None)
+                    elif st.st_size <= _KEEP_BYTES and kept + st.st_size <= _KEEP_TOTAL:
                         data = path.read_bytes()
                         kept += st.st_size
                         files[rel] = (_sha(data), data)
@@ -663,6 +749,24 @@ class AgentCoder:
             with contextlib.suppress(OSError):
                 (self.quest_root / rel).rmdir()
         return touched
+
+    def _startup_dirs(self) -> list[Path]:
+        return list(self._startup) if self._startup is not None else startup_dirs()
+
+    def _restore_startup(self, before: dict[str, Any]) -> list[str]:
+        """A file Python runs on start that the round added (removed again) or changed (recorded; FI cannot put it
+        back): each is a cheat."""
+        now = _startup_files(self._startup_dirs())
+        found: list[str] = []
+        for path in sorted(set(now) - set(before)):
+            with contextlib.suppress(OSError):
+                Path(path).unlink()
+            found.append(f"{path} (a file Python runs on start, created outside the copy; removed)")
+        for path in sorted(p for p in before if p in now and now[p] != before[p]):
+            found.append(f"{path} (a file Python runs on start, changed outside the copy; FI cannot put it back)")
+        for path in sorted(set(before) - set(now)):
+            found.append(f"{path} (a file Python runs on start, removed outside the copy)")
+        return found
 
     def _code_changed_since(self, snap: "TreeSnapshot | None") -> bool:
         return snap is not None and bool(snap.changed(self.code_dir))
@@ -768,14 +872,20 @@ class AgentCoder:
         return rel in names or rel.split("/", 1)[0] in FI_OWNED_DIRS
 
     def _fresh_copy(self, work: Path) -> None:
-        """The scratch folder holds exactly a copy of ``code/`` (no history, no environment, no caches)."""
+        """The scratch folder holds exactly a copy of ``code/``: no ``.git`` history, no environment, no caches, and none
+        of the files an older FI left in ``code/tests/`` with expected values in them (removed from ``code/`` first,
+        :func:`core.equation_tests.remove_stale`; FI writes its tests again in the current form)."""
+        from . import equation_tests as _eqt
+        from . import outside_run as _outside
+
+        removed = _eqt.remove_stale(self.code_dir)
+        if removed:
+            self._log.info("[implement] removed files an older FI left in code/ with expected values in them: %s",
+                           ", ".join(removed))
         scratch = work.parent
         shutil.rmtree(scratch, ignore_errors=True)
         scratch.mkdir(parents=True, exist_ok=True)
-        if self.code_dir.is_dir():
-            shutil.copytree(self.code_dir, work, ignore=shutil.ignore_patterns(*_TREE_SKIP, "*.pyc"))
-        else:
-            work.mkdir(parents=True, exist_ok=True)
+        _outside.copy_code(self.code_dir, work)
 
     @staticmethod
     def _hashes(folder: Path) -> dict[str, str]:
@@ -823,8 +933,21 @@ class AgentCoder:
         cheats: list[str] = []
         for rel in take:
             path = work / rel
-            if rel.endswith(".py") and path.is_file():
+            if not path.is_file():
+                continue
+            name = rel.rsplit("/", 1)[-1].lower()
+            if name.endswith(".pth") or name in _STARTUP_NAMES:
+                cheats.append(f"code/{rel} is a file Python runs when it starts, which the study's code never needs")
+            elif rel.endswith(".py"):
                 cheats += reaches_outside(path.read_text(encoding="utf-8", errors="replace"), f"code/{rel}")
+            elif not name.endswith(TEXT_SUFFIXES):
+                cheats.append(f"code/{rel} is not Python or a plain text or data file FI can read "
+                              f"({', '.join(TEXT_SUFFIXES)})")
+            else:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                named = next((n for n in _FI_CHECK_NAMES if n in text), "")
+                if named:
+                    cheats.append(f"code/{rel} names `{named}`, one of FI's own check files")
         if cheats:
             return [], tampered, cheats
         for rel in take:
@@ -841,8 +964,13 @@ class AgentCoder:
                           session_id: str | None, fallback_prompt: str) -> AgentResult:
         n = int(entry["n"])
         work = self.runner.workdir(self.quest_root)   # type: ignore[attr-defined]
+        confined = bool(getattr(self.runner, "confined", False))
+        entry["isolation"] = "docker" if confined else "none"
         await asyncio.to_thread(self._fresh_copy, work)
-        quest_before = await asyncio.to_thread(self._outside, with_code=True)
+        # Without a container the agent can reach the whole computer: the quest folder (its .venv/ included) and the
+        # folders Python starts from are watched for writes. A tripwire, not a sandbox: a read is never seen.
+        quest_before = None if confined else await asyncio.to_thread(self._outside, with_code=True)
+        startup_before = None if confined else await asyncio.to_thread(_startup_files, self._startup_dirs())
         out = await self._run_once(prompt, session_id, cwd=work)
         if (session_id is not None and fallback_prompt and out.exit_code != 0 and not out.timed_out
                 and not out.session_id and not await asyncio.to_thread(self._copy_diff, work)):
@@ -853,7 +981,9 @@ class AgentCoder:
             await asyncio.to_thread(self._fresh_copy, work)
             out = await self._run_once(fallback_prompt, None, cwd=work)
         # Every write outside the copy is a cheat, put back: in the quest folder (code/ included) and beside the copy.
-        cheats = [*await asyncio.to_thread(self._restore_outside, quest_before, with_code=True),
+        cheats = [*(await asyncio.to_thread(self._restore_outside, quest_before, with_code=True)
+                    if quest_before is not None else []),
+                  *(await asyncio.to_thread(self._restore_startup, startup_before) if startup_before is not None else []),
                   *await asyncio.to_thread(self._beside, work)]
         changed = await asyncio.to_thread(self._copy_diff, work)
         if cheats:
@@ -894,6 +1024,10 @@ class AgentCoder:
 #: not a change to the code, kept on an accepted round and put back with everything else on a rejected one.
 SCRATCH_DIRS = ("figures", "data", "raw", "results")
 _TREE_SKIP = {"__pycache__", ".pytest_cache", ".git", ".venv", "node_modules"}
+#: The only files besides ``.py`` that come back from the agent's copy into ``code/``: plain text and data FI can read.
+TEXT_SUFFIXES = (".json", ".csv", ".tsv", ".txt", ".md", ".yaml", ".yml", ".toml")
+#: Files Python runs by itself when it starts (with ``*.pth``): never written by the study's code.
+_STARTUP_NAMES = {"sitecustomize.py", "usercustomize.py"}
 
 
 @dataclass

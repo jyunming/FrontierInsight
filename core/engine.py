@@ -124,6 +124,7 @@ from . import plan_ledger as _ledger
 from . import plan_steps as _plan_steps
 from . import equation_tests as _equation_tests
 from . import outside_run as _outside_run
+from . import agent_coder as _agent_coder
 from . import code_reach as _code_reach
 from . import code_review as _code_review
 from . import review_pairs as _pairs
@@ -12898,6 +12899,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     # --analyze has no experiment to design, so there is no design to audit.
                     "design_audit": "not_applicable" if self.config.engine.analyze_local_first else "on",
                     **(_phased.evidence_settings(self.quest_root) if _phased.enabled(self.config) else {}),
+                    # A coding agent that wrote the code without a container ran without isolation (core/agent_coder.py).
+                    **_agent_coder.evidence_settings(self.quest_root),
                 },
             )
             if not write:

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -421,3 +420,107 @@ def test_a_container_started_with_the_runners_flags_sees_only_code(tmp_path: Pat
                           **ac._no_window())
     assert done.returncode == 0, done.stderr
     assert (code / "ok").is_file() and "0.7385113" not in done.stdout and "secret.txt" not in done.stdout
+
+
+# --- the review of the branch (C:/fi_compare/reviews/review_agent.md), probe by probe --------------------------------------
+
+
+def test_the_copy_is_named_by_a_random_id_never_by_the_quest(tmp_path: Path) -> None:
+    runner = ac.ClaudeCliRunner(mode="host", work_root=tmp_path / "work")
+    quest = tmp_path / "out" / "1791991314-kinetics-parameter-recovery-9da3c6"
+    work = runner.workdir(quest)
+    assert quest.name not in str(work) and "kinetics" not in str(work)
+    assert len(work.parent.name) == 32 and int(work.parent.name, 16) >= 0
+    assert runner.workdir(quest) == work, "a resume finds the same copy (the id is kept in the quest's .fi/)"
+
+
+def test_fi_checks_dir_never_reaches_the_agent_or_the_quests_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """probe_checks_env.py: before, an inherited FI_CHECKS_DIR reached both (True, True)."""
+    monkeypatch.setenv("FI_CHECKS_DIR", r"C:\fi_runs\some_quest\.fi\checks")
+    assert "FI_CHECKS_DIR" not in ac.ClaudeCliRunner(mode="host").process_env()
+    assert "FI_CHECKS_DIR" not in scrub_secrets()
+
+
+def test_cmd_c_is_not_an_absolute_path_and_a_drive_still_is() -> None:
+    """probe_reaches_outside.py: `cmd /c` was flagged as an absolute path (a false alarm, `/c` matched `\\b`)."""
+    assert ac.reaches_outside("import subprocess\nsubprocess.run(['cmd', '/c', 'dir'])") == []
+    assert ac.reaches_outside("label = '/c'") == []
+    assert ac.reaches_outside("open('C:/fi_runs/x.json')")
+    assert ac.reaches_outside("open('/home/me/x')")
+
+
+async def test_stale_value_files_are_removed_and_never_reach_the_copy(quest: Path, tmp_path: Path, standin) -> None:
+    """An older FI left code/tests/equation_numbers.json (expected values inside) and a test file with the values
+    inline; both are removed from code/ before the round and neither, nor .git, is in the agent's copy."""
+    tests = quest / "code" / "tests"
+    (tests / "equation_numbers.json").write_text('{"E1": {"expected": 60.653}}', encoding="utf-8")
+    (tests / "test_equations.py").write_text('"""Written by Frontier Insight"""\nCASES = [{"expected": 60.653}]\n',
+                                             encoding="utf-8")
+    (quest / "code" / ".git" / "old_test.py").write_text("expected = 60.653\n", encoding="utf-8")
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM}])
+    res = await ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60).write("task")
+    assert res.ok
+    assert not (tests / "equation_numbers.json").exists() and not (tests / "test_equations.py").exists()
+    work = _host(tmp_path, standin).workdir(quest)
+    seen = [p for p in work.rglob("*") if p.is_file()]
+    assert not any("60.653" in p.read_text(encoding="utf-8", errors="replace") for p in seen)
+    assert not (work / ".git").exists()
+
+
+async def test_a_write_into_the_quests_venv_is_a_cheat(quest: Path, tmp_path: Path, standin) -> None:
+    site = quest / ".venv" / "Lib" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "numpy_stub.py").write_text("x = 1\n", encoding="utf-8")
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM},
+                  {"write": str(site / "evil.pth"), "text": "import os\n"},
+                  {"write": str(site / "numpy_stub.py"), "text": "x = 2  # changed\n"}])
+    res = await ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60, startup=[]).write("task")
+    assert not res.ok and res.copied == []
+    assert any("evil.pth" in c for c in res.cheats) and any("numpy_stub.py" in c for c in res.cheats)
+    assert not (site / "evil.pth").exists()
+
+
+async def test_a_startup_file_in_the_users_site_is_a_cheat_and_is_removed(quest: Path, tmp_path: Path, standin) -> None:
+    user_site = tmp_path / "user_site"
+    user_site.mkdir()
+    (user_site / "keep.pth").write_text("# the person's own\n", encoding="utf-8")
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM},
+                  {"write": str(user_site / "zz_fi.pth"), "text": "import os; os.environ['X'] = '1'\n"},
+                  {"write": str(user_site / "sitecustomize.py"), "text": "print('hi')\n"}])
+    res = await ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60, startup=[user_site]).write("task")
+    assert not res.ok and res.copied == []
+    assert sum("a file Python runs on start" in c for c in res.cheats) == 2
+    assert not (user_site / "zz_fi.pth").exists() and not (user_site / "sitecustomize.py").exists()
+    assert (user_site / "keep.pth").is_file()
+
+
+@pytest.mark.parametrize("rel,text,why", [
+    ("pkg/boot.pth", "import os\n", "runs when it starts"),
+    ("sitecustomize.py", "x = 1\n", "runs when it starts"),
+    ("pkg/settings.ini", "[x]\n", "not Python or a plain text"),
+    ("pkg/blob.bin", "\x00\x01", "not Python or a plain text"),
+    ("pkg/table.json", '{"source": "oracle_values"}', "oracle_values"),
+])
+async def test_a_file_that_is_not_python_is_read_or_refused_before_it_comes_back(
+        quest: Path, tmp_path: Path, standin, rel: str, text: str, why: str) -> None:
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM}, {"write": rel, "text": text}])
+    res = await ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60, startup=[]).write("task")
+    assert not res.ok and res.copied == [] and any(why in c for c in res.cheats), res.cheats
+    assert not (quest / "code" / rel).exists()
+
+
+async def test_a_plain_data_file_comes_back(quest: Path, tmp_path: Path, standin) -> None:
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM}, {"write": "pkg/rates.csv", "text": "T,k\n300,1\n"}])
+    res = await ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60, startup=[]).write("task")
+    assert res.ok and sorted(res.copied) == ["pkg/rates.csv", "simulate.py"]
+
+
+async def test_the_evidence_record_says_the_code_writer_ran_without_isolation(quest: Path, tmp_path: Path,
+                                                                              standin) -> None:
+    assert ac.evidence_settings(quest) == {}, "no coding agent wrote this quest's code"
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM}])
+    await ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60, startup=[]).write("task")
+    got = ac.evidence_settings(quest)
+    assert got["code_writer_isolation"] == ac.ISOLATION_UNVERIFIED
+    assert "without isolation" in got["code_writer_isolation_why"] and "not a sandbox" in got["code_writer_isolation_why"]
+    assert "without isolation" in ac.NO_DOCKER_LINE and "not a sandbox" in ac.NO_DOCKER_LINE
