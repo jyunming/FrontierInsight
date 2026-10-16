@@ -167,3 +167,38 @@ def test_a_person_names_another_checks_folder_on_the_command_line_and_never_by_t
     stray = subprocess.run([sys.executable, "-B", cl.TEST_PATH], cwd=root / "code", capture_output=True, text=True,
                            timeout=60, env={**os.environ, "FI_CHECKS_DIR": str(moved)})
     assert stray.returncode == 1, stray.stdout + stray.stderr
+
+
+STALE = Path(__file__).parent / "fixtures" / "stale_tests"   # copied from a real r12 FDR quest's code/tests/
+
+
+def test_an_older_fis_files_with_expected_values_are_removed_from_code_tests(tmp_path: Path) -> None:
+    """review P1-2: 23 quests under C:/fi_runs kept code/tests/equation_numbers.json (expected values inside) and test
+    files with the values inline; nothing removed them on a resume."""
+    tests = tmp_path / "code" / "tests"
+    tests.mkdir(parents=True)
+    for p in STALE.iterdir():
+        (tests / p.name).write_bytes(p.read_bytes())
+    (tests / "test_mine.py").write_text("def test_x():\n    assert 1\n", encoding="utf-8")
+    assert '"expected"' in (tests / "equation_numbers.json").read_text(encoding="utf-8")
+    removed = eqt.remove_stale(tmp_path / "code")
+    assert sorted(removed) == ["tests/equation_numbers.json", "tests/test_equations.py", "tests/test_oracles.py"]
+    assert sorted(p.name for p in tests.iterdir()) == ["test_mine.py"], "a person's own test is kept"
+    # FI's current test files read their values from outside code/ and are kept.
+    root = _quest(tmp_path / "now")
+    assert eqt.remove_stale(root / "code") == []
+
+
+async def test_a_resumed_quest_loses_the_stale_files_when_fi_refreshes_code(tmp_path: Path) -> None:
+    from core.config import Config, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+    from core.engine import Engine
+
+    cfg = Config(topic="decay", title="decay", provider=ProviderConfig(name="openai"),
+                 execution=ExecutionConfig(sandbox="venv", timeout_s=120), knowledge=KnowledgeConfig(enabled=False),
+                 output=OutputConfig(output_dir=tmp_path / "outputs"))
+    engine = Engine(cfg)
+    tests = engine.quest_root / "code" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "equation_numbers.json").write_bytes((STALE / "equation_numbers.json").read_bytes())
+    await engine._refresh_code_project({"topic": "decay"}, [])
+    assert not (tests / "equation_numbers.json").exists()

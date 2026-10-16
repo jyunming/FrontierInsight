@@ -994,6 +994,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     # reused the quest_id; LangGraph still treated the
                     # `initial` payload as a fresh START.
                     prior_snapshot = await graph.aget_state(run_config)
+                    if getattr(prior_snapshot, "values", None):
+                        # A resumed quest: files an older FI left in code/tests/ with expected values in them go first.
+                        stale = _equation_tests.remove_stale(self.quest_root / "code")
+                        if stale:
+                            self._log.info("[run] removed files an older FI left in code/ with expected values in "
+                                           "them: %s", ", ".join(stale))
                     # `values` is empty dict for never-run threads.
                     payload: Any
                     # ``--from <step>``: the first call continues from the checkpoint taken just before that step; every
@@ -10130,6 +10136,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # git and the file scan block: keep them off the event loop so a --fleet's other quests keep going.
             protocol = self._protocol_block(state)
             package = self._package_in_use(state)
+            # A quest begun by an older FI (a resume) can still hold expected values in code/tests/: removed, and FI's
+            # test files written again below in the current form.
+            stale = await asyncio.to_thread(_equation_tests.remove_stale, self.quest_root / "code")
+            if stale:
+                self._log.info("[code] removed files an older FI left in code/ with expected values in them: %s",
+                               ", ".join(stale))
             if package:
                 # What the tests FI writes into code/ compare with goes to .fi/checks/, never into code/.
                 await asyncio.to_thread(_code_layout.write_check_values, self.quest_root / "code", protocol)
