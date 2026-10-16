@@ -1374,7 +1374,7 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
                         oracle: dict[str, Any], case: dict[str, Any], measure: str, timeout_s: int,
                         budget_s: float, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
                         in_each_run: dict[str, list[Any]] | None, means: Collection[str], paired: bool,
-                        most_trials: int, store: dict[str, Any] | None = None,
+                        most_trials: int, store: dict[str, Any] | None = None, proportions: Collection[str] = (),
                         ) -> tuple[dict[str, Any] | None, str, bool] | None:
     """An oracle whose number is a mean over trials (:func:`core.mc_error.reads_a_mean`), decided on trials of
     ``run_trial`` (core/mc_error.py): a first batch, then more trials, sized from their spread, until three standard
@@ -1397,7 +1397,7 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     used = _mc.measure_names(measure, first)
     if not used or not all(_scalar(first.get(n)) for n in used):
         return None
-    stat = _mc.statistic(rows, measure, means, expected)
+    stat = _mc.statistic(rows, measure, means, expected, limit, proportions)
     if stat is None:
         return None
     # A number is taken for a constant only when at least MIN_TRIALS trials agree: two or three equal draws of a random
@@ -1433,7 +1433,7 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
         if not more:
             why_open = "time"
             break
-        stat = _mc.statistic(rows, measure, means, expected) or stat
+        stat = _mc.statistic(rows, measure, means, expected, limit, proportions) or stat
     lost = len(failed) + int(stat.get("dropped") or 0)
     verdict, why_failed = _mc.failed_share_verdict(lost, ran, verdict)
     record = _mc.record(stat, read_as="mean", verdict=verdict, why=why_failed or why_open, failed=lost, started=ran,
@@ -1501,7 +1501,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
                           thresholds: dict[str, Any] | None = None, case_env: dict[str, str] | None = None,
                           in_each_run: dict[str, list[Any]] | None = None,
                           mean_names: Collection[str] | None = None, most_trials: int | None = None,
-                          paired: bool = False) -> tuple[list[dict[str, Any]], list[str], bool]:
+                          paired: bool = False, proportion_names: Collection[str] | None = None,
+                          ) -> tuple[list[dict[str, Any]], list[str], bool]:
     """``(checks, problems, timed_out)`` for the declared oracles. An oracle with a case is measured by the ENGINE: it calls
     the simulation function on that case and reads the measure from what comes back (``measured_by: "engine"``). The rest
     are read from the script's ``oracle()`` (``measured_by: "script"``), called once and only when one needs it.
@@ -1525,6 +1526,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
     except (OSError, ValueError):
         has_trial = False
     means = frozenset(mean_names or ())
+    proportions = frozenset(proportion_names or ())  # judged on their binomial interval (mc_error.statistic)
     most = int(most_trials or _mc.MAX_TRIALS)
 
     def on_trials(oracle: dict[str, Any]) -> str:
@@ -1554,7 +1556,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
             kw = dict(oracle=oracle, case=case, measure=measure, timeout_s=timeout_s, budget_s=share, env=cenv,
                       thresholds=thresholds, in_each_run=in_each_run, paired=paired, most_trials=most,
                       store=store)
-            got = (await _measure_mean(executor, python, quest_root, module, means=means, **kw) if how == "mean"
+            got = (await _measure_mean(executor, python, quest_root, module, means=means, proportions=proportions, **kw)
+                   if how == "mean"
                    else await _measure_every(executor, python, quest_root, module, **kw))
             if got is not None:
                 check, problem, not_run = got

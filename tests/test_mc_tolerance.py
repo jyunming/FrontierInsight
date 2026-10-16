@@ -398,6 +398,47 @@ def test_a_0_1_number_of_a_simulation_that_never_varies_is_judged_at_once() -> N
     assert seen is not None and seen["binary"] and mc.mean_verdict(seen, 0.0, 0.01) is None
 
 
+def test_a_declared_proportion_is_judged_on_its_binomial_interval_even_when_every_trial_gave_its_expected_value() -> None:
+    """The protocol declares ``hit`` a proportion, and the check says it is 0 within 0.01. Twenty zeros are not a rate
+    of 0 (a rate of 0.05 gives twenty zeros 36% of the time): not decided, where they passed at once. 2000 zeros put
+    the Wilson bound (0.0045) inside the tolerance: a pass. With a tolerance of exactly 0 the claim is exact (never
+    once), read as a constant. A number not declared a proportion (a distance exactly 0) keeps the constant reading."""
+    declared = {"hit"}
+    twenty = mc.statistic(_outcomes(0, 20), "hit", (), 0.0, 0.01, declared)
+    assert twenty is not None and twenty["binary"] and mc.mean_verdict(twenty, 0.0, 0.01) is None
+    many = mc.statistic(_outcomes(0, 2000), "hit", (), 0.0, 0.01, declared)
+    assert many is not None and mc.mean_verdict(many, 0.0, 0.01) == "pass"
+    ones = mc.statistic(_outcomes(20, 20), "hit", ("hit",), 1.0, 0.01, declared)
+    assert ones is not None and ones["binary"] and mc.mean_verdict(ones, 1.0, 0.01) is None
+    exact = mc.statistic(_outcomes(0, 20), "hit", (), 0.0, 0.0, declared)
+    assert exact is not None and not exact.get("binary") and mc.mean_verdict(exact, 0.0, 0.0) == "pass"
+    distance = mc.statistic([{"gap": 0.0, "wall": float(i)} for i in range(20)], "gap", (), 0.0, 0.0, declared)
+    assert distance is not None and not distance.get("binary") and mc.mean_verdict(distance, 0.0, 0.0) == "pass"
+    protocol = {"metrics": [{"id": "hit", "estimand": "P(hit)", "kind": "proportion", "unit": "a run"},
+                            {"id": "wall", "estimand": "E[wall]", "kind": "mean", "unit": "a run"}]}
+    assert mc.proportion_names(protocol) == frozenset({"hit"})
+
+
+ALL_ZERO = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    return {"hit": 0.0, "wall": random.Random(seed).random()}
+'''
+
+
+def test_a_declared_proportion_reaches_the_check_through_the_measurement(tmp_path: Path) -> None:
+    """The same rule when FI measures the check: an all-zero proportion expected 0 within 0.01 is run until its
+    interval fits (hundreds of trials), not judged on its first batch."""
+    check = {"name": "no_hits", "kind": "special_case", "expected": 0.0, "tolerance": 0.01, "case": {"n": 1},
+             "measure": "hit", "reference": "derivation: never"}
+    _c, problems, judged, _f = _plain(_synth(tmp_path, ALL_ZERO), [check], timeout_s=120,
+                                      proportion_names=frozenset({"hit"}))
+    (j,) = judged
+    assert j["passed_by_engine"] is True and j["mc"]["trials"] > mc.PILOT_TRIALS, (j, problems)
+    assert j["mc"]["binomial_interval"][1] <= 0.01
+
+
 def test_the_paper_says_a_check_that_could_not_be_decided_was_not_decided_in_neutral_words() -> None:
     """An undecided check is said plainly as not decided and not validated against: neither a hint that the method is
     wrong nor a reassurance that it is right."""

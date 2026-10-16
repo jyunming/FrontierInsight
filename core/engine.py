@@ -13209,6 +13209,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
                             case_env=dict(_replicate_env(exec_env, 0, stride)), in_each_run=_in_run.of(protocol),
                             mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol),
+                            proportion_names=_mc_error.proportion_names(protocol),
                         )
                     except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
                         checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
@@ -14161,6 +14162,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     timeout_s=max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)),
                     env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of(protocol),
                     mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol),
+                    proportion_names=_mc_error.proportion_names(protocol),
                 )
                 problems += found
                 judged = _oracle_with_reader_flags(

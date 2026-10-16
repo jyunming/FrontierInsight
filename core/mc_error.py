@@ -38,7 +38,8 @@ judges with them. The first rule is that a check the trials cannot decide is nev
   0's number, as a deterministic check is, so a constant quantity never runs to the time limit (fewer trials that
   agree show no constant, and leave it not decided).
 * **A 0/1 outcome of a random simulation** (every trial gives 0 or 1, some number the simulation returns varies, and
-  both values occurred or the check expects a rate strictly between 0 and 1) is judged on its binomial interval, never on its sample spread (:func:`wilson`, :func:`binomial_verdict`), at every
+  both values occurred, the check expects a rate strictly between 0 and 1, or the protocol declares the number a
+  proportion and the tolerance is not exactly 0) is judged on its binomial interval, never on its sample spread (:func:`wilson`, :func:`binomial_verdict`), at every
   number of trials: ten zeros are not a rate of 0 (their interval at three standard errors reaches 0.47), so they do
   not decide a check that expects 0.05 within 0.01; 2000 zeros fail it.
 """
@@ -78,6 +79,16 @@ def mean_names(protocol: dict[str, Any] | None) -> frozenset[str]:
         return frozenset()
     kept, _dropped = _metric_spec.repair(metrics)
     return frozenset(str(m["id"]) for m in kept if m.get("kind") in _metric_spec.KINDS and not m.get("given"))
+
+
+def proportion_names(protocol: dict[str, Any] | None) -> frozenset[str]:
+    """The names the protocol declares as metrics of kind ``proportion`` over every run: a 0/1 outcome, by the record,
+    judged on its binomial interval even when every trial gave its expected 0 or 1 (:func:`statistic`)."""
+    metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
+    if not metrics:
+        return frozenset()
+    kept, _dropped = _metric_spec.repair(metrics)
+    return frozenset(str(m["id"]) for m in kept if m.get("kind") == "proportion" and not m.get("given"))
 
 
 def paired(protocol: dict[str, Any] | None) -> bool:
@@ -282,11 +293,12 @@ def summarise(rows: list[dict[str, Any]], measure: str) -> dict[str, Any] | None
     return out
 
 
-def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expected: Any = None) -> dict[str, Any] | None:
+def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expected: Any = None, limit: Any = None,
+              proportions: Any = ()) -> dict[str, Any] | None:
     """The mean check's number and its error (see the module docstring): the formula on the names' means when every name
     it uses is a declared mean or proportion (``means``), else the mean of the formula trial by trial. A 0/1 outcome
-    (``binary``; ``expected`` is the check's expected value) carries its Wilson ``interval`` and the standard error
-    that interval stands for."""
+    (``binary``; ``expected`` and ``limit`` are the check's) carries its Wilson ``interval`` and the standard error
+    that interval stands for. ``proportions``: the names the protocol declares proportions (:func:`proportion_names`)."""
     measure = str(measure or "").strip()
     first = next((r for r in rows if isinstance(r, dict)), None)
     if first is None:
@@ -297,12 +309,16 @@ def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expecte
         return None
     # A 0/1 outcome of a random simulation: its uncertainty is its binomial interval, never its sample spread (ten
     # zeros have a spread of 0, which says nothing about a rate of 0.05). One rule at every number of trials. A 0/1
-    # number is an outcome when both values occurred, or when the check expects a rate strictly between 0 and 1; one
-    # that is the same in every trial and expected to be exactly that (a distance that is exactly 0) is a constant.
+    # number is an outcome when both values occurred, when the check expects a rate strictly between 0 and 1, or when
+    # the protocol declares it a proportion (then all zeros expected 0 within 0.01 are not a rate of 0, unless the
+    # tolerance is exactly 0: an exact claim, read as a constant). One that is the same in every trial, expected to be
+    # exactly that and not declared a proportion (a distance that is exactly 0) is a constant.
     values = _outcome_values(rows, stat)
     rate = expected is not None and _number(expected) and 0.0 < float(expected) < 1.0
+    exact = _number(limit) and float(limit) == 0.0
+    declared = str(stat.get("inner") or "") in {str(p) for p in proportions or ()} and not exact
     if (values and all(v in (0.0, 1.0) for v in values) and returned_varies(rows)
-            and (rate or len(set(values)) > 1)):
+            and (rate or declared or len(set(values)) > 1)):
         lo, hi = wilson(int(sum(values)), len(values))
         stat.update(binary=True, successes=int(sum(values)), interval=[lo, hi], se=(hi - lo) / (2 * BAND_SE))
     return stat
