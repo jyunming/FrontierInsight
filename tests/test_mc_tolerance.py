@@ -10,7 +10,7 @@ and still fails; declared ``per_trial: false`` (what the plan prompt now asks fo
 
 The same simulation with a planted fault must still fail: BH at twice its level, the false discovery proportion doubled
 in the tally, no correction at all, and the wrong tail of the p-value. The review of the first version of this fix
-(C:/fi_compare/reviews/review_tol.md) found seven ways a wrong simulation passed or a check cost far too much; each is a
+found seven ways a wrong simulation passed or a check cost far too much; each is a
 test below (A5, B, C, D, E, F, G). Everything runs through the real trial runner in its own process; no model is called.
 """
 
@@ -80,12 +80,17 @@ def test_the_s1_record_failed_the_bound_on_one_trial() -> None:
 
 
 def test_judged_on_one_trial_the_bound_still_fails_as_it_did(tmp_path: Path) -> None:
-    """``per_trial: true`` keeps a check on one trial: the s1 measurement is reproduced exactly (the same seed)."""
+    """``per_trial: true`` makes the bound a rule of every trial. On trial 0 alone the s1 measurement is reproduced
+    exactly (the same seed); on the first batch the worst trial decides, never better than trial 0."""
     one = {**BOUND, "per_trial": True}
-    checks, problems, judged, found = _measure(_quest(tmp_path), [one])
+    checks, problems, judged, found = _measure(_quest(tmp_path / "one"), [one], most_trials=1)
     assert not problems and judged[0]["value"] == pytest.approx(0.0188235, abs=1e-6)
     assert judged[0]["passed_by_engine"] is False and "mc" not in checks[0]
     assert found and "0.0188235" in found[0]
+    checks, problems, judged, found = _measure(_quest(tmp_path / "all"), [one])
+    assert judged[0]["passed_by_engine"] is False and judged[0]["value"] >= 0.0188235 - 1e-6
+    assert checks[0]["mc"]["read_as"] == "every_trial" and checks[0]["mc"]["trials"] == mc.PILOT_TRIALS
+    assert "the worst of 20 trials" in found[0]
 
 
 # --- the s1 record, after --------------------------------------------------------------------------------------------
@@ -126,6 +131,9 @@ async def test_the_s1_gate_passes_every_check_with_no_repair_and_no_failed_check
     from tests.test_known_answer_self_checks import _config, _Model
 
     engine = Engine(_config(tmp_path))
+    # The checks share one time budget, a fifth of the run's timeout: 120 s here, for seven checks that need some
+    # thousands of trials between them (the test config's 120 s run timeout gives 30 s, too little to decide them all).
+    engine.config.execution.timeout_s = 600
     model = _Model()
     engine._client = model
     protocol = {k: PROTOCOL[k] for k in ("grid", "in_each_run", "metrics", "thresholds")}
@@ -155,7 +163,7 @@ PLANTED = {
     "fdp_doubled_in_the_tally": {'out["fdr_" + s] = float(fdp)': 'out["fdr_" + s] = float(2 * fdp)'},
     "no_correction_called_bh": {'masks[meth] = model.bh_stepup(p, ALPHA)': 'masks[meth] = p <= ALPHA'},
 }
-SAME_TRIALS = 200
+SAME_TRIALS = 3000
 
 
 @pytest.mark.parametrize("fault", sorted(PLANTED))
@@ -304,14 +312,13 @@ def test_a_check_whose_trials_all_agree_is_judged_as_before(tmp_path: Path) -> N
 def test_a_rule_is_read_on_a_mean_only_when_the_check_says_so() -> None:
     """A rule each trial keeps is per trial unless the check declares ``per_trial: false``, whatever the protocol's
     metrics are; a quantity is a mean unless it declares ``per_trial: true``."""
-    means = mc.mean_names(PROTOCOL)
-    assert not mc.reads_a_mean(BOUND, means), "declared metrics are not a declaration that the check is on a mean"
-    assert mc.reads_a_mean(MEAN_BOUND, means) and mc.reads_a_mean(MEAN_BOUND, frozenset())
-    assert mc.reads_a_mean({**BOUND, "per_trial": "false"}, frozenset())
-    assert not mc.reads_a_mean(ORACLES["bh_superset_of_bonferroni"], means), "a per-trial count"
-    assert not mc.reads_a_mean({**BOUND, "per_trial": True}, means), "per_trial: true always means one trial"
-    assert mc.reads_a_mean(ORACLES["bonferroni_power_exact"], frozenset()), "a special case is a number of the setting"
-    assert not mc.reads_a_mean({**ORACLES["bonferroni_power_exact"], "per_trial": True}, frozenset())
+    assert "fdr_bh" in mc.mean_names(PROTOCOL)
+    assert not mc.reads_a_mean(BOUND), "a declared mean metric is not a declaration that the check is on a mean"
+    assert mc.reads_a_mean(MEAN_BOUND) and mc.reads_a_mean({**BOUND, "per_trial": "false"})
+    assert not mc.reads_a_mean(ORACLES["bh_superset_of_bonferroni"]), "a per-trial count"
+    assert not mc.reads_a_mean({**BOUND, "per_trial": True}), "per_trial: true always means every trial"
+    assert mc.reads_a_mean(ORACLES["bonferroni_power_exact"]), "a special case is a number of the setting"
+    assert not mc.reads_a_mean({**ORACLES["bonferroni_power_exact"], "per_trial": True})
     given = {"metrics": [{"id": "size", "estimand": "E[size | outbreak]", "kind": "mean", "unit": "a run",
                           "given": "outbreak"},
                          {"id": "outbreak", "estimand": "P(outbreak)", "kind": "proportion", "unit": "a run"}]}
@@ -348,7 +355,7 @@ def test_the_trials_decide_a_check_only_when_three_standard_errors_put_it_on_one
     assert mc.decide(0.05, 0.05, 1e-14, 0.0) == "pass", "exactly equal, with no spread"
     # A bound max(0, X) expecting 0 is judged on its one side: X far below 0 passes.
     assert mc.decide(-0.03, 0.0, 0.01, 0.005, shape="bound") == "pass"
-    assert mc.decide(0.03, 0.0, 0.01, 0.005, shape="bound") is None
+    assert mc.decide(0.03, 0.0, 0.01, 0.01, shape="bound") is None
     assert mc.decide(0.04, 0.0, 0.01, 0.005, shape="bound") == "fail"
 
 
@@ -367,7 +374,7 @@ def test_the_paper_says_a_check_that_could_not_be_decided_was_not_decided_in_neu
     assert "not decided" in ac.gap(undecided) and "unconfirmed" in ac.gap(undecided)
 
 
-# --- the review's probes (C:/fi_compare/reviews/review_tol.md): each a fault the check must not pass -------------------
+# --- the review's probes: each a fault the check must not pass, or a cost it must not have ---------------------------
 
 SLOW_RATE = '''
 import random, time
@@ -592,6 +599,65 @@ def test_a_check_its_trials_could_not_decide_is_not_validated_anywhere() -> None
     assert entry["undecided"] is True
     note = oc.analysis_note(judged)
     assert "not decided" in note and "passed" not in note.split("null_rate", 1)[1].split("\n", 1)[0]
+
+
+def test_a_hidden_check_its_trials_could_not_decide_is_a_gap_not_a_pass(tmp_path: Path) -> None:
+    """P0-1, the hidden check: a case not decided at a setting the code never saw is ``undecided``, not passed, and the
+    evidence names it as a gap."""
+    import random
+
+    from core import hidden_check as hc
+
+    bound = {"name": "rate_at_most_q", "kind": "invariant", "check": "the rate stays at most 0.05 on average",
+             "per_trial": False, "expected": 0, "tolerance": 0.002, "case": {"k": 100},
+             "measure": "max(0, rate - 0.05)", "reference": "derivation: a level-0.05 test"}
+    # The rate is a declared proportion, so the bound is on the rate's mean (the formula on the mean).
+    protocol = {"grid": {"k": [100, 200]}, "oracles": [bound],
+                "metrics": [{"id": "rate", "estimand": "P(reject)", "kind": "proportion", "unit": "a run"}]}
+    assert mc.mean_names(protocol) == frozenset({"rate"})
+    root = _synth(tmp_path, "P = 0.05\nSLEEP = 0.02\n" + SLOW_RATE)
+    record = asyncio.run(hc.run(SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, protocol,
+                                timeout_s=3, env={}, engine_callable=True, rng=random.Random(1)))
+    (case,) = record["cases"]
+    assert case["passed"] is None and case["undecided"] is True and record["status"] == "not_decided", record
+    sha = hc.write(root, record)
+    written = [{"sha256": sha, "status": record["status"], "code_sha256": record.get("code_sha256"),
+                "checks_key": record.get("checks_key")}]
+    gaps = hc.evidence_gaps(root, protocol, written)
+    assert any("was not decided at a setting the code never saw" in g for g in gaps), gaps
+
+
+def test_the_stop_card_does_not_lean_either_way_on_a_check_that_was_not_decided() -> None:
+    """An undecided check says nothing about which side is wrong: FI's look points to neither the check nor the
+    script (the old within-the-error entry pointed to the tolerance, so the card leaned towards the check)."""
+    from core import oracle_card, oracle_triage
+
+    oracle = {**RATE_CHECK, "tolerance": 0.005, "case": {"k": 50}}
+    judged = {"name": "null_rate", "value": 0.0533, "undecided": True,
+              "mc": {"read_as": "mean", "trials": 57, "se": 0.0042, "verdict": "undecided", "why": "time",
+                     "started": 57}}
+    entry = oracle_triage.trials_entry(oracle, judged)
+    assert entry["verdict"] == "undecided" and entry["points_to"] == ""
+    assert "not decided" in entry["cause"]["text"]
+    assert oracle_card.leaning([{"id": "null_rate", "status": "failed"}], [entry], []) == "unclear"
+
+
+def test_quality_md_names_a_check_that_was_not_decided(tmp_path: Path) -> None:
+    """P0-1, QUALITY.md: the gate's "was not decided" problem is listed as a known-answer problem left out."""
+    from core import quality_report as qr
+    from tests.test_quality_report import _audit, _stage, _w
+
+    oracle = {**RATE_CHECK, "tolerance": 0.005, "case": {"k": 50}}
+    record = {"read_as": "mean", "varies": True, "trials": 57, "se": 0.0042, "verdict": "undecided", "why": "time",
+              "started": 57}
+    reported = {"checks": [{"name": "null_rate", "value": 0.0533, "measured_by": "engine", "mc": record}],
+                "engine_measured": True}
+    found = oc.problems([oracle], reported, 0)
+    root = tmp_path / "q"
+    _audit(root, [{"kind": "check_result", "check": "oracle", "status": "went_on_failing", "problems": found}])
+    _w(root / "paper" / "paper.md", "x")
+    items = _stage(qr.build(root), "run")["problems"]["items"]
+    assert any("not decided" in i["text"] and i["status"] == "left out" for i in items), items
 
 
 # --- time and seeds -------------------------------------------------------------------------------------------------

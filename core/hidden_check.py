@@ -270,14 +270,17 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
                 checks, problems, _ = await _trial_runner.measure_oracles(
                     executor, python, quest_root, _SIMULATE.as_posix(), [hidden], timeout_s=timeout_s, env=env,
                     thresholds=thresholds, case_env=env, in_each_run=_in_run.of(protocol),
-                    mean_names=_mc.mean_names(protocol))
+                    mean_names=_mc.mean_names(protocol), paired=_mc.paired(protocol))
             except Exception as e:  # noqa: BLE001 -- a run that cannot start is recorded, never raised
                 checks, problems = [], [f"the run could not start: {type(e).__name__}: {str(e)[:200]}"]
             judged = _oracle.judged([hidden], {"checks": checks, "engine_measured": True})[0]
+            by_engine = judged["measured_by"] == "engine"
             record["cases"].append({
                 "name": str(oracle["name"]).strip(), "kind": _oracle.kind_of(oracle), "case": case, "changed": changed,
                 "value": judged["value"], "expected": judged["expected"], "limit": judged["limit"],
-                "passed": judged["passed_by_engine"] if judged["measured_by"] == "engine" else None,
+                "passed": judged["passed_by_engine"] if by_engine else None,
+                # The trials FI could run did not decide it (core/mc_error.py): not a pass, and not a failure either.
+                **({"undecided": True} if by_engine and judged.get("undecided") else {}),
                 **({"problem": "; ".join(problems)[:400]} if problems else {}),
             })
     finally:
@@ -286,7 +289,8 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
         return {**record, "status": "not_covered"}
     verdicts = [c["passed"] for c in record["cases"]]
     # "failed" only for a value outside the tolerance; a case that gave no value (a timeout, a crash) is run again.
-    status = "failed" if False in verdicts else "could_not_run" if None in verdicts else "passed"
+    status = ("failed" if False in verdicts else "not_decided" if any(c.get("undecided") for c in record["cases"])
+              else "could_not_run" if None in verdicts else "passed")
     return {**record, "status": status}
 
 
@@ -335,6 +339,10 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None,
             gaps.append(f"the check {name!r} passed at its own case but not at a setting the code never saw ({changed}): "
                         f"FI measured {_fmt(case.get('value'))}, expected {_fmt(case.get('expected'))} within "
                         f"{_fmt(case.get('limit'))}")
+        elif case.get("undecided"):
+            gaps.append(f"the check {name!r} was not decided at a setting the code never saw ({changed}): the trials FI "
+                        f"could run there put {_fmt(case.get('value'))} neither inside nor outside "
+                        f"{_fmt(case.get('expected'))} within {_fmt(case.get('limit'))}, so it is not validated there")
         else:
             gaps.append(f"the check {name!r} could not be run at a setting the code never saw ({changed}): "
                         f"{case.get('problem') or 'no value came back'}")

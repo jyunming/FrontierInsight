@@ -509,19 +509,22 @@ def seeds_entry(oracle: dict[str, Any], result: dict[str, Any]) -> dict[str, Any
 
 
 def trials_entry(oracle: dict[str, Any], judged: dict[str, Any]) -> dict[str, Any]:
-    """A check judged on the mean of many trials (core/mc_error.py) that is outside its tolerance by less than three
-    standard errors of those trials: they do not decide it, so it points to neither the script nor the check."""
+    """A check the trials FI could run did not decide (core/mc_error.py: three standard errors around its mean lie
+    neither inside nor outside its tolerance in the time it had, or too many of its trials failed): it points to neither
+    the script nor the check, so the script is not rewritten for it, and it stays unconfirmed."""
     from . import mc_error as _mc
 
     name = str(oracle.get("name") or "").strip()
     expected, limit, _mode = _oracle.limit_of(oracle)
-    mc = judged.get("mc") if isinstance(judged.get("mc"), dict) else {}
-    how = _mc.words(mc, limit)
-    return {"check": name, "kind": "trials", "verdict": "within_error", "points_to": "tolerance",
+    mc = _oracle.mc_of(judged) or {}
+    how = _mc.words(mc)
+    why = _mc.undecided_words(mc, limit)
+    # Points to neither side: an undecided check says nothing about whether the check or the simulation is wrong.
+    return {"check": name, "kind": "trials", "verdict": "undecided", "points_to": "",
             "trials": mc.get("trials"), "se": mc.get("se"), "value": judged.get("value"),
             "tried": f"FI judged `{name}` on {how}.",
-            "cause": {"text": f"`{name}` is outside its tolerance by less than three standard errors of the trials it "
-                              "was judged on: those trials do not decide it, and the script is not rewritten for it.",
+            "cause": {"text": f"`{name}` was not decided: {why}. The script is not rewritten for it, and the result is "
+                              "not validated against it.",
                       "evidence": f"measured {_fmt(_num(judged.get('value')))} ({how}); expected {_fmt(expected)} "
                                   f"within {_fmt(limit)}."}}
 

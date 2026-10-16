@@ -13101,6 +13101,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # the script is just not rewritten for them.
         self._oracle_set_aside: dict[str, str] = {}
         self._oracle_noisy: set[str] = set()  # those set aside as one random trial's noise
+        self._oracle_undecided: set[str] = set()  # those set aside because their trials did not decide them yet
         # A dispute outlives a stop: the checks the last run of this gate found disputed, while they are as they were then
         # (a person who changed one, or accepted its proposal, starts it afresh).
         self._restore_oracle_disputes(_oracle.declared(protocol))
@@ -13158,7 +13159,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                             run_oracles, timeout_s=limit_s, env=env,
                             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
                             case_env=dict(_replicate_env(exec_env, 0, stride)), in_each_run=_in_run.of(protocol),
-                            mean_names=_mc_error.mean_names(protocol),
+                            mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol),
                         )
                     except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
                         checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
@@ -13361,10 +13362,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # unconfirmed (one that measured nothing too), recorded as automatic and bound, as a person's choice was, to
             # the check and to this version of the code. The evidence keeps the result below "independently validated"
             # and the paper says so: nothing about the check is relaxed.
-            # A check FI found within the noise of the trials it was judged on is said as not decided, not as failed.
+            # A check the trials could not decide carries ``undecided`` from its verdict (accepted_checks._mc_said).
             went_on = [{**c, "by": _accepted.AUTOMATIC, "via": _accepted.AUTOMATIC, "script": self._rel_to_quest(seed_path),
-                        "script_version": version,
-                        **({"within_mc_error": True} if c.get("name") in self._oracle_noisy else {})}
+                        "script_version": version}
                        for c in (go_on_checks or _accepted.went_on_entries(found, run_oracles,
                                                                            attempts[-1].get("judged") or []))]
         status = ("ok" if not found else "warned" if self.config.engine.oracle_check == "warn"
@@ -13390,7 +13390,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         for warning in loose:
             self._log.warning("[oracle] %s", warning)
         aside_failing = [n for n in self._oracle_set_aside if found and n not in disputed_failing and any(
-            j.get("name") == n and j.get("passed_by_engine") is False for j in attempts[-1].get("judged") or [])]
+            j.get("name") == n and (j.get("passed_by_engine") is False or j.get("undecided"))
+            for j in attempts[-1].get("judged") or [])]
         for duplicate in _oracle.duplicate_names(oracles, {"checks": attempts[-1].get("checks") or []}):
             self._log.warning("[oracle] %s", duplicate)
         # Which side FI's own look points to, and why, in a scientist's words (core/oracle_card.py): recorded with the
@@ -13734,6 +13735,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._oracle_disputed.discard(n)
             self._oracle_set_aside.pop(n, None)
             self._oracle_noisy.discard(n)
+            self._oracle_undecided.discard(n)
             self._log.warning("[oracle] corrected the expected value of %r: %s -> %s (%s); measuring the checks again",
                               n, before[n], _oracle.fmt_digits(todo[n]["expected"]), why[n])
             second = todo[n].get("confirmed_by") or {}
@@ -14106,7 +14108,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     self.executor, py, root, simulate, oracles,
                     timeout_s=max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)),
                     env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of(protocol),
-                    mean_names=_mc_error.mean_names(protocol),
+                    mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol),
                 )
                 problems += found
                 judged = _oracle_with_reader_flags(
@@ -14530,19 +14532,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         entries: list[dict[str, Any]] = []
         for j in record.get("judged") or []:
             name = str(j.get("name") or "").strip()
+            if name in self._oracle_undecided and not j.get("undecided"):
+                # Set aside while its trials had not decided it; now they have (a later measurement adds to the stored
+                # trials): a failure is a fault like any other again, and is looked at and repaired as one.
+                self._oracle_undecided.discard(name)
+                self._oracle_set_aside.pop(name, None)
+                looked.discard(name)
             value = _oracle_triage.num(j.get("value"))
-            if (j.get("passed_by_engine") is not False or value is None or name in looked or name not in by_name
-                    or name in self._oracle_disputed or name in self._oracle_set_aside):
+            if ((j.get("passed_by_engine") is not False and not j.get("undecided")) or value is None or name in looked
+                    or name not in by_name or name in self._oracle_disputed or name in self._oracle_set_aside):
                 continue
             looked.add(name)
             oracle = by_name[name]
-            if j.get("within_error"):
-                # Outside its tolerance by less than three standard errors of the trials it was judged on
-                # (core/mc_error.py): those trials do not decide it, so the script is not rewritten for it.
+            if j.get("undecided"):
+                # The trials FI could run did not decide it (core/mc_error.py): not a fault to rewrite the script for,
+                # and not a pass. It is set aside (still held by the repair guard: a repair aimed at another check may
+                # not bend it) and goes on unconfirmed, said as not decided.
                 found = _oracle_triage.trials_entry(oracle, j)
                 entries.append(found)
                 self._oracle_set_aside[name] = found["cause"]["text"]
-                self._oracle_noisy.add(name)
+                self._oracle_undecided.add(name)
                 self._log.warning("[oracle] %s", found["cause"]["text"])
                 continue
             slip = _oracle_triage.plan_slip(oracle)
@@ -14605,8 +14614,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             own = _oracle.case_of(cases.get(name) or oracle)
             if not trial or own is None or j.get("measured_by") != "engine":
                 continue  # FI runs a case itself only under the trial contract, for a check it measured
-            if (j.get("mc") or {}).get("varies"):
-                continue  # already judged on many trials, with their Monte Carlo error: more seeds would add nothing
+            if (j.get("mc") or {}).get("read_as") == "mean":
+                continue  # already decided on many trials, with their Monte Carlo error: more seeds would add nothing
             case, measure = own
             # Per check: which function FI calls depends on the check (a one-trial check, or a number of the setting).
             try:
@@ -14619,7 +14628,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 try:
                     values, _why = await _trial_runner.run_case(
                         self.executor, py, self.quest_root, rel, cell=cell, timeout_s=timeout, env=case_env,
-                        thresholds=thresholds, trial=trial_no, oracle=oracle, in_each_run=_in_run.of(protocol))
+                        thresholds=thresholds, trial=trial_no, oracle=oracle, in_each_run=_in_run.of(protocol),
+                        paired=_mc_error.paired(protocol))
                 except Exception as e:  # noqa: BLE001 -- a look that could not be had never stops a quest
                     self._log.warning("[oracle] an extra run of %r's case could not be made: %r", name, e)
                     return None
@@ -25313,8 +25323,8 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
   FI itself: it calls run_trial / run_cell on that case and computes `measure` (one returned name, or a formula of
   them) from the dict returned, so that function must return every name the `measure` uses, computed by the real
   simulation (never the check's number already worked out in another form). When simulate.py defines both functions,
-  FI calls run_trial for a check of kind `invariant` (or `per_trial: true`) and, for every other check, run_cell only when
-  run_cell is built from calls to run_trial (the study runs only run_trial, so the check must test it); `run_trial` is always ONE trial and never calls or returns `run_cell`, whose mean over trials may call
+  FI measures a check on many calls of run_trial (each one trial, with FI's seed: the worst counts for a rule every run
+  keeps, the average for any other check), since the study runs only run_trial and the check must test it; `run_trial` is always ONE trial and never calls or returns `run_cell`, whose mean over trials may call
   `run_trial`. Only an oracle without a `case` needs `def oracle() -> dict`,
   which computes, with the SAME simulation code, the values those oracles name, returned as a dict keyed by the oracle
   names; this replaces the `FI_ORACLE` rule above. `FI_PILOT` does not apply.
@@ -25585,7 +25595,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 
 `model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead. @@EXAMPLE@@
 
-Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
+Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. On a random simulation FI runs each check's case many times: an `invariant`, a `symmetry` or a `second_implementation` must hold in every run (the worst run counts), and any other check is judged on the average over the runs; a rule that holds only on average over repeats (a false discovery rate at most q, an error rate at most alpha) says `"per_trial": false`, and a quantity that must hold in every single run says `"per_trial": true`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
 `criteria` are how a later version of the code will be judged better or worse: two to five checks of correctness that FI computes itself after every run, never the study's own finding. A criterion on a number in `metrics` or `precision` is refused, because judging the code by its result would reward bending the code towards the result. Each takes its number from exactly one of: an oracle above, by its name (`"use": "error"` for how far it lands from its expected value, such as the gap between an observed and a claimed convergence order; `"use": "value"` for the measured value, such as the worst drift of a conserved quantity), best one with a `case` so that FI runs it itself (a number the script's own `oracle()` reports is shown but never counts); or `"trials": "<a number every trial returns>"` in place of `oracle`, whose value is how fast the standard error of its mean shrinks as trials are added (use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more). Give each its own `tolerance`, from the method's known error or the noise of the measurement. Leave `criteria` out only when nothing FI can compute says whether the code is right.
 

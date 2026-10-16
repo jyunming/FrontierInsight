@@ -1,4 +1,4 @@
-"""A known-answer check on a random quantity is judged on enough trials for its tolerance.
+"""A known-answer check on a random quantity is decided by enough trials, or it is not decided: never passed by chance.
 
 A check against a known answer compares one number with an expected value within a tolerance. When the number is a
 random quantity (a rate, a mean, a probability over repeats of a random simulation), what is measured carries the Monte
@@ -9,61 +9,64 @@ simulation gives 0.0401 +- 0.00007, inside the bound. The simulation was right; 
 said the method might be broken.
 
 This module holds the rules; :func:`core.trial_runner.measure_oracles` runs the trials and :func:`core.oracle_check.judged`
-judges with them:
+judges with them. The first rule is that a check the trials cannot decide is never a pass.
 
 * **Which checks are read as a mean over trials** (:func:`reads_a_mean`). A check of a quantity (a special case, a
-  published value, a convergence rate) is a number of the setting, which for a random study is its mean over trials. A
-  rule every single trial keeps (an invariant, a symmetry, a second implementation: its worst violation, expecting 0) is
-  read as a mean only when every name its ``measure`` uses is one the protocol declares among its ``metrics`` as a mean
-  or proportion over runs: the plan itself says that number is an expected value, so a bound on it is a bound on an
-  expected value. Otherwise it stays per trial, so a violation is never averaged away. ``per_trial: true`` always means
-  one trial.
-* **The number** is the check's formula applied to the means of the names over the trials (what the study reports for a
-  setting), never the mean of the formula per trial: ``max(0, mean(fdr) - 0.04)``, not the mean of ``max(0, fdr - 0.04)``.
-* **Its Monte Carlo error** (:func:`summarise`) is the standard error of the formula's inner quantity (inside an outer
-  ``max(0, .)`` or ``abs(.)``, which only says which side counts), from the trials' own spread: the delta method with
-  the trials' covariance, exact for a formula that is linear in the names. A bound check ``max(0, X - b)`` expecting 0 is
-  therefore judged one-sided: the mean of ``X - b`` must not exceed the tolerance, and its band is that of ``X``.
-* **How many trials** (:func:`trials_for`): FI runs a first batch, reads the spread, and runs enough more (within the time
-  the check is given) for the standard error to be a quarter of the tolerance or less.
-* **The tolerance it is judged at** (:func:`limit_used`): the plan's own when three standard errors fit inside it. When
-  they do not (the time ran out first), the check is judged at three standard errors and the record says plainly that it
-  was judged at that precision, never at the plan's. With fewer than :data:`MIN_TRIALS` trials the spread itself is not
-  known well enough to widen anything: the plan's tolerance stands.
-* **A failure within the error** (:func:`within_error`): a check outside its tolerance by less than three standard errors
-  of the trials it was judged on still fails, but it is not decided by them: it is not taken as a fault of the
-  simulation to repair, and the paper does not say the method may be broken.
-
-A check on trials that return the same numbers every time is deterministic and judged as before, on trial 0's number.
-A random simulation whose check quantity did not move in the first batch (a rare outcome that has not happened yet) is
-sized from the spread a proportion at the expected value has (:func:`trials_for_constant`), never judged on trial 0.
-Nothing here makes a check pass that is outside both its tolerance and its Monte Carlo error.
+  published value, a convergence rate) is a number of the setting, which for a random study is its mean over trials;
+  ``per_trial: true`` makes it a rule of every trial instead. A rule (an invariant, a symmetry, a second implementation:
+  its violation, expecting 0) holds in every trial and is judged on every trial FI runs, the worst one deciding
+  (:func:`worst`), unless the check itself says it is a rule on the average over trials (``per_trial: false``: a bound
+  on a false discovery RATE, an error rate). The protocol's metrics never decide this: a number the plan declares as a
+  mean is still a number each trial has, and a rule each trial keeps is never averaged away.
+* **The number** of a mean check is the check's formula applied to the means of the names over the trials
+  (``max(0, mean(fdr) - 0.04)``) only when every name it uses is one the protocol declares among its ``metrics`` as a
+  mean or a proportion over runs (the plan then says each is an expected value). Otherwise it is the mean of the formula
+  taken trial by trial (:func:`per_trial_summary`): ``abs(x_num - x_exact)`` is a distance in each trial, and the two
+  means can agree while every trial misses.
+* **Its Monte Carlo error** (:func:`summarise`, :func:`per_trial_summary`) is the standard error of that number (for
+  the formula on the means, of the quantity inside an outer ``max(0, .)`` or ``abs(.)``, from the trials' covariance).
+* **The decision** (:func:`decide`): three standard errors around the measured value inside the tolerance is a pass;
+  three standard errors outside it is a failure; anything else is not decided yet, and FI adds trials (sized from the
+  spread, at most four times as many each step) until the trials decide it, the time the checks are given runs out, or
+  :data:`MAX_TRIALS` is reached. Then it is NOT DECIDED: not a pass, not counted as validation, said in the paper. A
+  tolerance is never widened, and a tolerance of 0 stays 0.
+* **Failed trials count** (:func:`failed_share_verdict`): a trial that raised, or gave no number for the check, is not
+  left out quietly. More than :data:`FAULT_SHARE` of the check's trials failing is a failure of the check (a fault, sent
+  to repair); more than :data:`STATE_SHARE` makes a check that would pass not decided, since the trials that finished
+  cannot stand for the case. (The shares are those FI uses for the main run's trials.)
+* **A number that does not move** in the first batch is judged at once on trial 0's number, as a deterministic check
+  is, so a constant quantity never runs to the time limit; the one exception is a 0/1 outcome that has not happened yet
+  (or always happened) whose expected value lies strictly between 0 and 1, in a simulation whose other numbers do
+  vary: it is sized with the spread a proportion at the expected value has (:func:`rare_se`).
 """
 
 from __future__ import annotations
 
 import ast
 import math
-from collections.abc import Collection
 from typing import Any
 
 from . import metric_spec as _metric_spec
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 
-#: How many standard errors the band around a mean is (about 99.7% two-sided for a normal mean). Two would fail a correct
-#: simulation on one check in twenty, and a plan has several.
+#: How many standard errors the band around a measured mean is (about 99.7% two-sided for a normal mean). Two would
+#: decide a correct simulation wrongly on one check in twenty, and a plan has several.
 BAND_SE = 3.0
-#: The standard error FI aims for, as a share of the tolerance: a quarter keeps the band (three of them) inside it.
-TARGET_SHARE = 0.25
-#: The first batch of trials, from which the spread is read.
+#: The first batch of trials, from which the spread is read (and on which a rule of every trial is judged).
 PILOT_TRIALS = 20
-#: Fewer trials than this give a spread too rough to widen a tolerance by.
+#: Fewer trials than this give a spread too rough to decide anything by.
 MIN_TRIALS = 10
 #: The most trials FI runs for one check.
 MAX_TRIALS = 20000
 #: The share of a check's time the first batch may use (the rest is for the trials the spread says are needed).
 PILOT_SHARE = 1 / 3
+#: How many times the trials may grow in one step (the spread of a first batch is rough).
+GROWTH = 4
+#: More than this share of a check's trials failing is a failure of the check: a fault in the simulation, repaired.
+FAULT_SHARE = 0.5
+#: More than this share failing leaves a check that would pass not decided, with the failures said.
+STATE_SHARE = 0.05
 
 
 def mean_names(protocol: dict[str, Any] | None) -> frozenset[str]:
@@ -76,9 +79,36 @@ def mean_names(protocol: dict[str, Any] | None) -> frozenset[str]:
     return frozenset(str(m["id"]) for m in kept if m.get("kind") in _metric_spec.KINDS and not m.get("given"))
 
 
-def _per_trial_flag(oracle: dict[str, Any]) -> bool:
+def paired(protocol: dict[str, Any] | None) -> bool:
+    """Whether the study is paired (a metric says ``paired: true``): it runs trial ``t`` of every setting on one seed, and
+    a check's trials then get those seeds too (:func:`core.trial_runner.trial_seed` with ``key=""``)."""
+    metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
+    return any(isinstance(m, dict) and m.get("paired") for m in metrics or [])
+
+
+def per_trial_flag(oracle: dict[str, Any]) -> bool | None:
+    """What a check's ``per_trial`` says: ``True`` (a rule of every trial), ``False`` (a number on the average over
+    trials), or ``None`` when it says nothing."""
     flag = oracle.get("per_trial")
-    return flag is True or (isinstance(flag, str) and flag.strip().lower() in ("true", "yes", "1"))
+    if isinstance(flag, bool):
+        return flag
+    if isinstance(flag, str):
+        word = flag.strip().lower()
+        if word in ("true", "yes", "1"):
+            return True
+        if word in ("false", "no", "0"):
+            return False
+    return None
+
+
+def reads_a_mean(oracle: dict[str, Any]) -> bool:
+    """Whether ``oracle``'s number is a mean over trials (see the module docstring): a check of a quantity unless it says
+    ``per_trial: true``; a rule (an invariant, a symmetry, a second implementation) only when it says ``per_trial:
+    false``. Nothing else decides it."""
+    flag = per_trial_flag(oracle)
+    if flag is not None:
+        return not flag
+    return _oracle.kind_of(oracle) not in _forms.VIOLATION_KINDS
 
 
 def measure_names(measure: str, returned: dict[str, Any] | None = None) -> list[str]:
@@ -87,21 +117,6 @@ def measure_names(measure: str, returned: dict[str, Any] | None = None) -> list[
     if returned is not None and measure in returned:
         return [measure]
     return _forms.names(measure)
-
-
-def reads_a_mean(oracle: dict[str, Any], means: Collection[str] = ()) -> bool:
-    """Whether ``oracle``'s number is a mean over trials (see the module docstring): a check of a quantity (a special
-    case, a published value, a convergence rate); a rule each trial keeps (an invariant, a symmetry, a second
-    implementation: its worst violation, expecting 0) only when its measure uses nothing but names the protocol declares
-    as means or proportions over runs. ``per_trial: true`` is never. (Two implementations whose counts differ by +1 in
-    one trial and -1 in another agree on the mean: a rule's violation is never averaged away.)"""
-    if _per_trial_flag(oracle):
-        return False
-    if _oracle.kind_of(oracle) not in _forms.VIOLATION_KINDS:
-        return True
-    measure = str(oracle.get("measure") or "").strip()
-    used = _forms.names(measure) if measure else []
-    return bool(used) and set(used) <= set(means)
 
 
 def inner(measure: str) -> tuple[str, str]:
@@ -140,13 +155,50 @@ def _value_of(text: str, values: dict[str, float]) -> float | None:
     return _forms.evaluate(text, values).value
 
 
+def per_trial_values(rows: list[dict[str, Any]], measure: str) -> list[float | None]:
+    """The check's formula on each trial's own numbers (``None`` for a trial that gives no finite number)."""
+    out: list[float | None] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            out.append(None)
+            continue
+        got = float(r[measure]) if measure in r and _number(r[measure]) else (
+            None if measure in r else _forms.evaluate(measure, {k: v for k, v in r.items() if _number(v)}).value)
+        out.append(got if got is not None and math.isfinite(got) else None)
+    return out
+
+
+def _same(a: float, b: float) -> bool:
+    return math.isclose(a, b, rel_tol=1e-12, abs_tol=1e-15)
+
+
+def per_trial_summary(rows: list[dict[str, Any]], measure: str) -> dict[str, Any] | None:
+    """What the trials ``rows`` say about the mean of ``measure`` taken trial by trial: ``trials`` (those with a finite
+    number), ``dropped`` (the others), ``value`` (the mean), ``se`` (its standard error, ``None`` with fewer than two
+    trials), ``varies`` (whether the number differs between trials; ``None`` with one trial), ``on: "trials"``. ``None``
+    when no trial gives a number."""
+    measure = str(measure or "").strip()
+    values = per_trial_values(rows, measure)
+    kept = [v for v in values if v is not None]
+    n = len(kept)
+    if n == 0:
+        return None
+    mean = math.fsum(kept) / n
+    varies = None if n < 2 else any(not _same(kept[0], v) for v in kept[1:])
+    se = None
+    if n >= 2:
+        se = 0.0 if not varies else math.sqrt(math.fsum((v - mean) ** 2 for v in kept) / (n - 1) / n)
+    return {"on": "trials", "trials": n, "dropped": len(values) - n, "value": mean, "inner": measure, "shape": "",
+            "inner_mean": mean, "varies": varies, "se": se, "first": kept[0]}
+
+
 def summarise(rows: list[dict[str, Any]], measure: str) -> dict[str, Any] | None:
-    """What the trials ``rows`` (each the values one trial returned) say about ``measure``: ``trials`` (those with a
-    finite number for every name it uses), ``dropped`` (the others), ``means``, ``value`` (the formula on the means),
-    ``inner`` and ``inner_mean`` (the quantity whose error counts, :func:`inner`), ``se`` (its standard error; ``None``
-    with fewer than two trials or when it cannot be computed), ``varies`` (whether any name differs between trials;
-    ``None`` with one trial) and ``problem`` when the formula gives no number on the means. ``None`` when no trial has
-    the names."""
+    """What the trials ``rows`` (each the values one trial returned) say about ``measure`` read as a formula of the
+    names' means: ``trials`` (those with a finite number for every name it uses), ``dropped`` (the others), ``means``,
+    ``value`` (the formula on the means), ``inner`` and ``inner_mean`` (the quantity whose error counts, :func:`inner`),
+    ``se`` (its standard error; ``None`` with fewer than two trials or when it cannot be computed), ``varies`` (whether
+    the quantity differs between trials; ``None`` with one trial), ``on: "means"`` and ``problem`` when the formula gives
+    no number on the means. ``None`` when no trial has the names."""
     measure = str(measure or "").strip()
     first = next((r for r in rows if isinstance(r, dict)), None)
     if first is None:
@@ -162,18 +214,18 @@ def summarise(rows: list[dict[str, Any]], measure: str) -> dict[str, Any] | None
     means = {name: math.fsum(col) / n for name, col in columns.items()}
     inner_text, shape = inner(measure) if measure not in first else (measure, "")
     # Whether the quantity itself differs between trials (names that move together, as two implementations' counts
-    # do, can leave it the same in every trial: then it is judged as a deterministic check is).
+    # do, can leave it the same in every trial).
     varies: bool | None = None
     if n >= 2:
         varies = False
         reference = _value_of(inner_text, {name: col[0] for name, col in columns.items()})
         for i in range(1, n):
             other = _value_of(inner_text, {name: col[i] for name, col in columns.items()})
-            if reference is None or other is None or not math.isclose(reference, other, rel_tol=1e-12, abs_tol=1e-15):
+            if reference is None or other is None or not _same(reference, other):
                 varies = True
                 break
-    out: dict[str, Any] = {"trials": n, "dropped": len(rows) - n, "means": means, "inner": inner_text, "shape": shape,
-                           "varies": varies, "se": None}
+    out: dict[str, Any] = {"on": "means", "trials": n, "dropped": len(rows) - n, "means": means, "inner": inner_text,
+                           "shape": shape, "varies": varies, "se": None}
     got = _forms.evaluate(measure, means) if measure not in first else _forms.Evaluated(value=means[measure])
     out["value"] = got.value
     if got.value is None:
@@ -208,20 +260,21 @@ def summarise(rows: list[dict[str, Any]], measure: str) -> dict[str, Any] | None
     return out
 
 
-def trials_for(summary: dict[str, Any], limit: float | None, *, most: int = MAX_TRIALS) -> int:
-    """How many trials in all bring the standard error of ``summary`` to :data:`TARGET_SHARE` of ``limit`` (never
-    fewer than it already has, never more than ``most``)."""
-    n = int(summary.get("trials") or 0)
-    se = summary.get("se")
-    if not summary.get("varies") or not _number(se) or not se or limit is None or limit <= 0 or n < 2:
-        return n
-    wanted = n * (se / (TARGET_SHARE * limit)) ** 2
-    return max(n, min(int(most), int(math.ceil(wanted))))
+def statistic(rows: list[dict[str, Any]], measure: str, means: Any = ()) -> dict[str, Any] | None:
+    """The mean check's number and its error (see the module docstring): the formula on the names' means when every name
+    it uses is a declared mean or proportion (``means``), else the mean of the formula trial by trial."""
+    measure = str(measure or "").strip()
+    first = next((r for r in rows if isinstance(r, dict)), None)
+    if first is None:
+        return None
+    used = measure_names(measure, first)
+    if used and set(used) <= set(means or ()):
+        return summarise(rows, measure)
+    return per_trial_summary(rows, measure)
 
 
 def returned_varies(rows: list[dict[str, Any]]) -> bool:
-    """Whether any number the trials returned differs between them: the simulation is random. (A check's own quantity
-    can still be the same in every trial of a first batch: a rare outcome that did not happen yet.)"""
+    """Whether any number the trials returned differs between them: the simulation is random."""
     first = next((r for r in rows if isinstance(r, dict)), None)
     if first is None:
         return False
@@ -230,86 +283,162 @@ def returned_varies(rows: list[dict[str, Any]]) -> bool:
             continue
         for r in rows[1:]:
             other = r.get(key) if isinstance(r, dict) else None
-            if _number(other) and not math.isclose(float(v), float(other), rel_tol=1e-12, abs_tol=1e-15):
+            if _number(other) and not _same(float(v), float(other)):
                 return True
     return False
 
 
-def trials_for_constant(rows: list[dict[str, Any]], measure: str, expected: float | None, limit: float | None, *,
-                        most: int = MAX_TRIALS) -> int:
-    """How many trials in all a check needs whose quantity was the same in every trial of a random simulation (a rare
-    outcome that has not happened yet: 20 trials of an event with probability 0.05 are all 0 more than a third of the
-    time). For a quantity that stayed at 0 or 1 (a 0/1 outcome, or a count of a rare one), the spread a proportion has at
-    the expected value (the rule of three's 3/n when the expected value is not a probability), sized as
-    :func:`trials_for` sizes any other; for anything else, as many as the check's time allows (``most``)."""
-    n = len(rows)
-    summary = summarise(rows, measure)
-    if summary is None or limit is None or limit <= 0:
-        return n
-    centre = summary.get("inner_mean")
-    if centre not in (0.0, 1.0):
-        return max(n, int(most))
-    rule_of_three = min(0.5, 3.0 / max(n, 1))
-    p = expected if expected is not None and 0.0 < expected < 1.0 else rule_of_three
-    sd = math.sqrt(p * (1.0 - p))
-    return max(n, min(int(most), int(math.ceil((sd / (TARGET_SHARE * limit)) ** 2))))
+def rare_outcome(stat: dict[str, Any], expected: float | None, rows: list[dict[str, Any]]) -> bool:
+    """Whether a check whose number did not move in the first batch is a 0/1 outcome that has not happened yet (or always
+    happened): the number stayed at 0 or 1, the expected value lies strictly between 0 and 1, and the simulation's other
+    numbers do vary (it is random). Anything else that did not move is judged at once."""
+    centre = stat.get("inner_mean") if stat.get("on") == "means" else stat.get("value")
+    return (centre in (0.0, 1.0) and expected is not None and 0.0 < float(expected) < 1.0
+            and returned_varies(rows))
 
 
-def limit_used(limit: float | None, mc: dict[str, Any] | None) -> tuple[float | None, str]:
-    """``(the limit a check is judged at, how)``: ``"planned"`` (the plan's own; three standard errors fit inside it),
-    ``"widened"`` (three standard errors, wider than the plan's, because the trials FI could run in the check's time do
-    not resolve the plan's tolerance), ``"few_trials"`` (too few trials to know the spread: the plan's own), or ``""``
-    for a check that is not a mean over trials whose trials differ."""
-    if limit is None or not isinstance(mc, dict) or not mc.get("varies"):
-        return limit, ""
-    se, n = mc.get("se"), int(mc.get("trials") or 0)
-    if not _number(se) or n < MIN_TRIALS:
-        return limit, "few_trials"
-    band = BAND_SE * float(se)
-    if band <= limit:
-        return limit, "planned"
-    return band, "widened"
+def rare_se(trials: int, expected: float) -> float:
+    """The standard error a proportion at ``expected`` has over ``trials`` trials: the least a 0/1 outcome that has not
+    moved yet is credited with."""
+    p = min(max(float(expected), 0.0), 1.0)
+    return math.sqrt(p * (1.0 - p) / max(int(trials), 1))
 
 
-def within_error(value: float | None, expected: float | None, limit: float | None, mc: dict[str, Any] | None) -> bool:
-    """Whether a check that fails at :func:`limit_used` fails by less than three standard errors of the trials it was
-    judged on: the trials do not decide it (the true value may be inside the tolerance)."""
-    if value is None or expected is None or limit is None or not isinstance(mc, dict) or not mc.get("varies"):
-        return False
-    used, _how = limit_used(limit, mc)
-    se = mc.get("se")
-    if used is None or not _number(se):
-        return False
-    gap = abs(value - expected)
-    return used < gap <= limit + BAND_SE * float(se)
+def decide(centre: float, expected: float, limit: float, se: float, *, shape: str = "") -> str | None:
+    """``"pass"`` when three standard errors around the measured ``centre`` lie inside the tolerance, ``"fail"`` when
+    they lie outside it, ``None`` when the trials do not decide it. A bound ``max(0, X)`` expecting 0 is judged on its
+    one side (``centre`` is X); ``abs(X)`` expecting 0 is a distance (``centre`` is X). The tolerance is never widened."""
+    if shape == "bound" and expected == 0:
+        gap = centre
+    elif shape == "abs" and expected == 0:
+        gap = abs(centre)
+    else:
+        gap = abs(centre - expected)
+    band = BAND_SE * se
+    if gap + band <= limit:
+        return "pass"
+    if gap - band > limit:
+        return "fail"
+    return None
 
 
-def words(mc: dict[str, Any] | None, limit: float | None) -> str:
+def _centre(stat: dict[str, Any], expected: float) -> tuple[float | None, str]:
+    """The number :func:`decide` is given for ``stat``, and its shape."""
+    if stat.get("on") == "means" and stat.get("shape") in ("bound", "abs") and expected == 0:
+        return stat.get("inner_mean"), str(stat["shape"])
+    return stat.get("value"), ""
+
+
+def mean_verdict(stat: dict[str, Any], expected: float | None, limit: float | None, *, rare: bool = False) -> str | None:
+    """:func:`decide` for a mean check's ``stat`` (``rare``: a 0/1 outcome that did not move yet, :func:`rare_se`);
+    ``None`` while it is not decided, and always with fewer than :data:`MIN_TRIALS` trials of a number that moves."""
+    if expected is None or limit is None:
+        return None
+    centre, shape = _centre(stat, float(expected))
+    se, n = stat.get("se"), int(stat.get("trials") or 0)
+    if centre is None or not _number(se):
+        return None
+    moves = bool(stat.get("varies")) or rare
+    if moves and n < MIN_TRIALS:
+        return None
+    if rare:
+        se = max(float(se), rare_se(n, float(expected)))
+    return decide(float(centre), float(expected), float(limit), float(se), shape=shape)
+
+
+def trials_wanted(stat: dict[str, Any], expected: float, limit: float, *, rare: bool = False,
+                  most: int = MAX_TRIALS) -> int:
+    """How many trials in all the next step runs: as many as the spread says would decide the check (with a margin),
+    at least half as many again, at most :data:`GROWTH` times as many as there are, never more than ``most``."""
+    n = max(int(stat.get("trials") or 0), 1)
+    se = float(stat.get("se") or 0.0)
+    if rare:
+        se = max(se, rare_se(n, expected))
+    centre, shape = _centre(stat, expected)
+    target = GROWTH * n
+    if centre is not None and se > 0:
+        gap = (centre if shape == "bound" else abs(centre) if shape == "abs" else abs(centre - expected))
+        room = abs(limit - gap) / BAND_SE
+        if room > 0:
+            target = int(math.ceil(1.2 * n * (se / room) ** 2))
+    return max(1, min(int(most), max(n + max(n // 2, MIN_TRIALS), min(target, GROWTH * n))))
+
+
+def worst(values: list[float | None], expected: float) -> int | None:
+    """The index of the trial whose number is furthest from ``expected`` (``None`` when no trial gave one)."""
+    best: int | None = None
+    for i, v in enumerate(values):
+        if v is not None and (best is None or abs(v - expected) > abs(values[best] - expected)):  # type: ignore[operator]
+            best = i
+    return best
+
+
+def failed_share_verdict(failed: int, started: int, verdict: str | None) -> tuple[str | None, str]:
+    """``(the verdict once failed trials count, why)``: more than :data:`FAULT_SHARE` of ``started`` failing is a
+    ``"fail"``; more than :data:`STATE_SHARE` makes a ``"pass"`` (or an open one) ``"undecided"``; else as it was."""
+    if started <= 0 or failed <= 0:
+        return verdict, ""
+    share = failed / started
+    if share > FAULT_SHARE:
+        return "fail", "failed_trials"
+    if share > STATE_SHARE and verdict != "fail":
+        return "undecided", "failed_trials"
+    return verdict, ""
+
+
+def words(mc: dict[str, Any] | None) -> str:
     """How the check's number was had, in a few plain words for a record line: ``the mean over 310 trials, Monte Carlo
-    error +-0.0024``; ``""`` for a check that is not a mean over trials whose trials differ."""
-    if not isinstance(mc, dict) or not mc.get("varies"):
+    error ±0.0024 (one standard error)``, ``the worst of 20 trials``; ``""`` for a check judged on one number."""
+    if not isinstance(mc, dict):
         return ""
     n, se = int(mc.get("trials") or 0), mc.get("se")
-    text = f"the mean over {n} trial{'s' if n != 1 else ''}"
-    if _number(se):
-        text += f", Monte Carlo error ±{_oracle.fmt_digits(float(se), 2)} (one standard error)"
-    used, how = limit_used(limit, mc)
-    if how == "widened" and used is not None:
-        text += (f"; judged at ±{_oracle.fmt_digits(used, 2)}, three standard errors, because the trials FI could run "
-                 f"in the check's time do not resolve the plan's ±{_oracle.fmt_digits(limit, 2)}")
-    elif how == "few_trials":
-        text += "; too few trials to know their spread, so the plan's tolerance stands"
+    read_as = mc.get("read_as")
+    if read_as == "mean" and mc.get("varies") is not False:
+        text = f"the mean over {n} trial{'s' if n != 1 else ''}"
+        if _number(se):
+            text += f", Monte Carlo error ±{_oracle.fmt_digits(float(se), 2)} (one standard error)"
+    elif read_as == "every_trial":
+        text = f"the worst of {n} trial{'s' if n != 1 else ''}"
+    else:
+        text = "one trial's number, the same in every trial"
+    failed, started = int(mc.get("failed_trials") or 0), int(mc.get("started") or 0)
+    if failed:
+        text += (f"; {failed} of {started} trials on its case failed"
+                 + (f" (first: {mc['failed_example']})" if mc.get("failed_example") else ""))
     return text
 
 
-def record(summary: dict[str, Any], limit: float | None, *, read_as: str, planned_trials: int) -> dict[str, Any]:
-    """The ``mc`` entry a check keeps (``needs/ORACLE_CHECK.json``): the trials, their error and the tolerance it was
-    judged at."""
-    used, how = limit_used(limit, summary)
-    se = summary.get("se")
-    return {
-        "read_as": read_as, "trials": int(summary.get("trials") or 0), "dropped": int(summary.get("dropped") or 0),
-        "varies": summary.get("varies"), "se": se, "band": BAND_SE * se if _number(se) else None,
-        "inner": summary.get("inner"), "inner_mean": summary.get("inner_mean"), "shape": summary.get("shape") or "",
-        "wanted_trials": int(planned_trials), "limit_used": used, "precision": how,
+def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
+    """Why a check was not decided, in one plain clause."""
+    if not isinstance(mc, dict):
+        return "the trials did not decide it"
+    if mc.get("why") == "failed_trials":
+        return (f"{mc.get('failed_trials')} of {mc.get('started')} trials on its case failed, so the trials that "
+                "finished cannot stand for the case")
+    n, se = int(mc.get("trials") or 0), mc.get("se")
+    band = f"±{_oracle.fmt_digits(BAND_SE * float(se), 2)}" if _number(se) else "their band"
+    when = ("the most FI runs for one check" if mc.get("why") == "most_trials" else "all FI could run in the time it had")
+    tolerance = f"±{_oracle.fmt_digits(float(limit), 2)}" if _number(limit) else "its tolerance"
+    return (f"three standard errors ({band}) around the mean of {n} trials ({when}) lie neither inside nor outside "
+            f"the tolerance {tolerance}")
+
+
+def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, why: str, failed: int, started: int,
+           failed_example: str = "", rare: bool = False, **extra: Any) -> dict[str, Any]:
+    """The ``mc`` entry a check keeps (``needs/ORACLE_CHECK.json``): how it was read, its trials and their error, and
+    the verdict they gave (``pass``, ``fail``, ``undecided``) with why it was not decided (``time``, ``most_trials``,
+    ``failed_trials``)."""
+    stat = stat or {}
+    se = stat.get("se")
+    out = {
+        "read_as": read_as, "on": stat.get("on") or "", "trials": int(stat.get("trials") or 0),
+        "dropped": int(stat.get("dropped") or 0), "started": int(started), "failed_trials": int(failed),
+        "varies": stat.get("varies"), "se": se, "band": BAND_SE * se if _number(se) else None,
+        "inner": stat.get("inner"), "inner_mean": stat.get("inner_mean"), "shape": stat.get("shape") or "",
+        "verdict": verdict or "undecided", "why": why if (verdict or "undecided") == "undecided" or why == "failed_trials"
+        else "",
+        **({"rare": True} if rare else {}), **extra,
     }
+    if failed_example:
+        out["failed_example"] = failed_example
+    return out
