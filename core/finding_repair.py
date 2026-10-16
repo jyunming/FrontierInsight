@@ -230,14 +230,16 @@ def parse_runs(stdout: str, paths: list[str]) -> dict[str, TestRun]:
             continue
         errors = [r for r in rows if isinstance(r, dict) and r.get("status") == "error"]
         fails = [r for r in rows if isinstance(r, dict) and r.get("status") == "fail"]
-        first = errors[0] if errors else fails[0] if fails else None
+        # Each test function is judged on its own: one that fails by its own assertion shows the fault, whatever another
+        # test function of the file did (an error in one shows nothing, and hides nothing).
+        first = fails[0] if fails else errors[0] if errors else None
         if first is None:
             out[path] = TestRun("pass")
             continue
         at = str(first.get("at") or "")
         detail = (f"{first.get('test')}: {first.get('detail') or 'the assertion failed'}"
-                  + (f" (at {at})" if at and errors else ""))
-        out[path] = TestRun("error" if errors else "fail", detail, str(first.get("kind") or ""),
+                  + (f" (at {at})" if at and not fails else ""))
+        out[path] = TestRun("fail" if fails else "error", detail, str(first.get("kind") or ""),
                             str(first.get("place") or ""), at, str(first.get("line") or ""))
     return out
 
@@ -266,6 +268,30 @@ def reply_test(reply: str) -> str:
             continue
         if any(isinstance(n, ast.FunctionDef) and n.name.startswith("test_") for n in tree.body):
             return text
+    return ""
+
+
+def swallowed_call(text: str) -> str:
+    """Why a test is no proof, read from its text before it runs (``""`` when it may be): it calls code inside a ``try``
+    whose ``except`` swallows the error (the handler ends without raising). A crash caught there leaves a value behind that
+    a later assertion then fails on, and the assertion's own traceback no longer holds the crash: it would pass for a shown
+    fault. A handler that raises or asserts again is kept (the harness reads the exception it caught), and so is a guarded
+    import."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return ""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try) or not node.handlers:
+            continue
+        if all(isinstance(b, (ast.Import, ast.ImportFrom)) for b in node.body):
+            continue
+        if not any(isinstance(n, ast.Call) for b in node.body for n in ast.walk(b)):
+            continue
+        if any(not h.body or not isinstance(h.body[-1], (ast.Raise, ast.Assert)) for h in node.handlers):
+            return (f"the test calls the code inside try/except and goes on after an error (line {node.lineno}): a crash "
+                    "caught there turns into a failed assertion and shows nothing about the values; call the code "
+                    "directly (or raise again in the except) and assert on the values it returns")
     return ""
 
 
@@ -1056,6 +1082,11 @@ async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -
     if not text:
         env.save()
         return None
+    swallowed = swallowed_call(text)
+    if swallowed:
+        issue["asked_again"]["outcome"] = f"refused: {swallowed}"[:300]
+        env.save()
+        return None
     issue["tests"] = int(issue.get("tests") or 0) + 1
     while (env.root / test_path(issue)).exists():  # the test that errored is kept as it is
         issue["tests"] += 1
@@ -1093,6 +1124,15 @@ async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
         if not text:
             detail = "the reply held no Python test: answer with one fenced block that defines a function `test_...`"
             last = "the reply held no test"
+            continue
+        swallowed = swallowed_call(text)
+        if swallowed:
+            # not run: asked for once more with the reason, and a second such test ends the tries
+            last = swallowed
+            if issue.get("swallowed"):
+                break
+            issue["swallowed"] = True
+            detail = swallowed
             continue
         issue["tests"] = int(issue.get("tests") or 0) + 1
         path = test_path(issue)

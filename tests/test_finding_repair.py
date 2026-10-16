@@ -103,13 +103,19 @@ def test_the_harness_tells_a_failure_by_assertion_from_a_test_that_could_not_run
         "raises.py": "import spring\n\ndef test_a():\n    spring.quality(1, 1, 0)\n",
         "no_import.py": "import not_a_module_here\n\ndef test_a():\n    pass\n",
         "no_test.py": "x = 1\n",
-        "mixed.py": "def test_a():\n    assert False, 'one'\n\ndef test_b():\n    raise KeyError('two')\n"})
+        "mixed.py": "def test_a():\n    assert False, 'one'\n\ndef test_b():\n    raise KeyError('two')\n",
+        # each test function is judged on its own: an error in one does not discard another's real assertion
+        "mixed_code_first.py": "import spring\n\ndef test_a_errors():\n    spring.quality(1, 1, 0)\n\n"
+                               "def test_b_asserts():\n    assert spring.quality(2, 3, 2) == 4, 'quality is wrong'\n"})
     assert runs["passes.py"].status == "pass"
     assert runs["fails.py"].status == "fail" and "wrong by design" in runs["fails.py"].detail
     assert runs["raises.py"].status == "error" and "ZeroDivisionError" in runs["raises.py"].detail, "a crash is not a demonstration"
     assert runs["no_import.py"].status == "error" and "ModuleNotFoundError" in runs["no_import.py"].detail
     assert runs["no_test.py"].status == "error"
-    assert runs["mixed.py"].status == "error", "a test that errors shows nothing, whatever else it asserts"
+    assert runs["mixed.py"].status == "fail" and "one" in runs["mixed.py"].detail, \
+        "a test that errors shows nothing, and does not hide another test's failing assertion"
+    mixed = runs["mixed_code_first.py"]
+    assert mixed.status == "fail" and mixed.kind == "assertion" and "quality is wrong" in mixed.detail
     assert fr.parse_runs("nothing printed", ["a.py"])["a.py"].status == "error"
 
 
@@ -202,6 +208,48 @@ def test_a_failing_test_then_a_repair_that_passes_it_is_kept(tmp_path: Path) -> 
     assert run.record["accepted_tests"] == [issue["test"]] and issue["repairs"] == [
         {"try": 1, "by": "code", "model": "writer", "outcome": "accepted"}]
     assert [(w, k) for w, k, _n in run.asked] == [("code", "test"), ("code", "repair")]
+
+
+SWALLOWS = ("import spring\n\ndef test_q():\n    try:\n        v = spring.quality(2, 3, 2)\n    except Exception:\n"
+            "        v = None\n    assert v == 3.5, 'the factor is wrong'\n")
+
+
+@pytest.mark.parametrize("text, refused", [
+    (SWALLOWS, True),
+    ("import spring\n\ndef _q():\n    try:\n        return spring.quality(1, 1, 0)\n    except ZeroDivisionError:\n"
+     "        return None\n\ndef test_q():\n    assert _q() is not None\n", True),
+    ("try:\n    import numpy\nexcept ImportError:\n    numpy = None\nimport spring\n\ndef test_q():\n"
+     "    assert spring.quality(2, 3, 2) == 3.5\n", False),
+    (FAILING, False)])
+def test_a_test_that_calls_the_code_inside_try_except_is_no_proof(text: str, refused: bool) -> None:
+    assert bool(fr.swallowed_call(text)) is refused
+
+
+def test_the_real_tests_that_raise_again_in_their_except_are_still_run() -> None:
+    # every finding test of the replayed quests catches an exception only to `assert False` on it, which the harness reads
+    found = sorted((Path(__file__).parent / "fixtures" / "replay" / "finding_v2").glob("*/.fi/finding_tests/*.py"))
+    assert len(found) >= 6
+    for path in found:
+        assert fr.swallowed_call(path.read_text(encoding="utf-8")) == "", path
+
+
+def test_a_test_that_swallows_the_codes_error_is_refused_and_asked_for_once_more(tmp_path: Path) -> None:
+    run = Run(tmp_path, [{"id": "F-1"}], {"code:test": [_block(SWALLOWS), _block(FAILING)], "code:repair": [_block(GOOD)]})
+    assert run.go() == ["spring.py"]
+    issue = run.record["issues"]["F-1"]
+    assert issue["demonstrated"] is True
+    assert "try/except" in run.prompts[1], "the second request says why the first test was refused"
+    # twice: no proof, and no third request
+    run = Run(tmp_path / "again", [{"id": "F-1"}], {"code:test": [_block(SWALLOWS)] * 3})
+    assert run.go() == []
+    issue = run.record["issues"]["F-1"]
+    assert issue["demonstrated"] is False and "try/except" in issue["reason"]
+    assert [k for _w, k, _n in run.asked] == ["test", "test"]
+    # the test asked for again after an error at the gate is held to the same rule
+    run = Run(tmp_path / "gate", [{"id": "F-1"}], {"code:test": [_block(SWALLOWS)]})
+    issue = run.record["issues"]["F-1"]
+    assert asyncio.run(fr.ask_again(run.env, issue, "spring.py", fr.TestRun("error", "NameError", place="test"))) is None
+    assert "try/except" in issue["asked_again"]["outcome"]
 
 
 def test_a_test_that_passes_on_the_current_code_leaves_the_finding_alone(tmp_path: Path) -> None:
