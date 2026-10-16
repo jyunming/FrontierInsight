@@ -775,3 +775,59 @@ async def test_the_speech_gets_fi_s_values_without_the_markers(tmp_path: Path, m
     art = QuestArtifacts(quest_id="q", quest_root=root, paper_md=paper, figures_dir=None)
     await SpeechGenerator(_make_config(tmp_path, kinds=["speech"])).generate(art, root)
     assert "The run took 121.3 s." in seen["prompt"] and "fi:fact" not in seen["prompt"]
+
+
+# Second review (P1-6): the paper generator takes FI's markers out of every output; a paper written before placeholders in
+# math got plain values may hold them there.
+MARKED_EVERYWHERE = ("# Marker Probe\n\n## Methods\n\nThe run took <!-- fi:fact-run_time -->223.2 s<!-- /fi:fact-run_time -->"
+                     " with $N = <!-- fi:fact-trials_per_setting -->400<!-- /fi:fact-trials_per_setting -->$ trials.\n\n"
+                     "Run with `--seed <!-- fi:fact-seed -->7<!-- /fi:fact-seed -->`.\n")
+
+
+def _paper_cfg(tmp_path: Path, kinds: list[str]) -> Any:
+    from core.config import Config
+
+    return Config.model_validate({"topic": "t", "title": "t", "output": {
+        "kinds": kinds, "html_pdf_fallback": False, "output_dir": str(tmp_path / "outputs")}})
+
+
+def test_the_delivered_paper_md_has_no_markers(tmp_path: Path) -> None:
+    from core.engine import QuestArtifacts
+    from generation.paper import PaperGenerator
+
+    src = tmp_path / "q" / "paper" / "paper.md"
+    src.parent.mkdir(parents=True)
+    src.write_text(MARKED_EVERYWHERE, encoding="utf-8")
+    out = tmp_path / "q"
+    PaperGenerator(_paper_cfg(tmp_path, ["paper_md"])).generate(
+        QuestArtifacts(quest_id="q", quest_root=out, paper_md=src), out)
+    delivered = (out / "paper.md").read_text(encoding="utf-8")
+    assert "fi:fact" not in delivered and "223.2 s" in delivered and "$N = 400$" in delivered
+    assert "fi:fact" in src.read_text(encoding="utf-8"), "the engine's own copy keeps its markers for the next render"
+
+
+@pytest.mark.slow
+def test_a_real_xelatex_compile_prints_no_markers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from generation._cjk import find_xelatex
+    from generation._pandoc import find_pandoc
+    from generation._pdf_engine import find_pdf_engine
+    from generation._pdf_measure import measure_pdf
+    from generation.paper import PaperGenerator
+
+    repo = Path(__file__).resolve().parent.parent
+    xelatex = find_xelatex(find_pdf_engine(repo))
+    if find_pandoc(repo) is None or xelatex is None:
+        pytest.skip("needs pandoc and xelatex")
+    monkeypatch.setattr(PaperGenerator, "_find_pdf_engine", lambda self: xelatex)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    paper_md = tmp_path / "paper.md"
+    paper_md.write_text(MARKED_EVERYWHERE, encoding="utf-8")
+    pdf, skip = PaperGenerator(_paper_cfg(tmp_path, ["paper_md", "paper_pdf"]))._compile_pdf(paper_md, out_dir)
+    assert pdf is not None, skip
+    source = out_dir / "paper_pdf_source.md"
+    if source.is_file():
+        assert "fi:fact" not in source.read_text(encoding="utf-8")
+    text = " ".join(line.text for page in measure_pdf(pdf, max_pages=2).pages for line in page.lines)
+    assert "400" in text and "223.2" in text, text
+    assert "fact" not in text and "<!" not in text and "−−" not in text, text

@@ -24,6 +24,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from core import paper_facts as _paper_facts
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config, resolve_page_limit
 from core.engine import QuestArtifacts, build_further_reading, cited_references, further_reading_listed
@@ -643,7 +644,14 @@ class PaperGenerator:
 
         if "paper_md" in kinds and art.paper_md is not None:
             dst = out_dir / "paper.md"
-            shutil.copy2(art.paper_md, dst)
+            # FI's fact markers stay in the engine's copy (the next render reads them) and go from the reader's.
+            if dst.resolve() != art.paper_md.resolve():
+                text = art.paper_md.read_text(encoding="utf-8")
+                plain = _paper_facts.without_marks(text)
+                if plain == text:
+                    shutil.copy2(art.paper_md, dst)
+                else:
+                    dst.write_text(plain, encoding="utf-8")
             result["paper_md"] = dst
 
         # Machine-readable citations: emit the paper's references as BibTeX +
@@ -980,7 +988,8 @@ class PaperGenerator:
         # shift-heading-level decision.
         title: str | None = None
         try:
-            md_text = paper_md.read_text(encoding="utf-8")
+            # FI's fact markers are HTML comments: inside math or code pandoc prints them as text.
+            md_text = _paper_facts.without_marks(paper_md.read_text(encoding="utf-8"))
             glyph_count = _count_sanitized_glyphs(md_text)
             sanitized_md = _sanitize_unicode_for_latex(md_text)
             # Tighten ``$ \beta $`` → ``$\beta$`` so pandoc parses it

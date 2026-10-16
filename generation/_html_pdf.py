@@ -175,7 +175,10 @@ def render_paper_html_pdf(
 
     work = out_pdf.parent
     try:
-        md_text = paper_md.read_text(encoding="utf-8")
+        from core import paper_facts as _paper_facts
+
+        # FI's fact markers would print as text inside math or code.
+        md_text = _paper_facts.without_marks(paper_md.read_text(encoding="utf-8"))
     except OSError as e:
         return None, f"could not read {paper_md}: {e}"
     # Both themes number figures, so the writer's "**Figure 2.**" comes off.
