@@ -27333,10 +27333,87 @@ def _strip_plan_numbers(protocol: dict[str, Any], *, names_only: bool = False) -
             if names_only and isinstance(inputs, dict):
                 eq["example"] = {"input_names": list(inputs), **({"random": True} if _equation_tests.is_random(
                     {**eq, "example": example}) else {})}
-    for oracle in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
-        if isinstance(oracle, dict):
-            oracle.pop("expected", None)
-            oracle.pop("expected_formula", None)
+    # The value each check compares with, and how close it must be, are not shown: not as the check's fields, not as a
+    # criterion's target built on a check, and not in any prose of the plan (written as words there, so the prose keeps
+    # its meaning). A number the code is given as an input (a grid value, a threshold, a check's setting) stays: the
+    # code cannot run without it, even where it is also what a check recovers.
+    oracles = [o for o in (protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else [])
+               if isinstance(o, dict)]
+    criteria = [c for c in (protocol.get("criteria") if isinstance(protocol.get("criteria"), list) else [])
+                if isinstance(c, dict) and c.get("oracle")]
+    hidden = [o.get(k) for o in oracles for k in ("expected", "tolerance", "limit")]
+    hidden += [c.get(k) for c in criteria for k in ("target", "tolerance")]
+    inputs = _input_numbers(protocol)
+    hidden = [v for v in hidden if isinstance(v, (int, float)) and not isinstance(v, bool) and float(v) not in inputs]
+    for oracle in oracles:
+        for key in _ORACLE_HIDDEN:
+            oracle.pop(key, None)
+    for criterion in criteria:
+        criterion.pop("target", None)
+        criterion.pop("tolerance", None)
+    _mask_prose(protocol, hidden)
+
+
+#: The fields of a check a request that writes or repairs code never sees.
+_ORACLE_HIDDEN = ("expected", "expected_formula", "tolerance", "tolerance_mode", "limit")
+
+
+def _input_numbers(protocol: dict[str, Any]) -> set[float]:
+    """The numbers the plan gives the code to run with: every number of the protocol outside its checks, its criteria
+    built on a check and its model's worked examples, plus each check's setting (``case``)."""
+    def walk(node: Any) -> set[float]:
+        if isinstance(node, dict):
+            return set().union(*(walk(v) for v in node.values())) if node else set()
+        if isinstance(node, list):
+            return set().union(*(walk(v) for v in node)) if node else set()
+        if isinstance(node, (int, float)) and not isinstance(node, bool):
+            return {float(node)}
+        return set()
+
+    found = walk({k: v for k, v in protocol.items() if k not in ("oracles", "criteria", "model")})
+    for o in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
+        if isinstance(o, dict):
+            found |= walk(o.get("case") or {})
+    return found
+
+
+def _mask_prose(node: Any, hidden: list[Any]) -> Any:
+    """In place: every string under ``node`` with the ``hidden`` numbers written as words (:func:`_without_numbers`)."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if isinstance(v, str):
+                node[k] = _without_numbers(v, hidden)
+            else:
+                _mask_prose(v, hidden)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            if isinstance(v, str):
+                node[i] = _without_numbers(v, hidden)
+            else:
+                _mask_prose(v, hidden)
+    return node
+_PROSE_NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?(%?)(?![\w.])")
+
+
+def _without_numbers(text: str, hidden: list[Any]) -> str:
+    """``text`` with every number that is one of ``hidden`` (a check's expected value or tolerance, also written as a
+    percentage) put as words: what is checked stays readable, the number it is held to does not."""
+    # 0 and 1 stay: every setting is written with them ("sigma=0"), and a check held to 0 says so in its words anyway.
+    values = [float(v) for v in hidden if isinstance(v, (int, float)) and not isinstance(v, bool) and v not in (0, 1)]
+    if not values:
+        return text
+
+    def swap(m: re.Match[str]) -> str:
+        try:
+            x = float(m.group(0).rstrip("%"))
+        except ValueError:
+            return m.group(0)
+        x = x / 100 if m.group(1) else x
+        if any(math.isclose(x, v, rel_tol=1e-9, abs_tol=1e-15) for v in values):
+            return "[the value FI checks it against]"
+        return m.group(0)
+
+    return _PROSE_NUMBER.sub(swap, text)
 
 
 def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:
