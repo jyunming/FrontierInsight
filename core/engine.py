@@ -20087,6 +20087,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
         # placeholder (core/paper_facts.py).
         markdown = self._render_paper_facts(markdown, state)
+        # A figure shares its paragraph with text (a run-in label, a sentence): pandoc then draws it inline, with no
+        # caption and no float. Each goes into a paragraph of its own here, so the PDF, slides and poster all read it so.
+        from generation._figure_captions import figures_in_own_paragraph
+
+        markdown, n_figures_moved = figures_in_own_paragraph(markdown)
+        if n_figures_moved:
+            self._log.info("[write] %d figure(s) moved into a paragraph of their own", n_figures_moved)
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
