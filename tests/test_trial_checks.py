@@ -154,6 +154,24 @@ def test_a_standard_error_far_too_small_is_a_fault_and_a_right_one_is_not():
     assert not tc.calibration(cells, proto).faults
 
 
+def test_estimates_that_never_vary_anywhere_while_the_trials_report_an_error_are_a_fault():
+    """A simulation that ignores its seed returns one number a trial, in every setting: with only a standard error
+    declared (so no coverage), the spread is 0 against a reported error of 0.5. Before, a setting with no spread was
+    skipped and this passed. One noise-free setting among settings that vary is still only skipped (a correct estimator
+    reports a small error there), and a right error is still not a fault."""
+    rng = random.Random(8)
+    proto = _proto(known("x_hat", "x_true", se="x_se"), thresholds={"x_true": 5.0})
+    same = _cells({f"s{i}": {"x_hat": [5.3] * 50, "x_se": [0.5] * 50} for i in range(4)})
+    cal = tc.calibration(same, proto)
+    assert [q.kind for q in cal.faults] == ["se_ratio"] and all(s.value == 0.0 for s in cal.faults[0].settings)
+    quiet = _cells({f"s{i}": {"x_hat": [5.0] * 50, "x_se": [0.0] * 50} for i in range(4)})
+    assert not tc.calibration(quiet, proto).faults, "no noise and no error reported: nothing to compare"
+    noisy = {f"s{i}": {"x_hat": [5 + rng.gauss(0, 0.5) for _ in range(50)], "x_se": [0.5] * 50} for i in range(4)}
+    assert not tc.calibration(_cells(noisy), proto).faults, "a right error is still not a fault"
+    noisy["s_free"] = {"x_hat": [5.0] * 50, "x_se": [0.01] * 50}
+    assert not tc.calibration(_cells(noisy), proto).faults, "a noise-free setting among noisy ones is skipped"
+
+
 def test_coverage_is_computed_by_fi_from_the_interval_and_the_true_value_never_from_the_codes_flag():
     rng = random.Random(5)
     # The code's interval is around a value 3 standard errors off the truth, and its own flag says it always covered.

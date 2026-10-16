@@ -607,7 +607,7 @@ PART_RULES = {
     "per_trial": "`protocol.oracles`, for each check named below and nothing else about it: does it hold in every "
                  "single trial, or only on average over trials? Write each as `{\"name\": \"<the check's name>\", "
                  "\"per_trial\": true}` when it must hold in every single trial, or `\"per_trial\": false` when it holds "
-                 "only on average over trials (a false discovery rate at most q, an error rate at most alpha). FI takes "
+                 "only on average over trials (a false discovery rate at most q, an error rate at most alpha; a check that says nothing is read as an average). FI takes "
                  "only `per_trial` from your answer.",
     "steps": "`protocol.model.steps`: a list of step cards; each has an `id` (S1, S2, ...), `name`, `does`, `inputs` (a "
              "mapping of each input's name to its unit), `output`, and optionally `uses` (equation ids of the model), "
