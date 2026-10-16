@@ -567,6 +567,28 @@ async def test_the_gate_asks_no_repair_for_a_check_its_trials_did_not_decide(tmp
     assert len(record["attempts"]) == 1 and record["status"] != "ok"
 
 
+@pytest.mark.asyncio
+async def test_a_repair_is_kept_when_a_check_its_trials_had_not_decided_passes_after_it(tmp_path: Path) -> None:
+    """Review pass 2, P1-2: ``double`` fails and is repaired; the repair also stops the crashes, so ``mean_wait``, not
+    decided before, now passes. That is a decided pass, not a check bent by the repair: the repair is kept (the guard
+    put the old code back, and ``double`` failed again)."""
+    from core.engine import Engine
+    from tests.test_known_answer_self_checks import _config, _gate, _Model, _record
+
+    fixed = SOME_CRASH.replace("YVALUE", "2.0").replace('"b" in cell and ', "False and ")
+    engine = Engine(_config(tmp_path))
+    model = _Model(recompute={"expected": 2.0, "how": "2 * 1"}, repair_code=fixed)
+    engine._client = model
+    await _gate(engine, [DOUBLE, WAIT], SOME_CRASH.replace("YVALUE", "3.0"))
+    record = _record(engine)
+    judged = {j["name"]: j for j in record["attempts"][-1]["judged"]}
+    assert model.repairs, "the failing check is repaired"
+    assert judged["double"]["passed_by_engine"] is True, judged["double"]
+    assert judged["mean_wait"]["passed_by_engine"] is True, judged["mean_wait"]
+    assert record["status"] == "ok", record.get("problems")
+    assert "False and" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+
+
 DET = '''
 import time
 

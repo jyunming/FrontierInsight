@@ -13393,7 +13393,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # Every disputed check not passing now, measured or not: a repair that restores a missing measurement must
             # not restore it bent to the disputed number either.
             passing_now = {str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True}
-            held = {n for n in disputed + aside if n not in passing_now and n not in self._oracle_noisy}
+            # A check its trials had not decided is not held either: decided as a pass after the repair, three standard
+            # errors inside its tolerance, it is a real pass, never a sign the repair bent the script to it.
+            held = {n for n in disputed + aside if n not in passing_now and n not in self._oracle_noisy
+                    and n not in self._oracle_undecided}
             if outcome == "applied" and held:
                 guard = (code_before, new_code_before, held, package_before)
         # What the stop may offer: "mark it unconfirmed and go on", only when every problem is a check that was measured
