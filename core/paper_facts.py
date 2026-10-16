@@ -472,12 +472,6 @@ def _metric_of(root: Path, name: str) -> tuple[str, str]:
     return str(best["id"]), _one(best.get("label")) or str(best["id"])
 
 
-def missing_items(paper_md: str, items: list[Item]) -> list[Item]:
-    """The items whose short name does not appear in the paper (case, spacing, underscores and backticks ignored)."""
-    text = _norm(_disclosure.without_block(paper_md))
-    return [i for i in items if _norm(i.name) not in text]
-
-
 def _undefined_items(rec: dict[str, Any], add: Any) -> None:
     """Each value of the plan with no number in SOME trials of a setting (core/trial_checks.py:undefined), one item per
     value. A value with none in EVERY trial of a setting has none there by its definition (a power where there is no true
