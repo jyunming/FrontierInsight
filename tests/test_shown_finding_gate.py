@@ -168,7 +168,7 @@ def _says_unconfirmed(engine: Engine) -> None:
     from core import paper_facts
 
     [item] = [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.CODE_FINDING]
-    assert item.id == "finding-f-1" and "could not confirm the fault is fixed" in item.sentence, item.sentence
+    assert item.id == "finding-f-1" and "not confirmed that the fault is fixed" in item.sentence, item.sentence
 
 
 @pytest.mark.asyncio

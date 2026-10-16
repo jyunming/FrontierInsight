@@ -61,7 +61,7 @@ async def test_with_the_budget_spent_it_is_recorded_and_stops_nothing(tmp_path: 
     [item] = [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.CODE_FINDING]
     assert item.id == "finding-f-1"
     assert "dose_to_size is set to a typed-in value" in item.sentence
-    assert "this test no longer runs" in item.sentence and "could not confirm the fault is fixed" in item.sentence
+    assert "the test no longer runs" in item.sentence and "not confirmed that the fault is fixed" in item.sentence
 
 
 @pytest.mark.asyncio
