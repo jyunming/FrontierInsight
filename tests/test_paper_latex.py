@@ -136,7 +136,15 @@ def _doc(*headings: str) -> str:
     (["## 3 Key Findings"], ["## 3 Key Findings"]),
     (["## 2.5 Million Cells"], ["## 2.5 Million Cells"]),
     (["## 2 Sample Tests Compared"], ["## 2 Sample Tests Compared"]),
-    (["## 1. Introduction", "## 3 Body Problem", "## 2. Methods"], ["## Introduction", "## 3 Body Problem", "## Methods"]),
+    # A number comes off only when it is the number the renderer prints for that heading:
+    # "3 Body Problem" is section 2, so it stays, and so does the writer's "2." on what is
+    # printed as section 3 (it prints "3 2. Methods", a writer's gap, not a lost word).
+    (["## 1. Introduction", "## 3 Body Problem", "## 2. Methods"], ["## Introduction", "## 3 Body Problem", "## 2. Methods"]),
+    (["## Introduction", "## 1 Million Cells Simulated", "## Discussion"],
+     ["## Introduction", "## 1 Million Cells Simulated", "## Discussion"]),
+    (["## Introduction", "## 2 Methods"], ["## Introduction", "## Methods"]),
+    (["## 1. Intro", "### Aim", "### 1.2 Data", "## 2. Next"], ["## Intro", "### Aim", "### Data", "## Next"]),
+    (["## 1. A", "## Methods {-}", "## 2. B"], ["## A", "## Methods {-}", "## B"]),
     (["## 2024 outlook"], ["## 2024 outlook"]),
     (["## 3.5% growth"], ["## 3.5% growth"]),
     (["## 4 × 4 grids"], ["## 4 × 4 grids"]),
@@ -147,6 +155,22 @@ def _doc(*headings: str) -> str:
 ])
 def test_a_headings_own_section_number_comes_off(headings: list[str], expected: list[str]) -> None:
     assert strip_heading_numbers(_doc(*headings)) == _doc(*expected)
+
+
+def test_without_a_title_the_numbers_still_come_off() -> None:
+    assert strip_heading_numbers("## 1. Introduction\n\nText.\n\n## 2. Methods\n") == (
+        "## Introduction\n\nText.\n\n## Methods\n"
+    )
+
+
+def test_the_s1_kinetics_paper_loses_all_nine_of_its_numbers() -> None:
+    source = (FIXTURES / "s1_kinetics_paper_pdf_source.md").read_text(encoding="utf-8")
+    out = strip_heading_numbers(source)
+    before = [line for line in source.splitlines() if line.startswith("#")]
+    after = [line for line in out.splitlines() if line.startswith("#")]
+    changed = [(a, b) for a, b in zip(before, after) if a != b]
+    assert len(changed) == 9, changed
+    assert ("### 3.3 Coverage", "### Coverage") in changed and ("## 5. Conclusion", "## Conclusion") in changed
 
 
 def test_the_title_is_never_touched() -> None:
@@ -189,6 +213,23 @@ def test_the_pdf_source_has_no_doubled_number(tmp_path: Path) -> None:
     assert re.search(r"\b1 Introduction\b", text) and "1 1." not in text and "1.1 1.1" not in text
     # A level-4 heading is numbered by the template too (secnumdepth 3), once.
     assert "1.1.1 Deep" in text and "1.1.1 1.1.1" not in text
+
+
+def test_a_count_in_the_second_sections_title_is_printed(tmp_path: Path) -> None:
+    _need_latex()
+    md = tmp_path / "paper.md"
+    md.write_text(
+        "# T\n\n## Abstract\n\nA.\n\n## Introduction\n\nText.\n\n## 1 Million Cells Simulated\n\nMore.\n\n"
+        "## Discussion\n\nEnd.\n", encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    pdf, skip = PaperGenerator(_config(tmp_path))._compile_pdf(md, out)
+    assert skip is None
+    from generation._pdf_measure import measure_pdf
+
+    text = " ".join(line.text for page in measure_pdf(pdf).pages for line in page.lines)
+    assert "2 1 Million Cells Simulated" in text and "2 Million Cells" not in text, text
 
 
 # ---------------------------------------------------------------------------

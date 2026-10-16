@@ -5,11 +5,13 @@ templates number sections themselves (``\\section``), as does the browser theme'
 so the page printed "1 1. Introduction" and "3.3 3.3 Coverage". The number comes off
 the heading in the copy that is rendered; ``paper.md`` is left as written.
 
-A number is taken only when it is a section number: it continues the document's own
-numbering (the first numbered section is 1, the next 2, ...; a subsection of section 3
-is 3.1, then 3.2, ...), and its heading sits at a level the renderer numbers. A count
-that is part of a title ("3 Body Problem", "10 Years Later", "2.5 Million Cells") does
-not continue that sequence, so it stays. At a level the renderer does not number (the
+A number is taken only when it is the number the renderer will print for that heading:
+the headings at each numbered level are counted as LaTeX and the browser theme count
+them (the title and the Abstract are not numbered; a subsection's count starts again
+under each section), and the writer's number must equal the count. The page then reads
+as written, with the doubled number gone. A count that is part of a title ("3 Body
+Problem", "10 Years Later", "2.5 Million Cells", or "1 Million Cells Simulated" as the
+second section) is not that heading's number, so it stays. At a level the renderer does not number (the
 briefing theme numbers none; LaTeX stops below ``secnumdepth``) the writer's number is
 the only one, so it stays too. The forms ``1.``, ``1``, ``1)``, ``1:``, ``3.2``,
 ``3.2.`` and Roman ``I.`` are read. The title (the first level-1 heading) is never
@@ -27,6 +29,11 @@ _NUMBER_RE = re.compile(
     r"^(?:(?P<arabic>\d{1,2}(?:\.\d{1,2})*)(?P<sep>[.):])?|(?P<roman>[IVXLC]{1,6})\.)[ \t]+(?=\S)"
 )
 _FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
+# Headings no renderer numbers: the Abstract (lifted out of the body, or the browser
+# theme's unnumbered one) and a heading marked unnumbered (``{-}``, ``{.unnumbered}``).
+_UNNUMBERED_RE = re.compile(
+    r"^(?:abstract\s*$|.*\{(?:[^}]*\s)?(?:-|\.unnumbered)(?:\s[^}]*)?\}\s*$)", re.IGNORECASE,
+)
 _ROMAN = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
 
 
@@ -83,24 +90,23 @@ def strip_heading_numbers(markdown: str, *, numbered_depth: int = 3) -> str:
         return markdown
     top = min(sections)
 
-    # The document's own numbering: the last number taken at each depth.
-    current: list[int] = []
+    # The number the renderer prints for each heading: a count at each numbered depth,
+    # the deeper counts starting again under each heading.
+    counts: list[int] = []
     for index, level, text in headings:
-        if index == title_index or level < top:
+        if index == title_index or level < top or _UNNUMBERED_RE.match(text):
             continue
         depth = level - top + 1
         if depth > numbered_depth:
             continue
+        counts = (counts + [0] * depth)[:depth]
+        counts[depth - 1] += 1
         found = _number(text)
         if found is None:
             continue
         parts, length = found
-        if len(parts) != depth:
+        if list(parts) != counts:
             continue
-        parent, last = current[:depth - 1], current[depth - 1] if len(current) >= depth else 0
-        if list(parts[:-1]) != parent or parts[-1] != last + 1:
-            continue
-        current = list(parts)
         hashes = "#" * level
         lines[index] = hashes + " " + text[length:]
     return "\n".join(lines)
