@@ -35,10 +35,51 @@ from typing import Any
 
 PATH = Path(".fi") / "run_facts.json"
 
-#: Calls that build or seed a random generator; their first argument is a seed.
-_SEEDERS = frozenset({"default_rng", "RandomState", "seed", "manual_seed", "PRNGKey", "Random", "SeedSequence",
-                      "Generator", "PCG64", "PCG64DXSM", "Philox", "MT19937", "SFC64", "spawn", "fold_in", "split",
-                      "set_seed", "seed_everything"})
+#: Calls that build or seed a random generator whatever they are called on; their first argument is a seed.
+_SEEDERS = frozenset({"default_rng", "RandomState", "manual_seed", "manual_seed_all", "PRNGKey", "SeedSequence",
+                      "PCG64", "PCG64DXSM", "Philox", "MT19937", "SFC64", "set_seed", "seed_everything"})
+#: Names that seed a generator only when called on a random module or generator (``np.random.seed``, ``random.seed``,
+#: ``random.Random``, ``jax.random.split``), not on anything else (``str.split``, ``re.split``).
+_RANDOM_ONLY_SEEDERS = frozenset({"seed", "Random", "Generator", "split", "fold_in", "key"})
+_RANDOM_RECEIVER = re.compile(r"(?:^|\.)(?:random|jrandom|jr|rng|torch|cuda|tf)$", re.I)
+
+
+def _receiver(call: ast.Call) -> str:
+    """The dotted name ``call`` is made on (``np.random`` for ``np.random.seed(...)``), ``""`` for a plain name."""
+    f = call.func
+    if not isinstance(f, ast.Attribute):
+        return ""
+    try:
+        return ast.unparse(f.value)
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+def _is_seeder(call: ast.Call) -> bool:
+    """``call`` builds or seeds a random generator: a constructor of one, or a seed call on a random module."""
+    name = _call_name(call)
+    if name in _SEEDERS:
+        return True
+    if name in _RANDOM_ONLY_SEEDERS:
+        receiver = _receiver(call)
+        return bool(_RANDOM_RECEIVER.search(receiver)) if receiver else name in ("seed", "Random")
+    return False
+
+
+def _without_zeroed(expr: ast.AST) -> ast.AST:
+    """``expr`` with every part multiplied by a literal 0 left out: ``seed * 0 + 5`` carries no seed."""
+
+    class _Zero(ast.NodeTransformer):
+        def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+            self.generic_visit(node)
+            if isinstance(node.op, ast.Mult) and any(isinstance(s, ast.Constant) and s.value == 0
+                                                     for s in (node.left, node.right)):
+                return ast.Constant(value=0)
+            return node
+
+    import copy
+
+    return _Zero().visit(copy.deepcopy(expr))
 _SKIP_PARTS = {"__pycache__", "site-packages", "tests", "test"}
 #: A name that holds a seed (``seed``, ``BASE_SEED``, ``random_state``), not one that merely contains the word.
 _SEED_NAME = re.compile(r"^(?:(?:base|random|rng|global|master|root)_)?seed$|^random_state$", re.I)
@@ -50,9 +91,14 @@ _NEUTRAL = frozenset({
     "max", "min", "sum", "round", "isinstance", "bool", "range", "sorted", "enumerate", "zip", "divmod", "pow", "bin", "hex",
     "dumps", "info", "debug", "warning", "error", "log", "write", "append", "update", "get", "setdefault", "items", "join",
     "uint32", "uint64", "int64", "int32", "array", "asarray", "from_bytes", "to_bytes", "encode", "hexdigest", "sha256",
-    "md5", "blake2b", "mod", "floor", "ceil", "exception", "isfinite", "isnan"})
+    "md5", "blake2b", "mod", "floor", "ceil", "exception", "isfinite", "isnan",
+    # string methods (``str(cell).split(str(seed))`` reshapes text, it seeds nothing)
+    "split", "rsplit", "strip", "lstrip", "rstrip", "replace", "lower", "upper", "startswith", "endswith", "find",
+    "index", "count", "zfill", "partition"})
 
 REACHES, DOES_NOT_REACH, UNKNOWN, NO_ENTRY = "reaches", "does_not_reach", "unknown", "no_entry"
+#: FI's seed seeds a generator, and a number typed into the code seeds one the trial also draws from.
+PARTLY = "partly"
 
 
 def read(quest_root: Path | str) -> dict[str, Any]:
@@ -136,11 +182,31 @@ def _call_name(node: ast.Call) -> str:
 
 
 def _int_of(node: ast.AST) -> int | None:
+    """``node`` as an int when it is one written as a number (``7``, ``-7``, ``seed * 0 + 5`` once the part multiplied by 0
+    is left out), else ``None``."""
+    value = _fold(node)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _fold(node: ast.AST) -> int | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
         return node.value
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-        inner = _int_of(node.operand)
+        inner = _fold(node.operand)
         return None if inner is None else -inner
+    if isinstance(node, ast.BinOp):
+        if isinstance(node.op, ast.Mult) and any(isinstance(s, ast.Constant) and s.value == 0
+                                                 for s in (node.left, node.right)):
+            return 0
+        left, right = _fold(node.left), _fold(node.right)
+        if left is None or right is None:
+            return None
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
     return None
 
 
@@ -154,7 +220,7 @@ def _literal_seeds(tree: ast.AST, rel: str) -> list[tuple[str, int]]:
         where = f"{rel}:{line}"
         if isinstance(node, ast.Call):
             name = _call_name(node)
-            if name in _SEEDERS and node.args:
+            if _is_seeder(node) and node.args:
                 first = node.args[0]
                 if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
                     first = first.elts[0]
@@ -177,7 +243,7 @@ def _seeder_literals(fn: ast.AST, rel: str) -> list[tuple[str, int]]:
     found: list[tuple[str, int]] = []
     for node in _own_nodes(fn):
         if isinstance(node, ast.Call):
-            if _call_name(node) in _SEEDERS and node.args:
+            if _is_seeder(node) and node.args:
                 first = node.args[0]
                 if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
                     first = first.elts[0]
@@ -235,6 +301,7 @@ class _Flow:
     used: bool = False           # the seed is read at all
     overwritten: bool = False    # the seed's name was given another value before every use
     chain: list[tuple[str, ast.AST]] = field(default_factory=list)  # (module, function) the seed was passed into
+    seeded: list[str] = field(default_factory=list)  # the seeding calls the seed reached (``np.random.seed``, ...)
 
 
 class _Code:
@@ -428,8 +495,11 @@ class _Follower:
 
     def _call(self, mod: _Module, call: ast.Call, tainted: set[str], flow: _Flow, depth: int) -> None:
         name = _call_name(call)
-        if name in _SEEDERS:
-            flow.reaches = True
+        if _is_seeder(call):
+            # The seed reaches the generator only through what is not multiplied away (``seed * 0 + 5`` seeds it with 5).
+            if any(_reads(_without_zeroed(a), tainted) for a in [*call.args, *(k.value for k in call.keywords)]):
+                flow.reaches = True
+                flow.seeded.append(_receiver(call) + "." + name if _receiver(call) else name)
             return
         if name == "partial" and call.args:
             kind, target = self.code.resolve(mod, call.args[0])
@@ -462,6 +532,7 @@ class _Follower:
             inner = self.follow(tmod, fn, p, depth + 1)
             flow.reaches = flow.reaches or inner.reaches
             flow.unsure += inner.unsure
+            flow.seeded += [s for s in inner.seeded if s not in flow.seeded]
             # The seed was handed on: the function it went to is where the trial's generators are made, whether it uses
             # the seed or not (a wrapper's run_trial that hands it to the model's, which ignores it).
             flow.chain += [c for c in inner.chain if c not in flow.chain]
@@ -618,8 +689,15 @@ def seed_verdict(quest_root: Path | str) -> dict[str, Any]:
                    + ", a generator made when the module is loaded")
     if unseeded:
         why.append("the trial's code builds a random generator without a seed (" + "; ".join(unseeded[:3]) + ")")
+    fixed = [f"{v}, at {w}" for w, v in dict.fromkeys(driving)]
     if why:
         out.update(verdict=DOES_NOT_REACH, fi_seed_reaches=False, why="; ".join(why))
+    elif flow.reaches and fixed:
+        # FI's seed seeds a generator, and a number typed into the code seeds another on the trial's own path (or the
+        # same one on another branch): the trials are not driven by FI's seed alone, so FI's base seed is not "the" seed.
+        out.update(verdict=PARTLY, fi_seed_reaches=False,
+                   why="FI's seed seeds a generator, but the trial's code also seeds one with a number written in the "
+                       f"code ({'; '.join(fixed[:3])})")
     elif flow.reaches:
         # What else the seed is handed to does not matter once it seeds a generator: the other generators the trial
         # could draw from are the two checks above.

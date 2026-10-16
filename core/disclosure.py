@@ -336,6 +336,9 @@ def _seed_sentence(quest_root: Path, rows: Any) -> str:
     from . import run_facts as _run_facts
 
     verdict = _run_facts.seed_verdict(quest_root)
+    if verdict.get("verdict") == _run_facts.PARTLY:
+        return (f"The seed FI gives each trial seeds a generator, but not the only one: {verdict['why']}. The trials depend "
+                "on both.")
     if verdict["fi_seed_reaches"] is False:
         used: dict[int, list[str]] = {}
         for lit in verdict.get("driving_seeds") or []:

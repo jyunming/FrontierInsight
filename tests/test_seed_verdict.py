@@ -52,6 +52,27 @@ CASES = {
     "library": ("import functools, numpy as np\nimport somelib\ndef run_trial(cell, trial_id, seed):\n"
                 "    return somelib.simulate(cell, seed=seed)\n", {}, "unknown", None),
     "outside": ("from somelib import run_trial\n", {}, "unknown", None),
+    # Second review (P0-1): FI's seed seeds a generator, but a number typed into the code seeds one on the trial's path
+    # too. That is "partly", never "reaches", and {{seed}} names both.
+    "side_rng_and_literal_rng": ("import numpy as np\ndef run_trial(cell, trial_id, seed):\n"
+                                 "    jitter = np.random.default_rng(seed)\n    rng = np.random.default_rng(20261015)\n"
+                                 "    return {'x': rng.normal(size=100).mean(), 'j': jitter.random()*0}\n",
+                                 {}, "partly", 20261015),
+    "model_ignores_the_rng_it_is_given": ("from model import sim\nimport numpy as np\ndef run_trial(cell, trial_id, seed):\n"
+                                          "    rng = np.random.default_rng(seed)\n    return sim(cell, rng)\n",
+                                          {"model.py": "import numpy as np\ndef sim(cell, rng):\n"
+                                                       "    r2 = np.random.default_rng(7)\n    return r2.normal()\n"},
+                                          "partly", 7),
+    "seed_only_on_a_branch": ("import numpy as np\ndef run_trial(cell, trial_id, seed):\n    if cell.get('debug'):\n"
+                              "        rng = np.random.default_rng(seed)\n    else:\n        rng = np.random.default_rng(3)\n"
+                              "    return rng.normal()\n", {}, "partly", 3),
+    "seed_times_zero": ("import numpy as np\ndef run_trial(cell, trial_id, seed):\n"
+                        "    rng = np.random.default_rng(seed * 0 + 5)\n    return rng.normal()\n", {}, "does_not_reach", 5),
+    "str_split_is_no_seeder": ("import numpy as np\ndef run_trial(cell, trial_id, seed):\n"
+                               "    parts = str(cell).split(str(seed))\n    rng = np.random.default_rng(1)\n"
+                               "    return rng.normal()\n", {}, "does_not_reach", 1),
+    "torch_manual_seed": ("import torch\ndef run_trial(cell, trial_id, seed):\n    torch.manual_seed(seed)\n"
+                          "    return float(torch.rand(1))\n", {}, "reaches", None),
 }
 
 
@@ -69,7 +90,7 @@ def test_the_seed_verdict_follows_the_seed_to_a_generator(tmp_path: Path, name: 
     src, extra, verdict, driving = CASES[name]
     got = _verdict(tmp_path, src, extra)
     assert got["verdict"] == verdict, (name, got)
-    assert got["fi_seed_reaches"] is {"reaches": True, "does_not_reach": False, "unknown": None}[verdict]
+    assert got["fi_seed_reaches"] is {"reaches": True, "does_not_reach": False, "partly": False, "unknown": None}[verdict]
     if driving is not None:
         assert driving in [d["value"] for d in got["driving_seeds"]], (name, got["driving_seeds"])
     if verdict != "reaches":
@@ -94,6 +115,16 @@ def test_e1_the_seed_that_drives_the_trials_is_the_one_in_run_trial_not_the_self
     assert not got["unseeded"], "model.py:52's unseeded generator is in a function run_trial never calls"
     # Every seed written in the code is still listed (the quality report shows them), 17 among them.
     assert 17 in {s["value"] for s in got["code_seeds"]}
+
+
+def test_partly_names_fi_s_seed_and_the_fixed_one_in_the_paper(tmp_path: Path) -> None:
+    from core import paper_facts
+
+    src, extra, _v, _d = CASES["model_ignores_the_rng_it_is_given"]
+    _verdict(tmp_path, src, extra)
+    text = paper_facts._seed_text(tmp_path / "q")
+    assert "FI's own seed for each trial" in text and "7, at code/model.py:3" in text, text
+    assert "derived from base seed" not in text or "fixed in the code" in text
 
 
 def test_kinetics_seed_reaches(tmp_path: Path) -> None:

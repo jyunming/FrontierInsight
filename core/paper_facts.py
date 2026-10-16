@@ -350,6 +350,13 @@ def _seed_text(root: Path) -> str:
     if state == _run_facts.UNKNOWN:
         return "a seed passed to each trial (FI could not tell from the code whether the simulation uses it)"
     driving = [d for d in verdict.get("driving_seeds") or [] if isinstance(d, dict)]
+    if state == _run_facts.PARTLY:
+        # Both are true and both drive the trials: FI's per-trial seed and a number typed into the code.
+        base, _trial = _disclosure.recorded_seeds(root)
+        listed = "; ".join(f"{d['value']}, at {d['where']}" for d in driving[:3])
+        return ("FI's own seed for each trial" + (f" (derived from base seed {base})" if base is not None else "")
+                + (", and a seed fixed in the code" if len(driving) == 1 else ", and seeds fixed in the code")
+                + f" ({listed})")
     unseeded = [str(u).split(" (", 1)[0] for u in verdict.get("unseeded") or []]
     if driving:
         listed = "; ".join(f"{d['value']}, at {d['where']}" for d in driving[:3])
