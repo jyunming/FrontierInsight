@@ -436,6 +436,7 @@ engine:
   improve_rounds: 3                 # after a run, when a check of correctness in the plan is not met: how many times (in the whole quest; a rerun --from the run or earlier starts again) FI may change the simulation, one small change at a time, keeping a change only when no check got worse by more than its own tolerance; a kept version runs once more in full. 0 = off. Under rigor_profile: research a change that made a check worse stops the quest for you
   pilot_run: false                  # OPT-IN. Run the experiment SMALL first (FI_PILOT=1, which the implement prompt tells the script to honour), then full scale. execute_reflect already repairs a script that CRASHES; the pilot catches one that runs fine and answers the wrong question — a sweep over the wrong parameter range, a resolution too coarse to show the effect — which otherwise costs the full timeout to discover. The pilot's numbers are DISCARDED: it is a smoke test of the design, not a measurement, and it never fails a quest (a bad pilot warns and the full run proceeds). Off by default: honouring FI_PILOT is a prompt instruction the engine cannot enforce, and a script that ignores it runs full-scale under a fifth of the timeout — timing out and warning on every quest. Enable it once your scripts comply.
   pilot_timeout_frac: 0.2           # Pilot timeout as a fraction of execution.timeout_s, floored at 30s. A pilot that takes as long as the real run buys nothing.
+  run_manifest_check: warn          # after the run, FI compares its own record of the trials with the plan: warn records what differs (run.log, QUALITY.md) and goes on; block sends the code back and stops the quest if it still differs (set by rigor_profile: research); off does not look
   cross_check_per_finding_k: 3      # per-finding lit-check hits, 0 to disable
   enable_analyze_reroute: true      # analyze can request re_experiment / broaden_lit
   review_panel:                     # empty = single reviewer
@@ -452,7 +453,7 @@ engine:
 
 execution:
   sandbox: venv                     # venv (default) | docker
-  timeout_s: 3600
+  timeout_s: 3600                   # the hard stop of one run. Before the full run FI times a few trials and sizes the run to the topic's own time limit when the topic states one ("must finish within 60 s"), else to this; a run that would not fit gets fewer runs per setting (never fewer settings), said in the paper with the precision it gives
   clean_check_timeout_s: 900        # the try of code/ in a clean environment before the paper is written may take at most this long (never more than timeout_s); a run still going is stopped and reported as not finished, not as a failure
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest
