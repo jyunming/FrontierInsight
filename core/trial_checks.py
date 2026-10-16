@@ -37,6 +37,20 @@ if it stays the quest stops (a wrong code must never reach a paper). A smaller m
 form can truly under-cover: a normal interval with three degrees of freedom covers about 0.86): it is recorded and
 reported, and so is a coverage above the level beyond its sampling error (intervals wider than they need be).
 
+**The multiplier of the standard error the interval uses (:func:`_judge_multiplier`).** The calibration above judges an
+interval by how often it covers, which a moderate miss in its form does not move beyond sampling error (a normal quantile
+where the plan fixed t with 3 degrees of freedom covers about 0.90, not below 0.80). When the plan also declares the
+interval's ``degrees_of_freedom`` (a whole number, or ``"normal"``: it says the interval is the estimate plus and minus
+one multiplier of its standard error), FI recovers the multiplier the code used from the trials' own records,
+``(upper - lower) / (2 * standard error)`` in each trial, and compares it with the plan's: the Student-t quantile of the
+level with those degrees of freedom, or the normal one. They must agree in every trial of a setting to within
+:data:`MULTIPLIER_TOLERANCE` (relative), plus what the rounding of the three values allows (a code that rounds what it returns
+is read from the values themselves: the unit they were rounded to, :func:`_grain`, never assumed). A setting whose trials do not share one multiplier is a miss too (the interval is not
+the estimate plus and minus a multiplier of the standard error the trial reports, as the declaration says). One missing
+setting is a fault, sent to repair with both numbers, and a stop if it stays; it needs no true value. Nothing is guessed: a
+plan that declares no ``degrees_of_freedom`` (the multiplier changes between settings, or the plan does not say) is not judged
+here, and a function-level check of the quantile function cannot see which argument its caller passes.
+
 Pure functions over FI's per-setting trial summary (``raw/trials.json`` cells, :func:`core.trial_runner._summary`); nothing
 here knows a field of science, and no name of a quantity is written into it.
 """
@@ -71,6 +85,16 @@ RATIO_HIGH = 1.5
 FAMILY_ALPHA = 0.05
 #: The fewest trials of a setting that are judged.
 MIN_TRIALS = 10
+#: The interval's multiplier of the standard error matches the plan's when every trial of a setting lies within this share of
+#: it, plus what the record's own rounding allows (:func:`_grain`). Chosen for a quantile typed with four significant digits
+#: (3.182 for 3.1824, off by 1.4e-4, is the plan's), and finer than any difference of multiplier that moves a 95% interval's
+#: coverage by a tenth of a point (t with 40 degrees of freedom against 41 differ by 4e-4, and both lie within it). The
+#: recovered multiplier of an unrounded record agrees to about 1e-12.
+MULTIPLIER_TOLERANCE = 1e-3
+#: A series of values is read as rounded to ``k`` decimals when every value is a multiple of ``10**-k`` to this share of it
+#: (float arithmetic leaves about 1e-16 of the value); with none of 0..:data:`GRAIN_MAX_DECIMALS` it is not rounded.
+GRAIN_MAX_DECIMALS = 10
+_GRAIN_EPS = 1e-12
 #: An estimate is grossly biased when the whole sampling band of (mean estimate - true value) / spread of the estimates lies
 #: beyond this many spreads (a bias of 1.1 spreads takes a right-width 95% interval down to about 0.80, the coverage line).
 BIAS_GROSS = 1.0
@@ -340,6 +364,10 @@ class Quantity:
     level: float | None = None
     truth: str = ""
     settings: list[SettingCheck] = field(default_factory=list)
+    #: ``multiplier``: the plan's multiplier of the standard error (its t or normal quantile) and the degrees of freedom the
+    #: plan declared (a whole number or ``"normal"``).
+    expected: float | None = None
+    df: int | str | None = None
     #: The same number over every setting together (at 95%): what catches a moderate miss present everywhere.
     pooled: SettingCheck | None = None
 
@@ -375,6 +403,19 @@ class Quantity:
             return (f"trials that ran but gave no number for `{self.label}`, the estimate of a declared true value: up to "
                     f"{max(vals):.0%} of a setting's trials, in {sum(1 for v in vals if v > 0)} setting(s); more than "
                     f"{FAULT_FRACTION:.0%} in {self.gross}")
+        if self.kind == "multiplier":
+            lows = [s.low for s in self.settings]
+            highs = [s.high for s in self.settings]
+            vals = [s.value for s in self.settings]
+            exp = self.expected or float("nan")
+            fixes = ("the normal quantile" if self.df == "normal" else f"t with {self.df} degrees of freedom")
+            fixes += f" at the {self.level:.0%} level" if self.level else ""
+            split = any(s.gross and s.high - s.low > 0.05 * exp for s in self.settings)
+            used = f"{min(vals):.4g} to {max(vals):.4g}" if vals else "no value"
+            if split:
+                used = f"no single multiplier in a setting (trials from {min(lows):.4g} to {max(highs):.4g})"
+            return (f"the multiplier of the standard error in the interval `{self.label}`: {used} over {self.judged} "
+                    f"setting(s); the plan fixes {exp:.4g} ({fixes}); not the plan's in {self.gross}")
         if self.kind == "missing":
             return (f"the trials do not return {', '.join(f'`{n}`' for n in self.names)}, which the plan declares for "
                     f"`{self.label}` (its estimate and its uncertainty), so FI could not measure them against the true "
@@ -406,6 +447,9 @@ class Quantity:
             return sorted(self.settings, key=lambda s: s.value)[:n]
         if self.kind in ("bias", "no_estimate"):
             return sorted(self.settings, key=lambda s: -abs(s.value))[:n]
+        if self.kind == "multiplier":
+            e = self.expected or 1.0
+            return sorted(self.settings, key=lambda s: -abs(s.value / e - 1.0))[:n]
         return sorted(self.settings, key=lambda s: -abs(math.log(max(s.value, 1e-300))))[:n]
 
 
@@ -463,6 +507,57 @@ def _z_family(k: int) -> float:
     """The critical value of each of ``k`` settings' intervals when, together, a right code shows a gross miss by sampling
     alone with chance :data:`FAMILY_ALPHA` at most."""
     return NormalDist().inv_cdf(1.0 - FAMILY_ALPHA / (2.0 * max(1, k)))
+
+
+def _judge_multiplier(q: "Quantity", per: list[tuple[str, list[tuple[float, float]]]]) -> None:
+    """Each setting's recovered multiplier of the standard error against the plan's (``q.expected``): ``value`` is the median
+    multiplier of the setting's trials, ``low`` / ``high`` the smallest and largest. A setting misses when any trial's multiplier
+    lies farther from the plan's than :data:`MULTIPLIER_TOLERANCE` plus that trial's own rounding allowance (so a half-width
+    that is not a multiplier of the trial's own standard error misses too). A setting with fewer than :data:`MIN_TRIALS` trials
+    is not judged."""
+    want = q.expected or 0.0
+    for key, pairs in per:
+        mults = [m for m, _a in pairs]
+        if len(mults) < MIN_TRIALS or want <= 0:
+            continue
+        off = max(abs(m / want - 1.0) - a for m, a in pairs)
+        ordered = sorted(mults)
+        mid = len(ordered) // 2
+        med = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+        lo, hi = ordered[0], ordered[-1]
+        q.settings.append(SettingCheck(key, len(ordered), med, lo, hi, gross=off > MULTIPLIER_TOLERANCE, below=False))
+
+
+def _grain(values: Iterable[float]) -> float:
+    """The unit a series of values was rounded to, read from the values themselves: ``10**-k`` for the smallest ``k`` from 0 to
+    :data:`GRAIN_MAX_DECIMALS` at which every value is a multiple of it, or 0.0 when none is (the values are not rounded)."""
+    vals = [v for v in values if math.isfinite(v)]
+    for k in range(GRAIN_MAX_DECIMALS + 1):
+        scale = 10.0 ** k
+        if all(abs(v * scale - round(v * scale)) <= 1e-9 + _GRAIN_EPS * abs(v * scale) for v in vals):
+            return 10.0 ** -k
+    return 0.0
+
+
+def _multipliers(cell: dict[str, Any], kv: dict[str, Any], want: float) -> list[tuple[float, float]]:
+    """``(multiplier, allowance)`` for each trial of one setting that reports the interval and a positive standard error: the
+    multiplier of the standard error in the interval, ``(upper - lower) / (2 * standard error)``, and the share of ``want`` (the
+    plan's multiplier) that the rounding of the three values it is read from can move it by: each series' own unit
+    (:func:`_grain`) is half an unit of error per value."""
+    lo, hi = kv["interval"]
+    se = _series(cell, kv["standard_error"])
+    low, high = _series(cell, lo), _series(cell, hi)
+    g_lo, g_hi, g_se = _grain(low.values()), _grain(high.values()), _grain(se.values())
+    out = []
+    for i in sorted(se):
+        # The standard error the code had may be as small as the value it returned less half its unit: that bounds the error
+        # of the multiplier. A value rounded down to the unit itself says too little to judge that trial.
+        smallest = se[i] - g_se / 2.0
+        if i in low and i in high and se[i] > 0 and smallest > 0:
+            q = (high[i] - low[i]) / (2.0 * se[i])
+            rounding = ((g_lo + g_hi) / 4.0 + abs(q) * g_se / 2.0) / smallest
+            out.append((q, rounding / want))
+    return out
 
 
 def _coverage_check(key: str, hits: list[float], level: float, z: float = _Z95) -> SettingCheck | None:
@@ -616,6 +711,19 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
     for spec in known:
         kv, ident = spec["known_value"], spec["id"]
         truth, level, est = kv["true_value"], kv["level"], kv["estimate"]
+        df = kv.get("degrees_of_freedom")
+        if df is not None and all(n in returned for n in [kv["standard_error"], *kv["interval"]]):
+            # Needs the standard error and the interval only, not the true value: judged even when that names nothing.
+            mult = Quantity("multiplier", " .. ".join(kv["interval"]), [*kv["interval"], kv["standard_error"]], level=level,
+                            expected=_stats.t_quantile(0.5 + level / 2.0, math.inf if df == "normal" else df), df=df)
+            _judge_multiplier(mult, [(str(c.get("key")), _multipliers(c, kv, mult.expected)) for c in cells
+                                     if not _undefined_here(spec.get("undefined_when") or {}, c)])
+            if mult.judged:
+                out.quantities.append(mult)
+            else:
+                out.not_checked.append(f"`{mult.label}` ({ident}): no setting had {MIN_TRIALS} or more trials with an "
+                                       "interval and a standard error, too few to judge the multiplier of the standard error "
+                                       "in the interval")
         if isinstance(truth, str) and truth not in thresholds and truth not in axes:
             out.not_checked.append(f"`{ident}`: its true value `{truth}` is neither a threshold nor a grid parameter of the "
                                    "plan")
@@ -757,12 +865,20 @@ def calibration_directive(faults: list[Quantity]) -> str:
                           + ([q.pooled] if q.pooled is not None and q.pooled.gross else []))
         lines.append(f"- {q.says()}." + (f" Worst settings: {worst}" if worst else
                                          " Return them from run_trial under exactly these names."))
-    return ("FI measured the intervals and standard errors the simulation reports against the true values it was given, "
-            "over the trials of each setting, and found them grossly wrong:\n" + "\n".join(lines)
-            + "\n\nA reported standard error must be about the spread of the estimate over repeated trials, and a 95% "
+    plan = any(q.kind == "multiplier" for q in faults)
+    head = ("FI measured the intervals and standard errors the simulation reports against the true values it was given, "
+            "over the trials of each setting, and found them " + ("wrong" if plan else "grossly wrong") + ":\n")
+    tail = ("A reported standard error must be about the spread of the estimate over repeated trials, and a 95% "
             "interval must cover the true value in about 95% of them. Find what makes them disagree in the code (a noise "
             "level or a weight that is fixed instead of computed from the trial's own data, a variance on the wrong scale, "
             "a wrong critical value) and fix it. Do not change the true values, the settings or the number of trials.")
+    if plan:
+        tail = ("The plan fixes the multiplier of the standard error that each `the multiplier of the standard error` line above "
+                "names; FI recovered the multiplier the code used from the interval and the standard error the trials return. "
+                "Make every place that forms that interval use the plan's multiplier (check the arguments each call passes, "
+                "such as the degrees of freedom, not only the function that computes the quantile), and return the interval "
+                "and the standard error under exactly these names. For any other quantity above: " + tail)
+    return head + "\n".join(lines) + "\n\n" + tail
 
 
 # ---- what FI does with them --------------------------------------------------------------------------------------------
@@ -833,7 +949,9 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
         if cal.faults:
             q = cal.faults[0]
             out.say = ("FI measured the intervals and standard errors the simulation reports against the true values it "
-                       f"was given, and they are grossly wrong ({q.says()})")
+                       f"was given, and they are grossly wrong ({q.says()})") if q.kind != "multiplier" else (
+                "FI recovered the multiplier of the standard error that the simulation's intervals use from the trials' own "
+                f"records, and it is not the one the plan fixes ({q.says()})")
             out.tried = ["ran every trial of the study and measured the reported intervals and standard errors against "
                          "the true values the simulation was given, per setting",
                          *[q.says() for q in cal.faults[:2]]]
@@ -885,6 +1003,8 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
         "calibration": None if cal is None else {
             "quantities": [{"kind": q.kind, "label": q.label, "names": q.names, "level": q.level, "truth": q.truth,
                             "judged": q.judged, "gross": q.gross, "below": q.below, "above": q.above, "fault": q.fault,
+                            **({"expected": round(q.expected, 6), "degrees_of_freedom": q.df}
+                               if q.kind == "multiplier" and q.expected is not None else {}),
                             "says": q.says(),
                             "settings": [{"key": s.key, "n": s.n, "value": round(s.value, 6), "low": round(s.low, 6),
                                           "high": round(s.high, 6), "gross": s.gross} for s in q.settings],

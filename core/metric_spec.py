@@ -144,7 +144,9 @@ KNOWN_VALUE_HELP = (
     "`known_value` holds `true_value` (a number, or the name of a threshold or of a grid parameter that holds it, on the "
     "estimate's own scale), `estimate` (the name run_trial returns for the estimate), `standard_error` (the name it returns "
     "for its standard error) and/or `interval` ([the name of the lower end, the name of the upper end]), and `level` (the "
-    "interval's level, for example 0.95)")
+    "interval's level, for example 0.95), and, when the interval is the estimate plus and minus one multiple of its "
+    "standard error in every setting, `degrees_of_freedom` (the whole number of the t distribution whose quantile is the "
+    "multiple, or \"normal\" for the normal quantile; leave it out when the multiple changes between settings)")
 
 
 def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
@@ -179,6 +181,15 @@ def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
     if isinstance(level, bool) or not isinstance(level, (int, float)) or not 0.5 < float(level) < 1.0:
         return None, where + "`known_value.level` must be the interval's level, a number between 0.5 and 1 (for example 0.95)"
     out["level"] = float(level)
+    if raw.get("degrees_of_freedom") is not None:
+        df = raw["degrees_of_freedom"]
+        if not (df == "normal" or isinstance(df, int) and not isinstance(df, bool) and df >= 1):
+            return None, (where + "`known_value.degrees_of_freedom` must be a whole number from 1 (the t distribution the "
+                          "interval's multiple comes from) or \"normal\"")
+        if "standard_error" not in out or "interval" not in out:
+            return None, (where + "`known_value.degrees_of_freedom` says the interval is the estimate plus and minus a "
+                          "multiple of the standard error, so it needs both `standard_error` and `interval`")
+        out["degrees_of_freedom"] = df
     return out, ""
 
 
