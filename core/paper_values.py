@@ -668,6 +668,16 @@ def _plural(k: int, unit: str) -> str:
     return "at that setting" if k == 1 else f"at all {k} {unit}"
 
 
+def _versus_instead(rec: Records, key: Key, why: str) -> str:
+    """What the writer can do when ``| vs ref`` has no reference to judge by: the plan gave none for this value, so there is
+    no key that compares it (no other value is offered: whether a value is the one to compare with is the plan's to say, not
+    a guess from the record), and the comparison is left out of the paper or said in words with no number."""
+    if key.operand != "ref" or "gives no reference" not in why:
+        return ""
+    return (f". FI has no reference value for {key.metric} to compare it with, so no key can make this comparison: leave it "
+            "out of the paper, or say it in words with no number")
+
+
 def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
     """The words for ``| vs <reference>``: FI judges the measured value against the reference at each setting kept apart by
     =each, by that setting's own 95% interval (above: the whole interval over the reference; below: under it; otherwise the
@@ -699,7 +709,7 @@ def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
                     raise _Unfilled(f"{key.operand_metric} is measured, not set by the setting, so it has no single value to "
                                     f"compare with")
         except _Unfilled as why:
-            raise _Unfilled(f"not computable at {here}: {why}") from None
+            raise _Unfilled(f"not computable at {here}: {why}" + _versus_instead(rec, key, str(why))) from None
         assert got.lower is not None and got.upper is not None
         verdicts.append("above" if got.lower > ref else "below" if got.upper < ref else "within")
         if ref != 0:

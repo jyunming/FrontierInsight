@@ -397,6 +397,13 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
         ident = str(m["id"]).strip()
         raw = m.get("reference")
         name = value_name(m)
+        if trial_names is not None and name not in trial_names and raw is not None and ident in trial_names:
+            # The plan names the value its reference is for by a name the trials never return (a "<id>_ref" it made up),
+            # but the trials do return the metric itself: the reference is for that, as `value` defaults to the id. A
+            # reference for a value no trial returns stays "no reference".
+            name = ident
+            if isinstance(raw, dict):
+                raw = {**raw, "value": ident}
         if trial_names is not None and name not in trial_names:
             missing: dict[str, Any] = {"metric": ident, "value": None, "status": "no reference",
                                        "why": f"the trials return no value named {name!r}"}
