@@ -642,7 +642,7 @@ CONTRASTS = ("versus", "vs.", "compared with", "but", "while", "against", "risin
 
 
 @pytest.mark.parametrize("join", CONTRASTS + ("and then",))
-def test_a_contrast_word_ends_the_clause_of_a_setting(monkeypatch: pytest.MonkeyPatch, join: str) -> None:
+def test_a_setting_across_a_contrast_word_loses_to_one_on_the_number_s_side(monkeypatch: pytest.MonkeyPatch, join: str) -> None:
     """Uncorrected FDR at pi1 = 0.2: m = 20 is 0.177, m = 200 is 0.198. Swapped, each number is named beside the other
     setting and flagged; in order, each is accounted for."""
     swapped = f"At π1 = 0.2 the uncorrected FDR was 0.198 at m = 20 {join} 0.177 at m = 200."
