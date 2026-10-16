@@ -2584,7 +2584,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         )
         # evidence_gate → write (sufficient / insufficient-but-write) OR
         # back to literature for ONE bounded broaden pass.
-        after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings"}
+        after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings",
+                      "repair_crash": "execute"}
         if _phased.enabled(self.config):
             # Explore, then confirm (core/phased.py): when exploration ends, the frozen design runs once more; a quest
             # that analyses data reads the held-back rows once more with it.
@@ -2916,8 +2917,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         Fails open to ``write`` when the gate was a passthrough. Under ``engine.phased`` a write at the end of
         exploration goes to the confirm run first (``_phased_route``)."""
         route = (state.get("evidence_assessment") or {}).get("route", "write")
-        if route == "stuck":
-            return route  # no findings to write up: the quest stops here, in every mode
+        if route in ("stuck", "repair_crash"):
+            return route  # no findings to write up, or a crash to repair first: the same in every mode
         if _phased.enabled(self.config):
             return self._phased_route(state, route)
         return route
@@ -18506,11 +18507,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # script gets its own repairs); after that the verdict stays insufficient and the writer is told why.
         redesign = bool(parsed.get("redesign")) and status == "ok"
         no_findings = bool(parsed.get("stuck")) and status == "ok"
+        # A shown fault's test crashed inside the program: back to the run step's crash repair (RunChecksMixin._gate_crash_repair).
+        crash_repair = bool(parsed.get("repair_crash")) and status == "ok" and not no_findings
         assessment = {
             "verdict": verdict,
             "status": status,
             "failure": failure,
-            "route": "stuck" if no_findings else "redesign" if redesign else "broaden_lit" if will_broaden else "write",
+            "route": ("stuck" if no_findings else "repair_crash" if crash_repair else "redesign" if redesign
+                      else "broaden_lit" if will_broaden else "write"),
             "rationale": str(parsed.get("rationale") or ""),
             "gaps": [str(g) for g in (parsed.get("gaps") or []) if str(g).strip()],
             "n_sources": n_sources,
@@ -18529,8 +18533,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "evidence_gate", "pass" if status == "ok" and verdict == "sufficient" else "fail" if status == "ok" else "unknown",
             started_at=started, inputs=_gate_inputs(state),
             output=assessment, error=failure,
-            detail=f"it judged the evidence {verdict} and the paper was written on it (gaps: "
-                   f"{'; '.join(assessment['gaps']) or 'none named'})" if status == "ok" and verdict != "sufficient" else "",
+            detail=(f"the code went back to the crash repair: {assessment['rationale']}" if crash_repair else
+                    f"it judged the evidence {verdict} and the paper was written on it (gaps: "
+                    f"{'; '.join(assessment['gaps']) or 'none named'})" if status == "ok" and verdict != "sufficient" else ""),
         )
         if status == "unknown":
             self._stop_once_for_check(
@@ -18839,6 +18844,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                  state: Any = None) -> dict[str, Any] | None:
         verdicts: list[tuple[dict[str, Any], str]] = []
         errored = False
+        crash_repair: dict[str, Any] | None = None
         for issue in shown:
             rel = str(issue.get("test") or "")
             if not (rel and (self.quest_root / rel).is_file()):
@@ -18872,6 +18878,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                         continue
                     if again is not None and again.status == "pass":
                         continue
+                if run.crash_in_program and record and isinstance(saved, dict) and crash_repair is None:
+                    # a crash inside the program goes to the same crash repair as before the run, while it has repairs left
+                    crash_repair = self._gate_crash_repair(saved, run, rel, record, state)
                 if isinstance(saved, dict):
                     saved["gate_error"] = {"kind": run.kind, "place": run.place, "at": run.at,
                                            "detail": _one_line(run.detail or "", 300)}
@@ -18881,6 +18890,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                   ", inside the code" if run.crash_in_program else "")
         if errored and record:
             _code_review.save(self.quest_root, record)
+        if crash_repair is not None:
+            # a fault that stops the quest is not held up by a crash elsewhere; anything else waits for the repaired run
+            outcome = self._shown_fault_outcome(verdicts, record or {}, result, headline or []) if verdicts else None
+            return outcome if outcome and outcome.get("stuck") else crash_repair
         if not verdicts:
             return None
         return self._shown_fault_outcome(verdicts, record or {}, result, headline or [])

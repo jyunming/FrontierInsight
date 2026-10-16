@@ -968,6 +968,25 @@ class RunChecksMixin:
             return self._code_review_failed_run(message, script=script)  # type: ignore[attr-defined]
         return None
 
+    def _gate_crash_repair(self, issue: dict[str, Any], run: Any, rel: str, record: dict[str, Any],
+                           state: Any = None) -> dict[str, Any] | None:
+        """At the evidence gate, a shown fault's test crashed inside the program: the crash is recorded on the issue (unsent)
+        and, while the budget of the crash repair before the run is left (:data:`REVIEW_CRASHES` a quest, and the run's own
+        repairs), the gate's verdict sends the quest back to the run step (``repair_crash``), where
+        :meth:`_review_crash_run` gives it to the repair of a failed run. ``None`` when the budget is spent: it is only
+        recorded, and nothing stops."""
+        issue["crash"] = {"at": run.at, "detail": str(run.detail or "")[:300], "test": rel, "at_gate": True}
+        left = int(record.get("crashes_sent") or 0) < REVIEW_CRASHES and (
+            int((state or {}).get("exec_reflect_iter") or 0) < self.config.engine.exec_reflect_max_iterations)  # type: ignore[attr-defined]
+        if not left:
+            issue["crash"]["sent"] = True
+            issue["crash"]["not_sent"] = "the repairs of a crash are spent"
+            return None
+        why = (f"the test of {issue.get('id')} crashed inside the code at {run.at or 'an unknown line'} on the code that "
+               f"ran ({_one(str(run.detail or ''), 160)}): a crash, not a shown fault; the code goes back to the crash repair")
+        self._log.warning("[evidence_gate] %s", why)  # type: ignore[attr-defined]
+        return {"verdict": "insufficient", "rationale": why, "gaps": [why], "repair_crash": True}
+
     async def _ask_finding_test_again(self, issue: dict[str, Any], error: Any, record: dict[str, Any],
                                       state: Any = None) -> Any:
         """At the evidence gate, a shown issue's test errors in its own code: the code model is asked once more for it,

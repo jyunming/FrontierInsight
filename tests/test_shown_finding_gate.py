@@ -158,9 +158,10 @@ async def test_an_exception_turned_into_an_assertion_shows_nothing_and_a_crash_i
     assert error["kind"] == "wrapped" and error["place"] == "test"
     (engine.quest_root / "code" / "experiment.py").write_text(CRASHES, encoding="utf-8")
     _record(engine, _issue(), test="import experiment\n\n\ndef test_x():\n    assert experiment.dose() != 60.0\n")
-    assert await engine._shown_fault_verdict(STATE) is None
-    error = code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]
-    assert error["kind"] == "exception" and error["place"] == "program" and error["at"] == "code/experiment.py:2"
+    # a crash inside the program goes to the crash repair (tests/test_gate_crash_repair.py), never a shown fault
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and verdict.get("repair_crash") is True and not verdict.get("stuck")
+    assert code_review.load(engine.quest_root)["issues"]["F-1"]["crash"]["at"] == "code/experiment.py:2"
 
 
 @pytest.mark.asyncio
