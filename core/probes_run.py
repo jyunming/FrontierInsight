@@ -12,7 +12,7 @@ the same seeds in every cell (paired), and reads the numbers itself. The harness
 * **Confirmation.** A ``broken`` relation is run once more with fresh seeds and a different size of the change (for the
   kinds that have one); only when both runs disagree with the plan is it ``broken``. Otherwise it is ``unconfirmed``.
 * **Saturation.** The generic test (:func:`core.probes.saturation`) on the numbers the cells returned; the quantities the
-  plan expects to stay put, a setting echoed back, and a constant the code marks ``# constant by design`` are left out.
+  plan expects to stay put and a setting echoed back are left out.
 * **Record.** ``.fi/probes.json`` = ``{plan_sha, asked, relations, dropped, results: {code_sha: {rid: {verdict, numbers,
   says, strength}}}, repairs}`` and a plain ``needs/PROBES.json`` summary. Results are keyed by the hash of ``code/``
   (:func:`core.gate_receipt.fingerprint`): a result for the same code is reused, nothing is run again (resume).
@@ -321,38 +321,14 @@ def _alt_plan(rel: _probes.Relation, grid: dict[str, list[Any]], seeds: int, det
     return _probes.plan_runs([rel], g, seeds, deterministic)
 
 
-def _files(root: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    code = Path(root) / "code"
-    for p in sorted(code.rglob("*.py")) if code.is_dir() else []:
-        if any(part in ("__pycache__", ".git", "tests") for part in p.relative_to(code).parts):
-            continue
-        try:
-            out[p.relative_to(code).as_posix()] = p.read_text(encoding="utf-8")
-        except (OSError, ValueError):
-            pass
-    return out
-
-
-def exempt_for_saturation(quest_root: Path, protocol: dict[str, Any] | None, grid: dict[str, list[Any]],
-                          names: list[str]) -> set[str]:
-    """Names saturation leaves out: what the plan expects to stay put, a setting echoed back, and a quantity the code marks
-    ``# constant by design: <reason>`` on a constant that it uses."""
-    from . import degenerate_results as _dr
+def exempt_for_saturation(protocol: dict[str, Any] | None, grid: dict[str, list[Any]], names: list[str]) -> set[str]:
+    """Names saturation leaves out: what the plan expects to stay put, and a setting echoed back."""
     from . import reported_settings as _rs
 
     out = set(_probes.exempt_names(protocol))
     for n in names:
         if any(_rs.names_setting(n, k) or _rs.names_setting(k, n) for k in grid):
             out.add(n)
-    try:
-        files = _files(quest_root)
-        marks = _dr.design_marks(files)
-        for n in names:
-            if any(_dr._uses(files, m, n) for m in marks):
-                out.add(n)
-    except Exception:  # noqa: BLE001 -- a mark that cannot be read leaves the name in
-        pass
     return out
 
 
@@ -388,7 +364,7 @@ def saturation_of(cells: list[dict[str, Any]], quest_root: Path, protocol: dict[
         names = [n for n in names if any(n == k or _rs.names_setting(n, k) or _rs.names_setting(k, n) for k in reported)]
         cells = [{**c, "metrics": {k: v for k, v in (c.get("metrics") or {}).items() if k in names}} for c in cells]
     # every name judged here is a reported quantity, so none may be excused as a diagnostic
-    return _probes.saturation(cells, exempt_for_saturation(quest_root, protocol, grid, names) | set(hold or ()),
+    return _probes.saturation(cells, exempt_for_saturation(protocol, grid, names) | set(hold or ()),
                               headline=set(names) if reported is not None else ())
 
 

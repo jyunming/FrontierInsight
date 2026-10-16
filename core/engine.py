@@ -11837,8 +11837,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return None
         design = state.get("design") if isinstance(state.get("design"), dict) else {}
         protocol = self._protocol_block(state)
-        reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None,
-                                        marks=_code_review.constant_marks(code))
+        reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None)
         if not reqs:
             return None
         review_node = self._review_node("code_review")
@@ -11846,8 +11845,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if _round:
                 # A plan the plan's model rewrote to resolve a contradiction is the plan the next reading is made against.
                 protocol = self._protocol_block(state)
-                reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None,
-                                                marks=_code_review.constant_marks(code)) or reqs
+                reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None) or reqs
             version = _code_review.version(code)
             record = _code_review.load(self.quest_root)
             if record.get("read_version") == version and record.get("version") == version:
