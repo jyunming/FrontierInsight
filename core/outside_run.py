@@ -219,11 +219,12 @@ class OutsideExecutor:
     on the command line and in the environment are written as the copy's."""
 
     def __init__(self, inner: Any, quest_root: Path | str, *, base: Path | str | None = None,
-                 outputs: tuple[str, ...] = OUTPUT_DIRS) -> None:
+                 outputs: tuple[str, ...] = OUTPUT_DIRS, log: Any = None) -> None:
         self.inner = inner
         self.quest_root = Path(quest_root).resolve()
         self._base = base
         self._outputs = outputs
+        self._log = log
         self.last: OutsideCopy | None = None
 
     def __getattr__(self, name: str) -> Any:
@@ -250,6 +251,12 @@ class OutsideExecutor:
             run_env = {k: self._map(v, root) for k, v in env.items()} if env is not None else None
             result = await self.inner.execute(argv, cwd=root, timeout_s=timeout_s, env=run_env)
             await asyncio.to_thread(box.bring_back)
+            dropped = [r for r in box.left_out if not r.endswith(".pyc") and "/__pycache__/" not in f"/{r}"]
+            if dropped and self._log is not None:
+                self._log.warning("[run] the code ran from a copy outside the quest folder and wrote %s there, outside "
+                                  "the folders FI keeps (%s); not kept", ", ".join(dropped[:6])
+                                  + (f" and {len(dropped) - 6} more" if len(dropped) > 6 else ""),
+                                  ", ".join(f"{d}/" for d in self._outputs))
             if dataclasses.is_dataclass(result):
                 return dataclasses.replace(result, stdout=box.to_quest(result.stdout or ""),
                                            stderr=box.to_quest(result.stderr or ""))

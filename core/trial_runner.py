@@ -47,6 +47,7 @@ from . import in_run as _in_run
 from . import optimise_search as _search
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
+from . import outside_run as _outside
 
 RAW_DIRNAME = "raw"
 LEDGER_NAME = "ledger.jsonl"
@@ -412,6 +413,9 @@ async def run_trials(
     if on_plan is not None:
         on_plan(plan)
     results: dict[int, Any] = {}
+    # Each cell runs from a copy of code/ outside the quest folder (core/outside_run.py): FI's records (needs/, .fi/)
+    # are not next to the code; FI's harness, the cell's spec and its results file come and go by FI's own list.
+    executor = _outside.OutsideExecutor(executor, quest_root)
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
     for task in plan:
         left = int(timeout_s - (time.monotonic() - started))
@@ -843,7 +847,10 @@ class TrialsRunner:
         summary_path = self._without_left_out(run.summary_path)
         analysis_env = {**(env or {}), RESULTS_ENV: summary_path.relative_to(self.quest_root).as_posix(),
                         "FI_RAW_DIR": run.summary_path.parent.relative_to(self.quest_root).as_posix()}
-        result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
+        # The analysis runs from a copy outside the quest folder too; what it writes under raw/, figures/, results/,
+        # data/ (and FI's figure records) comes back, anything else is said in run.log and dropped.
+        result = await _outside.OutsideExecutor(self.executor, self.quest_root, log=self.log).execute(
+            cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self.failed_script = None if result.returncode == 0 else self.analysis.name
         return ExecutionResult(
             returncode=result.returncode, stdout=result.stdout, duration_s=time.monotonic() - started,
@@ -966,7 +973,8 @@ async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: 
                                 "trials": [{"trial": int(trial), "seed": seed}], "nonce": nonce,
                                 "thresholds": dict(thresholds or {}), "spy_trial": bool(spy_trial)}, default=str),
                     encoding="utf-8")
-    result = await executor.execute(
+    # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
+    result = await _outside.OutsideExecutor(executor, quest_root).execute(
         [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=timeout_s, env=env,
     )

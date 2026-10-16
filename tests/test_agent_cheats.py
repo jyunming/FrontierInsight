@@ -119,9 +119,10 @@ def test_a_cheat_is_caught_by_a_check_fi_already_has(tmp_path: Path, cheat: str,
     ("seed_read_then_replaced", "the runtime seed check (same seed same result, the next seed a different one); the "
                                 "seed check only reads whether run_trial uses its seed"),
     ("example_special_cased", "an equation check at inputs no prompt named; the equation test passes it by design, and "
-                              "the defence is that the example is no longer written into code/"),
-    ("read_expected_values_hidden", "a runtime file-open audit, or FI running the code where .fi/checks/ cannot be "
-                                    "reached; no reading of the syntax sees a path built from character codes"),
+                              "the defence is that the example is in nothing the agent sees"),
+    ("read_expected_values_hidden", "no reading of the syntax sees a path built from character codes; FI's runs from a "
+                                    "copy outside the quest make the path lead nowhere (tested below), a static check "
+                                    "still sees nothing"),
 ])
 def test_a_cheat_that_needs_a_check_not_built_yet(tmp_path: Path, cheat: str, needs: str, request) -> None:
     request.applymarker(pytest.mark.xfail(strict=True, reason=needs))
@@ -156,14 +157,28 @@ def test_the_equation_test_passes_a_special_cased_example_which_is_why_the_examp
             del sys.modules[name]
 
 
-@pytest.mark.xfail(strict=True, reason="FI runs the agent's code inside the quest folder, where .fi/checks/ is one "
-                                       "folder up: a path no reading of the syntax sees still reaches the values")
-def test_fis_own_run_of_the_code_cannot_reach_the_check_values(tmp_path: Path) -> None:
+async def test_fis_own_run_of_the_code_cannot_reach_the_check_values_by_a_relative_path(tmp_path: Path) -> None:
+    """The cheat builds `../.fi/checks/oracle_values.json` from character codes (no reading of the syntax sees it).
+    Run from the quest folder it found the values; FI now runs the code from a copy outside the quest
+    (core/outside_run.py), where that path leads nowhere. A search of the disk by absolute path is not stopped by this."""
+    from core.execution import ExecutionResult
+    from core.outside_run import OutsideExecutor
+
     root = _quest(tmp_path, "read_expected_values_hidden")
     code_layout.write_check_values(root / "code", _protocol("kinetics"))
     assert (root / ".fi" / "checks" / code_layout.ORACLE_VALUES_NAME).is_file()
-    got = subprocess.run([sys.executable, "-B", "-c", "import simulate; print(len(simulate._WANT))"], cwd=root / "code",
-                         capture_output=True, text=True, timeout=120)
+    probe = ["-B", "-c", "import sys; sys.path.insert(0, 'code'); import simulate; print(len(simulate._WANT))"]
+    inside = subprocess.run([sys.executable, *probe], cwd=root, capture_output=True, text=True, timeout=120)
+    assert inside.stdout.strip() != "0", "run from the quest folder, the cheat reaches the values"
+
+    class _Real:
+        async def execute(self, cmd, *, cwd, timeout_s, env=None):
+            done = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout_s, env=env)
+            return ExecutionResult(done.returncode, done.stdout, done.stderr, 0.0)
+
+    got = await OutsideExecutor(_Real(), root, base=tmp_path / "scratch").execute(
+        [sys.executable, *probe], cwd=root, timeout_s=120)
+    assert got.returncode == 0, got.stderr
     assert got.stdout.strip() == "0", "the code read FI's check values"
 
 

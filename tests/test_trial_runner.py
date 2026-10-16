@@ -447,3 +447,36 @@ def test_the_standalone_run_script_has_the_same_ceiling() -> None:
     from core import code_project, optimise_search
 
     assert f"MAX_SETTINGS = {optimise_search.MAX_LISTED_SETTINGS}" in code_project.RUN_SOURCE
+
+
+SNOOP = '''
+import os
+from pathlib import Path
+
+def run_trial(cell, trial_id, seed):
+    here = Path.cwd()
+    out = Path(os.environ.get("FI_RAW_DIR", "raw"))
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"trial{trial_id}.txt").write_text("raw output", encoding="utf-8")
+    (here / "needs").mkdir(exist_ok=True)
+    (here / "needs" / "forged.json").write_text("{}", encoding="utf-8")
+    return {"sees_protocol": float((here / "needs" / "FROZEN_PROTOCOL.json").is_file()),
+            "sees_fi": float((here / ".fi" / "checks").is_dir())}
+'''
+
+
+def test_each_cell_runs_from_a_copy_outside_the_quest_and_its_outputs_come_back(tmp_path: Path) -> None:
+    """review P0-2: FI ran the code with the quest folder as its working directory, so `needs/FROZEN_PROTOCOL.json`
+    was one relative path away. Now a cell runs from a copy of code/ outside the quest: FI's records are not there,
+    what the trial writes under raw/ comes back, and a file it writes anywhere else (a forged needs/) does not."""
+    root = tmp_path / "quest"
+    (root / "needs").mkdir(parents=True)
+    (root / "needs" / "FROZEN_PROTOCOL.json").write_text('{"oracles": []}', encoding="utf-8")
+    (root / ".fi" / "checks").mkdir(parents=True)
+    root2, run = _run(tmp_path, SNOOP, {"k": [1.0]}, runs=2)
+    assert root2 == root and run.ok_trials == 2
+    rows = [r for c in run.cells for r in c.rows if r.get("status") == "ok"]
+    assert len(rows) == 2 and all(r["values"]["sees_protocol"] == 0.0 and r["values"]["sees_fi"] == 0.0
+                                  for r in rows), rows
+    assert (root / "raw" / "trial0.txt").is_file() and (root / "raw" / "trial1.txt").is_file()
+    assert not (root / "needs" / "forged.json").exists()
