@@ -64,8 +64,12 @@ _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_
 NOT_DONE, LEFT_OUT, NOT_COMPUTED, PRECISION = "not_done", "left_out", "not_computed", "precision"
 SECOND_VERSION, UNTESTED, CODE_FINDING, FAILED_TRIALS = "second_version", "untested", "code_finding", "failed_trials"
 FEWER_RUNS = "fewer_runs"
-#: The name of the item the paper must place when FI ran fewer runs per setting than the plan's minimum.
-FEWER_RUNS_NAME = "fewer runs than the plan's minimum"
+RUN_DIFFERENCE = "run_difference"
+#: The name of the item the paper must place when what the analysis reports differs from FI's record of the run and the
+#: quest went on (``engine.run_manifest_check: warn``).
+RUN_DIFFERENCE_NAME = "difference from the run record"
+#: The name of the item the paper must place when FI ran fewer runs per setting than the plan asked for (to fit a time limit).
+FEWER_RUNS_NAME = "fewer runs than the plan asked for"
 _KIND_WORDS = {
     NOT_DONE: "a part of the topic the study did not do",
     LEFT_OUT: "a quantity left out of the results because a test showed the code computes it wrongly",
@@ -75,11 +79,12 @@ _KIND_WORDS = {
     UNTESTED: "an equation not tested against a worked example before the run",
     CODE_FINDING: "an open problem in the code that can change a reported result",
     FAILED_TRIALS: "trials that failed",
-    FEWER_RUNS: "a part of the plan not fully done, to fit the topic's time limit",
+    FEWER_RUNS: "a part of the plan not fully done, to fit the time allowed",
+    RUN_DIFFERENCE: "a difference between what the analysis reports and FI's record of the trials that ran",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
-              FEWER_RUNS: "fewer"}
+              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference"}
 
 
 @dataclass(frozen=True)
@@ -289,12 +294,72 @@ def required_items(quest_root: Path | str) -> list[Item]:
                                                           "not in the reported numbers"), key="all")
     estimate = _read(root, ".fi/run_estimate.json")
     reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
-    if isinstance(reduced, dict) and reduced.get("below_plan_minimum"):
-        to = reduced.get("to") if isinstance(reduced.get("to"), dict) else {}
-        add(FEWER_RUNS, FEWER_RUNS_NAME,
-            _sentence(f"The experiment ran {to.get('runs_per_setting', '?')} runs per setting against the plan's minimum of "
-                      f"{reduced.get('plan_minimum', '?')}, so that the run fits the topic's time limit"), key="runs")
+    if isinstance(reduced, dict) and (said := fewer_runs_text(reduced)):
+        add(FEWER_RUNS, FEWER_RUNS_NAME, _sentence(f"The experiment ran {said}"), key="runs")
+    manifest = _read(root, "needs/RUN_MANIFEST_CHECK.json")
+    if isinstance(manifest, dict) and manifest.get("status") in ("warned", "differs_in_replicates"):
+        add(RUN_DIFFERENCE, RUN_DIFFERENCE_NAME, _sentence(run_difference_text(manifest)), key="record")
     return items
+
+
+def run_difference_text(record: dict[str, Any]) -> str:
+    """The sentence FI puts in the Limitations for a difference it recorded and went on with
+    (``needs/RUN_MANIFEST_CHECK.json``): the plain sentence FI made of it, or its first finding, and that the numbers rest
+    on it."""
+    headline = str(record.get("headline") or "").strip()
+    problems = [str(p) for p in record.get("problems") or [] if str(p).strip()]
+    seeds = record.get("seeds") if isinstance(record.get("seeds"), dict) else {}
+    if not headline and problems:
+        headline = problems[0][:300] + ("..." if len(problems[0]) > 300 else "")
+        if len(problems) > 1:
+            headline += f" (and {len(problems) - 1} more)"
+    if not headline and seeds:
+        seed, found = next(iter(seeds.items()))
+        first = str(found[0]) if isinstance(found, list) and found else "it differs"
+        headline = f"the run with seed {seed} differs from the plan: {first[:300]}"
+    return ("FI's record of the trials that ran does not match what the analysis reports: "
+            + (headline.rstrip(".") or "the difference is in the quality report")
+            + ". The numbers reported here rest on that analysis")
+
+
+def _runs(part: Any) -> int | None:
+    n = part.get("runs_per_setting") if isinstance(part, dict) else None
+    return int(n) if isinstance(n, (int, float)) and not isinstance(n, bool) else None
+
+
+def fewer_runs_text(reduced: dict[str, Any]) -> str:
+    """What the paper must say of a run FI made smaller (``.fi/run_estimate.json`` ``reduced``): the runs per setting it
+    ran against the plan's, why, whether that is below the plan's own minimum, and the 95% interval those runs give (or
+    that it was not known before the run). ``""`` when the record shows no fewer runs."""
+    ran, asked = _runs(reduced.get("to")), _runs(reduced.get("from"))
+    if ran is None or asked is None or ran >= asked:
+        return ""
+    if reduced.get("over_topic_limit"):
+        why = "the plan's minimum, the fewest it allows; the run is still over the topic's time limit"
+    elif reduced.get("limit") == "topic":
+        why = "so that the run fits the topic's time limit"
+    else:
+        why = "so that the run fits FI's time limit for one run"
+    said = f"{ran} runs per setting instead of the {asked} the plan asked for ({why})"
+    if reduced.get("below_plan_minimum") and isinstance(reduced.get("plan_minimum"), (int, float)):
+        said += f", below the plan's minimum of {int(reduced['plan_minimum'])}"
+    elif reduced.get("limit") == "topic" and reduced.get("plan_minimum") is None and not reduced.get("over_topic_limit"):
+        said += "; the plan states no fewest number of runs"
+    precision = reduced.get("precision")
+    if isinstance(precision, dict) and isinstance(precision.get("half_width"), (int, float)):
+        said += (f"; with {ran} runs per setting the 95% interval of {precision.get('metric') or 'the result'} is about "
+                 f"±{float(precision['half_width']):g}"
+                 + (f" against the plan's target of ±{float(precision['target']):g}"
+                    if isinstance(precision.get("target"), (int, float)) else ""))
+    else:
+        said += "; the 95% interval those runs give was not known before the run"
+    return said
+
+
+def missing_items(paper_md: str, items: list[Item]) -> list[Item]:
+    """The items whose short name does not appear in the paper (case, spacing, underscores and backticks ignored)."""
+    text = _norm(_disclosure.without_block(paper_md))
+    return [i for i in items if _norm(i.name) not in text]
 
 
 # ---- the run time ---------------------------------------------------------------------------------------------------

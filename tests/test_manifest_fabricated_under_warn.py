@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from core import paper_facts
 from core import run_manifest as rm
 from core import trial_runner as tr
 from core.engine import Engine
@@ -19,6 +20,14 @@ ANALYSIS_MADE_UP = ANALYSIS_TRIAL.replace(
     '    out[c["key"]] = {"final_size_values": m["values"], "final_size_count": m["count"]}',
     '    vals = m["values"][:-1] + [0.33] if c["key"] == "R0=0.9" else m["values"]\n'
     '    out[c["key"]] = {"final_size_values": vals, "final_size_count": m["count"]}',
+)
+
+# Five trials of one setting left out of its list, the count lowered to match: a count FI could not reconcile, not a number
+# that was made up.
+ANALYSIS_SHORT = ANALYSIS_TRIAL.replace(
+    '    out[c["key"]] = {"final_size_values": m["values"], "final_size_count": m["count"]}',
+    '    vals = m["values"][:-5] if c["key"] == "R0=0.9" else m["values"]\n'
+    '    out[c["key"]] = {"final_size_values": vals, "final_size_count": len(vals)}',
 )
 
 
@@ -70,3 +79,16 @@ async def test_a_value_no_trial_produced_that_the_repair_removes_goes_on(tmp_pat
     artifacts = await engine.run()
     assert calls.count("ExecuteReflect") == 1 and artifacts.paper_md is not None
     assert _record(engine)["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_difference_gone_on_with_under_warn_is_an_item_the_paper_must_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    _model(monkeypatch, ANALYSIS_SHORT, [ANALYSIS_SHORT], calls)
+    engine = Engine(_cfg(tmp_path, engine={"run_manifest_check": "warn"}))
+    await engine.run()
+    record = _record(engine)
+    assert record["status"] == "warned" and calls.count("ExecuteReflect") == 0, "recorded, not sent back"
+    assert "leaves out trials of one setting" in record["headline"] and "R0=0.9" in record["headline"]
+    items = [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.RUN_DIFFERENCE]
+    assert [i.name for i in items] == [paper_facts.RUN_DIFFERENCE_NAME] and record["headline"] in items[0].text

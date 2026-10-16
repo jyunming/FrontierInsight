@@ -2858,9 +2858,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return "write"
 
     def _precision_shortfalls(self, state: QuestState) -> list[dict[str, Any]]:
-        """The pooled probabilities whose interval is wider than the plan's precision target in this run (the record
-        ``_annotate_precision`` writes), each ``{"name", "half_width", "target", "trials"}``; empty when the plan sets
-        none, the run has no repeats, or all were reached. A mean carries no such record and is never listed."""
+        """The pooled quantities (a probability from its counts, a mean from the values the run lists) whose interval is
+        wider than the plan's precision target in this run (the record ``_annotate_precision`` writes), each ``{"name",
+        "half_width", "target", "trials"}``; empty when the plan sets none, the run has no repeats, or all were reached.
+        A mean the run gives without its values has no interval from the trials and is not listed."""
         try:
             replicates = state.get("result_json_replicates") or []
             if not (len(replicates) > 1 or (replicates and state.get("result_json_trials"))):
@@ -2869,7 +2870,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 replicates, assertions=_replicate_assertions(state), kinds=_replicate_metric_kinds(state))
             self._annotate_precision(state, aggregate)
             return [{"name": k, "half_width": float(v["ci_half_width"]), "target": float(v["target_half_width"]),
-                     "trials": v.get("n_trials")}
+                     "trials": v.get("n_trials") if v.get("n_trials") is not None else v.get("n_values")}
                     for k, v in aggregate.items() if isinstance(v, dict) and v.get("precision_reached") is False]
         except Exception as e:  # noqa: BLE001 -- a record that cannot be read never sends a quest back
             self._log.warning("[precision] the precision record could not be read (%r)", e)
@@ -12012,7 +12013,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                  else "If the topic asks for a shorter run")
         return (f"This is the limit FI enforces on one run. {asked}: plan to stay within the shorter of the two. Before the "
                 "run FI times a few trials; a run over the shorter limit gets fewer runs per setting from FI (never fewer "
-                "settings), below the plan's min_runs_per_setting only for the topic's own limit, and the paper says so. "
+                "settings), below the plan's min_runs_per_setting (down to 10) only for the topic's own limit, and the paper says so. "
                 "Each setting runs in a process of its own, whose start is paid once whatever the runs; the paper "
                 "reports how long the run took.")
 
@@ -12922,24 +12923,40 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return None
 
     def _annotate_precision(self, state: QuestState, aggregate: dict[str, Any]) -> str:
-        """For each probability with a pooled interval, its half-width, and whether the protocol's target was reached.
-        Returns a sentence for the analysis when a target was missed, else an empty string."""
+        """For each quantity with an interval pooled from the trials (a probability from its counts, a mean from the values
+        the run lists), its half-width, and whether the protocol's target was reached. Both are held to the target the same
+        way. Returns a sentence for the analysis when a target was missed, else an empty string.
+
+        Which quantities the target is for: the probabilities, or the one the protocol names (``precision.metric``); a
+        mean only when the target is on it (``run_estimate.precision_metric`` gives a ``mean``: the metric named, or the
+        plan's only metric), since a mean's scale is its own."""
+        from . import run_estimate as _run_estimate
+
         protocol = self._protocol_block(state) or {}
         precision = protocol.get("precision")
         target = precision.get("target_half_width") if isinstance(precision, dict) else None
+        on, kind = _run_estimate.precision_metric(protocol)
+        mean_on = str(on) if on and kind == "mean" else ""
+
+        def is_(key: str, name: str) -> bool:
+            return key == name or key.rsplit(".", 1)[-1] == name
+
         # The target is for the metric the protocol names (``precision.metric``), when it names one: a live quest's
         # target for its outbreak probability was held against every pooled interval in the run.
         named = str(precision.get("metric") or "").strip() if isinstance(precision, dict) else ""
         if named and not any(
-            isinstance(e, dict) and e.get("ci_method") == _CI_WILSON and (k == named or k.rsplit(".", 1)[-1] == named)
+            isinstance(e, dict) and e.get("ci_method") in (_CI_WILSON, _CI_BOOTSTRAP) and is_(k, named)
             for k, e in aggregate.items()
         ):
-            named = ""  # a name that matches no pooled probability (prose, say): every one is held to the target
+            named = ""  # a name that matches no pooled quantity (prose, say): every probability is held to the target
         missed: list[str] = []
         for key, entry in aggregate.items():
-            if not isinstance(entry, dict) or entry.get("ci_method") != _CI_WILSON:
+            if not isinstance(entry, dict):
                 continue
-            if named and key != named and key.rsplit(".", 1)[-1] != named:
+            if entry.get("ci_method") == _CI_BOOTSTRAP:
+                if not (mean_on and is_(key, mean_on)):
+                    continue
+            elif entry.get("ci_method") != _CI_WILSON or (named and not is_(key, named)):
                 continue
             lo, hi = entry.get("ci_lower"), entry.get("ci_upper")
             if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
@@ -12954,8 +12971,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return ""
         return (
             f"The protocol's target 95% half-width of ±{float(target):g} was not reached for {len(missed)} of the "
-            f"probabilities: {', '.join(missed[:6])}. Say so in the limitations and do not claim a precision the trials do "
-            f"not give."
+            f"quantities it is on: {', '.join(missed[:6])}. Say so in the limitations and do not claim a precision the "
+            f"trials do not give."
         )
 
     def _scan_numeric_warnings(self, state: QuestState, stderr: str, result_json: Any) -> list[dict[str, str]]:
@@ -16377,10 +16394,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._clear_stale_figures()
             else:
                 manifest_status = "stopped"
+        # Under warn the difference goes on into the paper, which must say it (core/paper_facts.py): in plain words when
+        # FI counted it (the analysis lists more, or leaves trials out), else its first finding.
+        warned_headline = (_run_manifest.plain_difference(list(getattr(self, "_manifest_differences", None) or []))
+                           if manifest_status == "warned" else "")
         self._run_manifest_record({
             "status": manifest_status, "problems": manifest_found, "attempts": manifest_attempts_next or manifest_attempts,
             "failed_trials": getattr(self, "_manifest_failed_trials", 0) or 0,
             **({"note": self._manifest_note} if getattr(self, "_manifest_note", "") else {}),
+            **({"headline": warned_headline} if warned_headline else {}),
         })
         # The run's data is kept only once the run is accepted: not a crash, a run the manifest sent back or stopped,
         # nor a job still pending (its raw files are half written).
@@ -25637,7 +25659,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "grid": {"<parameter, named as the code will name it>": [<every value it takes>]},
   "in_each_run": {"<what ONE run goes through all of together: the conditions one fit spans, the methods applied to the same simulated data>": [<all its values>]},
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
-  "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it, never below, and keeps every setting; leave out for a deterministic study>,
+  "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it and keeps every setting; only the topic's own time limit may take them below it (down to 10), and the paper then says so; leave out for a deterministic study>,
   "thresholds": {"<name>": <value>},
   "seed_policy": "<how randomness is seeded: one independent stream per setting and run, or say why streams are shared>",
   "failure_policy": "<how a trial that fails (a solver that does not converge, an exception) is treated: counted as a failure, excluded and reported, or retried; every failed trial is listed by the run>",

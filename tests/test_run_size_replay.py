@@ -142,8 +142,11 @@ async def test_replay_r13_lowers_the_runs_below_the_plans_minimum_to_fit_the_top
     assert "a part of the study not fully done" in note and "the plan's target is ±0.015" in note
     assert "the topic's limit is 60 seconds" in _log(eng)
     # The paper must say so by name, or it is sent back.
-    items = paper_facts.required_items(eng.quest_root)
-    assert [i.name for i in items if i.kind == paper_facts.FEWER_RUNS] == [paper_facts.FEWER_RUNS_NAME]
+    items = [i for i in paper_facts.required_items(eng.quest_root) if i.kind == paper_facts.FEWER_RUNS]
+    assert [i.name for i in items] == [paper_facts.FEWER_RUNS_NAME]
+    # with the numbers: the runs against the plan's, below its minimum, and the precision those runs give
+    assert f"{runs} runs per setting instead of the 4096 the plan asked for" in items[0].text
+    assert "below the plan's minimum of 4096" in items[0].text and "against the plan's target of ±0.015" in items[0].text
 
 
 @pytest.mark.asyncio
@@ -157,7 +160,11 @@ async def test_replay_r12_runs_at_the_plans_minimum_over_the_topics_minute_and_s
     assert reduced["over_topic_limit"] and not reduced["below_plan_minimum"]
     assert "cannot be met by fewer runs per setting" in reduced["note"] and "over the topic's limit" in reduced["note"]
     assert "from 2000 to the plan's minimum of 1068" in reduced["note"]
-    assert not [i for i in paper_facts.required_items(eng.quest_root) if i.kind == paper_facts.FEWER_RUNS]
+    # Every run FI made smaller is named in the paper, a cut to the plan's own minimum too (2000 asked, 1068 run).
+    items = [i for i in paper_facts.required_items(eng.quest_root) if i.kind == paper_facts.FEWER_RUNS]
+    assert [i.name for i in items] == [paper_facts.FEWER_RUNS_NAME]
+    assert "1068 runs per setting instead of the 2000 the plan asked for" in items[0].text
+    assert "still over the topic's time limit" in items[0].text and "below the plan's minimum" not in items[0].text
 
 
 @pytest.mark.asyncio

@@ -909,20 +909,28 @@ class RunChecksMixin:
                     f"have taken {self._padded(est)}. FI lowered the runs per setting from {runs} to {fewer} and kept all "
                     f"{cells} setting(s); the checks, thresholds and tolerances are unchanged.")
         if fit.below_plan:
-            note += (f" That is fewer than the {fit.plan_floor} runs per setting the plan allows at the least (its minimum "
-                     "and its precision target): the topic's time limit asked for it, so the plan's minimum number of runs is "
-                     "a part of the study not fully done.")
-        precision = _estimate.expected_precision(protocol, fewer, est.spreads)
+            note += (f" That is fewer than the {fit.plan_floor} runs per setting the plan allows at the least ("
+                     + ("its minimum and its precision target" if fit.precision_known else "its stated minimum")
+                     + "): the topic's time limit asked for it, so the plan's minimum number of runs is a part of the study "
+                     "not fully done.")
+        elif fit.plan_floor is None and topic and not over_topic:
+            note += (" The plan states no fewest number of runs per setting; for the topic's own limit FI goes down to "
+                     f"{_estimate.MIN_RUNS_FOR_LIMIT} at the least.")
+        precision = _estimate.expected_precision(protocol, fewer, est.spreads) if fit.precision_known else None
         if precision is not None:
             note += (f" With {fewer} runs per setting, the 95% interval of `{precision['metric']}` is about "
                      f"±{precision['half_width']:g} ({precision['how']})"
                      + (f"; the plan's target is ±{precision['target']:g}" if precision.get("target") else "") + ".")
+        elif not fit.precision_known:
+            metric, _kind = _estimate.precision_metric(protocol)
+            note += (f" The precision {fewer} runs per setting give for `{metric}` was not known before the run: the timed "
+                     "trials did not show its spread, so the 95% interval is the one the run itself gives.")
         self._log.warning("[execute] %s", note)  # type: ignore[attr-defined]
         print(f"[FI] {note}")
         return {"note": note, "from": {"grid": grid, "runs_per_setting": runs},
                 "to": {"grid": grid, "runs_per_setting": fewer}, "limit": "topic" if topic else "execution.timeout_s",
                 "below_plan_minimum": bool(fit.below_plan), "plan_minimum": fit.plan_floor, "precision": precision,
-                "over_topic_limit": bool(over_topic)}
+                "precision_known": bool(fit.precision_known), "over_topic_limit": bool(over_topic)}
 
     @staticmethod
     def _too_long_text(est: _estimate.Estimate, limit_s: float, cut: bool = True) -> str:

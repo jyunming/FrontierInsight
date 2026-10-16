@@ -18,7 +18,10 @@ with the time the study is allowed (the topic's own limit when it states one, el
   not finish within its allowance is a lower bound, and the estimate says it is "at least".
 * **What it is compared with.** The estimate with a margin of :data:`SAFETY` (one half more) against the time allowed.
   A run that would not fit is given fewer runs per setting (:func:`fit_runs`), never fewer settings, and the 95% interval
-  those runs give is stated (:func:`expected_precision`).
+  those runs give is stated (:func:`expected_precision`), or said to be unknown before the run. For FI's own limit the
+  runs go down only to the fewest the plan states; for the topic's own limit they may go down to
+  :data:`MIN_RUNS_FOR_LIMIT` whether or not the plan states a fewest. Every cut is an item the paper must name
+  (:data:`core.paper_facts.FEWER_RUNS`).
 
 None of the timed trials is a result: they are run apart from the study, write nothing into FI's ledger and are not
 kept. Everything here is arithmetic on the measurements; nothing is a judgement about the science.
@@ -71,7 +74,8 @@ MAX_AXES = 6
 #: most :data:`TIMING_TRIALS` in all: one short trial on a coarse clock measured nothing (r12: 0 or 16 ms for a 4 ms trial).
 TIMING_LATER_S = 1.0
 TIMING_TRIALS = 2000
-#: The fewest runs per setting FI goes down to when the topic's own time limit asks for fewer than the plan's minimum.
+#: The fewest runs per setting FI goes down to for the topic's own time limit: below the plan's minimum when the plan states
+#: one, and the floor when it states none. The paper names every such cut (``core.paper_facts.FEWER_RUNS``).
 MIN_RUNS_FOR_LIMIT = 10
 RECORD = Path(".fi") / "run_estimate.json"
 
@@ -139,7 +143,7 @@ class Probe:
     def at(self, runs: int, runs_now: int) -> "Probe":
         """This setting's cost with ``runs`` runs instead of ``runs_now``."""
         if self.fixed_s is not None and self.per_trial_s is not None:
-            seconds = self.fixed_s + max(1, int(runs)) * self.per_trial_s
+            seconds = max(0.0, self.fixed_s) + max(1, int(runs)) * self.per_trial_s
         else:
             seconds = self.seconds * max(1, int(runs)) / max(1, int(runs_now))
         return Probe(self.axis, self.index, dict(self.cell), max(seconds, 1e-6), self.at_least, dict(self.spread),
@@ -422,7 +426,8 @@ async def _time_one(
             per_trial = max(0.0, (float(starts[-1]) - float(starts[1])) / (len(done) - 2))
         else:
             per_trial = sum(durations[1:]) / (len(durations) - 1)
-        fixed = overhead + durations[0] - per_trial
+        # never negative: later trials slower than the start and the first call would under-cost a small run
+        fixed = max(0.0, overhead + durations[0] - per_trial)
         seconds = fixed + int(runs) * per_trial
     spread: dict[str, float] = {}
     if len(done) >= 2:
@@ -776,6 +781,28 @@ def progress_line(done_cells: int, cells: int, done_trials: int, trials: int, el
     return f"{head}, about {plain_duration(elapsed_s / done_trials * (trials - done_trials))} left"
 
 
+def _stated_min(protocol: dict[str, Any] | None) -> int | None:
+    """The plan's own `protocol.min_runs_per_setting`, or ``None``."""
+    least = protocol.get("min_runs_per_setting") if isinstance(protocol, dict) else None
+    return int(least) if isinstance(least, (int, float)) and not isinstance(least, bool) and least >= 1 else None
+
+
+def precision_known(protocol: dict[str, Any] | None, spreads: dict[str, float] | None = None) -> bool:
+    """Whether the runs a precision target needs can be worked out before the run: always, but for a target on a mean
+    whose spread the timed trials did not show (fewer than two trials, or all equal)."""
+    if not isinstance(protocol, dict):
+        return True
+    precision = protocol.get("precision")
+    target = precision.get("target_half_width") if isinstance(precision, dict) else None
+    if not (isinstance(target, (int, float)) and not isinstance(target, bool) and float(target) > 0):
+        return True
+    metric, kind = precision_metric(protocol)
+    if kind != "mean":
+        return True
+    sd = (spreads or {}).get(metric or "")
+    return isinstance(sd, (int, float)) and sd > 0
+
+
 def precision_metric(protocol: dict[str, Any] | None) -> tuple[str | None, str | None]:
     """``(the metric the precision target is on, its kind)``: `protocol.precision.metric` looked up among `protocol.metrics`; with
     no metric named, the only metric the plan has. ``(name, None)`` when its kind is not known."""
@@ -824,7 +851,9 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
 
 def floor_is_stated(protocol: dict[str, Any] | None) -> bool:
     """Whether the plan itself states how few runs per setting it may have (`protocol.min_runs_per_setting`, or a precision
-    target): only then may FI lower the runs on its own. FI never makes up a number of runs."""
+    target): only then may FI lower the runs to fit its own limit (``execution.timeout_s``). The topic's own time limit is
+    the one exception: it may take the runs down to :data:`MIN_RUNS_FOR_LIMIT` whatever the plan states, and the paper then
+    names the cut with the numbers (:func:`fit_runs`)."""
     if not isinstance(protocol, dict):
         return False
     least = protocol.get("min_runs_per_setting")
@@ -845,24 +874,40 @@ def seconds_at(grid: dict[str, list[Any]], runs: int, runs_now: int, determinist
 @dataclass
 class Fit:
     """FI's smaller run: ``runs`` per setting, every setting kept. ``below_plan`` when that is fewer than the plan's own
-    minimum (``plan_floor``), which only the topic's own time limit may ask for."""
+    minimum (``plan_floor``: its `min_runs_per_setting` and what its precision target needs, ``None`` when the plan states
+    neither or the target's needs are not known), which only the topic's own time limit may ask for. ``precision_known``:
+    False for a precision target on a mean whose spread the timed trials did not show, so the precision those runs give is
+    not known before the run."""
 
     runs: int
     seconds: float
     plan_floor: int | None
     below_plan: bool
+    precision_known: bool = True
 
 
 def fit_runs(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes: list[Probe], protocol: dict[str, Any] | None,
              *, limit_s: float, topic_limit: bool, spreads: dict[str, float] | None = None) -> Fit | None:
     """The most runs per setting (fewer than ``runs``) whose estimate, with its margin, fits ``limit_s``, every setting kept;
-    ``None`` when none does. The fewest allowed is the plan's own (:func:`runs_floor`, when the plan states one: FI invents no
-    number of runs otherwise), or, when the limit is the one the topic itself states (``topic_limit``), down to
-    :data:`MIN_RUNS_FOR_LIMIT`: the topic's limit comes before the plan's minimum, and going below it is said in the paper.
-    The result is timed again before it is used."""
+    ``None`` when none does. For FI's own limit the fewest allowed is the plan's own (:func:`runs_floor`, when the plan
+    states one: FI invents no number of runs for its own limit, and with a target on a mean whose spread is not known it
+    does not cut at all). For the limit the topic itself states (``topic_limit``) the runs may go down to
+    :data:`MIN_RUNS_FOR_LIMIT`, below the plan's minimum or with none stated: the topic's limit comes before the plan's
+    runs, and the paper names the cut with its numbers. The result is timed again before it is used."""
     if deterministic or int(runs) <= 1 or not probes:
         return None
-    floor = runs_floor(protocol, runs, spreads) if floor_is_stated(protocol) else None
+    known = precision_known(protocol, spreads)
+    if not floor_is_stated(protocol):
+        floor = None
+    elif known:
+        floor = runs_floor(protocol, runs, spreads)
+    else:
+        # The precision target's needs are not known, so the plan's fewest is only its stated minimum, if any: never the
+        # plan's own runs read as a "minimum".
+        stated = _stated_min(protocol)
+        floor = min(int(runs), stated) if stated is not None else None
+        if not topic_limit:
+            return None  # FI's own limit never cuts below a precision it cannot work out
     lowest = min(MIN_RUNS_FOR_LIMIT, floor or MIN_RUNS_FOR_LIMIT) if topic_limit else floor
     if lowest is None or lowest >= int(runs):
         return None
@@ -880,13 +925,15 @@ def fit_runs(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
             lo = mid
         else:
             hi = mid - 1
-    return Fit(runs=lo, seconds=float(fits_at(lo) or 0.0), plan_floor=floor, below_plan=floor is not None and lo < floor)
+    return Fit(runs=lo, seconds=float(fits_at(lo) or 0.0), plan_floor=floor, below_plan=floor is not None and lo < floor,
+               precision_known=known)
 
 
 def expected_precision(protocol: dict[str, Any] | None, runs: int, spreads: dict[str, float] | None = None) -> dict[str, Any] | None:
     """The 95% interval half-width ``runs`` runs per setting give, for the metric the plan's precision target is on (or, with
-    no target, its first proportion): a proportion at its worst case (near 0.5), a mean from the spread the timed trials
-    showed. ``None`` when there is nothing to say it of (no such metric, or a mean whose spread is not known)."""
+    no target, its first proportion, else its first mean whose spread the timed trials showed): a proportion at its worst
+    case (near 0.5), a mean from the spread the timed trials showed. ``None`` when there is nothing to say it of (no such
+    metric, or a mean whose spread is not known)."""
     from .stats import _Z95
 
     if not isinstance(protocol, dict) or runs < 1:
@@ -896,10 +943,16 @@ def expected_precision(protocol: dict[str, Any] | None, runs: int, spreads: dict
     target = precision.get("target_half_width")
     target = float(target) if isinstance(target, (int, float)) and not isinstance(target, bool) and target > 0 else None
     if metric is None:
-        first = next((m for m in protocol.get("metrics") or [] if isinstance(m, dict) and m.get("kind") == "proportion"), None)
-        if first is None:
-            return None
-        metric, kind = str(first.get("id")), "proportion"
+        metrics = [m for m in protocol.get("metrics") or [] if isinstance(m, dict) and m.get("id")]
+        first = next((m for m in metrics if m.get("kind") == "proportion"), None)
+        if first is not None:
+            metric, kind = str(first.get("id")), "proportion"
+        else:
+            spread_known = [m for m in metrics if m.get("kind") == "mean" and isinstance((spreads or {}).get(str(m["id"])), (int, float))
+                            and (spreads or {})[str(m["id"])] > 0]
+            if not spread_known:
+                return None
+            metric, kind = str(spread_known[0]["id"]), "mean"
     if kind == "mean":
         sd = (spreads or {}).get(metric)
         if not isinstance(sd, (int, float)) or not sd > 0:
