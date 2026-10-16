@@ -27372,23 +27372,41 @@ def _strip_plan_numbers(protocol: dict[str, Any], *, names_only: bool = False) -
 _ORACLE_HIDDEN = ("expected", "expected_formula", "tolerance", "tolerance_mode", "limit")
 
 
+#: The fields of a protocol that are settings the code runs with: a number written in them, also as text ("q = 0.01"),
+#: is an input and is never masked (with each check's ``case``).
+_SETTING_FIELDS = ("grid", "fixed", "in_each_run")
+
+
 def _input_numbers(protocol: dict[str, Any]) -> set[float]:
     """The numbers the plan gives the code to run with: every number of the protocol outside its checks, its criteria
-    built on a check and its model's worked examples, plus each check's setting (``case``)."""
-    def walk(node: Any) -> set[float]:
+    built on a check and its model's worked examples; and every number, also one written as text, of its settings
+    (:data:`_SETTING_FIELDS`) and of each check's setting (``case``)."""
+    def walk(node: Any, text: bool = False) -> set[float]:
         if isinstance(node, dict):
-            return set().union(*(walk(v) for v in node.values())) if node else set()
+            return set().union(*(walk(v, text) for v in node.values())) if node else set()
         if isinstance(node, list):
-            return set().union(*(walk(v) for v in node)) if node else set()
+            return set().union(*(walk(v, text) for v in node)) if node else set()
         if isinstance(node, (int, float)) and not isinstance(node, bool):
             return {float(node)}
+        if text and isinstance(node, str):
+            return {_prose_value(m) for m in _PROSE_NUMBER.finditer(node)} - {None}
         return set()
 
     found = walk({k: v for k, v in protocol.items() if k not in ("oracles", "criteria", "model")})
+    found |= walk({k: protocol.get(k) for k in _SETTING_FIELDS if protocol.get(k) is not None}, text=True)
     for o in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
         if isinstance(o, dict):
-            found |= walk(o.get("case") or {})
+            found |= walk(o.get("case") or {}, text=True)
     return found
+
+
+def _prose_value(m: re.Match[str]) -> float | None:
+    """The number a match of :data:`_PROSE_NUMBER` writes (a percentage as the fraction it states)."""
+    try:
+        x = float(m.group(0).rstrip("%"))
+    except ValueError:
+        return None
+    return x / 100 if m.group(1) else x
 
 
 def _mask_prose(node: Any, hidden: list[Any]) -> Any:
@@ -27406,7 +27424,8 @@ def _mask_prose(node: Any, hidden: list[Any]) -> Any:
             else:
                 _mask_prose(v, hidden)
     return node
-_PROSE_NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?(%?)(?![\w.])")
+#: A number in prose: not part of a word or a longer number; a full stop after it ends the sentence ("is 0.6415.").
+_PROSE_NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?(%?)(?!\w|\.\d)")
 
 
 def _without_numbers(text: str, hidden: list[Any]) -> str:
@@ -27418,11 +27437,9 @@ def _without_numbers(text: str, hidden: list[Any]) -> str:
         return text
 
     def swap(m: re.Match[str]) -> str:
-        try:
-            x = float(m.group(0).rstrip("%"))
-        except ValueError:
+        x = _prose_value(m)
+        if x is None:
             return m.group(0)
-        x = x / 100 if m.group(1) else x
         if any(math.isclose(x, v, rel_tol=1e-9, abs_tol=1e-15) for v in values):
             return "[the value FI checks it against]"
         return m.group(0)
