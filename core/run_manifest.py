@@ -983,6 +983,16 @@ def metric_grid(protocol: dict[str, Any] | None, metric: str,
     return grid
 
 
+def _undefined_where_never_defined(recorded_by_cell: dict[str, Any] | None, metric_id: str) -> int:
+    """The trials of FI's record with no value of ``metric_id`` at the settings where not one trial has a value of it."""
+    total = 0
+    for by_name in (recorded_by_cell or {}).values():
+        counts = recorded_counts(by_name, metric_id) if isinstance(by_name, dict) else None
+        if counts is not None and counts[0] == 0 and counts[1] > 0:
+            total += counts[1]
+    return total
+
+
 def _value_count_findings(
     protocol: dict[str, Any], manifest: dict[str, Any], result_json: Any, *, trial_mode: bool = False,
     recorded: dict[str, Any] | None = None, recorded_by_cell: dict[str, Any] | None = None,
@@ -1058,6 +1068,11 @@ def _value_count_findings(
                 recorded_by_cell)
             made = (f"in {measured:g} trial(s) of FI's record: {defined:g} with a value and {undefined:g} with none "
                     "(the measurement does not exist there)")
+            # A setting where no trial has a value of the metric (power where there is no real effect) holds nothing to
+            # drop: the analysis may leave its list out. Its undefined trials are not asked for, only allowed, and they
+            # never make up for values missing elsewhere.
+            nowhere = _undefined_where_never_defined(recorded_by_cell, metric)
+            owed_undefined, owed = undefined - nowhere, measured - nowhere
             if not _values_listed(result_json, metric) and not accounted_defined and not accounted_undefined:
                 out.append((
                     f"the metric `{metric}` is a mean over the trials that measured it, {made}, but the analysis's "
@@ -1065,10 +1080,10 @@ def _value_count_findings(
                     "it averaged, so the claimed trial count can be checked against them",
                     True,
                 ))
-            elif (accounted_defined + accounted_undefined < measured * _ACCOUNTED
-                  or (undefined and not accounted_undefined)):
+            elif (accounted_defined + min(accounted_undefined, owed_undefined) < owed * _ACCOUNTED
+                  or (owed_undefined and not accounted_undefined)):
                 gap = ("RESULT_JSON has no `" + metric + "_undefined` count and no null entries for them"
-                       if undefined and not accounted_undefined else "the rest are not accounted for")
+                       if owed_undefined and not accounted_undefined else "the rest are not accounted for")
                 out.append((
                     f"the metric `{metric}` is measured {made}; the analysis accounts for {accounted_defined} value(s) + "
                     f"{accounted_undefined} undefined = {accounted_defined + accounted_undefined}, and {gap}: the "
