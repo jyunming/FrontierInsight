@@ -1,5 +1,5 @@
 """What a search for the best design hands over: the paper's "Best design found" section (FI's numbers, which the
-number-provenance check traces), a refine that searches further toward a person's target, and the files listed in the
+writer does not type, so the check of typed numbers leaves them alone), a refine that searches further toward a person's target, and the files listed in the
 three interfaces.
 
 The search and its check run through FI's own harness on a toy simulation (each evaluation a process of its own), as
@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from core import best_design_report as report
-from core import number_provenance
+from core import paper_facts
 from core import optimisation_plan as op
 from core import optimise
 from core import optimise_refine as refine
@@ -88,10 +88,10 @@ PAPER = "# A study\n\n## Methods\n\nWe searched.\n\n## Results\n\nThe search ran
 
 
 @pytest.mark.asyncio
-async def test_the_papers_section_prints_fis_numbers_and_number_provenance_traces_every_one(tmp_path: Path) -> None:
+async def test_the_papers_section_prints_fis_numbers_and_the_typed_number_check_leaves_them_alone(tmp_path: Path) -> None:
     block = _block()
     root = _quest(tmp_path)
-    result_json = await _run(_runner(root, block), root)
+    await _run(_runner(root, block), root)
     best = json.loads((root / "results" / "best_design.json").read_text(encoding="utf-8"))
     check = oc.read(root)
     assert check is not None and best["check"]["record_sha256"]
@@ -117,17 +117,11 @@ async def test_the_papers_section_prints_fis_numbers_and_number_provenance_trace
     again = report.mark_paper(paper.replace("| 0 to 6 |", "| 0 to 60 |"), text)
     assert again.count(report.BEGIN) == 1 and "0 to 60" not in again
 
-    # Every number in the paper traces to this run: the section's to FI's two records.
-    rep = number_provenance.check(paper, result_json=result_json, design={"protocol": {"optimisation": block}},
-                                  optimisation=report.records(root))
-    assert not rep.skipped and rep.ok, [f.describe() for f in rep.findings]
-    assert rep.paper_numbers >= 8
-    # A number in the section that is not FI's is caught like any other.
-    wrong = paper.replace(f"| {fmt(finest_base)} | {fmt(finest_best)} |", f"| {fmt(finest_base)} | 7.913 |")
-    assert wrong != paper
-    bad = number_provenance.check(wrong, result_json=result_json, design={"protocol": {"optimisation": block}},
-                                  optimisation=report.records(root))
-    assert not bad.ok and any("7.913" in f.describe() for f in bad.findings)
+    # The section's numbers are FI's two records', not the writer's: the check of typed numbers finds none (the rest of this
+    # paper has no digit), and a number the writer types beside the section is found like any other.
+    assert paper_facts.typed_hits(paper, {"optimisation": block}) == []
+    typed = paper.replace("The search ran.", "The search lowered it by 7.913 K.")
+    assert any("7.913" in h for h in paper_facts.typed_hits(typed, {"optimisation": block}))
 
     # The claim check leaves the section out only when it is exactly FI's.
     assert report.BEGIN not in report.strip_for_checks(paper, report.for_paper(root, block, paper))
@@ -290,7 +284,7 @@ def _engine(tmp_path: Path):  # noqa: ANN202
     ))
 
 
-def test_the_write_step_puts_fis_section_in_the_paper_and_its_numbers_pass_the_provenance_check(
+def test_the_write_step_puts_fis_section_in_the_paper_and_its_numbers_are_not_typed_ones(
         tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     block = _block()
@@ -323,8 +317,8 @@ def test_the_write_step_puts_fis_section_in_the_paper_and_its_numbers_pass_the_p
     assert paper.count(report.BEGIN) == 1 and "9.5 K" not in paper
     assert report.for_paper(root, block, paper).strip() in paper
     assert "FI puts a section titled \"Best design found\"" in prompts[0]
-    # The paper's numbers, the section's included, all trace to the run.
-    assert eng._number_provenance_hits(paper, {**state, **out}) == []  # type: ignore[arg-type]
+    # The section's numbers are FI's records', so the check of typed numbers finds none in the paper.
+    assert paper_facts.typed_hits(paper, {"optimisation": block}) == []
 
 
 @pytest.mark.asyncio

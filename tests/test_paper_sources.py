@@ -33,7 +33,7 @@ from core.engine import (
     build_references,
     cited_references,
 )
-from core.numeric_oracle import extract_paper_numbers
+from core import typed_numbers
 from generation._keywords import keep_one_keywords_form
 
 TOPIC = "How fast do stochastic epidemics die out?"
@@ -201,12 +201,12 @@ def test_one_keywords_form_is_left_alone() -> None:
     assert keep_one_keywords_form(one, visible=True) == one
 
 
-# --- the numeric check ------------------------------------------------------------
+# --- the check of the numbers the writer types ------------------------------------------------------------
 
-def test_the_numeric_check_does_not_read_the_source_lists() -> None:
+def test_the_number_check_does_not_read_the_source_lists() -> None:
     md = (
         "# T\n\n## Results\nThe outbreak probability was 0.4213.\n\n## References\n\n"
         "1. van der Berg, K. (2016). A study of 12.75 outbreaks. J. X. DOI: 10.1/2.3456\n\n"
         "## Further reading\n\n- [W1] A page about 37.25 cases. https://x.example/a\n"
     )
-    assert [value for value, _token, _context in extract_paper_numbers(md)] == [0.4213]
+    assert [float(n.value) for n in typed_numbers.numbers(md)] == [0.4213]

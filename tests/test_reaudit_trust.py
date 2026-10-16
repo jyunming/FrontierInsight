@@ -226,10 +226,9 @@ def test_the_exclusion_persists_across_a_resume(tmp_path: Path, monkeypatch: pyt
     assert SENTINEL not in fresh._stdout_for_models(f"{sorted(left)[0]} = {SENTINEL}\n")
 
 
-def test_the_values_left_out_are_kept_so_the_writers_text_is_checked_for_them(
+def test_the_values_left_out_are_kept_in_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from core import record_claims
     from tests.test_run_checks import _typed_engine
 
     eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
@@ -238,9 +237,6 @@ def test_the_values_left_out_are_kept_so_the_writers_text_is_checked_for_them(
     eng._note_typed_values({"kept": 1.5, key: float(SENTINEL)})
     record = json.loads((eng.quest_root / "needs" / "TYPED_RESULTS_CHECK.json").read_text(encoding="utf-8"))
     assert record["removed_values"] == {key: [float(SENTINEL)]}
-    hits = record_claims.contradictions(f"The simulation gave {SENTINEL} at the end.", left_out_typed=record["removed_values"])
-    assert hits and key in hits[0] and "typed into its code" in hits[0]
-    assert record_claims.contradictions("The simulation gave 1.5 at the end.", left_out_typed=record["removed_values"]) == []
 
 
 @pytest.mark.asyncio

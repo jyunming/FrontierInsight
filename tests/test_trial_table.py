@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 
-from core import number_provenance as npv
 from core import stats
 from core import trial_table
 
@@ -61,16 +60,6 @@ def test_the_file_and_the_writer_s_note(tmp_path: Path, monkeypatch: pytest.Monk
     assert trial_table.write(tmp_path / "none") == [] and not (tmp_path / "none" / "paper").exists()
 
 
-def test_the_provenance_check_reads_the_table_and_only_ever_accepts_more(tmp_path: Path) -> None:
-    table = trial_table.traceable(trial_table.rows(_quest(tmp_path)))
-    results = {"cells": [{"ols": {"Ea_sd": 709.449}}], "noise": [round(0.001 * i, 3) for i in range(900)]}
-    text = "At 8% noise the OLS SD fell from 1,849.0 to 709 J/mol, not 1,920."
-    without = {f.token for f in npv.check(text, result_json=results).findings}
-    with_table = {f.token for f in npv.check(text, result_json=results, trial_table=table).findings}
-    assert "1,849.0" in without and "1,849.0" not in with_table
-    assert "1,920" in with_table and with_table <= without
-
-
 def test_the_writer_gets_the_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.test_disclosure import _engine
 
@@ -100,15 +89,3 @@ def test_malformed_records_are_skipped_not_fatal(tmp_path: Path) -> None:
     assert "nan" not in trial_table.markdown(table)
 
 
-@pytest.mark.parametrize("chance, flagged_in_table", [(0.1, True), (0.01, False)])
-def test_the_table_s_unnamed_matches_must_be_rarer(
-    monkeypatch: pytest.MonkeyPatch, chance: float, flagged_in_table: bool,
-) -> None:
-    """A number gets a second chance to match by luck in the table, so an unnamed match there needs a quarter of the
-    usual chance: at a chance of 0.1 the same unnamed match is accepted from the results and flagged from the table."""
-    monkeypatch.setattr(npv.Traceable, "chance", lambda self, value, dec: chance)
-    text = "Next came 3.457."
-    from_results = npv.check(text, result_json={"zz": {"alpha": 3.457}})
-    from_table = npv.check(text, result_json={"zz": {"beta": 9.1}}, trial_table={"zz": {"alpha": 3.457}})
-    assert not from_results.findings
-    assert bool(from_table.findings) is flagged_in_table

@@ -382,7 +382,7 @@ def test_a_first_draft_is_written_as_before(tmp_path: Path) -> None:
     assert not [m for _l, m in logged if "whole paper again" in m or "editing the earlier draft" in m]
     # A draft that answers no refine says so (refine_scope ""), so the trace never carries a stale scope.
     assert set(out) == {"paper_md", "literature", "paper_basis", "refine_scope", "refine_needs_experiment",
-                       "refine_extend", "refine_layout", "extend_unreported"}
+                       "refine_extend", "refine_layout", "extend_unreported", "paper_keys"}
     assert out["refine_scope"] == "" and not out["refine_needs_experiment"]
 
 
@@ -632,17 +632,17 @@ def test_a_caption_finding_is_located_by_its_figure_file() -> None:
     assert got[0].located == "" and "not found by the engine" in paper_patch.format_passages(got)
 
 
-def test_a_number_is_located_through_the_context_the_check_quotes() -> None:
-    hit = ("unsourced_number: the paper prints 0.34, and nothing in this run accounts for it: it matches no value "
-           "— “The rate was 0.34 at R0 = 1.5”")
-    got, reason = paper_patch.plan_passages(PAPER, END, hits=[("unsourced_number", hit)], claims=[], captions=[])
+def test_a_typed_number_is_located_through_the_sentence_the_check_quotes() -> None:
+    hit = ("paper_record_mismatch: you typed 0.34, which is not a number of the plan or the topic. If it is a result, place "
+           "its key from the \"Results you can place\" list (FI fills it in). — “The rate was 0.34 at R0 = 1.5”")
+    got, reason = paper_patch.plan_passages(PAPER, END, hits=[("paper_record_mismatch", hit)], claims=[], captions=[])
     assert reason == "" and got[0].kind == "number"
     assert got[0].flagged == "The rate was 0.34 at R0 = 1.5"
-    assert got[0].located == "The rate was 0.34 at \\(R_0 = 1.5\\)." and got[0].how == "sentence"
-    assert got[0].why.startswith("the paper prints 0.34")
+    assert got[0].located == "The rate was 0.34 at \(R_0 = 1.5\)." and got[0].how == "sentence"
+    assert got[0].why.startswith("you typed 0.34")
 
 
-def test_a_check_that_lists_only_some_of_the_numbers_is_not_answered_with_edits() -> None:
-    hit = "unsourced_number: the paper prints 0.34. A further 5 number(s) in this paper trace to nothing either — “x”"
-    got, reason = paper_patch.plan_passages(PAPER, END, hits=[("unsourced_number", hit)], claims=[], captions=[])
-    assert got == [] and "only some of the numbers" in reason
+def test_a_check_that_names_no_sentence_is_not_answered_with_edits() -> None:
+    hit = "paper_record_mismatch: a further 5 typed number(s) in other sentences are not numbers of the plan or the topic."
+    got, reason = paper_patch.plan_passages(PAPER, END, hits=[("paper_record_mismatch", hit)], claims=[], captions=[])
+    assert got == [] and "names no passage" in reason

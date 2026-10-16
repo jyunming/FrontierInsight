@@ -533,10 +533,9 @@ def _engine(tmp_path: Path) -> Engine:
     return eng
 
 
-def test_the_number_check_accepts_the_mean_over_the_seeds_and_its_interval(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    # The first seed's 0.42 sits one last digit from the mean 0.43 the paper prints, which the
-    # check reads as a slip of it; once the seeds are given the mean is a result too, and right.
+def test_the_checks_are_given_the_mean_over_the_seeds_and_its_interval() -> None:
+    """A paper reports the mean over the seeds and its interval, which the first seed's result holds neither of; the interval
+    the statistics check reads is the replicates'."""
     seeds = {
         "result_json": {"p_outbreak": 0.42},
         "result_json_replicates": [
@@ -546,12 +545,8 @@ def test_the_number_check_accepts_the_mean_over_the_seeds_and_its_interval(tmp_p
     stats = _replicate_result_intervals(seeds)  # type: ignore[arg-type]
     assert list(stats) == ["p_outbreak"]
     s = stats["p_outbreak"]
-    paper = (
-        "# P\n\n## Results\n\nThe outbreak probability was "
-        f"{s['mean']:.2f} (95% CI {s['ci_lower']:.3f} to {s['ci_upper']:.3f}).\n"
-    )
-    assert eng._numeric_oracle_hits(paper, {"result_json": seeds["result_json"]})  # type: ignore[arg-type]
-    assert eng._numeric_oracle_hits(paper, seeds) == []  # type: ignore[arg-type]
+    assert abs(s["mean"] - 0.43) < 1e-12 and s["ci_lower"] < s["mean"] < s["ci_upper"]
+    assert _replicate_result_intervals({"result_json": seeds["result_json"]}) == {}  # type: ignore[arg-type]
 
 
 def test_the_claim_check_sees_the_mean_over_the_seeds(tmp_path: Path) -> None:

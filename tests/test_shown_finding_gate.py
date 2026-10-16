@@ -318,8 +318,6 @@ async def test_an_error_inside_the_check_with_a_flagged_fault_stops_the_quest(
     assert verdict and "could not run its test again" in verdict["rationale"]
 
 
-
-
 TWO_RESULTS: dict[str, Any] = {"exec_result": {"returncode": 0}, "result_json": {"dose": 60.0, "contrast": 0.42}}
 
 
@@ -358,15 +356,6 @@ async def test_a_fault_whose_removal_leaves_no_result_still_stops(tmp_path: Path
     _record(engine, _issue(quantity="dose"))
     verdict = await engine._shown_fault_verdict(STATE)
     assert verdict and "leaves no result" in verdict["rationale"]
-
-
-def test_a_quoted_value_left_out_by_a_test_is_named_for_the_test_not_a_model() -> None:
-    from core import record_claims, result_checks
-
-    hits = record_claims.contradictions("The dose was 60.25 mJ/cm2.", left_out={"dose": [60.25]},
-                                        left_out_why={"dose": result_checks.SHOWN_FAULT_WHY})
-    assert len(hits) == 1 and "a test FI ran" in hits[0] and "second model" not in hits[0]
-    assert "second model" in record_claims.contradictions("The dose was 60.25 mJ/cm2.", left_out={"dose": [60.25]})[0]
 
 
 @pytest.mark.asyncio
