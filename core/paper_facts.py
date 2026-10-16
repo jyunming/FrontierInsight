@@ -309,7 +309,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
         if failed or late:
             add(FAILED_TRIALS, "failed trials", _sentence(
                 (f"{failed:,} of {len(statuses):,} trials failed; their results are not in the reported numbers"
-                 if failed else "")
+                 + _failed_where(root) if failed else "")
                 + ("; " if failed and late else "")
                 + (f"{late:,} trials were not run because the study's time limit ran out" if late else "")), key="all")
     _left_out_setting_items(root, add)
@@ -414,6 +414,19 @@ def _trial_check_items(root: Path, add: Any) -> None:
                     f"in {n} of {of} settings, by more than chance explains"
                     + (f" (ratio {min(vals):.2g} to {max(vals):.2g}; 1 when right)" if vals else ""))
         add(CALIBRATION, label or "a reported uncertainty", _sentence(said), key=f"{q.get('kind')}-{label}")
+
+
+def _failed_where(root: Path, most: int = 4) -> str:
+    """`` (key: failed of planned; ...)``: the settings where trials failed, most first, from FI's check of the trials
+    (core/trial_checks.py; trials the time limit cut off are not in it). ``""`` when it has none."""
+    from . import trial_checks as _trial_checks
+
+    rows = [f for f in _trial_checks.read_record(root).get("failures") or [] if isinstance(f, dict) and f.get("failed")]
+    if not rows:
+        return ""
+    rows.sort(key=lambda f: -int(f.get("failed") or 0))
+    shown = "; ".join(f"{f.get('key') or 'the one setting'}: {f.get('failed')} of {f.get('planned')}" for f in rows[:most])
+    return f" ({shown}" + (f"; and {len(rows) - most} more settings" if len(rows) > most else "") + ")"
 
 
 def _left_out_setting_items(root: Path, add: Any) -> None:

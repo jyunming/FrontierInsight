@@ -129,3 +129,13 @@ def test_estimates_off_the_truth_beyond_chance_are_an_item(tmp_path: Path) -> No
     [item] = _items(root, paper_facts.CALIBRATION)
     assert item.sentence == ("The estimates of `Ea_hat` lie off the true value in 2 of 4 settings, by more than chance "
                              "explains (by -0.20 to +0.70 of their own spread).")
+
+
+def test_the_failed_trials_item_names_the_settings_where_they_failed(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _ledger(root, {"n=5": ["ok", "ok", "ok", "failed"], "n=10": ["ok", "failed", "failed", "failed"],
+                   "n=20": ["ok"] * 4})
+    _checks(root, {"failures": [{"key": "n=5", "planned": 4, "failed": 1}, {"key": "n=10", "planned": 4, "failed": 3}]})
+    [item] = _items(root, paper_facts.FAILED_TRIALS)
+    assert item.sentence == ("4 of 12 trials failed; their results are not in the reported numbers (n=10: 3 of 4; "
+                             "n=5: 1 of 4).")

@@ -164,11 +164,21 @@ async def test_an_exception_turned_into_an_assertion_shows_nothing_and_a_crash_i
     assert code_review.load(engine.quest_root)["issues"]["F-1"]["crash"]["at"] == "code/experiment.py:2"
 
 
+def _says_unconfirmed(engine: Engine) -> None:
+    from core import paper_facts
+
+    [item] = [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.CODE_FINDING]
+    assert item.id == "finding-f-1" and "could not confirm the fault is fixed" in item.sentence, item.sentence
+
+
 @pytest.mark.asyncio
 async def test_a_missing_test_file_stops_nothing(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     _record(engine, _issue(), test=None)
     assert await engine._shown_fault_verdict(STATE) is None
+    # ... but nothing shows the fault fixed: the paper must say so
+    assert code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]["kind"] == "missing"
+    _says_unconfirmed(engine)
 
 
 @pytest.mark.asyncio
@@ -270,6 +280,8 @@ async def test_a_sole_fault_whose_test_hangs_stops_nothing(tmp_path: Path, monke
     engine = _engine(tmp_path)
     _record(engine, _issue(), test=HANG)
     assert await engine._shown_fault_verdict(STATE) is None
+    assert code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]["kind"] == "no_answer"
+    _says_unconfirmed(engine)
 
 
 @pytest.mark.asyncio

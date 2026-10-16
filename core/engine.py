@@ -18858,7 +18858,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         crash_repair: dict[str, Any] | None = None
         for issue in shown:
             rel = str(issue.get("test") or "")
+            saved = ((record or {}).get("issues") or {}).get(str(issue.get("id")))
             if not (rel and (self.quest_root / rel).is_file()):
+                if isinstance(saved, dict):  # nothing shows it fixed either: the paper says so (core/paper_facts.py)
+                    saved["gate_error"] = {"kind": "missing", "detail": f"its test is no longer on disk ({rel or 'none'})"}
+                    errored = True
                 # Only a failing assertion on the code that ran shows the fault (core/code_findings.py): no test, no stop.
                 self._log.warning("[evidence_gate] the test that showed %s is no longer on disk (%s): nothing shows the "
                                   "fault now, and it does not stop the quest", issue.get("id"), rel or "no test recorded")
@@ -18873,6 +18877,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if run is None:
                 self._log.warning("[evidence_gate] the test of %s gave no answer on the code that ran (it ran past its time "
                                   "or ended the process): it shows nothing and does not stop the quest", issue.get("id"))
+                if isinstance(saved, dict):
+                    saved["gate_error"] = {"kind": "no_answer", "detail": "it gave no answer: it ran past its time or ended "
+                                                                          "the process"}
+                    errored = True
                 continue
             if run.status == "pass":
                 self._log.info("[evidence_gate] the test that showed %s passes on the code that ran", issue.get("id"))
@@ -18880,7 +18888,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 verdicts.append((issue, "its test still fails on it"))
             else:
                 # An error shows nothing, in the code or in the test (core/finding_repair.py): recorded, never a stop.
-                saved = ((record or {}).get("issues") or {}).get(str(issue.get("id")))
                 if not run.crash_in_program and record and isinstance(saved, dict):
                     # ... but an error in the test's own code is asked for once more, as an assertion about values
                     again = await self._ask_finding_test_again(saved, run, record, state)
