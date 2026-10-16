@@ -5,7 +5,7 @@ counts, a bootstrap interval for a mean from pooled values), effect sizes
 
 No numpy / scipy: a small embedded two-sided 95% t-table covers small-n
 replication (the common case), falling back to the normal approximation for
-large df. Used by the analyze node to enrich the multi-seed replicate
+large df; ``t_quantile`` gives the t quantile for any level and degrees of freedom. Used by the analyze node to enrich the multi-seed replicate
 aggregate so the paper reports uncertainty instead of bare point numbers.
 """
 
@@ -44,6 +44,68 @@ def _t95(df: int) -> float:
         return _T95[df]
     below = [a for a in _T95_ANCHORS if a <= df]
     return _T95[below[-1]] if below else _Z95
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction of the regularized incomplete beta function (modified Lentz)."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 500):
+        m2 = 2 * m
+        for aa in (m * (b - m) * x / ((qam + m2) * (a + m2)), -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))):
+            d = 1.0 + aa * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + aa / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+            last = d * c
+        if abs(last - 1.0) < 1e-15:
+            break
+    return h
+
+
+def _t_cdf(t: float, df: float) -> float:
+    """The Student-t distribution function (t > 0 side computed, the other by symmetry)."""
+    x = df / (df + t * t)
+    a, b = df / 2.0, 0.5
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x))
+    tail = 0.5 * (front * _betacf(a, b, x) / a if x < (a + 1.0) / (a + b + 2.0)
+                  else 1.0 - front * _betacf(b, a, 1.0 - x) / b)
+    return 1.0 - tail if t > 0 else tail
+
+
+def t_quantile(p: float, df: float) -> float:
+    """The Student-t quantile: the value below which a share ``p`` of a t distribution with ``df`` degrees of freedom lies
+    (``t_quantile(0.975, 3)`` = 3.1824). ``df = math.inf`` gives the normal quantile. Exact to about 1e-12 (bisection on the
+    distribution function), where the table behind :func:`confidence_interval` is the 95% level only."""
+    if not 0.0 < p < 1.0:
+        raise ValueError("p must lie strictly between 0 and 1")
+    if math.isinf(df):
+        from statistics import NormalDist
+        return NormalDist().inv_cdf(p)
+    if df <= 0:
+        raise ValueError("df must be positive")
+    if p == 0.5:
+        return 0.0
+    if p < 0.5:
+        return -t_quantile(1.0 - p, df)
+    lo, hi = 0.0, 1.0
+    while _t_cdf(hi, df) < p:
+        lo, hi = hi, hi * 2.0
+        if hi > 1e12:
+            break
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _t_cdf(mid, df) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-14 * max(1.0, hi):
+            break
+    return 0.5 * (lo + hi)
 
 
 def mean_std(vals: list[float]) -> tuple[float, float, int]:

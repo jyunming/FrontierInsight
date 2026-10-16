@@ -495,7 +495,8 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
     else:
         lines.append(f"no trial failed in the {_int(rec.get('settings'))} setting(s)")
     for x in quantities:
-        state = ("grossly wrong (a fault)" if x.get("fault") else
+        state = (("not the multiplier the plan fixes (a fault)" if x.get("kind") == "multiplier" else "grossly wrong (a fault)")
+                 if x.get("fault") else
                  f"below the level in {_int(x.get('below'))} setting(s): reported, not a fault" if _int(x.get("below"))
                  else f"above the level in {_int(x.get('above'))} setting(s) (wider than need be): reported, not a fault"
                  if _int(x.get("above")) else "as it should be")

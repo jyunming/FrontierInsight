@@ -43,9 +43,12 @@ FIX = Path(__file__).parent / "fixtures" / "replay" / "trial_checks"
 
 
 def known(est: str, truth, *, se: str | None = None, var: str | None = None, interval: tuple[str, str] | None = None,
-          level: float = 0.95, ident: str | None = None) -> dict:
-    """A protocol metric that declares its known value."""
+          level: float = 0.95, ident: str | None = None, df: int | str | None = None) -> dict:
+    """A protocol metric that declares its known value (``df``: the degrees of freedom of the interval's multiplier, or
+    ``"normal"``)."""
     kv = {"true_value": truth, "estimate": est, "level": level}
+    if df is not None:
+        kv["degrees_of_freedom"] = df
     if se:
         kv["standard_error"] = se
     if var:
@@ -468,3 +471,162 @@ def test_trials_the_time_limit_cut_off_are_not_failures_of_the_code():
     assert "4 of 6 trials failed" in fails[1].says() and "time" not in fails[1].says()
     record = tc.summary(fails, None)
     assert record["out_of_time"] == [{"key": "a=1", "planned": 10, "trials": 10}, {"key": "a=2", "planned": 10, "trials": 4}]
+
+
+# ---- the multiplier of the reported interval, against the plan's ---------------------------------------------------------
+
+
+def _interval_cells(mult: float, n_settings: int = 3, n: int = 60, seed: int = 21) -> list[dict]:
+    """Settings whose trials report an interval est +/- mult * se (each trial its own standard error)."""
+    rng = random.Random(seed)
+    per = {}
+    for i in range(n_settings):
+        e = [rng.gauss(10, 1) for _ in range(n)]
+        s = [rng.uniform(0.5, 1.5) for _ in range(n)]
+        per[f"s{i}"] = {"x_hat": e, "x_se": s, "x_lo": [a - mult * b for a, b in zip(e, s)],
+                        "x_hi": [a + mult * b for a, b in zip(e, s)]}
+    return _cells(per)
+
+
+def _mult(cal):
+    return [q for q in cal.quantities if q.kind == "multiplier"]
+
+
+_DECL3 = known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"), df=3)
+_Z = 1.959963984540054
+
+
+def test_student_t_quantile_agrees_with_published_values():
+    from core import stats
+    for p, df, want in ((0.975, 3, 3.182446), (0.975, 1, 12.706205), (0.975, 38, 2.024394), (0.95, 3, 2.353363),
+                        (0.995, 10, 3.169273), (0.975, 1000, 1.962339)):
+        assert abs(stats.t_quantile(p, df) - want) < 1e-5
+    assert abs(stats.t_quantile(0.025, 3) + 3.182446) < 1e-5 and stats.t_quantile(0.5, 5) == 0.0
+    assert abs(stats.t_quantile(0.975, math.inf) - 1.959964) < 1e-5
+
+
+def test_a_degrees_of_freedom_declaration_is_checked_for_its_shape():
+    clean, why = metric_spec.normalize([_DECL3])
+    assert why is None and clean[0]["known_value"]["degrees_of_freedom"] == 3
+    clean, why = metric_spec.normalize([known("x_hat", 5.0, se="x_se", interval=("x_lo", "x_hi"), df="normal")])
+    assert why is None and clean[0]["known_value"]["degrees_of_freedom"] == "normal"
+    for bad in (0, -2, 2.5, True, "t", "student"):
+        clean, why = metric_spec.normalize([known("x_hat", 5.0, se="x_se", interval=("x_lo", "x_hi"), df=bad)])
+        assert clean is None and "degrees_of_freedom" in why
+    # a multiplier is est +/- m * se: it needs both the standard error and the interval
+    clean, why = metric_spec.normalize([known("x_hat", 5.0, interval=("x_lo", "x_hi"), df=3)])
+    assert clean is None and "standard_error" in why
+    clean, why = metric_spec.normalize([known("x_hat", 5.0, se="x_se", df=3)])
+    assert clean is None and "interval" in why
+
+
+def test_the_multiplier_the_code_used_is_recovered_from_its_records_and_compared_with_the_plans():
+    from core import stats
+    t3 = stats.t_quantile(0.975, 3)
+    # the plan says t with 3 degrees of freedom; the code used the normal quantile (a call-site argument, not a formula)
+    cal = tc.calibration(_interval_cells(_Z), _proto(_DECL3))
+    [q] = _mult(cal)
+    assert q.fault and q.gross == 3 and abs(q.settings[0].value - 1.96) < 1e-4 and abs(q.expected - t3) < 1e-9
+    assert "1.96" in q.says() and "3.18" in q.says() and "3 degrees of freedom" in q.says()
+    # the multiplier the plan states: not a fault
+    [q] = _mult(tc.calibration(_interval_cells(t3), _proto(_DECL3)))
+    assert not q.fault and q.gross == 0
+    # a plan that states the normal quantile, and a code that uses it
+    cal = tc.calibration(_interval_cells(_Z), _proto(known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"), df="normal")))
+    assert not _mult(cal)[0].fault
+
+
+@pytest.mark.parametrize("used", [2.5706, 2.0423, 2.3534])  # df 5, df 30, the 90% level
+def test_a_wrong_degrees_of_freedom_or_level_is_a_fault(used):
+    assert _mult(tc.calibration(_interval_cells(used), _proto(_DECL3)))[0].fault
+
+
+def test_a_half_width_that_is_not_a_multiple_of_the_standard_error_is_a_fault():
+    # the half-width comes from one spread for every trial, not from each trial's own standard error
+    cells = _interval_cells(3.1824463)
+    for c in cells:
+        m = c["metrics"]
+        for i, e in enumerate(m["x_hat"]["values"]):
+            m["x_lo"]["values"][i], m["x_hi"]["values"][i] = e - 3.0, e + 3.0
+    [q] = _mult(tc.calibration(cells, _proto(_DECL3)))
+    assert q.fault and "no single multiplier" in q.says()
+
+
+def test_no_declared_degrees_of_freedom_means_the_multiplier_is_not_judged_and_not_flagged():
+    cal = tc.calibration(_interval_cells(1.96), _proto(known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"))))
+    assert not _mult(cal) and not cal.faults
+
+
+def test_the_multiplier_is_judged_even_when_the_declared_true_value_names_nothing():
+    cal = tc.calibration(_interval_cells(_Z), _proto(known("x_hat", "x_missing", se="x_se", interval=("x_lo", "x_hi"), df=3)))
+    assert _mult(cal)[0].fault and any("neither a threshold" in n for n in cal.not_checked)
+
+
+def test_a_setting_with_too_few_trials_is_not_judged_for_its_multiplier():
+    cal = tc.calibration(_interval_cells(_Z, n=tc.MIN_TRIALS - 1), _proto(_DECL3))
+    assert not _mult(cal) and any("multiplier" in n for n in cal.not_checked)
+
+
+def test_a_wrong_multiplier_is_sent_back_to_the_code_with_both_numbers_and_stops_if_it_stays():
+    proto = _proto(_DECL3)
+    cells = _interval_cells(_Z)
+    v = tc.judge(cells, proto, repairs_left=True)
+    assert v.action == tc.REPAIR and "multiplier" in v.directive and "1.96" in v.directive and "3.18" in v.directive
+    assert "Do not change the true values" in v.directive
+    v = tc.judge(cells, proto, repairs_left=False)
+    assert v.action == tc.STOP and "multiplier" in v.say
+    ok = tc.judge(_interval_cells(3.1824463), proto, repairs_left=True)
+    assert ok.action == tc.OK
+    assert any(q["kind"] == "multiplier" and not q["fault"] for q in ok.record()["calibration"]["quantities"])
+
+
+def test_replay_s6_the_weighted_fit_used_the_normal_quantile_while_the_plan_fixed_t_with_3_df():
+    # live suite round s6 (kinetics): plan.md "The reported 95% interval uses t(0.975, df = 3)"; code/simulate.py passed
+    # df_int = np.inf for the weighted headline fit. The trial records hold the answer: (hi - lo) / (2 se) = 1.96.
+    metrics = [known("Ea_hat", "Ea_true_kJ_mol", se="Ea_se", interval=("Ea_lo", "Ea_hi"), df=3),
+               known("lnA_hat", "lnA_true", se="lnA_se", interval=("lnA_lo", "lnA_hi"), df=3)]
+    _fails, cal = _checks("s6_kinetics", metrics)
+    qs = _mult(cal)
+    assert len(qs) == 2 and all(q.fault and q.gross == 3 for q in qs)
+    assert all(abs(s.value - 1.959964) < 1e-4 for q in qs for s in q.settings)
+    # the same record under a plan that says "normal" is clean: the check compares code with plan, it does not prefer t
+    _f, cal = _checks("s6_kinetics", [known("Ea_hat", "Ea_true_kJ_mol", se="Ea_se", interval=("Ea_lo", "Ea_hi"),
+                                            df="normal")])
+    assert not _mult(cal)[0].fault
+    # and a quest whose code did use t with 3 df, as its plan says, is not flagged
+    _f, cal = _checks("s4_kinetics", [known("Ea_hat", "Ea_true_kJmol", se="Ea_se", interval=("Ea_lo", "Ea_hi"), df=3),
+                                      known("lnA_hat", "lnA_true", se="lnA_se", interval=("lnA_lo", "lnA_hi"), df=3)])
+    assert len(_mult(cal)) == 2 and not any(q.fault for q in _mult(cal))
+
+
+def _rounded(cells: list[dict], decimals: int) -> list[dict]:
+    for c in cells:
+        for name, m in c["metrics"].items():
+            if name != "x_hat":
+                m["values"] = [round(v, decimals) for v in m["values"]]
+    return cells
+
+
+@pytest.mark.parametrize("decimals", [6, 4, 3, 2])
+def test_a_right_multiplier_in_values_the_code_rounded_is_not_a_fault_the_rounding_is_read_from_the_values(decimals):
+    from core import stats
+    cells = _rounded(_interval_cells(stats.t_quantile(0.975, 3), seed=22), decimals)
+    assert not any(q.fault for q in _mult(tc.calibration(cells, _proto(_DECL3))))
+
+
+@pytest.mark.parametrize("decimals", [6, 4])
+def test_a_wrong_multiplier_is_still_a_fault_in_rounded_values(decimals):
+    cells = _rounded(_interval_cells(_Z, seed=23), decimals)
+    assert _mult(tc.calibration(cells, _proto(_DECL3)))[0].fault
+
+
+def test_a_quantile_typed_with_three_or_four_significant_digits_is_the_plans_but_not_two():
+    for typed in (3.182, 3.18):
+        assert not _mult(tc.calibration(_interval_cells(typed), _proto(_DECL3)))[0].fault
+    assert _mult(tc.calibration(_interval_cells(3.2), _proto(_DECL3)))[0].fault
+
+
+def test_the_unit_a_series_was_rounded_to_is_read_from_the_values():
+    assert tc._grain([1.25, 3.5, 0.75]) == 0.01 and tc._grain([1.0, 4.0]) == 1.0
+    assert tc._grain([0.1234, 0.5678]) == 1e-4
+    assert tc._grain([0.123456789012345, 0.5]) == 0.0
