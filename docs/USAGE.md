@@ -520,7 +520,7 @@ knowledge:
 
 output:
   kinds: [paper_md, paper_pdf]
-  paper_format: generic             # scientific: generic | article | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
+  paper_format: article             # scientific: article (default) | generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
   output_dir: ./outputs
   save_model_calls: false           # keep every prompt and answer, whole, in .fi/io/ (one file per call); see docs/trace.md
   save_thinking: true               # keep the reasoning summary the provider returns, when its connection gives one, in .fi/thinking.jsonl (for reading; it is not the model's hidden or complete chain of thought, and never evidence); false keeps none (set it for a quest that handles sensitive data), and on the VS Code connection stops asking Copilot for the model's reasoning (asked by default: Copilot's undocumented `_enableThinking` option for Claude, whose Opus returns a summary, and `includeEncryptedThinking` for a GPT model's reasoning summary). `--why <quest> <step>` says whether the file holds that step's reasoning and how long it is. It can quote your data and prompts: only credentials and your home folder are removed, so check it before sharing the quest folder
@@ -806,7 +806,8 @@ Requires the `docker` Python package (`pip install docker`) and a running Docker
 
 | Format | Status |
 |---|---|
-| `generic` | ✅ Fully styled — IMRAD with default LaTeX article geometry. The default; pick this when you don't have a target venue. |
+| `article` | ✅ Fully styled — FI's plain one-column article: Latin Modern, no venue name, no logo. The default; pick this when you don't have a target venue. |
+| `generic` | ✅ Fully styled — IMRAD with default LaTeX article geometry. |
 | `neurips` | ✅ Fully styled — uses the NeurIPS 2024 style sheet. |
 | `iclr`, `ieee_access`, `nature_mi` | ⚠️ Minimal stubs — they compile, but the style sheets are placeholders. Treat as starting points; copy the real venue's `.sty` file into `templates/paper/<format>/` to customize. |
 
@@ -822,7 +823,7 @@ Requires the `docker` Python package (`pip install docker`) and a running Docker
 The `clarify` node's `paper_venue` slot accepts both buckets. For
 non-simulatable topics (set via the new `simulatability` clarify
 slot or legacy `empirical_vs_theoretical: empirical`), the agent
-will default to `essay` instead of `generic`. The write-persona
+will default to `essay` instead of `article`. The write-persona
 swap is automatic — set `paper_format: policy_brief` in YAML and
 the `write` node loads the policy-analyst voice.
 

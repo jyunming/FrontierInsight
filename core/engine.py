@@ -146,6 +146,7 @@ from . import retractions as _retractions
 from . import split_run as _split_run
 from . import stats as _stats
 from .config import (
+    DEFAULT_PAPER_FORMAT,
     Config,
     NON_SCIENTIFIC_PAPER_FORMATS,
     SCIENTIFIC_PAPER_FORMATS,
@@ -21165,7 +21166,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         fmt = output.paper_format
         answers = state.get("clarify_answers")
         venue = answers.get("paper_venue") if isinstance(answers, dict) else None
-        if fmt == "generic" and venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS:
+        if fmt == DEFAULT_PAPER_FORMAT and venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS:
             fmt = venue
         config = self.config.model_copy(update={"output": output.model_copy(update={
             "html_pdf_fallback": False, "paper_style": "latex", "paper_format": fmt,
@@ -26744,8 +26745,8 @@ def _default_clarify_questions(topic: str) -> dict[str, Any]:
             "default": "journal-length",
         },
         "paper_venue": {
-            "question": "Which paper template should we use? (generic / article / neurips / iclr / ieee_access / nature_mi)",
-            "default": "generic",
+            "question": "Which paper template should we use? (article / generic / neurips / iclr / ieee_access / nature_mi)",
+            "default": DEFAULT_PAPER_FORMAT,
         },
         "topic_shape": {
             "question": "What's the intellectual shape of this topic? (experimental / survey / review / case_study / opinion)",

@@ -194,7 +194,7 @@ def parse_proposal_md(md: str) -> dict[str, Any] | None:
         "budget": budget,
         "output_kinds": ["paper_md", "paper_pdf"],
         "study_depth": "journal-length",
-        "paper_venue": "generic",
+        "paper_venue": "article",
     }
     if hypothesis:
         # Non-clarify slot but cheap to carry — downstream design /

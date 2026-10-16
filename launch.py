@@ -2744,8 +2744,8 @@ def _log_paper_render(cfg: Config, art: QuestArtifacts) -> None:
 
 def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
     """Honor the `paper_venue` clarify slot: if the user's YAML left
-    `output.paper_format` at the default `"generic"` AND clarify picked
-    a specific venue, apply the venue choice. We DON'T override an
+    `output.paper_format` at its default (`"article"`, read off the config
+    model) AND clarify picked a different template, apply the venue choice. We DON'T override an
     explicit YAML setting (the user's hand-written value wins) and
     we silently ignore unknown venue strings to avoid pydantic
     rejecting them on a Config validator."""
@@ -2754,14 +2754,15 @@ def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
     )
     if not isinstance(venue, str) or venue not in _VALID_PAPER_FORMATS:
         return
-    if cfg.output.paper_format != "generic":
+    default = type(cfg.output).model_fields["paper_format"].default
+    if cfg.output.paper_format != default:
         # User set an explicit format in YAML; honor that.
         return
-    if venue == "generic":
+    if venue == default:
         return  # nothing to do
     print(
         f"[FI] paper_venue from clarify -> overriding paper_format: "
-        f"generic -> {venue}",
+        f"{default} -> {venue}",
     )
     cfg.output.paper_format = venue  # type: ignore[assignment]
 
@@ -4464,7 +4465,7 @@ async def _run_new(
     try:
         preflight_cache = await preflight_clarify(
             topic=str(partial.get("topic", "")),
-            paper_format=str(derived.get("paper_format") or "generic"),
+            paper_format=str(derived.get("paper_format") or "article"),
             provider_name=str(partial.get("provider") or "openai"),
             provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
         )
@@ -4601,7 +4602,7 @@ async def _run_new(
                     try:
                         preflight_cache = await preflight_clarify(
                             topic=str(partial.get("topic", "")),
-                            paper_format=str(derived.get("paper_format") or "generic"),
+                            paper_format=str(derived.get("paper_format") or "article"),
                             provider_name=str(partial.get("provider") or "openai"),
                             provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
                         )

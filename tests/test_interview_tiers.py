@@ -281,7 +281,7 @@ def test_derive_tier2_works_the_paper_format_out_first_and_the_depth_from_it() -
     assert derived["output_kinds"] == ["paper_md", "paper_pdf"]
     history = derive_tier2({"topic": "A history of the printing press"})
     assert history["paper_format"] == "essay" and history["no_simulation"] is True
-    assert derive_tier2({"topic": "Compare Euler and RK4 integrators"})["paper_format"] == "generic"
+    assert derive_tier2({"topic": "Compare Euler and RK4 integrators"})["paper_format"] == "article"
     held = derive_tier2({"topic": "t", "paper_format": "policy_brief"})
     from core.interview import smart_default_study_depth
     assert held["study_depth"] == smart_default_study_depth({"paper_format": "policy_brief"})

@@ -70,6 +70,10 @@ SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
 NON_SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
     "essay", "report", "policy_brief", "whitepaper",
 })
+# The paper template a quest gets when nobody chose one: FI's plain one-column
+# article. A config left at this value also means "no template chosen yet", so
+# the clarify step's ``paper_venue`` pick may replace it.
+DEFAULT_PAPER_FORMAT: PaperFormat = "article"
 OutputKind = Literal["paper_md", "paper_pdf", "slides", "poster", "speech"]
 # How paper.pdf is rendered. ``latex`` (default) = the venue LaTeX template
 # (Computer Modern article). ``briefing`` = the Frontier Insight
@@ -1607,7 +1611,7 @@ class KnowledgeConfig(BaseModel):
 
 class OutputConfig(BaseModel):
     kinds: list[OutputKind] = Field(default_factory=lambda: ["paper_md", "paper_pdf"])
-    paper_format: PaperFormat = "generic"
+    paper_format: PaperFormat = DEFAULT_PAPER_FORMAT
     # Visual style of paper.pdf. ``latex`` (default) keeps the venue LaTeX
     # template (Computer Modern article). ``briefing`` renders the Frontier
     # Insight "Research Briefing" look (warm paper, deep-teal accents, serif
