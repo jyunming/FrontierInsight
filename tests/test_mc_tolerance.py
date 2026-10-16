@@ -419,6 +419,47 @@ def test_a_declared_proportion_is_judged_on_its_binomial_interval_even_when_ever
     assert mc.proportion_names(protocol) == frozenset({"hit"})
 
 
+def test_whether_trials_repeat_is_read_from_the_plan_not_from_the_numbers_a_trial_returns() -> None:
+    """A trial returns only ``{"hit": 0}``: nothing it returns varies, which once read a random simulation as
+    deterministic and passed "0 within 0.01" at once. The plan says whether trials repeat: with 200 runs per setting
+    the declared proportion is judged on its binomial interval (twenty zeros: not decided); with one run per setting
+    (a deterministic study) it keeps the constant reading."""
+    rows = [{"hit": 0.0}] * 20
+    assert mc.repeats_trials({"runs_per_setting": 200}) is True
+    assert mc.repeats_trials({"runs_per_setting": 1}) is False
+    assert mc.repeats_trials({}) is None
+    many = mc.statistic(rows, "hit", (), 0.0, 0.01, {"hit"}, repeated=True)
+    assert many is not None and many["binary"] and mc.mean_verdict(many, 0.0, 0.01) is None
+    once = mc.statistic(rows, "hit", (), 0.0, 0.01, {"hit"}, repeated=False)
+    assert once is not None and not once.get("binary") and mc.mean_verdict(once, 0.0, 0.01) == "pass"
+
+
+ONLY_HIT = '''
+def run_trial(cell, trial_id, seed):
+    return {"hit": 0.0}
+'''
+
+
+@pytest.mark.parametrize("runs, judged_at_once", [(200, False), (1, True)])
+def test_a_trial_that_returns_only_its_0_1_outcome_is_judged_as_the_plan_repeats_it(
+        tmp_path: Path, runs: int, judged_at_once: bool) -> None:
+    """Through the measurement: ``run_trial`` returns only ``{"hit": 0}``, the protocol declares ``hit`` a proportion.
+    With 200 runs per setting it runs past its first batch (no constant reading); with one, it is judged at once."""
+    protocol = {"runs_per_setting": runs,
+                "metrics": [{"id": "hit", "estimand": "P(hit)", "kind": "proportion", "unit": "a run"}]}
+    check = {"name": "no_hits", "kind": "special_case", "expected": 0.0, "tolerance": 0.01, "case": {"n": 1},
+             "measure": "hit", "reference": "derivation: never"}
+    _c, problems, judged, _f = _plain(_synth(tmp_path, ONLY_HIT), [check], timeout_s=120,
+                                      proportion_names=mc.proportion_names(protocol),
+                                      repeated=mc.repeats_trials(protocol))
+    (j,) = judged
+    assert j["passed_by_engine"] is True, (j, problems)
+    if judged_at_once:
+        assert "mc" not in j or j["mc"].get("trials", 0) <= mc.PILOT_TRIALS
+    else:
+        assert j["mc"]["trials"] > mc.PILOT_TRIALS and j["mc"]["binomial_interval"][1] <= 0.01
+
+
 ALL_ZERO = '''
 import random
 

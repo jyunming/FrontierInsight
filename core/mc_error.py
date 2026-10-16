@@ -37,7 +37,8 @@ judges with them. The first rule is that a check the trials cannot decide is nev
 * **A number that does not move** in a first batch of at least :data:`MIN_TRIALS` trials is judged at once on trial
   0's number, as a deterministic check is, so a constant quantity never runs to the time limit (fewer trials that
   agree show no constant, and leave it not decided).
-* **A 0/1 outcome of a random simulation** (every trial gives 0 or 1, some number the simulation returns varies, and
+* **A 0/1 outcome of a random simulation** (every trial gives 0 or 1; the plan runs more than one trial per setting,
+  :func:`repeats_trials`, or, when the plan does not say, some number the simulation returns varies; and
   both values occurred, the check expects a rate strictly between 0 and 1, or the protocol declares the number a
   proportion and the tolerance is not exactly 0) is judged on its binomial interval, never on its sample spread (:func:`wilson`, :func:`binomial_verdict`), at every
   number of trials: ten zeros are not a rate of 0 (their interval at three standard errors reaches 0.47), so they do
@@ -89,6 +90,18 @@ def proportion_names(protocol: dict[str, Any] | None) -> frozenset[str]:
         return frozenset()
     kept, _dropped = _metric_spec.repair(metrics)
     return frozenset(str(m["id"]) for m in kept if m.get("kind") == "proportion" and not m.get("given"))
+
+
+def repeats_trials(protocol: dict[str, Any] | None) -> bool | None:
+    """Whether the plan runs more than one trial per setting (``runs_per_setting`` or ``min_runs_per_setting`` above
+    1): a random study. ``False`` for one run per setting (a deterministic study), ``None`` when the plan says neither."""
+    if not isinstance(protocol, dict):
+        return None
+    runs = [protocol.get(k) for k in ("runs_per_setting", "min_runs_per_setting")]
+    runs = [int(r) for r in runs if _number(r)]
+    if not runs:
+        return None
+    return max(runs) > 1
 
 
 def paired(protocol: dict[str, Any] | None) -> bool:
@@ -294,7 +307,7 @@ def summarise(rows: list[dict[str, Any]], measure: str) -> dict[str, Any] | None
 
 
 def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expected: Any = None, limit: Any = None,
-              proportions: Any = ()) -> dict[str, Any] | None:
+              proportions: Any = (), *, repeated: bool | None = None) -> dict[str, Any] | None:
     """The mean check's number and its error (see the module docstring): the formula on the names' means when every name
     it uses is a declared mean or proportion (``means``), else the mean of the formula trial by trial. A 0/1 outcome
     (``binary``; ``expected`` and ``limit`` are the check's) carries its Wilson ``interval`` and the standard error
@@ -313,12 +326,16 @@ def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expecte
     # the protocol declares it a proportion (then all zeros expected 0 within 0.01 are not a rate of 0, unless the
     # tolerance is exactly 0: an exact claim, read as a constant). One that is the same in every trial, expected to be
     # exactly that and not declared a proportion (a distance that is exactly 0) is a constant.
+    # Whether the trials are random is the plan's to say (``repeated``: it runs more than one trial per setting,
+    # :func:`repeats_trials`), not the returned numbers': a trial that returns only its 0/1 outcome, zero every time,
+    # varies in nothing. Only when the plan does not say are the returned numbers read.
     values = _outcome_values(rows, stat)
     rate = expected is not None and _number(expected) and 0.0 < float(expected) < 1.0
     exact = _number(limit) and float(limit) == 0.0
     declared = str(stat.get("inner") or "") in {str(p) for p in proportions or ()} and not exact
-    if (values and all(v in (0.0, 1.0) for v in values) and returned_varies(rows)
-            and (rate or declared or len(set(values)) > 1)):
+    both = len(set(values)) > 1
+    random = both or (repeated if repeated is not None else returned_varies(rows))
+    if values and all(v in (0.0, 1.0) for v in values) and random and (rate or declared or both):
         lo, hi = wilson(int(sum(values)), len(values))
         stat.update(binary=True, successes=int(sum(values)), interval=[lo, hi], se=(hi - lo) / (2 * BAND_SE))
     return stat
