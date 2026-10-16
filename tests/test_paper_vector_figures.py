@@ -16,6 +16,7 @@ from core.plot_style import write_boot
 from generation import paper as paper_mod
 from generation._paper_figures import prefer_paper_figures
 from generation.paper import PaperGenerator
+from tests.paper_fakes import fake_pandoc
 
 PDF_63 = b"%PDF-1.4\n1 0 obj << /Type /Page /MediaBox [ 0 0 453.6 144 ] >> endobj\n"
 PDF_31 = b"%PDF-1.4\n1 0 obj << /Type /Page /MediaBox [0 0 223.2 186] >> endobj\n"
@@ -67,7 +68,7 @@ def test_the_latex_source_uses_the_paper_copy_and_paper_md_keeps_the_png(tmp_pat
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
     _copies(tmp_path)
     md = tmp_path / "paper.md"
     text = "# A title\n\n## Results\n\nText.\n\n![**Figure 1.** Bias.](figures/wide.png)\n\nMore text.\n"
