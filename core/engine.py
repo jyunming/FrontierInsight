@@ -11995,15 +11995,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _time_note(self, state: QuestState) -> str:
         """What the plan is told about the topic's own runtime request next to FI's enforced limit (read the way the
-        paper's run record reads it, :func:`core.disclosure._topic_limit`); it never becomes a limit."""
+        paper's run record reads it, :func:`core.disclosure._topic_limit`). FI sizes the run to the shorter of the two
+        (``RunChecksMixin._size_the_run``): over it, the runs per setting are lowered, never the settings."""
         required = _disclosure._read_json(self.quest_root / ".fi" / "topic_requirements.json")
         stated = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
                   for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
         limit = _disclosure._topic_limit([c for c in stated if isinstance(c, str)], str(state.get("topic") or ""))
         asked = (f"The topic asks for a run of at most {_disclosure._plain_seconds(limit)}" if limit is not None
                  else "If the topic asks for a shorter run")
-        return (f"This is the limit FI enforces on one run. {asked}: plan to stay within the shorter of the two where "
-                "the study allows. FI does not enforce the topic's figure and does not refuse a plan over it; the paper "
+        return (f"This is the limit FI enforces on one run. {asked}: plan to stay within the shorter of the two. Before the "
+                "run FI times a few trials; a run over the shorter limit gets fewer runs per setting from FI (never fewer "
+                "settings), below the plan's min_runs_per_setting only for the topic's own limit, and the paper says so. "
+                "Each setting runs in a process of its own, whose start is paid once whatever the runs; the paper "
                 "reports how long the run took.")
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,

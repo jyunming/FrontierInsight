@@ -260,14 +260,19 @@ def run_trial(cell, trial, seed):
 '''
 
 
-def test_the_two_timed_trials_give_the_spread_of_each_metric(tmp_path: Path) -> None:
+def test_the_timed_trials_give_the_spread_of_each_metric(tmp_path: Path) -> None:
+    import statistics
+
     root = _quest(tmp_path, NOISY)
     probes, why = _measure(root, {"n": [1, 2, 4]}, 10, False)
     assert why == "" and probes is not None
     assert all(set(p.spread) == {"y"} for p in probes)
     from core import trial_runner
-    values = [(trial_runner.trial_seed(0, trial_runner.cell_key(probes[0].cell), t) % 7) * 0.5 for t in (0, 1)]
-    assert abs(probes[0].spread["y"] - abs(values[0] - values[1]) / 2 ** 0.5) < 1e-9
+    # Instant trials: all 10 runs of the setting are timed, and the spread is their sample standard deviation.
+    assert probes[0].timed_trials == 10
+    values = [(trial_runner.trial_seed(0, trial_runner.cell_key(probes[0].cell), t) % 7) * 0.5 for t in range(10)]
+    assert abs(probes[0].spread["y"] - statistics.stdev(values)) < 1e-9
+    assert len(probes[0].trials) == 2, "the pilot still reads the first two trials of each setting"
     assert est.spreads_of(probes)["y"] == max(p.spread["y"] for p in probes)
     e = est.estimate({"n": [1, 2, 4]}, 10, False, probes)
     assert e is not None and e.spreads == est.spreads_of(probes)

@@ -63,6 +63,9 @@ _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_
 
 NOT_DONE, LEFT_OUT, NOT_COMPUTED, PRECISION = "not_done", "left_out", "not_computed", "precision"
 SECOND_VERSION, UNTESTED, CODE_FINDING, FAILED_TRIALS = "second_version", "untested", "code_finding", "failed_trials"
+FEWER_RUNS = "fewer_runs"
+#: The name of the item the paper must place when FI ran fewer runs per setting than the plan's minimum.
+FEWER_RUNS_NAME = "fewer runs than the plan's minimum"
 _KIND_WORDS = {
     NOT_DONE: "a part of the topic the study did not do",
     LEFT_OUT: "a quantity left out of the results because a test showed the code computes it wrongly",
@@ -72,9 +75,11 @@ _KIND_WORDS = {
     UNTESTED: "an equation not tested against a worked example before the run",
     CODE_FINDING: "an open problem in the code that can change a reported result",
     FAILED_TRIALS: "trials that failed",
+    FEWER_RUNS: "a part of the plan not fully done, to fit the topic's time limit",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
-              SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials"}
+              SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
+              FEWER_RUNS: "fewer"}
 
 
 @dataclass(frozen=True)
@@ -282,6 +287,13 @@ def required_items(quest_root: Path | str) -> list[Item]:
         if failed:
             add(FAILED_TRIALS, "failed trials", _sentence(f"{failed:,} of {len(statuses):,} trials failed; their results are "
                                                           "not in the reported numbers"), key="all")
+    estimate = _read(root, ".fi/run_estimate.json")
+    reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
+    if isinstance(reduced, dict) and reduced.get("below_plan_minimum"):
+        to = reduced.get("to") if isinstance(reduced.get("to"), dict) else {}
+        add(FEWER_RUNS, FEWER_RUNS_NAME,
+            _sentence(f"The experiment ran {to.get('runs_per_setting', '?')} runs per setting against the plan's minimum of "
+                      f"{reduced.get('plan_minimum', '?')}, so that the run fits the topic's time limit"), key="runs")
     return items
 
 
@@ -579,7 +591,9 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
     reduced_note = (_one(reduced["note"]) if isinstance(reduced, dict) and isinstance(reduced.get("note"), str)
                     and reduced["note"].strip() else "")
-    if not known and not items and not reduced_note:
+    over = estimate.get("over_topic_limit") if isinstance(estimate, dict) else None
+    over_note = _one(over["note"]) if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip() else ""
+    if not known and not items and not reduced_note and not over_note:
         return ""
     lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. Do not type them: write the "
                  "placeholder (double braces, exactly as shown) where the fact goes, and FI puts the value in from its "
@@ -603,6 +617,8 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
             lines.append(f"Required: the paper must hold {', '.join(needed)} (in the Methods, or where the run is described).")
     if reduced_note:
         lines.append(f"Reduced size: {reduced_note} Say this in the paper, with the numbers.")
+    if over_note:
+        lines.append(f"Time limit: {over_note} Say this in the paper.")
     if items:
         lines.append("In the Limitations section (a section headed \"Limitations\"), put each of these placeholders on its "
                      "own, as a sentence; FI replaces it with the plain sentence shown, from its record. You may add your "

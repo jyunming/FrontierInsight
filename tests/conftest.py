@@ -119,7 +119,7 @@ _SCRIPTED_AT_THE_PLAN_STEP = (
 #: made before the plan would be taken for it.
 _FIRST_REPLY_IS_THE_PLAN = (
     "test_drafted_search_block", "test_plan_optimisation", "test_plan_model_sources", "test_design_self_critique",
-    "test_design_critique_record", "test_latex_in_model_replies_nodes", "test_run_checks",
+    "test_design_critique_record", "test_latex_in_model_replies_nodes", "test_run_checks", "test_run_size_replay",
 )
 
 

@@ -74,6 +74,7 @@ def _number(v):
 
 def main():
     import os
+    clock0 = time.perf_counter()
     spec_path = sys.argv[1]
     with open(spec_path, encoding="utf-8") as f:  # closed before it is deleted: Windows refuses to delete an open file
         spec = json.load(f)
@@ -119,9 +120,17 @@ def main():
         out.write(json.dumps({"nonce": nonce, "load_error": f"{type(e).__name__}: {e}"[:500]}) + "\n")
         out.close()
         sys.exit(3)
-    for trial in spec["trials"]:
-        t0 = time.monotonic()
-        row = {"nonce": nonce, "trial": trial["trial"], "seed": trial.get("seed")}
+    # A timing run (core/run_estimate.py) stops once the trials after the first have taken this long: enough of them to
+    # measure what one costs, however short a trial is.
+    stop_after = spec.get("stop_after_s")
+    later = 0.0
+    for index, trial in enumerate(spec["trials"]):
+        # perf_counter, not monotonic: on Windows monotonic moves in steps of about 16 ms, so a trial of a few
+        # milliseconds was recorded as 0 or 0.016 s, and a run timed from one such trial was off by a factor of ten.
+        t0 = time.perf_counter()
+        # When the trial started (seconds into this process): from one start to the next is what a trial costs with the
+        # harness's own writing, which a timing run counts.
+        row = {"nonce": nonce, "trial": trial["trial"], "seed": trial.get("seed"), "at_s": round(t0 - clock0, 6)}
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             try:
@@ -141,7 +150,7 @@ def main():
                     raise
                 row.update(status="failed", reason=f"{type(e).__name__}: {e}"[:300],
                            traceback=traceback.format_exc()[-1500:])
-        row["duration_s"] = round(time.monotonic() - t0, 4)
+        row["duration_s"] = round(time.perf_counter() - t0, 6)
         if spec.get("spy_trial"):
             row["trial_calls"] = trial_calls[0]
             row["trial_means"] = {k: t / n for k, (t, n) in trial_sums.items() if n}
@@ -152,6 +161,10 @@ def main():
             sys.stderr.write(f"{w.filename}:{w.lineno}: {w.category.__name__}: {w.message}\n")
         out.write(json.dumps(row, allow_nan=True) + "\n")
         out.flush()
+        if stop_after and index > 0:
+            later += row["duration_s"]
+            if later >= float(stop_after):
+                break
     out.close()
     sys.stdout = real_stdout
 
@@ -266,9 +279,9 @@ def record_cells(runs: list[CellRun]) -> list[CellRun]:
     return out
 
 
-def _append(path: Path, row: dict[str, Any]) -> None:
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, allow_nan=True, default=str) + "\n")
+def _append(fh: Any, row: dict[str, Any]) -> None:
+    # One open file for the whole ledger: opening it again for each of 110,592 trials cost about 26 s on Windows (r13).
+    fh.write(json.dumps(row, allow_nan=True, default=str) + "\n")
 
 
 def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -325,12 +338,21 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
     raw = quest_root / RAW_DIRNAME
     raw.mkdir(parents=True, exist_ok=True)
     ledger = raw / LEDGER_NAME
-    ledger.write_text("", encoding="utf-8")
+    with open(ledger, "w", encoding="utf-8") as fh:
+        runs = _collect_cells(quest_root, plan, results, fh, run_id=run_id, not_reported=not_reported)
+    summary = raw / SUMMARY_NAME
+    summary.write_text(json.dumps(_summary(runs, thresholds), indent=1, allow_nan=True), encoding="utf-8")
+    return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary)
+
+
+def _collect_cells(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, Any], fh: Any, *, run_id: str,
+                   not_reported: str) -> list["CellRun"]:
+    """Each cell's rows (see :func:`_collect`), with the ledger written to ``fh`` as they are read."""
     runs: list[CellRun] = []
     for task in plan:
         key, trials, nonce = task["key"], task["trials"], task["nonce"]
         per_cell = len(trials)
-        _append(ledger, {"event": "planned", "run_id": run_id, "cell": key, "trials": per_cell,
+        _append(fh, {"event": "planned", "run_id": run_id, "cell": key, "trials": per_cell,
                          "entry": task["entry"], "at": time.time()})
         result = results.get(task["index"])
         run = CellRun(key=key, cell=task["cell"], planned=per_cell, levels=list(task.get("levels") or []),
@@ -375,7 +397,7 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
             if t["trial"] in twice:
                 row = {**row, "status": "failed", "reason": "this trial was reported more than once"}
             run.rows.append(row)
-            _append(ledger, {
+            _append(fh, {
                 "event": "trial", "run_id": run_id, "cell": key, "trial": t["trial"], "seed": t["seed"],
                 "status": "ok" if row.get("status") == "ok" else "failed",
                 **({"reason": row["reason"]} if row.get("reason") else {}),
@@ -386,9 +408,7 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
                 "warnings": len(row.get("warnings") or []),
             })
         runs.append(run)
-    summary = raw / SUMMARY_NAME
-    summary.write_text(json.dumps(_summary(runs, thresholds), indent=1, allow_nan=True), encoding="utf-8")
-    return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary)
+    return runs
 
 
 async def run_trials(

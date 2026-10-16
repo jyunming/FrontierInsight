@@ -1,0 +1,69 @@
+{
+ "grid": {
+  "m": [
+   20,
+   200,
+   2000
+  ],
+  "pi1": [
+   0.0,
+   0.05,
+   0.2
+  ],
+  "procedure": [
+   "uncorrected",
+   "bonferroni",
+   "bh"
+  ]
+ },
+ "runs_per_setting": 2000,
+ "min_runs_per_setting": 1000,
+ "precision": {
+  "target_half_width": 0.03,
+  "metric": "chance_any_false_discovery",
+  "reason": "A 0.03 95% half-width distinguishes nominal 0.05-scale familywise error from the large uncorrected global-null probability at m=200 and 2000; 2000 runs is more precise than the approximately 1067 worst-case runs required."
+ },
+ "thresholds": {
+  "alpha": 0.05,
+  "effect_size": 2.5
+ },
+ "metrics": [
+  {
+   "id": "empirical_fdr",
+   "estimand": "E[V/max(R,1)] across repeated simulated families.",
+   "kind": "mean",
+   "unit": "one simulated multiple-testing family",
+   "cluster": null,
+   "paired": true,
+   "family": "The m hypotheses in one simulated family."
+  },
+  {
+   "id": "power",
+   "estimand": "E[TP/n1] across repeated simulated families with n1>0.",
+   "kind": "mean",
+   "unit": "one simulated multiple-testing family",
+   "cluster": null,
+   "paired": true,
+   "family": "The m hypotheses in one simulated family.",
+   "given": "signal_present"
+  },
+  {
+   "id": "chance_any_false_discovery",
+   "estimand": "Pr(V>0) across repeated simulated families.",
+   "kind": "proportion",
+   "unit": "one simulated multiple-testing family",
+   "cluster": null,
+   "paired": true,
+   "family": "The m hypotheses in one simulated family."
+  },
+  {
+   "id": "signal_present",
+   "estimand": "Indicator that n1>0 in a grid cell.",
+   "kind": "proportion",
+   "unit": "grid cell",
+   "cluster": null,
+   "paired": false,
+   "family": "Not a hypothesis-testing family; it gates reporting of power."
+  }
+ ]
+}
