@@ -995,3 +995,36 @@ async def test_an_answer_that_does_not_say_leaves_the_check_judged_on_every_tria
     design, sha = engine._design_from_plan()
     await engine._ask_plan_for_the_parts(state, design, sha)
     assert len(model.asked) == first, "the same problem is not asked about again"
+
+
+def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_path: Path) -> None:
+    """Review pass 2, P1-4: the request asks for the metrics and for how ``fdp_le_one`` holds. The answer adds two
+    metrics declared as means and, with them, sets ``per_trial: false`` on ``counts_agree``, a second implementation
+    with a tolerance of 0 that was never asked about: that would read ``abs(count_a - count_b)`` on the means, where
+    the two counters may disagree by one in every trial. Only the checks named in the question take ``per_trial``."""
+    import logging
+    import types
+
+    from core import plan
+    from core.engine import Engine
+
+    metrics = [{"id": "fdr_bh", "estimand": "E[FDP]", "kind": "mean", "unit": "a repeat"}]
+    oracles = [
+        {"name": "fdp_le_one", "kind": "invariant", "expected": 0, "tolerance": 0, "case": {"m": 10},
+         "measure": "max(0, fdr_bh - 1)", "reference": "derivation: V <= R"},
+        {"name": "counts_agree", "kind": "second_implementation", "expected": 0, "tolerance": 0, "case": {"m": 10},
+         "measure": "abs(count_a - count_b)", "reference": "second implementation: independent counter"},
+    ]
+    before = plan.render("topic", {}, {"hypothesis": "h", "protocol": {"grid": {"m": [10]}, "metrics": metrics,
+                                                                      "oracles": oracles}})
+    more = metrics + [{"id": "count_a", "estimand": "E[count a]", "kind": "mean", "unit": "a repeat"},
+                      {"id": "count_b", "estimand": "E[count b]", "kind": "mean", "unit": "a repeat"}]
+    answer = {"protocol": {"metrics": more, "oracles": [{"name": "fdp_le_one", "per_trial": True},
+                                                        {"name": "counts_agree", "per_trial": False}]}}
+    owner = types.SimpleNamespace(_log=logging.getLogger("test"), _ledger_problems=lambda *a, **k: {})
+    kept = Engine._keep_only_the_parts(owner, before, answer, ["metrics", "per_trial"])  # type: ignore[arg-type]
+    assert kept is not None
+    after = {o["name"]: o for o in plan.raw_design_block(kept)["protocol"]["oracles"]}
+    assert after["fdp_le_one"]["per_trial"] is True
+    assert "per_trial" not in after["counts_agree"], after["counts_agree"]
+    assert not mc.reads_a_mean(after["counts_agree"])

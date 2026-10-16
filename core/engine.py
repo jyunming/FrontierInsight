@@ -6593,8 +6593,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         for part in parts:
             if part == "per_trial":
                 # Only `per_trial` of the checks asked about is taken (core/mc_error.py::unsaid_reading): never a
-                # tolerance, an expected value or anything else of a check.
-                names = set(_mc_error.unsaid_reading(merged))
+                # tolerance, an expected value or anything else of a check. The checks asked about are those of the
+                # plan as it was (`old_protocol`), never those a part merged from this answer (new metrics) would add.
+                names = set(_mc_error.unsaid_reading(old_protocol))
                 said = new_protocol.get("oracles") if isinstance(new_protocol.get("oracles"), list) else (
                     new.get("oracles") if isinstance(new.get("oracles"), list) else [])
                 answers = {str(e.get("name") or "").strip(): _mc_error.per_trial_flag(e) for e in said
