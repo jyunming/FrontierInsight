@@ -194,7 +194,7 @@ async def test_an_outline_whose_parameters_are_not_the_examples_inputs_is_given_
     specs, _notes = fs.model_functions(outline, engine._protocol_block(state))
     assert [s.params() for s in specs] == [["line_width_sd_nm"]], "FI sets the function's parameters from the example's inputs"
     aligned = engine._outline_with_example_names(state, outline)
-    assert aligned["functions"][0]["signature"] == "def cloglog_defect_probability(line_width_sd_nm) -> float:"
+    assert aligned["functions"][0]["signature"] == "def cloglog_defect_probability(*, line_width_sd_nm) -> float:"
     await engine._fill_model_functions(state, outline)
     assert model.revisions == [], "the plan is not asked to rename its example to the outline's words"
     assert _plan_example(engine) == BAD_EXAMPLE

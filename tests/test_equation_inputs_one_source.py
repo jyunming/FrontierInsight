@@ -6,6 +6,8 @@ from __future__ import annotations
 import ast
 from typing import Any
 
+import pytest
+
 from core import equation_tests as eqt
 from core import function_steps as fs
 
@@ -76,8 +78,8 @@ def test_the_outline_read_gives_the_functions_the_examples_parameters() -> None:
     assert [s.params() for s in specs] == [["g", "t"]], notes
     outline = _outline()
     aligned, changed = fs.align_outline(outline, protocol)
-    assert aligned["functions"][0]["signature"] == "def drop(g, t) -> float:"
-    assert "def drop(g, t) -> float:\n    raise NotImplementedError" in aligned["scaffold"]
+    assert aligned["functions"][0]["signature"] == "def drop(*, g, t) -> float:"
+    assert "def drop(*, g, t) -> float:\n    raise NotImplementedError" in aligned["scaffold"]
     assert len(changed) == 1 and "drop (E1)" in changed[0]
     assert outline == _outline(), "the outline given is not changed"
     assert fs.align_outline(aligned, protocol) == (aligned, []), "reading it again changes nothing"
@@ -90,3 +92,14 @@ def test_the_clash_that_asked_the_plan_to_rename_its_example_no_longer_arises() 
         assert eqt.parameter_problems([row], {"E1": (old.params(), old.required_params())}), sig
         new = fs.Spec("drop", fs.example_signature(sig, row), "", "E1")
         assert not eqt.parameter_problems([row], {"E1": (new.params(), new.required_params())}), sig
+
+
+def test_a_signature_fi_rewrote_takes_keywords_only_so_an_old_positional_call_fails_loudly() -> None:
+    row = {"id": "E1", "state": "ok", "inputs": {"t": 0.24, "w": 40, "p": 80, "m": 1}}
+    sig = fs.example_signature("def mask_order(w_nm, pitch_nm, order_m, t_amp) -> float:", row)
+    assert sig == "def mask_order(*, t, w, p, m) -> float:"
+    ns: dict = {}
+    exec(sig + "\n    return t * w / p * m", ns)
+    assert ns["mask_order"](t=0.24, w=40, p=80, m=1) == 0.12
+    with pytest.raises(TypeError):
+        ns["mask_order"](40, 80, 1, 0.24)  # the outline's old order: refused, never a silent wrong value
