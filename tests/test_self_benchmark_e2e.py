@@ -232,11 +232,19 @@ def test_the_valid_error_filter_keeps_n3_and_s1(bench: dict[str, Any]) -> None:
     assert s1["valid"] is True, s1
 
 
-@pytest.mark.parametrize("error,gate", [("R1", "numbers"), ("R2", "numbers"), ("N3", "oracle"),
+@pytest.mark.parametrize("error,gate", [("R1", "numbers"), ("R2", "claim_check"), ("N3", "oracle"),
                                         ("S1", "run_record"), ("L1", "retractions")])
 def test_fi_catches_each_planted_error(bench: dict[str, Any], error: str, gate: str) -> None:
     o = bench["outcomes"][error]
     assert o["role"] == "planted" and o["valid"] is True, o
+    assert o["let_through"] is False, (error, o["evidence_level"], o["flag_reasons"])
+    if error == "R1":
+        # The planted number sits in FI's table of every setting, which FI fills from its records again before delivery:
+        # the paper delivered no longer states it, which is the error put right, not flagged.
+        planted = json.loads((runner.paths(bench["root"] / "R1")[1] / "plant.json").read_text(encoding="utf-8"))
+        paper = (runner.quest_root(bench["root"] / "R1") / "paper" / "paper.md").read_text(encoding="utf-8")
+        assert planted["planted_value"] not in paper and planted["original_value"] in paper, planted
+        return
     assert not o["would_publish"], (error, o["evidence_level"], o["flag_reasons"])
     assert o["first_gate"] == gate, (error, o["flagged"], o["flag_reasons"])
 

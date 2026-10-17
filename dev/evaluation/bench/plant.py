@@ -82,9 +82,12 @@ def plant_r1(quest_root: Path, *, find: str | None = None, replace: str | None =
         replace = _perturbed(find)
     if replace is None:
         raise ValueError("give the number that replaces it")
+    # How often the paper states the original number before the plant (only the first is changed): the scorer asks for
+    # every one of them back, so a number the paper also states elsewhere does not pass for the planted one put right.
+    original_count = text.count(find)
     edits = [edit_file(quest_root, rel, find, replace) for rel in rels]
     return {"error": "R1", "how": "edit", "from_step": catalogue.get("R1").from_step, "edits": edits,
-            "planted_value": replace, "original_value": find}
+            "planted_value": replace, "original_value": find, "original_count": original_count}
 
 
 #: R2's planted sentence: a precise number nothing in the run computed.
@@ -108,7 +111,23 @@ def plant_r2(recording: Recording, *, node: str = "write", index: int = 1,
               "call": f"{node}#{index}", "added": sentence,
               "sha256_before": hashlib.sha256(text.encode("utf-8")).hexdigest(),
               "sha256_after": hashlib.sha256(new.encode("utf-8")).hexdigest()}
-    return record, {(node, index): new}
+    answers = {(node, index): new}
+    # The claim check reads the planted draft next, and the recording's answer is the one it gave the draft without the
+    # sentence: replayed, it would judge a paper it never saw. Its answer here is the recorded one with the sentence judged
+    # as a real model judged it (claude-sonnet-5-5 on this draft and on one with a plan number in the sentence: unsupported
+    # both times, 2026-10-17), so the replay measures what FI does with that verdict, not the model.
+    claimed = recording.get("claim_check", 1)
+    if claimed is not None:
+        from core.engine import _parse_json_lenient  # read as FI reads it (a fenced or wrapped reply too)
+
+        reply = _parse_json_lenient(str(claimed["response"]))
+        if not isinstance(reply, dict) or not isinstance(reply.get("claims") or [], list):
+            raise ValueError("the recording's claim check answer is not one JSON object")
+        judged = {"claim": sentence, "basis": "unsupported", "citation_index": None, "quote": "",
+                  "evidence": "The numbers appear nowhere in the evidence block; no supplementary sweep was run."}
+        answers[("claim_check", 1)] = json.dumps({**reply, "claims": [*(reply.get("claims") or []), judged]})
+        record["claim_check_answer"] = "the recorded one, with the planted sentence judged unsupported"
+    return record, answers
 
 
 def plant_code(error: str, quest_root: Path, *, file: str, find: str, replace: str) -> dict[str, Any]:

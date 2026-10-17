@@ -163,7 +163,8 @@ def test_the_written_paper_ends_with_further_reading(tmp_path: Path) -> None:
 
     async def chat(prompt, *, node=""):
         seen["prompt"] = prompt
-        return ("# Play and Plastic\n\nBody [1], quoting [W1].\n\n## References\n"
+        return ("# Play and Plastic\n\n## Abstract\n\nWhat children did with action figures.\n\n"
+                "## Body\n\nBody [1], quoting [W1].\n\n## References\n"
                 "1. A. Author (2020). Action figures and children's play. J. Toys. DOI: 10.1/a\n")
 
     eng._chat = chat  # type: ignore[method-assign]

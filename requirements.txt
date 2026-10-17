@@ -127,6 +127,8 @@ pytest-timeout>=2.3
 hypothesis>=6.100
 # The plot-style and figure-redraw tests draw real figures; without it they skip.
 matplotlib>=3.7
+# The replay tests run real quests' code (tests/fixtures/), which imports scipy as the quests' own venvs did.
+scipy>=1.10
 
 # Optional knowledge-layer source adapter (source-router):
 #   scholarly  → Google Scholar (no official API; rate-limited; EXPERIMENTAL).

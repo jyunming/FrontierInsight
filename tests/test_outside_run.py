@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from core.execution import ExecutionResult
 from core.outside_run import ANALYSIS_INPUTS, OutsideCopy, OutsideExecutor, named_paths
@@ -107,3 +109,19 @@ def test_a_path_named_on_the_command_line_or_in_the_environment_is_found(tmp_pat
     got = named_paths(root, ["-B", ".fi/trials/cell0.out.jsonl", "raw", "3", str(root / "raw" / "old.txt"),
                              "needs/FROZEN_PROTOCOL.json", str(root / ".venv" / "python.exe")])
     assert got == [".fi/trials/cell0.out.jsonl", "raw", "raw/old.txt"]
+
+
+def test_an_environment_value_naming_a_path_no_one_may_look_at_is_passed_over(tmp_path: Path, monkeypatch: Any) -> None:
+    # CI's runner: PSModulePath is "/root/.local/share/powershell/Modules:/usr/local/...", and stat of /root is refused.
+    root = _quest(tmp_path)
+    denied = os.pathsep.join(["/denied/powershell/Modules", "/usr/local/share/powershell/Modules"])
+    real_stat = Path.stat
+
+    def stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if str(self).replace("\\", "/").startswith("/denied") or str(self) == denied:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    got = named_paths(root, [denied, os.pathsep.join(["raw", "/usr/bin"]), str(root / "raw" / "old.txt")])
+    assert got == ["raw", "raw/old.txt"]

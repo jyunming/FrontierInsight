@@ -274,6 +274,16 @@ def _same_reason(text: str) -> str:
     return _DIGITS.sub("#", text).strip().lower()
 
 
+def r1_put_right(plant: dict[str, Any], delivered: str) -> bool:
+    """Whether the delivered paper put R1's planted number right: a number in a block FI fills from its records is
+    filled again before delivery, so the planted number is gone and the original one is back: as often as the paper
+    stated it before the plant (``original_count``; once for an older record). A paper that only lost the planted number
+    (reworded, rounded, its sentence dropped) has not been put right, also when it states the original elsewhere."""
+    planted, original = str(plant.get("planted_value") or ""), str(plant.get("original_value") or "")
+    wanted = max(int(plant.get("original_count") or 1), 1)
+    return bool(planted and original) and planted not in delivered and delivered.count(original) >= wanted
+
+
 def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | None = None,
               role: str | None = None, needs_control: bool = False) -> dict[str, Any]:
     """One run's outcome (see the module docstring). ``control``: the scored control of the same copy and step;
@@ -365,6 +375,8 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
     # A planted error let through: the result would be published. For L1, only when the paper also rests on the
     # retracted source: FI keeping it out of a published paper is the check working.
     let_through = would_publish and (error != "L1" or bool(cites_planted))
+    if error == "R1" and r1_put_right(plant, _paper_text(root)):
+        let_through = False
     return {
         "run": run_dir.name, "task": task["task"], "error": error, "role": role, "mode": meta.get("mode"),
         "from_step": meta.get("from_step"), "answer": answer, "evidence_level": level,

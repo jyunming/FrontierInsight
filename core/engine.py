@@ -20100,7 +20100,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             text, taken = _typed_numbers.remove(before.decode("utf-8"), plan)
             if not taken:
                 return []
-            Path(path).write_text(text, encoding="utf-8")
+            # Bytes back as bytes: text mode would write the draft's own CRLF as CR CR LF on Windows, which every later
+            # read takes for a blank line more, so the next step rewrites the paper and the receipt moved here is stale.
+            Path(path).write_bytes(text.encode("utf-8"))
             _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
                                  "FI took numbers the writer typed out of the checked draft and added no claim")
         except (OSError, UnicodeDecodeError) as e:
@@ -20123,7 +20125,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             text, taken = _paper_facts.take_out_unfilled(before.decode("utf-8"))
             if not taken:
                 return []
-            Path(path).write_text(text, encoding="utf-8")
+            Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (see _take_out_typed_numbers)
             _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
                                  "FI took out values it could not fill and added no claim")
         except (OSError, UnicodeDecodeError) as e:
@@ -22080,7 +22082,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 after = self._render_paper_facts(
                     _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
                 if after != before:
+                    checked = paper_path.read_bytes()
                     paper_path.write_text(after, encoding="utf-8")
+                    # The sentence is FI's own measurement: it adds no claim and no citation, so both checks' receipts move.
+                    for check in ("claim_check", "citation_check"):
+                        _receipts.carry_over(self.quest_root, check, "paper", checked, paper_path.read_bytes(),
+                                             "FI stated its own page count in the Limitations and added no claim")
             except (OSError, UnicodeDecodeError) as e:
                 self._log.warning("[page_limit] the paper could not be given its sentence on the page limit (%s)", e)
                 break

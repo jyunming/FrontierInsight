@@ -212,6 +212,14 @@ class OutsideCopy:
             shutil.rmtree(self.root, ignore_errors=True)
 
 
+def _exists(path: Path) -> bool:
+    """``path.exists()``, False for a path the user may not look at (a value such as ``PSModulePath`` naming ``/root``)."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def named_paths(quest_root: Path, values: list[str]) -> list[str]:
     """The paths into the quest folder that ``values`` (command-line arguments, environment values) name, relative to
     it: an absolute path under the quest folder, or a relative one that is there (or whose folder is there)."""
@@ -220,7 +228,7 @@ def named_paths(quest_root: Path, values: list[str]) -> list[str]:
     for value in values:
         if not isinstance(value, str) or not value or len(value) > 400 or "\n" in value or value.startswith("-"):
             continue
-        for part in value.split(os.pathsep) if os.pathsep in value and not Path(value).exists() else [value]:
+        for part in value.split(os.pathsep) if os.pathsep in value and not _exists(Path(value)) else [value]:
             try:
                 path = Path(part)
                 full = path.resolve() if path.is_absolute() else (root / path).resolve()

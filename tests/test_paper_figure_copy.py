@@ -74,6 +74,7 @@ def _snap(fig):
         legends += _legend(ax.get_legend())
         axes.append({
             "xlim": [float(v) for v in ax.get_xlim()], "ylim": [float(v) for v in ax.get_ylim()],
+            "datalim": [float(v) for v in ax.dataLim.extents],
             "aspect": str(ax.get_aspect()), "scales": [ax.get_xscale(), ax.get_yscale()],
             "lines": [[l.get_visible(), _c(l.get_color()), str(l.get_linestyle()), str(l.get_marker()),
                        _h(l.get_xydata())] for l in ax.get_lines()],
@@ -294,9 +295,12 @@ def test_the_copy_shows_the_same_data_as_the_slide_figure(tmp_path_factory: pyte
     # and a name drawn in other colours in two panels is not merged into one entry.
     assert paper["legend"] == slide["legend"]
     for s, p in zip(slide["axes"], paper["axes"]):
-        if s["aspect"] == "1.0":  # axis('equal'): a canvas of another shape shows more around the same data
-            assert p["xlim"][0] <= s["xlim"][0] and p["xlim"][1] >= s["xlim"][1]
-            assert p["ylim"][0] <= s["ylim"][0] and p["ylim"][1] >= s["ylim"][1]
+        if s["aspect"] == "1.0":
+            # axis('equal'): the margin around the data follows the canvas (and matplotlib's version), the data does not:
+            # the same data, all of it in view.
+            x0, y0, x1, y1 = s["datalim"]
+            assert p["datalim"] == s["datalim"]
+            assert p["xlim"][0] <= x0 and p["xlim"][1] >= x1 and p["ylim"][0] <= y0 and p["ylim"][1] >= y1
         else:
             assert p["xlim"] == s["xlim"] and p["ylim"] == s["ylim"]
 

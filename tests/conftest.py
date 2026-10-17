@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Files under fixtures/ are data the tests read (some are a real quest's own test files), never tests to collect.
+collect_ignore_glob = ["fixtures/*"]
+
 # On Windows the first platform.uname() runs ``ver`` through subprocess.run, and the
 # PDF reader (pypdfium2) calls it on its first import. A test that replaces
 # subprocess.run with a fake pandoc would record that call as a pandoc command when the
