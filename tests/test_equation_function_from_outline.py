@@ -40,6 +40,7 @@ def test_the_outline_names_the_tested_function_and_a_label_is_the_fallback() -> 
     assert by_outline["E2"] == {"module": "spring.model", "function": "quality", "file": "spring/model.py",
                                 "static": eqt.static_facts(sources["spring/model.py"], "quality")}
     assert by_outline["E1"]["function"] == "frequency"
+    assert eqt.locate(PROTOCOL, sources, {"e2": "quality"})["E2"]["function"] == "quality", "ids match in any case"
     # A function the outline names that the code does not have: the label, as before.
     assert eqt.locate(PROTOCOL, sources, {"E2": "q_factor"})["E2"]["function"] == "quality_terms"
 
