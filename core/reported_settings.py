@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from bisect import bisect_left
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -160,17 +161,67 @@ def _distinct(values: list[float]) -> list[float]:
     return out
 
 
-def _candidates(row: dict[str, Any], cells: list[dict[str, Any]], skip: set[str]) -> list[dict[str, Any]] | None:
+class _CellIndex:
+    """What :func:`_candidates` asks of the cells' trial values, answered without scanning them all for every printed row:
+    each cell's values of a metric sorted once (a value equal to a printed number within :func:`same` is found by bisecting
+    a window around it), the mean of those values, the metrics the cells carry, and whether a metric tells the cells apart
+    (two values that are not :func:`same` as the first are enough; the full list of distinct values is never built)."""
+
+    def __init__(self, cells: list[dict[str, Any]]) -> None:
+        self.cells = cells
+        self.names = {k for c in cells for k in c["metrics"]}
+        self._sorted: dict[tuple[int, str], list[float]] = {}
+        self._mean: dict[tuple[int, str], float] = {}
+        self._tells_apart: dict[str, bool] = {}
+
+    def holds(self, i: int, name: str, x: float) -> bool:
+        """Whether ``same(x, v)`` for some value ``v`` of cell ``i``'s ``name``, or ``x`` is the mean of those values."""
+        key = (i, name)
+        values = self._sorted.get(key)
+        if values is None:
+            raw = self.cells[i]["metrics"][name]
+            values = self._sorted[key] = sorted(raw)
+            self._mean[key] = sum(raw) / len(raw)
+        # ``same`` allows a gap of 1e-9 * (1 + max(|x|, |v|)); the window is a little wider and each value in it is judged
+        # by ``same`` itself, so the answer is the one a scan of every value gives.
+        w = 2e-9 * (1.0 + abs(x))
+        j = bisect_left(values, x - w)
+        n = len(values)
+        while j < n and values[j] <= x + w:
+            if same(x, values[j]):
+                return True
+            j += 1
+        return same(x, self._mean[key])
+
+    def tells_apart(self, name: str) -> bool:
+        known = self._tells_apart.get(name)
+        if known is None:
+            first: float | None = None
+            known = False
+            for c in self.cells:
+                for v in c["metrics"].get(name, ()):
+                    if first is None:
+                        first = v
+                    elif not same(v, first):
+                        known = True
+                        break
+                if known:
+                    break
+            self._tells_apart[name] = known
+        return known
+
+
+def _candidates(row: dict[str, Any], cells: list[dict[str, Any]], skip: set[str],
+                index: _CellIndex | None = None) -> list[dict[str, Any]] | None:
     """The cells that returned the numbers this row carries, or ``None`` when the row cannot be matched to any."""
-    shared = [k for k, v in row.items() if k not in skip and _is_number(v) and any(k in c["metrics"] for c in cells)]
+    index = index or _CellIndex(cells)
+    shared = [k for k, v in row.items() if k not in skip and _is_number(v) and k in index.names]
     if len(shared) < MIN_SHARED:
         return None
-    matched = [c for c in cells if all(
-        k not in c["metrics"] or any(same(row[k], v) for v in c["metrics"][k]) or
-        same(row[k], sum(c["metrics"][k]) / len(c["metrics"][k])) for k in shared)
+    matched = [c for i, c in enumerate(cells) if all(
+        k not in c["metrics"] or index.holds(i, k, row[k]) for k in shared)
         and any(k in c["metrics"] for k in shared)]
-    discriminating = [k for k in shared if len(_distinct([v for c in cells for v in c["metrics"].get(k, [])])) > 1]
-    if not matched or len(discriminating) < 1 or len(matched) > MAX_CANDIDATES:
+    if not matched or len(matched) > MAX_CANDIDATES or not any(index.tells_apart(k) for k in shared):
         return None
     return matched
 
@@ -182,6 +233,7 @@ def problems(cells: list[dict[str, Any]], reported: list[tuple[str, Any]]) -> li
     if len(cells) < 3 or not varying:
         return []
     out: list[Mismatch] = []
+    index = _CellIndex(cells)
     for where, value in reported:
         for path, rows in tables(value, where if where else ""):
             # Only a table of the printed result can be taken out of it, by the key it sits under.
@@ -193,12 +245,13 @@ def problems(cells: list[dict[str, Any]], reported: list[tuple[str, Any]]) -> li
                     columns[k] = axis
             if not columns:
                 continue
+            skip = set(columns)
+            nearest = [_candidates(row, cells, skip, index) for row in rows]  # the same for every column of the table
             for column, axis in sorted(columns.items()):
                 verified = wrong = 0
                 reported_values: list[float] = []
                 ran_values: list[float] = []
-                for row in rows:
-                    near = _candidates(row, cells, set(columns))
+                for row, near in zip(rows, nearest):
                     if near is None:
                         continue
                     verified += 1
