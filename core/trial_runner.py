@@ -2322,36 +2322,67 @@ def _not_among(values: list[Any], recorded: Counter) -> list[float]:
     :data:`_FLOAT32` of a recorded one is that value read through float32."""
     import bisect
 
-    left: Counter = Counter()
-    for k, n in recorded.items():
-        key = k if isinstance(k, str) else _value_key(k)
-        if key is not None:
-            left[key] += n
+    base, floats, keys = _prepared(recorded)
+    left = dict(base)
     pending: list[Any] = []
     for x in values:
         key = _value_key(x)
         if key is None:
             continue
-        if left[key] > 0:
-            left[key] -= 1
+        n = left.get(key, 0)
+        if n > 0:
+            left[key] = n - 1
         else:
             pending.append(x)
     if not pending:
         return []
-    pool = sorted(v for v in (_as_float(k) for k, n in left.items() for _ in range(max(n, 0))) if math.isfinite(v))
     extra = []
     for x in sorted(pending, key=_half_step):
         value, half = float(x), _half_step(x)
         if not math.isfinite(value):
             extra.append(value)
             continue
-        i = bisect.bisect_left(pool, value)
-        near = [(abs(pool[j] - value), j) for j in (i - 1, i) if 0 <= j < len(pool) and _near(pool[j], value, half)]
-        if near:
-            pool.pop(min(near)[1])  # the nearest value left: the same choice as a search of every value
+        # The nearest value left on each side: the recorded values in order, those used up passed over. A value used up
+        # that is already too far means every one past it is too (the distance grows faster than the float32 margin).
+        i = bisect.bisect_left(floats, value)
+        best: tuple[float, int] | None = None
+        for step, start in ((-1, i - 1), (1, i)):
+            j = start
+            while 0 <= j < len(floats):
+                near = _near(floats[j], value, half)
+                if left[keys[j]] > 0:
+                    if near and (best is None or abs(floats[j] - value) < best[0]):
+                        best = (abs(floats[j] - value), j)
+                    break
+                if not near:
+                    break
+                j += step
+        if best is not None:
+            left[keys[best[1]]] -= 1  # the nearest value left: the same choice as a search of every value
         else:
             extra.append(value)
     return extra
+
+
+def _prepared(recorded: Counter) -> tuple[dict[str, int], list[float], list[str]]:
+    """``recorded`` read once for :func:`_not_among`: its counts by value key, and its finite values in order with their
+    keys. Kept on the Counter while it is unchanged: one check matches many lists against the same record (each list
+    against each recorded name), and reading a record of 25,000 values again for every list was nearly all of its time."""
+    kept = getattr(recorded, "_fi_prepared", None)
+    if kept is not None and dict.__eq__(kept[0], recorded):
+        return kept[1]
+    base: dict[str, int] = {}
+    for k, n in recorded.items():
+        key = k if isinstance(k, str) else _value_key(k)
+        if key is not None:
+            base[key] = base.get(key, 0) + n
+    finite = sorted((f, key) for key in base if base[key] > 0 and math.isfinite(f := _as_float(key)))
+    prepared = (base, [f for f, _key in finite], [key for _f, key in finite])
+    try:
+        recorded._fi_prepared = (dict(recorded), prepared)  # type: ignore[attr-defined]
+    except AttributeError:  # a plain dict, not a Counter: read each time
+        pass
+    return prepared
 
 
 def _near(recorded: float, value: float, half: float) -> bool:

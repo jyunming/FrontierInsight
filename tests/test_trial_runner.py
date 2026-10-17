@@ -291,6 +291,22 @@ def test_a_value_printed_to_fewer_places_matches_the_trial_it_rounds_from() -> N
     assert _not_among([1.0, 1.0], rec([1.0])) == [1.0], "each trial's value is used once"
 
 
+def test_a_record_read_once_for_many_lists_is_read_again_when_it_changes() -> None:
+    """A check matches many lists against the same record, so the record is read once and kept on it; a record changed
+    after that is read again, and a match never uses up the record itself."""
+    from collections import Counter
+
+    from core.trial_runner import _not_among, _value_key
+
+    record = Counter(_value_key(x) for x in (1.25, 2.5, 3.75))
+    assert _not_among([1.25, 2.5], record) == [] and _not_among([1.25, 2.5], record) == []  # nothing used up between lists
+    assert _not_among([1.2], record) == []  # rounded from 1.25, matched through the kept reading
+    record[_value_key(1.25)] -= 1
+    record[_value_key(9.5)] += 1
+    assert _not_among([1.25], record) == [1.25] and _not_among([1.2], record) == [1.2]  # 1.25 is gone now
+    assert _not_among([9.5], record) == [] and _not_among([10], record) == []  # and 9.5 is there (10 rounds from it)
+
+
 METHOD_SIM = '''
 def run_trial(cell, trial_id, seed):
     return {"err": 1.0 if cell["method"] == "euler" else 0.1}
