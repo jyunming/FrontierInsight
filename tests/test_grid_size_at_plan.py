@@ -130,6 +130,7 @@ async def test_a_grid_still_too_large_stops_at_design_and_is_asked_only_once(tmp
     assert "147,604,654,080,000" in result["too_long"] and "500,000" in result["too_long"]
     tried = " ".join(result["too_long_tried"])
     assert "asked the plan's model" in tried and "does not choose" in tried
+    assert "fewer settings" in result["too_long_advice"] and "timeout_s" not in result["too_long_advice"]
     assert not (eng.quest_root / "code").exists() or not any((eng.quest_root / "code").iterdir())
     assert _record(eng)["count"] == 1
 

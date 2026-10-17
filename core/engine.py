@@ -7616,7 +7616,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                  "did not cut the grid: FI does not choose which settings or values to leave out"]
         self._log.warning("[design] the plan's grid is too large to run (%s); stopping, nothing was run", _one_line(said, 400))
         print(f"[FI] quest {self.quest_id}: {_one_line(said, 300)}; nothing was run (see needs/STUCK.json)")
-        return self._stop_before_run(said, "too_long", tried=tried)
+        return self._stop_before_run(said, "too_long", tried=tried, advice=(
+            "or ask in words for fewer settings to be crossed (`--revise-plan \"<what to change>\"`): more time does not "
+            "help, FI does not list that many settings."))
 
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
         """Pause for a person only when the quest's setup stops a search for the best design: the simulation is not a
@@ -19463,7 +19465,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
                or reason == "flat" or headline_missing else
                "or try another model for the code (`provider.node_models.implement`)." if reason == "shown_fault_open" else
-               "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
+               (str((state.get("exec_result") or {}).get("too_long_advice") or "")
+                or "or allow more time (`execution.timeout_s`), or a smaller study in the plan.") if reason == "too_long" else
                "or try another model for the code (`provider.node_models.implement`)." if reason == "cannot_repair" else
                "or ask for a change in words (`--revise-plan \"<what to change>\"`)." if reason in ("no_search", "topic_unmet") else
                "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
