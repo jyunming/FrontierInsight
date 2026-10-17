@@ -93,6 +93,14 @@ class _Model:
         return None
 
 
+def _at_root(engine: Engine, model: _Model) -> Path:
+    """The quest folder, written into the model's replies where they say ``@ROOT@``: a round's run starts in a copy of
+    code/ outside the quest (core/outside_run.py), so a change that reaches FI's own files names them by their full path."""
+    root = engine.quest_root
+    model.replies = [r.replace("@ROOT@", root.as_posix()) for r in model.replies]
+    return root
+
+
 async def _quest(tmp_path: Path, replies: list[str], *, criteria: list[dict[str, Any]] | None = None,
                  oracles: list[dict[str, Any]] | None = None, rounds: int = 3, research: bool = False,
                  sim: str = SIM, grid: dict[str, Any] | None = None, runs: int | None = None) -> tuple[Engine, _Model]:
@@ -400,10 +408,10 @@ async def test_the_loop_stops_when_the_rounds_are_used_up(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_a_round_whose_run_changes_the_frozen_protocol_is_aborted_and_put_back(tmp_path: Path) -> None:
     tamper = _edit('    dt = cell["dt"]\n',
-                   '    dt = cell["dt"]\n    import pathlib\n    p = pathlib.Path("needs/FROZEN_PROTOCOL.json")\n'
+                   '    dt = cell["dt"]\n    import pathlib\n    p = pathlib.Path("@ROOT@/needs/FROZEN_PROTOCOL.json")\n'
                    '    p.write_text(p.read_text(encoding="utf-8").replace("1e-05", "1.0"), encoding="utf-8")\n')
     engine, model = await _quest(tmp_path, [tamper, _edit(EULER, RK4)])
-    root = engine.quest_root
+    root = _at_root(engine, model)
     frozen_before = (root / "needs" / "FROZEN_PROTOCOL.json").read_bytes()
     history_before = (root / cr.HISTORY).read_bytes()
     out = await engine._node_improve(dict(STATE))
@@ -426,11 +434,11 @@ async def test_a_round_whose_run_plants_a_git_hook_or_a_file_in_code_is_aborted_
     tmp_path: Path,
 ) -> None:
     plant = _edit('    dt = cell["dt"]\n',
-                  '    dt = cell["dt"]\n    import os\n    os.makedirs("code/.git/no-hooks", exist_ok=True)\n'
-                  '    open("code/.git/no-hooks/pre-commit", "w").write("#!/bin/sh\\necho x > HOOK_RAN\\n")\n'
-                  '    open("code/notes.txt", "w").write("x")\n')
+                  '    dt = cell["dt"]\n    import os\n    os.makedirs("@ROOT@/code/.git/no-hooks", exist_ok=True)\n'
+                  '    open("@ROOT@/code/.git/no-hooks/pre-commit", "w").write("#!/bin/sh\\necho x > HOOK_RAN\\n")\n'
+                  '    open("@ROOT@/code/notes.txt", "w").write("x")\n')
     engine, _model = await _quest(tmp_path, [plant])
-    root = engine.quest_root
+    root = _at_root(engine, _model)
     await engine._node_improve(dict(STATE))
     record = improve.load(root)
     assert record["rounds"][0]["outcome"] == "aborted"
@@ -443,10 +451,11 @@ async def test_a_round_whose_run_plants_a_git_hook_or_a_file_in_code_is_aborted_
 @pytest.mark.asyncio
 async def test_a_junction_a_round_makes_in_code_is_removed_and_what_it_points_at_is_kept(tmp_path: Path) -> None:
     link = _edit('    dt = cell["dt"]\n',
-                 '    dt = cell["dt"]\n    import os, subprocess\n    if not os.path.exists("code/link"):\n'
-                 '        subprocess.run(["cmd", "/c", "mklink", "/J", "code\\\\link", "data"], capture_output=True)\n')
+                 '    dt = cell["dt"]\n    import os, subprocess\n    if not os.path.exists("@ROOT@/code/link"):\n'
+                 '        subprocess.run(["cmd", "/c", "mklink", "/J", os.path.normpath("@ROOT@/code/link"), '
+                 'os.path.normpath("@ROOT@/data")], capture_output=True)\n')
     engine, _model = await _quest(tmp_path, [link])
-    root = engine.quest_root
+    root = _at_root(engine, _model)
     (root / "data").mkdir(exist_ok=True)
     (root / "data" / "measurements.csv").write_text("a,b\n1,2\n", encoding="utf-8")
     await engine._node_improve(dict(STATE))
@@ -518,9 +527,9 @@ async def test_a_round_that_forges_the_saved_trial_record_is_aborted_and_the_rea
 ) -> None:
     shrink = {"name": "error bars shrink", "trials": "outcome", "direction": "target", "target": 0.5, "tolerance": 0.15}
     forge = _edit("    rng = random.Random(trial_id // 32)\n",
-                  "    rng = random.Random(seed)\n    open('.fi/improve/raw/0.bin', 'w').write('forged')\n")
+                  "    rng = random.Random(seed)\n    open('@ROOT@/.fi/improve/raw/0.bin', 'w').write('forged')\n")
     engine, _model = await _quest(tmp_path, [forge], criteria=[shrink], sim=SIM_TRIALS, grid={"p": [0.5]}, runs=256)
-    root = engine.quest_root
+    root = _at_root(engine, _model)
     ledger = root / "raw" / "ledger.jsonl"
     before = ledger.read_bytes()
     await engine._node_improve(dict(STATE))
