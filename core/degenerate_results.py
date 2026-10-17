@@ -303,24 +303,64 @@ def _quantity_problems_in(cells: list[dict[str, Any]], reported: set[str], exemp
 
 #: The kinds of check whose measured quantity is expected to be the same everywhere (a worst violation of an invariant).
 _EXPECTED_KINDS = ("invariant", "symmetry", "second_implementation")
+#: The kinds of check whose measured quantity is a value the plan expects to learn from the data (a special case, a published value).
+_MEASURED_KINDS = ("special_case", "published_value")
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 
+def _same_value(a: Any, b: Any) -> bool:
+    if (isinstance(a, (int, float)) and not isinstance(a, bool) and isinstance(b, (int, float)) and not isinstance(b, bool)):
+        return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12)
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _is_off(value: Any) -> bool:
+    """A numeric 0 (no noise, no spread): the axis switched off."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+
+
+def _runs_on_fixed_inputs(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> bool:
+    """Whether a check's ``case`` names a value of a study axis (``grid`` or ``in_each_run``) that the axis does not run: the
+    check then runs on its own fixed inputs, not on a setting of the study, and what it measures is the same whatever the
+    setting. A case that is one of the study's settings (each axis it names at a value the axis runs), one with no case, and
+    one that names no axis are not. One exception, an added rule and not a derived fact: a 0 on an axis whose values are all
+    above 0 (``nsr = 0`` beside 0.01 to 0.2) is that axis switched off, the noise-free end of the study itself, and the
+    estimate it measures there is still computed by the study's own pipeline (``ea_est``); it is not told apart from a
+    setting."""
+    case = oracle.get("case")
+    p = protocol if isinstance(protocol, dict) else {}
+    if not isinstance(case, dict):
+        return False
+    for block in ("grid", "in_each_run"):
+        axes = p.get(block)
+        for axis, values in (axes.items() if isinstance(axes, dict) else ()):
+            if axis not in case or not isinstance(values, (list, tuple)) or any(_same_value(case[axis], v) for v in values):
+                continue
+            numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            if _is_off(case[axis]) and numbers and len(numbers) == len(values) and all(v > 0 for v in numbers):
+                continue
+            return True
+    return False
+
+
 def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
-    """Names the plan itself expects to stay put. A check's own measure, when it IS one bare name, is not a data estimate
-    unless the plan lists it as one of its metrics (:func:`plan_estimates`): a worst violation (invariant, symmetry, second
-    implementation) is expected to stay put whatever it is called, and what a check of any other kind measures at its fixed
-    case (a known answer for fixed inputs, such as ``bh_fixed_rejections``) is the same at every setting by construction.
-    Also the keys of the plan's declared bounds or limits. A name that is only an operand of a measure's expression
-    (``abs(Ea_hat - Ea_polyfit)``) is not exempt: what the check measures is the expression, and ``Ea_hat`` in it is still
-    the plan's own estimate."""
+    """Names the plan itself expects to stay put: what a check of an invariant, a symmetry or a second implementation measures
+    when the measure IS that one bare name (``bh_scipy_disagree``); what a special-case or published-value check measures when
+    that is one bare name and the check runs on its own fixed inputs, a case that is no setting of the study
+    (:func:`_runs_on_fixed_inputs`: ``bh_fixed_rejections`` at ``m = 4`` when the study runs ``m`` at 20, 200 and 2000), unless
+    the plan lists the name as an estimate of its own; and the keys of the plan's declared bounds or limits. A name that is only
+    an operand of a measure's expression (``abs(Ea_hat - Ea_polyfit)``) is not exempt: what the check measures is the
+    expression, and ``Ea_hat`` in it is still the plan's own estimate."""
     from . import oracle_check as _oracle
 
-    estimated = plan_estimates(protocol)
+    own = _own_estimates(protocol)
     out: set[str] = set()
     for o in _oracle.declared(protocol):
         measure = str(o.get("measure") or "").strip()
-        if _IDENT.fullmatch(measure) and (_oracle.kind_of(o) in _EXPECTED_KINDS or measure not in estimated):
+        if not _IDENT.fullmatch(measure):
+            continue
+        kind = _oracle.kind_of(o)
+        if kind in _EXPECTED_KINDS or (kind in _MEASURED_KINDS and measure not in own and _runs_on_fixed_inputs(o, protocol)):
             out.add(measure)
     for key in ("bounds", "limits"):
         block = (protocol or {}).get(key) if isinstance(protocol, dict) else None
@@ -329,12 +369,9 @@ def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
     return out
 
 
-def plan_estimates(protocol: dict[str, Any] | None) -> set[str]:
-    """Names the frozen plan says are estimated from the trials, from fields it already has: each metric's id, the names of a
-    metric's declared known value (its estimate, its standard error, the two ends of its interval) and the metric the run's
-    size is set for (``precision.metric``). What a check measures is not read here: a check measures either a metric the plan
-    already lists or a quantity at a fixed case (:func:`expected_constants`). A theory value, a design constant or a count is
-    not among them."""
+def _own_estimates(protocol: dict[str, Any] | None) -> set[str]:
+    """The names the plan lists as estimates itself: each metric's id, the names of a metric's declared known value (its
+    estimate, its standard error, the two ends of its interval) and the metric the run's size is set for."""
     p = protocol if isinstance(protocol, dict) else {}
     out: set[str] = set()
     for m in p.get("metrics") if isinstance(p.get("metrics"), list) else []:
@@ -349,6 +386,21 @@ def plan_estimates(protocol: dict[str, Any] | None) -> set[str]:
     precision = p.get("precision")
     if isinstance(precision, dict) and precision.get("metric"):
         out.add(str(precision["metric"]))
+    return out
+
+
+def plan_estimates(protocol: dict[str, Any] | None) -> set[str]:
+    """Names the frozen plan says are estimated or measured from the trials, from fields it already has: what it lists itself
+    (:func:`_own_estimates`) and what a special-case or published-value check measures when that is one bare name (an
+    expression is not a name) and the check's case is a setting of the study or names none; a check on its own fixed inputs
+    measures a constant (:func:`expected_constants`). A theory value, a design constant or a count is not among them."""
+    from . import oracle_check as _oracle
+
+    out = _own_estimates(protocol)
+    for o in _oracle.declared(protocol):
+        measure = str(o.get("measure") or "").strip()
+        if _oracle.kind_of(o) in _MEASURED_KINDS and _IDENT.fullmatch(measure) and not _runs_on_fixed_inputs(o, protocol):
+            out.add(measure)
     return out
 
 

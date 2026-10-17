@@ -25,12 +25,14 @@ from pathlib import Path
 from typing import Any
 
 from core import stats as _stats
+from core.result_checks import left_out_by_record as _left_out_by_record
 
 #: The table goes into the writer's evidence only up to this many rows; a longer one stays in its file.
 WRITER_MAX_ROWS = 200
 
 
 def _record(quest_root: Path) -> list[dict[str, Any]]:
+    """The cells of ``raw/trials.json`` that carry metrics, without a quantity FI left out of the results."""
     try:
         data = json.loads((Path(quest_root) / "raw" / "trials.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -38,7 +40,12 @@ def _record(quest_root: Path) -> list[dict[str, Any]]:
     cells = data.get("cells") if isinstance(data, dict) else None
     if not isinstance(cells, list):
         return []
-    return [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
+    gone = set(_left_out_by_record(quest_root))  # the one source of what FI left out (core/result_checks.py)
+    out = [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
+    if not gone:
+        return out
+    # FI's own record (raw/trials.json) is unchanged; what the writer and the reader are shown has no left-out quantity.
+    return [{**c, "metrics": {k: v for k, v in c["metrics"].items() if str(k) not in gone}} for c in out]
 
 
 def _values(metric: Any) -> list[float]:

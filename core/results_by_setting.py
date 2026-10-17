@@ -44,6 +44,7 @@ from typing import Any
 from . import grid_keys as _grid_keys
 from . import oracle_forms as _forms
 from . import reference_values as _refs
+from . import result_checks as _result_checks
 from . import trial_table as _trial_table
 from . import unread_settings as _unread
 
@@ -649,6 +650,18 @@ def paper_block(built: Built | None, cap: int | None = None) -> str:
 # --- the files ------------------------------------------------------------------------------------------------------
 
 
+def _without_left_out(protocol: dict[str, Any] | None, quest_root: Path) -> dict[str, Any] | None:
+    """The protocol as this table reads it: a metric of a quantity FI left out of the results (core/result_checks.py
+    :func:`~core.result_checks.left_out_by_record`) is not listed, so no line names it. The frozen protocol itself is unchanged."""
+    gone = set(_result_checks.left_out_by_record(quest_root))
+    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    if not gone or not isinstance(metrics, list):
+        return protocol
+    kept = [m for m in metrics
+            if not (isinstance(m, dict) and ({str(m.get("id") or "").strip(), _refs.value_name(m)} & gone))]
+    return {**protocol, "metrics": kept} if len(kept) != len(metrics) else protocol
+
+
 def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
                judged: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], Built | None]:
     """``(FI's trial table rows, what this module builds)`` from the quest's trial record, read once; ``([], None)``
@@ -657,6 +670,7 @@ def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
     if not cells:
         return [], None
     summarised = _trial_table.summaries(cells)
+    protocol = _without_left_out(protocol, Path(quest_root))
     built = build(summarised, protocol, _grid_keys.code_files(Path(quest_root) / "code"), judged)
     return _trial_table.rows_of(summarised), built
 

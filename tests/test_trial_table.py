@@ -89,3 +89,40 @@ def test_malformed_records_are_skipped_not_fatal(tmp_path: Path) -> None:
     assert "nan" not in trial_table.markdown(table)
 
 
+
+
+def _left_out_quest(tmp_path: Path, record: str = "RESULT_CHECK.json") -> Path:
+    cells = [{"cell": {"m": m}, "key": f"m={m}",
+              "metrics": {"est": {"values": [1.0 + m, 2.0 + m, 3.5]}, "gone": {"values": [float(m), m * 2.0, 7.0 * m]}}}
+             for m in (1, 2)]
+    (tmp_path / "raw").mkdir(parents=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / "needs").mkdir()
+    (tmp_path / "needs" / record).write_text(
+        json.dumps({"removed_quantities": ["gone"], "note": "typed into the code"}), encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.parametrize("record", ["RESULT_CHECK.json", "TYPED_RESULTS_CHECK.json"])
+def test_a_quantity_fi_left_out_is_in_no_table_shown_to_the_writer(tmp_path: Path, record: str) -> None:
+    from core import results_by_setting
+    root = _left_out_quest(tmp_path, record)
+    assert {r["metric"] for r in trial_table.rows(root)} == {"est"}
+    note = trial_table.write(root)
+    assert {r["metric"] for r in note} == {"est"}
+    assert "gone" not in (root / "paper" / "results_table.md").read_text(encoding="utf-8")
+    plan = {"metrics": [{"id": "est", "kind": "mean"}, {"id": "gone", "kind": "mean"}]}
+    built = results_by_setting.write(root, plan)
+    assert built is not None and "gone" not in json.dumps(built.references, default=str)
+    for rel in ("paper/results_by_setting.md", "paper/results_by_setting.csv", ".fi/results_table.md"):
+        f = root / rel
+        if f.is_file():
+            assert "gone" not in f.read_text(encoding="utf-8"), rel
+    # FI's own record is unchanged
+    assert "gone" in (root / "raw" / "trials.json").read_text(encoding="utf-8")
+
+
+def test_without_a_left_out_record_the_same_quantity_is_tabulated(tmp_path: Path) -> None:
+    root = _left_out_quest(tmp_path)
+    (root / "needs" / "RESULT_CHECK.json").unlink()
+    assert {r["metric"] for r in trial_table.rows(root)} == {"est", "gone"}
