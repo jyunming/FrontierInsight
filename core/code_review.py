@@ -1091,6 +1091,19 @@ def _names_check(finding: str, name: str) -> bool:
     return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
 
 
+def still_open(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """The findings of the latest reading still open after the repairs that followed it: the record's ``problems``, or,
+    when a later reading failed, the ``read_problems`` it carried, less what a test showed fixed or a later reading no
+    longer names. A flag sticks: these stay open for a later version of the code no one has read (a repair after the run,
+    a round of the improve loop) until a reading of that version no longer flags them."""
+    from . import code_findings as _issues
+
+    found = record["problems"] if "problems" in record else record.get("read_problems")
+    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    return [v for v in (found if isinstance(found, list) else []) if isinstance(v, dict)
+            and (issues.get(v.get("fid")) or {}).get("outcome") not in (_issues.FIXED, _issues.GONE)]
+
+
 def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[str, str]:
     """The checks of correctness (``names``) that an OPEN finding of the second model's reading of the code concerns, as
     ``{name: the finding in its own words}`` (no line number). A check is evidence only if the code that computes its measure
@@ -1107,21 +1120,12 @@ def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[s
     record = load(quest_root)
     if not record:
         return {}
-    if "problems" in record:
-        if record.get("version") == version(code_dir) and not record.get("final"):
-            return {}  # a reading in progress: the gate has not finished with this version
-        found = record["problems"]
-    else:
-        found = record.get("read_problems")  # the latest reading's findings survive a reading that failed
-    from . import code_findings as _issues
-
-    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    if "problems" in record and record.get("version") == version(code_dir) and not record.get("final"):
+        return {}  # a reading in progress: the gate has not finished with this version
     out: dict[str, str] = {}
-    for v in found if isinstance(found, list) else []:
-        if not isinstance(v, dict) or v.get("contradicted") or v.get("plan_conflict"):
+    for v in still_open(record):
+        if v.get("contradicted") or v.get("plan_conflict"):
             continue
-        if (issues.get(v.get("fid")) or {}).get("outcome") in (_issues.FIXED, _issues.GONE):
-            continue  # a repair a test showed, or a later reading that no longer names it, settled it
         text = _plain_text(v.get("text"))
         for name in names:
             if name not in out and _names_check(f"{v.get('text') or ''}", str(name)):
