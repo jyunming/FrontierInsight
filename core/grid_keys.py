@@ -14,6 +14,10 @@ What is read as "a setting":
 * anything read as ``<expression>["cell"]`` or ``<expression>.get("cell")``: how the analysis reads a cell out of FI's
   per-cell record.
 
+A loop or comprehension variable called ``cell`` is not one of these when what it walks is a list the script builds itself from
+its own summaries (``cells.append(result)``, :func:`_fresh_summaries`, a strict allow-list: a list filled only with new dict literals); a list FI supplies, a
+parameter or anything it cannot see through is still read as settings.
+
 What counts as a read: ``setting["k"]`` and ``setting.get("k"[, default])`` with a literal ``k``. Names written in a
 chain of fallbacks (``cell.get("a", cell.get("b", 1.0))`` or ``cell.get("a") or cell.get("b")``) are one read that is
 satisfied by any one of them, so a code that accepts several spellings is flagged only when none of them is a name
@@ -43,6 +47,9 @@ SETTING_NAMES = frozenset({"cell", "setting", "settings"})
 ENTRIES = ("run_cell", "run_trial")
 #: The fields of the per-cell record FI writes for the analysis (``raw/trials.json``): not settings.
 RECORD_FIELDS = frozenset({"cell", "key", "planned", "ok", "failed", "metrics", "trials", "rows", "values"})
+#: The fields FI adds to the record of a study that compares values inside each run (core/in_run.py): names only such a
+#: study has.
+IN_RUN_RECORD_FIELDS = frozenset({"level", "compared_in_each_run"})
 _GET = frozenset({"get", "pop", "setdefault"})
 
 
@@ -140,6 +147,114 @@ def _own_nodes(scope: ast.AST) -> list[ast.AST]:
     return found
 
 
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+_LOOKS = frozenset({"values", "keys", "items", "get", "copy"})
+
+
+def _assignments_of(name: str, nodes: list[ast.AST]) -> list[ast.AST] | None:
+    """The values ``name`` is assigned in ``nodes``, or ``None`` when it is also bound or changed some other way (``+=``, a
+    loop variable, ``:=``, ``global``, a tuple target, a ``with`` / ``import`` name)."""
+    values: list[ast.AST] = []
+    for node in nodes:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            if len(node.targets) != 1:
+                return None
+            values.append(node.value)
+        elif (isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension, ast.NamedExpr))
+              and any(isinstance(t, ast.Name) and t.id == name for t in ast.walk(node.target))):
+            return None
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+            return None
+        elif isinstance(node, ast.Assign) and any(isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)
+                                                   for t in node.targets for n in ast.walk(t)):
+            return None  # a tuple target
+        elif isinstance(node, (ast.With, ast.AsyncWith)) and any(
+                o.optional_vars is not None and any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(o.optional_vars))
+                for o in node.items):
+            return None
+        elif isinstance(node, (ast.Import, ast.ImportFrom)) and any((a.asname or a.name) == name for a in node.names):
+            return None
+    return values
+
+
+def _fresh_dict(value: ast.AST, nodes: list[ast.AST]) -> bool:
+    """Whether ``value`` is positively a new summary dict: a dict literal with no ``**`` entry, or a name assigned exactly once
+    in this scope from one and never changed with ``.update`` / ``|=``."""
+    if isinstance(value, ast.Dict):
+        return all(k is not None for k in value.keys)
+    if not isinstance(value, ast.Name):
+        return False
+    got = _assignments_of(value.id, nodes)
+    if got is None or len(got) != 1 or not (isinstance(got[0], ast.Dict) and all(k is not None for k in got[0].keys)):
+        return False
+    name = value.id
+    for n in nodes:
+        if isinstance(n, ast.Call):
+            if isinstance(n.func, ast.Attribute) and _is_name(n.func.value, name) and n.func.attr not in _LOOKS:
+                return False
+            handed = [*n.args, *(k.value for k in n.keywords)]
+            appended = isinstance(n.func, ast.Attribute) and n.func.attr == "append"
+            if any(isinstance(a, ast.Starred) and _is_name(a.value, name) for a in n.args):
+                return False
+            if not appended and any(_is_name(a, name) for a in handed):
+                return False  # handed to a call that may change it
+        elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
+            targets = n.targets if isinstance(n, (ast.Assign, ast.Delete)) else [n.target]
+            if any(isinstance(sub, ast.Subscript) and _is_name(sub.value, name) for t in targets for sub in ast.walk(t)):
+                return False  # ``name[k] = v``, ``name[k] += v``, ``del name[k]``: its contents change
+    return True
+
+
+def _fresh_summaries(iterable: ast.AST, nodes: list[ast.AST], depth: int = 0) -> bool:
+    """Whether ``iterable`` is a local list of the script's own summaries, which a loop variable called ``cell`` then walks
+    without holding a setting. A strict allow-list: it must be positively known, and anything else is read as settings.
+    Recognised: a name assigned once as an empty ``[]`` / ``{}`` and filled only by ``.append(x)`` / ``name[k] = x`` with at
+    least one fill, every ``x`` a fresh summary dict (:func:`_fresh_dict`); or a name assigned once from a list comprehension
+    that keeps (does not change) the items of such a list (``[c for c in cells if ...]``). A parameter, FI's record, a call, a
+    subscript, an ``extend``, a ``dict(...)`` or a value of unknown origin among the fills is not recognised."""
+    while True:  # ``sorted(x)``, ``list(x)``, ``x.values()`` walk the same items
+        if (isinstance(iterable, ast.Call) and len(iterable.args) == 1 and not iterable.keywords
+                and isinstance(iterable.func, ast.Name) and iterable.func.id in ("sorted", "list", "tuple", "reversed")):
+            iterable = iterable.args[0]
+        elif (isinstance(iterable, ast.Call) and not iterable.args and not iterable.keywords
+              and isinstance(iterable.func, ast.Attribute) and iterable.func.attr == "values"):
+            iterable = iterable.func.value
+        else:
+            break
+    if not isinstance(iterable, ast.Name) or depth > 4:
+        return False
+    name = iterable.id
+    assigned = _assignments_of(name, nodes)
+    if assigned is None or len(assigned) != 1:
+        return False
+    fills: list[ast.AST] = []
+    for node in nodes:
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and _is_name(node.func.value, name):
+            if node.func.attr in _LOOKS:
+                continue
+            if node.func.attr != "append" or len(node.args) != 1 or node.keywords:
+                return False
+            fills.append(node.args[0])
+        elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Subscript) and _is_name(t.value, name) for t in node.targets):
+            fills.append(node.value)
+        elif isinstance(node, (ast.AugAssign, ast.Delete)) and any(
+                isinstance(n, ast.Name) and n.id == name for n in ast.walk(node)):
+            return False
+    value = assigned[0]
+    if isinstance(value, ast.ListComp):
+        if fills or len(value.generators) != 1:
+            return False
+        g = value.generators[0]
+        return (isinstance(g.target, ast.Name) and _is_name(value.elt, g.target.id)
+                and _fresh_summaries(g.iter, nodes, depth + 1))
+    empty = (isinstance(value, ast.List) and not value.elts) or (isinstance(value, ast.Dict) and not value.keys)
+    return empty and bool(fills) and all(_fresh_dict(f, nodes) for f in fills)
+
+
+def _is_name(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Name) and node.id == name
+
+
 def reads(source: str, script: str) -> list[Read]:
     """Every read of a setting by a literal name in ``source`` (see the module docstring). Never raises: a script that
     does not parse has none to report (it fails on its own)."""
@@ -151,15 +266,39 @@ def reads(source: str, script: str) -> list[Read]:
     for scope, names in _scopes(tree):
         names = set(names)
         nodes = sorted(_own_nodes(scope), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)))
-        # A name assigned from a setting holds one too (``c = entry["cell"]``), in the order the code assigns them.
+        # A name assigned from a setting holds one too (``c = entry["cell"]``), in the order the code assigns them. A loop
+        # or comprehension variable called ``cell`` holds one, unless it walks a list of the script's own summaries
+        # (:func:`_fresh_summaries`): then it is not one inside that loop or comprehension, whatever the outer scope
+        # makes of the name (the module body treats ``cell`` as a setting throughout).
+        shadow: dict[int, set[str]] = {}
+
+        def shade(inner: list[ast.AST], drop: set[str], add: set[str]) -> None:
+            for n in inner:
+                shadow[id(n)] = (shadow.get(id(n), names) - drop) | add
+
         for node in nodes:
             if isinstance(node, ast.Assign) and _setting_like(node.value, names):
                 names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-            elif isinstance(node, (ast.For, ast.comprehension)) and isinstance(node.target, ast.Name):
-                if node.target.id in SETTING_NAMES:
+            elif isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id in SETTING_NAMES:
+                if not _fresh_summaries(node.iter, nodes):
                     names.add(node.target.id)
+        # Each loop or comprehension that binds the name sets it for its own nodes: dropped over the script's own
+        # summaries, a setting holder over anything else. Outer ones come first (``nodes`` is in source order), so the
+        # innermost binding wins.
         for node in nodes:
-            hit = _read_of(node, names)
+            if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id in SETTING_NAMES:
+                fresh = _fresh_summaries(node.iter, nodes)
+                inner = [n for stmt in (*node.body, *node.orelse) for n in ast.walk(stmt)]
+                shade(inner, {node.target.id} if fresh else set(), set() if fresh else {node.target.id})
+            elif isinstance(node, _COMPREHENSIONS):
+                drop = {g.target.id for g in node.generators if isinstance(g.target, ast.Name)
+                        and g.target.id in SETTING_NAMES and _fresh_summaries(g.iter, nodes)}
+                add = {g.target.id for g in node.generators if isinstance(g.target, ast.Name)
+                       and g.target.id in SETTING_NAMES} - drop
+                if drop or add:
+                    shade(list(ast.walk(node)), drop, add)
+        for node in nodes:
+            hit = _read_of(node, shadow.get(id(node), names))
             if hit is not None and hit[0] not in RECORD_FIELDS:
                 found[id(node)] = (node, hit[0], hit[1])
     # A chain of fallbacks is one read: the default of one is another read, and ``a or b`` joins both.
@@ -210,14 +349,16 @@ def _case_keys(value: Any, into: set[str]) -> None:
 
 
 def supplied_names(protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> tuple[list[str], set[str]]:
-    """``(the grid's axes, every name a setting may have)``: the axes, the settings the plan fixes, and the keys of the
-    cases its checks run at."""
+    """``(the study's axes, every name a setting may have)``: the axes (the grid's, and what each run compares inside it,
+    which every run's cell carries as a list), the settings the plan fixes, and the keys of the cases its checks run at."""
+    from . import in_run as _in_run
     from . import oracle_forms as _forms
 
     protocol = protocol if isinstance(protocol, dict) else {}
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-    axes = [str(k) for k in grid]
-    allowed = set(axes)
+    inside = _in_run.of(protocol) or {}
+    axes = [str(k) for k in grid] + [str(k) for k in inside if str(k) not in grid]
+    allowed = set(axes) | (set(IN_RUN_RECORD_FIELDS) if inside else set())
     allowed.update(_forms.fixed_settings_of_design({**(design or {}), "protocol": protocol}))
     _case_keys(protocol, allowed)
     return axes, allowed

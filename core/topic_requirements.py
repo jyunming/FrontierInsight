@@ -28,6 +28,16 @@ import math
 import re
 from typing import Any
 
+
+def _extreme(bound: Any, pick: Any) -> Any:
+    """A design variable's ``low`` or ``high`` as one number: an array variable gives one per element, and the smallest low
+    (the largest high) stands for the range it covers."""
+    if not isinstance(bound, list):
+        return bound
+    leaves = [x for item in bound for x in ([_extreme(item, pick)] if isinstance(item, list) else [item])]
+    leaves = [x for x in leaves if isinstance(x, (int, float)) and not isinstance(x, bool)]
+    return pick(leaves) if leaves else None
+
 #: The file in ``.fi/`` that holds the requirements, and the one that holds how far they are met.
 FILE = "topic_requirements.json"
 COVERED_FILE = "topic_covered.json"
@@ -148,8 +158,9 @@ def _tokens(text: Any) -> set[str]:
 
 
 def view(design: Any, protocol: Any = None) -> dict[str, Any]:
-    """What the plan can be searched for: ``axes`` ({name: values}, from ``protocol.grid``, a search's design variables and
-    the settings its own scan compares: ``protocol.optimisation.grid``),
+    """What the plan can be searched for: ``axes`` ({name: values}, from ``protocol.grid``, what each run compares inside
+    it: ``protocol.in_each_run``, a search's design variables and the settings its own scan compares:
+    ``protocol.optimisation.grid``),
     ``metrics`` ([(id, text)]), ``equations`` ([{id, formula, source}]) and ``assumptions`` (text). ``protocol`` is the one
     that runs when it differs from the design's own (the frozen one)."""
     design = design if isinstance(design, dict) else {}
@@ -159,12 +170,17 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     for axis, values in grid.items():
         axes[str(axis)] = list(values) if isinstance(values, list) else [values]
+    # What each run compares inside it (all five temperatures of one fit, every procedure on the same data) is varied by
+    # the study as much as a setting is: each run goes through all its values.
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    for axis, values in inside.items():
+        axes[str(axis)] = list(values) if isinstance(values, list) else [values]
     block = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else {}
     for variable in block.get("design_variables") if isinstance(block.get("design_variables"), list) else []:
         if not isinstance(variable, dict) or not str(variable.get("name") or "").strip():
             continue
         values = variable.get("values") if isinstance(variable.get("values"), list) else [
-            v for v in (variable.get("low"), variable.get("high")) if v is not None]
+            v for v in (_extreme(variable.get("low"), min), _extreme(variable.get("high"), max)) if v is not None]
         axes[str(variable["name"]).strip()] = list(values)
     # The block's own scan compares the study across settings (of a design variable, or of a condition held fixed): those
     # are the settings the plan varies, whatever the plan's kind of study.
@@ -434,11 +450,12 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False) -> 
         "A setting to vary or compare is a key of `protocol.optimisation.grid` with every value the topic states (this "
         "plan is a search for the best design, so do NOT write a `protocol.grid`): either one of the design variables, or "
         "a condition held fixed during the search, which you also list under `protocol.optimisation.fixed` with the value "
-        "the search holds it at. What the search itself finds (the best design) needs no setting: say in "
+        "the search holds it at (a condition whose values are names, such as a family or a mode, needs no `fixed` entry: "
+        "FI holds it at the first name listed). What the search itself finds (the best design) needs no setting: say in "
         "`protocol.topic_map` that `optimisation` covers it. "
         if search else
         "A setting to vary or compare is a key of `protocol.grid` with every value the topic states (or, for a search for "
-        "the best design, a design variable of `protocol.optimisation` with its range). ")
+        "the best design, a design variable of `protocol.optimisation` with its range, and its value in `protocol.optimisation.baseline.values`). ")
     return (
         "The topic asks for things this plan does not yet include:\n" + "\n".join(lines)
         + f"\n\nThe topic: “{' '.join(str(topic or '').split())[:1500]}”\n\n"
@@ -455,8 +472,10 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False) -> 
 
 def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) -> dict[str, Any] | None:
     """``old`` (a design block as written) with only what was asked taken from ``new``: settings of ``protocol.grid`` that
-    are new, or that a gap names; metrics and equations whose id is new; design variables of a search that are new. Every
-    check, threshold, tolerance and the rest are ``old``'s. ``None`` when nothing was taken."""
+    are new, or that a gap names; what each run compares inside it (``protocol.in_each_run``) the same way, and a factor
+    ``old`` compares inside each run stays there, whichever of the two places the answer wrote it in; metrics and equations
+    whose id is new; design variables of a search that are new. Every check, threshold, tolerance and the rest are
+    ``old``'s. ``None`` when nothing was taken."""
     if not isinstance(old, dict) or not isinstance(new, dict):
         return None
     o = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
@@ -486,6 +505,21 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
         if scan:
             protocol["optimisation"] = {**o["optimisation"], "grid": scan, **({"fixed": held} if held else {})}
         new_grid = {}
+    old_inside = o.get("in_each_run") if isinstance(o.get("in_each_run"), dict) else {}
+    new_inside = n.get("in_each_run") if isinstance(n.get("in_each_run"), dict) else {}
+    have_grid = o.get("grid") if isinstance(o.get("grid"), dict) else {}
+    # A factor each run compares inside it is never a setting of the grid as well: the answer's values for it are read
+    # as its list, and one the plan already sweeps as a setting stays a setting.
+    asked_inside = {**{a: v for a, v in new_grid.items() if a in old_inside},
+                    **{a: v for a, v in new_inside.items() if a not in have_grid}}
+    new_grid = {a: v for a, v in new_grid.items() if a not in old_inside}
+    if asked_inside:
+        inside = dict(old_inside)
+        for axis, values in asked_inside.items():
+            if (axis not in inside or axis in named) and isinstance(values, list) and inside.get(axis) != values:
+                inside[axis] = values
+                taken = True
+        protocol["in_each_run"] = inside
     if new_grid:
         grid = dict(o.get("grid") if isinstance(o.get("grid"), dict) else {})
         for axis, values in new_grid.items():
@@ -522,8 +556,19 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
         have_vars = {str(v.get("name")) for v in block_old.get("design_variables") or [] if isinstance(v, dict)}
         extra = [v for v in block_new.get("design_variables") or [] if isinstance(v, dict) and str(v.get("name")) not in have_vars]
         if extra:
-            protocol["optimisation"] = {**protocol.get("optimisation", block_old),
-                                        "design_variables": [*(block_old.get("design_variables") or []), *extra]}
+            merged_block = {**protocol.get("optimisation", block_old),
+                            "design_variables": [*(block_old.get("design_variables") or []), *extra]}
+            # A variable the baseline has no value for is a block the plan reader refuses: the answer's baseline value of
+            # each added variable comes with it (the design to beat keeps every value it already had).
+            old_base = block_old.get("baseline") if isinstance(block_old.get("baseline"), dict) else {}
+            new_base = block_new.get("baseline") if isinstance(block_new.get("baseline"), dict) else {}
+            old_values = old_base.get("values") if isinstance(old_base.get("values"), dict) else {}
+            new_values = new_base.get("values") if isinstance(new_base.get("values"), dict) else {}
+            names = {" ".join(str(x.get("name")).split()) for x in extra}
+            added = {k: v for k, v in new_values.items() if " ".join(str(k).split()) in names and k not in old_values}
+            if added and old_base:
+                merged_block["baseline"] = {**old_base, "values": {**old_values, **added}}
+            protocol["optimisation"] = merged_block
             taken = True
     new_map = [m for m in (n.get("topic_map") if isinstance(n.get("topic_map"), list) else []) if isinstance(m, dict)]
     if new_map:
@@ -598,19 +643,33 @@ def write_note(quest_root: Any) -> str:
                      "formulas), so the plan was not held against it. Say plainly in the limitations that this was not checked.")
     if left:
         sentences = "; ".join(str(g.get("sentence") or "").rstrip(".") for g in left if isinstance(g, dict))
-        parts.append(f"The topic asked for more than this study did: {sentences}. Say plainly in the limitations that these "
-                     "were not studied, and do not write a result for them.")
+        parts.append(f"The topic asked for more than this study did: {sentences}. FI states this in its own record of the run "
+                     "at the end of the limitations; do not write a result for them.")
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
+    ledger_left = [str(g).strip() for g in (record.get("ledger_left") if isinstance(record, dict) else None) or []
+                   if str(g).strip()]
+    if ledger_left:
+        steps = any(g.startswith("`protocol.steps`") for g in ledger_left)
+        parts.append("The plan did not give all of what it was asked for about what it simplifies and how its metrics are "
+                     f"defined ({'; '.join(g.rstrip('.') for g in ledger_left)}). Say plainly in the limitations that the "
+                     "simplifications or definitions of this study are not fully stated"
+                     + (", and that the steps of the method are not all described in full" if steps else "")
+                     + ", and do not present a metric's definition as taken from a source.")
+    own = [str(m).strip() for m in (record.get("unsourced_definitions") if isinstance(record, dict) else None) or [] if str(m).strip()]
+    if own:
+        parts.append(f"These metrics are the study's own definitions, not taken from a source: {', '.join(own)}. State plainly in "
+                     "the limitations which metrics are the study's own definitions, and do not cite a source for them.")
     raw = requirements.get("constraints") if isinstance(requirements, dict) else None
     constraints = [str(c).strip().rstrip(".").strip() for c in (raw if isinstance(raw, list) else [])]
     constraints = [c for c in constraints if c]
     if constraints:
-        parts.append(f"The topic set these requirements on the study and the paper: {'; '.join(constraints)}. For each one the "
-                     "study did not meet (check it against the run record: run time, the code files, the seed, the uncertainty "
-                     "of every number), say plainly in the limitations that it was not met and why; never leave one out "
-                     "silently, and never claim one was met unless the record shows it.")
+        parts.append(f"The topic set these requirements on the study and the paper: {'; '.join(constraints)}. FI's own record "
+                     "of the run, at the end of the limitations, states the seeds and the run time against the topic's limit; "
+                     "do not state them again. For each other requirement the study did not meet (the code files, the "
+                     "uncertainty of every number), say plainly in the limitations that it was not met and why; never leave "
+                     "one out silently, and never claim one was met unless the record shows it.")
     return " ".join(parts)
 
 
@@ -666,3 +725,49 @@ def code_block(topic: Any, req: Any = None, *, limit: int = 6000, scrub: Any = N
     if len(body) > room:
         body = body[:max(0, room - 40)].rstrip() + "\n(the rest of the topic is not shown)"
     return body + tail
+
+
+#: The most characters the checklist shown to the plan may take.
+CHECKLIST_LIMIT = 1900
+
+
+def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT) -> str:
+    """The topic's requirements as plain lines the plan is shown before it is written (``""`` for an empty or failed
+    reading): factors with their stated levels or range, quantities to report, stated formulas and constraints. Never
+    ``stated_results`` (a plan is not shown the answer). Pure; at most ``limit`` characters, what does not fit is counted
+    in a last line."""
+    if not isinstance(req, dict) or is_empty(req):
+        return ""
+    lines: list[str] = []
+    for item in req.get("factors") or []:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        levels = item.get("levels") or []
+        rng = item.get("range") or []
+        if levels:
+            shown = ", ".join(f"{v:g}" if isinstance(v, float) else str(v) for v in levels[:10])
+            detail = f": {shown}" + (f" (and {len(levels) - 10} more)" if len(levels) > 10 else "")
+        else:
+            detail = f": {rng[0]:g} to {rng[1]:g}" if len(rng) == 2 else ""
+        lines.append(f"- vary or compare {item['name']}{detail}")
+    for item in req.get("quantities") or []:
+        if isinstance(item, dict) and item.get("name"):
+            lines.append(f"- report {item['name']}")
+    for item in req.get("formulas") or []:
+        if isinstance(item, dict) and item.get("text"):
+            name = str(item.get("name") or "").strip()
+            lines.append(f"- formula{' ' + name if name else ''}: {str(item['text'])[:160]}")
+    for text in req.get("constraints") or []:
+        if str(text).strip():
+            lines.append(f"- constraint: {str(text)[:160]}")
+    head = ("What the topic asks for (each item must appear as a setting, a metric or an equation of the plan, "
+            "or be named in `simplifications`):")
+    out = [head]
+    used = len(head)
+    for i, line in enumerate(lines):
+        if used + len(line) + 1 > limit - 40:
+            out.append(f"(and {len(lines) - i} more)")
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out)

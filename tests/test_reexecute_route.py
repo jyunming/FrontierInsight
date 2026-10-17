@@ -210,13 +210,12 @@ def test_a_hit_the_engine_wrote_about_a_figure_still_rewrites_the_paper(
     assert _engine(tmp_path)._route_after_review(_state(review)) == "rewrite"  # type: ignore[arg-type]
 
 
-def test_a_flaw_in_the_design_still_goes_back_to_design(tmp_path: Path) -> None:
-    """A hit that already re-opens the design re-runs the experiment on its way
-    through implement anyway, and a flawed design is not fixed by writing the
-    same experiment again — so re-execution replaces the rewrite, nothing else."""
+def test_a_flaw_in_the_design_no_check_confirms_is_stated_not_redesigned(tmp_path: Path) -> None:
+    """A reviewer's objection to the design that no check of FI's confirms does not re-run the experiment or change the
+    design: the paper is written again with the objection stated in its limitations."""
     review = {**XG3_REVIEW, "must_flag_hits": ["[methodologist] circular_evaluation"]}
     assert _review_sends_the_experiment_back(review, _state(review)) == ""  # type: ignore[arg-type]
-    assert _engine(tmp_path)._route_after_review(_state(review)) == "revise"  # type: ignore[arg-type]
+    assert _engine(tmp_path)._route_after_review(_state(review)) == "rewrite"  # type: ignore[arg-type]
 
 
 def test_a_draft_over_the_page_limit_does_not_spend_the_re_execute(tmp_path: Path) -> None:

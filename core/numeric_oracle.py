@@ -159,6 +159,7 @@ horizons, seeds, step counts) are excluded by name, since a tolerance of
 
 from __future__ import annotations
 
+import decimal
 import math
 import re
 from dataclasses import dataclass, field
@@ -688,12 +689,35 @@ def _digit_bag(v: float) -> str:
     return "".join(sorted(s)) if s else ""
 
 
+_ROUNDING_CONTEXT = decimal.Context(prec=80)
+
+
+def roundings(value: float, decimals: int) -> tuple[float, ...]:
+    """Every standard rounding of ``value`` to ``decimals`` places: the one code prints (``round`` / ``f"{x:.3f}"``,
+    which rounds the binary float), and, on the decimal the value reads as (``repr``), half-up (what people do) and
+    half-even. They differ only at a tie: 0.8125 is 0.812 half-even and 0.813 half-up, and 0.9175, stored as
+    0.91749999..., prints as 0.917 and reads as 0.918. A paper that writes any of them has rounded the value; the
+    interval they cover is still half a unit of the last place, ends included, and nothing else is accepted."""
+    first = round(value, decimals)
+    out = [first]
+    try:
+        exact = decimal.Decimal(repr(float(value)))
+        unit = decimal.Decimal(1).scaleb(-decimals)
+        for mode in (decimal.ROUND_HALF_UP, decimal.ROUND_HALF_EVEN):
+            r = float(exact.quantize(unit, rounding=mode, context=_ROUNDING_CONTEXT))
+            if r not in out:
+                out.append(r)
+    except (decimal.InvalidOperation, ValueError, OverflowError):
+        pass  # nan, inf, or too many digits to quantize: only the float rounding exists
+    return tuple(out)
+
+
 def _rounds_to(paper: float, actual: float, token: str) -> bool:
     """True when `actual`, rounded to the paper's own precision, is `paper`."""
     t = token.replace(",", "")
     decimals = len(t.split(".", 1)[1]) if "." in t else 0
     try:
-        return round(actual, decimals) == round(paper, decimals)
+        return round(paper, decimals) in roundings(actual, decimals)
     except (ValueError, OverflowError):
         return False
 
@@ -910,11 +934,16 @@ def _is_repeating_constant(value: float, token: str) -> bool:
     return False
 
 
+# LaTeX writes a thousands separator as ``24{,}122``; it is the same separator as ``24,122``, and left as it is the
+# number reads as two: 24 and 122.
+_TEX_THOUSANDS = re.compile(r"(?<=\d)\{,\}(?=\d{3}(?!\d))")
+
+
 def _is_last_digit_slip(value: float, token: str, actual: float) -> bool:
     """Is the paper's number one unit of its own last printed digit away from
     ``actual`` correctly rounded to that precision (2.12 for 2.1259)?"""
     decimals = _decimals_of_token(token)
-    return decimals >= MIN_SLIP_DECIMALS and abs(round(actual, decimals) - value) <= 1.01 * 10 ** -decimals
+    return decimals >= MIN_SLIP_DECIMALS and min(abs(r - value) for r in roundings(actual, decimals)) <= 1.01 * 10 ** -decimals
 
 
 # Report order: the self-contradiction first, then the classic copy error,
@@ -952,7 +981,9 @@ def check(
     # findings depend on what the other does with the extractor.
     # A citation bracket holds reference numbers, not measurements: taken out for
     # this check only, since the extractor is shared with ``number_provenance``.
-    numbers = _scan_paper_numbers(_CITATION_GROUP.sub(" ", paper_text.replace(_MINUS_SIGN, "-")))
+    numbers = _scan_paper_numbers(
+        _CITATION_GROUP.sub(" ", _TEX_THOUSANDS.sub(",", paper_text).replace(_MINUS_SIGN, "-"))
+    )
     report.paper_numbers = len(numbers)
     settings = list(declared) if declared else []
 

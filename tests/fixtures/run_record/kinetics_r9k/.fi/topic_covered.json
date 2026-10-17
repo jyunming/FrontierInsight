@@ -1,0 +1,16 @@
+{
+  "ledger_left": [],
+  "unsourced_definitions": [
+    "Ea_bias_J_mol",
+    "Ea_estimate_sd_J_mol",
+    "Ea_true_J_mol",
+    "abs_Ea_lnA_correlation",
+    "empirical_coverage",
+    "lnA_bias",
+    "lnA_estimate_sd",
+    "lnA_true",
+    "solver_failure_fraction"
+  ],
+  "plan_done": true,
+  "unreadable": "the call failed (antigravity: The stream was interrupted. Please continue the task you were working on.)"
+}

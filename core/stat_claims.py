@@ -36,8 +36,8 @@ each one fires only when it can point at the run's own numbers and say what
 the paper called them instead. A claim this module cannot recompute is a
 claim it stays silent about.
 
-Five checks, each independently gated
--------------------------------------
+Six checks, each independently gated
+------------------------------------
 ``effect_size_overstated``
     A universally-quantified effect-size claim ("Cohen's d > 16 for *all*
     pairwise comparisons") against every pairwise Cohen's d the run's
@@ -68,7 +68,15 @@ Five checks, each independently gated
     whose number matches a result named for the *opposite* event (a major
     outbreak) and matches no result named for extinction.
 
-All five are recorded through ``StatReport`` with the contradiction spelled
+``seed_not_recorded``
+    A seed the paper gives that the run's records contradict: a "base seed N"
+    when the study record holds another base seed, or a "seed N" that is
+    neither the base seed, a trial seed in FI's ledger nor a seed written in
+    the code. A paper once called the seed of its bootstrap intervals the base
+    seed every trial was derived from; the claim check had only a model to ask
+    and marked the sentence unsupported, with no repair.
+
+All six are recorded through ``StatReport`` with the contradiction spelled
 out, so the paper's writer is told which number to relabel rather than "a
 statistic is wrong somewhere".
 """
@@ -78,9 +86,10 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterator
 
-from core.disclosure import strip_for_checks
+from core.disclosure import recorded_seeds, strip_for_checks
 from core.numeric_oracle import flatten_numbers
 
 # A replicated run needs at least this many seeds before its spread means
@@ -676,6 +685,111 @@ def _check_probability_complement(
 
 # --- entry point ---------------------------------------------------------------
 
+# --- 6. a seed the run's records do not hold ------------------------------------
+
+# A seed written as a number in the code: ``default_rng(N)``, ``np.random.seed(N)``, ``random.Random(N)``,
+# ``torch.manual_seed(N)``, ``seed=N``, ``random_state=N``, ``BASE_SEED = N``.
+_CODE_SEED = re.compile(
+    r"\b(?:default_rng|RandomState|seed|manual_seed|PRNGKey|Random|SeedSequence)\s*\(\s*(-?[0-9]+)\s*\)"
+    r"|\b(?i:(?:base_|random_|rng_|global_|master_|root_)?seed|random_state)\s*=\s*(-?[0-9]+)\b"
+)
+_SEED_VERB = r"(?:\s*(?:value\s+)?(?:of|=|:|was|is|equal\s+to|set\s+to))?\s*"
+# The number must end there: "seed of 1,537 trials" is not seed 1, and "seed 3 of 10" is the third of ten seeds.
+_SEED_NUMBER = r"(-?[0-9]+)(?![0-9]|[.,][0-9])(?!\s*(?:of|out\s+of|/)\s*[0-9])"
+_BASE_SEED = re.compile(
+    rf"\b(?:base|master|root|global)[\s_-]+(?:random[\s_-]+)?seed\b{_SEED_VERB}{_SEED_NUMBER}", re.I,
+)
+# One seed, never "seeds" (a list or range of trial numbers) and never a count ("10 seeds").
+_ONE_SEED = re.compile(rf"(?<![\w-])(?:random[\s_-]+)?seed\b{_SEED_VERB}{_SEED_NUMBER}", re.I)
+
+
+@dataclass(frozen=True)
+class SeedRecords:
+    """The seeds the run's records hold: the study record's base seed, FI's ledger of trial seeds, and each seed
+    written as a number in the code with where it is (``("code/experiment.py:291", 20261013)``)."""
+
+    base_seed: int | None = None
+    trial_seeds: frozenset[int] = frozenset()
+    code_seeds: tuple[tuple[str, int], ...] = ()
+
+
+def seed_records(quest_root: Path) -> SeedRecords:
+    """Read the seeds a quest's records hold; a missing record is an empty part, never an error."""
+    root = Path(quest_root)
+    base, trials = recorded_seeds(root)
+    code: list[tuple[str, int]] = []
+    code_dir = root / "code"
+    for path in sorted(code_dir.rglob("*.py")) if code_dir.is_dir() else []:
+        rel = path.relative_to(root)
+        if any(part.startswith(".") or part in {"__pycache__", "site-packages"} for part in rel.parts):
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for no, line in enumerate(lines, 1):
+            for m in _CODE_SEED.finditer(line.split("#", 1)[0]):
+                code.append((f"{rel.as_posix()}:{no}", int(m.group(1) or m.group(2))))
+    return SeedRecords(base_seed=base, trial_seeds=trials, code_seeds=tuple(code))
+
+
+def _check_seeds(sents: list[str], seeds: SeedRecords | None, values: dict[str, float]) -> list[StatFinding]:
+    """A seed the paper gives that the run's records contradict.
+
+    Silent unless FI holds the run's real seeds: a "base seed N" is checked only against a study record's base seed,
+    and a "seed N" only when FI's ledger holds every trial's seed. A seed is accepted when it is the base seed, a
+    trial seed, a seed written in the code or a result named for a seed."""
+    if seeds is None or (seeds.base_seed is None and not seeds.trial_seeds):
+        return []
+    where: dict[int, str] = {}
+    for loc, value in seeds.code_seeds:
+        where.setdefault(value, loc)
+    recorded = set(seeds.trial_seeds) | set(where)
+    if seeds.base_seed is not None:
+        recorded.add(seeds.base_seed)
+    recorded |= {int(v) for path, v in values.items() if "seed" in path.lower() and float(v).is_integer()}
+
+    def _elsewhere(n: int) -> str:
+        return f"; {n} is the seed written at {where[n]}, which seeds something there, not the trials" if n in where else ""
+
+    out: list[StatFinding] = []
+    for s in sents:
+        base_spans: list[tuple[int, int]] = []
+        for m in _BASE_SEED.finditer(s):
+            base_spans.append(m.span())
+            n = int(m.group(1))
+            if seeds.base_seed is None or n == seeds.base_seed:
+                continue
+            out.append(StatFinding(
+                kind="seed_not_recorded",
+                message=(
+                    f"the paper gives base seed {n}, but the study record (code/study.json) has base seed "
+                    f"{seeds.base_seed}, from which every trial's seed is derived{_elsewhere(n)}. Give the base seed "
+                    f"as recorded, and say what any other seed is used for."
+                ),
+                context=_ctx(s, m.start()),
+            ))
+        if not seeds.trial_seeds:
+            continue
+        for m in _ONE_SEED.finditer(s):
+            if any(a <= m.start() < b for a, b in base_spans):
+                continue
+            n = int(m.group(1))
+            if n in recorded:
+                continue
+            out.append(StatFinding(
+                kind="seed_not_recorded",
+                message=(
+                    f"the paper gives seed {n}, but no seed this run recorded is {n}: not the base seed"
+                    f"{'' if seeds.base_seed is None else f' ({seeds.base_seed})'}, not one of the "
+                    f"{len(seeds.trial_seeds):,} trial seeds in FI's ledger, and not a seed written in the code. "
+                    f"Give the seeds as recorded."
+                ),
+                context=_ctx(s, m.start()),
+            ))
+    return out
+
+
 def _series_extremes(figure_records: dict[str, Any]) -> set[float]:
     """Every min/max a recorded figure's series reaches, so a count that really
     is plotted data is never mistaken for an axis limit."""
@@ -704,13 +818,15 @@ def check(
     comparison_stats: dict[str, Any] | None = None,
     figure_records: dict[str, Any] | None = None,
     n_seeds: int = 0,
+    seeds: SeedRecords | None = None,
 ) -> StatReport:
     """Test what the paper says its numbers ARE against what the run computed.
 
     ``intervals`` and ``comparison_stats`` are the engine's own replicate
     aggregates (``_replicate_result_intervals`` and ``_result_comparison_stats``)
     — passed in rather than recomputed here so this module stays free of
-    ``core.engine`` and can be tested without one.
+    ``core.engine`` and can be tested without one. ``seeds`` is what the
+    quest's records hold (``seed_records``).
     """
     report = StatReport()
     if not paper_text.strip():
@@ -737,7 +853,7 @@ def check(
     report.checks_run = [
         "effect_size_overstated", "threshold_as_pvalue",
         "interval_method_mismatch", "axis_limit_as_count",
-        "probability_complement",
+        "probability_complement", "seed_not_recorded",
     ]
     findings: list[StatFinding] = []
     findings += _check_effect_sizes(sents, comparison_stats)
@@ -747,6 +863,7 @@ def check(
         sents, figure_records, values, _series_extremes(figure_records),
     )
     findings += _check_probability_complement(sents, values)
+    findings += _check_seeds(sents, seeds, values)
 
     seen: set[str] = set()
     for f in findings:

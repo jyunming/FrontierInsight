@@ -25,10 +25,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import code_reach as _code_reach
 from . import code_review as _code_review
 from . import degenerate_results as _degenerate
 from . import grid_keys as _grid_keys
 from . import reported_settings as _reported
+
+#: Why a quantity a failing test showed wrong is left out, as the must-fix hit for a paper that quotes it says it.
+SHOWN_FAULT_WHY = "a test FI ran on the code that produced the results shows the code computes it wrongly"
 
 #: How many times, in all, the results of one design iteration are sent back for the checks of this module.
 REPAIRS = 2
@@ -105,6 +109,49 @@ class ResultChecksMixin:
             self._log.warning("[execute] could not check the run's results for empty figures and constants (%r)", exc)  # type: ignore[attr-defined]
         return found
 
+    def _saved_figures(self) -> list[str]:
+        from . import engine as _e
+
+        folder = self.quest_root / "figures"  # type: ignore[attr-defined]
+        return sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _e._FIGURE_SUFFIXES) if folder.is_dir() else []
+
+    def _no_figures_standing(self, state: Any) -> list[Found]:
+        try:
+            return self._no_figures_findings(state)
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[execute] could not check whether the planned figures were drawn (%r)", exc)  # type: ignore[attr-defined]
+            return []
+
+    def _no_figures_findings(self, state: Any) -> list[Found]:
+        """The plan has figures and the run, which finished, saved none: nothing was drawn, so the paper has no figure. Not
+        sent back (the results stand); the writer is told, and the limitations say so."""
+        planned = (state.get("design") or {}).get("figures_planned")
+        names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
+        if not names or self._saved_figures():
+            return []
+        listed = ", ".join(f"`{n}`" for n in names[:6])
+        directive = (f"FI looked at what the run produced: the plan has figures ({listed}) and the run saved none. Draw each from "
+                     "the saved results and save it to the figures folder. If there is nothing valid to draw because the results "
+                     "are not valid, find out why and fix that first. Change nothing else.")
+        note = f"the plan has figures ({listed}) and the run saved none"
+        say = (f"{note[0].upper()}{note[1:]}, so the paper has no figure. Do not describe, cite or caption a figure, and do not "
+               "write \"as shown in Figure N\": say plainly, in the limitations, that no figure was drawn.")
+        return [Found("no_figures", ANALYSIS, directive, note, say)]
+
+    def _figure_gap_findings(self, dropped: set[str]) -> list[Found]:
+        """Where a figure that stays has no point at a setting (:func:`core.degenerate_results.figure_gaps`): not repaired and
+        nothing is left out, the writer is told which settings the figure does not show."""
+        try:
+            gaps = [g for g in _degenerate.figure_gaps(self.fi_dir / "figure_records", self._saved_figures())  # type: ignore[attr-defined]
+                    if g.figure not in dropped]
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[execute] could not check the figures for settings they do not show (%r)", exc)  # type: ignore[attr-defined]
+            return []
+        if not gaps:
+            return []
+        return [Found("figure_gaps", ANALYSIS, "", "a figure has no point at some settings (" + "; ".join(g.says() for g in gaps[:3]) + ")",
+                      _degenerate.gap_note(gaps))]
+
     def _code_reader_findings(self, result_json: Any) -> list[Found]:
         """The quantities the plan names that the code computes differently (a second model's finding on the version that ran,
         left standing by the repairs) and that the run's results hold under a name that begins with the plan's. They are left
@@ -116,10 +163,19 @@ class ResultChecksMixin:
             self._log.warning("[execute] could not read the code reader's findings against the results (%r)", exc)  # type: ignore[attr-defined]
             return []
         found: list[Found] = []
+        issues = _code_review.load(self.quest_root).get("issues") or {}  # type: ignore[attr-defined]
+        never_run = _code_reach.never_run_in(self.quest_root)  # type: ignore[attr-defined]
         for q in differing:
             # Only "computed differently": a quantity called missing that the results hold is one the reader got wrong
             # (:func:`core.code_review.resolve_headline` says so for the headline; the writer's note covers the rest).
             if q["status"] != _code_review.DIFFERENT:
+                continue
+            # Not taken out when FI's own record contradicts the reader: a test written to show the fault passed on the code
+            # (it was not shown), or the function it names is never run (core/code_reach.py). A finding no test was written
+            # for still takes the quantity out: a real paper reported standard deviations under the plan's name for mean
+            # absolute errors, and its reader, never tested, was right.
+            issue = issues.get(q.get("fid")) if isinstance(issues, dict) else None
+            if (isinstance(issue, dict) and issue.get("demonstrated") is False) or never_run(q.get("file_rel"), q.get("function")):
                 continue
             keys = sorted(_code_review.named_in_results(q["name"], result_json))
             if not keys:
@@ -210,7 +266,11 @@ class ResultChecksMixin:
         self._result_marked = []
         found = self._result_findings(state, result_json) if getattr(self, "_trial_mode", False) else []
         # What a second model found the code computes otherwise cannot be repaired here (its repairs were spent before the run).
-        standing = self._code_reader_findings(result_json)
+        # A run that drew none of the planned figures still has its results: they stand, and the writer is told there is
+        # no figure. Sent back like a failed run, a repair that gave up would have thrown the results away and stopped the
+        # quest with nothing to write up (a false stop).
+        standing = [*self._code_reader_findings(result_json), *self._figure_gap_findings(set()),
+                    *self._no_figures_standing(state)]
         if not found and not standing:
             if self._result_marked:
                 self._write_marked(record_path)
@@ -230,6 +290,9 @@ class ResultChecksMixin:
             result = _e.ExecutionResult(1, kept, (result.stderr or "") + "\n[FI] " + why, result.duration_s, result.timed_out)
             self._clear_stale_figures()  # type: ignore[attr-defined]
             return result, to_fix
+        if found:  # a figure that is taken out has no gap to report
+            standing = [*self._code_reader_findings(result_json),
+                        *self._figure_gap_findings({n for f in found for n in f.figures}), *self._no_figures_standing(state)]
         self._leave_out_results([*found, *standing], record_path, result_json)
         return result, failed_script
 
@@ -250,7 +313,51 @@ class ResultChecksMixin:
         except OSError as exc:
             self._log.warning("[execute] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
         self._log.warning(  # type: ignore[attr-defined]
-            "[execute] %s. The paper does not use them and says so in its limitations.", record["note"])
+            "[execute] %s. The paper is told and says so in its limitations.", record["note"])
+
+    def _leave_out_shown_faults(self, left_out: list[tuple[str, list[str], str]], not_done: list[tuple[str, str]],
+                                result_json: Any) -> None:
+        """At the evidence gate: the quantities a failing test showed the code computes wrongly (``(quantity, keys, how)``)
+        are left out of the results the paper may use, and the plan's quantities the code does not compute
+        (``(quantity, how)``) are named, by adding them to ``needs/RESULT_CHECK.json`` (what the run's checks left out
+        stays). The same issues found again add nothing."""
+        path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
+        record = _read_json(path)
+        found: list[Found] = []
+        for quantity, keys, how in left_out:
+            note = f"a test FI ran on the code that produced the results shows a fault in how it computes `{quantity}` ({how})"
+            say = (f"A test FI ran on the code that produced the results fails because of a fault in how `{quantity}` is "
+                   f"computed ({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
+                   f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, in "
+                   f"the limitations, that `{quantity}` is left out of this paper because a test showed the code computes it "
+                   "wrongly.")
+            found.append(Found("shown_fault", ANALYSIS, "", note, say, keys=list(keys), quantity=quantity))
+        for quantity, how in not_done:
+            note = f"the code does not compute the plan's `{quantity}` ({how})"
+            say = (f"The code does not compute `{quantity}`, which the plan asks for ({how}). Do not report a value for it or "
+                   f"call another number by its name. Say plainly, in the limitations, that `{quantity}` was not computed.")
+            found.append(Found("not_computed", ANALYSIS, "", note, say, quantity=quantity))
+        checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
+        seen = {(c.get("kind"), c.get("quantity")) for c in checks}
+        new = [f for f in found if (f.kind, f.quantity) not in seen]
+        if not new:
+            return
+        keys = sorted({*(str(k) for k in record.get("removed_quantities") or []), *(k for f in new for k in f.keys)})
+        why = record.get("removed_why") if isinstance(record.get("removed_why"), dict) else {}
+        for f in new:
+            for k in f.keys:
+                why.setdefault(k, SHOWN_FAULT_WHY)
+        record.update({
+            "removed_quantities": keys, "removed_figures": list(record.get("removed_figures") or []),
+            "removed_values": _values_left_out(result_json, set(keys)), "removed_why": why,
+            "checks": [*checks, *({"kind": f.kind, "note": f.note, "quantity": f.quantity, "keys": f.keys} for f in new)],
+            "note": "; ".join(x for x in [str(record.get("note") or ""), *(f.note for f in new)] if x),
+            "say": "\n\n".join(x for x in [str(record.get("say") or ""), *(f.say for f in new)] if x)})
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[evidence_gate] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
 
     def _marked_say(self) -> list[str]:
         marked = getattr(self, "_result_marked", None) or []

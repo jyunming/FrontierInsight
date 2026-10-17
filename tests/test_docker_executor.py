@@ -962,3 +962,14 @@ async def test_network_disabled_real_docker(
         f"expected network-disabled exit 7; got rc={result.returncode}, "
         f"stdout={result.stdout!r}, stderr={result.stderr!r}"
     )
+
+
+def test_docker_env_for_leaves_out_secret_variables() -> None:
+    exe = DockerExecutor()
+
+    client = MagicMock()
+    client.info.return_value = {"NCPU": 4}
+    env = {"FAKE_SERVICE_API_KEY": "dummy", "GITHUB_TOKEN": "dummy", "FI_TRIALS": "raw/t.json", "LANG": "C"}
+    out = exe._env_for(client, "", env)
+    assert "FAKE_SERVICE_API_KEY" not in out and "GITHUB_TOKEN" not in out
+    assert out["FI_TRIALS"] == "raw/t.json" and out["LANG"] == "C"

@@ -16,6 +16,7 @@ import pytest
 
 from core import optimisation_plan as optim
 from core import plan
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import Paused, _engine
 
 FIXTURE = Path(__file__).parent / "fixtures" / "replay" / "plan_part_misplaced"
@@ -42,7 +43,7 @@ def _setup(tmp_path: Path, replies: list[str]) -> tuple[Any, list[str], list[dic
         asked.append(messages[-1]["content"])
         if not pending:
             raise RuntimeError("no answer")
-        return pending.pop(0)
+        return as_parts(pending.pop(0))
 
     eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=chat)})()
     paused: list[dict[str, Any]] = []
@@ -129,7 +130,7 @@ async def test_fi_moves_the_part_and_asks_with_the_exact_reason_and_ends_in_an_h
     # the model writes the same top-level block with the same kind sentence, as it did six times (it took out the grid)
     same = plan.edit_design_block(_text(), lambda d: {**d, "protocol": {k: v for k, v in d["protocol"].items() if k != "grid"}})
     assert same is not None
-    eng, asked, paused = _setup(tmp_path, [same, same, same, same])
+    eng, asked, paused = _setup(tmp_path, [same] * 12)
     design, sha = eng._design_from_plan()
     assert design is not None and sha
     after = plan.raw_design_block(plan.plan_path(eng.quest_root).read_text(encoding="utf-8"), as_written=True)
@@ -142,8 +143,8 @@ async def test_fi_moves_the_part_and_asks_with_the_exact_reason_and_ends_in_an_h
 
     design, sha = await eng._ask_plan_for_the_search(STATE, design, sha)
     record = json.loads((eng.fi_dir / "search_block_asked.json").read_text(encoding="utf-8"))
-    assert record["count"] == 2 and record["calls"] <= 6, "bounded: two asks, at most six chat calls"
-    assert len(asked) <= 6
+    assert record["count"] == 2 and record["calls"] <= 12, "bounded: the model repeats the same answer, so the same refusal twice ends the asking"
+    assert len(asked) <= 12
     first, second = asked[0], next(a for a in asked[1:] if "Your last answer was not used" in a)
     assert "ONE number per design variable" in first, "the ask says plainly that the search takes scalar variables"
     assert VAR in first and "array of values" in first, "the first ask quotes the reason the block was left out"
@@ -185,11 +186,11 @@ async def test_the_model_that_describes_the_design_with_scalar_parameters_gets_a
 async def test_the_reason_of_a_rejected_answer_is_kept_on_disk_and_a_resume_asks_no_more(tmp_path: Path) -> None:
     same = plan.edit_design_block(_text(), lambda d: {**d, "protocol": {k: v for k, v in d["protocol"].items() if k != "grid"}})
     assert same is not None
-    eng, asked, _paused = _setup(tmp_path, [same] * 6)
+    eng, asked, _paused = _setup(tmp_path, [same] * 12)
     design, sha = eng._design_from_plan()
     await eng._ask_plan_for_the_search(STATE, design, sha)
     record = json.loads((eng.fi_dir / "search_block_asked.json").read_text(encoding="utf-8"))
-    assert record["count"] == 2 and record["calls"] <= 6
+    assert record["count"] == 2 and record["calls"] <= 12  # the same answer twice: the same refusal ends the asking
     assert VAR in record["problem"] and "array of values" in record["problem"]
     made = len(asked)
     again, sha2 = eng._design_from_plan()

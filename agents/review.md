@@ -10,7 +10,7 @@ Judge whether this paper is acceptable as-is, or whether one more revision pass 
 
 Grade on three axes (each 1–5) and combine into the overall `score`:
 
-1. **Honesty** — does the paper reflect the analysis truthfully (no fabricated numbers, no glossing over a broken experiment, claims are supported by results)? A dishonest paper cannot score above 2 overall regardless of polish. **Non-negotiable:** if the Claim grounding block above lists any UNSUPPORTED CLAIMS, you MUST add an `unsupported_claim` identifier to `must_flag_hits` and set `verdict` to `revise` — an unsupported claim is a non-bypassable failure, exactly like the methodology must-flags.
+1. **Honesty** — does the paper reflect the analysis truthfully (no fabricated numbers, no glossing over a broken experiment, claims are supported by results)? A dishonest paper cannot score above 2 overall regardless of polish. If the Claim grounding block above lists any UNSUPPORTED CLAIMS, FI adds `unsupported_claim` to `must_flag_hits` itself and the paper is written again; judge honesty with them in mind.
 2. **Rigor** — `rigor_score`: are Methods sufficient for a reader to understand what was done, are limitations clearly stated, are design constraints (sample size, compute budget, baseline choice) explained?
 3. **Depth** — `depth_score`: does the paper engage with prior work substantively? Specifically, does the Discussion synthesize across cited sources rather than read like a thin summary of this study only?
 
@@ -37,10 +37,10 @@ Respond with a single JSON object, no prose, no markdown fence:
   "suggestions": ["<actionable change — particularly any that would raise rigor_score or depth_score>", ...],
   "blocking": "<one sentence — only if verdict is 'revise'; otherwise empty string>",
   "why": "<one short sentence: the main reason for your verdict, accept or revise>",
-  "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'unsupported_claim' when the Claim grounding block lists unsupported claims, 'figure_caption' when the Figures block lists captions that describe what their figure does not show, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"]
+  "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'figure_caption' when the Figures block lists captions that describe what their figure does not show, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"]
 }
 
-The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and forces another revision pass (or escalates to human review). Personas without their own MUST-FLAG rules return ``[]``, except for the shared ones above (`unsupported_claim`, `figure_caption`) and `user_feedback_unaddressed` when the person's refine notes are shown below and the paper does not answer one.
+The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and has the paper written again. An objection to the design itself (such as the methodology identifiers above) does not change the design: FI states it in the paper's limitations as your objection, so name only what you can point to in the inputs. Personas without their own MUST-FLAG rules return ``[]``, except for the shared one above (`figure_caption`) and `user_feedback_unaddressed` when the person's refine notes are shown below and the paper does not answer one.
 
 ---
 
@@ -64,6 +64,6 @@ $claim_grounding_block
 $figure_check_block$foundational_check_block$user_feedback_block$code_findings_block
 
 ## Paper draft
-(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's own records: how often the design was revised and how many runs were made. It is not the writer's text and no revision can change it, so never ask for it to be edited or removed; you may weigh what it says. The same holds for a block between `<!-- fi:code-findings:... -->` and `<!-- /fi:code-findings -->`: FI's record of what a second reading of the code left open, listed under "Open points in the code" in the Inputs above when there is one.)
+(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's own records: how often the design was revised and how many runs were made. It is not the writer's text and no revision can change it, so never ask for it to be edited or removed; you may weigh what it says. The same holds for a block between `<!-- fi:run-record:... -->` and `<!-- /fi:run-record -->` (FI's record of the run's seeds, run time, trial counts, reduced size and what was not done or not tested), and for a block between `<!-- fi:code-findings:... -->` and `<!-- /fi:code-findings -->`: FI's record of what a second reading of the code left open, listed under "Open points in the code" in the Inputs above when there is one.)
 
 $paper_md

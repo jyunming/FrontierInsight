@@ -70,6 +70,11 @@ def _fmt(value: Any) -> str:
             return str(int(value))
         text = f"{value:.4g}"
         return "0" if float(text) == 0.0 else text
+    if isinstance(value, list):  # an array design variable: short ones in full, long ones by their first values
+        leaves = [x for item in value for x in (item if isinstance(item, list) else [item])]
+        if len(leaves) > 16:
+            return "[" + ", ".join(_fmt(x) for x in leaves[:8]) + f", ... ({len(leaves)} values)]"
+        return "[" + ", ".join(_fmt(x) for x in value) + "]"
     return str(value)
 
 
@@ -139,7 +144,11 @@ def _variables_table(block: dict[str, Any] | None, baseline: dict[str, Any], cho
     for name in names:
         v = by_name.get(name) or {}
         unit = f" ({v['unit']})" if v.get("unit") else ""
-        if isinstance(v.get("values"), list):
+        if isinstance(v.get("shape"), list):
+            shape = "x".join(str(n) for n in v["shape"])
+            allowed = (f"an array, {shape}; each element {_fmt(v['low'])} to {_fmt(v['high'])}"
+                       if _num(v.get("low")) and _num(v.get("high")) else f"an array, {shape}; each element in its own range")
+        elif isinstance(v.get("values"), list):
             allowed = "one of " + ", ".join(_fmt(x) for x in v["values"])
         elif _num(v.get("low")) and _num(v.get("high")):
             allowed = f"{_fmt(v['low'])} to {_fmt(v['high'])}"

@@ -27,6 +27,16 @@ A fault of the environment never costs a function a repair: a package the code i
 dependency path) and the check is run again; a check that could not run (a timeout, a harness that printed nothing, an
 example whose input names are not the outline's parameters) is run once more and then left out, said in the record.
 
+**Steps of the method.** The plan's non-equation steps (``protocol.model.steps``, ids ``S1``..., :mod:`core.plan_steps`) are
+functions of the same package, one each: ``implements`` in the outline is the card's id, the function is written, labelled
+(``# S1``) and import-checked like an equation's, tested by the card's worked example when it has a usable one (the same
+judge as an equation's, so FI computes the expected value), and looked at statically (:mod:`core.step_static`: a function
+that returns a number written into it, or never reads a parameter, fails). They live in ``model.py`` beside the equations,
+not in a file of their own: the code-writing prompt, the focused module repair, the improve step and the layout checks all
+read ``<package>/model.py``. A card with neither an example nor a relation is listed as ``untested_by_example`` in the
+record. A function can be shown passages from the literature (``passages``, :mod:`core.step_passages`) and, for a step with an
+example, the example's inputs; the expected output is shown only in the repair that follows a failed example.
+
 The most the step can ask of the model in a quest is ``max_calls`` (:data:`MAX_CALLS`): at
 most ``functions x (1 + repairs)`` per pass, and never more than that in all passes together. Every call is counted in
 ``.fi/function_steps.json``, which also keeps each function's status, so a resume does not fill a function that is done.
@@ -44,6 +54,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from . import equation_tests as _eqt
+from . import plan_steps as _plan_steps
+from . import step_static as _step_static
 
 RECORD = Path(".fi") / "function_steps.json"
 #: Fixed limits (not settings): repairs of ONE function before the code is written whole; model functions above which the
@@ -51,8 +63,19 @@ RECORD = Path(".fi") / "function_steps.json"
 #: in a whole quest.
 REPAIRS = 2
 MODULE_REPAIRS = 2
-MAX_FUNCTIONS = 10
+MAX_FUNCTIONS = 16
 MAX_CALLS = 40
+#: Requests the step may make for ``n`` functions in a whole quest (one fill and up to :data:`REPAIRS` repairs, and a
+#: little over for the module's repairs); the quest-wide count in the record (:func:`spend`) is what holds it. The caller
+#: passes this as ``max_calls``; :data:`MAX_CALLS` stays the figure for the old equation-only call sites.
+CALLS_PER_FUNCTION = 4
+EQUATION, STEP = "equation", "step"
+_STEP_ID = re.compile(r"S[0-9]+", re.IGNORECASE)
+
+
+def max_calls_for(n_functions: int) -> int:
+    """The most requests the step may make in a quest with ``n_functions`` functions to write."""
+    return CALLS_PER_FUNCTION * max(1, int(n_functions))
 #: A fenced Python block in a reply.
 _FENCE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 PENDING, DONE, FAILED = "pending", "done", "failed"
@@ -65,12 +88,21 @@ class Spec:
     name: str
     signature: str
     purpose: str
-    equation: str
+    equation: str  # the id of the equation, or of the step card (``S1``), the function computes
     depends_on: list[str] = field(default_factory=list)
+    kind: str = EQUATION  # "equation" | "step"
+    card: dict[str, Any] | None = None  # the step card (core/plan_steps.py) for a step
 
     def params(self) -> list[str]:
         node = ast.parse(self.signature.rstrip().rstrip(":") + ":\n    pass").body[0]
         return _param_names(node)  # type: ignore[arg-type]
+
+    def required_params(self) -> list[str]:
+        """The parameters a call must give (no default value, not ``*args`` or ``**kwargs``)."""
+        a = ast.parse(self.signature.rstrip().rstrip(":") + ":\n    pass").body[0].args  # type: ignore[attr-defined]
+        positional = [*a.posonlyargs, *a.args]
+        required = positional[:len(positional) - len(a.defaults)]
+        return [x.arg for x in required] + [x.arg for x, d in zip(a.kwonlyargs, a.kw_defaults) if d is None]
 
 
 def _param_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
@@ -90,30 +122,54 @@ def _param_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
 def model_functions(outline: dict[str, Any] | None, protocol: dict[str, Any] | None) -> tuple[list[Spec], list[str]]:
     """``(specs in the order they are written, why not)``. The step is used only when EVERY equation the simulation
     generates its data with (``role: generates``) has a function in the outline (``implements``: its id), each with a
-    signature that parses; otherwise no specs and the reason, and the code is written whole."""
+    signature that parses; otherwise no specs and the reason, and the code is written whole.
+
+    Beside the equations' functions, an outline entry whose ``implements`` is the id of a step card
+    (``protocol.model.steps``, ``S1``...; :mod:`core.plan_steps`) is a step's function. A step with no function, or whose
+    function cannot be used, is a note and is left to the code written with the scenario: only the equations decide
+    whether the step applies, as before. A step runs after the equations it ``uses``. A plan with no step cards gives
+    exactly what it always gave."""
     equations = {_eqt._text(e["id"]).upper(): _eqt._text(e["id"]) for e in _eqt.eligible(protocol)}
+    cards = {c["id"].upper(): c for c in _plan_steps.parse(protocol)[0] if _STEP_ID.fullmatch(c["id"])}
     notes: list[str] = []
     specs: dict[str, Spec] = {}
     seen_eq: set[str] = set()
+    seen_step: set[str] = set()
     for item in (outline or {}).get("functions") or []:
         if not isinstance(item, dict) or not _eqt._text(item.get("implements")):
             continue
-        eid = equations.get(_eqt._text(item["implements"]).upper())
+        implements = _eqt._text(item["implements"])
+        is_step = _STEP_ID.fullmatch(implements) is not None and implements.upper() not in equations
+        eid = implements.upper() if is_step else equations.get(implements.upper())
         name = _eqt._text(item.get("name"))
+        if is_step and implements.upper() not in cards:
+            notes.append(f"the outline's function {name or '?'} implements {implements}, which the plan's steps do not list")
+            continue
         if eid is None:
             notes.append(f"the outline's function {name or '?'} implements {item['implements']}, which the plan's model does not list")
             continue
-        if eid in seen_eq:
-            notes.append(f"the outline names two functions for equation {eid}")
+        label = f"step {implements.upper()}" if is_step else f"equation {eid}"
+        if (implements.upper() in seen_step) if is_step else (eid in seen_eq):
+            notes.append(f"the outline names two functions for {label}")
             continue
         sig = _eqt._text(item.get("signature"))
         if not name.isidentifier() or not sig.startswith("def ") or not _signature_ok(sig, name):
-            notes.append(f"the outline's signature for equation {eid} cannot be read ({sig[:80] or 'none'})")
+            notes.append(f"the outline's signature for {label} cannot be read ({sig[:80] or 'none'})")
             continue
         deps = [_eqt._text(d) for d in (item.get("depends_on") if isinstance(item.get("depends_on"), list) else [])]
-        specs[name] = Spec(name=name, signature=sig, purpose=_eqt._text(item.get("one_line_purpose")) or name,
-                           equation=eid, depends_on=[d for d in deps if d])
-        seen_eq.add(eid)
+        purpose = _eqt._text(item.get("one_line_purpose")) or name
+        if is_step:
+            card = cards[implements.upper()]
+            wanted = _step_inputs_mismatch(card, sig)
+            if wanted:
+                notes.append(f"the outline's function {name} for {label} {wanted}")
+                continue
+            specs[name] = Spec(name=name, signature=sig, purpose=purpose, equation=card["id"],
+                               depends_on=[d for d in deps if d], kind=STEP, card=card)
+            seen_step.add(implements.upper())
+        else:
+            specs[name] = Spec(name=name, signature=sig, purpose=purpose, equation=eid, depends_on=[d for d in deps if d])
+            seen_eq.add(eid)
     from . import oracle_check as _oracle
 
     missing = [i for i in _oracle.generating_equations(protocol) if _eqt._text(i) not in seen_eq]
@@ -121,7 +177,35 @@ def model_functions(outline: dict[str, Any] | None, protocol: dict[str, Any] | N
         return [], [*notes, f"the outline names no function for equation {', '.join(missing)}"]
     if not specs:
         return [], notes or ["the outline names no function for an equation (`implements`)"]
+    by_equation = {s.equation: s.name for s in specs.values() if s.kind == EQUATION}
+    for spec in specs.values():  # a step is written after the equations it uses
+        if spec.kind == STEP and spec.card:
+            for u in spec.card.get("uses") or []:
+                fn = by_equation.get(_eqt._text(u))
+                if fn and fn not in spec.depends_on:
+                    spec.depends_on.append(fn)
+    for card_id, card in cards.items():
+        if card_id not in seen_step:
+            notes.append(f"step {card['id']} ({card['name'] or 'unnamed'}) has no function in the outline; it is written with the scenario")
     return _in_order(list(specs.values())), notes
+
+
+def _step_inputs_mismatch(card: dict[str, Any], signature: str) -> str:
+    """Why a step's function cannot be tested by the card's example (its parameters are not the card's inputs), or ``""``.
+    Only a card with a usable example is held to it: that is the one case where the names are called by FI."""
+    if card.get("example_state") != "ok":
+        return ""
+    try:
+        node = ast.parse(signature.rstrip().rstrip(":") + ":\n    pass").body[0]
+        params = {p for p in _param_names(node) if not p.startswith("*")}  # type: ignore[arg-type]
+    except SyntaxError:
+        return ""
+    names = set(card.get("inputs") or {})
+    extra = {"rng", "seed"} if card.get("random") not in (None, False, "", 0, "false", "False") else set()
+    if names and params - extra != names:
+        return (f"takes ({', '.join(sorted(params))}), not the card's inputs ({', '.join(sorted(names))}); "
+                "its parameters are named as the card's inputs")
+    return ""
 
 
 def _signature_ok(sig: str, name: str) -> bool:
@@ -150,12 +234,17 @@ def _in_order(specs: list[Spec]) -> list[Spec]:
 
 def spec_hash(specs: list[Spec], protocol: dict[str, Any] | None) -> str:
     """What the filled functions were written for: the functions asked for and the equations (formula and worked
-    example) they implement. A different one means the functions are written again."""
-    wanted = {s.equation for s in specs}
+    example) and step cards they implement. A different one means the functions are written again. A set of specs
+    with no step hashes as it did before steps existed."""
+    wanted = {s.equation for s in specs if s.kind == EQUATION}
     eqs = [{k: e.get(k) for k in ("id", "formula", "example")} for e in _eqt.eligible(protocol)
            if _eqt._text(e["id"]) in wanted]
-    blob = json.dumps({"f": [[s.name, s.signature, s.equation, s.depends_on] for s in specs], "e": eqs},
-                      sort_keys=True, default=str)
+    body: dict[str, Any] = {"f": [[s.name, s.signature, s.equation, s.depends_on] for s in specs], "e": eqs}
+    cards = [{k: s.card.get(k) for k in ("id", "name", "does", "inputs", "output", "uses", "source", "example", "relations")}
+             for s in specs if s.kind == STEP and s.card]
+    if cards:
+        body["s"] = cards
+    blob = json.dumps(body, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -218,6 +307,24 @@ def is_stub(source: str, name: str) -> bool:
     if node is None:
         return True
     return any(isinstance(n, ast.Raise) and _STUB_MARK in ast.dump(n) for n in ast.walk(node))
+
+
+def changed_signatures(source: str, fixed: dict[str, str]) -> list[str]:
+    """For each function of ``fixed`` (its name to the ``def`` line the outline gave it) that ``source`` defines at the
+    top level with other parameters: a plain sentence saying so. The outline is the one place a function's parameters
+    are fixed: the tests FI writes before the run call the function by them, so a repair that changes them makes the
+    next test fail on names alone (and the next repair change them back). Only names are compared."""
+    out = []
+    for name, signature in fixed.items():
+        node = _find(source, name)
+        if node is None:
+            continue
+        want = _param_names(ast.parse(signature.rstrip().rstrip(":") + ":\n    pass").body[0])  # type: ignore[arg-type]
+        have = _param_names(node)
+        if have != want:
+            out.append(f"`{name}` must keep the parameters ({', '.join(want)}) the outline fixed; the repair gave "
+                       f"({', '.join(have)})")
+    return out
 
 
 def _find(source: str, name: str) -> ast.FunctionDef | None:
@@ -550,8 +657,13 @@ class FunctionFiller:
                  prompts: dict[str, string.Template], chat: ChatFn, run: RunFn, log: Any, repairs: int = 2,
                  max_calls: int = 30, constants: str = "", install: InstallFn | None = None,
                  module_repairs: int = MODULE_REPAIRS, declared: list[str] | None = None,
-                 topic_block: str = "") -> None:
+                 topic_block: str = "", passages: dict[str, str] | None = None) -> None:
         self.topic_block = topic_block or "(the topic is not available)"
+        #: ``{equation or step id: passages from the literature}`` (core/step_passages.py), found by the caller before the
+        #: step starts; an id with none gets an empty literature block.
+        self.passages = {str(k): str(v) for k, v in (passages or {}).items() if str(v).strip()}
+        self._by_id: dict[str, Spec] = {}
+        self._example_failed: set[str] = set()
         self.root, self.package, self.protocol, self.summary = Path(quest_root), package, protocol, summary
         self.prompts, self.chat, self.run, self.log = prompts, chat, run, log
         self.install, self.module_repairs = install, max(0, int(module_repairs))
@@ -575,6 +687,9 @@ class FunctionFiller:
         return next((e for e in _eqt.eligible(self.protocol) if _eqt._text(e["id"]) == eid), {"id": eid, "formula": ""})
 
     def _equation_block(self, eid: str) -> str:
+        spec = self._by_id.get(eid)
+        if spec is not None and spec.kind == STEP and spec.card:
+            return self._step_block(spec.card)
         e = self._equation(eid)
         lines = [f"{eid}: {_eqt._text(e.get('formula'))}"]
         if _eqt._text(e.get("source")):
@@ -582,6 +697,61 @@ class FunctionFiller:
         if _eqt._text(e.get("derivation")):
             lines.append(f"derivation: {_eqt._text(e.get('derivation'))}")
         return "\n".join(lines)
+
+    def _step_block(self, card: dict[str, Any]) -> str:
+        """What a step of the method is, for the request that writes its function (never an expected value)."""
+        lines = [f"{card['id']} (a step of the method, not an equation): {card.get('name') or ''}".rstrip(),
+                 f"what it does: {card.get('does') or '(not stated)'}"]
+        inputs = card.get("inputs") or {}
+        if inputs:
+            lines.append("inputs: " + "; ".join(f"{k} ({v})" if v else k for k, v in inputs.items()))
+        if card.get("output"):
+            lines.append(f"returns: {card['output']}")
+        for u in card.get("uses") or []:
+            e = self._equation(_eqt._text(u))
+            if _eqt._text(e.get("formula")):
+                lines.append(f"uses equation {u}: {_eqt._text(e.get('formula'))}  (call its function; do not write it again)")
+        if card.get("source"):
+            lines.append(f"source: {card['source']}")
+        if card.get("relations"):
+            lines.append("properties its result must have: " + "; ".join(card["relations"]))
+        return "\n".join(lines)
+
+    def _step_row(self, spec: Spec) -> dict[str, Any] | None:
+        """The worked example of a step card as :func:`core.equation_tests.example_rows` judges an equation's (FI computes
+        the expected value from the card's formula), or ``None`` when the card has none."""
+        card = spec.card or {}
+        if card.get("example") is None:
+            return None
+        pseudo = {"model": {"equations": [{"id": spec.equation, "formula": card.get("does") or card.get("name") or "step",
+                                           "role": "analyses", "example": card["example"], "random": card.get("random")}]}}
+        return next((r for r in _eqt.example_rows(pseudo) if r["id"] == spec.equation), None)
+
+    def _literature_block(self, spec: Spec) -> str:
+        text = self.passages.get(spec.equation, "").strip()
+        if not text:
+            return ""
+        return ("# What the literature says (passages from the source the plan cites; use them for the method's definition "
+                "and details, do not copy numbers from them)\n\n" + text + "\n")
+
+    def _example_block(self, spec: Spec, *, with_expected: bool = False) -> str:
+        """A step's worked inputs; the output FI computed for them only for the repair that follows a failed example."""
+        if spec.kind != STEP:
+            return ""
+        row = self._step_row(spec)
+        if row is None or row["state"] != "ok":
+            return ""
+        given = ", ".join(f"{k} = {v:g}" for k, v in row["inputs"].items())
+        text = f"# A worked case\n\nFI will call the function with: {given}.\n"
+        if row.get("random"):
+            text += "Its result is a random draw: FI compares the mean of many draws.\n"
+        elif with_expected:
+            shown = (", ".join(f"{k} = {v:.10g}" for k, v in row["expected"].items())
+                     if isinstance(row["expected"], dict) else f"{row['expected']:.10g}")
+            text += (f"FI computed the result for these inputs from the plan's own formula: {shown} "
+                     f"(relative tolerance {row['rel']:g}). The function as it is does not give it; find out why from the "
+                     "step's description, do not write the number into the function.\n")
+        return text
 
     # -- one function --
 
@@ -628,11 +798,30 @@ class FunctionFiller:
             if who == spec.name:
                 return "importing it failed" + (f" (line {line})" if line else "") + ":\n" + end, who, end
             return (f"importing the module failed {place(who, line)}, not in `{spec.name}`:\n" + end), who, end
+        if spec.kind == STEP:
+            row = self._step_row(spec)
+            if row is None or row["state"] != "ok":
+                record.setdefault("untested", {})[spec.equation] = (row or {}).get("why") or "no worked example"
+            else:
+                problem = await self._example_test(spec, row, record, module, formula=str((spec.card or {}).get("does") or ""))
+                if problem:
+                    self._example_failed.add(spec.equation)
+                    return problem, spec.name, ""
+                self._example_failed.discard(spec.equation)
+            why = _step_static.check(text, spec.name)
+            return (why, spec.name, "") if why else ("", "", "")
         rows = _eqt.example_rows(self.protocol)
         row = next((r for r in rows if r["id"] == spec.equation), None)
         if row is None or row["state"] != "ok":
             record.setdefault("untested", {})[spec.equation] = (row or {}).get("why") or "no worked example"
             return "", "", ""
+        problem = await self._example_test(spec, row, record, module, formula=row["formula"])
+        return (problem, spec.name, "") if problem else ("", "", "")
+
+    async def _example_test(self, spec: Spec, row: dict[str, Any], record: dict[str, Any], module: str, *,
+                            formula: str) -> str:
+        """Run the worked example of ``row`` against the function; ``""`` when it passes or could not be judged (said in the
+        record), else the plain problem (never the expected value)."""
         case_list = _eqt.cases([row], {spec.equation: {"module": module, "function": spec.name, "file": f"{self.package}/model.py"}})
         _eqt.write(self.code, case_list)
         results = None
@@ -645,14 +834,20 @@ class FunctionFiller:
         if results is None:
             self._unchecked(record, spec, "the equation test could not be run here ("
                             + exception_line(err or out or "", 120) + ")")
-            return "", "", ""
+            return ""
         bad = next((r for r in results if r.get("status") != _eqt.OK), None)
-        if bad and bad.get("status") == _eqt.CONTRACT:
-            # The plan's example names inputs the outline's function does not take, and its parameters are fixed: nothing the
-            # function could change. FI's own mismatch, not the function's.
+        if bad and bad.get("status") in (_eqt.CONTRACT, _eqt.OUTPUTS):
+            # The plan's example names inputs the outline's function does not take, and its parameters are fixed; or it gives
+            # one value where the function returns its outputs by name: nothing the function could change. FI's own
+            # mismatch with the plan, not the function's; the equation tests before the run ask the plan about it.
             self._unchecked(record, spec, f"the plan's worked example does not fit the outline's function ({bad.get('detail')})")
-            return "", "", ""
-        return (_eqt.failure_message(bad, row["formula"]), spec.name, "") if bad else ("", "", "")
+            return ""
+        if not bad:
+            return ""
+        message = _eqt.failure_message(bad, formula)
+        if spec.kind == STEP:
+            message = message.replace(f"implements equation {spec.equation} of the model", f"implements step {spec.equation} of the method")
+        return message
 
     def _unchecked(self, record: dict[str, Any], spec: Spec, why: str) -> None:
         """A check that could not be made (a fault of the environment or of FI's own test): said in the record and the log,
@@ -733,7 +928,7 @@ class FunctionFiller:
                     source=source, name=who, signature=other.signature, equation=other.equation,
                     equation_block=self._equation_block(other.equation), problem=directive,
                     prompt=self.prompts["repair"], chat=self.chat, package=self.package,
-                    topic_block=self.topic_block)
+                    topic_block=self.topic_block, literature_block=self._literature_block(other))
             except Exception as e:  # noqa: BLE001 -- a repair that could not be asked for leaves the module as it was
                 new = None
                 self.log.warning("[implement] the repair of %s could not be asked for: %r", who, e)
@@ -779,14 +974,16 @@ class FunctionFiller:
                     model_block=self.summary or "(not stated)", equation_block=self._equation_block(spec.equation),
                     function_block=f"{spec.signature}\n    # {spec.purpose}", related_block=_text_block(related),
                     constants_block=self.constants or "(none)", package=self.package,
-                    topic_block=self.topic_block)
+                    topic_block=self.topic_block, literature_block=self._literature_block(spec),
+                    example_block=self._example_block(spec))
             else:
                 current = _find(source, spec.name)
                 prompt = self.prompts["repair"].substitute(
                     equation_block=self._equation_block(spec.equation),
                     function_block=ast.get_source_segment(source, current) if current is not None else spec.signature,
                     problem=problem, related_block=_text_block(related), package=self.package,
-                    topic_block=self.topic_block)
+                    topic_block=self.topic_block, literature_block=self._literature_block(spec),
+                    example_block=self._example_block(spec, with_expected=spec.equation in self._example_failed))
             try:
                 reply = await self.chat(prompt)
             except Exception as e:  # noqa: BLE001 -- a call that failed is a failed attempt
@@ -828,6 +1025,7 @@ class FunctionFiller:
         """Write every function of ``specs`` in order. Returns ``done`` when all pass, ``fell_back`` when one ends the
         step (its files are removed, the code is then written whole), ``skipped`` when it was not used."""
         digest = spec_hash(specs, self.protocol)
+        self._by_id = {s.equation: s for s in specs}
         record = load(self.root)
         if record.get("package") != self.package or record.get("hash") != digest:
             record = {"calls_total": int(record.get("calls_total") or 0), "package": self.package, "hash": digest,
@@ -836,6 +1034,12 @@ class FunctionFiller:
             return Outcome("skipped", reason=str(record.get("reason") or "an earlier pass of the step fell back"))
         record["functions"] = {s.name: record["functions"].get(s.name) or
                                {"equation": s.equation, "status": PENDING, "attempts": 0} for s in specs}
+        for s in specs:
+            record["functions"][s.name]["kind"] = s.kind
+        # A step with neither a usable worked example nor a relation to hold is not tested by anything but the static look;
+        # said here so that the checks that come after can pick it up.
+        record["untested_by_example"] = [s.equation for s in specs if s.kind == STEP and s.card
+                                         and s.card.get("untested_by_example")]
         pkg_dir = self.code / self.package
         pkg_dir.mkdir(parents=True, exist_ok=True)
         (pkg_dir / "__init__.py").write_text(
@@ -1040,6 +1244,41 @@ class FunctionFiller:
         self._remove()
         return Outcome("fell_back", int(record.get("calls") or 0), record["reason"], target.name)
 
+    # -- after the step: the second-version check asks for one function to be tested again, or repaired once --
+
+    def know(self, specs: list[Spec]) -> None:
+        """Tell a filler that did not write the functions (a later pass of the quest) which functions the package has."""
+        self._by_id = {s.equation: s for s in specs}
+
+    async def still_passes(self, spec: Spec) -> bool:
+        """The function's own checks (import, worked example, the static look) again on what is in the module now. A
+        check that could not be made does not count as a pass."""
+        record: dict[str, Any] = {}
+        problem, _who, _trace = await self._check(spec, record)
+        return not problem and spec.name not in (record.get("unchecked") or {})
+
+    async def repair_function(self, spec: Spec, problem: str) -> bool:
+        """ONE repair of one function, alone (its card or equation and the problem, never the expected value), written into
+        the module when the reply is a usable function with the parameters it had. ``True`` when the module changed."""
+        source = self.model_path.read_text(encoding="utf-8")
+        record = load(self.root)
+        if not self._spend(record):  # counted in the quest's total before the request, like every other one of the step
+            self.log.info("[implement] function %s is not repaired: the most requests the step may make in this quest are spent",
+                          spec.name)
+            return False
+        new, why = await repair_one(
+            source=source, name=spec.name, signature=spec.signature, equation=spec.equation,
+            equation_block=self._equation_block(spec.equation), problem=problem, prompt=self.prompts["repair"],
+            chat=self.chat, package=self.package, topic_block=self.topic_block,
+            literature_block=self._literature_block(spec), example_block=self._example_block(spec))
+        if new is None:
+            self.log.info("[implement] the repair of function %s was not used: %s", spec.name, why)
+            return False
+        if new == source:
+            return False
+        self.model_path.write_text(new, encoding="utf-8")
+        return True
+
     def _remove(self) -> None:
         import shutil
 
@@ -1051,12 +1290,14 @@ class FunctionFiller:
 
 
 async def repair_one(*, source: str, name: str, signature: str, equation: str, equation_block: str, problem: str,
-                     prompt: string.Template, chat: ChatFn, package: str = "", topic_block: str = "") -> tuple[str | None, str]:
+                     prompt: string.Template, chat: ChatFn, package: str = "", topic_block: str = "",
+                     literature_block: str = "", example_block: str = "") -> tuple[str | None, str]:
     """ONE repair of one function in ``source`` (a module's text), alone: ``(new module text, "")`` or ``(None, why)``.
     The request holds that function, its equation and the problem, not the script."""
     node = _find(source, name)
     current = ast.get_source_segment(source, node) if node is not None else signature
     reply = await chat(prompt.substitute(equation_block=equation_block, function_block=current or signature,
                                          problem=problem, related_block="(none)", package=package or "the package",
-                                         topic_block=topic_block or "(the topic is not available)"))
+                                         topic_block=topic_block or "(the topic is not available)",
+                                         literature_block=literature_block, example_block=example_block))
     return replace_function(source, name, reply_code(reply), signature=signature, equation=equation)

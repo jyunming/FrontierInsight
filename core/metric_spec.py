@@ -40,12 +40,18 @@ call the statistics adequate while there is one.
 
 from __future__ import annotations
 
+import logging
 import math
+import time
+from collections.abc import Callable
 from typing import Any
 
 from . import stats as _stats
 
 KINDS = ("proportion", "mean")
+# Plain words for "one measured number per run": the estimator is the mean over runs, so these read as `mean`.
+KIND_ALIASES = {"value": "mean", "measure": "mean", "measurement": "mean", "number": "mean", "scalar": "mean",
+                "average": "mean", "continuous": "mean", "numeric": "mean"}
 DEFAULT_FAMILY = "all"
 
 
@@ -66,8 +72,10 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
             return None, f"`protocol.metrics` names `{ident}` twice"
         seen.add(ident)
         kind = str(item.get("kind") or "").strip().lower()
+        kind = KIND_ALIASES.get(kind, kind)
         if kind not in KINDS:
-            return None, f"`protocol.metrics` entry `{ident}`: `kind` must be `proportion` or `mean`"
+            return None, (f"`protocol.metrics` entry `{ident}`: `kind` must be `proportion` (a share of runs that succeed) "
+                          f"or `mean` (a number measured once per run and averaged over runs; `value` is accepted for it)")
         # `estimand` and `unit` are what make a spec say what the number actually is (a probability of what,
         # over what population) rather than just which estimator function to call -- required, the same as
         # every other gate here (a config missing what protocol_check/oracle_check need is refused, not
@@ -320,19 +328,46 @@ def _contrast(a: dict[str, Any], b: dict[str, Any], spec: dict[str, Any]) -> tup
     return _stats.two_sample_mean_test(a["values"], b["values"]), None
 
 
-def statistics(replicates: list[dict[str, Any]], protocol: dict[str, Any] | None) -> dict[str, Any]:
+_PROGRESS_EVERY_SECONDS = 30.0
+_PROGRESS_EVERY_CONTRASTS = 50
+
+
+def statistics(
+    replicates: list[dict[str, Any]], protocol: dict[str, Any] | None, *, progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     """What the declared metrics estimate, and every pairwise contrast between the settings of a factor, with the p-values of
-    each family adjusted together. ``{}`` when the protocol declares no metric."""
+    each family adjusted together. ``{}`` when the protocol declares no metric.
+
+    ``progress`` receives one plain line ("[evidence] statistics: k of n contrasts") at most every ~30 seconds or 50
+    contrasts, so a long run is not silent; without it the line goes to the ``frontier_insight.metric_spec`` logger."""
     specs = declared(protocol)
     if not specs or not replicates or not all(isinstance(r, dict) for r in replicates):
         return {}
+    say = progress or logging.getLogger("frontier_insight.metric_spec").info
     estimates: dict[str, dict[str, Any]] = {}
     contrasts: list[dict[str, Any]] = []
     unsupported: list[dict[str, str]] = []
     declared_contrasts = protocol.get("contrasts") if isinstance(protocol, dict) and isinstance(protocol.get("contrasts"), list) else []
     any_prespecified = False
-    for spec in specs:
-        settings = _settings(replicates, spec)
+    all_settings = [_settings(replicates, spec) for spec in specs]
+    total_contrasts = 0
+    for spec, found in zip(specs, all_settings):
+        wanted_pairs = {
+            frozenset((str(c.get("a")), str(c.get("b"))))
+            for c in declared_contrasts if isinstance(c, dict) and c.get("metric") == spec["id"]
+        }
+        by_factor: dict[tuple[str, ...], list[str]] = {}
+        for path in found:
+            if path:
+                by_factor.setdefault(path[:-1], []).append(path[-1])
+        for labels in by_factor.values():
+            for i in range(len(labels)):
+                for j in range(i + 1, len(labels)):
+                    if not wanted_pairs or frozenset((labels[i], labels[j])) in wanted_pairs:
+                        total_contrasts += 1
+    started = last_said = time.monotonic()
+    done = 0
+    for spec, settings in zip(specs, all_settings):
         if not settings:
             unsupported.append({"id": spec["id"], "reason": f"`{spec['id']}` does not appear in the results"})
             continue
@@ -371,6 +406,11 @@ def statistics(replicates: list[dict[str, Any]], protocol: dict[str, Any] | None
                         continue
                     matched_wanted.add(pair)
                     result, why = _contrast(pooled[members[i]], pooled[members[j]], spec)
+                    done += 1
+                    now = time.monotonic()
+                    if now - last_said >= _PROGRESS_EVERY_SECONDS or (done % _PROGRESS_EVERY_CONTRASTS == 0 and done < total_contrasts):
+                        last_said = now
+                        say(f"[evidence] statistics: {done} of {total_contrasts} contrasts ({int(now - started)} s)")
                     tag = f"{'.'.join(factor)}: {a_label} vs {b_label}"
                     if result is None:
                         unsupported.append({"id": f"{spec['id']} {tag}", "reason": why or "too few observations"})

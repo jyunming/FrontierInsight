@@ -64,6 +64,8 @@ dependencies = [
   "uvicorn>=0.27",
   "python-multipart>=0.0.9",  # GUI paper-upload endpoint (multipart forms)
   "psutil>=5.9",
+  # The bootstrap / permutation loops of the evidence statistics (core/stats.py) run as array operations.
+  "numpy>=1.24",
   # Cross-process lock around a skill's provenance.json, so two quests
   # recording a use of the same skill can't lose each other's record.
   "filelock>=3.13",

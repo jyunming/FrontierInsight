@@ -1,0 +1,25 @@
+{
+  "entry": "run_trial",
+  "grid": {
+    "m": [
+      20,
+      2000
+    ],
+    "pi1": [
+      0.0,
+      0.2
+    ],
+    "procedure": [
+      "uncorrected",
+      "Benjamini-Hochberg"
+    ]
+  },
+  "runs_per_setting": 1537,
+  "base_seed": 0,
+  "paired": false,
+  "thresholds": {
+    "alpha": 0.05,
+    "effect_shift": 2.5,
+    "bootstrap_resamples": 2000
+  }
+}

@@ -32,9 +32,9 @@ def test_the_function_steps_prompts_carry_the_topic(tmp_path: Path) -> None:
     agents = Path(__file__).resolve().parent.parent / "agents"
     for name, kwargs in {
         "implement_function": dict(model_block="m", equation_block="E1: y", function_block="def f(a):", related_block="(none)",
-                                  constants_block="(none)", package="p"),
+                                  constants_block="(none)", package="p", literature_block="(none)", example_block="(none)"),
         "implement_function_repair": dict(equation_block="E1: y", function_block="def f(a): pass", problem="p",
-                                          related_block="(none)", package="p"),
+                                          related_block="(none)", package="p", literature_block="(none)", example_block="(none)"),
         "implement_module_repair": dict(passing_block="(none)", failing_block="f", module="x = 1", package="p"),
         "execute_reflect": None, "implement": None, "implement_outline": None, "implement_body": None, "improve": None,
     }.items():

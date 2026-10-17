@@ -35,6 +35,8 @@ from typing import Any, Awaitable, Callable
 
 from . import code_findings as _issues
 from . import function_steps as _steps
+from . import optimise as _optimise
+from . import trial_runner as _trials
 
 #: Where a test written for an issue is kept (under the quest root).
 TEST_DIR = Path(".fi") / "finding_tests"
@@ -84,6 +86,70 @@ for path in {paths!r}:
     out[path] = results
 print({mark!r} + json.dumps(out))
 '''
+
+
+#: What a script reads from the environment FI gives a run: the variable, the file it names (the paths the run itself uses,
+#: relative to the quest folder) and what a stand-in holds until the run has written the real one.
+_RUN_FILES = (("FI_TRIALS", Path(_trials.RAW_DIRNAME) / _trials.SUMMARY_NAME, '{"cells": []}'),
+              ("FI_OPTIMISATION", _optimise.LEDGER_PATH, ""),
+              ("FI_BEST_DESIGN", _optimise.BEST_PATH, "{}"))
+STAND_IN_DIR = TEST_DIR / "_env"
+
+
+def run_environment(root: Path, raw_dir: str = _trials.RAW_DIRNAME, *, stand_ins: bool = True) -> dict[str, str]:
+    """The ``FI_*`` variables a finding test runs with, the ones the real run gives the code: the real file when the run
+    has written it. Without it, a stand-in under ``.fi/finding_tests/_env/`` (never under ``raw/`` or ``results/``, never over
+    a real file) when ``stand_ins`` is true, so a module that reads one while it is imported does not fail on a variable that
+    is not set; a test run after the real run (``stand_ins=False``) gets only real files, and a missing one makes it error."""
+    env: dict[str, str] = {}
+    if not all(runs_nothing_on_import(f) for f in sorted((root / "code").glob("*.py"))):
+        # importing such a script would run the analysis again in the quest folder (and could rewrite its results):
+        # it gets no FI_* variables, as before, so the import stops at the first one it reads
+        return env
+    for var, rel, content in _RUN_FILES:
+        if (root / rel).is_file():
+            env[var] = rel.as_posix()
+            continue
+        stand = STAND_IN_DIR / rel.name
+        try:
+            if stand_ins:
+                (root / stand).parent.mkdir(parents=True, exist_ok=True)
+                if not (root / stand).is_file():
+                    (root / stand).write_text(content, encoding="utf-8")
+                env[var] = stand.as_posix()
+        except OSError:
+            pass  # the test then runs as it did before: an import that needs the variable shows as an error
+    if (root / raw_dir).is_dir():
+        env["FI_RAW_DIR"] = raw_dir
+    elif stand_ins:
+        try:
+            (root / STAND_IN_DIR / "raw").mkdir(parents=True, exist_ok=True)
+            env["FI_RAW_DIR"] = (STAND_IN_DIR / "raw").as_posix()
+        except OSError:
+            pass
+    return env
+
+
+def runs_nothing_on_import(path: Path) -> bool:
+    """Whether importing the script runs nothing: at its top level only imports, definitions, assignments that call
+    nothing, a docstring and an ``if __name__ == "__main__":`` block. A file that cannot be read or parsed does not."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return False
+    from .code_layout import _is_main_guard
+
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+            continue
+        if _is_main_guard(stmt) and not stmt.orelse:
+            continue
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and not any(isinstance(n, ast.Call) for n in ast.walk(stmt)):
+            continue
+        return False
+    return True
 
 
 def harness_source(code_dir: str, paths: list[str]) -> str:
@@ -325,22 +391,227 @@ def frame_changes(old: str, new: str) -> list[str]:
     return [f"{where or 'the module'}: {text[:60]}" for where, text in changed + new_frame]
 
 
-def frame_altered(old: str, new: str) -> list[tuple[str, set[str]]]:
+def frame_altered(old: str, new: str) -> list[tuple[str, set[str], str]]:
     """The module- and class-level statements of ``old`` that ``new`` changed or removed (additions are not listed), each
-    as ``(description, the names it binds)``."""
+    as ``(description, the names it binds, its ast.dump)``."""
     try:
         before, after = ast.parse(old), ast.parse(new)
     except SyntaxError:
-        return [("the file does not parse", set())]
+        return [("the file does not parse", set(), "")]
     kept = [d for _w, d in _frame(after)]
     names = {ast.dump(n): _bound_names(n) for tree in (before,) for n in ast.walk(tree)
              if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Import, ast.ImportFrom))}
-    out: list[tuple[str, set[str]]] = []
+    out: list[tuple[str, set[str], str]] = []
     for where, dump in _frame(before):
         if dump in kept:
             kept.remove(dump)
         else:
-            out.append((f"{where or 'the module'}: {dump[:60]}", names.get(dump, set())))
+            out.append((f"{where or 'the module'}: {dump[:60]}", names.get(dump, set()), dump))
+    return out
+
+
+def _quantity_keys(issue: dict[str, Any]) -> set[str]:
+    """The finding's quantities, normalised as the findings themselves are (:func:`core.code_findings.norm`)."""
+    raw = [issue.get("quantity"), *(issue.get("quantities") or [])]
+    return {k for k in (_issues.norm(q) for q in raw) if k}
+
+
+def _frame_assigns(source: str) -> list[tuple[str, str, ast.stmt]]:
+    """The assignments at module or class level of ``source`` (where the statements of :func:`_frame` are), as
+    ``(where, ast.dump, node)``; those inside a function or a nested block are not."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    out: list[tuple[str, str, ast.stmt]] = []
+
+    def walk(body: list[ast.stmt], where: str) -> None:
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                walk(node.body, f"{where}{node.name}.")
+            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                out.append((where, ast.dump(node), node))
+
+    walk(tree.body, "")
+    return out
+
+
+def _targets(node: ast.stmt) -> list[ast.expr]:
+    return list(node.targets) if isinstance(node, ast.Assign) else [node.target]  # type: ignore[attr-defined]
+
+
+def _dict_value(node: ast.stmt | None) -> ast.Dict | None:
+    value = getattr(node, "value", None)
+    return value if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(value, ast.Dict) else None
+
+
+def _quantity_name(key: ast.expr | None, quantities: set[str]) -> bool:
+    return isinstance(key, ast.Constant) and isinstance(key.value, str) and _issues.norm(key.value) in quantities
+
+
+def changes_only_quantity_entries(old: ast.stmt, new: ast.stmt | None, quantities: set[str]) -> bool:
+    """Whether a changed statement changes only the entries of the finding's own quantity: a dict literal assigned to the
+    same targets in which every existing entry that changed or went is keyed by a quantity of the finding (entries of the
+    quantity may be added; a ``**`` entry may not be added, taken out or changed), or
+    an assignment (``=``, ``+=``, annotated) to the one subscript ``name["quantity"]``, the same on both sides. Anything
+    else, and a statement that is gone, is not."""
+    if not quantities or new is None or type(old) is not type(new):
+        return False
+    old_targets, new_targets = _targets(old), _targets(new)
+    if [ast.dump(t) for t in old_targets] != [ast.dump(t) for t in new_targets]:
+        return False
+    if any(isinstance(t, (ast.Tuple, ast.List, ast.Starred)) for t in old_targets):
+        return False
+    before, after = _dict_value(old), _dict_value(new)
+    if before is not None or after is not None:
+        if before is None or after is None:
+            return False
+        old_keys = [ast.dump(k) if k is not None else None for k in before.keys]
+        new_keys = [ast.dump(k) if k is not None else None for k in after.keys]
+        named = [k for k in new_keys if k is not None]
+        if len(named) != len(set(named)):
+            return False
+        # The entries the dict had keep their order (a ``**`` among them, whose place decides what it overwrites), apart
+        # from entries of the quantity, which may go, come or stand where one went; a ``**`` is never added or changed,
+        # and no other key is added.
+        if any(isinstance(n, ast.NamedExpr) for n in ast.walk(after)):
+            return False
+        old_ids = [("key", k) if k is not None else ("**", ast.dump(v)) for k, v in zip(old_keys, before.values)]
+        new_ids = [(("key", key) if key is not None else ("**", ast.dump(v)), k)
+                   for key, k, v in zip(new_keys, after.keys, after.values)]
+        kept = [i for i, k in zip(old_ids, before.keys) if i in [n for n, _k in new_ids] or not _quantity_name(k, quantities)]
+        rest = [n for n, k in new_ids if n in old_ids or not _quantity_name(k, quantities)]
+        if rest != kept:  # a key that is new and not the quantity's, a new or moved ``**``, an entry out of order
+            return False
+        now = {k: ast.dump(v) for k, v in zip(new_keys, after.values) if k is not None}
+        for k, v, key in zip(before.keys, before.values, old_keys):
+            if key is not None and now.get(key) != ast.dump(v) and not _quantity_name(k, quantities):
+                return False
+        return any(_quantity_name(k, quantities) for k in before.keys + after.keys)
+    return len(old_targets) == 1 and isinstance(old_targets[0], ast.Subscript) and _quantity_name(old_targets[0].slice, quantities)
+
+
+def _containers(source: str, quantities: set[str]) -> set[str]:
+    """The names under which ``source`` already keeps an entry of the finding's quantity at module or class level: a
+    name assigned a dict literal with a key of the quantity, or one whose ``name["quantity"]`` is assigned."""
+    found: set[str] = set()
+    for _w, _d, node in _frame_assigns(source):
+        targets = _targets(node)
+        if len(targets) != 1:
+            continue
+        value = _dict_value(node)
+        if isinstance(targets[0], ast.Name) and value is not None and any(_quantity_name(k, quantities) for k in value.keys):
+            found.add(targets[0].id)
+        elif isinstance(targets[0], ast.Subscript) and isinstance(targets[0].value, ast.Name)                 and _quantity_name(targets[0].slice, quantities):
+            found.add(targets[0].value.id)
+    return found
+
+
+def _adds_quantity_entry(node: ast.stmt, quantities: set[str], bound: set[str]) -> bool:
+    """Whether an added statement is a set of the finding's quantity entry (``name["quantity"] = ...``, ``+=``,
+    annotated) of a name that already holds an entry of that quantity (``bound``: :func:`_containers`). The value
+    written is not looked at, apart from a walrus (it binds a name unseen): the finding's own test and the regression
+    checks run it."""
+    if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) or any(isinstance(n, ast.NamedExpr) for n in ast.walk(node)):
+        return False
+    targets = _targets(node)
+    return (len(targets) == 1 and isinstance(targets[0], ast.Subscript) and isinstance(targets[0].value, ast.Name)
+            and targets[0].value.id in bound and _quantity_name(targets[0].slice, quantities))
+
+
+def _added(old: str, new: str) -> list[tuple[str, str, ast.stmt]]:
+    """The module- and class-level statements ``new`` has that ``old`` does not, as ``(where, ast.dump, node)``, apart
+    from what :func:`frame_changes` allows (a new function or class, a new import that binds only names not bound
+    before)."""
+    before, after = ast.parse(old), ast.parse(new)
+    taken: set[str] = set()
+    for node in before.body:
+        taken |= _bound_names(node)
+    new_classes = {n.name for n in after.body if isinstance(n, ast.ClassDef) and n.name not in taken}
+    kept = _frame_nodes(before)
+    out = []
+    for where, dump, node in _frame_nodes(after):
+        if (isinstance(node, (ast.Import, ast.ImportFrom)) and where == "" and not (_bound_names(node) & taken)
+                and not any(a.name == "*" for a in node.names)):
+            continue
+        if where.split(".")[0] in new_classes or (isinstance(node, ast.ClassDef) and where == "" and node.name in new_classes):
+            if _plain_class_statement(node):
+                continue
+            out.append((where, dump, node))
+            continue
+        match = next((k for k in kept if k[:2] == (where, dump)), None)
+        if match:
+            kept.remove(match)
+        else:
+            out.append((where, dump, node))
+    return out
+
+
+def _plain_class_statement(node: ast.stmt) -> bool:
+    """A statement a new class may have: a nested class, a docstring, ``pass``, or an assignment to plain names (class
+    attributes) with no walrus in it. (Its methods are functions, which :func:`_frame_nodes` leaves out.)"""
+    if isinstance(node, (ast.ClassDef, ast.Pass)):
+        return True
+    if isinstance(node, ast.Expr):
+        return isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    return (isinstance(node, (ast.Assign, ast.AnnAssign)) and all(isinstance(t, ast.Name) for t in _targets(node))
+            and not any(isinstance(n, ast.NamedExpr) for n in ast.walk(node)))
+
+
+def _frame_nodes(tree: ast.Module) -> list[tuple[str, str, ast.stmt]]:
+    """:func:`_frame` with the statement node of each item."""
+    out: list[tuple[str, str, ast.stmt]] = []
+
+    def walk(body: list[ast.stmt], where: str) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(node, ast.ClassDef):
+                bare = copy.copy(node)
+                bare.body = []
+                out.append((where, ast.dump(bare), node))
+                walk(node.body, f"{where}{node.name}.")
+            else:
+                out.append((where, ast.dump(node), node))
+
+    walk(tree.body, "")
+    return out
+
+
+def unspoken_frame_changes(old: str, new: str, issue: dict[str, Any]) -> list[str]:
+    """What a repair changed at module or class level that the finding does not speak of: a statement that binds no name
+    the finding names and is not a change of the entries of the finding's own quantity
+    (:func:`changes_only_quantity_entries`)."""
+    spoken, quantities = issue_names(issue), _quantity_keys(issue)
+    everything = frame_altered(old, new)
+    if everything and not everything[0][2]:  # the file does not parse
+        return [t for t, _n, _d in everything]
+    olds, news = _frame_assigns(old), _added(old, new)
+    out = []
+    for text, names, dump in everything:
+        found = next((o for o in olds if o[1] == dump), None)
+        if found is not None:
+            olds.remove(found)
+        value = _dict_value(found[2]) if found is not None else None
+        if names & spoken and not (value is not None and any(_quantity_name(k, quantities) for k in value.keys)):
+            # it binds a name the finding speaks of (a dict that holds the finding's quantity is held to the entries
+            # of that quantity whatever it is called): its replacement is taken out of the additions
+            twin = next((n for n in news if _bound_names(n[2]) & names), None)
+            if twin:
+                news.remove(twin)
+            continue
+        twin = None
+        if found is not None:
+            twin = next((n for n in news if n[0] == found[0] and isinstance(n[2], (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                         and [ast.dump(t) for t in _targets(n[2])] == [ast.dump(t) for t in _targets(found[2])]), None)
+        if twin:
+            news.remove(twin)
+        if found is None or not changes_only_quantity_entries(found[2], twin[2] if twin else None, quantities):
+            out.append(text)
+    bound = _containers(old, quantities)
+    for where, dump, node in news:  # what is added and is no replacement of a statement that went
+        if not _adds_quantity_entry(node, quantities, bound):
+            out.append(f"{where or 'the module'}: added {dump[:60]}")
     return out
 
 
@@ -604,14 +875,15 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         elif new:
             # A finding that names no function (a quantity the results lack, a module-level value): the repair may
             # add helpers and change ONE existing function, and may change an existing module- or class-level
-            # statement only when a name it binds is one the finding speaks of. Anything wider is not this finding's.
+            # statement only when a name it binds is one the finding speaks of, or when it is an entry of the finding's
+            # own quantity (a result dict built in one module-level statement). Anything wider is not this finding's.
             changed = other_functions_changed(old, new, "")
-            altered = [s for s in frame_altered(old, new) if not (s[1] & issue_names(issue))]
+            altered = unspoken_frame_changes(old, new, issue)
             if len(changed) > 1:
                 new, why = None, ("it changed " + ", ".join(f"`{n}`" for n in changed[:4])
                                   + "; a repair of a finding that names no function may change one existing function")
             elif altered:
-                new, why = None, ("it changed " + "; ".join(t for t, _ in altered[:3])
+                new, why = None, ("it changed " + "; ".join(altered[:3])
                                   + ", which the finding does not speak of")
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"

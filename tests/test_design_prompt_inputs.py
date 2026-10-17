@@ -98,3 +98,13 @@ async def test_design_gets_the_skill_summary_not_the_full_skill_text(
     await eng._node_design(_state())
     assert "SUMMARY_SENTINEL" in prompts["design"]
     assert "FULL_SENTINEL" not in prompts["design"]
+
+
+def test_design_prompt_says_the_topics_runtime_is_a_wish_and_fis_limit_is_enforced(tmp_path):
+    cfg = _cfg(tmp_path)
+    eng = Engine(cfg)
+    note = eng._time_note({"topic": "CPU only; under 60 seconds of runtime."})
+    assert "limit FI enforces on one run" in note and "at most 60 s" in note and "does not enforce" in note
+    assert "does not enforce" in eng._time_note({"topic": "SIR final outbreak size"})
+    text = (Path(__file__).resolve().parent.parent / "agents" / "design.md").read_text(encoding="utf-8")
+    assert "$timeout_s\n\n$time_note" in text

@@ -1,0 +1,20 @@
+{
+  "entry": "run_trial",
+  "grid": {
+    "m": [
+      20,
+      2000
+    ],
+    "pi1": [
+      0.0,
+      0.2
+    ]
+  },
+  "runs_per_setting": 1200,
+  "base_seed": 0,
+  "paired": true,
+  "thresholds": {
+    "alpha": 0.05,
+    "effect_size": 2.5
+  }
+}

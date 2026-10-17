@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,7 +84,8 @@ def _as_list(value: Any) -> list[str]:
 #: The parts of the protocol. A model sometimes writes one of them beside ``protocol:`` (at the top level of the design
 #: block) instead of under it; the plan's readers look only under ``protocol``, so the part read as absent.
 PROTOCOL_PARTS = (
-    "optimisation", "grid", "runs_per_setting", "min_runs_per_setting", "numerical_axes", "thresholds", "metrics",
+    "optimisation", "grid", "in_each_run", "runs_per_setting", "min_runs_per_setting", "numerical_axes", "thresholds",
+    "metrics",
     "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
 )
 
@@ -212,6 +214,35 @@ def _number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _grid_values(axis: Any, values: Any, part: str = "grid") -> tuple[list[Any] | None, str | None]:
+    """``(the values of one grid axis, None)`` or ``(None, why)``.
+
+    An axis takes numbers, names (text), or tuples (a list of equal-length lists of numbers, each inner list being ONE
+    setting, such as an inner and an outer radius). A list that mixes names and numbers is refused with how to write it
+    (it may be a numeric sweep with a stray piece of text, which must not silently become names), and so is a list that
+    mixes tuples with anything else, since there is no single meaning for either."""
+    where = f"`protocol.{part}.{axis}`"
+    if not isinstance(values, list) or not values:
+        return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
+    if all(isinstance(v, (list, tuple)) for v in values):
+        width = len(values[0])
+        if not width or any(len(v) != width or not all(_number(x) and math.isfinite(x) for x in v) for v in values):
+            return None, (f"{where}: when each value is a list, every one must be a list of the same number of numbers "
+                          "(for example [[0.5, 0.8], [0.6, 0.9]]); each list is one setting")
+        return [list(v) for v in values], None
+    if any(isinstance(v, (list, tuple, dict)) for v in values):
+        return None, (f"{where} mixes lists with single values: write every value as a number, every value as text, "
+                      "or every value as a list of numbers of the same length")
+    if all(_number(v) for v in values):
+        return list(values), None
+    if all(isinstance(v, str) and v.strip() for v in values):
+        return [v.strip() for v in values], None
+    if all(_number(v) or (isinstance(v, str) and v.strip()) for v in values):
+        return None, (f"{where} mixes names and numbers: if the values are names, write every one as text in quotes "
+                      "(for example [\"a\", \"3\"]); if they are numbers, write every one as a number, without units or text")
+    return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
+
+
 def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None]:
     """``(protocol, None)`` when the experiment protocol block can be checked against a script, else ``(None, why)``.
 
@@ -230,11 +261,35 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         for axis, values in grid.items():
             if _number(values) or (isinstance(values, str) and values.strip()):
                 values = [values]
-            if (not isinstance(values, list) or not values
-                    or not (all(_number(v) for v in values) or all(isinstance(v, str) and v.strip() for v in values))):
-                return None, f"`protocol.grid.{axis}` must be a non-empty list of numbers, or a non-empty list of names (text), not a mix"
-            fixed[str(axis)] = [v.strip() if isinstance(v, str) else v for v in values]
+            fixed_values, why = _grid_values(axis, values)
+            if why:
+                return None, why
+            fixed[str(axis)] = fixed_values
         out["grid"] = fixed
+    inside = out.get("in_each_run")
+    if inside is not None:
+        # What every run goes through together (core/in_run.py): all five temperatures one fit uses, every procedure applied
+        # to the same simulated data. Not a setting of its own: each run is given the whole list.
+        if not isinstance(inside, dict) or not inside:
+            return None, ("`protocol.in_each_run` must map each thing every run compares inside it (all its values in "
+                          "one run, on the same random numbers) to the list of those values")
+        fixed_inside: dict[str, list[Any]] = {}
+        for factor, values in inside.items():
+            fixed_values, why = _grid_values(factor, values, part="in_each_run")
+            if why:
+                return None, why
+            seen_values = [json.dumps(float(v) if _number(v) else v) for v in fixed_values or []]
+            if len(set(seen_values)) < len(seen_values):
+                return None, (f"`protocol.in_each_run.{factor}` lists the same value twice: each value is compared "
+                              "once, so list every value one time")
+            if len(fixed_values or []) < 2:
+                return None, (f"`protocol.in_each_run.{factor}` has one value: a single value is not compared; it is "
+                              "a fixed setting of the run")
+            if str(factor) in (out.get("grid") or {}):
+                return None, (f"`{factor}` is both a setting of `protocol.grid` (each value run on its own) and in "
+                              "`protocol.in_each_run` (all its values in one run): it is one or the other")
+            fixed_inside[str(factor)] = fixed_values or []
+        out["in_each_run"] = fixed_inside
     runs = out.get("runs_per_setting")
     if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):
         return None, "`protocol.runs_per_setting` must be a whole number of at least 1"
@@ -262,6 +317,12 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         if fixed_metrics is None:
             return None, why
         out["metrics"] = fixed_metrics
+        subset = [str(m.get("id")) for m in fixed_metrics if isinstance(m, dict) and m.get("given")]
+        if subset and out.get("in_each_run"):
+            return None, (f"`protocol.metrics` gives a mean over a subset of the trials (`given`) for {', '.join(subset)}, "
+                          "and `protocol.in_each_run` records a number per value inside each run: the two cannot be "
+                          "combined. Make what each run compares a setting of `protocol.grid` (each value run on its "
+                          "own), or drop `given` and report the mean over every run")
     oracles = out.get("oracles")
     if oracles is not None:
         if isinstance(oracles, (str, dict)):
@@ -314,6 +375,9 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         # `grid`: a protocol is either a sweep or a search, never both.
         from . import optimisation_plan
 
+        if out.get("in_each_run") is not None:
+            return None, ("`protocol.optimisation` and `protocol.in_each_run` cannot both be given: a search for the best "
+                          "design runs one design at a time")
         if out.get("grid") is not None:
             return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
                           "best design puts the settings it compares, and a coarse scan run before it, in "
@@ -516,15 +580,31 @@ PART_RULES = {
     "runs_per_setting": "`protocol.runs_per_setting`: a whole number of at least 1.",
     "precision": "`protocol.precision`: a mapping with `target_half_width`, a number between 0 and 1, and optionally "
                  "`metric` and `reason` (text).",
+    # The plan's ledger parts (core/plan_ledger.py, core/plan_steps.py): asked once, never a stop.
+    "simplifications": "`protocol.simplifications`: a list; each entry has an `id` (X1, X2, ...), `replaces` (what the topic "
+                       "asks for that the plan leaves out or approximates), `because` (why), `effect` (what this could change "
+                       "in the result) and `probe` (one sentence: how a run could show whether it matters).",
+    "definitions": "`protocol.definitions`: a list with an entry for every metric: `metric` (its id), `defined_as` (one "
+                   "line), `source` (the [n] of a source listed in the plan), `quote` (the passage of that source that states "
+                   "the definition, word for word) and `differs` (empty, or the id of a `simplifications` entry when you "
+                   "define it differently; then leave `quote` empty if you have no source for your own definition).",
+    "steps": "`protocol.model.steps`: a list of step cards; each has an `id` (S1, S2, ...), `name`, `does`, `inputs` (a "
+             "mapping of each input's name to its unit), `output`, and optionally `uses` (equation ids of the model), "
+             "`source`, `example` and `relations`. Write the model's other keys again unchanged.",
 }
 
 
 def part_request(topic: str, unread: dict[str, str]) -> str:
     """The request FI makes of the plan's model, in place of asking a person, for each protocol part that could not be read:
     the sentence that says what could not be read (quoted) and the rule the part must meet. Nothing else may change."""
-    lines = [f"- {PART_RULES[part]}\n  What could not be read: {why}" for part, why in unread.items() if part in PART_RULES]
+    lines = [f"- {PART_RULES[part]}\n  {'What could not be read' if part in ASKED_PARTS else 'What is missing or wrong'}: {why}"
+             for part, why in unread.items() if part in PART_RULES]
+    lead = ("Parts of this plan's protocol could not be read, so the experiment would not run what the study needs."
+            if any(part in ASKED_PARTS for part in unread) else
+            "Parts of this plan's protocol are missing or incomplete, so the plan does not say what it leaves out or how its "
+            "metrics are defined.")
     return (
-        "Parts of this plan's protocol could not be read, so the experiment would not run what the study needs. Write "
+        f"{lead} Write "
         f"each of them again in the design block, from the plan and the topic: “{' '.join(str(topic or '').split())[:600]}”.\n"
         + "\n".join(lines)
         + "\nChange nothing else in the plan: not a check, a threshold, a tolerance or a criterion, and not a part of the "
@@ -1039,6 +1119,115 @@ def repair_block(block: str) -> tuple[str | None, list[str]]:
             rows = folded
             notes.append(f"the value of `{key}` (line {owner + 1}) has `: ` in it; written as a folded block, same text")
     return None, []
+
+
+def _entry_key(entry: Any) -> str | None:
+    if isinstance(entry, dict):
+        for name in ("id", "name"):
+            if entry.get(name) is not None:
+                return str(entry[name])
+    return None
+
+
+def _lost(had: Any, now: Any, depth: int = 2) -> bool:
+    """Whether ``now`` lacks something ``had`` has: a key of a mapping, or a named entry of a list (by its ``id`` or
+    ``name``), looked at ``depth`` levels down (a protocol's parts, and the entries and keys inside each)."""
+    if isinstance(had, dict):
+        if not isinstance(now, dict) or any(k not in now for k in had):
+            return True
+        return depth > 0 and any(_lost(v, now[k], depth - 1) for k, v in had.items())
+    if isinstance(had, list) and any(_entry_key(e) is not None for e in had):
+        if not isinstance(now, list):
+            return True
+        named = {_entry_key(x): x for x in now if _entry_key(x) is not None}
+        return any(_entry_key(e) is not None and (_entry_key(e) not in named
+                                                   or (depth > 0 and _lost(e, named[_entry_key(e)], depth - 1)))
+                   for e in had)
+    return False
+
+
+def _put_back_inside(plan_part: Any, kept: Any) -> list[Any]:
+    """The ways to put back, one at a time, what ``kept`` (the answer's version of a part) lost of the plan's own
+    ``plan_part``: a named entry of a list that is missing added, or one that lost something mended the same way (the
+    plan's own entry when it is neither a list nor a mapping inside); a key of a mapping that is missing or lost something
+    likewise; the answer's own additions beside them stay. The whole part when it is neither."""
+    if isinstance(plan_part, list) and isinstance(kept, list):
+        out: list[Any] = []
+        for entry in plan_part:
+            name = _entry_key(entry)
+            if name is None:
+                continue
+            at = next((i for i, x in enumerate(kept) if _entry_key(x) == name), None)
+            if at is None:
+                out.append([*kept, entry])
+            elif _lost(entry, kept[at]):
+                out.extend([*kept[:at], mended, *kept[at + 1:]] for mended in _put_back_inside(entry, kept[at]))
+        return out
+    if isinstance(plan_part, dict) and isinstance(kept, dict):
+        out = []
+        for key, value in plan_part.items():
+            if key not in kept:
+                out.append({**kept, key: value})
+            elif _lost(value, kept[key]):
+                out.extend({**kept, key: mended} for mended in _put_back_inside(value, kept[key]))
+        return out
+    return [plan_part]
+
+
+def accept_answer(before: Any, after: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(protocol, refused)`` for a model's answer to a request to complete the plan: ``after`` as it is when it can be
+    read whole; otherwise what can be read of it, part by part and entry by entry (:func:`repair_protocol`), with each
+    part or entry of ``before`` (the plan as it was) that the answer broke put back as the plan had it, and one sentence
+    per part or entry of the answer that was not taken (the reader's own reason, to send back to the model). A real plan
+    request lost its whole answer, the metrics it added and the formula's mapping, to one metric whose `kind` the reader
+    refuses. Nothing is loosened: what cannot be read is still not taken. ``(None, reasons)`` when nothing of the answer
+    can be read, or taking it would cost the plan a part it had."""
+    fixed, why = normalize_protocol(after)
+    if fixed is not None:
+        return fixed, []
+    repaired, notes = repair_protocol(after)
+    if repaired is None:
+        return None, notes or [str(why)]
+    base = before if isinstance(before, dict) else {}
+    plan_now = normalize_protocol(base)[0] or base
+    restored = True
+    for _pass in range(16):  # again until nothing more comes back: a part can rest on one put back later in the pass
+        if not restored:
+            break
+        restored = False
+        for key, value in base.items():
+            if key not in repaired:
+                trials = [value]
+            elif isinstance(value, list) and isinstance(repaired[key], list):
+                trials = [e for e in value if _entry_key(e) is not None
+                          and _entry_key(e) not in {_entry_key(x) for x in repaired[key]}]
+            elif isinstance(value, dict) and isinstance(repaired[key], dict):
+                trials = [{k: v} for k, v in value.items() if k not in repaired[key]]
+            else:
+                trials = []
+            for item in trials:  # one at a time, each on what is already kept
+                now = repaired.get(key)
+                option = ([*now, item] if isinstance(now, list) else {**now, **item} if isinstance(now, dict) else item)
+                trial, _ = normalize_protocol({**repaired, key: option})
+                if trial is not None:
+                    repaired, restored = trial, True
+            # Something inside a part lost (an equation of the model, a key of an entry): the plan's own goes back, one
+            # entry or key at a time, each on what is already kept; the answer's additions beside it stay.
+            for _round in range(64):  # bounded: each round puts back one entry or key
+                if not (key in repaired and key in plan_now and _lost(plan_now[key], repaired[key])):
+                    break
+                for option in _put_back_inside(plan_now[key], repaired[key]):
+                    trial, _ = normalize_protocol({**repaired, key: option})
+                    if trial is not None and trial != repaired:
+                        repaired, restored = trial, True
+                        break
+                else:
+                    break
+    # Taken in part only when the part taken adds to the plan and costs it nothing it had, a part or anything in one.
+    gained = any(k not in plan_now or repaired[k] != plan_now[k] for k in repaired)
+    if not gained or _lost(plan_now, repaired, depth=3):
+        return None, notes or [str(why)]
+    return repaired, notes
 
 
 def repair_design(text: str) -> tuple[str | None, list[str]]:

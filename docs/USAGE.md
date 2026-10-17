@@ -70,7 +70,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `implement_oracle` | 0–3 (+1 per disputed check) | One repair per attempt (`engine.oracle_repair_attempts`), only when a check of the plan's oracles is missing or fails before the main run (`engine.oracle_check`; FI runs the simulation on each oracle's case itself, and a one-script quest answers them when run with `FI_ORACLE=1`), plus one retry of a repair call that got no answer (a provider timeout) and one more for each check a repair says is itself wrong (that answer is set aside and not counted); a protocol with no oracle, or one without numbers, first makes `plan_revise` calls (up to the same number, counted apart). None when the oracles pass or the plan has no protocol. |
 | `implement_protocol` | 0–3 | One repair per attempt (`engine.protocol_repair_attempts`), only when the written script differs from the protocol in the plan (`engine.protocol_check`), plus one retry of a repair call that got no answer (a provider timeout); none when it agrees or the plan has no protocol. |
 | `implement` | 1 per design pass | |
-| `execute_reflect` | 0–3 | Only when the experiment fails; capped by `engine.exec_reflect_max_iterations`. Also when the finished run's manifest differs from the frozen protocol (`engine.run_manifest_check`, `engine.run_manifest_repair_attempts`). |
+| `execute_reflect` | 0–3 | Only when the experiment fails; capped by `engine.exec_reflect_max_iterations`. Also when the finished run's manifest differs from the frozen protocol (`engine.run_manifest_check`, `engine.run_manifest_repair_attempts`; a difference that is only in the analysis can use up to three of the repairs). |
 | `improve` | 0–3 | One per round, only when a check of correctness in the plan (`criteria`) is not met after a run; at most `engine.improve_rounds` (default 3) in the whole quest (a rerun `--from` the run or earlier starts it again). None when every check is met or the plan names none FI can measure. |
 | `analyze` | 1 per design pass | |
 | `cross_check` | 0–10 | One per key finding that found related literature, up to 10 findings (skipped when `cross_check_per_finding_k = 0`); 0–8 in the measured runs. |
@@ -452,7 +452,8 @@ engine:
 
 execution:
   sandbox: venv                     # venv (default) | docker
-  timeout_s: 600
+  timeout_s: 3600
+  clean_check_timeout_s: 900        # the try of code/ in a clean environment before the paper is written may take at most this long (never more than timeout_s); a run still going is stopped and reported as not finished, not as a failure
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest
   split_analysis: auto              # auto (default: two scripts for every quest that runs a simulation, deterministic or random) | true | false. Keep the simulation (code/simulate.py: run_cell for a deterministic study, run_trial for a random one, run by FI, record in raw/) apart from its analysis (code/experiment.py), so FI can run each oracle's case itself; false keeps one script and the result then cannot reach independently_validated; with background_jobs the trials run as a job array (code/submit.py submits FI's tasks)

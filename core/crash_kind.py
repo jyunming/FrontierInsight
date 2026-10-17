@@ -52,7 +52,8 @@ _PROGRAMMING_ERRORS = (AttributeError, KeyError, IndexError, TypeError, NameErro
 _AUTH_WORDS = ("invalid api key", "invalid_api_key", "incorrect api key", "did not accept the api key", "http 401",
                "http 403", "unauthorized", "unauthorised", "authentication", "token may be invalid", "run '/login'",
                "re-authenticate", "not logged in", "please log in", "login required", "copilot requests",
-               "permission denied for model")
+               "permission denied for model", "refresh token", "sign in again", "log out and sign in",
+               "token has expired", "token is expired")
 #: Read only from an error that carries no HTTP answer (a CLI's or the bridge's text): an HTTP 429 is judged by the
 #: provider's own rule, which reads the error's type and code and its Retry-After (a per-minute limit is not a quota).
 _QUOTA_WORDS = ("monthly usage limit", "weekly limit", "session limit", "usage limit reached", "out of credits",
@@ -238,6 +239,21 @@ def _program_name(exc: FileNotFoundError) -> str | None:
     return Path(name).name if name else ""
 
 
+def _sign_in_todo(provider: str) -> str:
+    """The one thing to do for a refused sign-in: the CLI's own login command when FI knows it."""
+    try:
+        from core import provider as _provider
+
+        how = _provider._CLI_SIGN_IN.get(provider)
+        if how:
+            return f"Sign in again: run {how}."
+        if provider in _provider._CLI_SPECS:
+            return f"Sign in to {_provider._CLI_SPECS[provider].argv[0]} again."
+    except Exception:  # noqa: BLE001
+        pass
+    return "Sign in to it again (the setup check, `python launch.py --doctor`, shows how)."
+
+
 def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | None:
     """(say, do) when the failure needs one action on this machine or account, else None."""
     text = _text(exc)
@@ -255,8 +271,9 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
         return (f"The account FI uses for {service} has used up its allowance (a usage limit or credit balance).",
                 "Add credits or wait until the limit resets, then continue the quest.")
     if model_call and (status in (401, 403) or (not has_http_answer and any(w in text for w in _AUTH_WORDS))):
-        return (f"FI could not sign in to {service}.",
-                "Sign in to it again (the setup check, `python launch.py --doctor`, shows how), then continue the quest.")
+        todo = _sign_in_todo(provider)
+        return (f"FI could not sign in to {service}{f' ({model})' if model else ''}: its sign-in has expired or was refused.",
+                f"{todo} Then continue the quest.")
     # Read from the message itself, never from the provider's note (which always names the model).
     names_model = bool(model) and model.lower() in str(exc).lower()
     if model_call and (status == 404 or any(w in text for w in _MODEL_MISSING_WORDS)

@@ -19,6 +19,9 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from . import in_run as _in_run
+from . import optimisation_plan as _plan
+
 #: Two numbers are "the same" when they differ by less than this fraction of their own size: numerical noise, not a
 #: different answer. There is no absolute floor: a floor has a unit, and the same quantity written in another unit
 #: (a length in metres or in picometres) must be judged the same way. A set of numbers that cannot be told apart by their
@@ -128,11 +131,24 @@ def flat_search_check(check: dict[str, Any] | None, block: dict[str, Any] | None
     if not no_effect:
         return None
     sensitivity = hood.get("sensitivity") or {}
-    movable = [str(v.get("name")) for v in block.get("design_variables") or []
-               if isinstance(v, dict) and str(v.get("kind") or "continuous") != "choice"]
+    # Judged on the numbers the check really nudged: an array larger than the check's sample has elements it never moved,
+    # and those are not evidence either way; a variable with no nudged number is left out of the claim.
+    probed = hood.get("probed")
+    movable, variables = [], []
+    for v in block.get("design_variables") or []:
+        if not isinstance(v, dict) or str(v.get("kind") or "continuous") == "choice":
+            continue
+        names = ([_plan.element_name(str(v.get("name")), i) for i in _plan.indices(_plan.shape_of(v))]
+                 if _plan.is_array(v) else [str(v.get("name"))])
+        if probed is not None:
+            names = [n for n in names if n in {str(p) for p in probed}]
+            if not names:
+                continue  # a variable none of whose numbers was nudged: nothing is claimed about it, the others are judged
+        movable.extend(names)
+        variables.append(str(v.get("name")))  # the code reads a variable by its name, an array as a whole
     if not movable or set(movable) - set(no_effect) or set(sensitivity) - set(no_effect):
         return None
-    if not _ignores(source, movable):
+    if not _ignores(source, variables):
         return None
     return (f"the result does not change when {_names(movable)} change, so the simulation does not use "
             f"{'it' if len(movable) == 1 else 'them'}: nudging {'it' if len(movable) == 1 else 'each of them'} "
@@ -169,18 +185,46 @@ def observed_flat_sweep(cells: list[Any]) -> Observed | None:
     """The observation behind :func:`flat_sweep`: ``cells`` are :class:`core.trial_runner.CellRun` objects (``cell`` and
     ``rows``, each row with ``status`` and ``values``). ``None`` for a study with one setting, one that varies nothing, or
     one in which some quantity does change from one setting to the next (or whose numbers cannot be told apart by their
-    size)."""
-    by_cell: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
+    size). A run that compared values inside it (:mod:`core.in_run`) holds numbers per run and numbers per value: the first
+    are judged over the settings, the others over the settings and values (a cell with a truthy ``level`` is a value's own
+    record), each over the cells that hold them, and the observation is made only when every one of them holds."""
+    run: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
+    value: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
     for c in cells:
-        columns: dict[str, list[float]] = {}
         ok = [r for r in getattr(c, "rows", []) if r.get("status") == "ok"]
         if not ok:
             continue
+        cell = dict(getattr(c, "cell", {}) or {})
+        levels = {_in_run.level_key(lv): lv for lv in getattr(c, "levels", None) or []}
+        own: dict[str, list[float]] = {}
+        per_level: dict[str, dict[str, list[float]]] = {}
         for r in ok:
-            for name, value in (r.get("values") or {}).items():
-                if _is_number(value):
-                    columns.setdefault(str(name), []).append(float(value))
-        by_cell.append((dict(getattr(c, "cell", {}) or {}), columns))
+            per_run, by_level = _in_run.split(r.get("values") or {})
+            for name, v in per_run.items():
+                if _is_number(v):
+                    own.setdefault(str(name), []).append(float(v))
+            for lk, named in by_level.items():
+                for name, v in named.items():
+                    if _is_number(v):
+                        per_level.setdefault(lk, {}).setdefault(str(name), []).append(float(v))
+        if own or getattr(c, "level", None) or not per_level:
+            # a run that gives numbers per value only has nothing per run to judge over the settings
+            (value if getattr(c, "level", None) else run).append((cell, own))
+        for lk, columns in per_level.items():
+            value.append(({**cell, **(levels.get(lk) or _in_run.parse_level_key(lk))}, columns))
+    seen = [o for o in (_observed_in(g) for g in (run, value) if g) if o is not None]
+    groups = [g for g in (run, value) if g]
+    if not groups or len(seen) < len(groups):
+        return None
+    if len(seen) == 1:
+        return seen[0]
+    names = sorted({n for o in seen for n in o.names})
+    return Observed(names, {k: v for o in seen for k, v in o.values.items()},
+                    list(dict.fromkeys(a for o in seen for a in o.varied)), seen[0].count)
+
+
+def _observed_in(by_cell: list[tuple[dict[str, Any], dict[str, list[float]]]]) -> Observed | None:
+    """:func:`observed_flat_sweep` over the cells of one group."""
     if len(by_cell) < 2:
         return None
     axes = sorted({a for cell, _ in by_cell for a in cell})

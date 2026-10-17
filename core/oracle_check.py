@@ -42,7 +42,13 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 from typing import Any
+
+# What a tolerance of 0 can mean for a computed value: floating-point arithmetic cannot give it more exactly than a few
+# dozen units in its last place (a plan's 0 on a computed p-value failed correct code on a measured 1.1e-16), so 0 is read
+# as "exact to machine precision". A count that is off by 1 still fails; a tolerance above 0 is never widened.
+_ROUNDING = 64 * sys.float_info.epsilon
 
 _LINE_RE = re.compile(r"^\s*ORACLE_JSON:\s*(\{.*\})\s*$", re.MULTILINE)
 
@@ -127,16 +133,18 @@ def _num(value: Any) -> float | None:
 
 def limit_of(oracle: dict[str, Any]) -> tuple[float | None, float | None, str]:
     """``(expected, limit, mode)`` an oracle is judged by: ``limit`` is the largest difference from ``expected`` that counts as
-    agreeing (``None`` when the oracle cannot be judged: no numeric expected or tolerance, or a relative tolerance around 0)."""
+    agreeing (``None`` when the oracle cannot be judged: no numeric expected or tolerance, or a relative tolerance around 0).
+    A tolerance of 0 is read as rounding of a number of the expected value's size (of 1 when the expected value is 0), see
+    ``_ROUNDING``; any other tolerance is used as written."""
     expected, tolerance = _num(oracle.get("expected")), _num(oracle.get("tolerance"))
     mode = "relative" if str(oracle.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
     if expected is None or tolerance is None or tolerance < 0:
         return None, None, mode
-    if mode == "relative":
-        if expected == 0:
-            return expected, None, mode
-        return expected, tolerance * abs(expected), mode
-    return expected, tolerance, mode
+    if mode == "relative" and expected == 0:
+        return expected, None, mode
+    if tolerance == 0:
+        return expected, _ROUNDING * (abs(expected) if expected != 0 else 1.0), mode
+    return expected, tolerance * abs(expected) if mode == "relative" else tolerance, mode
 
 
 def case_of(oracle: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
@@ -1105,7 +1113,10 @@ _TRIAL_CONTRACT = (
     "The contract: FI checks the simulation itself. For an oracle that names a `case` and a `measure`, FI calls the "
     "simulation function (run_trial or run_cell in simulate.py) on that case and computes the `measure` (one returned "
     "name, or a formula of them) from the dict it returns, so that function must return every name the measure uses, "
-    "computed by the real simulation. An oracle without a `case` is read from `def oracle() -> dict` in simulate.py, "
+    "computed by the real simulation. If simulate.py defines both, FI calls run_trial (ONE trial) for a check of kind "
+    "invariant and for every other check too, unless run_cell is built from calls to run_trial (a mean or rate over the study's "
+    "own trials), when it calls run_cell; run_trial must "
+    "stay ONE trial and never return or call run_cell. An oracle without a `case` is read from `def oracle() -> dict` in simulate.py, "
     "which computes each such check with the same simulation code and returns its value keyed by the check's name. "
     "There is no FI_ORACLE variable and no ORACLE_JSON line. Nothing the script writes decides pass or fail: the "
     "engine judges each value against the `expected` and `tolerance` the protocol fixes above (for an invariant the "

@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from . import experiment_deps as _experiment_deps
+from .execution import scrub_secrets
+from .proc_tree import ProcessTree as _ProcessTree
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
 
@@ -59,15 +61,19 @@ QUEST = HERE.parent if (HERE.parent / ".fi").is_dir() else None
 WORK = (QUEST / "run_output") if QUEST else (HERE / "output")
 
 
+# @IN_RUN@ (the text of core/in_run.py: what a run returned, read as FI reads it)
+
+MAX_SETTINGS = 500000  # the most settings listed from one grid (core.optimise_search.MAX_LISTED_SETTINGS)
+
+
 def cells(grid):
+    size = math.prod(len(v) for v in grid.values())
+    if size > MAX_SETTINGS:
+        raise SystemExit("the study asks for {:,} settings; this script does not list or run more than {:,}".format(size, MAX_SETTINGS))
     axes = list(grid.items())
     if not axes:
         return [{}]
     return [dict(zip((a for a, _ in axes), combo)) for combo in itertools.product(*(v for _, v in axes))]
-
-
-def fmt(value):
-    return repr(value) if isinstance(value, float) and value.is_integer() else str(value)
 
 
 def cell_key(cell):
@@ -101,18 +107,19 @@ def run_cell_child(study, index, out_path):
     fn = getattr(module, entry)
     cell = cells(study.get("grid") or {})[index]
     key = cell_key(cell)
+    inside = study.get("in_each_run") or {}
+    levels = level_cells(inside)
     runs = 1 if entry == "run_cell" else int(study.get("runs_per_setting") or 1)
     rows = []
     for trial in range(runs):
         seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
         try:
-            value = fn(dict(cell)) if entry == "run_cell" else fn(dict(cell), trial, seed)
-            if not isinstance(value, dict) or not value:
-                raise TypeError(f"{entry}() must return a dict of numbers")
-            bad = [k for k, v in value.items() if not is_number(v)]
-            if bad:
-                raise TypeError(f"{entry}() returned non-numbers for {bad[:5]}")
-            rows.append({"trial": trial, "ok": True, "values": {str(k): float(v) for k, v in value.items()}})
+            given = dict(cell, **inside)  # every value each run compares inside it, as FI gives them
+            value = fn(given) if entry == "run_cell" else fn(given, trial, seed)
+            kept, why = read_returned(value, levels, entry)
+            if kept is None:
+                raise TypeError(why)
+            rows.append({"trial": trial, "ok": True, "values": kept})
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -124,6 +131,7 @@ def run_cell_child(study, index, out_path):
 def run_trials(study):
     out = []
     planned = 1 if study["entry"] == "run_cell" else int(study.get("runs_per_setting") or 1)
+    levels = level_cells(study.get("in_each_run") or {})
     for index, cell in enumerate(cells(study.get("grid") or {})):
         key = cell_key(cell)
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,24 +140,8 @@ def run_trials(study):
             study_file.write_text(json.dumps(study), encoding="utf-8")
             subprocess.call([sys.executable, str(HERE / "run.py"), "--cell", str(index), str(result), str(study_file)])
             rows = json.loads(result.read_text(encoding="utf-8")) if result.is_file() else []
-        metrics, trials_of = {}, {}
-        for row in rows:
-            if row.get("ok"):
-                for name, value in row["values"].items():
-                    metrics.setdefault(name, []).append(value)
-                    trials_of.setdefault(name, []).append(row["trial"])
+        out.extend(summary_cells(cell, key, planned, rows, levels))
         ok = sum(1 for r in rows if r.get("ok"))
-        out.append({
-            "cell": cell, "key": key, "planned": planned, "ok": ok, "failed": planned - ok,
-            "metrics": {
-                name: {
-                    "values": values, "trials": trials_of[name], "count": len(values),
-                    "total": math.fsum(v for v in values if math.isfinite(v)),
-                    "non_finite": sum(1 for v in values if not math.isfinite(v)),
-                }
-                for name, values in metrics.items()
-            },
-        })
         print(f"[run] {key or 'the one setting'}: {ok} of {planned} ok", file=sys.stderr)
     return {"schema": "fi.trials/v1", "thresholds": study.get("thresholds") or {}, "cells": out}
 
@@ -286,6 +278,10 @@ def main():
 if __name__ == "__main__":
     main()
 '''
+# The text of core/in_run.py goes where the marker is: run.py reads what a run returned as FI does.
+RUN_SOURCE = RUN_SOURCE.replace(
+    "# @IN_RUN@ (the text of core/in_run.py: what a run returned, read as FI reads it)\n",
+    (Path(__file__).with_name("in_run.py")).read_text(encoding="utf-8"), 1)
 
 
 def _sha(text: str) -> str:
@@ -397,9 +393,11 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
         return study
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     metrics = protocol.get("metrics") or []
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     return {
         "entry": entry,
         "grid": grid,
+        **({"in_each_run": inside} if inside else {}),
         "runs_per_setting": int(protocol.get("runs_per_setting") or 1),
         "base_seed": 0,
         "paired": any(isinstance(m, dict) and m.get("paired") for m in metrics),
@@ -435,6 +433,13 @@ def study_differences(code_dir: Path, protocol: dict[str, Any] | None, *, split:
     for name in have_grid:
         if name not in grid:
             found.append(f"it varies `{name}`, which the protocol does not")
+    inside, have_inside = wanted.get("in_each_run") or {}, have.get("in_each_run") or {}
+    for name, values in inside.items():
+        if have_inside.get(name) != values:
+            found.append(f"each run compares `{name}` over {have_inside.get(name)}, the protocol says {values}")
+    for name in have_inside:
+        if name not in inside:
+            found.append(f"each run compares `{name}`, which the protocol does not")
     return found
 
 
@@ -628,7 +633,8 @@ def pin(python: Path | str, deps: list[str]) -> list[str]:
     )
     try:
         done = subprocess.run([str(python), "-c", script, json.dumps(sorted(set(names.values())))],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                              env=scrub_secrets())
         versions = json.loads(done.stdout.strip().splitlines()[-1]) if done.returncode == 0 else {}
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         return list(deps)
@@ -646,7 +652,7 @@ def _git(code_dir: Path, *args: str) -> Any:
     null = "\\\\.\\nul" if os.name == "nt" else os.devnull
     # And git never looks above code/ for a repository: with code/.git gone or broken, a commit must fail, never land in
     # a repository that happens to hold the quest folder (with whatever that repository has uncommitted).
-    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+    env = {**scrub_secrets(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
            "GIT_CEILING_DIRECTORIES": str(Path(code_dir).resolve().parent)}
     return subprocess.run(
         ["git", "-c", "user.name=Frontier Insight", "-c", "user.email=fi@localhost", "-c", "commit.gpgsign=false",
@@ -847,10 +853,47 @@ def head(quest_root: Path) -> tuple[str | None, bool | None]:
         return None, None
 
 
-def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
+def _remove_env(env_dir: Path) -> None:
+    """Remove the clean environment; on Windows a process still holding a file can leave it half deleted, which is
+    said once in the log (the next check removes it again before it builds a new one)."""
+    import logging
+    import shutil
+
+    shutil.rmtree(env_dir, ignore_errors=True)
+    if env_dir.exists():
+        logging.getLogger("frontier_insight.code_project").warning(
+            "[code] could not remove %s completely (a file is still in use); it is removed again at the next check", env_dir)
+
+
+def _drain(proc: Any) -> str:
+    """What is left on a stopped run's pipes, never waiting for ever: a process that survived the stop and still
+    holds a pipe open would otherwise hold FI with it."""
+    import subprocess
+
+    try:
+        return proc.communicate(timeout=30)[1] or ""
+    except subprocess.TimeoutExpired:
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except OSError:
+                pass
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def _minutes(seconds: float) -> str:
+    return f"{seconds / 60:g} min" if seconds >= 60 else f"{seconds:g} s"
+
+
+def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
     """Run ``code/`` the way a person would: a fresh environment, only ``requirements.txt`` installed, then
-    ``python run.py``. Never raises; returns ``{"ok": bool, "reason": plain words}`` (also saved to
-    ``needs/CODE_PROJECT_CHECK.json``)."""
+    ``python run.py``. Never raises; returns ``{"ok": bool, "status": "ran" | "failed" | "not_finished", "reason":
+    plain words, "says": ...}`` (also saved to ``needs/CODE_PROJECT_CHECK.json``). ``not_finished`` is a run that
+    installed and was still going when ``run_timeout_s`` ran out: FI stopped it (the whole process tree), and that
+    is not a failure, so ``ok`` is False but only ``failed`` deserves a warning."""
     import shutil
     import subprocess
     import time
@@ -865,35 +908,57 @@ def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s
         if not (code_dir / RUN).is_file() or not (code_dir / REQUIREMENTS).is_file():
             result["reason"] = "code/ has no run.py or requirements.txt to try"
         else:
-            shutil.rmtree(env_dir, ignore_errors=True)
+            _remove_env(env_dir)
             subprocess.run([sys.executable, "-m", "venv", str(env_dir)], check=True, capture_output=True, timeout=300)
             py = env_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
             wanted = [ln for ln in (code_dir / REQUIREMENTS).read_text(encoding="utf-8").split("\n") if ln.strip()]
             step = "installing requirements.txt"
             if wanted:
+                # Packages' install hooks and run.py are code FI did not write: they run without FI's API keys.
                 done = subprocess.run([str(py), "-m", "pip", "install", "-q", "-r", str(code_dir / REQUIREMENTS)],
                                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                      timeout=install_timeout_s)
+                                      timeout=install_timeout_s, env=scrub_secrets())
                 if done.returncode != 0:
                     result["reason"] = f"installing requirements.txt failed: {(done.stderr or '').strip()[-300:]}"
             if not result["reason"]:
                 step = "running run.py"
-                done = subprocess.run([str(py), str(code_dir / RUN)], capture_output=True, text=True,
-                                      encoding="utf-8", errors="replace", timeout=run_timeout_s, cwd=code_dir)
-                if done.returncode == 0:
-                    result["ok"] = True
-                else:
-                    result["reason"] = f"run.py stopped with an error: {(done.stderr or '').strip()[-300:]}"
+                # A tree, not just the child: run.py starts a worker process per cell, and a timeout must stop them all.
+                with _ProcessTree(
+                    [str(py), str(code_dir / RUN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    encoding="utf-8", errors="replace", cwd=code_dir, env=scrub_secrets(),
+                ) as tree:
+                    err = ""
+                    try:
+                        _out, err = tree.proc.communicate(timeout=run_timeout_s)
+                    except subprocess.TimeoutExpired:
+                        # Still running, unless run.py already exited (non-zero) and a worker it left behind holds the pipes.
+                        if tree.proc.poll() is None:
+                            result["status"] = "not_finished"  # set first: nothing below may turn it into a failure
+                            result["reason"] = (
+                                f"it installed and was still running after {_minutes(run_timeout_s)}, so FI stopped "
+                                "it there (the full run takes longer; this is not a failure)"
+                            )
+                        tree.kill()
+                        err = _drain(tree.proc)
+                    if result.get("status") != "not_finished":
+                        if tree.proc.returncode == 0:
+                            result["ok"] = True
+                        else:
+                            result["reason"] = f"run.py stopped with an error: {(err or '').strip()[-300:]}"
     except subprocess.TimeoutExpired:
         result["reason"] = f"{step} took too long and was stopped"
     except (OSError, subprocess.SubprocessError) as exc:
         result["reason"] = f"the check could not start: {exc}"
     finally:
-        shutil.rmtree(env_dir, ignore_errors=True)
+        _remove_env(env_dir)
     result["seconds"] = round(time.monotonic() - started)
+    result["status"] = result.get("status") or ("ran" if result["ok"] else "failed")
     result["says"] = (
         "code/ was run again in a clean environment from requirements.txt and it ran."
         if result["ok"] else
+        f"code/ was started again in a clean environment from requirements.txt; {result['reason']}. "
+        "The results above are not affected."
+        if result["status"] == "not_finished" else
         "code/ was run again in a clean environment from requirements.txt and it did NOT run "
         f"({result['reason']}). The results above are not affected; fix requirements.txt or run.py before sharing code/."
     )

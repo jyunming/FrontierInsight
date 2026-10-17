@@ -287,8 +287,20 @@ def test_verify_says_it_ran_in_a_clean_environment(tmp_path):
     code_project.refresh(root, deps=[], protocol=None)
     result = code_project.verify(root)
     assert result["ok"] is True, result
+    assert result["status"] == "ran"
     assert json.loads((root / "needs" / "CODE_PROJECT_CHECK.json").read_text())["ok"] is True
     assert not (root / ".fi" / "project_check").exists()
+
+
+def test_verify_runs_the_project_without_fis_api_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_SERVICE_API_KEY", "dummy")
+    root = _quest(tmp_path, two=False)
+    (root / "code" / "experiment.py").write_text(
+        "import os\nif 'FAKE_SERVICE_API_KEY' in os.environ:\n    raise SystemExit('the key reached the project')\n",
+        encoding="utf-8")
+    code_project.refresh(root, deps=[], protocol=None)
+    result = code_project.verify(root)
+    assert result["ok"] is True, result
 
 
 def test_verify_warns_in_plain_words_when_it_does_not_run(tmp_path):
@@ -297,6 +309,19 @@ def test_verify_warns_in_plain_words_when_it_does_not_run(tmp_path):
     code_project.refresh(root, deps=[], protocol=None)
     result = code_project.verify(root)
     assert result["ok"] is False and "did NOT run" in result["says"] and "boom in the script" in result["says"]
+    assert result["status"] == "failed"
+
+
+def test_verify_reports_a_run_cut_off_by_the_time_limit_as_not_finished(tmp_path):
+    root = _quest(tmp_path, two=False)
+    (root / "code" / "experiment.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    code_project.refresh(root, deps=[], protocol=None)
+    result = code_project.verify(root, run_timeout_s=3)
+    assert result["ok"] is False and result["status"] == "not_finished", result
+    assert "did NOT run" not in result["says"]
+    assert "still running after 3 s" in result["says"] and "not a failure" in result["says"]
+    assert json.loads((root / "needs" / "CODE_PROJECT_CHECK.json").read_text())["status"] == "not_finished"
+    assert not (root / ".fi" / "project_check").exists()
 
 
 def test_the_web_zip_leaves_out_run_output(tmp_path):
@@ -465,3 +490,53 @@ def test_a_commit_never_lands_in_a_repository_that_holds_the_quest_and_runs_no_h
     assert code_project.record_change(root, "third") is False
     log = subprocess.run(["git", "log", "--oneline"], cwd=parent, capture_output=True, text=True).stdout
     assert log.strip().endswith("base") and len(log.strip().splitlines()) == 1
+
+
+def test_verify_stops_a_worker_the_run_started(tmp_path):
+    import os
+    import time
+
+    import psutil
+
+    root = _quest(tmp_path, two=False)
+    pidfile = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(c.pid))\n"
+        "time.sleep(120)\n"
+    )
+    (root / "code" / "experiment.py").write_text(script, encoding="utf-8")
+    code_project.refresh(root, deps=[], protocol=None)
+    started = time.monotonic()
+    result = code_project.verify(root, run_timeout_s=3)
+    assert result["status"] == "not_finished", result
+    assert time.monotonic() - started < 60
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        if not psutil.pid_exists(pid):
+            break
+        time.sleep(0.1)
+    assert not psutil.pid_exists(pid)
+
+
+def test_verify_reports_an_early_crash_as_failed_even_if_a_worker_holds_the_pipes(tmp_path):
+    root = _quest(tmp_path, two=False)
+    script = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "raise SystemExit('crashed early')\n"
+    )
+    (root / "code" / "experiment.py").write_text(script, encoding="utf-8")
+    code_project.refresh(root, deps=[], protocol=None)
+    result = code_project.verify(root, run_timeout_s=3)
+    assert result["status"] == "failed" and "did NOT run" in result["says"], result
+
+
+def test_verify_defaults_to_the_same_limit_as_the_config():
+    import inspect
+
+    from core.config import ExecutionConfig
+
+    default = inspect.signature(code_project.verify).parameters["run_timeout_s"].default
+    assert default == ExecutionConfig().clean_check_timeout_s

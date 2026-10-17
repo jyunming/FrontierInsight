@@ -888,7 +888,8 @@ class EngineConfig(BaseModel):
     # it attempted and completed per setting, the failures, the thresholds) is compared with the frozen protocol
     # (``core/run_manifest.py``); it needs the two-script layout (``execution.split_analysis``), because that is where the
     # simulation is a script of its own. ``block`` (default) sends the simulation back for up to
-    # ``run_manifest_repair_attempts`` repairs (each is a full run again, so the default is one) and, if it still differs, stops
+    # ``run_manifest_repair_attempts`` repairs (each is a full run again, so the default is one; a difference only in the
+    # analysis is sent back up to three times, since its repair reruns no experiment) and, if it still differs, stops
     # the quest with what differs; ``warn`` only records it; ``off`` does not look. Every check is in
     # ``needs/RUN_MANIFEST_CHECK.json``.
     run_manifest_check: Literal["block", "warn", "off"] = "block"
@@ -1158,6 +1159,10 @@ class EngineConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     sandbox: SandboxKind = "venv"
     timeout_s: int = Field(default=60 * 30, gt=0)
+    # The try of code/ in a clean environment (before the paper is written) is a convenience: it runs the whole
+    # experiment again, so it gets its own, shorter limit (never longer than ``timeout_s``). A run still going when
+    # it ends is stopped and reported as not finished, not as a failure.
+    clean_check_timeout_s: int = Field(default=900, gt=0)
     # Which interpreter builds each quest's venv. Previously declared but
     # never read — venv.EnvBuilder().create() always used sys.executable
     # (whichever interpreter happened to be running FI that invocation),

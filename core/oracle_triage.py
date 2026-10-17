@@ -216,6 +216,63 @@ def recompute_entry(oracle: dict[str, Any], verdict: str, recomputed: float | No
             "tried": tried, "cause": cause}
 
 
+def formula_value(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> float | None:
+    """The check's expected value as FI computes it itself from the plan's ``expected_formula``, when that agrees with the
+    ``expected`` the check uses (within the check's own tolerance) and FI is sure of its reading; ``None`` otherwise.
+    Such a value is the plan's own working, computed exactly: a model's recomputation of it is no evidence against it
+    (one real quest's repairs proposed 0.10355153507545575 four times where FI's 0.1035560611 was right), so only the
+    formula itself can be questioned, through the plan.
+
+    Sure means: a real working (an operation, a function or a name, not a number restated, in brackets or not); every
+    name a setting of the check's own ``case`` (a plan's fixed setting may not be what this check's run uses: a formula
+    written with ``L`` for a case that sets ``length`` agrees with the plan's number and is still wrong); one reading only
+    (:func:`ambiguous`), and no angle named in degrees without its conversion (the calculator reads radians).
+    ``protocol`` is not used for the names, by that rule; it is kept for the callers."""
+    import ast
+
+    expected, limit, _mode = _oracle.limit_of(oracle)
+    if expected is None or limit is None or not correctable(oracle):
+        return None
+    try:
+        value, _why, _unset, used = _forms._formula_result(oracle, None)
+        text = used or str(oracle.get("expected_formula") or "")
+        if value is None or not math.isfinite(value) or ambiguous(text) or _degrees_unconverted(text):
+            return None
+        tree, _ = _forms._tree(text, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
+        if tree is None or not any(isinstance(n, (ast.BinOp, ast.Call, ast.Name)) for n in ast.walk(tree)):
+            return None  # a number restated is not a working FI computed
+        if abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
+            return None
+    except Exception:  # noqa: BLE001 -- a formula FI cannot compute (or compare) decides nothing
+        return None
+    return value
+
+
+def _degrees_unconverted(text: str) -> bool:
+    """Whether a trig call's argument names degrees (``deg``, ``°``) without converting them (``pi``, ``180``)."""
+    for m in _TRIG.finditer(text):
+        argument = _call_argument(text, m.end())
+        if _re.search(r"deg|°", argument, _re.IGNORECASE) and not _re.search(r"pi|π|180", argument, _re.IGNORECASE):
+            return True
+    return False
+
+
+def formula_entry(oracle: dict[str, Any], computed: float, value: float | None) -> dict[str, Any]:
+    """The triage record of a failing check whose expected value FI computed itself from the plan's formula: it holds up,
+    so the simulation is the likely cause; no model is asked to work it out again."""
+    name = str(oracle.get("name") or "").strip()
+    expected, _limit, _mode = _oracle.limit_of(oracle)
+    formula = " ".join(str(oracle.get("expected_formula") or "").split())[:200]
+    tried = (f"FI computed the expected value of `{name}` itself from the plan's formula ({formula}): {_fmt(computed)}, as "
+             f"the check says ({_fmt(expected)}; measured {_fmt(value)}). No model was asked to work it out again.")
+    return {"check": name, "kind": "formula", "verdict": "agrees", "points_to": "script", "recomputed": computed,
+            "expected": expected, "measured": value, "how": formula, "model": "FI's own calculator", "same_model": False,
+            "tried": tried,
+            "cause": {"text": f"The expected value of `{name}` holds up, so the simulation is the likely cause: FI computed it "
+                              "from the plan's own formula.",
+                      "evidence": f"FI's value {_fmt(computed)}, the check's {_fmt(expected)}; formula: {formula}."}}
+
+
 def recompute_proposal(oracle: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
     """A disputed expected value as a proposal, in the shape :func:`core.oracle_check.proposals` gives (the card's
     one-step "accept" reads it): the recomputed value with the check's own tolerance. Never the measured value."""
@@ -472,7 +529,7 @@ def calculate(text: str) -> float | None:
         return None
     text = _DEGREES.sub(lambda m: f"({m.group(1)}*pi/180)", text)
     text = text.replace("^", "**").replace("×", "*").replace("·", "*").replace("−", "-").replace("π", "pi")
-    return _forms.evaluate(text, {}, special=True).value
+    return _forms.evaluate(text, {}, special=_forms.PROSE_FUNCTIONS).value
 
 
 def _digits(number: str) -> int:

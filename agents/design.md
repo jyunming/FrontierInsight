@@ -106,6 +106,8 @@ $study_mode_directive
 ## Wall-time limit (seconds)
 $timeout_s
 
+$time_note
+
 ## Skills available (library = importable code; tool = external software)
 $skills_block
 

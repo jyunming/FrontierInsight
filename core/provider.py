@@ -2104,17 +2104,90 @@ _CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
 # earlier run here). Matched case-insensitively against the CLI error message
 # (which carries the CLI's stderr). Deliberately separate from the momentary
 # "rate limit exceeded · resets <soon>" case, which IS worth a retry.
+_CLI_AUTH_MARKERS: tuple[str, ...] = (
+    # An expired or refused sign-in: it cannot clear by itself, so it is not tried again (codex CLI: "Failed to
+    # refresh token: Your access token could not be refreshed because your refresh token has expired. Please log
+    # out and sign in again." with "workspace routing discovery unauthorized (401)"). Specific phrases only: a
+    # bare "401" or "unauthorized" could be part of a CLI's ordinary output.
+    "token may be invalid",
+    "run '/login'",
+    "re-authenticate",
+    "refresh token has expired",
+    "refresh token is expired",
+    "failed to refresh token",
+    "access token could not be refreshed",
+    "token has expired",
+    "token is expired",
+    "sign in again",
+    "log in again",
+    "login again",
+    "log out and sign in",
+    "not logged in",
+    "please log in",
+    "please run /login",
+    "login required",
+    "not authenticated",
+    "authentication failed",
+    "authentication_error",
+    "invalid authentication credentials",
+    "unauthorized (401)",
+    "401 unauthorized",
+    "invalid api key",
+    "incorrect api key",
+)
+
 _CLI_FATAL_MARKERS: tuple[str, ...] = (
     "session limit",
     "weekly limit",
     "usage limit reached",
     "hit your usage limit",      # codex CLI: "You've hit your usage limit. ... try again at 4:51 AM."
     "out of credits",
-    "token may be invalid",
     "copilot requests",          # gh token lacking the Copilot scope
-    "run '/login'",
-    "re-authenticate",
+    *_CLI_AUTH_MARKERS,
 )
+
+_CLI_AUTH_STATUS = re.compile(r"\b(?:http|status)[ :=]*401\b")
+
+
+def _cli_fatal(text: str) -> bool:
+    """Whether a CLI failure's text names a limit or a refused sign-in that does not clear within the run."""
+    text = text.lower()
+    return any(m in text for m in _CLI_FATAL_MARKERS) or bool(_CLI_AUTH_STATUS.search(text))
+
+
+#: What a person runs to sign in to a CLI provider again (``None`` where FI does not know the CLI's login command).
+_CLI_SIGN_IN: dict[str, str] = {
+    "codex_cli": "`codex logout`, then `codex login`",
+    "claude_cli": "`claude`, then type `/login`",
+    "copilot_cli": "`copilot login`",
+    "gemini_cli": "`gemini` and sign in when it asks",
+}
+
+
+def is_auth_error(exc: BaseException) -> bool:
+    """A provider refused the sign-in (an expired or invalid token, a 401, a CLI that says to sign in again). Only a
+    provider's own failure counts: a 401 inside a model's answer text is not an error here."""
+    if isinstance(exc, _CliTransientError):
+        text = str(exc).lower()
+        return any(m in text for m in _CLI_AUTH_MARKERS) or bool(_CLI_AUTH_STATUS.search(text))
+    if isinstance(exc, httpx.HTTPStatusError):
+        sc = getattr(getattr(exc, "response", None), "status_code", None)
+        return sc in (401, 403)
+    return False
+
+
+def sign_in_advice(provider: str, model: str = "") -> str:
+    """One plain message for a sign-in that expired or was refused: which provider and model, what to run, and that
+    ``--resume`` continues. No token or key is ever printed."""
+    who = f"{provider} ({model})" if provider and model else (provider or "the model's provider")
+    how = _CLI_SIGN_IN.get(provider)
+    if how:
+        todo = f"Sign in again: run {how}."
+    elif provider in _CLI_SPECS:
+        todo = f"Sign in to {_CLI_SPECS[provider].argv[0]} again."
+    else:
+        todo = f"Check or replace the key or sign-in for {who}."
+    return f"The sign-in for {who} has expired or was refused. {todo}"
 
 
 def _retry_http_error(exc: BaseException) -> bool:
@@ -2338,7 +2411,7 @@ def _retry_cli_error(exc: BaseException) -> bool:
     if isinstance(exc, OSError):
         return True
     if isinstance(exc, _CliTransientError):
-        return not any(m in str(exc).lower() for m in _CLI_FATAL_MARKERS)
+        return not _cli_fatal(str(exc))
     return False
 
 
@@ -5118,7 +5191,7 @@ def _is_fatal_provider_error(exc: BaseException) -> bool:
     usual failure threshold. Transient blips (5xx, timeouts) trip only after
     repeated failures."""
     if isinstance(exc, _CliTransientError):
-        return any(m in str(exc).lower() for m in _CLI_FATAL_MARKERS)
+        return _cli_fatal(str(exc))
     if isinstance(exc, httpx.HTTPStatusError):
         sc = getattr(getattr(exc, "response", None), "status_code", None)
         return isinstance(sc, int) and (sc in (401, 403, 402) or (sc == 429 and _is_exhausted_quota(exc.response)))

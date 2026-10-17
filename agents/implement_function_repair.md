@@ -8,9 +8,12 @@ This is what the study is for. The plan below was written from it; where the pla
 
 $topic_block
 
-# The equation this function computes
+# The equation or step this function computes
 
 $equation_block
+
+$literature_block
+$example_block
 
 # The function as it is now
 
@@ -28,4 +31,4 @@ $related_block
 
 # What to return
 
-Reply with ONE fenced Python block holding the corrected function (and, if it needs them, import lines and small helper functions). Keep the equation's id in a comment on the line above the `def`. Compute the equation exactly as it is written above. Nothing else.
+Reply with ONE fenced Python block holding the corrected function (and, if it needs them, import lines and small helper functions). Keep the equation's or step's id in a comment on the line above the `def`. Compute the equation (or carry out the step) exactly as it is written above. Nothing else.

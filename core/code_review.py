@@ -51,6 +51,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import code_reach as _code_reach
 from . import oracle_check as _oracle
 from . import review_pairs as _pairs
 
@@ -129,6 +130,11 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
     for name, values in grid.items():
         if isinstance(values, list) and len(values) > 1:
             add("sweep", f"the parameter {_text(name, 60)} is varied over all {len(values)} values of the plan's grid")
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    for name, values in inside.items():
+        if isinstance(values, list) and len(values) > 1:
+            add("sweep", f"every run uses all {len(values)} values of {_text(name, 60)} it is given in its cell, on the same "
+                "random numbers")
     for o in _oracle.declared(protocol):
         measure = _text(o.get("measure"), 160)
         if measure:
@@ -462,7 +468,7 @@ def repair_problem(old: str, new: str, rel: str, *, equations: list[str], packag
 
 #: What a record keeps from one code version to the next (the quest-wide counters and the history of the readings).
 CARRIED = ("reviews_total", "send_backs", "repair_calls", "finding_calls", "test_calls", "readings", "converged", "repaired",
-           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts", "read_problems")
+           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts", "read_problems", "round_fixed")
 
 
 def carried(record: dict[str, Any]) -> dict[str, Any]:
@@ -487,8 +493,8 @@ def earlier_block(previous: list[dict[str, Any]]) -> str:
 
 def may_repair(record: dict[str, Any]) -> str:
     """Why the problems the last reading found are not to be repaired now (``""`` when they are): the rounds or the requests
-    are spent, no reading is left to read the repaired version, or the last repair did not reduce the open high-severity
-    findings."""
+    are spent, no reading is left to read the repaired version, or the last round made no fault a failing test showed
+    pass its test (:func:`note_reading`)."""
     if int(record.get("send_backs") or 0) >= MAX_SEND_BACKS:
         return f"the {MAX_SEND_BACKS} rounds of repair allowed in a quest are spent"
     if int(record.get("finding_calls") or 0) >= MAX_FINDING_CALLS:
@@ -496,7 +502,7 @@ def may_repair(record: dict[str, Any]) -> str:
     if int(record.get("reviews_total") or 0) >= MAX_REVIEWS:
         return "no reading is left to read a repaired version"
     if record.get("converged") is False:
-        return "the last repair did not reduce the open findings that change a result"
+        return "the last round of repairs made no fault a failing test showed pass its test"
     return ""
 
 
@@ -518,8 +524,10 @@ def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[s
                  code_dir: Path | None = None) -> None:
     """Record a reading: the open findings in it (distinct issues, when ``code_dir`` is given: the id of each finding is
     stable, :mod:`core.code_findings`) and the ones that can change a reported result. When it is the reading of a version
-    a repair made, it is compared with the reading before: the repairs have converged while each round reduced the open
-    issues that change a result (or, with none open, the open issues), and not when one did not."""
+    a repair made, the repairs have converged while each round made a fault a failing test showed pass its test
+    (``round_fixed``, counted by the repair round): FI's own test runs, not the reader's list, which can name the same
+    problem again under a new id (a real quest stopped its repairs when the second reading reworded three findings). A
+    record without that count compares the open issues that change a result with the reading before."""
     from . import code_findings as _issues
 
     readings = [r for r in record.get("readings") or [] if isinstance(r, dict)]
@@ -536,11 +544,19 @@ def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[s
     entry: dict[str, Any] = {"n": n, "version": version_now, "open": total, "high": high, "changing": changing}
     if code_dir is not None:
         entry["ids"] = [i["id"] for i in _issues.open_issues(record)]
+    fixed = record.pop("round_fixed", None)
+    if code_dir is not None:
+        entry["shown_failing"] = sum(1 for i in _issues.issues_of(record).values() if isinstance(i, dict)
+                                     and i.get("demonstrated") is True and i.get("outcome") not in (_issues.FIXED, _issues.GONE))
     if record.get("repaired") and readings:
         before = readings[-1]
         before_changing = int(before.get("changing", before.get("high")) or 0)
-        improved = changing < before_changing or (
-            changing == before_changing == 0 and total < int(before.get("open") or 0))
+        if isinstance(fixed, int) and not isinstance(fixed, bool):
+            improved = fixed > 0
+            entry["fixed_in_round"] = fixed
+        else:
+            improved = changing < before_changing or (
+                changing == before_changing == 0 and total < int(before.get("open") or 0))
         entry["improved"] = improved
         record["converged"] = bool(improved) and record.get("converged") is not False
     record["repaired"] = False
@@ -748,6 +764,87 @@ def named_in_results(name: str, result: Any) -> set[str]:
     return found
 
 
+def reported_under_another_name(record: dict[str, Any], issue: dict[str, Any], result: Any) -> list[str]:
+    """The keys under which the run's results hold what an issue calls missing, when that is all the issue says: every
+    requirement it stands for in the latest reading is a quantity of the plan (a dependent variable, a metric) the reader
+    called missing, and the results hold each one (:func:`named_in_results`: the name itself, or a longer key such as
+    ``k_relative_bias_by_temp`` for ``k_relative_bias``). The reader is then contradicted by the results: the number is
+    reported, under another name. ``[]`` otherwise -- a quantity said to be computed differently, a problem of logic, a
+    figure, a check, an issue the latest reading does not list, or a quantity the results do not hold.
+
+    A real run stopped without a paper on such an issue: its test asserted the plan's key in a dictionary that held the
+    same per-temperature values under ``k_relative_bias_by_temp``."""
+    names = missing_quantities(record, issue)
+    keys: set[str] = set()
+    for name in names:
+        found = named_in_results(name, result)
+        if not found:
+            return []
+        keys |= found
+    return sorted(keys)
+
+
+def _requirements_of(record: dict[str, Any], issue: dict[str, Any]) -> list[dict[str, Any]]:
+    """The requirements of the latest reading that an issue stands for (by its ``fid``)."""
+    fid = issue.get("id")
+    return [v for v in record.get("read_problems") or [] if isinstance(v, dict) and fid and v.get("fid") == fid]
+
+
+def missing_quantities(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
+    """The plan's quantities an issue says the code does not compute, when that is all the issue says: every requirement
+    it stands for in the latest reading is a quantity of the plan (a dependent variable, a metric) the reader called
+    missing. ``[]`` otherwise. Such an issue makes no reported number wrong: the paper is short of a quantity the plan
+    asks for."""
+    reqs = _requirements_of(record, issue)
+    if not reqs or any(v.get("kind") not in QUANTITY_KINDS or v.get("status") != MISSING for v in reqs):
+        return []
+    return list(dict.fromkeys(n for v in reqs if (n := str(v.get("name") or "").strip())))
+
+
+def quantity_names(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
+    """The names of the quantities an issue is about: those the latest reading gives its requirements, else the issue's
+    own quantity."""
+    names: list[str] = []
+    for v in _requirements_of(record, issue):
+        for n in [v.get("name"), *(v.get("quantities") if isinstance(v.get("quantities"), list) else [])]:
+            if (n := str(n or "").strip()) and n not in names:
+                names.append(n)
+    if not names and str(issue.get("quantity") or "").strip():
+        names.append(str(issue["quantity"]).strip())
+    return names
+
+
+def headline_names(design: Any, protocol: Any) -> list[str]:
+    """The names of the plan's main quantity: its first dependent variable and the metric its precision target is for."""
+    reqs = requirements(design if isinstance(design, dict) else None, protocol if isinstance(protocol, dict) else None)
+    return [str(r["name"]) for r in reqs if r.get("headline") and str(r.get("name") or "").strip()]
+
+
+def about_headline(record: dict[str, Any], issue: dict[str, Any], result: Any, headline: list[str]) -> bool:
+    """Whether an issue may be about the study's main quantity: the reading says so, or one of its quantity names and a
+    headline name hold one another (``yield`` and ``total_yield``), or the keys of the results it names are among the
+    headline's. When in doubt it is: a fault there leaves nothing to report."""
+    if issue.get("headline"):
+        return True
+    exact = {n for n in (_norm(h) for h in headline) if n}
+    wanted = [n for n in exact if len(n) >= 4]  # one name inside another only for names long enough to mean something
+    for name in quantity_names(record, issue):
+        n = _norm(name)
+        if n in exact or (len(n) >= 4 and any(n in w or w in n for w in wanted)):
+            return True
+    mine = set(keys_of_issue(record, issue, result))
+    return bool(mine) and any(mine & named_in_results(h, result) for h in headline)
+
+
+def keys_of_issue(record: dict[str, Any], issue: dict[str, Any], result: Any) -> list[str]:
+    """The keys of the run's results that hold the quantities an issue is about (:func:`named_in_results` for each of
+    :func:`quantity_names`). ``[]`` when the results hold none of them."""
+    keys: set[str] = set()
+    for name in quantity_names(record, issue):
+        keys |= named_in_results(name, result)
+    return sorted(keys)
+
+
 def absent_from_results(names: list[str], result: Any) -> list[str]:
     """Of the plan's quantities ``names``, those the run's results hold no number for under any key that contains the name
     (case, punctuation and underscores ignored). Containment, not equality: an analysis that writes ``variant_metric_c``
@@ -809,7 +906,8 @@ def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any
                 or v.get("contradicted") or name in seen):
             continue
         seen[name] = {"name": name, "kind": v.get("kind"), "status": v.get("status"), "text": str(v.get("text") or ""),
-                      "note": str(v.get("note") or "")}
+                      "note": str(v.get("note") or ""), "fid": v.get("fid"), "file_rel": v.get("file_rel"),
+                      "function": v.get("function")}
     return list(seen.values())
 
 
@@ -921,6 +1019,24 @@ def _listed(items: list[str], cap: int) -> str:
     return out + (f"; and {more} more (all are listed in {RECORD.as_posix()})" if more > 0 else "")
 
 
+def _second_record() -> str:
+    from . import second_impl as _second
+
+    return _second.RECORD.as_posix()
+
+
+def second_version_sentences(quest_root: Path) -> list[str]:
+    """The finding of kind ``second_version``: a key function of the model whose second, independently written version
+    (:mod:`core.second_impl`) could not be settled against the first, or could not be compared. Plain sentences from
+    ``.fi/second_impl.json``; empty when the check was not made or every function agreed."""
+    try:
+        from . import second_impl as _second
+
+        return [_plain_text(s) for s in _second.limitations(_second.load(quest_root))]
+    except Exception:  # noqa: BLE001 -- a record that cannot be read adds nothing
+        return []
+
+
 def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     """What a second model's reading of the code left unresolved on the version that ran, by kind: ``unread`` (why the
     code was not read by another model, else ``""``), ``reread`` (the final version was changed after the reading and
@@ -931,7 +1047,10 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     not in it. Everything is empty for a quest with no record."""
     record = load(quest_root)
     out: dict[str, Any] = {"unread": "", "reread": False, "not_reviewed": [], "not_reviewed_headline": False,
-                           "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False}
+                           "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False,
+                           "never_run": [],
+                           "second_version": second_version_sentences(quest_root),
+                           "reviewed": bool(record.get("read_version"))}
     if not record:
         return out
     now = version(code_dir)
@@ -944,8 +1063,16 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     elif record.get("version") == now and record.get("not_reviewed"):
         out["not_reviewed"] = [str(x) for x in record["not_reviewed"]]
         out["not_reviewed_headline"] = bool(record.get("not_reviewed_headline"))
-    still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")]
     issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    # A quantity the results hold under another name (reported_under_another_name, recorded at the evidence gate) is
+    # computed: it is not "not computed".
+    still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")
+             and not (issues.get(v.get("fid")) or {}).get("reported_as")]
+    # A finding about a function the run never calls cannot change a reported number: it stays in FI's record
+    # (QUALITY.md), not in the paper (core/code_reach.py). A quantity said to be missing is about the whole code.
+    never_run = _code_reach.never_run_in(quest_root)
+    out["never_run"] = [v for v in still if v.get("status") != MISSING and never_run(v.get("file_rel"), v.get("function"))]
+    still = [v for v in still if v not in out["never_run"]]
     logic = [v for v in still if v.get("kind") == "logic"]
     left = [v for v in still if v.get("kind") != "logic"]
     out["missing"] = [v for v in left if v.get("status") == MISSING]
@@ -1064,6 +1191,11 @@ def write_note(quest_root: Path, code_dir: Path) -> str:
     if f["stopped"]:
         notes.append("The repairs of the second model's findings were stopped because a round did not reduce the open "
                      "findings that change a result; what is open is listed here as it stands.")
+    if f["second_version"]:
+        notes.append("FI had a second, independently written version of key functions of the model compared with the first "
+                     f"on many inputs, and for these it could not settle which is right: {_listed(f['second_version'], NOTE_CAP)}. "
+                     "Say plainly in the limitations that the number or figure that rests on such a function was not "
+                     "confirmed by an independent version, and do not present it as established.")
     return " ".join(notes)
 
 
@@ -1131,8 +1263,20 @@ def findings_block(quest_root: Path, code_dir: Path) -> str:
     if f["stopped"]:
         points.append("**Repairs stopped.** They ended because a round did not reduce the open findings that change a "
                       "result, so what is listed above is open as it stands.")
+    # No second model read the code at all (nothing else is open, or the only other point is that it was not read):
+    only_second = bool(f["second_version"]) and (not points or (bool(f["unread"]) and len(points) == 1))
+    if f["second_version"]:
+        points.append("**A second, independent version of a key function was not settled.** FI had these functions written "
+                      "a second time from the plan's description alone and compared the two on many inputs: "
+                      f"{_listed(f['second_version'], BLOCK_CAP)}.")
     if not points:
         return ""
+    if only_second:
+        # No second model read the code: the only point is FI's own comparison of two versions of a function.
+        return ("**Open points in the code that produced these results.** FI compared two independently written versions of "
+                "key functions of the model. The points below were still open on the version that ran, and none of them was "
+                f"settled by the run; the full record is in `{_second_record()}`.\n\n"
+                + "\n\n".join(f"- {p}" for p in points))
     return ("**Open points in the code that produced these results.** A second model read the code against the plan. "
             "These points were still open on the version that ran. The second model can be wrong, and none of them was "
             f"settled by the run; the full record is in `{RECORD.as_posix()}`.\n\n"

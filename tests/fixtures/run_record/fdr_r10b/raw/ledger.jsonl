@@ -1,0 +1,36 @@
+{"event": "planned", "run_id": "", "cell": "m=20,pi1=0.0", "trials": 1200, "entry": "run_trial", "at": 1791987079.9815884}
+{"event": "planned", "run_id": "", "cell": "m=20,pi1=0.05", "trials": 1200, "entry": "run_trial", "at": 1791987080.17082}
+{"event": "planned", "run_id": "", "cell": "m=20,pi1=0.2", "trials": 1200, "entry": "run_trial", "at": 1791987080.362235}
+{"event": "planned", "run_id": "", "cell": "m=200,pi1=0.0", "trials": 1200, "entry": "run_trial", "at": 1791987080.5444846}
+{"event": "planned", "run_id": "", "cell": "m=200,pi1=0.05", "trials": 1200, "entry": "run_trial", "at": 1791987080.6777956}
+{"event": "planned", "run_id": "", "cell": "m=200,pi1=0.2", "trials": 1200, "entry": "run_trial", "at": 1791987080.8676941}
+{"event": "planned", "run_id": "", "cell": "m=2000,pi1=0.0", "trials": 1200, "entry": "run_trial", "at": 1791987081.089682}
+{"event": "planned", "run_id": "", "cell": "m=2000,pi1=0.05", "trials": 1200, "entry": "run_trial", "at": 1791987081.2897956}
+{"event": "planned", "run_id": "", "cell": "m=2000,pi1=0.2", "trials": 1200, "entry": "run_trial", "at": 1791987081.481691}
+{"event": "trial", "run_id": "", "cell": "m=20,pi1=0.0", "trial": 0, "seed": 1739449275, "status": "ok", "duration_s": 0.031, "values_sha256": "6584287ad46a2380c87aa69dd301a45e5e71089ffedc2db34db492cc3a35f1dd", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=20,pi1=0.0", "trial": 1, "seed": 2568652290, "status": "ok", "duration_s": 0.0, "values_sha256": "8f165c3ad3a55038439648b936fa7930d6bf48f571d1aee3c1c06cd460547d3a", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=20,pi1=0.0", "trial": 2, "seed": 471989188, "status": "ok", "duration_s": 0.0, "values_sha256": "6584287ad46a2380c87aa69dd301a45e5e71089ffedc2db34db492cc3a35f1dd", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=20,pi1=0.05", "trial": 0, "seed": 1739449275, "status": "ok", "duration_s": 0.015, "values_sha256": "1f29aff9b16951e77c0ea5822c0500c62f6e9b3152e587d3a984751f02f73cd7", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=20,pi1=0.05", "trial": 1, "seed": 2568652290, "status": "ok", "duration_s": 0.0, "values_sha256": "b0ccfe69f41545cbb58efcb6b80c408df4f540c079dcc43f0bbd581b81453154", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=20,pi1=0.05", "trial": 2, "seed": 471989188, "status": "ok", "duration_s": 0.0, "values_sha256": "1f29aff9b16951e77c0ea5822c0500c62f6e9b3152e587d3a984751f02f73cd7", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=20,pi1=0.2", "trial": 0, "seed": 1739449275, "status": "ok", "duration_s": 0.0, "values_sha256": "2ee58303ed0fe083bff6a3f6e1e43becf1c0266eb47d28a6255bc69ba9394cc0", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=20,pi1=0.2", "trial": 1, "seed": 2568652290, "status": "ok", "duration_s": 0.0, "values_sha256": "17a20963a2924a9f7ba7796f86ba2023880f9b2731a8bab6148c8255be9cbc48", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=20,pi1=0.2", "trial": 2, "seed": 471989188, "status": "ok", "duration_s": 0.0, "values_sha256": "9c7d9043e7dc86f5a88bdebd8625a1d168f0efd711b02b6ed95d05fb25b6dea3", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=200,pi1=0.0", "trial": 0, "seed": 1739449275, "status": "ok", "duration_s": 0.0, "values_sha256": "69249afafdd8d1d7e1fa3a8a51c54aa1983ebbdf4116f14fd0f09e4b10918ef4", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=200,pi1=0.0", "trial": 1, "seed": 2568652290, "status": "ok", "duration_s": 0.0, "values_sha256": "ecdc9e5c3a037979f577f273cb2490a0e53810a9e41c04203c64bb37ad4ce6cd", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=200,pi1=0.0", "trial": 2, "seed": 471989188, "status": "ok", "duration_s": 0.0, "values_sha256": "05e15b89b660b0031a04f5d31567e9bb0df26fc102132e605377ac0e764ed7d7", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=200,pi1=0.05", "trial": 0, "seed": 1739449275, "status": "ok", "duration_s": 0.0, "values_sha256": "40cc670f42e9f3fff789c3a1e33e21eff18c985883a6f6a8aa4c5d01aaf5d3b3", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=200,pi1=0.05", "trial": 1, "seed": 2568652290, "status": "ok", "duration_s": 0.0, "values_sha256": "84230623ad5d7c4d720e140f4bd53ffc8c309e134df0a6651fbe819427c1d56b", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=200,pi1=0.05", "trial": 2, "seed": 471989188, "status": "ok", "duration_s": 0.0, "values_sha256": "6d953b6b9fca3b78d72c7b69fb4eaebb458a75fa91681cdeca2f2b97051bde4c", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=200,pi1=0.2", "trial": 0, "seed": 1739449275, "status": "ok", "duration_s": 0.0, "values_sha256": "4d2b51e62675b62a12ed66d996a9db46712e81730c5a80f9a31a1caa3e3a3e91", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=200,pi1=0.2", "trial": 1, "seed": 2568652290, "status": "ok", "duration_s": 0.0, "values_sha256": "4fb409f2fb78b669410b3375f9d813b822df69a9f9a94f14b21cf880c5133a4a", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=200,pi1=0.2", "trial": 2, "seed": 471989188, "status": "ok", "duration_s": 0.0, "values_sha256": "cd3d69a20ff7a84d771a855a3840ebe080377a83a98bfaf3948b312c13971445", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=2000,pi1=0.0", "trial": 0, "seed": 1739449275, "status": "ok", "duration_s": 0.015, "values_sha256": "95cb9053df7eefc338cd46b81a84c48d263ade98070cfc897b9c92889f240b86", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=2000,pi1=0.0", "trial": 1, "seed": 2568652290, "status": "ok", "duration_s": 0.0, "values_sha256": "b82bcfc39c4697887309411785a208d5fbbd017e6399a7bbcb7e3cd2653af77b", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=2000,pi1=0.0", "trial": 2, "seed": 471989188, "status": "ok", "duration_s": 0.0, "values_sha256": "569893ae71692ff6775ebe76a75a9bf5722cbaf983264ad46da9d96446756a9d", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=2000,pi1=0.05", "trial": 0, "seed": 1739449275, "status": "ok", "duration_s": 0.016, "values_sha256": "c076eb39775a971426b0ee64afd8b087010911ebcbf3af79d38ca9e63c74bd7b", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=2000,pi1=0.05", "trial": 1, "seed": 2568652290, "status": "ok", "duration_s": 0.0, "values_sha256": "37ad6942b0b78334fcee3c8577c14b8b01a4f9e58f1560efc5e941b958515c76", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=2000,pi1=0.05", "trial": 2, "seed": 471989188, "status": "ok", "duration_s": 0.0, "values_sha256": "3562a0347d7fed502f7d7e82ae98973bb5e09ebdd1ba984a799943eac4a24c8f", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=2000,pi1=0.2", "trial": 0, "seed": 1739449275, "status": "ok", "duration_s": 0.015, "values_sha256": "4efdc426fc10b3578e1a21031dc9960ed89462ee1bde2baaf12282e43406b08e", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=2000,pi1=0.2", "trial": 1, "seed": 2568652290, "status": "ok", "duration_s": 0.0, "values_sha256": "930424f725f0f93b4c8265e3c83e6f9387f46bbaa5ffaf37f9847de8cf2d9441", "warnings": 0}
+{"event": "trial", "run_id": "", "cell": "m=2000,pi1=0.2", "trial": 2, "seed": 471989188, "status": "ok", "duration_s": 0.0, "values_sha256": "566b3facc2fba87570284c9bc532c703dff2ed742018afdc52531be0aba2f40b", "warnings": 0}

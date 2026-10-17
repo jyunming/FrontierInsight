@@ -53,16 +53,15 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
+from . import in_run as _in_run
 from . import trial_runner as _tr
 
 #: The margin added to the measured total before it is compared with the time allowed.
 SAFETY = 1.5
 #: The most varying settings that are timed one by one (the first ones, largest range first); the rest are taken as 1.
 MAX_AXES = 6
-#: How many times FI asks the plan to make the run smaller before it stops.
-ASKS = 2
 RECORD = Path(".fi") / "run_estimate.json"
 
 
@@ -280,11 +279,13 @@ async def measure(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs: int,
     deterministic: bool, limit_s: float, budget_s: float, env: dict[str, str] | None = None,
     thresholds: dict[str, Any] | None = None, cached: dict[str, Probe] | None = None,
+    in_each_run: dict[str, list[Any]] | None = None,
 ) -> tuple[list[Probe] | None, str]:
     """Time the settings of :func:`probe_cells`. ``(probes, "")``, or ``(None, why)`` when the simulation could not be timed
     (it failed, or could not be loaded: the real run's repair is what handles that). ``budget_s`` is the most time all the
     timing together may take; the settings not reached are left out (the estimate then says it is not complete).
-    ``cached``: settings already timed on this grid (by their key), not timed again."""
+    ``cached``: settings already timed on this grid (by their key), not timed again. ``in_each_run``: the values each run
+    goes through together; a timed run is given all of them, as the study gives them, so one run's time is one trial's."""
     quest_root = Path(quest_root)
     total_trials = trial_count(grid, runs, deterministic)
     allowance = max(60.0, 3.0 * limit_s / max(1, total_trials))
@@ -303,7 +304,7 @@ async def measure(
             return True, "budget"
         timeout = int(max(5, min(allowance, max(left, 60.0) if not probes else left)))
         probe, why = await _time_one(executor, python, quest_root, module, cell, runs=runs, deterministic=deterministic,
-                                     timeout_s=timeout, env=env, thresholds=thresholds)
+                                     timeout_s=timeout, env=env, thresholds=thresholds, in_each_run=in_each_run)
         if probe is None:
             return False, f"at {_tr.cell_key(cell) or 'its only setting'}: {why}"
         probe.axis, probe.index = axis, index
@@ -330,6 +331,7 @@ async def measure(
 async def _time_one(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, cell: dict[str, Any], *, runs: int,
     deterministic: bool, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+    in_each_run: dict[str, list[Any]] | None = None,
 ) -> tuple[Probe | None, str]:
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -340,8 +342,10 @@ async def _time_one(
     n = 1 if deterministic else (2 if int(runs) >= 2 else 1)
     trials = [{"trial": t, "seed": None if deterministic else _tr.trial_seed(0, key, t)} for t in range(n)]
     nonce = f"pilot{time.time_ns()}"
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     spec.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
-                                "cell": cell, "trials": trials, "nonce": nonce, "thresholds": dict(thresholds or {})},
+                                "cell": {**cell, **inside}, "levels": _in_run.level_cells(inside), "trials": trials,
+                                "nonce": nonce, "thresholds": dict(thresholds or {})},
                                default=str), encoding="utf-8")
     t0 = time.monotonic()
     result = await executor.execute(
@@ -378,10 +382,14 @@ async def _time_one(
         seconds = max(0.0, wall - sum(durations)) + durations[0] + (int(runs) - 1) * durations[1]
     spread: dict[str, float] = {}
     if n == 2:
-        for name in set(done[0].get("values") or {}) & set(done[1].get("values") or {}):
-            a, b = done[0]["values"][name], done[1]["values"][name]
-            if all(isinstance(v, (int, float)) and math.isfinite(v) for v in (a, b)):
-                spread[str(name)] = abs(float(a) - float(b)) / math.sqrt(2.0)  # the sample standard deviation of two numbers
+        # a number per value spreads as the widest of its values does: the precision is wanted at every one of them
+        first, second = (_in_run.flat("", dict(done[i].get("values") or {})) for i in (0, 1))
+        later = {(k, name): v for k, name, v in second}
+        for k, name, a in first:
+            b = later.get((k, name))
+            if b is not None and all(isinstance(v, (int, float)) and math.isfinite(v) for v in (a, b)):
+                sd = abs(float(a) - float(b)) / math.sqrt(2.0)  # the sample standard deviation of two numbers
+                spread[str(name)] = max(spread.get(str(name), 0.0), sd)
     return Probe(None, None, cell, max(seconds, 1e-6), spread=spread,
                  trials=[dict(r.get("values") or {}) for r in done]), ""
 
@@ -427,8 +435,17 @@ def _finite(value: Any) -> bool:
 
 
 def observations(probes: list[Probe]) -> list[tuple[dict[str, Any], dict[str, float]]]:
-    """Every pilot trial as ``(its setting, what it returned)``."""
-    return [(dict(p.cell), dict(t)) for p in probes for t in p.trials]
+    """Every pilot trial as ``(its setting, what it returned)``. A run that compared values inside it is its setting's
+    numbers per run, and one observation per value with that value's numbers (its setting names the value too)."""
+    out: list[tuple[dict[str, Any], dict[str, float]]] = []
+    for p in probes:
+        for t in p.trials:
+            per_run, per_level = _in_run.split(t)
+            if per_run or not per_level:  # a run that gives numbers per value only has nothing per run
+                out.append((dict(p.cell), dict(per_run)))
+            for lk, named in per_level.items():
+                out.append(({**p.cell, **_in_run.parse_level_key(lk)}, dict(named)))
+    return out
 
 
 def _settings_text(obs: list[tuple[dict[str, Any], dict[str, float]]], limit: int = 6) -> str:
@@ -441,8 +458,11 @@ def _settings_text(obs: list[tuple[dict[str, Any], dict[str, float]]], limit: in
     return shown + (f"; and {len(seen) - limit} more" if len(seen) > limit else "")
 
 
-def _setting_count(obs: list[tuple[dict[str, Any], dict[str, float]]]) -> int:
-    return len({_tr.cell_key(c) for c, _v in obs})
+def _setting_count(obs: list[tuple[dict[str, Any], dict[str, float]]], inside: Iterable[str] = ()) -> int:
+    """How many settings the observations were made at; ``inside``: the names of what each run compares inside it, which
+    are values of a run and not settings (left out of the count)."""
+    skip = set(inside)
+    return len({_tr.cell_key({k: v for k, v in c.items() if k not in skip}) for c, _v in obs})
 
 
 def undefined_metrics(obs: list[tuple[dict[str, Any], dict[str, float]]], ids: list[str]) -> list[str]:
@@ -488,8 +508,9 @@ def _say_undefined(name: str, obs: list[tuple[dict[str, Any], dict[str, float]]]
 def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: dict[str, str], *,
                    exempt: set[str] | frozenset[str] = frozenset(), tried_all: str = "",
                    unsure: set[str] | frozenset[str] = frozenset(), axes: set[str] | frozenset[str] = frozenset(),
-                   source: str | None = None) -> Pilot:
-    """What the pilot trials show. ``kinds``: the protocol's metrics (``{id: kind}``); only those the trials returned are read.
+                   source: str | None = None, inside: Iterable[str] = ()) -> Pilot:
+    """What the pilot trials show. ``inside``: the names of what each run compares inside it (``protocol.in_each_run``), whose
+    values are not settings. ``kinds``: the protocol's metrics (``{id: kind}``); only those the trials returned are read.
     ``tried_all``: a clause saying that every combination of the small settings was tried (when it was); ``unsure``: metrics
     that looked undefined but whose subsets were not all tried (nothing is claimed about them). ``exempt``: names the plan
     expects to stay put. ``source``: the text of the simulation, for the evidence a value that never changed needs (see the
@@ -498,7 +519,7 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
     output that is the same everywhere."""
     from . import flat_output as _flat
 
-    pilot = Pilot(trials=len(obs), settings=_setting_count(obs))
+    pilot = Pilot(trials=len(obs), settings=_setting_count(obs, inside))
     returned = sorted({n for _c, v in obs for n in v})
     pilot.checked = [n for n in kinds if n in returned]
     if not obs:
@@ -548,7 +569,8 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
                 "is sampled does not do"))
     by_cell: dict[str, Any] = {}
     for cell, values in obs:
-        run = by_cell.setdefault(_tr.cell_key(cell), type("PilotCell", (), {"cell": dict(cell), "rows": []})())
+        run = by_cell.setdefault(_tr.cell_key(cell), type("PilotCell", (), {
+            "cell": dict(cell), "rows": [], "level": any(k in cell for k in inside)})())
         run.rows.append({"status": "ok", "values": values})
     flat = _flat.flat_sweep(list(by_cell.values()), source=source, expected=set(exempt))
     if flat:
@@ -571,8 +593,10 @@ def directive(pilot: Pilot) -> str:
 async def run_values(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, cell: dict[str, Any], *, deterministic: bool,
     timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-) -> dict[str, float] | None:
-    """What one trial of ``cell`` returns (nothing is written to FI's ledger), or ``None`` when it failed or did not finish."""
+    in_each_run: dict[str, list[Any]] | None = None,
+) -> dict[str, Any] | None:
+    """What one trial of ``cell`` returns (nothing is written to FI's ledger), or ``None`` when it failed or did not finish.
+    With values compared inside each run, the run is given all of them and may return a number per value."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -581,8 +605,10 @@ async def run_values(
     out.unlink(missing_ok=True)
     key = _tr.cell_key(cell)
     nonce = f"pilot{time.time_ns()}"
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     spec.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
-                                "cell": cell, "trials": [{"trial": 0, "seed": None if deterministic else _tr.trial_seed(0, key, 0)}],
+                                "cell": {**cell, **inside}, "levels": _in_run.level_cells(inside),
+                                "trials": [{"trial": 0, "seed": None if deterministic else _tr.trial_seed(0, key, 0)}],
                                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
     await executor.execute(
         [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
@@ -601,7 +627,7 @@ async def pilot(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]],
     probes: list[Probe], kinds: dict[str, str], *, deterministic: bool, budget_s: float, allowance_s: float,
     env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
-    exempt: set[str] | frozenset[str] = frozenset(),
+    exempt: set[str] | frozenset[str] = frozenset(), in_each_run: dict[str, list[Any]] | None = None,
 ) -> Pilot:
     """Read what the timed trials returned (:func:`pilot_problems`). When a metric looks undefined everywhere, the settings with
     few values are first tried in every combination, one trial each, within ``budget_s``: a metric that applies to only some
@@ -615,7 +641,8 @@ async def pilot(
     suspects = undefined_metrics(obs, [n for n in kinds if any(n in v for _c, v in obs)])
     tried_all, unsure = "", set()
     if suspects:
-        todo, whole = confirm_cells(grid, [c for c, _v in obs])
+        inside = set(in_each_run or ())
+        todo, whole = confirm_cells(grid, [{k: v for k, v in c.items() if k not in inside} for c, _v in obs])
         started = time.monotonic()
         reached = True
         for cell in todo:
@@ -624,17 +651,19 @@ async def pilot(
                 reached = False
                 break
             values = await run_values(executor, python, quest_root, module, cell, deterministic=deterministic,
-                                      timeout_s=int(max(5, min(allowance_s, left))), env=env, thresholds=thresholds)
+                                      timeout_s=int(max(5, min(allowance_s, left))), env=env, thresholds=thresholds,
+                                      in_each_run=in_each_run)
             if values is None:
                 reached = False
                 continue
-            obs.append((dict(cell), values))
+            obs.extend(observations([Probe(None, None, dict(cell), 0.0, trials=[values])]))
         if whole and reached:
             tried_all = (f"; FI also tried every value of every setting and every combination of the settings that take few "
-                         f"values ({_setting_count(obs)} settings in all)")
+                         f"values ({_setting_count(obs, tuple(in_each_run or ()))} settings in all)")
         else:
             unsure = set(suspects)
-    return pilot_problems(obs, kinds, exempt=exempt, tried_all=tried_all, unsure=unsure, axes=axes, source=source)
+    return pilot_problems(obs, kinds, exempt=exempt, tried_all=tried_all, unsure=unsure, axes=axes, source=source,
+                          inside=tuple(in_each_run or ()))
 
 
 # ---- the record: so a resume neither times nor asks again -------------------------------------------------------------
@@ -745,75 +774,33 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
     return min(int(before_runs), floor)
 
 
-def numerical_axes(protocol: dict[str, Any] | None) -> set[str]:
-    """The settings the plan marks as numerical resolution (`protocol.numerical_axes`): the only ones that may be made coarser."""
-    marked = protocol.get("numerical_axes") if isinstance(protocol, dict) else None
-    return {str(n) for n in marked} if isinstance(marked, list) else set()
+def floor_is_stated(protocol: dict[str, Any] | None) -> bool:
+    """Whether the plan itself states how few runs per setting it may have (`protocol.min_runs_per_setting`, or a precision
+    target): only then may FI lower the runs on its own. FI never makes up a number of runs."""
+    if not isinstance(protocol, dict):
+        return False
+    least = protocol.get("min_runs_per_setting")
+    if isinstance(least, (int, float)) and not isinstance(least, bool) and least >= 1:
+        return True
+    precision = protocol.get("precision")
+    target = precision.get("target_half_width") if isinstance(precision, dict) else None
+    return isinstance(target, (int, float)) and not isinstance(target, bool) and float(target) > 0
 
 
-def smaller_run_problems(protocol: dict[str, Any] | None, before_grid: dict[str, list[Any]], before_runs: int,
-                         new_grid: dict[str, list[Any]], new_runs: int, deterministic: bool,
-                         spreads: dict[str, float] | None = None) -> list[str]:
-    """Why a smaller run is not one the study can use, in plain words; empty when it is. The range every setting covers stays
-    (its first and last value), no setting is added or removed, a setting gets no value it did not have unless the plan marks
-    it as numerical resolution, the runs per setting stay at the plan's own minimum, and the run is strictly smaller."""
-    problems: list[str] = []
-    before, new = dict(axes_of(before_grid)), dict(axes_of(new_grid))
-    if before and set(before) != set(new):
-        problems.append("it changes which settings the experiment varies")
-    marked = numerical_axes(protocol)
-    for name, values in before.items():
-        got = new.get(name)
-        if got is None or name in marked:
-            continue
-        if values[0] not in got or values[-1] not in got:
-            problems.append(f"it drops the first or last value of `{name}` ({values[0]} and {values[-1]}), the range the "
-                            "study covers")
-        elif any(v not in values for v in got):
-            problems.append(f"it gives `{name}` values it did not have, and `{name}` is not marked as a numerical resolution "
-                            "(`protocol.numerical_axes`)")
-    floor = runs_floor(protocol, before_runs, spreads)
-    if not deterministic and new_runs < floor:
-        problems.append(f"it cuts the runs per setting to {new_runs}, below the {floor} the plan's precision or stated "
-                        "minimum needs")
-    if trial_count(new_grid, new_runs, deterministic) >= trial_count(before_grid, before_runs, deterministic):
-        problems.append("it is not a smaller run")
-    return problems
-
-
-def rules(protocol: dict[str, Any] | None, before_runs: int, deterministic: bool,
-          spreads: dict[str, float] | None = None) -> str:
-    """The rules a smaller run must keep, as the request to the plan's model states them."""
-    marked = sorted(numerical_axes(protocol))
-    text = ("Keep the first and last value of every setting (the range the study covers) and the same settings: take out "
-            "values in between instead")
-    text += (f"; only {', '.join('`' + m + '`' for m in marked)} (numerical resolution) may be made coarser, with other values"
-             if marked else "; do not coarsen a numerical resolution or give a setting values it did not have")
-    if not deterministic:
-        text += f"; keep at least {runs_floor(protocol, before_runs, spreads)} runs per setting"
-    return text + "."
-
-
-def request(est: Estimate, limit_s: float, runs: int, deterministic: bool, rules_text: str = "") -> str:
-    """What the plan's model is asked, with the measured numbers: shrink the run, change nothing that decides whether a
-    result is right."""
-    lines = []
-    for name, per in est.ratios.items():
-        shown = "; ".join(f"`{name}` = {v} costs {r:g} times the time of `{name}` = {est.base.get(name)}" for v, r in per.items())
-        lines.append(f"- {shown}")
-    if est.together:
-        cell = ", ".join(f"`{k}` = {v}" for k, v in est.together["cell"].items() if k in est.ratios)
-        lines.append(f"- all the costly ends together ({cell}) cost {est.together['ratio']:g} times the time of the base setting")
-    per_trial = "" if deterministic else f", each setting {int(runs)} runs"
-    return (
-        "The experiment this plan describes would take longer than the time it is allowed on this machine, so it cannot "
-        f"finish. FI timed a few real trials: the whole experiment ({est.cells} settings{per_trial}) would take "
-        f"{'at least ' if est.at_least else 'about '}{plain_duration(est.seconds * SAFETY)}, and it is allowed "
-        f"{plain_duration(limit_s)}.\n"
-        + ("How the time changes with each setting, as measured:\n" + "\n".join(lines) + "\n" if lines else "")
-        + f"Make the experiment smaller so that it takes about {plain_duration(limit_s / 2)} or less: use fewer runs per "
-        "setting (`protocol.runs_per_setting`) and/or fewer values of the settings in `protocol.grid`. "
-        + (rules_text + " " if rules_text else "") + "Write only `protocol.grid` and `protocol.runs_per_setting` again.\n"
-        "Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion, and not any other part of "
-        "the protocol."
-    )
+def runs_that_fit(est: Estimate, limit_s: float, runs: int, deterministic: bool, protocol: dict[str, Any] | None,
+                  spreads: dict[str, float] | None = None) -> int | None:
+    """The runs per setting that make the experiment fit the time allowed with every setting kept, or ``None`` when the
+    runs alone cannot do it (the plan states no fewest number of runs, or its fewest still takes too long). Aims at half the
+    limit; never below :func:`runs_floor`. The result is timed again before it is used."""
+    if deterministic or int(runs) <= 1 or not floor_is_stated(protocol) or not est.seconds > 0:
+        return None
+    full = est.seconds * SAFETY
+    floor = runs_floor(protocol, runs, spreads)
+    want = int(runs * (limit_s / 2.0) / full)
+    if want >= floor:
+        n = want
+    elif full * floor / runs <= limit_s * 0.9:
+        n = floor
+    else:
+        return None
+    return n if floor <= n < int(runs) else None

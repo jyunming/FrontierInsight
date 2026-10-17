@@ -112,7 +112,8 @@ def test_panels_that_draw_something_pass(tmp_path: Path) -> None:
         {"title": "Bars", "draws_other": True},
         {"title": "One marker", "lines": [_line([5.0], [1.0])]},
         {"title": "A vertical reference", "lines": [_line([5.0, 5.0], [0.0, 1.0])]},
-        {"title": "A horizontal level", "lines": [_line([1.0, 9.0, 4.0], [2.0, 2.0, 2.0], kind="hline")]},
+        {"title": "A horizontal level with data", "lines": [_line([1.0, 9.0, 4.0], [2.0, 2.0, 2.0], kind="hline"),
+                                                           _line([1.0, 2.0, 3.0], [1.0, 4.0, 9.0])]},
         {"title": "Constant y at a few x", "lines": [_line([1.0, 2.0, 3.0], [2.0, 2.0, 2.0])]},
     ])
     assert dr.figure_problems(tmp_path, ["fine.png"]) == []
@@ -140,6 +141,94 @@ def test_the_recorder_says_whether_a_panel_draws_anything_but_lines(tmp_path: Pa
     panels = json.loads((records / "fig.seed0.json").read_text(encoding="utf-8"))["axes"]
     assert [p["draws_other"] for p in panels] == [False, True, True, False]
     assert [(p.panel, p.kind) for p in dr.figure_problems(records, ["fig.png"])] == [("empty", "empty")]
+
+
+def _draw(tmp_path: Path, script: str) -> Path:
+    """Run ``script`` (matplotlib code) under the plot recorder; the records folder."""
+    pytest.importorskip("matplotlib")
+    records = tmp_path / "records"
+    env = {**os.environ, "FI_FIGURE_RECORDS": str(records),
+           "PYTHONPATH": os.pathsep.join(p for p in (str(write_boot(tmp_path / ".boot", "latex")), os.environ.get("PYTHONPATH", "")) if p)}
+    out = subprocess.run([sys.executable, "-c", "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n" + script],
+                         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    return records
+
+
+THREE_FIGURES = (
+    "m = [20, 200, 2000]\n"
+    # one panel holds only a reference line (a stray axis), the others hold data
+    "fig, axes = plt.subplots(1, 3)\n"
+    "axes[0].plot(m, [0.6, 0.7, 0.8], label='a'); axes[0].set_title('with data')\n"
+    "axes[1].axhline(0.05, linestyle='--', label='reference'); axes[1].set_title('only the reference'); axes[1].set_xlabel('m')\n"
+    "axes[2].plot(m, [0.1, 0.2, 0.3], label='b'); axes[2].axhline(0.05, color='k'); axes[2].set_title('data and reference')\n"
+    "fig.savefig('reference_only.png')\n"
+    # a value of None at two settings: matplotlib drops the points
+    "fig, ax = plt.subplots()\n"
+    "ax.plot(m, [0.6, None, None], 'o', label='uncorrected'); ax.plot(m, [0.6, 0.9, 1.0], label='theory'); ax.set_title('Chance')\n"
+    "fig.savefig('none_values.png')\n"
+    # a series filtered before it was plotted: only the first setting is drawn
+    "fig, ax = plt.subplots()\n"
+    "kept = [(x, y) for x, y in zip(m, [0.6, None, None]) if y is not None]\n"
+    "ax.plot([k[0] for k in kept], [k[1] for k in kept], 'o', label='uncorrected'); ax.plot(m, [0.6, 0.9, 1.0], label='theory')\n"
+    "ax.set_title('Chance'); fig.savefig('dropped_before.png')\n"
+    # a normal figure: every series at every setting, a data line on a dense axis, a reference line
+    "import numpy as np\n"
+    "fig, ax = plt.subplots()\n"
+    "ax.plot(m, [0.1, 0.2, 0.3], 'o', label='measured'); ax.plot(np.linspace(20, 2000, 100), np.linspace(0.1, 0.3, 100), label='curve')\n"
+    "ax.plot(m, [0.2, 0.3, 0.4], label='other'); ax.axhline(0.05, linestyle='--', label='reference'); ax.set_title('Normal')\n"
+    "fig.savefig('normal.png')\n"
+)
+
+
+def test_a_panel_with_only_a_reference_line_is_empty_and_a_normal_figure_raises_nothing(tmp_path: Path) -> None:
+    records = _draw(tmp_path, THREE_FIGURES)
+    names = ["reference_only.png", "none_values.png", "dropped_before.png", "normal.png"]
+    assert [(p.figure, p.panel, p.kind) for p in dr.figure_problems(records, names)] == [
+        ("reference_only.png", "only the reference", "empty")]
+    # a reference line beside data, or a twin axis that carries the data, is not an empty panel
+    (tmp_path / "twin").mkdir()
+    twin = _draw(tmp_path / "twin", "fig, ax = plt.subplots(); ax.axhline(1.0); ax.set_title('left'); ax.set_ylabel('r')\n"
+                                    "ax2 = ax.twinx(); ax2.plot([1, 2, 3], [3, 2, 1]); fig.savefig('twin.png')\n")
+    assert dr.figure_problems(twin, ["twin.png"]) == []
+
+
+def test_a_constant_series_with_markers_a_twin_made_with_add_axes_and_a_legend_panel_are_not_empty(tmp_path: Path) -> None:
+    # a measured series that happens to be constant, drawn dashed with markers, is data (each marker a setting)
+    (tmp_path / "marked").mkdir()
+    marked = _draw(tmp_path / "marked", "fig, ax = plt.subplots(); ax.plot([1, 2, 3], [0.0, 0.0, 0.0], 'o--', label='error')\n"
+                                        "ax.set_title('Error'); fig.savefig('marked.png')\n")
+    assert dr.figure_problems(marked, ["marked.png"]) == []
+    # twin axes on axes made without a grid (add_axes) share the place
+    (tmp_path / "boxes").mkdir()
+    boxes = _draw(tmp_path / "boxes", "fig = plt.figure(); ax = fig.add_axes([0.1, 0.1, 0.8, 0.8]); ax.axhline(1.0)\n"
+                                      "ax.set_title('left'); ax2 = ax.twinx(); ax2.plot([1, 2, 3], [3, 2, 1])\n"
+                                      "fig.savefig('boxes.png')\n")
+    assert dr.figure_problems(boxes, ["boxes.png"]) == []
+    # a panel that only holds the legend the other panels share
+    (tmp_path / "legend").mkdir()
+    legend = _draw(tmp_path / "legend", "fig, (a, b) = plt.subplots(1, 2); h, = a.plot([1, 2, 3], [1, 2, 3], label='x')\n"
+                                        "a.set_title('Data'); b.axis('off'); b.legend(handles=[h]); b.set_title('Legend')\n"
+                                        "fig.savefig('legend.png')\n")
+    assert dr.figure_problems(legend, ["legend.png"]) == []
+    # the same reference line alone, with no data anywhere, is still empty
+    (tmp_path / "alone").mkdir()
+    alone = _draw(tmp_path / "alone", "fig, ax = plt.subplots(); ax.plot([1, 2, 3], [0.5, 0.5, 0.5], '--')\n"
+                                      "ax.set_title('Only the line'); fig.savefig('alone.png')\n")
+    assert [p.kind for p in dr.figure_problems(alone, ["alone.png"])] == ["empty"]
+
+
+def test_a_series_that_misses_settings_the_figure_otherwise_shows_is_counted_from_the_plotted_data(tmp_path: Path) -> None:
+    records = _draw(tmp_path, THREE_FIGURES)
+    lines = json.loads((records / "none_values.seed0.json").read_text(encoding="utf-8"))["axes"][0]["lines"]
+    assert [ln["missing_x"] for ln in lines] == [[200.0, 2000.0], []]
+    got = {g.figure: g for g in dr.figure_gaps(records, ["reference_only.png", "none_values.png", "dropped_before.png", "normal.png"])}
+    assert set(got) == {"none_values.png", "dropped_before.png"}, "the normal figure, with a dense curve and a reference, raises nothing"
+    assert (got["none_values.png"].why, got["none_values.png"].absent) == ("no value", [200.0, 2000.0])
+    assert (got["dropped_before.png"].why, got["dropped_before.png"].absent) == ("not plotted", [200.0, 2000.0])
+    assert "the series \"uncorrected\" has no value at x = 200, 2000" in got["none_values.png"].says()
+    note = dr.gap_note(list(got.values()))
+    assert "as shown in Figure N" in note and "caption" in note and "uncorrected" in note
 
 
 # ---- the words ------------------------------------------------------------------------------------------------------------
@@ -220,6 +309,51 @@ async def test_a_figure_alone_goes_back_to_the_analysis(tmp_path: Path, monkeypa
     assert result.returncode == 1 and script == "experiment.py" and "draws no data" in result.stderr
     # once, the figures of the failed run are cleared like any failed run's
     assert not (eng.quest_root / "figures" / "fine.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_saved_no_figure_though_the_plan_has_some_keeps_its_results_and_says_so_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    for p in (eng.quest_root / "figures").iterdir():
+        p.unlink()
+    record = {"cells": [{"cell": c["cell"], "metrics": {n: {"values": v} for n, v in c["metrics"].items()}}
+                        for c in _cells(gain=lambda r: 3 * r, level=lambda r: r * r)]}
+    (eng.quest_root / "raw" / "trials.json").write_text(json.dumps(record), encoding="utf-8")
+    state: dict[str, Any] = {"iteration": 0, "design": {"figures_planned": ["figures/power.png", "figures/fdr.png"]}}
+    # Not sent back: a repair that gave up would throw the results away and stop the quest with nothing to write up.
+    result, _ = await eng._results_match_run(state, _run(), None, True)
+    assert result.returncode == 0
+    note = eng._run_checks_note()
+    assert "the paper has no figure" in note and "as shown in Figure N" in note and "no figure was drawn" in note
+    # a plan without figures asks for none
+    (eng.quest_root / "needs" / "RESULT_CHECK.json").unlink()
+    result, _ = await eng._results_match_run({"iteration": 5, "design": {"figures_planned": []}}, _run(), None, True)
+    assert result.returncode == 0 and not (eng.quest_root / "needs" / "RESULT_CHECK.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_figure_that_stays_but_has_no_point_at_some_settings_is_not_dropped_and_the_writer_is_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    (eng.quest_root / "figures" / "empty_one.png").unlink()
+    (eng.fi_dir / "figure_records" / "empty_one.json").unlink()
+    (eng.fi_dir / "figure_records" / "empty_one.seed0.json").unlink()
+    record = {"cells": [{"cell": c["cell"], "metrics": {n: {"values": v} for n, v in c["metrics"].items()}}
+                        for c in _cells(gain=lambda r: 3 * r, level=lambda r: r * r)]}
+    (eng.quest_root / "raw" / "trials.json").write_text(json.dumps(record), encoding="utf-8")
+    gappy = [{"label": "uncorrected", "kind": "data", "x": [20.0], "y": [0.6]},
+             {"label": "theory", "kind": "data", "x": [20.0, 200.0, 2000.0], "y": [0.6, 0.9, 1.0]}]
+    _record(eng.fi_dir / "figure_records", "fine", [{"title": "Chance", "xlabel": "m", "lines": gappy}])
+    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
+    assert result.returncode == 0, "nothing is sent back for a gap"
+    assert (eng.quest_root / "figures" / "fine.png").exists()
+    saved = json.loads((eng.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
+    assert saved["removed_figures"] == [] and saved["removed_quantities"] == []
+    note = eng._run_checks_note()
+    assert "the series \"uncorrected\" has no point at x = 200, 2000" in note and "as shown in Figure N" in note
 
 
 # ---- a constant that is expected -----------------------------------------------------------------------------------------

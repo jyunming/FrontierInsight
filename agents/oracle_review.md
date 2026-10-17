@@ -32,6 +32,8 @@ Each kind has one numeric form: an `invariant`, a `symmetry` or a `second_implem
 
 Then say which equations of the model (their ids) the checks together test, and which none of them tests.
 
+Also say, in `findings`, whether anything the topic names is approximated in this model without the plan saying so (an entry in its `simplifications`), and whether each metric's definition matches the source it quotes.
+
 # What to judge, for each equation of the model
 
 The plan's own model lists equations (`equations` above). The code will implement them exactly as written, and the checks' expected values are worked out from them, so an equation that is wrong in the plan makes everything after it wrong while every check still agrees. For each equation, say whether it is the **standard definition** of the quantity it names (including its normalisation: which length, area, time or amount it is divided or multiplied by, and which sign and units), or a correct derivation from the source it cites. If it is not, write the correct equation and give one line saying why. Say "no" only when you can state the correct equation. Say "yes" only when you checked it against the standard definition (or the derivation). If you cannot tell, leave `standard` empty: FI then records that nobody has verified this equation, which is better than a "yes" that was not checked.

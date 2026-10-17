@@ -1,0 +1,51 @@
+{
+ "equations": {
+  "E1": {
+   "state": "ok",
+   "why": ""
+  },
+  "E2": {
+   "state": "ok",
+   "why": ""
+  },
+  "E3": {
+   "state": "ok",
+   "why": ""
+  },
+  "E4": {
+   "state": "ok",
+   "why": ""
+  },
+  "E5": {
+   "state": "ok",
+   "why": ""
+  },
+  "E6": {
+   "state": "missing",
+   "why": "the plan gave no worked example"
+  },
+  "E7": {
+   "state": "ok",
+   "why": ""
+  },
+  "E8": {
+   "state": "ok",
+   "why": ""
+  }
+ },
+ "untested_core": [],
+ "not_tested": [
+  "equation E6 is not tested before the run: the plan gave no worked example for it"
+ ],
+ "tested": [
+  "E1",
+  "E2",
+  "E3",
+  "E4",
+  "E5",
+  "E7",
+  "E8"
+ ],
+ "failed": [],
+ "repairs": {}
+}

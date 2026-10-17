@@ -326,3 +326,124 @@ def test_no_grid_and_a_script_that_reads_its_setting_is_not_run_with_an_empty_se
     result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=60, env={}))
     assert result.returncode != 0 and "no `grid`" in result.stderr and runner.failed_script == "simulate.py"
     assert runner.last is None
+
+
+# ---- run_trial is ONE trial; run_cell is the setting's own number (the oracle and the harness mean different things) ----
+
+R6T_SHAPE = '''
+def run_trial(m, pi1=None, run_index=0):
+    if isinstance(m, dict):
+        return run_cell(m)
+    return {"fdp": 0.1}
+
+def run_cell(case):
+    return {"fdp": sum(run_trial(case["m"], 0.0, i)["fdp"] for i in range(100)) / 100}
+'''
+
+
+def test_a_run_trial_that_returns_a_cell_aggregate_is_named() -> None:
+    why = trial_runner.trial_aggregates(R6T_SHAPE)
+    assert "run_trial must run ONE trial" in why and "run_cell" in why
+    # Through a helper of the same file, one level down.
+    via = "def _mean(c):\n    return run_cell(c)\n\ndef run_trial(c, t, s):\n    return _mean(c)\n\ndef run_cell(c):\n    return {'y': 1.0}\n"
+    assert "run_trial must run ONE trial" in trial_runner.trial_aggregates(via)
+
+
+def test_a_cell_built_from_trials_and_a_lone_run_trial_are_not_named() -> None:
+    fine = ("def run_trial(c, t, s):\n    return {'y': float(s % 7)}\n\n"
+            "def run_cell(c):\n    return {'y': sum(run_trial(c, i, i)['y'] for i in range(50)) / 50}\n")
+    assert trial_runner.trial_aggregates(fine) == ""
+    assert trial_runner.trial_aggregates("def run_trial(c, t, s):\n    return {'y': 1.0}\n") == ""
+    assert trial_runner.trial_aggregates("def run_trial(:\n") == ""  # unreadable text is not this check's to judge
+
+
+def test_the_ways_around_the_one_trial_rule_are_named_too() -> None:
+    deep = ("def a(c):\n    return run_cell(c)\n\ndef b(c):\n    return a(c)\n\ndef c_(c):\n    return b(c)\n\n"
+            "def run_trial(c, t, s):\n    return c_(c)\n\ndef run_cell(c):\n    return {'y': 1.0}\n")
+    imported = "from other import run_cell as _rc\n\ndef run_trial(c, t, s):\n    return _rc(c)\n"
+    plain_import = "from other import run_cell\n\ndef run_trial(c, t, s):\n    return run_cell(c)\n"
+    alias = "def run_cell(c):\n    return {'y': 1.0}\n\n_run = run_cell\n\ndef run_trial(c, t, s):\n    return _run(c)\n"
+    renamed = "def run_cell(c):\n    return {'y': 1.0}\n\nrun_trial = run_cell\n"
+    table = ("def run_cell(c):\n    return {'y': 1.0}\n\nTABLE = {'a': run_cell}\n\n"
+             "def run_trial(c, t, s):\n    return TABLE['a'](c)\n")
+    lam = "def run_cell(c):\n    return {'y': 1.0}\n\nrun_trial = lambda c, t, s: run_cell(c)\n"
+    module = "import simulate\n\ndef run_cell(c):\n    return {'y': 1.0}\n\ndef run_trial(c, t, s):\n    return simulate.run_cell(c)\n"
+    for name, src in dict(deep=deep, imported=imported, plain_import=plain_import, alias=alias, renamed=renamed,
+                          table=table, lam=lam, module=module).items():
+        assert "run_trial must run ONE trial" in trial_runner.trial_aggregates(src), name
+
+
+def test_a_method_called_run_cell_on_another_object_is_not_this_files_run_cell() -> None:
+    honest = ("def run_trial(c, t, s):\n    sim_cell = make(c)\n    return {'y': sim_cell.run_cell(s)}\n\n"
+              "def run_cell(c):\n    return {'y': 1.0}\n")
+    assert trial_runner.trial_aggregates(honest) == ""
+
+
+def test_a_cell_is_built_from_trials_only_when_it_really_calls_run_trial() -> None:
+    assert trial_runner.cell_runs_trials("def run_trial(c,t,s):\n    return {}\n\ndef run_cell(c):\n    return _m(c)\n\n"
+                                         "def _m(c):\n    return [run_trial(c, i, i) for i in range(3)]\n")
+    assert trial_runner.cell_runs_trials("def run_trial(c,t,s):\n    return {}\n\ndef run_cell(c):\n"
+                                         "    return list(map(run_trial, [c], [0], [0]))\n")
+    assert not trial_runner.cell_runs_trials("def run_trial(c,t,s):\n    return {}\n\ndef run_cell(c):\n    return {'y': 1.0}\n")
+
+
+def test_the_oracle_is_measured_on_the_function_that_means_what_it_measures() -> None:
+    both, trial_only, cell_only = {"run_trial", "run_cell"}, {"run_trial"}, {"run_cell"}
+    mean = {"name": "n", "kind": "special_case"}
+    inv = {"name": "n", "kind": "invariant"}
+    assert trial_runner.oracle_entry(both, mean, cell_runs_trials=True) == "run_cell", "a mean built from the study's trials"
+    assert trial_runner.oracle_entry(both, mean) == "run_trial", "the study runs only run_trial: test that code"
+    assert trial_runner.oracle_entry(both, inv, cell_runs_trials=True) == "run_trial", "an invariant holds in every trial"
+    assert trial_runner.oracle_entry(both, mean, per_trial=True, cell_runs_trials=True) == "run_trial"
+    assert trial_runner.oracle_entry(both, {**mean, "per_trial": True}, cell_runs_trials=True) == "run_trial"
+    assert trial_runner.oracle_entry(both, {**mean, "per_trial": "false"}, cell_runs_trials=True) == "run_cell"
+    assert trial_runner.oracle_entry(trial_only, mean) == "run_trial"
+    assert trial_runner.oracle_entry(cell_only, inv) == "run_cell"
+
+
+def test_a_local_name_that_is_also_run_cell_is_not_the_modules_run_cell() -> None:
+    local = "def run_trial(c, t, s):\n    run_cell = c.get('steps')\n    return {'y': float(run_cell)}\n"
+    param = "def run_trial(run_cell, t, s):\n    return {'y': float(run_cell)}\n"
+    loop = "def run_trial(c, t, s):\n    for run_cell in c['xs']:\n        pass\n    return {'y': 1.0}\n"
+    lam = "run_trial = lambda c, t, run_cell: {'y': run_cell}\n"
+    for src in (local, param, loop, lam, local + "\ndef run_cell(c):\n    return {'y': 1.0}\n"):
+        assert trial_runner.trial_aggregates(src) == "", src
+    # ... while the module's own function is still found when nothing shadows it.
+    assert trial_runner.trial_aggregates("def run_trial(c, t, s):\n    return run_cell(c)\n")
+
+
+# ---- a grid too large to list is refused by its count, before anything is allocated -------------------------------------
+
+
+def _huge_grid() -> dict[str, list[int]]:
+    return {f"axis{i}": list(range(n)) for i, n in enumerate((5, 33, 10, 5, 6, 6, 3, 4, 5, 3, 18, 10, 2))}
+
+
+def test_listing_a_grid_over_the_ceiling_is_refused_quickly_with_a_plain_reason() -> None:
+    import time
+
+    import pytest
+
+    from core import optimise_search
+
+    grid = _huge_grid()
+    started = time.monotonic()
+    for listing in (trial_runner.cells, optimise_search.grid_cells, run_manifest._all_cells):
+        with pytest.raises(ValueError, match=r"the plan asks for 19,245,600,000 settings .*does not list or run more than 500,000"):
+            listing(grid)
+    assert time.monotonic() - started < 1
+
+
+def test_small_grids_are_listed_as_before() -> None:
+    from core import optimise_search
+
+    grid = {"a": [1, 2, 3], "b": ["x", "y"]}
+    assert len(trial_runner.cells(grid)) == len(optimise_search.grid_cells(grid)) == len(run_manifest._all_cells(grid)) == 6
+    assert trial_runner.cells({}) == [{}]
+    assert trial_runner.cells({"n": list(range(optimise_search.MAX_LISTED_SETTINGS))})[-1] == {"n": 499999}
+
+
+def test_the_standalone_run_script_has_the_same_ceiling() -> None:
+    from core import code_project, optimise_search
+
+    assert f"MAX_SETTINGS = {optimise_search.MAX_LISTED_SETTINGS}" in code_project.RUN_SOURCE

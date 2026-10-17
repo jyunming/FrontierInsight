@@ -43,6 +43,8 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
+from . import optimise_search as _search
+
 SCHEMA = "fi.run-manifest/v1"
 NAME = "run_manifest.json"
 LEDGER_NAME = "trial_ledger.jsonl"
@@ -149,7 +151,9 @@ def manifest_from_ledger(
                 realized[axis].add(value)
     manifest = {
         "schema": SCHEMA,
-        "realized_grid": {axis: sorted(values, key=lambda v: (isinstance(v, str), v)) for axis, values in realized.items()},
+        "realized_grid": {axis: [list(v) if isinstance(v, tuple) else v
+                                 for v in sorted(values, key=lambda v: (isinstance(v, (str, tuple)), v))]
+                          for axis, values in realized.items()},
         "attempted_per_cell": attempted,
         "successful_per_cell": successful,
         "failed_trials": failed,
@@ -195,7 +199,15 @@ def _whole(value: Any) -> tuple[float | None, str | None]:
     return float(value), None
 
 
+def _freeze(value: Any) -> Any:
+    """A grid value as something that can sit in a set: a tuple setting (a list of numbers) becomes a tuple."""
+    return tuple(_freeze(v) for v in value) if isinstance(value, (list, tuple)) else value
+
+
 def _same(a: Any, b: Any) -> bool:
+    if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+        return (isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)) and len(a) == len(b)
+                and all(_same(x, y) for x, y in zip(a, b)))
     x, y = _num(a), _num(b)
     if x is not None and y is not None:
         return math.isclose(x, y, rel_tol=1e-9, abs_tol=1e-12)
@@ -271,6 +283,11 @@ def _match_grid_value(raw: str, allowed: list[Any]) -> Any:
     for v in allowed:
         if isinstance(v, str) and raw == v:
             return v
+    if raw.startswith("[") and raw.endswith("]"):  # a tuple setting is written "[0.5;0.8]" (no comma: a key is split on them)
+        parts = [_coerce_number(x.strip()) for x in raw[1:-1].replace(",", ";").split(";")]
+        for v in allowed:
+            if isinstance(v, (list, tuple)) and len(v) == len(parts) and all(_same(x, y) for x, y in zip(v, parts)):
+                return _freeze(v)
     number = _num(_coerce_number(raw))
     if number is not None:
         for v in allowed:
@@ -325,8 +342,9 @@ def _canonicalize_cell(key: Any, grid: dict[str, list[Any]]) -> tuple[frozenset[
 def _all_cells(grid: dict[str, list[Any]]) -> set[frozenset[tuple[str, Any]]]:
     """Every setting the protocol's grid names — its full Cartesian product, canonically keyed the same way
     :func:`_canonicalize_cell` keys a manifest's cells, so the two sets can be compared for exact equality."""
+    _search.check_listable(grid)
     axes = list(grid.items())
-    return {frozenset(zip((a for a, _ in axes), combo)) for combo in product(*(v for _, v in axes))}
+    return {frozenset(zip((a for a, _ in axes), (_freeze(c) for c in combo))) for combo in product(*(v for _, v in axes))}
 
 
 def _total_values_reported(result_json: Any, metric_id: str) -> int:
@@ -535,7 +553,19 @@ def _recorded_in_cells(recorded_by_cell: dict[str, Any], metric_id: str, cells: 
 
 def _listed_counts(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recorded: tuple[int, int],
                    recorded_by_cell: dict[str, Any] | None) -> tuple[int, int, list[str], int, int]:
-    """``(real values, undefined, excesses)`` the analysis accounts for, counting ONE representation of the trials.
+    """:func:`_listed_counts_detailed` with each excess as the sentence the finding quotes."""
+    defined, undefined, records, acc_defined, acc_undefined = _listed_counts_detailed(
+        result_json, metric_id, grid, recorded, recorded_by_cell)
+    excesses = [f"{r['listed'][0]} value(s) and {r['listed'][1]} undefined for `{r['setting']}` where FI's record has "
+                f"{r['recorded'][0]} with a value and {r['recorded'][1]} with none" for r in records]
+    return defined, undefined, excesses, acc_defined, acc_undefined
+
+
+def _listed_counts_detailed(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recorded: tuple[int, int],
+                            recorded_by_cell: dict[str, Any] | None) -> tuple[int, int, list[dict[str, Any]], int, int]:
+    """``(real values, undefined, excesses)`` the analysis accounts for, counting ONE representation of the trials. Each
+    excess is ``{"setting", "listed": (values, undefined), "recorded": (values, undefined)}``: a setting the analysis
+    lists more under than FI's record of that setting holds.
 
     Lists sitting under a setting's key (``R0=1.5,N=500``, or a part of the setting such as ``R0=1.5``) are the per-setting
     copy: each setting is counted once (the largest list for it, never the sum of two), and each is held, when FI keeps its
@@ -562,7 +592,7 @@ def _listed_counts(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
 
     strata: list[tuple[Any, set[frozenset[tuple[str, Any]]], tuple[int, int]]] = []
     pooled = [0, 0]
-    excesses: list[str] = []
+    excesses: list[dict[str, Any]] = []
     for under, counts in groups.items():
         cells = cells_of(under)
         if cells:
@@ -579,8 +609,8 @@ def _listed_counts(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
         if recorded_by_cell:
             have_value, have_none = _recorded_in_cells(recorded_by_cell, metric_id, cells, grid)
             if counts[0] > have_value or counts[1] > have_none or counts[0] + counts[1] > have_value + have_none:
-                excesses.append(f"{counts[0]} value(s) and {counts[1]} undefined for `{label(under)}` where FI's record has "
-                                f"{have_value} with a value and {have_none} with none")
+                excesses.append({"setting": label(under), "listed": (counts[0], counts[1]),
+                                 "recorded": (have_value, have_none)})
     defined, undefined = max(per_setting[0], pooled[0]), max(per_setting[1], pooled[1])
     side_by_side = (0, 0)
     for members in families.values():
@@ -909,6 +939,23 @@ def strata_coverage(protocol: dict[str, Any] | None, result_json: Any) -> list[s
     return out
 
 
+def metric_grid(protocol: dict[str, Any] | None, metric: str,
+                recorded_by_cell: dict[str, Any] | None) -> dict[str, list[Any]]:
+    """The settings ``metric`` is recorded over: the protocol's grid, and, for a number each run gives per value of what it
+    compares inside it (``protocol.in_each_run``; FI keeps it under the value's own key, core/in_run.py), those values too.
+    A number per run is counted once per run, a number per value once per value: never one as the other."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    if not inside:
+        return grid
+    for key, by_name in (recorded_by_cell or {}).items():
+        parsed = _parse_cell(key)
+        if parsed and set(parsed) & set(inside) and recorded_counts(by_name, metric) is not None:
+            return {**grid, **inside}
+    return grid
+
+
 def _value_count_findings(
     protocol: dict[str, Any], manifest: dict[str, Any], result_json: Any, *, trial_mode: bool = False,
     recorded: dict[str, Any] | None = None, recorded_by_cell: dict[str, Any] | None = None,
@@ -931,7 +978,9 @@ def _value_count_findings(
     per-setting list the analysis prints is then held to its own setting's trials as well (:func:`_listed_counts`)."""
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     runs = _num(protocol.get("runs_per_setting"))
-    if result_json is None or not grid or runs is None:
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    # A study whose only factor is what each run compares inside it (one fit over five temperatures) has no grid: one setting.
+    if result_json is None or not (grid or inside) or runs is None:
         return []
     # The baseline is trials the manifest itself says SUCCEEDED, not the protocol's raw runs_per_setting x cells: a
     # design with a genuine, declared failure rate (failed_trials, a failure_policy) legitimately has fewer real values
@@ -978,7 +1027,8 @@ def _value_count_findings(
             defined, undefined = counts
             measured = defined + undefined
             listed_defined, listed_undefined, excesses, accounted_defined, accounted_undefined = _listed_counts(
-                result_json, metric, grid, (defined, undefined), recorded_by_cell)
+                result_json, metric, metric_grid(protocol, metric, recorded_by_cell), (defined, undefined),
+                recorded_by_cell)
             made = (f"in {measured:g} trial(s) of FI's record: {defined:g} with a value and {undefined:g} with none "
                     "(the measurement does not exist there)")
             if not _values_listed(result_json, metric) and not accounted_defined and not accounted_undefined:
@@ -1087,6 +1137,80 @@ def _counts_listed(result_json: Any, key: str) -> bool:
     if isinstance(result_json, list):
         return any(_counts_listed(v, key) for v in result_json)
     return False
+
+
+def differences(
+    protocol: dict[str, Any], manifest: dict[str, Any] | None, result_json: Any, *, recorded: dict[str, Any] | None = None,
+    recorded_by_cell: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """The concrete difference behind a finding that the analysis lists MORE values than FI's record holds, one entry per
+    `kind: "mean"` metric: ``{"metric", "measured": (values, undefined), "listed": (values, undefined), "settings": [...]}``
+    where each setting is ``{"setting", "listed": (values, undefined), "recorded": (values, undefined)}`` for a setting the
+    analysis lists more under than the trials of that setting returned. Computed from the counts :func:`problems` compares,
+    never from its sentences. Empty when FI holds no record or the analysis lists no more than was measured."""
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    if not recorded or result_json is None or not (grid or inside) or not isinstance(manifest, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for spec in protocol.get("metrics") or []:
+        if not isinstance(spec, dict) or spec.get("kind") != "mean" or not spec.get("id") or str(spec.get("given") or "").strip():
+            continue
+        metric = str(spec["id"])
+        counts = recorded_counts(recorded, metric)
+        if counts is None:
+            continue
+        defined, undefined = counts
+        listed_defined, listed_undefined, excesses, _ad, _au = _listed_counts_detailed(
+            result_json, metric, metric_grid(protocol, metric, recorded_by_cell), (defined, undefined), recorded_by_cell)
+        measured = defined + undefined
+        if (listed_defined > defined or listed_undefined > undefined or listed_defined + listed_undefined > measured
+                or excesses):
+            out.append({"metric": metric, "measured": (defined, undefined), "listed": (listed_defined, listed_undefined),
+                        "settings": excesses})
+    return out
+
+
+def _settings_phrase(settings: list[dict[str, Any]], *, limit: int = 4) -> str:
+    names = [f"`{s['setting']}`" for s in settings]
+    shown = ", ".join(names[:limit])
+    return shown + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def plain_difference(found: list[dict[str, Any]]) -> str:
+    """The first sentence of a stop for :func:`differences`, in the words a scientist uses (the numbers follow it)."""
+    if not found:
+        return ""
+    metrics = ", ".join(f"`{d['metric']}`" for d in found[:3]) + (f" and {len(found) - 3} more" if len(found) > 3 else "")
+    settings = [s for d in found for s in d["settings"]]
+    if settings:
+        many = "under several settings" if len(settings) > 1 else "under one setting"
+        return (f"The analysis lists more values {many} than the trials of those settings returned (for {metrics}: "
+                "values appear under a setting they were not measured in, or more than once), so the paper could not be "
+                f"tied to what was measured (settings: {_settings_phrase(settings)}).")
+    listed = sum(sum(d["listed"]) for d in found)
+    measured = sum(sum(d["measured"]) for d in found)
+    return (f"The analysis lists more values for {metrics} than the trials returned ({listed:g} listed, {measured:g} "
+            "measured), so the paper could not be tied to what was measured.")
+
+
+def difference_request(found: list[dict[str, Any]], *, limit: int = 10) -> str:
+    """What FI computed about the difference, for the repair request of the analysis: which metric, which settings, the
+    counts FI recorded against the counts the analysis printed."""
+    lines: list[str] = []
+    for d in found[:4]:
+        lines.append(f"- `{d['metric']}`: the trials returned {d['measured'][0]:g} value(s) and {d['measured'][1]:g} with "
+                     f"no value; your analysis lists {d['listed'][0]:g} value(s) and {d['listed'][1]:g} undefined.")
+        for s in d["settings"][:limit]:
+            lines.append(f"    - under `{s['setting']}` it lists {s['listed'][0]:g} value(s) and {s['listed'][1]:g} "
+                         f"undefined, but that setting's trials returned {s['recorded'][0]:g} and {s['recorded'][1]:g}")
+        if len(d["settings"]) > limit:
+            lines.append(f"    - ... and {len(d['settings']) - limit} more settings")
+    return ("\n\nWhat FI found by counting (its own record of the trials against what your analysis prints):\n"
+            + "\n".join(lines)
+            + "\nThe values listed under a setting must be that setting's own trials, each once: read them from that "
+            "setting's entry in the file `FI_TRIALS` names, never from another setting's list, never one list copied "
+            "under several settings.") if lines else ""
 
 
 def analysis_output_problems(
@@ -1336,7 +1460,7 @@ def missing_keys(found: list[str]) -> list[str]:
     return keys
 
 
-def analysis_directive(found: list[str]) -> str:
+def analysis_directive(found: list[str], difference: list[dict[str, Any]] | None = None) -> str:
     """The repair request for :func:`analysis_output_problems`: the simulation stands, the analysis must print its values.
     It names the exact keys that are missing and where the per-trial values are (FI's per-setting results, the file
     ``FI_TRIALS`` names), so the repair does not have to guess."""
@@ -1350,7 +1474,7 @@ def analysis_directive(found: list[str]) -> str:
     ) if keys else ""
     return (
         "This run finished, and the simulation's raw files stand, but the analysis did not print what the contract asks:\n"
-        + "\n".join(f"- {line}" for line in found[:8]) + named
+        + "\n".join(f"- {line}" for line in found[:8]) + named + difference_request(difference or [])
         + ("\n\nA trial whose measurement does not exist (FI_TRIALS holds it as NaN, and counts such trials under "
            "`non_finite`) is not dropped and not invented: keep it as `null` in `<metric>_values`, or give how many there "
            "are as `<metric>_undefined`. The numbers with a value plus the undefined ones must be the trials that measured "

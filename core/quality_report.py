@@ -60,7 +60,7 @@ _READERS = {"plan": ("oracle_review.topic",), "checks": ("oracle_review", "oracl
 _KEY = {"plan": "plan", "checks": "oracle_review", "design": "design", "code": "implement", "run": "execute_reflect",
         "analysis": "analyze", "paper": "write", "review": "review"}
 _RECORD_FILES = ("model_calls.jsonl", "audit.jsonl", "oracle_review.json", "code_review.json", "equation_tests.json",
-                 "function_steps.json")
+                 "function_steps.json", "second_impl.json")
 
 
 def _is_choice(text: str) -> bool:
@@ -168,6 +168,7 @@ class _Quest:
         self.code_review = _dict(_json(fi / "code_review.json"))
         self.equation_tests = _dict(_json(fi / "equation_tests.json"))
         self.function_steps = _dict(_json(fi / "function_steps.json"))
+        self.second_impl = _dict(_json(fi / "second_impl.json"))
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
@@ -322,6 +323,16 @@ def _code_problems(q: _Quest) -> list[dict[str, str]]:
         elif f.get("status") == "done" and attempts > 1:
             out.append(_problem("code", f"function {name} (equation {eqn}) needed {attempts} tries",
                                 "FI's equation test", "fixed", ".fi/function_steps.json"))
+    # A second, independently written version of a key function (core/second_impl.py): said in plain words, never a stop.
+    for name, f in _dict(q.second_impl.get("functions")).items():
+        f = _dict(f)
+        if f.get("status") in ("unresolved", "unconfirmed") and f.get("limitation"):
+            out.append(_problem("code", _one(f.get("limitation"), 220), "a second, independently written version",
+                                "not fixed" if f.get("status") == "unresolved" else "left out", ".fi/second_impl.json"))
+        elif _dict(f.get("adjudication")).get("outcome") == "repair accepted":
+            out.append(_problem("code", f"function {name} differed from a second, independently written version; the first "
+                                "was wrong and was repaired", "a second, independently written version", "fixed",
+                                ".fi/second_impl.json"))
     return out
 
 
@@ -421,7 +432,7 @@ def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
     trials, settings = _int(p.get("trials")), _int(p.get("settings"))
     read = f"{trials} trial(s) at {settings} setting(s) were read before the full run"
     if p["outcome"] == "passed":
-        said = f"{read}; nothing was wrong" + (f" once the simulation was repaired" if repairs else "")
+        said = f"{read}; nothing was wrong" + (" once the simulation was repaired" if repairs else "")
     elif p["outcome"] == "stopped":
         said = f"{read}; they showed the simulation does not measure what the protocol names, and its repairs did not remove it"
     else:
@@ -535,7 +546,7 @@ def _stuck_stage(q: _Quest) -> str:
     text = str(q.stuck.get("problem") or "")
     if "contradict" in text or "claims" in text:
         return "paper"
-    if "main quantity" in text or "typed in" in text or "text still could not be checked" in text:
+    if "main quantity" in text or "typed in" in text or "shown by a failing test" in text or "text still could not be checked" in text:
         return "code"
     if "no number" in text or "could not run" in text or "the same result" in text or "time allowed" in text \
             or "nothing was run" in text:
@@ -849,16 +860,18 @@ def _code_metrics(q: _Quest) -> dict[str, Any]:
             "repairs_converged": cr.get("converged") if isinstance(cr.get("converged"), bool) else None,
             "repair_requests": _int(cr.get("repair_calls")), "repair_rounds": _int(cr.get("send_backs")),
             "repairs_stopped": str(cr.get("repairs_stopped") or ""),
-            "issues": _issue_rows(cr), "issue_summary": _issue_summary(cr),
+            "issues": _issue_rows(cr, getattr(q, "root", None)), "issue_summary": _issue_summary(cr),
             "open_changing_per_reading": [_int(r.get("changing", r.get("high"))) for r in readings]}
 
 
-def _issue_rows(cr: dict[str, Any]) -> list[dict[str, Any]]:
+def _issue_rows(cr: dict[str, Any], root: Path | None = None) -> list[dict[str, Any]]:
     """One row per issue of the code reader (a stable id; :mod:`core.code_findings`): what it concerns, whether it can change
     a reported result, whether a failing test showed it, whether and by which model it was repaired, and whether it is
     still open after the last reading."""
     from . import code_findings as _issues
+    from . import code_reach as _code_reach
 
+    never_run = _code_reach.never_run_in(root) if root is not None else (lambda _f, _g: False)
     rows = []
     for issue in _issues.ranked(cr, only_open=False):
         outcome = str(issue.get("outcome") or "")
@@ -871,7 +884,10 @@ def _issue_rows(cr: dict[str, Any]) -> list[dict[str, Any]]:
             "demonstrated": issue.get("demonstrated") if isinstance(issue.get("demonstrated"), bool) else None,
             "repaired": outcome == _issues.FIXED, "repaired_by": str(issue.get("fixed_by") or ""),
             "open": still, "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
-            "reason": _one(issue.get("reason"), 140), "seen_in": len(readings)})
+            "reason": _one(issue.get("reason"), 140), "seen_in": len(readings),
+            "reported_as": [str(k) for k in _list(issue.get("reported_as"))],
+            "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {},
+            "never_run": bool(issue.get("never_run")) or never_run(issue.get("file"), issue.get("function"))})
     return rows
 
 
@@ -995,8 +1011,17 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
         repaired = f"yes, by {row['repaired_by']}" if row["repaired"] else ("no" + (f" ({row['reason']})" if row["reason"] else ""))
         if row["plan_problem"]:
             still = "plan problem: the plan contradicts itself, asked of the plan's model"
+        elif row["open"] and row.get("never_run"):
+            still = "yes, but the run never calls this code, so it changes nothing reported; it is kept here, not in the paper"
+        elif row["open"] and row.get("at_gate", {}).get("outcome") == "left_out":
+            keys = ", ".join(str(k) for k in _list(row["at_gate"].get("keys"))[:3])
+            still = f"yes: its test still fails, so FI left {keys} out of the results the paper uses, and the paper says so"
+        elif row["open"] and row.get("at_gate", {}).get("outcome") == "not_computed":
+            still = "yes: the code does not compute it, and the paper says so as a part not done"
         elif row["open"]:
-            still = "yes, and it changes a result" if row["changes_result"] else "yes, but it changes nothing reported"
+            still = ("yes, and it changes a result" if row["changes_result"] else
+                     f"yes, but the results hold it as {', '.join(row['reported_as'][:3])}: a difference of names"
+                     if row.get("reported_as") else "yes, but it changes nothing reported")
         else:
             still = "no"
         lines.append(f"| {_cell(row['id'])} | {_cell(row['where'] or '-')} | {_cell(row['what'])} | "

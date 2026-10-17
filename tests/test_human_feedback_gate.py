@@ -60,7 +60,7 @@ def test_route_after_review_gate_off_keeps_existing_revise_done(tmp_path: Path) 
     accept_state = {"review": {"verdict": "accept"}, "iteration": 0}
     revise_state = {"review": {"verdict": "revise"}, "iteration": 0}
     assert eng._route_after_review(accept_state) == "done"  # type: ignore[arg-type]
-    assert eng._route_after_review(revise_state) == "revise"  # type: ignore[arg-type]
+    assert eng._route_after_review(revise_state) == "rewrite"  # type: ignore[arg-type]
 
 
 def test_route_after_review_gate_on_always_human_feedback(tmp_path: Path) -> None:
@@ -305,7 +305,7 @@ def test_route_must_flag_forces_revise_even_with_review_loop_off(
         "review": {"verdict": "accept", "must_flag_hits": ["[methodologist] circular_evaluation"]},
         "iteration": 0,
     }
-    assert eng._route_after_review(flagged_state) == "revise"  # type: ignore[arg-type]
+    assert eng._route_after_review(flagged_state) == "rewrite"  # type: ignore[arg-type]
 
 
 def test_route_must_flag_respects_max_iterations(tmp_path: Path) -> None:

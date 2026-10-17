@@ -88,6 +88,27 @@ the defence:
     follows from it and is accepted deliberately: a two-significant-digit
     textbook value quoted as the run's own result (``0.94``) is not checked.
 
+``trailing zeros``
+    An integer written ``2330`` from a run that holds ``2326.66`` is that value
+    to three significant digits, the same reading ``_significant_digits``
+    gives it, so it is compared at the tens (``-1`` decimals), not at the
+    units, where ``2327`` is not ``2330``. A token with ``k`` trailing zeros
+    and no decimal point is compared at ``-k`` decimals; ``2316.0`` still
+    does not account for ``2330`` (it rounds to ``2320``). Any integer with at
+    least three significant digits and trailing zeros (``1550``, ``20300``) is
+    compared this way, at +-5 or +-50; measured, it added no coincidental match.
+    Rounding only: a rounded integer is never matched by truncation, and is not
+    scaled by 100 upwards. A number with fewer
+    than three significant digits (``2000``) is not checked at all, as before.
+
+``unit prefixes``
+    A change of unit by 1000 (J to kJ, ms to s) is deliberately NOT accepted as
+    a scale change. It was tried and measured: checking the stored papers
+    against the *wrong* quest's results (every acceptance a coincidence), 71 of
+    133 numbers were accepted without it and 76 with it. A check is not
+    loosened for that; a paper that changes unit should print the value the run
+    computed.
+
 ``years`` / ``versions``
     An integer in 1900–2099 is a year, and a dotted ``1.11.4`` is a version;
     neither is a measurement. Reference markers, figure/table/section numbers,
@@ -134,10 +155,11 @@ from __future__ import annotations
 
 import math
 import re
+from array import array
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
-from core.numeric_oracle import _MINUS_SIGN, extract_paper_numbers, flatten_numbers
+from core.numeric_oracle import MIN_MAGNITUDE, _MINUS_SIGN, _TEX_THOUSANDS, extract_paper_numbers, flatten_numbers, roundings
 from core.stat_claims import normalise
 
 # A number must carry this many significant digits before its value says
@@ -163,6 +185,23 @@ HEDGED_REL_TOL = 0.10
 MAX_FINDINGS = 8
 
 _CONTEXT_CHARS = 170
+
+# A column of more than this many numbers under one result name (an array of per-trial values, or one field of a long
+# group of records) is RAW DATA: a paper reports what was computed from it, never one element picked at random. Such a
+# column accounts for a paper number only through the statistics derived from it (see ``_column_stats``); its
+# individual elements do not. Shorter columns (a sweep, a table row, a per-seed list) keep every element, because a
+# paper does print those one by one. Without this, a result file with hundreds of thousands of trial values held
+# nearly every number a paper could print: papers checked against ANOTHER quest's results had more than half their
+# numbers "accounted for" by pure coincidence.
+RAW_COLUMN_MIN = 200
+
+# ...except that a long column keeps its elements when they cannot be a crowd of lucky matches: it takes few distinct
+# values (a 0/1 outcome, a coded level).
+_MAX_DISTINCT_KEPT = 50
+
+# A string or boolean field of a record that takes at most this many values names a GROUP (arm, method, dataset): the
+# records are pooled within a group, never across groups. A field with more values (an id, a timestamp) names nothing.
+_MAX_GROUPS = 20
 
 
 @dataclass(frozen=True)
@@ -300,6 +339,16 @@ def _decimals(token: str) -> int:
     return len(t.split(".", 1)[1]) if "." in t else 0
 
 
+def _written_precision(token: str) -> int:
+    """The decimal place the paper rounded to: the decimals of ``0.583`` (3), and
+    minus the trailing zeros of an integer written to fewer digits than it has
+    (``2330`` is rounded to the tens: -1). ``round(v, -1)`` is how it compares."""
+    t = token.lstrip("-+").replace(",", "")
+    if "." in t:
+        return _decimals(token)
+    return -(len(t) - len(t.rstrip("0")))
+
+
 def _carries_enough_precision(token: str) -> bool:
     """Is this number written precisely enough to say where it came from?
 
@@ -314,8 +363,11 @@ def _carries_enough_precision(token: str) -> bool:
 
 
 def _is_year(value: float, token: str) -> bool:
+    # A year has no thousands separator: "1,920" is a quantity of 1920 (a standard deviation in the paper this was found
+    # in), and reading it as the year 1920 exempted it from every check.
     return (
-        _decimals(token) == 0
+        "," not in token
+        and _decimals(token) == 0
         and float(value).is_integer()
         and YEAR_LO <= value <= YEAR_HI
     )
@@ -337,7 +389,7 @@ def paper_numbers(paper_text: str) -> list[tuple[float, str, str]]:
     minus sign is folded before the range dash is looked for, so a U+2212
     between two numbers is a range or a subtraction exactly as ``-`` is.
     """
-    text = normalise(paper_text).replace(_MINUS_SIGN, "-")
+    text = normalise(_TEX_THOUSANDS.sub(",", paper_text)).replace(_MINUS_SIGN, "-")
     text = _RANGE_DASH.sub(" to ", _VERSION.sub(" ", text))
     text = _COMMA_RUN.sub(_spaced_if_a_list, text)
     # An underscore is a word character, so the tokenizer no longer starts a
@@ -403,7 +455,7 @@ def _derivable(value: float, token: str, context: str, traceable: Traceable) -> 
         for b, _b_token in operands[i:]:
             for cand in (a + b, a - b, b - a, a * b):
                 try:
-                    if round(cand, dec) == round(value, dec):
+                    if round(value, dec) in roundings(cand, dec):
                         return True
                 except (ValueError, OverflowError):
                     continue
@@ -411,7 +463,7 @@ def _derivable(value: float, token: str, context: str, traceable: Traceable) -> 
                 if not den:
                     continue
                 try:
-                    if round(num / den, dec) == round(value, dec):
+                    if round(value, dec) in roundings(num / den, dec):
                         return True
                 except (ZeroDivisionError, OverflowError, ValueError):
                     continue
@@ -431,6 +483,59 @@ _PATH_NUMBER = re.compile(r"(?<![\w])\d+(?:\.\d+)*(?![\w])")
 _TEXT_NUMBER = re.compile(r"(?<![\w.])(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)(?![\w])")
 
 
+# Words that name nothing: a connective, a statistic every result has, the structure the run's own record is stored in,
+# and the words every paper and every result uses (a rate, a score, an error, a run). The list is applied to the 4-letter
+# STEMS, so every inflection ("means", "values") is stopped with its root.
+_STOP_WORDS = (
+    "the and for with from that this these those are was were per over all each both also than then when which where "
+    "while into onto between across under using used use show shows shown table figure paper study "
+    "value values mean means median std sem min max low lower high upper ledger trial trials result results data "
+    "time times rate rates score scores error errors test tests case cases step steps run runs number total sample "
+    "samples size level levels point points"
+).split()
+# The two-letter words of ordinary English. Written in capitals (a heading, a sentence in capitals, emphasis) or as a
+# part of a result's path (`in`, `no`, `id`), they are still connectives, not abbreviations: only a two-letter word
+# that is NOT one of these (SD, CI, SE) can name a result.
+_TWO_LETTER_WORDS = frozenset(
+    "ad ah am an as at aw ax be by do eh er ex go ha he hi id if in is it me my no of oh ok on or ow ox pa re so to uh um "
+    "up us we ye yo".split()
+)
+_COMMON_STOP = frozenset(w[:4] for w in _STOP_WORDS) | _TWO_LETTER_WORDS
+_PATH_STOP = _COMMON_STOP | frozenset(w[:4] for w in (
+    "replicates config design oracle figure comparisons optimisation stratum len records cells settings setting seeds "
+    "seed over key keys estimate"
+).split())
+_WORD = re.compile(r"[a-z]{3,}")
+# An abbreviation is the one two-letter word that names something (SD, CI, SE): in a sentence it is written in capitals,
+# in a result's name it is a lowercase snake_case part (`Ea_estimate_sd_J_mol`). Any other two-letter word is a
+# connective ("of", "in", "is") and names nothing.
+_ABBREVIATION_IN_TEXT = re.compile(r"(?<![A-Za-z])[A-Z]{2}(?![A-Za-z])")
+_ABBREVIATION_IN_NAME = re.compile(r"(?<![A-Za-z])(?:[a-z]{2}|[A-Z]{2})(?![A-Za-z])")
+_GROUP_TAG = re.compile(r"\{[^}]*\}")
+_INDEX_OR_STAT = re.compile(r"\[\d*\]|\.@\w+$")
+
+# A value the run was told or declared (configuration, design) is not a computed value that could match by luck.
+_UNGATED_PREFIXES = ("config.", "design.")
+
+
+def _leaf_name(path: str) -> str:
+    """The last segment of a result path, which names the quantity (``by_noise.0.1.k_coverage_probability[1]`` ->
+    ``k_coverage_probability``); the segments before it are the strata it was computed in."""
+    path = _GROUP_TAG.sub("", _INDEX_OR_STAT.sub("", _INDEX_OR_STAT.sub("", path)))
+    return path.rsplit(".", 1)[-1] if "." in path else path
+
+
+def _name_stems(text: str, stop: frozenset[str], *, of_a_name: bool = False) -> frozenset[str]:
+    """The first four letters of each word in ``text`` that names something, so ``coverage`` and ``covered`` meet.
+    The stop list is applied to the stem, so ``means`` is stopped with ``mean``. An abbreviation of two letters is
+    kept (see ``_ABBREVIATION_IN_TEXT``); ``of_a_name`` says ``text`` is a result's name, not a sentence."""
+    stems = {w[:4] for w in _WORD.findall(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text).lower())}
+    stems.update(
+        ([w.lower() for w in _ABBREVIATION_IN_NAME.findall(text)] if of_a_name else [w.lower() for w in _ABBREVIATION_IN_TEXT.findall(text)])
+    )
+    return frozenset(stems - stop)
+
+
 class Traceable:
     """The set of values this run can account for, indexed for rounded lookup.
 
@@ -441,13 +546,26 @@ class Traceable:
     one run stores 14 565 of them.
     """
 
-    def __init__(self, values: dict[str, float]) -> None:
+    def __init__(self, values: dict[str, float], derived: dict[str, float] | None = None) -> None:
+        # ``values`` are the numbers the run stored or declared: exact-match targets, and the operands of a derivation.
+        # ``derived`` are statistics FI computed from raw columns (``mean``, ``sd``...): they account for a paper number
+        # that names them, but only through the same luck gate as everything else, and they are never an operand.
         self.values = values
+        self.derived = derived or {}
+        self._all = {**values, **self.derived} if self.derived else values
         self._by_dec: dict[int, dict[float, str]] = {}
         self._trunc_by_dec: dict[int, dict[float, str]] = {}
+        self._lists_by_dec: dict[int, dict[float, list[str]]] = {}
+        self._trunc_lists_by_dec: dict[int, dict[float, list[str]]] = {}
+        self._buckets_by_dec: dict[int, dict[tuple[bool, int], int]] = {}
+        self._words_of: dict[str, frozenset[str]] = {}
+
+    def all_paths(self) -> Iterator[str]:
+        """Every path this set holds, stored and derived."""
+        return iter(self._all)
 
     def __len__(self) -> int:
-        return len(self.values)
+        return len(self._all)
 
     def _table(self, dec: int) -> dict[float, str]:
         table = self._by_dec.get(dec)
@@ -455,7 +573,8 @@ class Traceable:
             table = {}
             for path, value in self.values.items():
                 try:
-                    table.setdefault(round(value, dec), path)
+                    for key in roundings(value, dec):
+                        table.setdefault(key, path)
                 except (ValueError, OverflowError):
                     continue
             self._by_dec[dec] = table
@@ -486,6 +605,10 @@ class Traceable:
         number. ``0.05/36 = 0.0013888…`` gets written ``0.001388``, and against
         rounding alone that reads as a number from nowhere — the one flag this
         check raised on a threshold the run really did compute."""
+        if dec < 0:
+            # Nobody truncates 2326.66 to 2320: a number rounded to the tens is rounded, and truncating would widen
+            # the window of 2320 to [2315, 2330).
+            return None
         scale = 10.0 ** dec
         try:
             key = math.floor(value * scale) / scale
@@ -493,13 +616,273 @@ class Traceable:
             return None
         return self._trunc_table(dec).get(key)
 
+    def _lists(self, dec: int) -> dict[float, list[str]]:
+        table = self._lists_by_dec.get(dec)
+        if table is None:
+            table = {}
+            for path, value in self._all.items():
+                try:
+                    for key in roundings(value, dec):
+                        table.setdefault(key, []).append(path)
+                except (ValueError, OverflowError):
+                    continue
+            self._lists_by_dec[dec] = table
+        return table
+
+    def _trunc_lists(self, dec: int) -> dict[float, list[str]]:
+        table = self._trunc_lists_by_dec.get(dec)
+        if table is None:
+            table = {}
+            scale = 10.0 ** dec
+            for path, value in self._all.items():
+                try:
+                    table.setdefault(math.floor(value * scale) / scale, []).append(path)
+                except (ValueError, OverflowError):
+                    continue
+            self._trunc_lists_by_dec[dec] = table
+        return table
+
+    def paths_at(self, value: float, dec: int) -> list[str]:
+        """Every path holding ``value`` rounded (or truncated) to ``dec`` decimals; empty when none does."""
+        scale = 10.0 ** dec
+        try:
+            hit = list(self._lists(dec).get(round(value, dec), ()))
+            if dec >= 0:  # nobody truncates a number rounded to the tens (see find_truncated)
+                hit += self._trunc_lists(dec).get(math.floor(value * scale) / scale, ())
+        except (ValueError, OverflowError):
+            return []
+        return hit
+
+    def chance(self, value: float, dec: int) -> float:
+        """How likely a number written like this is to equal SOME value here by luck alone: the share of the numbers
+        of its size and sign, at its precision, that this run's values already take (rounded, and truncated where a
+        truncated match is accepted). A run holding 400 distinct values between 0.1 and 1 holds about 40% of the 900
+        numbers ``0.xyz`` can be, so a 3-digit number in that range matches one of them on a coin flip; a run of 5
+        such values holds 0.6% of them.
+
+        A number that rounds to zero carries no information about where it came from (there is one such number, and
+        every run holds something near it), so its chance is 1: it is accepted only when the sentence names it."""
+        try:
+            key = round(value, dec)
+        except (ValueError, OverflowError):
+            return 1.0
+        if key == 0:
+            return 1.0
+        buckets = self._buckets_by_dec.get(dec)
+        if buckets is None:
+            keys = set(self._lists(dec))
+            if dec >= 0:
+                keys |= set(self._trunc_lists(dec))
+            buckets = {}
+            for k in keys:
+                if k:
+                    b = (k > 0, math.floor(math.log10(abs(k))))
+                    buckets[b] = buckets.get(b, 0) + 1
+            self._buckets_by_dec[dec] = buckets
+        e = math.floor(math.log10(abs(key)))
+        slots = 9.0 * 10.0 ** (max(e + 1 + dec, 1) - 1)
+        return min(1.0, buckets.get((key > 0, e), 0) / slots)
+
+    def is_declared(self, path: str) -> bool:
+        """Is this path something the run was told (its configuration or its design)?"""
+        return path.startswith(_UNGATED_PREFIXES)
+
+    def words_of(self, path: str) -> frozenset[str]:
+        """The words a result path names its quantity with (``by_noise.0.1.coverage_95`` -> ``noise``, ``coverage``)."""
+        got = self._words_of.get(path)
+        if got is None:
+            tags = " ".join(_GROUP_TAG.findall(path))
+            got = _name_stems(_leaf_name(path) + " " + tags, _PATH_STOP, of_a_name=True)
+            if not got:
+                # ``trials.error.@mean`` or ``ols.Ea_sd.estimate``: the leaf names nothing, so the quantity is named by
+                # what it is of
+                bare = _GROUP_TAG.sub("", _INDEX_OR_STAT.sub("", path))
+                for segment in reversed(bare.split(".")[:-1]):
+                    got = _name_stems(segment, _PATH_STOP, of_a_name=True)
+                    if got:
+                        break
+            self._words_of[path] = got
+        return got
+
     def find_near(self, value: float, tol: float) -> str | None:
         """Nearest value within a relative tolerance, for a hedged number."""
-        for path, actual in self.values.items():
+        for path, actual in self._all.items():
             denom = max(abs(value), abs(actual))
             if denom and abs(value - actual) / denom <= tol:
                 return path
         return None
+
+
+# --- raw columns: only what is derived from them is a result -------------------
+
+def _plain_numbers(seq: Any) -> "array | None":
+    """``seq`` as an array of doubles when every element is a plain finite number, else ``None``. Fast on millions of
+    elements: the conversion itself rejects a string or a ``None``; a boolean first element is not a number."""
+    first = seq[0]
+    if isinstance(first, bool) or not isinstance(first, (int, float)):
+        return None
+    try:
+        arr = array("d", seq)
+    except (TypeError, OverflowError):
+        return None
+    total = sum(arr)
+    if total - total != 0.0:  # a NaN or an infinity somewhere: drop them
+        arr = array("d", (v for v in arr if v - v == 0.0))
+    return arr
+
+
+def _quantile(ordered: list[float], pct: float) -> float:
+    """The linear-interpolation percentile (numpy's default) of an already sorted list."""
+    pos = (len(ordered) - 1) * pct / 100.0
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(ordered) - 1)
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+
+
+def _column_stats(path: str, vals: Any, derived: dict[str, float]) -> None:
+    """What a paper reports from a column of raw values, none of which it reports itself: mean, median, sample SD, min
+    and max (and the count). Only these: a percentile or an interval is a result when the run stored it, and is not
+    made up here. Computed deterministically from the values themselves."""
+    n = len(vals)
+    if n < 2:
+        return
+    ordered = sorted(vals)
+    mean = math.fsum(vals) / n
+    sd = math.sqrt(math.fsum((v - mean) ** 2 for v in vals) / (n - 1))
+    stats = {
+        "mean": mean, "median": _quantile(ordered, 50.0), "sd": sd, "min": ordered[0], "max": ordered[-1],
+        "count": float(n),
+    }
+    for name, value in stats.items():
+        if math.isfinite(value) and abs(value) > MIN_MAGNITUDE:
+            derived.setdefault(f"{path}.@{name}", value)
+
+
+def _kept_elements(vals: Any) -> list[int]:
+    """The positions of a long column whose elements a paper may still quote one by one, else ``[]``: only a column with
+    few distinct values (a coded level, a 0/1 outcome), one position per value. A long column in order is NOT kept: a
+    cumulative sum, sorted errors or arrival times are results of a computation over thousands of values, and keeping
+    each as a target would make nearly any number match."""
+    first: dict[float, int] = {}
+    for i, v in enumerate(vals):
+        if v not in first:
+            first[v] = i
+            if len(first) > _MAX_DISTINCT_KEPT:
+                return []
+    return sorted(first.values())
+
+
+def _emit_column(
+    label: str, vals: Any, element_path: Callable[[int], str],
+    kept: list[tuple[str, float]], derived: dict[str, float],
+) -> None:
+    """A long column: its derived statistics, and its elements only when ``_kept_elements`` says a paper may quote them."""
+    _column_stats(label, vals, derived)
+    for i in _kept_elements(vals):
+        if abs(vals[i]) > MIN_MAGNITUDE:
+            kept.append((element_path(i), vals[i]))
+
+
+def _walk(obj: Any, path: str, kept: list[tuple[str, float]], derived: dict[str, float]) -> None:
+    """Collect the numbers of ``obj`` as ``kept`` (stored values) and ``derived`` (statistics of raw columns)."""
+    if isinstance(obj, bool):
+        return
+    if isinstance(obj, (int, float)):
+        if math.isfinite(obj) and abs(obj) > MIN_MAGNITUDE:
+            kept.append((path or "<root>", float(obj)))
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            _walk(v, f"{path}.{k}" if path else str(k), kept, derived)
+        return
+    if isinstance(obj, (list, tuple)):
+        if len(obj) > RAW_COLUMN_MIN:
+            arr = _plain_numbers(obj)
+            if arr is not None:
+                _emit_column(path or "<root>", arr, lambda i: f"{path}[{i}]", kept, derived)
+                return
+            if isinstance(obj[0], dict):
+                _walk_records(obj, path, kept, derived)
+                return
+        for i, v in enumerate(obj):
+            _walk(v, f"{path}[{i}]", kept, derived)
+
+
+def _walk_records(
+    records: list, path: str, kept: list[tuple[str, float]], derived: dict[str, float],
+) -> None:
+    """A long list of records. The records are split into GROUPS by their string / boolean fields that take few values
+    (control vs treatment, method A vs B), and each field of a group is one column of that group alone: pooling across
+    groups would make a subgroup mean no one's statistic. A group of at most ``RAW_COLUMN_MIN`` records keeps every
+    element. Per-record path strings are only built for columns that keep their elements."""
+    seen: dict[str, set] = {}
+    for rec in records:
+        if isinstance(rec, dict):
+            for k, v in rec.items():
+                if isinstance(v, (str, bool)) or v is None:
+                    vs = seen.setdefault(k, set())
+                    if len(vs) <= _MAX_GROUPS:
+                        vs.add(v)
+    group_keys = [k for k, vs in seen.items() if len(vs) <= _MAX_GROUPS]
+    groups: dict[tuple, list[int]] = {}
+    for i, rec in enumerate(records):
+        if isinstance(rec, dict):
+            # Only a string, boolean or null names a group; a list or dict in that field is treated as missing.
+            key = tuple((k, v if isinstance(v, (str, bool)) or v is None else None)
+                        for k in group_keys if k in rec for v in (rec[k],))
+        else:
+            key = ()
+        groups.setdefault(key, []).append(i)
+    for key, idxs in groups.items():
+        tag = "{" + ",".join(f"{k}={v}" for k, v in key) + "}" if key else ""
+        cols: dict[str, tuple[array, array]] = {}
+        names: dict[tuple[str, str], str] = {}
+
+        def collect(obj: Any, col: str, i: int) -> None:
+            if isinstance(obj, bool):
+                return
+            if isinstance(obj, (int, float)):
+                if math.isfinite(obj):
+                    ix, vs = cols.get(col) or cols.setdefault(col, (array("q"), array("d")))
+                    ix.append(i)
+                    vs.append(obj)
+            elif isinstance(obj, dict):
+                for k, v in obj.items():
+                    sub = names.get((col, k))
+                    if sub is None:
+                        sub = names[(col, k)] = f"{col}.{k}"
+                    collect(v, sub, i)
+            elif isinstance(obj, (list, tuple)):
+                if len(obj) > RAW_COLUMN_MIN and (arr := _plain_numbers(obj)) is not None:
+                    _emit_column(f"{path}[{i}]{col}", arr, lambda j: f"{path}[{i}]{col}[{j}]", kept, derived)
+                    return
+                sub = names.get((col, "[]"))
+                if sub is None:
+                    sub = names[(col, "[]")] = f"{col}[]"
+                for v in obj:
+                    collect(v, sub, i)
+
+        for i in idxs:
+            collect(records[i], "", i)
+        for col, (ix, vs) in cols.items():
+            label = f"{path}[]{tag}{col}"
+            if len(vs) <= RAW_COLUMN_MIN:
+                # a small group keeps every element, and its mean / SD / extremes are a group's results too
+                _column_stats(label, vs, derived)
+                for i, v in zip(ix, vs):
+                    if abs(v) > MIN_MAGNITUDE:
+                        kept.append((f"{path}[{i}]{col}", v))
+            else:
+                _emit_column(label, vs, lambda j, ix=ix, col=col: f"{path}[{ix[j]}]{col}", kept, derived)
+
+
+def _trace_values(obj: Any, prefix: str = "") -> tuple[list[tuple[str, float]], dict[str, float]]:
+    """Like ``flatten_numbers``, except that raw columns (see ``RAW_COLUMN_MIN``) give their derived statistics and not
+    their elements. Returns ``(stored values, derived statistics)``."""
+    kept: list[tuple[str, float]] = []
+    derived: dict[str, float] = {}
+    _walk(obj, prefix, kept, derived)
+    return kept, derived
 
 
 def _list_lengths(obj: Any, path: str, out: dict[str, float]) -> None:
@@ -517,9 +900,12 @@ def _list_lengths(obj: Any, path: str, out: dict[str, float]) -> None:
     elif isinstance(obj, (list, tuple)):
         if obj:
             out.setdefault(f"len({path or '<root>'})", float(len(obj)))
-        for i, v in enumerate(obj):
-            if isinstance(v, (dict, list, tuple)):
-                _list_lengths(v, f"{path}[{i}]", out)
+        if obj and isinstance(obj[0], (dict, list, tuple)):
+            # Of a long list of records only the first is read: the others have the same shape, and formatting a path
+            # for each of millions would cost far more than the lengths are worth.
+            for i, v in enumerate(obj if len(obj) <= RAW_COLUMN_MIN else obj[:1]):
+                if isinstance(v, (dict, list, tuple)):
+                    _list_lengths(v, f"{path}[{i}]", out)
 
 
 def _strings(obj: Any, path: str = "") -> Iterator[tuple[str, str]]:
@@ -579,21 +965,28 @@ def build_traceable(
     design: Any = None,
     oracle_checks: Any = None,
     optimisation: Any = None,
+    run_facts: Any = None,
 ) -> tuple[Traceable, int]:
     """Everything this run can account for, and how much of it came from the
     experiment itself (the second number gates the whole check: a run that
     computed nothing has nothing to check a paper against)."""
     values: dict[str, float] = {}
+    derived: dict[str, float] = {}
 
-    for path, value in flatten_numbers(result_json or {}):
-        values.setdefault(path, value)
-    for path, value in flatten_numbers(replicates or []):
-        values.setdefault(f"replicates{path}", value)
+    def take(obj: Any, prefix: str = "") -> None:
+        kept, stats = _trace_values(obj, prefix)
+        for path, value in kept:
+            values.setdefault(path, value)
+        for path, value in stats.items():
+            derived.setdefault(path, value)
+
+    take(result_json or {})
+    take(replicates or [], "replicates")
     _stat_values(intervals, "mean_over_seeds", values)
     _stat_values(aggregate, "over_seeds", values)
     _list_lengths(result_json or {}, "", values)
     _list_lengths(replicates or [], "replicates", values)
-    from_results = len(values)
+    from_results = len(values) + len(derived)
 
     # Stratum labels, read off the result paths themselves.
     for path in list(values):
@@ -606,29 +999,29 @@ def build_traceable(
     # A figure's own numbers, axis limits included. An axis limit printed as a
     # count IS a defect, but stat_claims recomputes and names it; flagging it
     # here too would report one mistake twice.
-    for path, value in flatten_numbers(figure_records or {}):
-        values.setdefault(f"figure.{path}", value)
+    take(figure_records or {}, "figure")
 
     # The pairwise comparison aggregate: each stratum's interval and every
     # Cohen's d the replicates support. These are computed FOR the paper and
     # are absent from RESULT_JSON, so an effect size the paper quotes has
     # nowhere else to trace to. Whether such a claim is overstated is a
     # different question, and stat_claims already answers it.
-    for path, value in flatten_numbers(comparison_stats or {}):
-        values.setdefault(f"comparisons.{path}", value)
+    take(comparison_stats or {}, "comparisons")
 
     # The engine's oracle checks before the main run: what the script measured on each check case, and the expected
     # value and limit it was judged against. These are numbers this run computed, just not in RESULT_JSON; a paper
     # that reports "the energy drift was 1.25e-5, within 2e-5" quotes them.
-    for path, value in flatten_numbers(oracle_checks or []):
-        values.setdefault(f"oracle{path}", value)
+    take(oracle_checks or [], "oracle")
 
     # A search for the best design: FI's own record of the search and of its check at finer numerical settings
     # (results/best_design.json, needs/OPTIMUM_CHECK.json: core/best_design_report.py). The paper's "Best design found"
     # section prints them at every level of the numerical settings; they are numbers this run computed, not the
     # script's, and FI wrote them.
-    for path, value in flatten_numbers(optimisation or {}):
-        values.setdefault(f"optimisation.{path}", value)
+    take(optimisation or {}, "optimisation")
+
+    # What FI recorded about the run itself (how long it took): a paper or an analysis that says "the run took
+    # 111.3 s" quotes FI's record, not a result.
+    take(run_facts or {}, "run")
 
     # The run configuration, including numbers the user wrote into the topic.
     if config is not None:
@@ -653,7 +1046,7 @@ def build_traceable(
             for value, _token in _numbers_in_text(text):
                 values.setdefault(f"design.{path}={value:g}", value)
 
-    return Traceable(values), from_results
+    return Traceable(values, derived), from_results
 
 
 # --- the check ----------------------------------------------------------------
@@ -662,15 +1055,160 @@ def _variants(value: float, token: str) -> Iterator[tuple[float, int, str]]:
     """``(candidate, decimals, how)`` — the same number under the scale and
     complement shifts a paper legitimately applies. Dividing by 100 moves the
     decimal point two places, so the precision it must be compared at moves
-    with it."""
-    dec = _decimals(token)
+    with it. The precision is the
+    one the paper wrote, so ``2330`` is compared at the tens (``-1``)."""
+    dec = _written_precision(token)
     yield value, dec, ""
-    yield value / 100.0, dec + 2, " (as a fraction rather than a percentage)"
-    yield value * 100.0, max(dec - 2, 0), " (as a percentage rather than a fraction)"
+    # A rounded integer is divided at the precision it had before trailing zeros counted (2 decimals), not at
+    # dec + 2: 233000 / 100 compared at the tens would match an unrelated 2326.66.
+    yield value / 100.0, max(dec, 0) + 2, " (as a fraction rather than a percentage)"
+    if dec >= 0:  # never for a rounded integer: 2330 x 100 would match an unrelated 233,450
+        yield value * 100.0, max(dec - 2, 0), " (as a percentage rather than a fraction)"
     if 0.0 < value < 1.0:
         yield 1.0 - value, dec, " (as its complement)"
     if 0.0 < value < 100.0:
         yield 1.0 - value / 100.0, dec + 2, " (as the complement of a percentage)"
+
+
+# A match that shares no word with the sentence it stands in is accepted only when it is unlikely to be luck.
+MAX_CHANCE_UNNAMED = 0.2
+SHIFT_CHANCE_DIVISOR = 4
+
+
+# The words that name a number's quantity are read from the sentence it stands in; a sentence that is too
+# long to say anything (a run-on, a paragraph with no full stop) falls back to this many characters either side.
+_NAMING_FALLBACK = 120
+_SENTENCE_MAX = 500
+
+
+_BLANK_LINE = re.compile(r"\n[ \t]*\n")
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence of ``text`` holding ``[start, end)``. A table row is one line; elsewhere a sentence ends at a full
+    stop followed by a capital or at a blank line, so a paragraph soft-wrapped over several lines is read whole."""
+    line_lo = text.rfind("\n", 0, start) + 1
+    line_hi = text.find("\n", end)
+    line_hi = len(text) if line_hi < 0 else line_hi
+    if text[line_lo:line_hi].lstrip().startswith("|"):
+        lo, hi = line_lo, line_hi
+    else:
+        lo = 0
+        for m in _BLANK_LINE.finditer(text, 0, start):
+            lo = m.end()
+        m_end = _BLANK_LINE.search(text, end)
+        hi = m_end.start() if m_end else len(text)
+        stop = hi
+        for m in _SENTENCE_END.finditer(text, lo, hi):
+            if m.end() <= start:
+                lo = m.end()
+            else:
+                stop = m.start()
+                break
+        hi = stop
+    sentence = text[lo:hi]
+    if len(sentence) <= _SENTENCE_MAX:
+        return sentence
+    return text[max(0, start - _NAMING_FALLBACK): end + _NAMING_FALLBACK]
+
+
+def _naming_words(text: str, token: str, context: str) -> frozenset[str]:
+    """The words that name the quantity ``token`` stands for: those of the sentence it stands in, wherever the paper
+    writes it (at most four places)."""
+    words: set[str] = set()
+    found = 0
+    for m in re.finditer(r"(?<![\d.])" + re.escape(token) + r"(?!\d)", text):
+        words |= _name_stems(_sentence_around(text, m.start(), m.end()), _COMMON_STOP)
+        found += 1
+        if found >= 4:
+            break
+    if not found:  # the tokenizer rewrote the text around it; the short context it kept is what is left
+        words |= _name_stems(context, _COMMON_STOP)
+    return frozenset(words)
+
+
+# A value with its interval beside it: ``0.918 (367/400; 0.886 to 0.941)``, ``0.813 for OLS (0.771-0.848)``,
+# ``0.918 [0.886, 0.941]``, ``0.918 (95% CI 0.886-0.941)``. At most three words between the value and the bracket, and
+# the bracket must close right after the upper bound, so the pair is the interval.
+_NUM_TOKEN = r"(?<![\w.])(-?[0-9]+(?:\.[0-9]+)?)"
+_INTERVAL_BESIDE = re.compile(
+    _NUM_TOKEN + r"\s*%?(?:\s+[A-Za-z]+){0,3}\s*[(\[][^()\[\]]{0,60}?" + _NUM_TOKEN
+    + r"\s*%?\s*(?:to|\u2013|\u2014|-|,|;)\s*" + _NUM_TOKEN + r"\s*%?\s*[)\]]",
+    re.I,
+)
+
+
+def _intervals_beside(text: str) -> dict[str, list[tuple[str, str, str]]]:
+    """Each interval endpoint the paper prints beside a value, by its token: ``{"0.886": [("0.918", "0.886",
+    "0.941")]}``. Only a pair that holds the value between its ends is taken for its interval."""
+    out: dict[str, list[tuple[str, str, str]]] = {}
+    for m in _INTERVAL_BESIDE.finditer(text):
+        value, lower, upper = m.group(1), m.group(2), m.group(3)
+        try:
+            if not float(lower) <= float(value) <= float(upper):
+                continue
+        except ValueError:
+            continue
+        for end in (lower, upper):
+            out.setdefault(end, []).append((value, lower, upper))
+    return out
+
+
+#: The most numbers one result may hold for its value and interval to be read as one: an estimate, its interval's two
+#: ends and a few counts. A larger group (a list, a whole table) holds an unrelated pair by luck.
+RESULT_GROUP_MAX = 8
+
+
+def _parent(path: str) -> str:
+    """``path`` without its last part (``a.b.estimate`` -> ``a.b``, ``a.vals[3]`` -> ``a.vals``); ``""`` at the top."""
+    cut = max(path.rfind("."), path.rfind("["))
+    return path[:cut] if cut > 0 else ""
+
+
+def _under(path: str, parent: str) -> bool:
+    return path.startswith(parent + ".") or path.startswith(parent + "[")
+
+
+def _interval_of_a_result(token: str, beside: dict[str, list[tuple[str, str, str]]], traceable: Traceable) -> bool:
+    """Is ``token`` an end of the interval printed beside a value, where one result holds the value and both ends:
+    ``….coverage.estimate`` 0.9175 and ``….coverage.wilson_95_ci[0]``/``[1]`` 0.886/0.941? A run holding thousands of
+    numbers matches a 3-digit endpoint by luck, so the endpoint alone is not enough; the value and both ends under one
+    result -- a group of at most ``RESULT_GROUP_MAX`` numbers -- are."""
+    for value, lower, upper in beside.get(token, ()):
+        ends = [traceable.paths_at(float(t), _written_precision(t)) for t in (lower, upper)]
+        if not all(ends):
+            continue
+        for path in traceable.paths_at(float(value), _written_precision(value)):
+            parent = _parent(path)
+            if not parent or not all(any(_under(p, parent) for p in paths) for paths in ends):
+                continue
+            if sum(1 for p in traceable.all_paths() if _under(p, parent)) <= RESULT_GROUP_MAX:
+                return True
+    return False
+
+
+def _is_accounted_for(
+    traceable: Traceable, cand: float, dec: int, named: Callable[[], frozenset[str]], *, shifted: bool = False,
+    max_chance: float = MAX_CHANCE_UNNAMED,
+) -> bool:
+    """Does a result hold ``cand`` (rounded or truncated at ``dec`` decimals) as the quantity the sentence names?
+
+    A value equal to the number is not enough when the run holds thousands of values: by luck alone a 3-digit number
+    equals one of them. So a match counts when the words around the number name what the matching result is
+    (``coverage`` in the sentence, ``coverage`` in the result's name), or when the run holds so few values of that
+    size that a match is not luck (``Traceable.chance``).
+    """
+    paths = traceable.paths_at(cand, dec)
+    if not paths:
+        return False
+    # A value the run was told or declared (configuration, design) is no luck.
+    if any(traceable.is_declared(path) for path in paths):
+        return True
+    # A scale or complement change is one more way to match by luck, so the unnamed match must be that much rarer.
+    if traceable.chance(cand, dec) <= max_chance / (SHIFT_CHANCE_DIVISOR if shifted else 1):
+        return True
+    words = named()
+    return any(traceable.words_of(path) & words for path in paths)
 
 
 def check(
@@ -687,6 +1225,8 @@ def check(
     oracle_checks: Any = None,
     n_seeds: int = 0,
     optimisation: Any = None,
+    run_facts: Any = None,
+    trial_table: Any = None,
 ) -> ProvenanceReport:
     """Flag every number in the paper that nothing in this run accounts for.
 
@@ -703,8 +1243,14 @@ def check(
         result_json=result_json, replicates=replicates, intervals=intervals,
         aggregate=aggregate, figure_records=figure_records,
         comparison_stats=comparison_stats, config=config, design=design,
-        oracle_checks=oracle_checks, optimisation=optimisation,
+        oracle_checks=oracle_checks, optimisation=optimisation, run_facts=run_facts,
     )
+    # FI's own table of what every trial gave, per setting (core/trial_table.py): the mean, SD and interval of each value
+    # over the trials, which the paper may quote and RESULT_JSON need not hold. A pool of its own, read only when the
+    # results account for nothing: added to the results, its hundreds of numbers would make every match there likelier
+    # to be luck, and correct numbers the results do account for would be flagged.
+    table_kept, table_stats = _trace_values(trial_table or {}, "trials")
+    table = Traceable(dict(table_kept), table_stats) if table_kept or table_stats else None
     report.traceable_values = len(traceable)
     # The experiment recorded nothing: it crashed, or its last RESULT_JSON is
     # empty. A paper written over no results is a real problem and not this
@@ -716,6 +1262,8 @@ def check(
         return report
 
     seen: set[float] = set()
+    flat_text = normalise(_TEX_THOUSANDS.sub(",", paper_text)).replace(_MINUS_SIGN, "-")
+    beside = _intervals_beside(flat_text)
     for value, token, context in paper_numbers(paper_text):
         if not _carries_enough_precision(token) or _is_year(value, token):
             continue
@@ -727,10 +1275,11 @@ def check(
         # A number after a plus-minus sign is two numbers, and either traces.
         readings = (value, -value) if _either_sign(token, context) else (value,)
         if any(
-            traceable.find(cand, dec) is not None
-            or traceable.find_truncated(cand, dec) is not None
+            _is_accounted_for(
+                traceable, cand, dec, lambda: _naming_words(flat_text, token, context), shifted=bool(how),
+            )
             for reading in readings
-            for cand, dec, _ in _variants(reading, token)
+            for cand, dec, how in _variants(reading, token)
         ):
             continue
         if hedged and traceable.find_near(value, HEDGED_REL_TOL) is not None:
@@ -738,6 +1287,21 @@ def check(
         if _derivable(value, token, context, traceable):
             continue
         if _a_list_the_run_holds(token, traceable):
+            continue
+        if _interval_of_a_result(token, beside, traceable):
+            continue
+        # A number gets a second chance to match by luck here, so an unnamed match must be that much rarer.
+        if table is not None and (
+            any(
+                _is_accounted_for(
+                    table, cand, dec, lambda: _naming_words(flat_text, token, context), shifted=bool(how),
+                    max_chance=MAX_CHANCE_UNNAMED / SHIFT_CHANCE_DIVISOR,
+                )
+                for reading in readings
+                for cand, dec, how in _variants(reading, token)
+            )
+            or _interval_of_a_result(token, beside, table)
+        ):
             continue
         report.untraceable += 1
         if value in seen:

@@ -219,12 +219,371 @@ def paragraph(quest_root: Path, *, no_simulation: bool = False, survey: bool = F
     return " ".join(parts)
 
 
+# ---- the run record ------------------------------------------------------------------------------------------------
+
+_RECORD_LEAD = "**What FI recorded about this run.**"
+_SHOWN = 3  # sentences of one record listed in the paper; the rest are counted
+_LIMIT_PHRASE = re.compile(
+    r"\b(?:under|within|at most|less than|no more than|below)\s+(?:about\s+|roughly\s+|approximately\s+)?"
+    r"(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|s|h)\b", re.I)
+#: A word that says the limit is about how long the run takes (not about, say, a time inside the study).
+_RUN_WORD = re.compile(r"\b(?:run[ \t-]?times?|runtimes?|runs?|running|comput\w*|execut\w*|wall[ \t-]?clock)\b", re.I)
+_UNIT_SECONDS = (("h", 3600.0), ("m", 60.0), ("s", 1.0))
+
+
+def _whole(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _plain_seconds(seconds: float) -> str:
+    """A duration the way the paper says it: ``73.6 s``, ``60 s``, ``1,200 s``."""
+    return f"{seconds:,.0f} s" if float(seconds).is_integer() else f"{seconds:,.1f} s"
+
+
+def _limits_in(text: str) -> set[float]:
+    """The distinct run-time limits (in seconds) that ``text`` states: a phrase such as "under 60 seconds" with a word
+    about the run itself ("runtime", "runs", "computing") within a few words of it."""
+    found: set[float] = set()
+    for m in _LIMIT_PHRASE.finditer(text):
+        around = text[max(0, m.start() - 60):m.end() + 60]
+        if not _RUN_WORD.search(around):
+            continue
+        scale = next(s for u, s in _UNIT_SECONDS if m.group(2).lower().startswith(u))
+        found.add(round(float(m.group(1)) * scale, 6))
+    return found
+
+
+def _topic_limit(constraints: list[str], topic: str) -> float | None:
+    """The one run-time limit the topic states (in seconds), or ``None`` when it states none or several different ones.
+    The topic's constraints are read first; its text only when they state none."""
+    for source in ("\n".join(constraints), topic):
+        limits = _limits_in(source)
+        if limits:
+            return next(iter(limits)) if len(limits) == 1 else None
+    return None
+
+
+def _items(value: Any) -> list[str]:
+    """FI's sentences from a record's list (plain sentences, or objects that hold one under ``sentence``)."""
+    out: list[str] = []
+    for item in value if isinstance(value, list) else []:
+        text = item.get("sentence") if isinstance(item, dict) else item
+        if isinstance(text, str) and text.strip() and text.strip() not in out:
+            out.append(text.strip())
+    return out
+
+
+def _listed(lead: str, sentences: list[str]) -> str:
+    """``lead`` and the first few of ``sentences`` (each a sentence of its own), then how many more there are."""
+    shown = [s[:1].upper() + s[1:] + ("" if s.endswith((".", "!", "?")) else ".") for s in sentences[:_SHOWN]]
+    more = len(sentences) - _SHOWN
+    return " ".join([lead, *shown, *([f"And {more} more."] if more > 0 else [])])
+
+
+def _ledger_rows(quest_root: Path) -> tuple[dict[str, int], dict[tuple[str, int], tuple[str, int | None]]] | None:
+    """What FI's trial ledger holds: the trials planned per setting, and each trial's ``(status, seed)`` (a later line
+    for the same trial replaces an earlier one). ``None`` when there is no readable ledger or it holds no trial."""
+    try:
+        lines = (Path(quest_root) / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    planned: dict[str, int] = {}
+    trials: dict[tuple[str, int], tuple[str, int | None]] = {}
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or not isinstance(row.get("cell"), str):
+            continue
+        if row.get("event") == "planned" and (n := _whole(row.get("trials"))) is not None:
+            planned[row["cell"]] = n
+        elif row.get("event") == "trial" and (t := _whole(row.get("trial"))) is not None:
+            trials[(row["cell"], t)] = (str(row.get("status")), _whole(row.get("seed")))
+    return (planned, trials) if trials else None
+
+
+def recorded_seeds(quest_root: Path) -> tuple[int | None, frozenset[int]]:
+    """What the run's own records say its seeds were: the base seed in the study record (``code/study.json``) and
+    every trial seed in FI's ledger (``raw/ledger.jsonl``); ``None`` and an empty set where a record is missing."""
+    study = _read_json(Path(quest_root) / "code" / "study.json")
+    base = _whole(study.get("base_seed")) if isinstance(study, dict) else None
+    rows = _ledger_rows(quest_root)
+    trial = frozenset(seed for _status, seed in rows[1].values() if seed is not None) if rows else frozenset()
+    return base, trial
+
+
+def _seeds_paired(trials: dict[tuple[str, int], tuple[str, int | None]]) -> bool | None:
+    """Whether the ledger shows every setting using the same seed for the same trial number (``True``), or no two
+    settings sharing one (``False``); ``None`` when it shows neither (one setting only, or a mixture)."""
+    by_trial: dict[int, list[int]] = {}
+    for (_cell, t), (_status, seed) in trials.items():
+        if seed is not None:
+            by_trial.setdefault(t, []).append(seed)
+    shared = [seeds for seeds in by_trial.values() if len(seeds) > 1]
+    if not shared:
+        return None
+    if all(len(set(seeds)) == 1 for seeds in shared):
+        return True
+    if all(len(set(seeds)) == len(seeds) for seeds in shared):
+        return False
+    return None
+
+
+def _inside_sentence(study: Any) -> str:
+    """What each run compared on its own random numbers (``in_each_run`` of ``code/study.json``), or ``""``."""
+    inside = study.get("in_each_run") if isinstance(study, dict) else None
+    if not isinstance(inside, dict) or not inside:
+        return ""
+    said = " and of ".join(f"`{name}` ({', '.join(str(v) for v in values)})" for name, values in inside.items()
+                           if isinstance(values, list))
+    return (f" Within each run, every value of {said} was used on the same simulated data, so differences between those "
+            "values do not come from different random draws.") if said else ""
+
+
+def _seed_sentence(quest_root: Path, rows: Any) -> str:
+    study = _read_json(Path(quest_root) / "code" / "study.json")
+    base = _whole(study.get("base_seed")) if isinstance(study, dict) else None
+    if base is None:
+        return ""
+    return _settings_seed_sentence(study, base, rows) + _inside_sentence(study)
+
+
+def _settings_seed_sentence(study: dict[str, Any], base: int, rows: Any) -> str:
+    stated = study.get("paired") if isinstance(study.get("paired"), bool) else None
+    shown = _seeds_paired(rows[1]) if rows else None
+    if shown is not None and shown != stated:
+        # The ledger is what happened; the study's own setting does not override it.
+        if shown:
+            return (f"Each trial's random seed is derived from base seed {base}; the run's ledger shows that every "
+                    "setting used the same seeds for the same trial number (common random numbers), so the settings' "
+                    "results are paired, not independent.")
+        return (f"Each trial's random seed is derived from base seed {base}; the run's ledger shows that different "
+                "settings used different seeds for the same trial number.")
+    if stated is True:
+        return (f"Each trial's random seed is derived from base seed {base} and the trial number; every setting uses "
+                "the same seeds for the same trial number (common random numbers), so the settings' results are "
+                "paired, not independent.")
+    if stated is False:
+        return (f"Each trial's random seed is derived from base seed {base}, the setting and the trial number, so "
+                "different settings use different seeds.")
+    return f"Each trial's random seed is derived from base seed {base}."
+
+
+def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> str:
+    if isinstance(duration_s, bool) or not isinstance(duration_s, (int, float)) or not 0 <= duration_s < float("inf"):
+        return ""
+    required = _read_json(Path(quest_root) / ".fi" / "topic_requirements.json")
+    constraints = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
+                   for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
+    limit = _topic_limit([c for c in constraints if isinstance(c, str)], topic or "")
+    ran = f"The experiment ran for {_plain_seconds(float(duration_s))}"
+    if limit is None:
+        return f"{ran}; FI did not check it against a limit in the topic."
+    return f"{ran}; the topic sets a limit of {_plain_seconds(limit)}, and the run was {'within' if duration_s <= limit else 'over'} it."
+
+
+def _count_sentence(rows: Any) -> str:
+    if not rows:
+        return ""
+    planned, trials = rows
+    cells = sorted({cell for cell, _t in trials} | set(planned))
+    counts: dict[str, int] = {}
+    for c, _t in trials:
+        counts[c] = counts.get(c, 0) + 1
+    per = sorted(set(planned.values())) or sorted({counts.get(cell, 0) for cell in cells})
+    each = f"{per[0]:,}" if len(per) == 1 else f"{per[0]:,} to {per[-1]:,}"
+    finished = sum(1 for status, _s in trials.values() if status == "ok")
+    failed = sum(1 for status, _s in trials.values() if status == "failed")
+    settings = f"{len(cells):,} setting{'' if len(cells) == 1 else 's'}"
+    return (f"The run had {settings} with {each} trial{'' if per == [1] else 's'} per setting; "
+            f"{finished:,} trial{'' if finished == 1 else 's'} finished and {failed:,} failed.")
+
+
+_UNTESTED_ID = re.compile(r"\bequation\s+(\S+?)\s+is not tested( at all)?\b", re.I)
+
+
+def _code_faults_sentence(quest_root: Path) -> str:
+    """The quantities FI left out because a test it ran on the code that produced the results showed them computed
+    wrongly, and the plan's quantities the code does not compute (the evidence gate's record of each, in
+    ``.fi/code_review.json``)."""
+    record = _read_json(quest_root / ".fi" / "code_review.json")
+    issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
+    wrong: list[str] = []
+    missing: list[str] = []
+    from . import code_findings as _code_findings
+
+    for issue in issues.values():
+        gate = issue.get("at_gate") if isinstance(issue, dict) else None
+        if not isinstance(gate, dict) or not _code_findings.flagged_now(issue):
+            continue
+        if gate.get("outcome") == "left_out" and str(gate.get("quantity") or "").strip():
+            name = str(gate["quantity"]).strip()
+            if name not in wrong:
+                wrong.append(name)
+        elif gate.get("outcome") == "not_computed":
+            for n in gate.get("names") if isinstance(gate.get("names"), list) else []:
+                if str(n).strip() and str(n).strip() not in missing:
+                    missing.append(str(n).strip())
+    said = []
+    if wrong:
+        said.append("Tests FI ran on the code that produced these results showed it computes " + _names(wrong)
+                    + " wrongly, so " + ("this quantity is" if len(wrong) == 1 else "these quantities are")
+                    + " left out of the results reported here.")
+    if missing:
+        said.append("The code does not compute " + _names(missing) + ", which the plan asks for.")
+    return " ".join(said)
+
+
+def _names(names: list[str]) -> str:
+    shown = [f"`{n}`" for n in names[:_SHOWN]]
+    more = len(names) - _SHOWN
+    if more > 0:
+        return ", ".join(shown) + f" and {more} more"
+    return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+
+
+#: The probabilities whose pooled 95% interval was wider than the plan's precision target, as the writing step found them
+#: in the run it writes up (``Engine._precision_shortfalls``): ``[{"name", "half_width", "target", "trials"}]``.
+PRECISION_RECORD = Path(".fi") / "precision_missed.json"
+
+
+def write_precision_record(quest_root: Path, missed: list[dict[str, Any]]) -> None:
+    """Keep ``missed`` for the paper's limitations and the claim check (both read it); no record when none was missed."""
+    path = Path(quest_root) / PRECISION_RECORD
+    if missed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(missed, indent=1) + "\n", encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
+
+
+#: A reviewer's objections to the design that no check of FI's confirms, kept by the review step when the paper is
+#: written again after it (``Engine._note_design_objections``), cleared when a new design is made:
+#: ``[{"names": [...], "hits": [...], "said": str}]`` (``names`` are the keys a repeated objection is found by).
+OBJECTIONS_RECORD = Path(".fi") / "review_objections.json"
+
+
+def _objection_rows(quest_root: Path) -> list[dict[str, Any]]:
+    rows = _read_json(Path(quest_root) / OBJECTIONS_RECORD)
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def stated_objections(quest_root: Path) -> set[str]:
+    """The objections the record holds, by name."""
+    return {str(n) for r in _objection_rows(quest_root) for n in r.get("names") or [] if str(n).strip()}
+
+
+def add_objections(quest_root: Path, hits: list[tuple[str, str]], said: str) -> None:
+    """Add one review's objections (``hits``: each ``(key, the hit as the reviewer wrote it)``, and the reviewer's own
+    reason ``said``) to the record."""
+    rows = _objection_rows(quest_root) + [{"names": [str(k) for k, _t in hits], "hits": [str(t) for _k, t in hits],
+                                           "said": str(said or "").strip()}]
+    path = Path(quest_root) / OBJECTIONS_RECORD
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
+
+
+def clear_objections(quest_root: Path) -> None:
+    (Path(quest_root) / OBJECTIONS_RECORD).unlink(missing_ok=True)
+
+
+def _objections_sentence(rows: Any) -> str:
+    """The reviewer's objections, each in the reviewer's own words: its reason when it gave one, else each objection as
+    it wrote it (an identifier read as words). The same words twice are said once."""
+    said: list[str] = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        reason = " ".join(str(r.get("said") or "").split()).rstrip(".")
+        hits = [re.sub(r"^\s*\[[^\]]*\]\s*", "", str(h)) for h in r.get("hits") or r.get("names") or []]
+        words = [reason] if reason else [" ".join(h.replace("_", " ").split()).rstrip(".") for h in hits if h.strip()]
+        said += [f"\"{w}\"" for w in words if f"\"{w}\"" not in said]
+    if not said:
+        return ""
+    more = f" and {len(said) - _SHOWN} more" if len(said) > _SHOWN else ""
+    return ("A reviewer objected to the design in ways FI's records neither confirm nor rule out, and the study was not "
+            f"changed for them: {'; '.join(said[:_SHOWN])}{more}.")
+
+
+def _precision_sentence(missed: Any) -> str:
+    """The plan's precision target and the quantities that missed it, with the half-width each reached."""
+    rows = [m for m in missed if isinstance(m, dict) and m.get("name")] if isinstance(missed, list) else []
+    try:
+        target = float(rows[0]["target"]) if rows else None
+        said = [f"{m['name']} (±{float(m['half_width']):.3g}"
+                + (f" from {int(m['trials']):,} trials)" if isinstance(m.get("trials"), (int, float)) else ")")
+                for m in rows[:_SHOWN]]
+    except (KeyError, TypeError, ValueError):
+        return ""
+    if not rows or target is None:
+        return ""
+    more = f" and {len(rows) - _SHOWN} more" if len(rows) > _SHOWN else ""
+    return (f"The plan's precision target (a 95% interval of ±{target:g}) was not reached for "
+            f"{', '.join(said)}{more}.")
+
+
+def _untested_sentence(notes: list[str]) -> str:
+    """The equations FI did not test before the run, by id, in one short sentence (the paper has little room; the reasons
+    are in the quality report, from the same record). A note whose id cannot be read is kept as written."""
+    ids, never, other = [], [], []
+    for note in notes:
+        m = _UNTESTED_ID.search(note)
+        if not m:
+            other.append(note)
+            continue
+        if m.group(1) not in ids:
+            ids.append(m.group(1))
+        if m.group(2) and m.group(1) not in never:
+            never.append(m.group(1))
+    text = ""
+    if ids:
+        text = (("Equation " + ids[0] + " was") if len(ids) == 1 else
+                ("Equations " + ", ".join(ids[:-1]) + " and " + ids[-1] + " were")) + \
+            " not tested against a worked example before the run" + \
+            (" (" + ", ".join(never) + (" is" if len(never) == 1 else " are") + " not tested at all)" if never else "") + \
+            "; the quality report says why."
+    if other:
+        text = (text + " " + _listed("", other)).strip()
+    return text
+
+
+def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = None) -> str:
+    """One paragraph (no heading) of what FI recorded about the run, for the paper's limitations: the seeds, the run
+    time against any limit the topic states, the trial counts, a reduced size, the topic's requirements that were not
+    done and the equations not tested before the run. Each sentence is written only from a record that exists and can
+    be read; a missing record leaves its sentence out. ``duration_s`` is the measured wall time of the experiment
+    run; ``topic`` is the topic's text (its limits are read from it when the topic's constraints state none).
+    Nothing here is asked of a model."""
+    quest_root = Path(quest_root)
+    rows = _ledger_rows(quest_root)
+    parts = [_seed_sentence(quest_root, rows), _time_sentence(quest_root, topic, duration_s), _count_sentence(rows)]
+    estimate = _read_json(quest_root / ".fi" / "run_estimate.json")
+    reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
+    if isinstance(reduced, dict) and isinstance(reduced.get("note"), str) and reduced["note"].strip():
+        parts.append(reduced["note"].strip())
+    covered = _read_json(quest_root / ".fi" / "topic_covered.json")
+    left = _items(covered.get("left")) if isinstance(covered, dict) else []
+    if left:
+        parts.append(_listed("FI did not do all of the topic's requirements.", left))
+    parts.append(_code_faults_sentence(quest_root))
+    tests = _read_json(quest_root / ".fi" / "equation_tests.json")
+    untested = _items(tests.get("not_tested")) if isinstance(tests, dict) else []
+    if untested:
+        parts.append(_untested_sentence(untested))
+    parts.append(_precision_sentence(_read_json(quest_root / PRECISION_RECORD)))
+    parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
+    parts = [p for p in parts if p]
+    return f"{_RECORD_LEAD} " + " ".join(parts) if parts else ""
+
+
 # ---- the paper -----------------------------------------------------------------------------------------------------
 
 #: Any block between the markers, whoever wrote it (with the blank lines around it), a marker left on its own, and a
 #: paragraph under the engine's lead words outside the markers (the passage editor can drop a marker and keep the rest).
 _ANY_BLOCK = re.compile(r"\n*[ \t]*" + re.escape(BEGIN) + r".*?" + re.escape(END) + r"[ \t]*\n*", re.S)
 _STRAY_MARKER = re.compile(r"(?:" + re.escape(BEGIN) + "|" + re.escape(END) + r")")
+_RECORD_LEAD_LINE = re.compile(r"\n*^[ \t]*" + re.escape(_RECORD_LEAD) + r"[^\n]*(?:\n|\Z)\n*", re.M)
 _LEAD_LINE = re.compile(r"\n*^[ \t]*" + re.escape(LEAD) + r"[^\n]*(?:\n|\Z)\n*", re.M)
 
 _SECTION_NUMBER = r"(?:(?:\d+(?:\.\d+)*|[IVXLC]+)\.?[ \t]+)?"
@@ -254,6 +613,15 @@ _FINDINGS_BLOCK = re.compile(
     r"<!-- fi:code-findings:([0-9a-f]{12}) -->[ \t]*\r?\n(.*?)\r?\n[ \t]*" + re.escape(FINDINGS_END), re.S)
 
 
+#: The run record block (:func:`run_record`): the same scheme as the findings block, its own markers.
+RUN_RECORD_END = "<!-- /fi:run-record -->"
+_RECORD_OPEN = r"<!-- fi:run-record(?::[0-9a-f]*)? -->"
+_RECORD_ANY = re.compile(r"\n*[ \t]*" + _RECORD_OPEN + r".*?" + re.escape(RUN_RECORD_END) + r"[ \t]*\n*", re.S)
+_RECORD_STRAY = re.compile(r"(?:" + _RECORD_OPEN + "|" + re.escape(RUN_RECORD_END) + r")")
+_RECORD_BLOCK = re.compile(
+    r"<!-- fi:run-record:([0-9a-f]{12}) -->[ \t]*\r?\n(.*?)\r?\n[ \t]*" + re.escape(RUN_RECORD_END), re.S)
+
+
 def findings_checksum(text: str) -> str:
     """The checksum in the opening marker of the open code findings block: 12 hex digits of the SHA-256 of its text
     (line ends and outer blank lines not counted)."""
@@ -276,10 +644,24 @@ def without_block_findings(markdown: str) -> str:
             return text
 
 
+def without_block_run_record(markdown: str) -> str:
+    """``markdown`` with only the run record block (and any marker of it left on its own) taken out, and a paragraph
+    under the record's lead words that lost its markers: a copy the writer carried over is FI's text, not the
+    writer's, and is put back by :func:`mark_run_record` with its markers."""
+    text = markdown
+    while True:
+        before = text
+        text = _RECORD_ANY.sub(_gap, text)
+        text = _RECORD_STRAY.sub("", text)
+        text = _RECORD_LEAD_LINE.sub(_gap, text)
+        if text == before:
+            return text
+
+
 def without_block(markdown: str) -> str:
     """``markdown`` with every block between the markers, every marker left on its own, and every paragraph under the
     engine's lead words taken out. Repeated until nothing is left to take out, so taking one piece out cannot join
-    what is around it into a new marker. The open code findings block (:func:`mark_findings`) goes too."""
+    what is around it into a new marker. The open code findings block (:func:`mark_findings`) and the run record block (:func:`mark_run_record`) go too."""
     text = markdown
     while True:
         before = text
@@ -287,6 +669,7 @@ def without_block(markdown: str) -> str:
         text = _STRAY_MARKER.sub("", text)
         text = _LEAD_LINE.sub(_gap, text)
         text = without_block_findings(text)
+        text = without_block_run_record(text)
         if text == before:
             return text
 
@@ -374,22 +757,33 @@ def mark_findings(markdown: str, body: str, *, heading: str = "Limitations") -> 
     markdown = without_block_findings(markdown)
     if not body.strip():
         return markdown
+    return _put_block(markdown, body, "code-findings", FINDINGS_END, heading, heading_inside=True)
+
+
+def _put_block(markdown: str, text: str, name: str, end: str, heading: str, *, heading_inside: bool) -> str:
+    """``markdown`` with ``text`` between ``<!-- fi:NAME:checksum -->`` and ``end`` at the end of the paper's limitations
+    section (the last heading that names limitations or threats to validity). A paper with none gets a ``heading``
+    section of its own, before the references (else at the end); that heading is inside the block (and its checksum)
+    when ``heading_inside``, else just above it. The block is not in ``markdown`` yet."""
     lines = markdown.split("\n")
     start = 0
     if lines and lines[0].strip() == "---" and len(lines) > 1 and _FRONT_MATTER_KEY.match(lines[1]):
-        end = next((i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")), None)
-        start = end + 1 if end is not None else 0
+        end_fm = next((i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")), None)
+        start = end_fm + 1 if end_fm is not None else 0
     headings = _headings(lines, start)
     title_line = next((i for i, lv, _t in headings if lv == 1), None)
     levels = [lv for i, lv, _t in headings if i != title_line]
     level = min(levels) if levels else 2
-    text = body.strip("\n")
+    text = text.strip("\n")
     own = [h for h in headings if h[0] != title_line and _LIMITS.match(h[2])]
+    lead = ""
     if own:
         at, lv, _t = own[-1]
         place = _section_end(headings, at, lv, len(lines))
     else:
-        text = "#" * level + f" {heading}\n\n" + text
+        lead = "#" * level + f" {heading}\n\n"
+        if heading_inside:
+            text, lead = lead + text, ""
         refs = next((h for h in headings if h[0] != title_line and h[1] <= level and _BEFORE_END.match(h[2])), None)
         place = refs[0] if refs else len(lines)
     if place < len(lines):
@@ -404,8 +798,37 @@ def mark_findings(markdown: str, body: str, *, heading: str = "Limitations") -> 
     tail = lines[place:]
     while tail and not tail[0].strip():
         tail.pop(0)
-    block = [f"<!-- fi:code-findings:{findings_checksum(text)} -->", text, FINDINGS_END]
+    block = [f"<!-- fi:{name}:{findings_checksum(text)} -->", text, end]
+    if lead:
+        block = [lead.rstrip("\n"), "", *block]
     return "\n".join([*head, *([""] if head else []), *block, *([""] if tail else []), *tail]) + ("" if tail else "\n")
+
+
+_FINDINGS_INNER = re.compile(_FINDINGS_OPEN + r"[ \t]*\r?\n?(.*?)\r?\n?[ \t]*" + re.escape(FINDINGS_END), re.S)
+_OWN_HEADING = re.compile(r"\A(#{1,6}[ \t]+[^\n]*)\n\n(.*)\Z", re.S)
+
+
+def mark_run_record(markdown: str, text: str, *, heading: str = "Limitations") -> str:
+    """``markdown`` with the run record ``text`` (:func:`run_record`) once, between its checksummed markers, at the end
+    of the paper's limitations section, the place :func:`mark_findings` uses. The run record always comes before the
+    open code findings: a findings block already in ``markdown`` is taken out and put back after it. Whatever was
+    between the run record markers before is taken out first; an empty ``text`` leaves no block."""
+    markdown = without_block_run_record(markdown)
+    if not text.strip():
+        return markdown
+    body = ""
+    found = _FINDINGS_INNER.search(markdown)
+    if found:
+        body = found.group(1).strip("\n")
+        # A limitations heading the findings block made for itself stays in the paper, above both blocks.
+        own = _OWN_HEADING.match(body)
+        keep = ""
+        if own:
+            keep, body = own.group(1), own.group(2)
+        markdown = _FINDINGS_ANY.sub(lambda m: f"\n\n{keep}\n\n" if keep else _gap(m), markdown, count=1)
+        markdown = without_block_findings(markdown)
+    out = _put_block(markdown, text, "run-record", RUN_RECORD_END, heading, heading_inside=False)
+    return mark_findings(out, body, heading=heading) if body.strip() else out
 
 
 # ---- what the number checks leave out ------------------------------------------------------------------------------
@@ -447,9 +870,12 @@ def strip_for_checks(text: str) -> str:
     """``text`` with the engine's paragraph taken out, for the checks that hold the paper's numbers to the results and
     for the claim check. Only a block whose every word is the engine's grammar is taken out; anything else between
     the markers stays and is checked. The open code findings block is left out while its text matches the checksum in
-    its opening marker (:func:`findings_checksum`)."""
+    its opening marker (:func:`findings_checksum`); so is the run record block (:func:`run_record`)."""
     if "fi:code-findings:" in text:
         text = _FINDINGS_BLOCK.sub(
+            lambda m: " " if findings_checksum(m.group(2)) == m.group(1) else m.group(0), text)
+    if "fi:run-record:" in text:
+        text = _RECORD_BLOCK.sub(
             lambda m: " " if findings_checksum(m.group(2)) == m.group(1) else m.group(0), text)
     if BEGIN not in text:
         return text

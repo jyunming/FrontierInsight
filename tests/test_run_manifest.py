@@ -438,7 +438,7 @@ async def test_an_analysis_that_prints_no_values_is_sent_back_alone_and_the_simu
     artifacts = await engine.run()
     assert artifacts.paper_md is not None and calls.count("ExecuteReflect") == 1
     log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert "has no `final_size_values` list at all" in log and "sending experiment.py back (1 of 1)" in log
+    assert "has no `final_size_values` list at all" in log and "sending experiment.py back (1 of 3)" in log
     reflect = next(p for p in prompts if _classify(p) == "ExecuteReflect")
     assert "Rewrite experiment.py (not simulate.py)" in reflect
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8").strip() == SIM_OK.strip()

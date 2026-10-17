@@ -12,6 +12,7 @@ import pytest
 
 from core import optimisation_plan as op
 from core import plan
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import BLOCK, EXTRA, HEAT_SINK, Paused, _engine, _NO_OBJECTIONS
 
 TOPIC = "Find the fin spacing and thickness that minimise the base temperature of a heat sink"
@@ -52,7 +53,7 @@ class Model:
             if answer is None:
                 raise RuntimeError("no answer")
             text = plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")
-            return answer(text) if callable(answer) else answer
+            return as_parts(answer(text) if callable(answer) else answer)
         if not self.drafted:
             self.drafted = True
             return json.dumps({**self.draft, "plan": EXTRA})
@@ -61,7 +62,7 @@ class Model:
     @property
     def requests(self) -> int:
         """Requests, not tries: a reply that cannot be used is asked once more with the reason, inside one request."""
-        return len([p for p in self.asked if "Your last reply could not be used" not in p])
+        return len([p for p in self.asked if "Your previous reply could not be used" not in p])
 
 
 def _complete(text: str) -> str:
@@ -140,7 +141,7 @@ async def test_a_reply_that_cannot_be_used_counts_as_a_request_and_leaves_the_pl
     def unusable(text: str) -> str:
         return _with_block(text, {"objective": {"quantity": "x"}})  # no direction, no variables
 
-    model = Model(eng, [unusable, unusable, unusable, unusable], _broken_draft())
+    model = Model(eng, [unusable] * 6, _broken_draft())
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     seen = []
@@ -148,7 +149,7 @@ async def test_a_reply_that_cannot_be_used_counts_as_a_request_and_leaves_the_pl
     state = {"topic": TOPIC, "iteration": 0}
     patch = await eng._node_design(state)
     assert seen == []
-    assert model.requests == 2 and _record(eng)["count"] == 2
+    assert model.requests == 2 and _record(eng)["count"] == 2  # a form the reader refused is asked again; the same refusal twice ends the asking
     assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
     stop = eng._search_cannot_start_stop(state, patch["design"])["exec_result"]
     steps = stop["no_search"] + " " + " ".join(stop["no_search_tried"])

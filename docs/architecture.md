@@ -105,10 +105,10 @@ Conditional edges visible in the graph:
 | Edge | Trigger | Bound by |
 |---|---|---|
 | `execute_reflect → execute` | Script crashed (rc != 0 or no `RESULT_JSON`) | `engine.exec_reflect_max_iterations` (default 3) |
-| `cross_check → design` | `analyze.next_step == "re_experiment"` | `engine.max_iterations` (default 2) |
+| `cross_check → design` | `analyze.next_step == "re_experiment"`, and FI's own record agrees: the plan's precision target for a probability was missed and a run large enough for it fits the time allowed (FI's run-time estimate times the square of the width ratio). Otherwise the evidence check decides from the record, and a missed target is stated in the paper's limitations | `engine.max_iterations` (default 2) |
 | `cross_check → literature` | `analyze.next_step == "broaden_lit"` — re-enters the literature node so a second retrieval fetches fresh evidence (the design's hypothesis is folded into the query); new docs merge into the existing list with DOI / URL / content-prefix dedup. | `engine.max_iterations` (default 2) |
-| `review → design` | `review.verdict == "revise"` | `engine.max_iterations` (default 2) |
-| `review → write` | every problem the review found is in the text (an unbacked claim, a caption that does not match its figure); the experiment stands | the same `engine.max_iterations` (a draft over the page limit is shortened up to a few times outside it) |
+| `review → design` | only a person's refine note that the rewritten paper still does not answer | `engine.max_iterations` (default 2) |
+| `review → write` | every problem the review found is in the text (an unbacked claim, a caption that does not match its figure), or the reviewer asks for a revision or objects to the design with no check of FI's behind it: the experiment and the design stand, and FI states the objection in the paper's limitations (`.fi/review_objections.json`; one already stated there is not counted again) | the same `engine.max_iterations` (a draft over the page limit is shortened up to a few times outside it) |
 | `review → implement` | a problem the run itself computed (a saved number, a figure's data, the experiment file): the experiment is written and run again | a small fixed number of times per quest, and `engine.max_iterations` |
 | `review → human_feedback` | `pauses.review: ask`; the person accepts, rejects or refines | a person's refine is honoured whatever `engine.max_iterations` says |
 | `human_feedback → write` | a person's refine goes to `write` first, with their notes | none |

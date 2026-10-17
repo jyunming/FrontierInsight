@@ -206,7 +206,7 @@ def test_router_treats_the_hit_as_blocking() -> None:
         "review": {"verdict": "accept", "must_flag_hits": ["unverified_number: x"]},
         "iteration": 0,
     }
-    assert Engine._route_after_review(engine, state) == "revise"  # type: ignore[arg-type]
+    assert Engine._route_after_review(engine, state) == "rewrite"  # type: ignore[arg-type]
 
 
 def test_max_iterations_zero_still_bypasses_the_gate() -> None:

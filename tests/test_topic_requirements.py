@@ -15,6 +15,7 @@ import pytest
 
 from core import plan
 from core import topic_requirements as tr
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, Paused, _engine, _NO_OBJECTIONS
 
 TOPIC = (
@@ -148,7 +149,9 @@ class Reader:
             return self._judge(prompt)
         if "The topic asks for things this plan does not yet include" in prompt:
             self.asked.append(prompt)
-            return self._rewrite(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8"))
+            whole = self._rewrite(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8"))
+            # The plan step's model is asked for the parts alone, as JSON; the design step's request is not changed here.
+            return as_parts(whole) if kw.get("node") == "plan_revise" else whole
         if not self.drafted:
             self.drafted = True
             return json.dumps({**self.draft, "plan": EXTRA})
@@ -245,7 +248,8 @@ async def test_a_reading_that_could_not_be_had_is_said_and_never_stops_the_quest
     eng = _engine(tmp_path, [])
     Reader(eng, _draft(), extraction=None)
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
-    assert "What the topic asks for" not in _plan_text(eng), "a plan a person reads is not changed by a reading that failed"
+    # (The section also holds what the plan left out of its simplifications and definitions: only the topic's own lines are tested.)
+    assert "Read from the topic by" not in _plan_text(eng), "a plan a person reads is not changed by a reading that failed"
     assert not any("what the topic asks for" in str(h.get("note") or "") for h in plan.history(eng.quest_root))
     seen = _stop(eng)
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
@@ -320,7 +324,7 @@ async def test_a_main_factor_still_missing_after_the_bound_stops_before_anything
     seen = _stop(eng)
     await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [], "nobody is asked to pick another model: the plan's rules, not the model, left it out"
-    assert 1 <= len(model.asked) <= 2
+    assert 1 <= len(model.asked) <= 4
     result = _honest_stop(eng)
     shown = " ".join([result["topic_unmet"], *result["topic_unmet_tried"]])
     assert "lid material" in shown and "asked the plan's model" in shown
@@ -343,7 +347,7 @@ async def test_a_secondary_item_still_missing_is_said_in_the_limitations_and_the
     assert seen == [] and "lid_material" in patch["design"]["protocol"]["grid"]
     note = tr.write_note(eng.quest_root)
     assert "The topic asked for more than this study did" in note and "heat lost per minute" in note
-    assert "Say plainly in the limitations that these were not studied" in note
+    assert "FI states this in its own record of the run" in note and "do not write a result for them" in note
     assert tr.write_note(tmp_path / "nowhere") == ""
 
 
@@ -373,7 +377,7 @@ async def test_a_redesign_that_drops_an_axis_is_caught_and_asked_once(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_is_asked_only_once(tmp_path: Path) -> None:
+async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_is_asked_within_its_bound(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
     model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
                                model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
@@ -385,7 +389,8 @@ async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_i
     for _ in range(2):
         await eng._hold_the_design_to_the_topic(state, redesign, "")
     assert seen == []
-    assert len([p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]) == 1
+    asked = [p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]
+    assert len(asked) == 2 and "Your last answer was not used" not in asked[0] and "Your last answer was not used" in asked[1]
     assert "lid material" in _honest_stop(eng)["topic_unmet"]
 
 
@@ -495,3 +500,79 @@ def test_the_cover_reader_counts_a_metric_of_an_estimate_for_a_recovery_topic() 
     text = (Path(__file__).resolve().parent.parent / "agents" / "topic_cover.md").read_text(encoding="utf-8")
     assert "how well that quantity is estimated, fitted or recovered" in text
     assert "a metric of its estimate" in text
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_answer_for_the_topic_is_asked_again_with_the_reason_and_the_second_one_is_used(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
+                               model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    redesign = copy.deepcopy(plan.parse(_plan_text(eng)).design)
+    del redesign["protocol"]["grid"]["lid_material"]
+    state = {"topic": TOPIC, "iteration": 1, "design": redesign}
+    original = model.chat
+    prompts: list[str] = []
+    bad = {**redesign, "protocol": {**redesign["protocol"], "grid": {**redesign["protocol"]["grid"], "lid_material": []}}}
+    good = {**redesign, "protocol": {**redesign["protocol"], "grid": {**redesign["protocol"]["grid"], **LID_AXIS}}}
+
+    async def chat(messages: list[dict[str, str]], **kw: Any) -> str:
+        prompt = messages[-1]["content"]
+        if "The topic asks for things this plan does not yet include" in prompt:
+            prompts.append(prompt)
+            return json.dumps(bad if len(prompts) == 1 else good)
+        return await original(messages, **kw)
+
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=chat)})()
+    design, _sha = await eng._hold_the_design_to_the_topic(state, redesign, "")
+    assert design["protocol"]["grid"]["lid_material"] == ["paper", "foam", "steel"]
+    assert len(prompts) == 2 and "Your last answer was not used" not in prompts[0]
+    assert "protocol.grid.lid_material" in prompts[1] and "non-empty list" in prompts[1]
+    record = json.loads((eng.fi_dir / "topic_design_asked.json").read_text(encoding="utf-8"))
+    assert record["asks"] == 2
+    await eng._hold_the_design_to_the_topic(state, redesign, "")  # a resume never asks past the bound
+    assert len(prompts) == 2
+
+
+async def _redesign_setup(tmp_path: Path) -> tuple[Any, Any, dict[str, Any], dict[str, Any]]:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
+                               model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    redesign = copy.deepcopy(plan.parse(_plan_text(eng)).design)
+    del redesign["protocol"]["grid"]["lid_material"]
+    return eng, model, redesign, {"topic": TOPIC, "iteration": 1, "design": redesign}
+
+
+@pytest.mark.asyncio
+async def test_the_stop_names_the_design_steps_real_ask_count_and_why_its_last_answer_was_not_used(tmp_path: Path) -> None:
+    eng, _model, redesign, state = await _redesign_setup(tmp_path)  # the model never adds the axis
+    await eng._hold_the_design_to_the_topic(state, redesign, "")
+    record = json.loads((eng.fi_dir / "topic_design_asked.json").read_text(encoding="utf-8"))
+    assert record["asks"] == 2 and record["problem"]  # written after the last failed attempt too  # the same refusal twice ends the asking
+    stop = json.loads((eng.fi_dir / "topic_unmet.json").read_text(encoding="utf-8"))
+    assert stop["asked"] == 2
+    assert record["problem"] in eng._topic_last_problem(1)
+    assert any(record["problem"][:40] in t for t in stop["tried"])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_call_for_the_topic_is_noted_and_the_next_try_is_still_made(tmp_path: Path) -> None:
+    eng, model, redesign, state = await _redesign_setup(tmp_path)
+    original = model.chat
+    prompts: list[str] = []
+    good = {**redesign, "protocol": {**redesign["protocol"], "grid": {**redesign["protocol"]["grid"], **LID_AXIS}}}
+
+    async def chat(messages: list[dict[str, str]], **kw: Any) -> str:
+        prompt = messages[-1]["content"]
+        if "The topic asks for things this plan does not yet include" in prompt:
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                raise RuntimeError("connection reset")
+            return json.dumps(good)
+        return await original(messages, **kw)
+
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=chat)})()
+    design, _sha = await eng._hold_the_design_to_the_topic(state, redesign, "")
+    assert design["protocol"]["grid"]["lid_material"] == ["paper", "foam", "steel"]
+    assert len(prompts) == 2 and "connection reset" in prompts[1]

@@ -55,6 +55,25 @@ class FigureProblem:
 
 
 @dataclass
+class FigureGap:
+    """A series of a drawn figure that has no point at some settings the figure otherwise shows (or has no value there)."""
+
+    figure: str
+    panel: str
+    series: str
+    absent: list[float]  # the x values with no point
+    why: str  # "no value" (None / NaN at that x) or "not plotted" (the panel's other series have a point there)
+
+    def says(self) -> str:
+        where = f"`{self.figure}`" + (f", panel \"{self.panel}\"" if self.panel else "")
+        at = ", ".join(f"{x:g}" for x in self.absent[:8]) + (" ..." if len(self.absent) > 8 else "")
+        what = f"the series \"{self.series}\"" if self.series and not self.series.startswith("_") else "a series"
+        if self.why == "no value":
+            return f"{where}: {what} has no value at x = {at}, so the figure shows no point there"
+        return f"{where}: {what} has no point at x = {at}, where the panel's other series do"
+
+
+@dataclass
 class QuantityProblem:
     name: str
     kind: str  # "constant" | "saturated"
@@ -78,6 +97,101 @@ def _read(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+_DASHED = ("--", ":", "-.", "dashed", "dotted", "dashdot")
+
+
+def _is_reference(line: Any) -> bool:
+    """A recorded line that is a reference drawn on purpose: ``axhline`` / ``axvline``, or a dashed line at one value
+    with no markers. A constant drawn with markers is a measured series (each marker is a setting), not a reference."""
+    if not isinstance(line, dict):
+        return False
+    if line.get("kind") in ("hline", "vline"):
+        return True
+    y = line.get("y")
+    return (line.get("kind") == "data" and line.get("linestyle") in _DASHED and isinstance(y, list) and len(y) > 1
+            and str(line.get("marker") or "None") in ("None", "none", "", " ")
+            and len(_rs._distinct([float(v) for v in y])) == 1)
+
+
+def _has_data(panel: Any) -> bool:
+    if not isinstance(panel, dict):
+        return False
+    lines = panel.get("lines") if isinstance(panel.get("lines"), list) else []
+    return bool(panel.get("draws_other")) or any(not _is_reference(line) for line in lines)
+
+
+def _shares_place_with_data(panels: list[Any], i: int) -> bool:
+    """Another panel in the same place holds data (a twin axis): the same cell of a grid, or the same box on the figure
+    for axes made without a grid."""
+    me = panels[i] if isinstance(panels[i], dict) else {}
+    keys = [k for k in ("grid", "place") if me.get(k) is not None]
+    return bool(keys) and any(j != i and isinstance(p, dict) and any(p.get(k) == me[k] for k in keys) and _has_data(p)
+                              for j, p in enumerate(panels))
+
+
+#: A panel's series are compared point for point only when the longer of the two has at most this many points (a grid of
+#: settings, not a curve drawn on a dense axis).
+MAX_GRID_POINTS = 12
+
+
+def _numbers(values: Any) -> list[float]:
+    out: list[float] = []
+    for v in values if isinstance(values, list) else []:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f) and f not in out:
+            out.append(f)
+    return out
+
+
+def figure_gaps(records_dir: Path, figures: list[str]) -> list[FigureGap]:
+    """Where a series of a figure has no point at a setting: from the figure's own record (``<stem>.seed0.json``), two ways.
+
+    * the line holds a missing value (None / NaN) at an x: matplotlib draws nothing there (``missing_x``, counted by the plot
+      recorder from the plotted data);
+    * the series' x values are a strict part of another series' x values in the same panel, both few enough to be a grid of
+      settings (at most :data:`MAX_GRID_POINTS`): the panel's other series have a point where this one has none.
+
+    Reference lines are never compared. Nothing here changes the figure or the results; it says what the figure does not show."""
+    out: list[FigureGap] = []
+    for name in sorted(set(figures)):
+        panels = _read(records_dir / f"{Path(name).stem}.seed0.json").get("axes")
+        for panel in panels if isinstance(panels, list) else []:
+            if not isinstance(panel, dict):
+                continue
+            lines = [ln for ln in (panel.get("lines") if isinstance(panel.get("lines"), list) else [])
+                     if isinstance(ln, dict) and ln.get("kind") == "data" and not _is_reference(ln)]
+            title = str(panel.get("title") or "")
+            # Compared at 9 significant digits: the same setting written as 0.1 and as np.arange's 0.1000000000000001.
+            xs = [{float(f"{v:.9g}") for v in _numbers(ln.get("x"))} for ln in lines]
+            for k, ln in enumerate(lines):
+                label = str(ln.get("label") or "")
+                gone = _numbers(ln.get("missing_x"))
+                if gone:
+                    out.append(FigureGap(Path(name).name, title, label, gone, "no value"))
+                    continue
+                if not xs[k] or label.startswith("_"):
+                    continue
+                lacking: set[float] = set()
+                for j, other in enumerate(lines):
+                    if j != k and not str(other.get("label") or "").startswith("_") and xs[k] < xs[j] and len(xs[j]) <= MAX_GRID_POINTS:
+                        lacking |= xs[j] - xs[k]
+                if lacking:
+                    out.append(FigureGap(Path(name).name, title, label, sorted(lacking), "not plotted"))
+    return out
+
+
+def gap_note(gaps: list[FigureGap]) -> str:
+    """For the writer: where a figure has no point, and what that means for the sentences about it."""
+    shown = "; ".join(g.says() for g in gaps[:6])
+    return (f"Where the figures show no point: {shown}. Do not say a figure shows, confirms or reaches a value at those "
+            "settings, and do not write \"as shown in Figure N\" for them: where the results hold the value, give it in the text or a "
+            "table; where they do not, say it was not computed; and say in the caption which settings the figure has no "
+            "point for.")
+
+
 def figure_problems(records_dir: Path, figures: list[str]) -> list[FigureProblem]:
     """The empty panels and the single-x series of the figures in ``figures`` (file names), from their records."""
     out: list[FigureProblem] = []
@@ -93,7 +207,16 @@ def figure_problems(records_dir: Path, figures: list[str]) -> list[FigureProblem
             title = str(panel.get("title") or labelled.get("title") or "")
             named = bool(title or panel.get("xlabel") or panel.get("ylabel") or labelled.get("xlabel"))
             drawn = panel.get("lines") if isinstance(panel.get("lines"), list) else []
-            if not drawn and not labelled.get("series") and not panel.get("draws_other") and named:
+            # A panel that only holds a legend (shared by the other panels) is not empty.
+            if (not drawn and not labelled.get("series") and not panel.get("draws_other") and not panel.get("legend")
+                    and named):
+                out.append(FigureProblem(Path(name).name, title, "empty"))
+                continue
+            # A panel whose only lines are reference lines (a threshold, a known value) holds no result: the axes are
+            # there and the data are not. Read from the lines themselves, since an unlabelled data line is not among the
+            # labelled series; and not when another panel sits in the same place (a twin axis carries the data).
+            if (drawn and all(_is_reference(line) for line in drawn) and not panel.get("draws_other") and named
+                    and not _shares_place_with_data(panels, i)):
                 out.append(FigureProblem(Path(name).name, title, "empty"))
                 continue
             for line in drawn:
@@ -129,8 +252,24 @@ def keys_in(value: Any) -> set[str]:
 
 def quantity_problems(cells: list[dict[str, Any]], reported: set[str], exempt: set[str] | frozenset[str] = frozenset()
                       ) -> list[QuantityProblem]:
-    """The constant and the stuck quantities among those the analysis reported (``reported``: the keys it printed or wrote)."""
+    """The constant and the stuck quantities among those the analysis reported (``reported``: the keys it printed or wrote).
+    A number per run is judged over the settings and a number per value over the settings and values, each over the records
+    that hold it (:func:`core.in_run.groups`)."""
+    from . import in_run as _in_run
+
+    return [q for group in _in_run.groups(cells) for q in _quantity_problems_in(group, reported, exempt)]
+
+
+def _quantity_problems_in(cells: list[dict[str, Any]], reported: set[str], exempt: set[str] | frozenset[str]
+                          ) -> list[QuantityProblem]:
     varying = _rs._varying(cells)
+    seen: dict[str, set[str]] = {}
+    for c in cells:   # the values compared inside each run vary a record too, numbers or not (a procedure)
+        for k, v in (c.get("level") or {}).items():
+            seen.setdefault(str(k), set()).add(str(v))
+    for k, vs in seen.items():
+        if len(vs) > 1:
+            varying.setdefault(k, sorted(vs))  # type: ignore[arg-type]
     if len(cells) < MIN_CELLS or not varying:
         return []
     means = {n: v for n, v in _means(cells).items() if all(math.isfinite(x) for x in v)}

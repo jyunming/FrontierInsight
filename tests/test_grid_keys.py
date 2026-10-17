@@ -96,6 +96,75 @@ def test_a_dict_that_is_not_a_setting_is_not_read_as_one() -> None:
     assert _names({"simulate.py": src}) == []
 
 
+KINETICS = '''\
+def main():
+    record = load()
+    cells = []
+    for entry in record["cells"]:
+        setting = entry["cell"]
+        result = {"rate": float(setting["rate"]), "fit_failure_fraction": 0.0, "by_method": {"weighted": {}}}
+        cells.append(result)
+    supported = [
+        cell for cell in cells
+        if cell["fit_failure_fraction"] <= 0.01
+        and abs(cell["by_method"]["weighted"]["ea_bias_j_mol"]) <= 0.05
+    ]
+    largest = max(cell["fit_failure_fraction"] for cell in supported)
+    return supported, largest
+'''
+OVER_RECORD = '''\
+def main(record):
+    for cell in record["cells"]:
+        cell["missing"]
+    for entry in record["cells"]:
+        c = entry["cell"]
+        c["missing"]
+'''
+BUILT_FROM_SETTINGS = '''\
+def main(record):
+    cells = []
+    for entry in record["cells"]:
+        c = entry["cell"]
+        cells.append(c)
+    return [1 for cell in cells if cell["missing"]]
+'''
+BUILT_FROM_COPIES = '''\
+def main(record):
+    cells = []
+    for entry in record["cells"]:
+        cells.append(dict(entry["cell"]))
+    return [1 for cell in cells if cell["missing"]]
+'''
+BUILT_AS_DICT = '''\
+def main(record):
+    cells = {}
+    for entry in record["cells"]:
+        cells[entry["key"]] = entry["cell"]
+    return [1 for cell in cells.values() if cell["missing"]]
+'''
+UNTRUSTED_LISTS = (
+    'def f(cells):\n    return [1 for cell in cells if cell["missing"]]\n',
+    'def f(grid):\n    cells = []\n    cells.extend(grid)\n    cells.append(1)\n    return [1 for cell in cells if cell["missing"]]\n',
+    'def f(grid):\n    cells = []\n    cells = grid\n    cells.append(1)\n    return [1 for cell in cells if cell["missing"]]\n',
+)
+
+
+def test_a_loop_variable_over_the_scripts_own_summaries_is_not_a_setting() -> None:
+    assert _names({"experiment.py": KINETICS}) == []
+
+
+def test_a_loop_over_the_record_or_a_parameter_called_cell_is_still_read_as_a_setting() -> None:
+    assert _names({"a.py": OVER_RECORD}) == [("a.py", ("missing",)), ("a.py", ("missing",))]
+    assert _names({"a.py": 'def f(cell):\n    return cell["missing"]\n'}) == [("a.py", ("missing",))]
+    for src in UNTRUSTED_LISTS:  # a list not plainly built here (a parameter, an extend, a second assignment) is not trusted
+        assert _names({"a.py": src}) == [("a.py", ("missing",))], src
+
+
+def test_a_comprehension_over_a_list_built_from_settings_is_still_checked() -> None:
+    for src in (BUILT_FROM_SETTINGS, BUILT_FROM_COPIES, BUILT_AS_DICT):
+        assert _names({"a.py": src}) == [("a.py", ("missing",))], src
+
+
 def test_no_grid_means_nothing_to_compare_with() -> None:
     assert _names({"simulate.py": SIM_BAD}, {}) == [] and _names({"simulate.py": SIM_BAD}, None) == []
     assert gk.reads("def broken(:\n", "x.py") == []
@@ -183,3 +252,98 @@ async def test_code_that_reads_only_the_studys_names_is_not_asked_about(tmp_path
     eng, asked = _engine(tmp_path, monkeypatch, ["{}"])
     (eng.quest_root / "code" / "simulate.py").write_text(SIM_OK, encoding="utf-8")
     assert await eng._static_gate({}) is None and asked == []
+
+
+def test_a_list_picked_from_settings_by_a_comprehension_is_still_checked() -> None:
+    src = ('def main(record):\n    cells = [entry["cell"] for entry in record["cells"]]\n'
+           '    picked = [cell for cell in cells if cell["missing"]]\n    return picked\n')
+    assert _names({"a.py": src}) == [("a.py", ("missing",))]
+
+
+KINETICS_MODULE = '''\
+import json, os
+record = json.load(open(os.environ["FI_TRIALS"]))
+cells = []
+for entry in record["cells"]:
+    setting = entry["cell"]
+    result = {"rate": float(setting["rate"]), "fit_failure_fraction": 0.0, "by_method": {"weighted": {}}}
+    cells.append(result)
+supported = [cell for cell in cells if cell["fit_failure_fraction"] <= 0.01 and cell["by_method"]["weighted"]]
+largest = max(cell["fit_failure_fraction"] for cell in supported)
+for cell in cells:
+    print(cell["by_method"])
+'''
+FLOW_TEMPLATE = '''\
+def get_cell(entry):
+    return entry["cell"]
+
+
+def main(record, labels):
+    cells = []
+{build}
+    return [1 for cell in cells if cell["missing"]]
+
+
+def second(record, labels):
+    cells = []
+{build}
+    for cell in cells:
+        print(cell["missing"])
+'''
+# Each builds a list of settings in a way the check cannot see through, then reads a name the grid lacks.
+FLOW_BUILDS = {
+    "spread into a literal": ('    for entry in record["cells"]:\n        setting = entry["cell"]\n'
+                              '        result = {**setting, "metric": 1}\n        cells.append(result)'),
+    "dict(**setting)": ('    for entry in record["cells"]:\n        setting = entry["cell"]\n'
+                        '        cells.append(dict(**setting))'),
+    "helper that returns the cell": '    for entry in record["cells"]:\n        cells.append(get_cell(entry))',
+    "zip target": '    for cell, _ in zip(record["cells"], labels):\n        cells.append(cell)',
+    "enumerate target": '    for i, cell in enumerate(record["cells"]):\n        cells.append(cell)',
+    "nested loop": '    for group in record["groups"]:\n        for c in group["cells"]:\n            cells.append(c)',
+}
+
+
+def test_every_way_a_list_of_settings_can_be_built_unseen_is_still_checked() -> None:
+    for label, build in FLOW_BUILDS.items():
+        src = FLOW_TEMPLATE.format(build=build)
+        found = _names({"a.py": src})
+        assert found == [("a.py", ("missing",)), ("a.py", ("missing",))], (label, found)
+
+
+def test_the_scripts_own_summaries_are_not_settings_at_module_level_either() -> None:
+    assert _names({"experiment.py": KINETICS_MODULE}) == []
+    # ... but a comprehension over something else, in the same module, still is
+    src = KINETICS_MODULE + 'other = [1 for cell in record["cells"] if cell["missing"]]\n'
+    assert _names({"experiment.py": src}) == [("experiment.py", ("missing",))]
+
+
+def test_a_summary_dict_that_is_changed_or_spread_is_not_trusted() -> None:
+    for body in ('result = {"a": 1}\n        result.update(entry["cell"])\n        cells.append(result)',
+                 'result = {"a": 1}\n        result |= entry["cell"]\n        cells.append(result)',
+                 'result = {"a": 1, **entry["cell"]}\n        cells.append(result)',
+                 'cells.append({"a": 1, **entry["cell"]})'):
+        src = ('def main(record):\n    cells = []\n    for entry in record["cells"]:\n        ' + body
+               + '\n    return [1 for cell in cells if cell["missing"]]\n')
+        assert _names({"a.py": src}) == [("a.py", ("missing",))], body
+
+
+def test_a_loop_over_settings_inside_a_loop_over_summaries_is_still_checked() -> None:
+    head = ('def main(record):\n    cells = []\n    for entry in record["cells"]:\n        cells.append({"a": 1})\n')
+    as_loop = head + ('    for cell in cells:\n        print(cell["by_method"])\n'
+                      '        for cell in record["cells"]:\n            print(cell["missing"])\n')
+    as_comprehension = head + ('    for cell in cells:\n        print(cell["by_method"])\n'
+                               '        print([1 for cell in record["cells"] if cell["missing"]])\n')
+    as_inner_comprehension = head + ('    print([[cell["missing"] for cell in record["cells"]] for cell in cells])\n')
+    for src in (as_loop, as_comprehension, as_inner_comprehension):
+        assert _names({"a.py": src}) == [("a.py", ("missing",))], src
+
+
+def test_a_summary_dict_filled_by_item_assignment_is_not_trusted() -> None:
+    for body in ('result = {}\n        for k, v in entry["cell"].items():\n            result[k] = v\n        cells.append(result)',
+                 'result = {"a": 1}\n        result["b"] = entry["cell"]["rate"]\n        cells.append(result)',
+                 'result = {"a": 1}\n        result["a"] += 1\n        cells.append(result)',
+                 'result = {"a": 1}\n        fill(result, entry["cell"])\n        cells.append(result)'):
+        base = 'def main(record):\n    cells = []\n    for entry in record["cells"]:\n        ' + body + '\n'
+        for tail in ('    return [1 for cell in cells if cell["missing"]]\n',
+                     '    for cell in cells:\n        print(cell["missing"])\n'):
+            assert _names({"a.py": base + tail}) == [("a.py", ("missing",))], (body, tail)

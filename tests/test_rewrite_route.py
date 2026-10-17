@@ -54,10 +54,83 @@ def test_hits_about_the_text_rewrite_the_paper(tmp_path: Path, hits: list[str]) 
     # Not a hit name: the reviewer is asked for the identifier.
     ["unsupported claim"],
 ])
-def test_any_other_hit_runs_the_quest_again_from_design(tmp_path: Path, hits: list[str]) -> None:
+def test_an_objection_to_the_design_rewrites_the_paper_and_keeps_the_design(tmp_path: Path, hits: list[str]) -> None:
     assert not _hits_need_only_a_rewrite(hits)
     state = {"review": {"verdict": "revise", "must_flag_hits": hits}, "iteration": 1}
-    assert _engine(tmp_path)._route_after_review(state) == "revise"  # type: ignore[arg-type]
+    assert _engine(tmp_path)._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
+
+
+def test_an_objection_is_recorded_stated_in_the_paper_and_not_counted_again(tmp_path: Path) -> None:
+    """The first review's objection goes into FI's record, which the limitations state; the next review raising it
+    again is not counted, so it neither costs a round nor sends the paper back once more."""
+    from core import disclosure
+
+    eng = _engine(tmp_path, max_iterations=3)
+    first = {"verdict": "revise", "must_flag_hits": ["[methodologist] single_point_eval"],
+             "blocking": "Only one operating point is evaluated."}
+    counted = eng._note_design_objections({"iteration": 0}, first)  # type: ignore[arg-type]
+    assert counted == first["must_flag_hits"] and "objections_repeated" not in first
+    assert disclosure.stated_objections(tmp_path) == {"single_point_eval"}
+    text = disclosure.run_record(tmp_path)
+    assert "A reviewer objected to the design" in text and '"Only one operating point is evaluated"' in text
+
+    again = {"verdict": "accept", "must_flag_hits": ["[methodologist] single_point_eval"]}
+    assert eng._note_design_objections({"iteration": 1}, again) == []  # type: ignore[arg-type]
+    assert again["objections_repeated"] == ["single_point_eval"]
+    assert eng._route_after_review({"review": again, "iteration": 1}) == "done"  # type: ignore[arg-type]
+
+    eng.config.engine.max_iterations = 1  # no rewrite follows: nothing is recorded
+    disclosure.clear_objections(tmp_path)
+    eng._note_design_objections({"iteration": 0}, dict(first))  # type: ignore[arg-type]
+    assert disclosure.stated_objections(tmp_path) == set()
+
+
+def test_two_objections_written_as_prose_are_two_and_each_is_said_as_written(tmp_path: Path) -> None:
+    from core import disclosure
+    from core.engine import _objection_key
+
+    assert _objection_key("[methodologist] circular_evaluation: the test set is the training set") == "circular_evaluation"
+    assert _objection_key("pseudo_units") == "pseudo_unit" and _objection_key("`single_point_eval`") == "single_point_eval"
+    assert _objection_key("The baseline is weak") != _objection_key("The sample is too small")
+    assert _objection_key("Baseline: weak") != _objection_key("Baseline: missing")
+    assert _objection_key("[high] Overfitting") == "overfitting"
+    eng = _engine(tmp_path, max_iterations=3)
+    eng._note_design_objections({"iteration": 0}, {"verdict": "accept", "must_flag_hits": ["The baseline is weak"]})  # type: ignore[arg-type]
+    second = {"verdict": "accept", "must_flag_hits": ["The sample is too small"]}
+    assert eng._note_design_objections({"iteration": 1}, second) == ["The sample is too small"]  # type: ignore[arg-type]
+    assert "objections_repeated" not in second
+    text = disclosure.run_record(tmp_path)
+    assert '"The baseline is weak"; "The sample is too small"' in text
+
+
+def test_an_objection_is_recorded_when_a_record_rewrite_follows_outside_the_rounds(tmp_path: Path) -> None:
+    from core import disclosure
+
+    eng = _engine(tmp_path, max_iterations=1)  # no round left: only the rewrite for FI's records follows
+    review = {"verdict": "accept",
+              "must_flag_hits": ["[methodologist] circular_evaluation", "record_contradiction: the paper says validated"]}
+    eng._note_design_objections({"iteration": 0}, review)  # type: ignore[arg-type]
+    assert disclosure.stated_objections(tmp_path) == {"circular_evaluation"}
+    assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": 1}) == "rewrite"  # type: ignore[arg-type]
+
+
+def test_fi_adds_the_unsupported_claim_hit_from_its_own_claim_check() -> None:
+    from core.engine import _unsupported_claim_hit
+
+    state = {"claim_grounding": {"unsupported": ["R0 is 3.1", "the method is the fastest"]}}
+    [hit] = _unsupported_claim_hit(state, ["[methodologist] circular_evaluation"])  # type: ignore[arg-type]
+    assert hit.startswith("unsupported_claim:") and "2 claim(s)" in hit
+    assert _unsupported_claim_hit(state, ["unsupported_claims"]) == []  # type: ignore[arg-type]  # already named
+    assert _unsupported_claim_hit({"claim_grounding": {"unsupported": []}}, []) == []  # type: ignore[arg-type]
+
+
+def test_the_writer_is_told_an_objection_is_stated_not_answered() -> None:
+    state = {"review": {"verdict": "revise", "blocking": "The baseline is weak.",
+                        "must_flag_hits": ["[methodologist] circular_evaluation", "unsupported_claim"]}}
+    text = _format_review_for_writer(state)  # type: ignore[arg-type]
+    block = text.split("Objections to the design")[1]
+    assert "circular_evaluation" in block and "The baseline is weak." in block
+    assert "never write that the study answers them" in block
 
 
 def test_no_rewrite_once_the_iterations_are_spent(tmp_path: Path) -> None:

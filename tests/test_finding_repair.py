@@ -488,3 +488,226 @@ def test_only_code_names_of_a_finding_count_never_the_plain_words_of_its_prose()
     names = fr.issue_names(issue)
     assert {"SCALE", "OFFSET", "max_dose", "E5"} <= names
     assert not names & {"data", "is", "the", "value", "missing", "simulation"}
+
+
+RESULT = 'THRESHOLD = 0.5\nresult = {"missing_probability": 0.0, "merged_probability": 0.0, "n": 3}\n'
+
+
+def test_a_result_dict_entry_of_the_findings_quantity_may_change_and_no_other_value_of_it() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability", "quantities": ["missingprobability"]}
+    entry = RESULT.replace('"missing_probability": 0.0', '"missing_probability": 0.25')
+    assert fr.unspoken_frame_changes(RESULT, entry, issue) == []
+    added = RESULT.replace('"n": 3}', '"n": 3, "missing_count": 4}')
+    assert fr.unspoken_frame_changes(RESULT, entry.replace('"n": 3}', '"n": 3, "missing_count": 4}'), issue)
+    assert fr.unspoken_frame_changes(RESULT, added, issue), "an entry of another name is not the finding's"
+    other = entry.replace('"merged_probability": 0.0', '"merged_probability": 0.4')  # another entry's value changes too
+    assert fr.unspoken_frame_changes(RESULT, other, issue)
+    assert fr.unspoken_frame_changes(RESULT, entry.replace("THRESHOLD = 0.5", "THRESHOLD = 0.9"), issue)
+    # A statement that is not a dict literal but sets an entry of the quantity.
+    sub_old, sub_new = 'result = {}\nresult["missing_probability"] = 0.0\n', 'result = {}\nresult["missing_probability"] = 0.3\n'
+    assert fr.unspoken_frame_changes(sub_old, sub_new, issue) == []
+    assert fr.unspoken_frame_changes(sub_old.replace("missing", "merged"), sub_new.replace("missing", "merged"), issue)
+    assert fr.unspoken_frame_changes(RESULT, entry, {"function": "<module>"}), "no quantity, no entry allowed"
+
+
+def test_a_finding_that_names_no_function_may_change_the_entry_of_its_quantity_in_a_module_level_dict(tmp_path: Path) -> None:
+    base = RESULT + SOURCE
+    failing = "import spring\n\ndef test_q():\n    assert spring.result['missing_probability'] == 0.25, 'the entry is wrong'\n"
+    entry = base.replace('"missing_probability": 0.0', '"missing_probability": 0.25')
+    other = entry.replace('"merged_probability": 0.0', '"merged_probability": 0.4')
+    untouched = base.replace("return m * w / c", "return m * w / c + 0.5")  # the entry is not repaired: the test fails
+    run = Run(tmp_path, [{"id": "F-1", "function": "<module>", "quantity": "missingprobability"}], {})
+    (run.code / "spring.py").write_text(base, encoding="utf-8")
+    run.replies = {"code:test": [_block(failing)],
+                   "code:repair": [_block("# file: spring.py\n" + other),
+                                   _block("# file: spring.py\n" + untouched), _block("# file: spring.py\n" + entry)]}
+    assert run.go() == ["spring.py"]
+    repairs = run.record["issues"]["F-1"]["repairs"]
+    assert [r["outcome"] for r in repairs] == ["rejected", "rejected", "accepted"]
+    assert "does not speak of" in repairs[0]["why"]
+    assert "test still fails" in repairs[1]["why"]
+    text = (run.code / "spring.py").read_text(encoding="utf-8")
+    assert '"missing_probability": 0.25' in text and '"merged_probability": 0.0' in text and "THRESHOLD = 0.5" in text
+
+
+def test_only_the_findings_own_quantity_entries_may_change_at_module_level() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+
+    def changes(old: str, new: str) -> list[str]:
+        return fr.unspoken_frame_changes(old, new, issue)
+
+    # A call that merely holds a dict, a statement that reads the entry, a deleted statement: not the quantity's entry.
+    assert changes(f'CONFIG = build({{{q}: 0, "k": "a"}})\n', 'CONFIG = build({"k": "b"})\n')
+    assert changes(f"TOTAL = f(d[{q}], x)\n", "TOTAL = x * 100\n")
+    assert changes(f"result = {{}}\nresult[{q}] = 0.0\n", "result = {}\n")
+    # The one subscript of the quantity may be set or added to; another subscript may not.
+    assert changes(f"result = {{}}\nresult[{q}] = 0.0\n", f"result = {{}}\nresult[{q}] = 0.3\n") == []
+    assert changes(f"result = {{}}\nresult[{q}] += 1\n", f"result = {{}}\nresult[{q}] += 2\n") == []
+    assert changes(f"result = {{}}\nresult[{q}] = 0.0\n", f"result = {{}}\nother[{q}] = 0.0\n")
+    kept = f"result = {{}}\nresult[{q}] = 0.0\n"  # the quantity's entry stays and another name's, or another key, is added
+    assert changes(kept, kept + f"other[{q}] = 0.0\n")
+    assert changes(kept, kept + 'result["other_quantity"] = 0.0\n')
+    # A ** entry added to the dict may overwrite others; one that was there already is unchanged.
+    base = f'result = {{{q}: 0.0, "merged": 0.0}}\n'
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, **{{"merged": 99}}}}\n')
+    spread = f"result = {{{q}: 0.0, **extra}}\n"
+    assert changes(spread, f"result = {{{q}: 0.1, **extra}}\n") == []
+    # An assignment inside a function is not the module-level one it shares a text with.
+    local = f"def f():\n    result = {{{q}: 0.1}}\n"
+    assert changes(f"result = {{{q}: 0.0}}\n{local}", local), "the module-level one is gone; its function-local twin is not it"
+    # Chained or tuple targets are not a plain result dict.
+    assert changes(f"result = cache = {{{q}: 0.0}}\n", f"result = {{{q}: 0.1}}\n")
+    assert changes(f"result, other = {{{q}: 0.0}}, 1\n", f"result, other = {{{q}: 0.1}}, 1\n")
+    assert changes(f"result = cache = {{{q}: 0.0}}\n", f"result = cache = {{{q}: 0.1}}\n") == []
+    # An added key must be a static string that the dict does not have; a computed or repeated one can overwrite an entry.
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "extra": 1}}\n'), "a key of another name is not the finding's"
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, name: 1}}\n')
+    assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "new": 1, "new": 2}}\n')
+
+
+def test_the_entries_a_module_level_dict_had_keep_their_order_and_a_spread_is_never_new() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+    two = f"result = {{**a, **b, {q}: 0.0}}\n"
+
+    def changes(new: str) -> list[str]:
+        return fr.unspoken_frame_changes(two, new, issue)
+
+    assert changes(f"result = {{**b, **a, {q}: 0.1}}\n")
+    assert changes(f"result = {{{q}: 0.1, **a, **b}}\n")
+    assert changes(f'result = {{**a, **b, "extra": 1, {q}: 0.1}}\n')
+    assert changes(f"result = {{**a, **b, {q}: 0.1, **c}}\n")
+    assert changes(f'result = {{**a, **b, {q}: 0.1, "extra": 1}}\n')
+    assert changes(f'result = {{**a, **b, {q}: 0.1, "new": 1, "new": 2}}\n'), "a new key given twice"
+
+
+def test_what_a_repair_adds_at_module_level_is_the_findings_quantity_entry_or_a_helper_and_nothing_else() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+    old = f"import math\nTHRESHOLD = 0.5\nresult = {{{q}: 0.0}}\nresult[{q}] = 0.0\n"
+
+    def changes(new: str) -> list[str]:
+        return fr.unspoken_frame_changes(old, new, issue)
+
+    assert changes(old) == []
+    for bad in ('result["unspoken_metric"] = 999.0\n', "THRESHOLD2 = 0.9\n", "print(1)\n", f"other[{q}] = 0.0\n",
+                f"result[{q}], result['k'] = 1, 2\n", "import math as THRESHOLD\n", "import numpy as math\n"):
+        got = changes(old + bad)
+        assert got and "added" in got[0], bad
+    # Allowed: a helper function or class, an import of a new module, the quantity's entry on a name the file has.
+    assert changes(old + "def _help(x):\n    return x\n") == []
+    assert changes(old + "class K:\n    LIMIT = 3\n") == []
+    assert changes("import os\n" + old) == []
+    assert changes(old + f"result[{q}] += 0.1\nresult[{q}]: float = 0.1\n") == []
+    # An added statement does not hide as the replacement of one that went.
+    assert changes(old.replace(f"result[{q}] = 0.0\n", 'result["k"] = 1\n'))
+    assert changes(old.replace("THRESHOLD = 0.5", "THRESHOLD = 0.5\nTHRESHOLD = 0.9"))
+    # Setting the quantity's entry again while another name's entry is added is refused as well.
+    assert changes(old.replace(f"result[{q}] = 0.0\n", f"result[{q}] = 0.3\nother[{q}] = 0.0\n"))
+
+
+def test_a_dict_that_holds_the_quantity_is_held_to_its_entries_even_when_the_finding_names_the_container() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability", "summary": "the `result` dictionary reports it as zero"}
+    q = '"missing_probability"'
+    old = f'result = {{{q}: 0.0, "merged": 0.0}}\n'
+    assert fr.unspoken_frame_changes(old, f'result = {{{q}: 0.3, "merged": 0.0}}\n', issue) == []
+    assert fr.unspoken_frame_changes(old, f'result = {{{q}: 0.3, "merged": 5.0}}\n', issue)
+    assert fr.unspoken_frame_changes(old, 'result = {"other": 1}\n', issue)
+    # A statement that is not such a dict keeps the allowance of a name the finding speaks of.
+    assert fr.unspoken_frame_changes("result = build(1)\n", "result = build(2)\n", issue) == []
+    # A walrus in the dict binds a name that is not seen.
+    assert fr.unspoken_frame_changes(old, f'result = {{{q}: (z := 1), "merged": 0.0}}\n', issue)
+
+
+def test_a_quantity_entry_may_stand_where_the_old_one_stood_and_a_new_class_is_checked() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+    old = f'result = {{"a": 1, {q}: 0.0, "b": 2}}\n'
+    assert fr.unspoken_frame_changes(old, 'result = {"a": 1, "Missing_Probability": 0.3, "b": 2}\n', issue) == []
+    assert fr.unspoken_frame_changes(old, 'result = {"b": 2, "Missing_Probability": 0.3, "a": 1}\n', issue)
+    base = f"result = {{{q}: 0.0}}\n"
+    assert fr.unspoken_frame_changes(base, base + "from os import *\n", issue), "a star import binds names unseen"
+    assert fr.unspoken_frame_changes(base, base + "class K:\n    LIMIT = 3\n    def f(self):\n        return 1\n", issue) == []
+    for body in ('    result["k"] = 1\n', "    print(1)\n", "    global result\n", "    del x\n", "    A = (z := 1)\n", "    a[0] = 1\n"):
+        assert fr.unspoken_frame_changes(base, base + "class K:\n" + body, issue), body
+    assert fr.unspoken_frame_changes(base, base + f"result[{q}] = (z := 1)\n", issue)
+
+
+def test_an_added_entry_goes_only_to_a_name_that_already_holds_the_findings_quantity() -> None:
+    issue = {"function": "<module>", "quantity": "missingprobability"}
+    q = '"missing_probability"'
+    old = f"result = {{{q}: 0.0}}\ncache = {{}}\n"
+    assert fr.unspoken_frame_changes(old, old + f"result[{q}] = 0.3\n", issue) == []
+    assert fr.unspoken_frame_changes(old, old + f"cache[{q}] = 0.0\n", issue), "cache holds no entry of the quantity"
+    assert fr.unspoken_frame_changes(old + f"cache[{q}] = 1\n", old + f"cache[{q}] = 1\ncache[{q}] += 1\n", issue) == []
+
+
+# --- the environment a finding test runs in ----------------------------------------------------------------------------------
+
+LOADS = ('import json, os\n\nwith open(os.environ["FI_TRIALS"]) as h:\n    CELLS = json.load(h)["cells"]\n\n\n'
+         'def n_cells():\n    return len(CELLS)\n')
+BARE = 'import os\n\nPATH = os.environ["FI_TRIALS"]\n\n\ndef n_cells():\n    return 0\n'
+# reads the run's file when called, and runs its analysis only as a script
+GUARDED = ('import json, os\n\nPATH = os.environ["FI_TRIALS"]\n\n\ndef n_cells():\n    with open(PATH) as h:\n'
+           '        return len(json.load(h)["cells"])\n\n\nif __name__ == "__main__":\n    print(n_cells())\n')
+
+
+def _run_finding_test(root: Path, test: str, **kw: Any) -> fr.TestRun:
+    (root / "code").mkdir(exist_ok=True)
+    (root / "t.py").write_text(test, encoding="utf-8")
+    env = {**__import__("os").environ, **fr.run_environment(root, **kw)}
+    ran = subprocess.run([sys.executable, "-B", "-c", fr.harness_source("code", ["t.py"])], cwd=root, env=env,
+                         capture_output=True, text=True, timeout=60)
+    return fr.parse_runs(ran.stdout, ["t.py"])["t.py"]
+
+
+@pytest.mark.parametrize("module", [BARE, GUARDED])
+def test_a_module_that_reads_the_runs_files_when_imported_gives_a_pass_or_a_fail_on_the_assertion(tmp_path: Path, module: str) -> None:
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "experiment.py").write_text(module, encoding="utf-8")
+    passing = "import experiment\n\n\ndef test_a():\n    assert experiment.n_cells() == 0\n"
+    failing = "import experiment\n\n\ndef test_a():\n    assert experiment.n_cells() == 5, 'five cells'\n"
+    assert _run_finding_test(tmp_path, passing).status == "pass"
+    got = _run_finding_test(tmp_path, failing)
+    assert got.status == "fail" and "five cells" in got.detail
+    assert not (tmp_path / "raw").exists() and not (tmp_path / "results").exists(), "no stand-in under the run's folders"
+
+
+def test_the_real_files_of_the_run_are_used_when_they_exist_and_never_overwritten(tmp_path: Path) -> None:
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text('{"cells": [1, 2, 3]}', encoding="utf-8")
+    env = fr.run_environment(tmp_path)
+    assert env["FI_TRIALS"] == "raw/trials.json" and env["FI_RAW_DIR"] == "raw"
+    assert (tmp_path / "raw" / "trials.json").read_text(encoding="utf-8") == '{"cells": [1, 2, 3]}'
+    assert env["FI_BEST_DESIGN"].startswith(".fi/finding_tests/_env/")
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "experiment.py").write_text(GUARDED, encoding="utf-8")
+    ok = "import experiment\n\n\ndef test_a():\n    assert experiment.n_cells() == 3\n"
+    assert _run_finding_test(tmp_path, ok).status == "pass"
+
+
+def test_after_the_run_a_missing_file_is_no_stand_in_and_the_test_errors(tmp_path: Path) -> None:
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "experiment.py").write_text(GUARDED, encoding="utf-8")
+    ok = "import experiment\n\n\ndef test_a():\n    assert experiment.n_cells() == 0\n"
+    assert fr.run_environment(tmp_path, stand_ins=False) == {}
+    assert _run_finding_test(tmp_path, ok, stand_ins=False).status == "error"
+    assert not (tmp_path / ".fi" / "finding_tests" / "_env").exists()
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text('{"cells": [1]}', encoding="utf-8")
+    assert fr.run_environment(tmp_path, stand_ins=False) == {"FI_TRIALS": "raw/trials.json", "FI_RAW_DIR": "raw"}
+
+
+def test_a_script_that_runs_its_analysis_when_imported_gets_no_run_files(tmp_path: Path) -> None:
+    # importing it would run the analysis again in the quest folder and could rewrite the run's results
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text('{"cells": [1]}', encoding="utf-8")
+    (tmp_path / "code").mkdir()
+    for module in (LOADS, GUARDED + "main_result = n_cells()\n", GUARDED.replace("if __name__", "print(1)\nif __name__")):
+        (tmp_path / "code" / "experiment.py").write_text(module, encoding="utf-8")
+        assert fr.run_environment(tmp_path) == {} and fr.run_environment(tmp_path, stand_ins=False) == {}
+    (tmp_path / "code" / "experiment.py").write_text(GUARDED, encoding="utf-8")
+    assert fr.run_environment(tmp_path, stand_ins=False)["FI_TRIALS"] == "raw/trials.json"
+    (tmp_path / "code" / "experiment.py").write_text("def f(:\n", encoding="utf-8")
+    assert fr.run_environment(tmp_path) == {}, "a file that does not parse is not known to run nothing"

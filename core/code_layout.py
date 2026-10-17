@@ -247,9 +247,22 @@ Do not write tests, a README or a command-line entry: FI writes the unit tests f
 """
 
 
-def prefilled_block(package: str, model_source: str) -> str:
+def steps_block(steps: list[tuple[str, str, str]] | None) -> str:
+    """Which functions of the package are steps of the plan's method (``(function, step id, name)``): simulate.py calls
+    them and does not write the method again, not even in a shorter form of its own."""
+    rows = [(f, i, n) for f, i, n in steps or [] if f]
+    if not rows:
+        return ""
+    lines = "\n".join(f"  - `{f}` ({i}{': ' + n if n else ''})" for f, i, n in rows)
+    return ("\nThe package already holds the steps of the plan's method as functions, written from the plan's step cards and "
+            "the literature the plan cites. CALL them from simulate.py; do not rewrite them, and do not put a shorter or "
+            "simpler version of a step into simulate.py:\n" + lines + "\n")
+
+
+def prefilled_block(package: str, model_source: str, steps: list[tuple[str, str, str]] | None = None) -> str:
     """The layout the code-writing prompts ask for when FI has already written and checked the package, function by
-    function (:mod:`core.function_steps`): only the two scripts are asked for."""
+    function (:mod:`core.function_steps`): only the two scripts are asked for. ``steps``: the package's functions that are
+    steps of the method, which the scripts call and do not write again."""
     return f"""
 THE CODE AS A SMALL RESEARCH TOOL. The model's package `{package}/` is ALREADY WRITTEN AND TESTED: FI wrote it one function
 at a time, one function per equation, and checked each function against the plan's equation. Do NOT write any file of the
@@ -264,7 +277,7 @@ itself. The package's `{package}/{MODEL_NAME}` as it is:
 ```python
 {model_source.rstrip()}
 ```
-"""
+{steps_block(steps)}"""
 
 
 def reminder(package: str) -> str:
@@ -610,7 +623,33 @@ def _measure(check):
         assert value is not None, f"{{check['name']}}: simulate.oracle() does not return this check"
         return value
     case = dict(check["case"])
-    if hasattr(simulate, "run_trial"):
+    # With both functions the study runs only run_trial: a check that holds in every single trial runs on it, and so does any
+    # other check unless run_cell really calls run_trial (its mean then comes from the study's own trials), as Frontier
+    # Insight does.
+    if hasattr(simulate, "run_trial") and hasattr(simulate, "run_cell") and not check["per_trial"]:
+        # Counted at run time, as Frontier Insight does: run_cell counts only if it really called run_trial.
+        real, calls, sums = simulate.run_trial, [0], {{}}
+
+        def counted(*args, **kwargs):
+            calls[0] += 1
+            got = real(*args, **kwargs)
+            for key, v in (got.items() if isinstance(got, dict) else ()):
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    total, n = sums.get(key, (0.0, 0))
+                    sums[key] = (total + v, n + 1)
+            return got
+
+        simulate.run_trial = counted
+        try:
+            got = simulate.run_cell(case)
+        finally:
+            simulate.run_trial = real
+        # ... and what it returns agrees, within the check's limit, with the mean of what those trials returned.
+        if calls[0] and all(abs(v - sums[k][0] / sums[k][1]) <= check["limit"]
+                            for k, v in got.items() if k in sums and isinstance(v, (int, float))):
+            return got[check["measure"]]
+        return real(case, 0, _seed(case))[check["measure"]]
+    if hasattr(simulate, "run_trial") and (not hasattr(simulate, "run_cell") or check["per_trial"]):
         return simulate.run_trial(case, 0, _seed(case))[check["measure"]]
     return simulate.run_cell(case)[check["measure"]]
 
@@ -626,6 +665,8 @@ def _check(index):
 def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
     """``tests/test_oracles.py``: one test per check of the plan that has a number to agree with; ``None`` when there is
     none."""
+    from .trial_runner import is_per_trial
+
     checks, names = [], []
     taken: set[str] = set()
     for oracle in _oracle.declared(protocol):
@@ -635,7 +676,8 @@ def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
         own = _oracle.case_of(oracle)
         name = str(oracle["name"]).strip()
         checks.append({"name": name, "case": own[0] if own else None, "measure": own[1] if own else None,
-                       "expected": expected, "limit": limit})
+                       "expected": expected, "limit": limit,
+                       "per_trial": is_per_trial(oracle)})
         names.append(_test_name(name, taken))
     if not checks:
         return None

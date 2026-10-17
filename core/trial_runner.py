@@ -31,6 +31,7 @@ experiment's ``code/submit.py`` submits the array the way the cluster's skill sa
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from collections import Counter
@@ -42,6 +43,8 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
+from . import in_run as _in_run
+from . import optimise_search as _search
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 
@@ -61,8 +64,9 @@ SUBMIT_NAME = "submit.py"
 # The harness runs in the quest's own Python (venv, shared interpreter or container), which may not have FI installed:
 # it is self-contained, standard library only. It loads the simulation from its file, calls the entry function for
 # each trial it is given, and writes one JSON line per trial to the results file the parent named. The simulation's own
-# prints go to stderr, so nothing it prints can pass for a result line.
-HARNESS_SOURCE = r'''
+# prints go to stderr, so nothing it prints can pass for a result line. It carries the text of core/in_run.py, so what a
+# run returned is read the same way here, in code/run.py and in FI.
+HARNESS_BODY = r'''
 import importlib.util, json, math, sys, time, traceback, warnings
 
 def _number(v):
@@ -97,6 +101,20 @@ def main():
         fn = getattr(mod, spec["entry"], None)
         if not callable(fn):
             raise AttributeError(f"{spec['module']} has no function {spec['entry']}()")
+        # A run_cell measured for a check must really run the study's trials: run_trial is wrapped to count its calls.
+        trial_calls, trial_sums = [0], {}
+        if spec.get("spy_trial") and spec["entry"] == "run_cell" and callable(getattr(mod, "run_trial", None)):
+            _real_trial = mod.run_trial
+            def _counted(*a, **k):
+                trial_calls[0] += 1
+                got = _real_trial(*a, **k)
+                if isinstance(got, dict):
+                    for key, v in got.items():
+                        if _number(v):
+                            total, n = trial_sums.get(str(key), (0.0, 0))
+                            trial_sums[str(key)] = (total + float(v), n + 1)
+                return got
+            mod.run_trial = _counted
     except BaseException as e:
         out.write(json.dumps({"nonce": nonce, "load_error": f"{type(e).__name__}: {e}"[:500]}) + "\n")
         out.close()
@@ -113,18 +131,22 @@ def main():
                     value = fn(dict(spec["cell"]))
                 else:
                     value = fn()
-                if not isinstance(value, dict) or not value:
-                    raise TypeError(f"{spec['entry']}() returned {type(value).__name__}, not a dict of numbers")
-                bad = [k for k, v in value.items() if not _number(v)]
-                if bad:
-                    raise TypeError(f"{spec['entry']}() returned non-numbers for {bad[:5]}")
-                row.update(status="ok", values={str(k): float(v) for k, v in value.items()})
+                # A number per run, or (for what each run compares inside it) one per value it was given.
+                kept, why = read_returned(value, spec.get("levels") or [], spec["entry"])
+                if kept is None:
+                    raise TypeError(why)
+                row.update(status="ok", values=kept)
             except BaseException as e:
                 if isinstance(e, KeyboardInterrupt):
                     raise
                 row.update(status="failed", reason=f"{type(e).__name__}: {e}"[:300],
                            traceback=traceback.format_exc()[-1500:])
         row["duration_s"] = round(time.monotonic() - t0, 4)
+        if spec.get("spy_trial"):
+            row["trial_calls"] = trial_calls[0]
+            row["trial_means"] = {k: t / n for k, (t, n) in trial_sums.items() if n}
+            trial_calls[0] = 0
+            trial_sums.clear()
         row["warnings"] = [f"{w.category.__name__}: {w.message}"[:300] for w in caught][:20]
         for w in caught:  # printed as Python prints them, so the numeric-warning check reads them from stderr
             sys.stderr.write(f"{w.filename}:{w.lineno}: {w.category.__name__}: {w.message}\n")
@@ -135,11 +157,13 @@ def main():
 
 main()
 '''
+HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + HARNESS_BODY
 
 
 def cells(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
     """Every combination of the grid's values, axes in the grid's order, values in theirs. An empty grid is one cell
     with no axes (a study that runs one setting)."""
+    _search.check_listable(grid)
     axes = list(grid.items())
     if not axes:
         return [{}]
@@ -149,6 +173,8 @@ def cells(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
 def _fmt(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return repr(value)
+    if isinstance(value, list):  # an array setting (a design variable that is an array): no comma, a key is split on them
+        return "[" + ";".join(_fmt(x) for x in value) + "]"
     return str(value)
 
 
@@ -178,6 +204,8 @@ class CellRun:
     timed_out: bool = False
     stderr: str = ""
     load_error: str = ""
+    #: The values each run compared inside it (``protocol.in_each_run``), one dict per combination; empty when none.
+    levels: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -208,6 +236,35 @@ class TrialRun:
         """Every cell's stderr (its warnings and prints), for the numeric-warning scan."""
         return "\n".join(c.stderr for c in self.cells if c.stderr)
 
+    def record_cells(self) -> list[CellRun]:
+        """The settings as FI records them (:func:`record_cells`): each run setting with its numbers per run, then a
+        record of its own for each value the runs compared inside them, with the numbers per value. Every row holds
+        plain numbers only."""
+        return record_cells(self.cells)
+
+
+def record_cells(runs: list[CellRun]) -> list[CellRun]:
+    """Each run setting as :class:`CellRun` with its numbers per run, and for each value its runs compared inside them
+    (``levels``) a :class:`CellRun` keyed by that value too (``m=20,procedure=bh``) with its numbers per value; the same
+    trials, seeds and statuses (a failed run fails for every value). A study that compares nothing inside its runs gives
+    back its settings as they are."""
+    out: list[CellRun] = []
+    for run in runs:
+        if not run.levels:
+            out.append(run)
+            continue
+        out.append(CellRun(key=run.key, cell=dict(run.cell), planned=run.planned, returncode=run.returncode,
+                           timed_out=run.timed_out, stderr=run.stderr, load_error=run.load_error,
+                           rows=[{**r, "values": _in_run.split(r.get("values"))[0]} if r.get("status") == "ok" else dict(r)
+                                 for r in run.rows]))
+        for level in run.levels:
+            lk = _in_run.level_key(level)
+            out.append(CellRun(key=_in_run.record_key(run.key, lk), cell={**run.cell, **level}, planned=run.planned,
+                               returncode=run.returncode, timed_out=run.timed_out, load_error=run.load_error,
+                               rows=[{**r, "values": _in_run.split(r.get("values"))[1].get(lk, {})}
+                                     if r.get("status") == "ok" else dict(r) for r in run.rows]))
+    return out
+
 
 def _append(path: Path, row: dict[str, Any]) -> None:
     with open(path, "a", encoding="utf-8") as fh:
@@ -216,47 +273,28 @@ def _append(path: Path, row: dict[str, Any]) -> None:
 
 def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
     """Per cell, each metric's values over the trials that succeeded, with their count and total: what the analysis
-    script reads (``FI_TRIALS``) and what FI's statistics are computed from."""
-    out = []
+    script reads (``FI_TRIALS``) and what FI's statistics are computed from. Each metric's ``trials`` is the trial each
+    value came from (FI's own number): what a paired design joins on. A setting whose runs compared values inside them
+    is followed by a record per value (:func:`core.in_run.summary_cells`)."""
+    out: list[dict[str, Any]] = []
     for run in runs:
-        metrics: dict[str, list[float]] = {}
-        trials_of: dict[str, list[int]] = {}
-        for row in run.rows:
-            if row.get("status") != "ok":
-                continue
-            for name, value in (row.get("values") or {}).items():
-                metrics.setdefault(name, []).append(value)
-                trials_of.setdefault(name, []).append(row.get("trial"))
-        out.append({
-            "cell": run.cell,
-            "key": run.key,
-            "planned": run.planned,
-            "ok": sum(1 for r in run.rows if r.get("status") == "ok"),
-            "failed": sum(1 for r in run.rows if r.get("status") != "ok"),
-            "metrics": {
-                name: {
-                    "values": values,
-                    # The trial each value came from (FI's own number): what a paired design joins on.
-                    "trials": trials_of.get(name, []),
-                    "count": len(values),
-                    "total": math.fsum(v for v in values if math.isfinite(v)),
-                    "non_finite": sum(1 for v in values if not math.isfinite(v)),
-                }
-                for name, values in metrics.items()
-            },
-        })
+        out.extend(_in_run.summary_cells(run.cell, run.key, run.planned, run.rows, run.levels))
     return {"schema": "fi.trials/v1", "thresholds": dict(thresholds or {}), "cells": out}
 
 
 def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int, base_seed: int,
           deterministic: bool, folder: Path, out_name: str, keep_spec: bool = False,
-          paired: bool = False, thresholds: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+          paired: bool = False, thresholds: dict[str, Any] | None = None,
+          in_each_run: dict[str, list[Any]] | None = None) -> list[dict[str, Any]]:
     """Write one spec per cell (the simulation file, the entry, the cell, its trials with their seeds, a nonce) into
     ``folder`` and return the plan: per cell its key, cell, trials, nonce, and the spec and results paths relative to
-    ``quest_root``."""
+    ``quest_root``. ``in_each_run``: the values every run goes through together; the cell a run is given holds each such
+    list whole, and the run may return a number per value (:func:`core.in_run.read_returned`)."""
     quest_root = Path(quest_root)
     entry = "run_cell" if deterministic else "run_trial"
     per_cell = 1 if deterministic else max(1, int(runs_per_setting))
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
+    levels = _in_run.level_cells(inside)
     plan = []
     for index, cell in enumerate(cells(grid)):
         key = cell_key(cell)
@@ -266,11 +304,13 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
         out_path = folder / out_name.format(index=index)
         out_path.unlink(missing_ok=True)
         nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
-        spec_path.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": entry, "cell": cell,
+        spec_path.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": entry,
+                                         "cell": {**cell, **inside}, "levels": levels,
                                          "trials": trials, "nonce": nonce, "keep_spec": keep_spec,
                                          "thresholds": dict(thresholds or {})}, default=str),
                              encoding="utf-8")
-        plan.append({"index": index, "key": key, "cell": cell, "trials": trials, "nonce": nonce, "entry": entry,
+        plan.append({"index": index, "key": key, "cell": cell, "levels": levels, "trials": trials, "nonce": nonce,
+                     "entry": entry,
                      "spec": spec_path.relative_to(quest_root).as_posix(),
                      "out": out_path.relative_to(quest_root).as_posix()})
     return plan
@@ -293,7 +333,7 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
         _append(ledger, {"event": "planned", "run_id": run_id, "cell": key, "trials": per_cell,
                          "entry": task["entry"], "at": time.time()})
         result = results.get(task["index"])
-        run = CellRun(key=key, cell=task["cell"], planned=per_cell,
+        run = CellRun(key=key, cell=task["cell"], planned=per_cell, levels=list(task.get("levels") or []),
                       returncode=getattr(result, "returncode", None) if result is not None else None,
                       timed_out=bool(getattr(result, "timed_out", False)),
                       stderr=(getattr(result, "stderr", "") or "") if result is not None else "")
@@ -355,6 +395,7 @@ async def run_trials(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
     runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
     run_id: str = "", thresholds: dict[str, Any] | None = None, paired: bool = False, on_plan: Any = None,
+    in_each_run: dict[str, list[Any]] | None = None,
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
     the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study. ``on_plan(plan)`` is told the
@@ -367,7 +408,7 @@ async def run_trials(
     (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                  deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
-                 thresholds=thresholds)
+                 thresholds=thresholds, in_each_run=in_each_run)
     if on_plan is not None:
         on_plan(plan)
     results: dict[int, Any] = {}
@@ -386,7 +427,8 @@ async def run_trials(
 
 def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int,
                     base_seed: int, deterministic: bool, key: str, paired: bool = False,
-                    thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
+                    thresholds: dict[str, Any] | None = None,
+                    in_each_run: dict[str, list[Any]] | None = None) -> dict[str, Any]:
     """The job array for a cluster: FI's harness, one spec per setting and the task list in ``job/fi/``, and FI's own
     record of the plan (``.fi/trials/cluster.json``). Kept as it is while ``key`` (the simulation and the protocol) is
     the same, so every check of a submitted job sees the tasks that were submitted. Returns the record."""
@@ -411,7 +453,7 @@ def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[A
     (folder / "harness.py").write_text(HARNESS_SOURCE, encoding="utf-8")
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                  deterministic=deterministic, folder=folder, out_name="out{index}-" + key[:10] + ".jsonl", keep_spec=True,
-                 paired=paired, thresholds=thresholds)
+                 paired=paired, thresholds=thresholds, in_each_run=in_each_run)
     harness = (CLUSTER_DIR / "harness.py").as_posix()
     tasks = {
         "count": len(plan),
@@ -484,6 +526,123 @@ def entries(simulate: Path) -> set[str]:
         return set(_ENTRY_RE.findall(Path(simulate).read_text(encoding="utf-8")))
     except OSError:
         return set()
+
+
+TRIAL_AGGREGATE_WHY = ("run_trial must run ONE trial of the setting, and it currently returns the result of run_cell, "
+                       "which is the setting's number computed over many trials")
+
+_OWN_MODULE = "simulate"
+
+
+class _Module:
+    """What one reading of simulate.py (never run) says about which function reaches which. A module-level ``def``, a
+    module-level name bound to an expression (``_run = run_cell``, ``run_trial = lambda c, t, s: run_cell(c)``,
+    ``TABLE = {"a": run_cell}``) and an import (``from x import run_cell as y``) are all followed by name. An attribute
+    call counts only when its object is this very module (``import simulate``, ``import x as simulate``); ``obj.run_cell()``
+    on any other object is that object's own method and is not this file's ``run_cell``."""
+
+    def __init__(self, source: str) -> None:
+        self.ok = True
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            self.ok = False
+            return
+        self.nodes: dict[str, list[ast.AST]] = {}
+        self.alias: dict[str, str] = {}      # an imported name -> the name it stands for in this module
+        self.modules: set[str] = {_OWN_MODULE}
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.nodes.setdefault(n.name, []).append(n)
+            elif isinstance(n, (ast.Assign, ast.AnnAssign)) and getattr(n, "value", None) is not None:
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        self.nodes.setdefault(t.id, []).append(n.value)
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.name.split(".")[-1] == _OWN_MODULE:
+                        self.modules.add(a.asname or a.name.split(".")[0])
+            elif isinstance(n, ast.ImportFrom):
+                for a in n.names:
+                    if a.name in ("run_cell", "run_trial"):
+                        self.alias[a.asname or a.name] = a.name
+                    elif a.name == _OWN_MODULE:
+                        self.modules.add(a.asname or a.name)
+
+    def _names(self, node: ast.AST, *, calls_only: bool) -> set[str]:
+        """The module-level names ``node`` refers to. ``calls_only``: only a call, or a function handed to a call as an
+        argument (``map(run_trial, ...)``); otherwise any mention (a table of functions, a returned function)."""
+        found: set[str] = set()
+
+        # A name the code binds itself (a parameter, an assignment, a loop variable) is that variable, not the module's
+        # function of the same name.
+        local: set[str] = set()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = node.args
+            local |= {x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs, *filter(None, (a.vararg, a.kwarg)))}
+        local |= {x.id for x in ast.walk(node) if isinstance(x, ast.Name) and not isinstance(x.ctx, ast.Load)}
+
+        def resolve(x: ast.AST) -> str | None:
+            if isinstance(x, ast.Name):
+                return None if x.id in local else self.alias.get(x.id, x.id)
+            if (isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id in self.modules
+                    and x.value.id not in local):
+                return x.attr
+            return None
+
+        for sub in ast.walk(node):
+            if calls_only:
+                if isinstance(sub, ast.Call):
+                    for x in (sub.func, *sub.args, *(k.value for k in sub.keywords)):
+                        name = resolve(x)
+                        if name:
+                            found.add(name)
+            elif isinstance(sub, (ast.Name, ast.Attribute)):
+                name = resolve(sub)
+                if name:
+                    found.add(name)
+        return found
+
+    def reaches(self, start: str, goal: str, *, calls_only: bool) -> bool:
+        """Whether ``goal`` is reached from what ``start`` is, through any number of module-level functions and names."""
+        seen: set[str] = set()
+        todo = [start]
+        while todo:
+            current = todo.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            for node in self.nodes.get(current, []):
+                names = self._names(node, calls_only=calls_only)
+                if goal in names and current != goal:
+                    return True
+                todo.extend(n for n in names if n in self.nodes and n not in seen)
+        return False
+
+
+def trial_aggregates(source: str) -> str:
+    """A plain sentence when ``run_trial`` in ``source`` (read, never run) is not one trial because it reaches ``run_cell``
+    (it calls or names it, directly or through any number of the file's own functions and names, an alias such as
+    ``_run = run_cell`` or ``run_trial = run_cell``, a table of functions, or an imported ``run_cell``), and ``""``
+    otherwise.
+
+    ``run_cell`` is the setting's own number, the mean over many trials for a random study. FI's harness calls
+    ``run_trial`` once per trial and keeps each result, so a ``run_trial`` that returns ``run_cell``'s number makes every
+    trial as long as a whole cell (the study would not fit its time) and every kept "trial" a mean of many (wrong
+    statistics). The converse, a ``run_cell`` that calls ``run_trial``, is how a cell is built and is not flagged. Not
+    followed: a function looked up by a computed string (``globals()[name]``), ``getattr``, and code in other files."""
+    mod = _Module(source)
+    if not mod.ok or "run_trial" not in mod.nodes:
+        return ""
+    return TRIAL_AGGREGATE_WHY if mod.reaches("run_trial", "run_cell", calls_only=False) else ""
+
+
+def cell_runs_trials(source: str) -> bool:
+    """Whether ``run_cell`` in ``source`` really calls ``run_trial`` (directly or through the file's own functions, also
+    handed to ``map`` and the like): the mean it returns then comes from the trials the study itself runs."""
+    mod = _Module(source)
+    return mod.ok and mod.reaches("run_cell", "run_trial", calls_only=True)
 
 
 class TrialsRunner:
@@ -572,6 +731,7 @@ class TrialsRunner:
         key = _run_key(self.simulate, protocol, runs, base, self.deterministic)
         # A paired metric compares the settings trial by trial: each trial number gets one seed across the settings.
         paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
+        inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
         run = _load_run(self.quest_root, key)
         if run is not None:
             if self.log is not None:
@@ -585,6 +745,7 @@ class TrialsRunner:
                 self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, key=key, paired=paired,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+                in_each_run=inside,
             )
             submitted = await self.executor.execute(
                 [cmd[0], str(self.submit)], cwd=cwd, timeout_s=timeout_s,
@@ -633,7 +794,7 @@ class TrialsRunner:
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                paired=paired, on_plan=self._note_plan,
+                paired=paired, on_plan=self._note_plan, in_each_run=inside,
             )
             self._plan_seen = None
             _save_run(self.quest_root, key, run)
@@ -745,7 +906,8 @@ def _file_hashes(quest_root: Path) -> dict[str, str]:
 def _save_run(quest_root: Path, key: str, run: TrialRun) -> None:
     record = {"key": key, "files": _file_hashes(quest_root), "cells": [
         {"key": c.key, "cell": c.cell, "planned": c.planned, "rows": c.rows, "returncode": c.returncode,
-         "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error} for c in run.cells]}
+         "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error, "levels": c.levels}
+        for c in run.cells]}
     try:
         (Path(quest_root) / RUN_RECORD).write_text(json.dumps(record, allow_nan=True, default=str), encoding="utf-8")
     except OSError:
@@ -770,8 +932,12 @@ def _load_run(quest_root: Path, key: str) -> TrialRun | None:
 
 async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, entry: str, cell: dict[str, Any],
                    seed: int | None, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-                   label: str, trial: int = 0) -> tuple[dict[str, float] | None, str]:
-    """Call one entry function once in its own process: ``(values, "")``, or ``(None, why)`` when it could not."""
+                   label: str, trial: int = 0, spy_trial: bool = False,
+                   spy_out: dict[str, Any] | None = None,
+                   levels: list[dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, str]:
+    """Call one entry function once in its own process: ``(values, "")``, or ``(None, why)`` when it could not.
+    ``spy_trial``: count the calls ``run_cell`` makes to ``run_trial`` and the mean of what they returned, per
+    name, in ``spy_out`` (``calls``, ``means``)."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -781,8 +947,10 @@ async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: 
     out.unlink(missing_ok=True)
     nonce = hashlib.sha256(f"oracle|{time.time_ns()}".encode()).hexdigest()[:24]
     spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": entry, "cell": cell,
+                                "levels": list(levels or []),
                                 "trials": [{"trial": int(trial), "seed": seed}], "nonce": nonce,
-                                "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
+                                "thresholds": dict(thresholds or {}), "spy_trial": bool(spy_trial)}, default=str),
+                    encoding="utf-8")
     result = await executor.execute(
         [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=timeout_s, env=env,
@@ -797,6 +965,8 @@ async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: 
         if row.get("load_error"):
             return None, str(row["load_error"])
         if row.get("status") == "ok":
+            if spy_out is not None:
+                spy_out.update(calls=int(row.get("trial_calls") or 0), means=dict(row.get("trial_means") or {}))
             return dict(row.get("values") or {}), ""
         if row.get("status") == "failed":
             where = last_frame(str(row.get("traceback") or ""), quest_root)
@@ -845,18 +1015,121 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
                           env=env, thresholds=thresholds, label="oracle()")
 
 
+def is_per_trial(oracle: dict[str, Any] | None) -> bool:
+    """A check that holds in every single trial: kind ``invariant``, or declared ``per_trial: true``."""
+    if oracle is None:
+        return False
+    flag = oracle.get("per_trial")
+    if flag is True or (isinstance(flag, str) and flag.strip().lower() in ("true", "yes", "1")):
+        return True
+    return _oracle.kind_of(oracle) == "invariant"
+
+
+def oracle_entry(have: set[str] | frozenset[str], oracle: dict[str, Any] | None = None, *, per_trial: bool = False,
+                 cell_runs_trials: bool = False) -> str:
+    """Which simulation function FI calls to measure an oracle: ``"run_trial"`` or ``"run_cell"``.
+
+    The two mean different things. ``run_trial`` is ONE trial of one setting (FI's trial harness calls it once per trial
+    and keeps each result); ``run_cell`` is the setting's own number, the one a deterministic study computes or the mean
+    over many trials of a random one. A simulation that defines only one of them is called through it. When it defines
+    both, the study runs ONLY ``run_trial``, so a check must test that code: a check that holds in every single trial
+    (:func:`is_per_trial`) is measured on ``run_trial``; any other check is measured on ``run_cell`` only when
+    ``cell_runs_trials`` (``run_cell`` really calls ``run_trial``, so its mean comes from the study's own trials), and
+    otherwise on ``run_trial`` as before. A ``run_cell`` with a formula of its own would let a bug in ``run_trial`` pass."""
+    if "run_trial" not in have:
+        return "run_cell"
+    if "run_cell" not in have:
+        return "run_trial"
+    if per_trial or is_per_trial(oracle) or not cell_runs_trials:
+        return "run_trial"
+    return "run_cell"
+
+
+def oracle_entry_for(simulate: Path | str, oracle: dict[str, Any] | None = None, *, per_trial: bool = False) -> str:
+    """:func:`oracle_entry` for the simulation file at ``simulate`` (read, not run)."""
+    path = Path(simulate)
+    have = entries(path)
+    reaches = False
+    if {"run_trial", "run_cell"} <= have:
+        try:
+            reaches = cell_runs_trials(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            reaches = False
+    return oracle_entry(have, oracle, per_trial=per_trial, cell_runs_trials=reaches)
+
+
+def _built_from_trials(values: dict[str, float], spy: dict[str, Any], oracle: dict[str, Any] | None) -> bool:
+    """Whether what ``run_cell`` returned really comes from the trials it ran: it called ``run_trial`` at least once, and
+    for every name both return, ``run_cell``'s number agrees (within the check's own limit) with the mean of what the
+    trials returned. A ``run_cell`` that runs a trial and drops it for a formula of its own does not agree."""
+    if int(spy.get("calls") or 0) <= 0:
+        return False
+    limit = _oracle.limit_of(oracle)[1] if oracle is not None else None
+    means = spy.get("means") or {}
+    for key, v in values.items():
+        if key in means and isinstance(v, (int, float)):
+            allowed = limit if limit is not None else 1e-6 * max(1.0, abs(v))
+            if abs(float(v) - float(means[key])) > allowed:
+                return False
+    return True
+
+
 async def run_case(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
                    timeout_s: int, env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
-                   trial: int = 0) -> tuple[dict[str, float] | None, str]:
+                   trial: int = 0, oracle: dict[str, Any] | None = None,
+                   per_trial: bool = False,
+                   in_each_run: dict[str, list[Any]] | None = None) -> tuple[dict[str, Any] | None, str]:
     """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial ``trial``, 0 unless asked,
-    with the seed FI gives that trial of that cell, or ``run_cell``): ``(the metrics it returned, "")``, or ``(None,
-    why)``. This is how an oracle is measured without asking the script for the number."""
-    have = entries(Path(module) if Path(module).is_absolute() else Path(quest_root) / module)
-    entry = "run_trial" if "run_trial" in have else "run_cell"
+    with the seed FI gives that trial of that cell, or ``run_cell``; :func:`oracle_entry` says which): ``(the metrics it
+    returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number.
+
+    With values compared inside each run (``in_each_run``), the run is given every one of them, as in the study, with the
+    study's seed for the case's setting; a number per value is then read at the value the case names, or kept as the
+    list of every value when the case names none (:func:`core.in_run.for_case`)."""
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
+    if not inside:
+        return await _run_case(executor, python, quest_root, module, cell=dict(cell), timeout_s=timeout_s, env=env,
+                               thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial)
+    levels = _in_run.level_cells(inside)
+    setting = {k: v for k, v in cell.items() if k not in inside}
+    named = {k: v for k, v in cell.items() if k in inside}
+    if named and _in_run.level_named(named, levels) is None:
+        shown = ", ".join(f"{k}={_fmt(v)}" for k, v in named.items())
+        return None, (f"the case sets {shown}; each run compares {', '.join(inside)} inside it, so a case names one of "
+                      f"the values each run is given for every one of them ({', '.join(_in_run.level_key(lv) for lv in levels[:6])}), "
+                      "or none of them")
+    got, why = await _run_case(executor, python, quest_root, module, cell={**setting, **inside}, timeout_s=timeout_s,
+                               env=env, thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
+                               levels=levels, seed_key=cell_key(setting))
+    if got is None:
+        return None, why
+    return _in_run.for_case(got, levels, named), why
+
+
+async def _run_case(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
+                    timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None, trial: int,
+                    oracle: dict[str, Any] | None, per_trial: bool, levels: list[dict[str, Any]] | None = None,
+                    seed_key: str | None = None) -> tuple[dict[str, Any] | None, str]:
+    """:func:`run_case` on the cell the run is given (``seed_key``: the setting the seed is FI's for, the cell's own key
+    when not given)."""
+    path = Path(module) if Path(module).is_absolute() else Path(quest_root) / module
+    entry = oracle_entry_for(path, oracle, per_trial=per_trial)
     base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
-    seed = trial_seed(base, cell_key(cell), int(trial)) if entry == "run_trial" else None
+    if entry == "run_cell" and "run_trial" in entries(path):
+        # The study runs only run_trial: a run_cell measurement counts only if run_cell really called it (a mention the
+        # code never reaches, or a call whose result is dropped for a formula of its own, proves nothing). The AST read
+        # is the first filter; this is the decision.
+        spy: dict[str, Any] = {}
+        values, why = await _run_one(executor, python, quest_root, module, entry="run_cell", cell=dict(cell), seed=None,
+                                     timeout_s=timeout_s, env=env, thresholds=thresholds, label="run_cell()",
+                                     trial=int(trial), spy_trial=True, spy_out=spy, levels=levels)
+        if values is None or _built_from_trials(values, spy, oracle):
+            return values, why
+        entry = "run_trial"  # run_cell never ran a trial: the check is measured on the code the study runs
+    key = cell_key(cell) if seed_key is None else seed_key
+    seed = trial_seed(base, key, int(trial)) if entry == "run_trial" else None
     return await _run_one(executor, python, quest_root, module, entry=entry, cell=dict(cell), seed=seed, timeout_s=timeout_s,
-                          env=env, thresholds=thresholds, label=f"{entry}()", trial=int(trial))
+                          env=env, thresholds=thresholds, label=f"{entry}()", trial=int(trial), levels=levels)
 
 
 def _same_value(a: Any, b: Any) -> bool:
@@ -871,7 +1144,7 @@ def _same_value(a: Any, b: Any) -> bool:
 
 async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,
                          env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
-                         most: int = 3) -> tuple[bool | None, str]:
+                         most: int = 3, in_each_run: dict[str, list[Any]] | None = None) -> tuple[bool | None, str]:
     """Whether ``run_cell`` returns the same numbers when FI calls it again, each call in a new process, on up to
     ``most`` settings that ran to the end (the fastest first, and only while their first runs together took under a
     tenth of ``timeout_s``; always at least one): ``(True, "")``, ``(False, what differed)``, or ``(None, why it could not
@@ -895,20 +1168,28 @@ async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, mo
         return None, "no setting ran to the end"
     done.sort(key=lambda item: item[0])
     spent = 0.0
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
+    levels = _in_run.level_cells(inside)
     for index, (seconds, cell, row) in enumerate(done[:max(1, most)]):
         spent += seconds
         if index and spent > timeout_s / 10:
             break
-        again, why = await run_case(executor, python, quest_root, module, cell=cell["cell"], timeout_s=timeout_s,
-                                    env=env, thresholds=thresholds)
-        if again is None and "did not report" in why:
-            # A new venv's first start can fail before it reaches the code (see the retry in the execute step).
-            again, why = await run_case(executor, python, quest_root, module, cell=cell["cell"], timeout_s=timeout_s,
-                                        env=env, thresholds=thresholds)
+        # The setting as the study gave it (with every value each run compares), so the numbers compare one for one.
+        again, why = None, ""
+        for _attempt in range(2):  # a new venv's first start can fail before it reaches the code (see the execute step)
+            if not inside:
+                again, why = await run_case(executor, python, quest_root, module, cell=dict(cell["cell"]),
+                                            timeout_s=timeout_s, env=env, thresholds=thresholds, trial=0)
+            else:
+                again, why = await _run_case(executor, python, quest_root, module, cell={**cell["cell"], **inside},
+                                             timeout_s=timeout_s, env=env, thresholds=thresholds, trial=0, oracle=None,
+                                             per_trial=False, levels=levels, seed_key=cell_key(cell["cell"]))
+            if again is not None or "did not report" not in why:
+                break
         if again is None:
             return None, why
-        first = {str(k): v for k, v in (row.get("values") or {}).items()}
-        second = {str(k): v for k, v in again.items()}
+        first = {_in_run.record_key(k, n) if k else n: v for k, n, v in _in_run.flat("", row.get("values") or {})}
+        second = {_in_run.record_key(k, n) if k else n: v for k, n, v in _in_run.flat("", again)}
         changed = sorted(k for k in set(first) | set(second)
                          if k not in first or k not in second or not _same_value(first[k], second[k]))
         if changed:
@@ -920,6 +1201,7 @@ async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, mo
 async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, module: Path | str,
                           oracles: list[dict[str, Any]], *, timeout_s: int, env: dict[str, str] | None = None,
                           thresholds: dict[str, Any] | None = None, case_env: dict[str, str] | None = None,
+                          in_each_run: dict[str, list[Any]] | None = None,
                           ) -> tuple[list[dict[str, Any]], list[str], bool]:
     """``(checks, problems, timed_out)`` for the declared oracles. An oracle with a case is measured by the ENGINE: it calls
     the simulation function on that case and reads the measure from what comes back (``measured_by: "engine"``). The rest
@@ -937,7 +1219,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
         case, measure = own
         name = str(oracle["name"]).strip()
         values, why = await run_case(executor, python, quest_root, module, cell=case, timeout_s=timeout_s, env=cenv,
-                                     thresholds=thresholds)
+                                     thresholds=thresholds, oracle=oracle, in_each_run=in_each_run)
         if values is None:
             problems.append(f"the oracle {name!r}: the simulation could not be run on its case "
                             f"({clip_keeping_place(why, 300)})")
@@ -1063,8 +1345,12 @@ def recorded_rows_by_cell(quest_root: Path) -> dict[str, list[dict[str, Any]]]:
             digest = hashlib.sha256(json.dumps(values, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
             if _trial_id(row) is None or hashes.get((key, _trial_id(row))) != digest:
                 continue
-            out.setdefault(key, []).append({"cell": key, "trial": row.get("trial"), "seed": row.get("seed"),
-                                            "values": values})
+            # A run that compared values inside it is a row of its setting (its numbers per run) and one per value.
+            per_run, per_level = _in_run.split(values)
+            for where, named in [(key, per_run), *((_in_run.record_key(key, lk), v) for lk, v in per_level.items())]:
+                if named or where == key:
+                    out.setdefault(where, []).append({"cell": where, "trial": row.get("trial"), "seed": row.get("seed"),
+                                                      "values": named})
     return out
 
 
@@ -1250,10 +1536,11 @@ def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Count
             if _trial_id(row) is None or hashes.get((str(cell.get("key")), _trial_id(row))) != digest:
                 altered += 1
                 continue
-            for name, value in values.items():
+            # Each value's numbers are its own setting's (core/in_run.py): a number per run is counted once per run.
+            for where, name, value in _in_run.flat(str(cell.get("key")), values):
                 key = _value_key(value)
                 if key is not None:
-                    out.setdefault(str(cell.get("key")), {}).setdefault(str(name), Counter())[key] += 1
+                    out.setdefault(where, {}).setdefault(str(name), Counter())[key] += 1
     problems = []
     if altered:
         problems = [f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
@@ -1292,10 +1579,10 @@ def recorded_series(quest_root: Path, names: set[str] | list[str]) -> dict[str, 
             digest = hashlib.sha256(json.dumps(values, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
             if hashes.get((str(cell.get("key")), _trial_id(row))) != digest:
                 continue
-            for name in wanted & set(values):
-                v = values[name]
-                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
-                    out.setdefault(name, {}).setdefault(str(cell.get("key")), []).append((_trial_id(row), float(v)))
+            for where, name, v in _in_run.flat(str(cell.get("key")), values):
+                if (name in wanted and isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and math.isfinite(v)):
+                    out.setdefault(name, {}).setdefault(where, []).append((_trial_id(row), float(v)))
     return {name: {key: [v for _, v in sorted(rows)] for key, rows in cells.items()} for name, cells in out.items()}
 
 

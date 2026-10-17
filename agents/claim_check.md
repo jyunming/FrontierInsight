@@ -49,7 +49,7 @@ Respond with a single JSON object, no prose, no markdown fence:
 ## Topic
 $topic
 
-## This quest's own evidence (experiment results + key findings)
+## This quest's own evidence (the run's results; the analysis step's prose is not evidence)
 $evidence_block
 
 ## How the study was run (the plan, the code that ran, what a second model found in it, what each figure draws)

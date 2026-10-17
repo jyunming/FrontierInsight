@@ -1,0 +1,75 @@
+{
+ "summary": "Across 30 simulated cells (400 paired trials each), inverse-variance weighting generally brought empirical Wald-interval coverage closer to 95% than OLS, but both methods undercovered. The hypothesized reduction in estimator spread was not observed: weighted estimates were typically slightly more variable than OLS. Increasing the number of time points strongly reduced spread, while all nonlinear fits passed numerical checks.",
+ "key_findings": [
+  "All cells were numerically successful: 0 of 400 planned trials failed in each reported cell (Wilson 95% upper bound 0.0095). The pre-run Arrhenius recovery, rate-ratio, centering, delta-method, and centroid oracles all passed.",
+  "[by_Arrhenius_regression_method] At 0.25% noise and 5 time points, Ea coverage was identical for OLS and weighted fitting: 0.870 (348/400; Wilson 95% CI 0.833\u20130.899). Thus weighting did not improve calibration uniformly.",
+  "[by_Arrhenius_regression_method] In visible higher-information cells, weighted Ea coverage was closer to nominal than OLS but still below 0.95: at 8% noise and 20 points, 0.915 (366/400; 0.884\u20130.939) versus 0.813 (325/400; 0.771\u20130.848); at 8% noise and 32 points, 0.918 (367/400; 0.886\u20130.941) versus 0.870 (348/400; 0.833\u20130.899). ln A coverage followed the same pattern (0.923 versus 0.820 at 8% noise and 20 points).",
+  "[by_n_time_points] Estimate spread declined sharply with additional time points. At 8% noise, weighted Ea SD fell from 2,030 J mol^-1 at 5 points to 717 J mol^-1 at 32 points; weighted ln A SD fell from 0.771 to 0.276. The corresponding OLS decreases were 1,920 to 709 J mol^-1 and 0.745 to 0.272.",
+  "[by_Arrhenius_regression_method] Weighting did not reduce spread in the reported cells. For example, at 8% noise and 20 points, weighted versus OLS Ea SD was 923 versus 909 J mol^-1, and at 8% noise and 32 points it was 717 versus 709 J mol^-1. At 0.25% noise and 5 points, it was 64.0 versus 56.5 J mol^-1.",
+  "[by_Arrhenius_regression_method] Ea and ln A estimates were extremely positively correlated in every displayed cell (approximately 0.995\u20130.997), consistent with strong slope\u2013intercept coupling when recovering the uncentered Arrhenius intercept.",
+  "Bias was small relative to the true Ea of 24,122 J mol^-1: the largest displayed weighted Ea mean bias was 154 J mol^-1 (about 0.64%), meeting the pre-specified 5% absolute-bias criterion, although some bootstrap bias intervals exclude zero."
+ ],
+ "claims_supported": [
+  {
+   "claim": "More time points improve precision.",
+   "evidence": "At 8% noise, weighted Ea SD declined from 2,030 J mol^-1 (5 points) to 717 J mol^-1 (32 points), with the analogous OLS decline from 1,920 to 709 J mol^-1."
+  },
+  {
+   "claim": "The nominal-Wald intervals are undercalibrated under this two-stage procedure.",
+   "evidence": "Observed Ea coverage ranged from 0.813 to 0.918 in the displayed cells, and even weighted coverage intervals remained below the nominal 0.95 target (for example, 0.884\u20130.939 at 8% noise and 20 points)."
+  },
+  {
+   "claim": "Weighting is associated with better observed interval coverage in many non-minimal time-point cells.",
+   "evidence": "At 8% noise, weighted Ea coverage was 0.905\u20130.918 across 8\u201332 points, versus OLS 0.813\u20130.878; however, formal paired coverage contrasts were not supplied."
+  },
+  {
+   "claim": "The kinetic fitting procedure was numerically reliable on this simulation grid.",
+   "evidence": "All reported cells had 400 successful trials and zero failures; all specified pre-run numerical and analytical oracles passed."
+  }
+ ],
+ "claims_unsupported": [
+  {
+   "claim": "Inverse-variance weighting reduces Ea or ln A estimator spread relative to OLS.",
+   "reason": "Displayed weighted SDs are generally slightly larger than their OLS counterparts."
+  },
+  {
+   "claim": "Weighted fitting achieves nominal 95% coverage.",
+   "reason": "Weighted coverage estimates were below 0.95 throughout the displayed results, with Wilson intervals also below 0.95 in the cited cells."
+  },
+  {
+   "claim": "Weighting improves coverage in every grid cell.",
+   "reason": "At 0.25% noise and 5 points, both methods had identical 0.870 Ea and ln A coverage."
+  },
+  {
+   "claim": "Method differences are statistically significant after multiplicity control.",
+   "reason": "The supplied comparison-statistics block contains no estimable contrasts, effect sizes, p-values, or Holm-adjusted results."
+  }
+ ],
+ "limitations": [
+  "Only one simulation seed was run; there is no between-seed replication interval.",
+  "Coverage uncertainty is binomial and cell-specific: Wilson intervals are often wider than \u00b10.025, so the intended coverage precision was not attained for many cells.",
+  "Formal paired method-comparison statistics were unavailable because the comparison engine marked the requested metrics unsupported; observed method differences should not be presented as significance-tested.",
+  "The simulation uses five exact temperatures, first-order kinetics, independently scaled sampling windows, and additive independent concentration noise; conclusions do not establish performance under correlated, proportional, or model-misspecified errors.",
+  "The run took 111.3 seconds, exceeding the stated under-60-second compute target."
+ ],
+ "primary_sources": [
+  {
+   "title": "result_json_seed_0",
+   "detail": "Monte Carlo results for 30 noise-by-time-point cells, each with 400 paired simulated trajectories, including method-stratified estimates, bootstrap intervals, and Wilson coverage intervals."
+  },
+  {
+   "title": "figures/ea_calibration.png",
+   "detail": "Visual summary of Ea bias, estimate SD, and empirical 95% coverage across noise levels and time-point counts."
+  },
+  {
+   "title": "figures/lna_calibration.png",
+   "detail": "Visual summary of ln A bias, estimate SD, and empirical 95% coverage across noise levels and time-point counts."
+  },
+  {
+   "title": "figures/weighted_minus_unweighted.png",
+   "detail": "Visual summary of paired weighted-minus-OLS differences across the simulation grid."
+  }
+ ],
+ "next_step": "publish",
+ "next_step_reason": "The experiment yields a coherent, well-checked partial refutation: weighting improved observed calibration in many cells but did not reduce spread or attain nominal coverage, and the negative result is publishable with its uncertainty and scope limitations."
+}

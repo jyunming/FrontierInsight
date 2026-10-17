@@ -98,7 +98,8 @@ def cells_of(record: Any) -> list[dict[str, Any]]:
             values = [float(v) for v in (m.get("values") if isinstance(m, dict) else m or []) if _is_number(v)]
             if values:
                 metrics[str(name)] = values
-        out.append({"cell": entry["cell"], "metrics": metrics})
+        out.append({"cell": entry["cell"], "metrics": metrics,
+                    **({"level": entry["level"]} if isinstance(entry.get("level"), dict) and entry["level"] else {})})
     return out
 
 
@@ -138,6 +139,17 @@ def _varying(cells: list[dict[str, Any]]) -> dict[str, list[float]]:
             if _is_number(v):
                 axes.setdefault(str(a), set()).add(float(v))
     return {a: sorted(vs) for a, vs in axes.items() if len(vs) > 1}
+
+
+def _per_record_kind(cells: list[dict[str, Any]], axis: str) -> set[int]:
+    """How many records carry ``axis``, counted per kind of record: one count for a study that compares nothing inside
+    its runs, and with values compared inside each run (core/in_run.py), one for the settings and one for the records
+    per value (whose cells name the value too), so a table of either is one row per record."""
+    sizes: dict[int, int] = {}
+    for c in cells:
+        if axis in c["cell"]:
+            sizes[len(c["cell"])] = sizes.get(len(c["cell"]), 0) + 1
+    return set(sizes.values())
 
 
 def _distinct(values: list[float]) -> list[float]:
@@ -198,7 +210,7 @@ def problems(cells: list[dict[str, Any]], reported: list[tuple[str, Any]]) -> li
                 if verified and wrong >= max(1, math.ceil(0.5 * verified)):
                     out.append(Mismatch(path, column, axis, _distinct(reported_values), _distinct(ran_values), len(rows), wrong,
                                         top=root))
-                elif not verified and len(rows) == len(cells):
+                elif not verified and len(rows) in _per_record_kind(cells, axis):
                     values = _distinct([float(r[column]) for r in rows])
                     if len(values) == 1:
                         out.append(Mismatch(path, column, axis, values, varying[axis], len(rows), len(rows), collapsed=True,

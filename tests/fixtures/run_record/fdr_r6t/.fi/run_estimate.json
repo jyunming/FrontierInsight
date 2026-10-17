@@ -1,0 +1,44 @@
+{
+ "key": "ea1847ec2dab93e604f41ff790a453e134d3e137403acde8bb93fb88c92ae94e|900",
+ "estimate_s": 14565.010932681249,
+ "limit_s": 900.0,
+ "says": "FI estimates the experiment takes about 4 h 3 min; the limit is 15 minutes",
+ "reduced": {
+  "note": "FI made the experiment smaller so that it fits the time allowed (15 minutes): it would have taken about 7 h 6 min. The plan's model changed it from 9 setting(s) with 1200 run(s) each to 4 setting(s) with 1200 run(s) each; the checks, thresholds and tolerances are unchanged.",
+  "from": {
+   "grid": {
+    "m": [
+     20,
+     200,
+     2000
+    ],
+    "pi1": [
+     0.0,
+     0.05,
+     0.2
+    ]
+   },
+   "runs_per_setting": 1200
+  },
+  "to": {
+   "grid": {
+    "m": [
+     20,
+     2000
+    ],
+    "pi1": [
+     0.0,
+     0.2
+    ]
+   },
+   "runs_per_setting": 1200
+  }
+ },
+ "at": 1791797874.8590033,
+ "timed": 3,
+ "cells": 4,
+ "trials": 4800,
+ "fits": false,
+ "asks": 2,
+ "stopped": "the experiment would take about 4 h 3 min, more than the 15 minutes allowed; FI asked the plan 2 times to make it smaller"
+}

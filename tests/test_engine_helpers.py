@@ -489,10 +489,11 @@ def test_route_after_review_accept_returns_done(tmp_path: Path) -> None:
     assert engine._route_after_review(state) == "done"
 
 
-def test_route_after_review_revise_under_cap_returns_revise(tmp_path: Path) -> None:
+def test_route_after_review_revise_under_cap_rewrites_the_paper(tmp_path: Path) -> None:
+    # A revise verdict no check of FI's confirms: the paper is written again; the design is not changed.
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
     state = {"review": {"verdict": "revise"}, "iteration": 1}
-    assert engine._route_after_review(state) == "revise"
+    assert engine._route_after_review(state) == "rewrite"
 
 
 def test_route_after_review_revise_at_cap_returns_done(tmp_path: Path) -> None:
@@ -511,16 +512,16 @@ def test_route_after_review_missing_review_field_returns_done(tmp_path: Path) ->
 def test_route_after_review_missing_iteration_treated_as_zero(tmp_path: Path) -> None:
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=1))
     state = {"review": {"verdict": "revise"}}
-    # iteration defaults to 0, 0 < 1 => revise.
-    assert engine._route_after_review(state) == "revise"
+    # iteration defaults to 0, 0 < 1 => the paper is written again.
+    assert engine._route_after_review(state) == "rewrite"
 
 
 # ---- graph topology ------------------------------------------------------
 
 
 def test_conditional_edge_targets_match_route_return_values(tmp_path: Path) -> None:
-    """The conditional dict {"revise": "design", "done": END} must cover both
-    possible return values of `_route_after_review` and nothing else.
+    """A verdict alone sends the paper to be written again or finishes it: the design is changed only for a person's
+    note the rewrite left unanswered, never for a verdict.
     """
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=3))
 
@@ -529,7 +530,7 @@ def test_conditional_edge_targets_match_route_return_values(tmp_path: Path) -> N
         for it in (0, 1, 2, 3, 99):
             seen.add(engine._route_after_review({"review": {"verdict": verdict}, "iteration": it}))
 
-    assert seen == {"revise", "done"}
+    assert seen == {"rewrite", "done"}
 
 
 # ---- evidence_gate -------------------------------------------------------
@@ -1131,7 +1132,7 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert hf_branch.ends == {"rewrite": "write", "revise": "design", "done": END, "search": "execute",
                               "ask_again": "human_feedback"}
     reflect_branch = next(iter(g.branches["execute_reflect"].values()))
-    assert reflect_branch.ends == {"retry": "execute", "proceed": "improve"}
+    assert reflect_branch.ends == {"retry": "execute", "proceed": "improve", "stuck": "evidence_gate"}
     # improve → analyze, or back to execute once for a kept change to the simulation.
     improve_branch = next(iter(g.branches["improve"].values()))
     assert improve_branch.ends == {"rerun": "execute", "proceed": "analyze"}
@@ -1605,7 +1606,7 @@ def test_no_sim_directive_renders_into_design_prompt() -> None:
     kw = dict(topic="t", chosen_idea="{}", literature_block="lit",
               review_feedback="r", timeout_s="60", clarify_block="c",
               skills_block="(no simulation skills enabled)",
-              inputs_block="(none supplied)", job_block="")
+              inputs_block="(none supplied)", job_block="", time_note="")
     on = tmpl.substitute(study_mode_directive=_NO_SIM_DESIGN_DIRECTIVE, **kw)
     off = tmpl.substitute(study_mode_directive="", **kw)
     assert "NO-SIMULATION" in on

@@ -362,12 +362,13 @@ def protocol_numbers(protocol: dict[str, Any] | None) -> list[tuple[float, str]]
     out: list[tuple[float, str]] = []
     if not isinstance(protocol, dict):
         return out
-    grid = protocol.get("grid")
-    if isinstance(grid, dict):
-        for axis, values in grid.items():
+    for part, where in (("grid", "grid"), ("in_each_run", "compared in each run")):
+        grid = protocol.get(part)
+        for axis, values in (grid.items() if isinstance(grid, dict) else []):
             for v in values if isinstance(values, list) else []:
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    out.append((float(v), f"grid {axis}"))
+                for x in (v if isinstance(v, (list, tuple)) else [v]):   # a tuple setting fixes each of its numbers
+                    if isinstance(x, (int, float)) and not isinstance(x, bool):
+                        out.append((float(x), f"{where} {axis}"))
     runs = protocol.get("runs_per_setting")
     if isinstance(runs, (int, float)) and not isinstance(runs, bool):
         out.append((float(runs), "runs per setting"))
@@ -442,8 +443,11 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
     lists, scalars, numbers = _read(scripts)
     out: list[Mismatch] = []
 
-    grid = protocol.get("grid")
-    for axis, values in (grid.items() if isinstance(grid, dict) else []):
+    # What each run compares inside it is handed in by FI as well (the whole list in each run's cell): a script that
+    # names other values for it contradicts the protocol the same way.
+    grid = {**(protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}),
+            **(protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {})}
+    for axis, values in grid.items():
         want = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)] if isinstance(values, list) else []
         if not want:
             continue
