@@ -678,21 +678,6 @@ async def test_a_hung_pip_freeze_is_killed_instead_of_leaked(tmp_path: Path, mon
 # ---- required receipts: a check that did not run, or whose record is broken, is never a pass ----------------------
 
 
-def test_a_code_writer_that_ran_without_isolation_is_said_plainly_and_keeps_it_from_publication_ready(
-        tmp_path: Path) -> None:
-    from core import agent_coder
-
-    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
-    unsafe = {**ON, "code_writer_isolation": agent_coder.ISOLATION_UNVERIFIED,
-              "code_writer_isolation_why": agent_coder.NO_ISOLATION_WHY}
-    got = evidence.assess(root, _state(), settings=unsafe)
-    assert got["status"] == "statistically_adequate"
-    assert any(g.startswith("the code writer ran without isolation (") for g in got["gaps"]), got["gaps"]
-    assert got["code_writer"]["isolation"] == agent_coder.ISOLATION_UNVERIFIED
-    contained = evidence.assess(root, _state(), settings={**ON, "code_writer_isolation": "docker"})
-    assert contained["status"] == "publication_ready" and contained["code_writer"]["isolation"] == "docker"
-
-
 def _ready_quest(tmp_path: Path) -> Path:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"

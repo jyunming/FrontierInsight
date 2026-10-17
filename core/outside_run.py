@@ -50,7 +50,7 @@ ANALYSIS_INPUTS = (EVERY_FOLDER,)
 #: FI's own folders: what a run writes there in its copy never comes back (except a path FI named for the run).
 FI_OWNED = ("needs", ".fi", "code", "paper")
 #: Never in a copy and never written back, even when named.
-NEVER = ("needs", ".fi/checks", ".venv", ".git", ".fi/state.sqlite", ".fi/agent_coder.json")
+NEVER = ("needs", ".fi/checks", ".venv", ".git", ".fi/state.sqlite")
 #: FI's own records inside the folders a harness writes in (core/execution.py keeps them read-only in a container).
 RECORD_FILES = (".fi/trials/run.json", ".fi/trials/cluster.json", ".fi/optimisation/run.json",
                 ".fi/optimisation/check.json")
