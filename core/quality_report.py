@@ -172,7 +172,6 @@ class _Quest:
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
-        self.probes = _dict(_json(fi / "probes.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.pause = _dict(_json(fi / "pause.json"))
@@ -440,28 +439,6 @@ def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
         said = f"{read}; they showed the simulation does not measure what the protocol names, and it was sent back to be repaired"
     return {"outcome": p["outcome"], "trials": trials, "settings": settings, "repairs": repairs,
             "problems": [str(x) for x in _list(p.get("problems"))], "says": said}
-
-
-def _probes_summary(q: _Quest) -> dict[str, Any] | None:
-    """FI's own behaviour checks of the simulation (recorded, not yet acting): how many held, could not be checked, or did not
-    hold, with the plain sentence of each that did not hold. ``None`` when none ran."""
-    results = _dict(q.probes.get("results"))
-    if not results:
-        return None
-    from . import probes_run as _pr
-
-    sha = _pr.code_sha(q.root)
-    exact = sha in results
-    mine = _dict(results[sha] if exact else list(results.values())[-1])   # the code as it is now, else the newest recorded
-    rows = {k: v for k, v in mine.items() if k != "saturation" and isinstance(v, dict)}
-    if not rows:
-        return None
-    count = Counter(str(v.get("verdict")) for v in rows.values())
-    return {"held": count["held"], "unconfirmed": count["unconfirmed"], "broken": count["broken"],
-            "broken_items": [{"id": k, "says": _one(str(v.get("says") or ""), 300), "strength": str(v.get("strength") or "core")}
-                             for k, v in rows.items() if v.get("verdict") == "broken"],
-            "not_understood": len(_list(q.probes.get("dropped"))),
-            "for_current_code": exact}
 
 
 def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
@@ -988,7 +965,6 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
-        "behaviour_checks": _probes_summary(q),
         "citations": _citations(q),
         "left_out_of_paper": _left_out_of_paper(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
@@ -1118,14 +1094,6 @@ def render(report: dict[str, Any]) -> str:
     pilot = report.get("pilot")
     if pilot:
         lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
-    checks = report.get("behaviour_checks")
-    if checks:
-        lines += ["", "## FI's own behaviour checks (recorded, not yet acting)", "",
-                  f"FI ran the simulation on settings of its own and tested what the plan says must happen when a setting changes: "
-                  f"{checks['held']} held, {checks['unconfirmed']} could not be checked, {checks['broken']} did not hold. "
-                  "Nothing was sent back or stopped because of them."
-                  + ("" if checks.get("for_current_code", True) else " (These were run on an earlier version of the code.)")]
-        lines += [f"- ({b['strength']}) {b['says']}" for b in checks["broken_items"]]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")
     if f:

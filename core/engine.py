@@ -24261,7 +24261,6 @@ def _load_prompts() -> dict[str, string.Template]:
                             # from user-supplied data
         "web_plots",        # no-simulation mode — chart the collected
                             # web/data content (text-only outputs otherwise)
-        "probe_relations",      # behaviour probes: the properties the plan says its output must have (core/probes.py)
         "second_impl_write",    # a second, independent version of a key function, from its card alone
         "second_impl_adjudicate",  # which of two versions that disagree is wrong
     )

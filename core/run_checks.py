@@ -30,8 +30,6 @@ from . import frozen_protocol as _frozen
 from . import in_run as _in_run
 from . import oracle_forms as _forms
 from . import plan as _plan
-from . import probes as _probes
-from . import probes_run as _probes_run
 from . import run_estimate as _estimate
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
@@ -43,20 +41,6 @@ TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
 NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
 
-#: FI's own behaviour checks (core/probes.py) are RECORD ONLY for now: a core check that does not hold is written down (the
-#: record, needs/PROBES.json, QUALITY.md, a sentence in the paper's limitations) and nothing else happens. Turning on
-#: ``REPAIR_ENABLED`` sends the simulation back once per allowed repair with the finding; turning on ``STOP_ENABLED`` stops the
-#: quest when the repairs are used up. Both stay off until the false-alarm rate has been measured on good quests.
-STOP_ENABLED = False
-REPAIR_ENABLED = False
-#: The share of the run's time limit the checks may spend running cells, and its ceiling and floor in seconds.
-PROBE_BUDGET_FRAC = 0.10
-PROBE_BUDGET_MAX_S = 900.0
-PROBE_BUDGET_MIN_S = 30.0
-#: Calls to the reader in a quest, at most (one per version of the plan; a redesign is a new version).
-PROBE_MAX_ASKS = 3
-PROBE_NODE = "oracle_review.probes"
-_PROBE_PLAN_CHARS = 12000
 
 
 def _one(text: str, limit: int = 400) -> str:
@@ -399,8 +383,6 @@ class RunChecksMixin:
             parts.append(static)
         if observed := self._no_difference_note():
             parts.append(observed)
-        if probed := self._probe_note():
-            parts.append(probed)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
@@ -485,8 +467,6 @@ class RunChecksMixin:
             for p in probes:
                 cached[_estimate.probe_key(p.cell, runs)] = p
             if (broken := await self._pilot_gate(state, runner, python, env, grid, probes, thresholds, limit_s, budget_s)) is not None:
-                return broken
-            if (broken := await self._probe_gate(state, runner, python, env, grid, probes, thresholds, limit_s)) is not None:
                 return broken
             est = _estimate.estimate(grid, runs, runner.deterministic, probes)
             if est is None:
@@ -649,134 +629,6 @@ class RunChecksMixin:
                    "and read what they returned",
                    *[_one(s) for s in says[:3]],
                    f"sent the simulation back to be repaired {iters} time(s) with this named; it still showed it"])
-
-    # ---- FI's own behaviour checks (core/probes.py): recorded, not yet acting ---------------------------------------------
-
-    def _probe_text_of_plan(self) -> str:
-        """The prose of ``plan.md`` without the design block (the reader gets the settings and metric names separately)."""
-        try:
-            text = _plan.plan_path(self.quest_root).read_text(encoding="utf-8")  # type: ignore[attr-defined]
-        except OSError:
-            return ""
-        text = re.sub(r"```.*?```", "", text, flags=re.S)
-        return text.strip()[:_PROBE_PLAN_CHARS]
-
-    def _probe_save(self, **fields: Any) -> None:
-        """Merge ``fields`` into ``.fi/probes.json`` (what was asked is written BEFORE the call, so a resume never asks again)."""
-        record = _probes_run.load(self.quest_root) or {}  # type: ignore[attr-defined]
-        record.update(fields)
-        path = self.quest_root / _probes_run.RECORD  # type: ignore[attr-defined]
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
-        except OSError as e:
-            self._log.warning("[execute] couldn't record FI's own behaviour check: %r", e)  # type: ignore[attr-defined]
-
-    async def _probe_relations(self, plan_text: str, grid: dict[str, list[Any]], shown: list[str],
-                               accepted: list[str]) -> tuple[list[_probes.Relation], list[dict[str, str]]]:
-        """ONE call (node ``oracle_review.probes``): the relations the plan states, read strictly. Metric names are the ones the
-        simulation returns (``accepted``); a reply naming anything else is dropped."""
-        settings = "\n".join(f"- `{k}`: " + ", ".join(str(v) for v in vals[:12]) + (", ..." if len(vals) > 12 else "")
-                             for k, vals in grid.items())
-        prompt = self._prompts["probe_relations"].substitute(  # type: ignore[attr-defined]
-            plan_text=plan_text, grid_settings=settings, metrics_list="\n".join(shown))
-        reply = await self._chat(prompt, node=PROBE_NODE, temperature=0.0)  # type: ignore[attr-defined]
-        return _probes.parse(reply, {"grid": grid, "metrics": [{"id": n} for n in accepted]})
-
-    async def _probe_gate(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]],
-                          probes: list[_estimate.Probe], thresholds: dict[str, Any], limit_s: float) -> dict[str, Any] | None:
-        """After the pilot passed: FI tests the relations the plan states between settings and results (does the result move
-        with the setting the plan says it does?) by running a few cells of its own, within about a tenth of the run's time
-        limit, and writes down what it found. RECORD ONLY (:data:`STOP_ENABLED`, :data:`REPAIR_ENABLED`): nothing is sent back
-        and nothing stops. Never raises; ``None`` to go on."""
-        try:
-            return await self._probe_gate_inner(state, runner, python, env, grid, probes, thresholds, limit_s)
-        except Exception as e:  # noqa: BLE001 -- a check that cannot be made never stops a quest
-            self._log.warning("[execute] FI's own behaviour check could not be made (%s); nothing is changed",  # type: ignore[attr-defined]
-                              str(e)[:200] or type(e).__name__)
-            return None
-
-    async def _probe_gate_inner(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]],
-                                probes: list[_estimate.Probe], thresholds: dict[str, Any], limit_s: float) -> dict[str, Any] | None:
-        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
-        _grid, protocol_ids = _probes._protocol_parts({**protocol, "grid": grid})
-        returned = sorted({str(k) for p in probes for t in p.trials for k in t})
-        sha = _probes_run.code_sha(self.quest_root)  # type: ignore[attr-defined]
-        if not grid or not protocol_ids or not returned or not sha:
-            return None   # nothing to vary, nothing to read, or nothing came back: no check, no noise
-        alias, shown = _probes_run.metric_names(sorted(protocol_ids), returned)
-        accepted = sorted(set(returned) | set(alias))
-        plan_text = self._probe_text_of_plan()
-        key = hashlib.sha256(json.dumps([plan_text, grid, shown], sort_keys=True, default=str).encode("utf-8")).hexdigest()[:20]
-        kept = _probes_run.load(self.quest_root) or {}  # type: ignore[attr-defined]
-        asked = dict(kept.get("asked")) if isinstance(kept.get("asked"), dict) else {}
-        had = sha in (kept.get("results") or {})
-        relations: list[_probes.Relation] = []
-        dropped: list[dict[str, str]] = list(kept.get("dropped") or [])
-        if asked.get("key") == key:
-            relations = [r for r in (_probes.from_dict(d) for d in kept.get("relations") or []) if r is not None]
-        elif plan_text and self._client is not None and int(asked.get("calls") or 0) < PROBE_MAX_ASKS:  # type: ignore[attr-defined]
-            asked = {"key": key, "calls": int(asked.get("calls") or 0) + 1}
-            self._probe_save(asked=asked, relations=[], dropped=[])   # counted BEFORE the call: a resume never asks again
-            try:
-                relations, dropped = await self._probe_relations(plan_text, grid, shown, accepted)
-            except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
-                dropped = [{"id": "reader", "reason": f"the call failed ({str(e)[:120] or type(e).__name__})"}]
-                self._log.warning("[execute] FI could not read the relations the plan states: %s", dropped[0]["reason"])  # type: ignore[attr-defined]
-            self._probe_save(relations=[r.to_dict() for r in relations], dropped=dropped)
-            if not had:
-                self._log.info("[execute] FI read %d relation(s) between settings and results from the plan to check "  # type: ignore[attr-defined]
-                               "(%d not usable)", len(relations), len(dropped))
-        budget = min(PROBE_BUDGET_MAX_S, max(PROBE_BUDGET_MIN_S, float(limit_s) * PROBE_BUDGET_FRAC))
-        mapped = {alias.get(m, m) for m in protocol_ids}
-        out = await _probes_run.run(
-            self.executor, python, self.quest_root, {**protocol, "grid": grid}, relations,  # type: ignore[attr-defined]
-            reported=mapped, budget_s=budget, timeout_s=int(min(_probes_run.DEFAULT_TIMEOUT_S, max(PROBE_BUDGET_MIN_S, budget))),
-            env=env, metric_alias=alias, asked=asked, dropped=dropped)
-        results = {k: v for k, v in ((out.get("results") or {}).get(sha) or {}).items() if k != "saturation"}
-        count = {w: sum(1 for v in results.values() if v.get("verdict") == w) for w in ("held", "broken", "unconfirmed")}
-        broken = {k: v for k, v in results.items() if v.get("verdict") == "broken" and v.get("strength", "core") == "core"}
-        if not had:
-            self._log.info("[execute] FI's own behaviour checks (recorded, not yet acting): %d held, %d could not be checked, %d did "  # type: ignore[attr-defined]
-                           "not hold", count["held"], count["unconfirmed"], count["broken"])
-            for rid, v in broken.items():
-                self._log.warning("[execute] FI's own check %s did not hold: %s",  # type: ignore[attr-defined]
-                                  _probes.describe(next((r for r in relations if r.id == rid), None), rid), v.get("says"))
-        repair_on = bool(getattr(self, "probe_repair_enabled", REPAIR_ENABLED))   # an instance can differ: no process-global switch
-        stop_on = bool(getattr(self, "probe_stop_enabled", STOP_ENABLED))
-        if not broken or not (repair_on or stop_on):
-            return None
-        says = [str(v.get("says")) for v in broken.values()]
-        iters = int(state.get("exec_reflect_iter") or 0)
-        if repair_on and iters < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
-            self._probe_save(repairs=int(out.get("repairs") or 0) + 1)   # counted BEFORE the run goes back
-            return self._code_review_failed_run(  # type: ignore[attr-defined]
-                "FI ran the simulation on a few settings of its own and compared what came back with what the plan says "
-                "must happen. It did not hold: " + " ".join(says)
-                + " Repair simulate.py so that it does what the plan says; keep every setting and every metric as they are.",
-                script=_split_run.SIMULATE_NAME)
-        if stop_on:
-            return self._stop_before_run(  # type: ignore[attr-defined]
-                "FI's own check of the simulation did not hold: " + "; ".join(_one(x, 300) for x in says[:3]), "cannot_repair",
-                tried=["ran the simulation on a few settings of its own and compared the results with what the plan says",
-                       *[_one(x) for x in says[:3]]])
-        return None
-
-    def _probe_note(self) -> str:
-        """For the writer: a core check of FI's own that did not hold, in plain words, to be said in the limitations."""
-        record = _probes_run.load(self.quest_root)  # type: ignore[attr-defined]
-        if not record:
-            return ""
-        sha = _probes_run.code_sha(self.quest_root)  # type: ignore[attr-defined]
-        by_id = {str(r.get("id")): _probes.from_dict(r) for r in record.get("relations") or [] if isinstance(r, dict)}
-        lines = []
-        for rid, v in ((record.get("results") or {}).get(sha) or {}).items():
-            if rid == "saturation" or v.get("verdict") != "broken" or v.get("strength", "core") != "core":
-                continue
-            lines.append(f"FI's own check {_probes.describe(by_id.get(rid), rid)} did not hold: {_one(str(v.get('says') or ''), 300)}")
-        if not lines:
-            return ""
-        return "\n".join(lines) + "\nSay so plainly in the limitations, with the numbers: this was recorded, and the study was run as written."
 
     def _design_after_sizing(self, state: Any) -> dict[str, Any] | None:
         """The state's design with the runs per setting FI lowered, or ``None`` when none were."""

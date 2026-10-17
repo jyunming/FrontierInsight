@@ -1,5 +1,5 @@
 """Step cards in the function steps (core/function_steps.py), the passages a function is written from
-(core/step_passages.py), and the two static looks (core/step_static.py, core/step_coverage.py). Fake models, fake
+(core/step_passages.py), and the static look (core/step_static.py). Fake models, fake
 knowledge, neutral topics (a damped spring); the one replay is the r6t kinetics quest's two helper steps."""
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from core import function_steps as fs
-from core import plan_steps, step_coverage, step_passages, step_static
+from core import plan_steps, step_passages, step_static
 
 AGENTS = Path(__file__).resolve().parents[1] / "agents"
 PROMPTS = {"fill": string.Template((AGENTS / "implement_function.md").read_text(encoding="utf-8")),
@@ -228,46 +228,6 @@ def test_step_static() -> None:
     assert "number written" not in step_static.check("def f(a):\n    return True\n", "f"), "a boolean is not a number"
 
 
-# --- step_coverage -------------------------------------------------------------------------------------------------------
-
-SIM = '''
-import numpy as np
-from p import model
-from p.model import frequency
-
-def _helper(x):
-    return model.quality(1.0, x, 2.0)
-
-def run_cell(cell):
-    vals = []
-    for i in range(3):
-        vals.append(frequency(cell["k"], 1.0))
-    total = 0.0
-    total += _helper(cell["w"])
-    result = {"freq_mean": np.mean(vals), "q": total, "const": 0.5, "plain": cell["k"] * 2}
-    result["late"] = model.mean_quality(1.0, 2.0)
-    return result
-'''
-
-
-def test_step_coverage_flags_what_the_package_does_not_stand_behind() -> None:
-    funcs = ["frequency", "quality", "mean_quality"]
-    warnings = step_coverage.check(SIM, funcs, ["freq_mean", "q", "const", "plain", "late", "missing"])
-    text = "\n".join(warnings)
-    assert "`const`" in text and "written into the code" in text
-    assert "`plain`" in text and "without calling any function" in text
-    assert "`missing`" in text and "not among the numbers" in text
-    assert "freq_mean" not in text and "`q`" not in text and "`late`" not in text, warnings
-    assert len(warnings) == 3
-
-
-def test_step_coverage_is_quiet_when_it_cannot_tell() -> None:
-    dynamic = "def run_trial(cell, i, seed):\n    out = {}\n    for k in cell:\n        out[k] = 1\n    return {**out}\n"
-    assert step_coverage.check(dynamic, ["f"], [{"id": "m"}]) == []
-    assert step_coverage.check("def other():\n    pass\n", ["f"], ["m"]) == []
-    assert step_coverage.check("def run_cell(c:\n", ["f"], ["m"]) == [] and step_coverage.check(SIM, [], ["const"]) == []
-
-
 # --- passages ------------------------------------------------------------------------------------------------------------
 
 
@@ -365,14 +325,3 @@ def test_replay_kinetics_helper_steps_parse_and_produce_specs() -> None:
     assert names.index("first_order_concentration") < names.index("fit_rate")
     assert names.index("activation_energy_from_slope") < names.index("fit_arrhenius")
     assert next(s for s in specs if s.name == "fit_arrhenius").card["untested_by_example"] is True
-
-
-def test_replay_coverage_of_the_stored_kinetics_simulation_if_present() -> None:
-    root = Path("C:/fi_runs/suite/rounds/r6t/first_order_kinetics/out")
-    sims = sorted(root.glob("*/code/simulate.py")) if root.is_dir() else []
-    if not sims:
-        pytest.skip("the stored r6t run is not on this machine")
-    funcs = ["first_order_concentration", "noisy_concentration", "arrhenius_rate", "centered_arrhenius_log_rate",
-             "activation_energy_from_slope"]
-    warnings = step_coverage.check(sims[0].read_text(encoding="utf-8"), funcs, ["definitely_not_a_metric"])
-    assert isinstance(warnings, list)
