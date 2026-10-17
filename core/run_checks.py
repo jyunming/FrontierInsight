@@ -137,6 +137,7 @@ class RunChecksMixin:
 
         code = path.read_text(encoding="utf-8")
         prompt = self._prompts["execute_reflect"].substitute(  # type: ignore[attr-defined]
+            topic_block=self._topic_block(),
             previous_code=code, returncode="(not run yet)", stdout_tail=_typed.directive(found), stderr_tail="",
             duration_s="0.00", figures_count="0", result_json_present="no (not run yet)",
             reflect_history_block=_e._format_reflect_history([]),
@@ -207,7 +208,7 @@ class RunChecksMixin:
 
     def _left_out_quantities(self) -> set[str]:
         """The quantities this pass's analysis and results must not use (still typed into the code after the repairs)."""
-        return set(getattr(self, "_typed_result_keys", None) or ())
+        return set(getattr(self, "_typed_result_keys", None) or ()) | self._result_check_keys()  # type: ignore[attr-defined]
 
     def _without_typed_results(self, result_json: Any) -> Any:
         """``result_json`` without the left-out quantities."""
@@ -226,6 +227,10 @@ class RunChecksMixin:
             names = ", ".join(f"`{k}`" for k in record.get("removed_quantities") or [])
             parts.append(f"{note} Do not report, describe or quote any value for {names or 'them'}: say plainly, in the "
                          "limitations, that this quantity was not computed by the simulation and is left out.")
+        if checked := self._result_checks_note():  # type: ignore[attr-defined]  # core/result_checks.py
+            parts.append(checked)
+        if static := self._static_checks_note():  # type: ignore[attr-defined]  # core/static_checks.py
+            parts.append(static)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
@@ -417,7 +422,8 @@ class RunChecksMixin:
         """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""
         return self._stop_before_run(text, "too_long")
 
-    def _stop_before_run(self, text: str, kind: str) -> dict[str, Any]:
+    def _stop_before_run(self, text: str, kind: str, tried: list[str] | None = None,
+                         advice: str | None = None) -> dict[str, Any]:
         """The quest's plain stop before the study (``too_long``: it would not fit the time allowed; ``not_run``: a text of
         the simulation could not be checked), with no paper."""
         self._log.warning("[execute] %s; stopping, the study was not run", text)  # type: ignore[attr-defined]
@@ -425,7 +431,8 @@ class RunChecksMixin:
             "exec_result": {
                 "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": text[-2000:],
                 "packages_note": getattr(self, "_packages_note", ""), "failed_script": "", "flat_output": "",
-                "numeric_warnings": [], kind: text,
+                "numeric_warnings": [], kind: text, **({f"{kind}_tried": tried} if tried else {}),
+            **({f"{kind}_advice": advice} if advice else {}),
             },
             "exec_give_up_reason": text,
             "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,

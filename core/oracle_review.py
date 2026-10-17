@@ -31,12 +31,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import oracle_check as _oracle
+from . import review_pairs as _pairs
 
 #: The node a model is named for in ``provider.node_models``.
 NODE = "oracle_review"
 #: The steps whose answers write the plan's checks: the plan, every rewrite of it (FI's own requests about the checks
-#: included), the design step of a quest with no plan.md, and the design's own critique (which may amend the checks).
-WRITER_NODES = ("plan", "plan_revise", "design", "design_self_critique")
+#: included), the design step of a quest with no plan.md, and the design's own review (``design_review``, or the audit
+#: under its old step name), which may amend the checks.
+WRITER_NODES = ("plan", "plan_revise", "design", "design_self_critique", "design_review")
 #: How a person gives the review another model (the key that already names a step's model; nothing new).
 HOW_TO_NAME_ANOTHER = ("set `oracle_review: <another model your provider offers>` under `provider: node_models:` in "
                        "the quest's config.yaml (or give it another provider's model under `provider: node_providers:`); it reads the checks when the plan is written (for this quest, do the "
@@ -84,6 +86,12 @@ class Review:
     #: "standard" (True / False / None), "correct", "why"}``, only for equations the plan lists. Whether these count is
     #: decided by who the reviewer was (:func:`equation_findings` is used only when it was another model).
     equations: list[dict[str, Any]] = field(default_factory=list)
+    #: The problems the reviewer found, each ``{where, what, why, fix, severity}`` (core/review_pairs.py), and the items it
+    #: says it checked and found no problem with.
+    found: list[dict[str, Any]] = field(default_factory=list)
+    checked: list[str] = field(default_factory=list)
+    #: The reply named no problem anywhere and said nothing it checked: no review (it is asked again).
+    said_nothing: bool = False
 
 
 def prompt_parts(protocol: dict[str, Any] | None) -> tuple[str, str, bool]:
@@ -174,6 +182,14 @@ def parse(reply: Any, protocol: dict[str, Any] | None, *, partial: bool = False)
             out.add.append(kept)
     out.summary = _text(reply.get("summary"), 600)
     out.equations = _equation_verdicts(reply.get("equations"), model)
+    out.found = _pairs.findings(reply.get("findings"))
+    out.checked = _pairs.checked(reply.get("checked"))
+    problem = (any(c[k] is False for c in out.checks for k in ("appropriate", "discriminating", "well_defined", "isolates"))
+               or bool(out.untested) or bool(out.add) or any(e["standard"] is False for e in out.equations))
+    # A reason beside a check, an equation said to be the standard one ("yes" only when it was checked) or a case said to
+    # isolate what it measures (only when traced) each show what the reviewer looked at.
+    evidence = (any(c["why"] or c["bug"] or c["isolates"] for c in out.checks) or any(e["standard"] for e in out.equations))
+    out.said_nothing = _pairs.said_nothing(out.found, out.checked, other_problem=problem, evidence=evidence)
     return out
 
 
@@ -261,6 +277,7 @@ def findings(review: Review) -> list[str]:
                    "of the model behind the numbers")
     for item in review.add:
         out.append(f"a check to add: {json.dumps(item, default=str)}")
+    out.extend(_pairs.sentence(f).rstrip(".") for f in review.found)
     return out
 
 
@@ -443,6 +460,11 @@ def _check_lines(review: Review | None, *, reviewer: str, planner: str, same_mod
         extra = "; ".join(x for x in (c["definition_note"], c["isolates"] is False and c.get("isolation_note"),
                                       c["better"] and f"a better check: {c['better']}") if x)
         rows.append(f"  - **{c['name']}**: {', '.join(verdict)}." + (f" {extra}." if extra else ""))
+    for f in review.found:
+        rows.append(f"  - Found ({f['severity']}): {_pairs.sentence(f)}")
+    if review.checked:
+        rows.append("  - Checked, and no problem found: " + "; ".join(review.checked[:8]) + ("." if len(review.checked) <= 8 else
+                                                                                              f"; and {len(review.checked) - 8} more."))
     if review.tested or review.untested:
         rows.append(f"  - Equations the checks test: {', '.join(review.tested) or 'none named'}"
                     + ("." if review.partial else f"; not tested by any: {', '.join(review.untested) or 'none'}."))

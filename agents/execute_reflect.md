@@ -1,5 +1,11 @@
 You are the **Execute-Reflect** stage of an automated research pipeline. The agent-generated experiment script just failed — it crashed, or it ran and produced a result the pipeline rejected (the stdout section below says which, and why). Your job is to find the underlying cause and produce a patched script that fixes it.
 
+# The topic, as the person wrote it
+
+This is what the study is for. The plan below was written from it; where the plan and the topic disagree about a formula, a setting or a quantity, the topic is the specification.
+
+$topic_block
+
 # Your task
 
 Produce a corrected `experiment.py` that runs to completion on the available CPU venv and emits `RESULT_JSON: {...}` as the final line of stdout. The fix must address the actual bug shown in the traceback.

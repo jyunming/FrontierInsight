@@ -329,7 +329,7 @@ async def test_a_repair_that_still_ignores_the_seed_warns_once_and_the_quest_pro
 
 
 @pytest.mark.asyncio
-async def test_under_research_profile_an_unrepairable_seed_pauses_instead_of_proceeding(
+async def test_under_research_profile_an_unrepairable_seed_ends_in_the_honest_stop_instead_of_proceeding(
     tmp_path: Path,
 ) -> None:
     """The re-audit's P1-3: outside research profile this failure only warns (the test above) --
@@ -337,17 +337,14 @@ async def test_under_research_profile_an_unrepairable_seed_pauses_instead_of_pro
     eng, client, logged = _engine(
         tmp_path, [_implement_reply(IGNORING), _repair_reply(STILL_IGNORING)], rigor_profile="research",
     )
-    paused: dict[str, Any] = {}
-
     def fake_pause(self, **kwargs):  # noqa: ANN001
-        paused.update(kwargs)
-        raise RuntimeError("paused")
+        raise AssertionError(f"a person was asked to fix the script: {kwargs.get('kind')}")
 
     with mock.patch.object(Engine, "_pause_for_human", fake_pause):
-        with pytest.raises(RuntimeError, match="paused"):
-            await eng._node_implement(_implement_state())  # type: ignore[arg-type]
-    assert paused["kind"] == "replicate_seed_unrepairable" and paused["interaction"] == "supply"
-    # The script is not silently kept and run on -- the quest stopped before execute ever saw it.
+        await eng._node_implement(_implement_state())  # type: ignore[arg-type]
+    # The script is not run: the run step ends in the honest stop, saying the randomness cannot be traced to the seed.
+    stop = eng._cannot_repair_stop()
+    assert stop is not None and "FI_REPLICATE_SEED" in stop["exec_result"]["cannot_repair"]
     assert _code_path(eng).read_text(encoding="utf-8") == IGNORING
 
 

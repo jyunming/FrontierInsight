@@ -106,6 +106,10 @@
             "description": "Why a quest did what it did, from what it recorded: why it stopped, why the review asked for a revision, why the evidence is at its level, why one step decided what it did, or the reasons the model gave at every step. @fi /why <quest_id> [stop|review|evidence|reasons|<step>]. Mirrors `python launch.py --why` and the quest page's Why?."
           },
           {
+            "name": "quality",
+            "description": "A quest's quality report, from what it recorded: where it went wrong, who caught it, what was fixed, what to try, and what it cost. @fi /quality <quest_id>. Mirrors `python launch.py --quality` and the quest page's Quality report."
+          },
+          {
             "name": "update",
             "description": "Mid-quest re-entry of the interview. Pass the quest_id (or pick from the list). Opens an integrated terminal that runs `python launch.py --update <id>`: pre-fills the editable fields with the quest's current values, computes a diff, soft-invalidates affected LangGraph stages, then resumes — re-opening a finished quest when needed so the invalidated stages actually re-run instead of re-emitting from the old paper."
           },

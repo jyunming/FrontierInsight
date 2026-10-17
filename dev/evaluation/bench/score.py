@@ -287,6 +287,10 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
         if (root / name).is_file():
             stop_text = (root / name).read_text(encoding="utf-8", errors="replace")
             break
+    if not stop_text and (root / "needs" / "STUCK.json").is_file():
+        # FI's own honest stop (no paper): what FI could not repair, in its words.
+        stuck = _json(root / "needs" / "STUCK.json")
+        stop_text = str((stuck or {}).get("say") or (stuck or {}).get("problem") or "") if isinstance(stuck, dict) else ""
     if meta.get("error") and not stop_text:
         stop_text = str(meta["error"])
     infra = bool(stop_text) and bool(INFRA_RE.search(stop_text))

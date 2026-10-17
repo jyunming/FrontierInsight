@@ -1,0 +1,20 @@
+{
+  "kind": "plan",
+  "interaction": "supply",
+  "headline": "the settings to vary could not be read",
+  "decide": "Is the plan what you want to run?",
+  "recommended": "Try another model for the plan step.",
+  "alternatives": [
+    "Or ask for a change in words: `--resume 1791451939-duv-lowk1-source-dof-opc-ambit-1da64e --revise-plan \"<the settings to vary and their values>\"`."
+  ],
+  "steps": [
+    "Nothing was run. The plan lists settings to vary, but FI could not read them, so the experiment would have run one setting only and called it a study of several.",
+    "FI did not ask the plan's model to write them again (no model was available to ask, or the plan was already settled).",
+    "You do not need to write them yourself. What to do:",
+    "1. Try another model for the plan step: give `provider.node_models.plan_revise` (or `provider.model`) another model in the quest's config.yaml, then `python launch.py --update 1791451939-duv-lowk1-source-dof-opc-ambit-1da64e`.",
+    "2. Or ask for a change in words: `--resume 1791451939-duv-lowk1-source-dof-opc-ambit-1da64e --revise-plan \"<the settings to vary and their values>\"`."
+  ],
+  "quest_id": "1791451939-duv-lowk1-source-dof-opc-ambit-1da64e",
+  "next_step_file": "NEXT_STEP.md",
+  "upload_targets": []
+}

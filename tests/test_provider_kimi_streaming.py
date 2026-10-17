@@ -1,4 +1,4 @@
-"""Kimi's chat calls are streamed; every other HTTP provider keeps the plain request.
+"""Kimi's chat calls are streamed (as is every direct HTTP provider's: see test_provider_http_streaming.py).
 
 Long non-streamed requests to Moonshot's API stalled with zero bytes until the read timeout, while the same request
 streamed completed (the 2026-09-27 Kimi K3 campaign). No real API is called here: ``httpx.MockTransport``.
@@ -46,12 +46,12 @@ def _fast_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("core.provider.wait_random_exponential", lambda **kw: tenacity.wait_none())
 
 
-def test_only_moonshot_hosts_stream() -> None:
+def test_moonshot_hosts_stream_like_every_other_direct_provider() -> None:
     assert _http_streams(resolve_endpoint(ProviderConfig(**KIMI)))
     assert _http_streams(resolve_endpoint(ProviderConfig(**{**KIMI, "base_url": "https://api.moonshot.cn/v1"})))
     for cfg in (dict(name="openai"), dict(name="gemini"), dict(name="ollama"), dict(name="vllm"),
                 dict(name="openai", base_url="https://moonshot.example.com/v1")):
-        assert not _http_streams(resolve_endpoint(ProviderConfig(**cfg))), cfg
+        assert _http_streams(resolve_endpoint(ProviderConfig(**cfg))), cfg
 
 
 def test_the_stream_is_put_back_together() -> None:
@@ -168,15 +168,16 @@ def test_a_streamed_call_can_be_cancelled() -> None:
     asyncio.run(run())
 
 
-def test_other_providers_still_send_a_plain_request() -> None:
+def test_a_server_that_answers_a_streamed_call_with_one_json_reply_is_read_as_a_plain_call() -> None:
     sent: list[dict] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         sent.append(json.loads(request.content))
-        return httpx.Response(200, json={"choices": [{"message": {"content": "plain"}}], "usage": {}, "model": "gpt-x"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "plain"}, "finish_reason": "stop"}],
+                                         "usage": {}, "model": "gpt-x"})
 
     text, _c, _l = asyncio.run(_chat(resolve_endpoint(ProviderConfig(name="openai", model="gpt-x")), handler))
-    assert text == "plain" and "stream" not in sent[0] and "stream_options" not in sent[0]
+    assert text == "plain" and sent[0]["stream"] is True
 
 
 # --- review follow-ups ------------------------------------------------------------------------------------------------

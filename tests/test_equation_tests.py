@@ -172,3 +172,41 @@ def test_a_tiny_output_is_held_to_its_size_and_only_an_exact_zero_gets_the_round
         (tmp_path / "t.py").write_text(eqt.test_source([{**c, "module": "m", "function": "f"}]), encoding="utf-8")
         done = subprocess.run([sys.executable, "-B", "t.py", "--json"], cwd=tmp_path, capture_output=True, text=True)
         assert eqt.parse_results(done.stdout)[0]["status"] == want, name
+
+
+# --- `untestable` is accepted only when something else checks the equation -----------------------------------------------
+
+BARE = {"model": {"equations": [
+    {"id": "E1", "formula": "y = f(x)", "role": "generates", "source": "derivation",
+     "example": {"untestable": "no closed form for its output"}},
+    {"id": "E2", "formula": "z = g(y)", "role": "analyses", "source": "derivation",
+     "example": {"untestable": "read from a trace"}}]}}
+
+
+def test_an_untestable_generating_equation_with_no_other_check_is_unprotected_and_the_plan_is_asked_for_one() -> None:
+    rows = eqt.example_rows(BARE)
+    assert _row(rows, "E1")["state"] == "unprotected" and _row(rows, "E2")["state"] == "untestable"
+    text = eqt.request([r for r in rows if r["state"] in ("missing", "unusable", "unprotected")])
+    assert "E1" in text and "nothing else checks it" in text and "`symmetry`" in text and "E2" not in text
+    notes = eqt.untested_notes(rows, {})
+    assert any("equation E1 is not tested at all" in n for n in notes)
+    assert eqt.untested_core(BARE) == ["E1"]
+    assert "E1 that generates the study's data is not tested at all" in eqt.write_note(BARE)
+
+
+@pytest.mark.parametrize("kind", ["special_case", "invariant", "symmetry", "second_implementation", "conservation"])
+def test_a_check_of_the_right_kind_that_names_the_equation_makes_untestable_acceptable(kind: str) -> None:
+    covered = {**BARE, "oracles": [{"name": "limit_check", "kind": kind, "check": "behaviour of E1 at the limit",
+                                    "expected": 0.0, "reference": "derivation: the limit"}]}
+    row = _row(eqt.example_rows(covered), "E1")
+    assert row["state"] == "untestable" and row["covered_by"] == "limit_check"
+    assert eqt.untested_core(covered) == [] and eqt.write_note(covered) == ""
+    assert "tests it instead" in " ".join(eqt.untested_notes(eqt.example_rows(covered), {}))
+
+
+def test_a_check_that_names_another_equation_or_is_another_kind_does_not_count() -> None:
+    other = {**BARE, "oracles": [{"name": "elsewhere", "kind": "special_case", "check": "E2 at a limit", "expected": 1.0,
+                                  "reference": "derivation: by hand"},
+                                 {"name": "converges", "kind": "convergence_rate", "check": "E1 converges", "expected": 2.0,
+                                  "reference": "derivation: order"}]}
+    assert _row(eqt.example_rows(other), "E1")["state"] == "unprotected"

@@ -1,0 +1,33 @@
+{
+ "reviews_total": 3,
+ "send_backs": 1,
+ "repair_calls": 7,
+ "readings": [
+  {
+   "n": 1,
+   "version": "6a5fe9b0c1efe55e",
+   "open": 40,
+   "high": 11
+  },
+  {
+   "n": 2,
+   "version": "2117bd91f3182c5c",
+   "open": 42,
+   "high": 11,
+   "improved": false
+  },
+  {
+   "n": 3,
+   "version": "deb5e425a34327d0",
+   "open": 40,
+   "high": 13
+  }
+ ],
+ "converged": false,
+ "repaired": false,
+ "read_version": "deb5e425a34327d0",
+ "version": "2def42899a4f3406",
+ "requirements": 36,
+ "skipped": "the 3 readings of the code allowed in a quest are spent",
+ "final_read": false
+}

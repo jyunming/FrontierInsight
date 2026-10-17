@@ -243,6 +243,8 @@ class ProviderConfig(BaseModel):
             "design_self_critique": 600.0,
             # The second reading of the plan's checks: a referee's reasoning, like the methodology audit.
             "oracle_review": 600.0,
+            "design_review": 600.0,
+            "code_review": 600.0,
             "analyze": 300.0,
             # Reads the whole simulation before it answers with one change.
             "improve": 300.0,
@@ -294,6 +296,8 @@ class ProviderConfig(BaseModel):
             "plan_revise": 900.0,
             "design_self_critique": 900.0,
             "oracle_review": 900.0,
+            "design_review": 900.0,
+            "code_review": 900.0,
             # web_plots writes a short matplotlib script — it should be
             # quick. A tight ceiling kills a stuck codex_cli call fast
             # instead of letting it dribble output past the default budget.
@@ -455,10 +459,11 @@ class ProviderConfig(BaseModel):
     @field_validator("extra_body")
     @classmethod
     def _no_stream_in_extra_body(cls, v: dict[str, Any]) -> dict[str, Any]:
-        """FI decides whether a call streams (it streams calls to Moonshot's API) and reads the answer to match."""
+        """FI decides whether a call streams (it streams every direct provider's calls) and reads the answer to match."""
         if "stream" in (v or {}):
-            raise ValueError("provider.extra_body cannot set `stream`: FI decides that itself (it streams calls to "
-                             "Moonshot's API and sends every other request whole). Remove `stream` from extra_body.")
+            raise ValueError("provider.extra_body cannot set `stream`: FI decides that itself (it streams the calls of "
+                             "every direct provider, and sends one whole when a server does not take it). Remove "
+                             "`stream` from extra_body.")
         return v
 
     @field_validator("reasoning_effort", mode="before")

@@ -33,7 +33,7 @@ GOOD_MODEL = {
     "assumptions": ["scalar optics", "thin mask"],
     "holds_for": "NA below 0.9",
     "equations": [{"id": "E1", "formula": "I(x) = sum_s S(s) |H * M|^2", "role": "generates", "source": "[2]",
-                   "example": {"untestable": "a sum over the source and an image, with no closed form for its output"}}],
+                   "example": {"inputs": {"s": 0.5, "h": 2.0}, "expected_formula": "s * h * h"}}],
 }
 
 

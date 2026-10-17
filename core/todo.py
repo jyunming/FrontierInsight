@@ -76,16 +76,17 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         ["Write `independent` on that line if every row is a separate case.",
          "Turn explore-then-confirm off (`engine.phased: false`): the result is then not confirmed on unseen data."],
     ),
+    # The stops below (split ... replicate_seed_unrepairable) are only an earlier FI's: a problem in the code is now sent to
+    # FI's own repair, and one the repairs cannot remove ends the quest without a paper. Nobody is asked to fix code.
     "split": (
-        "The simulation and the analysis did not come as the two scripts this quest keeps. Ask for them again, or run "
-        "one script?",
-        "Go on: the two scripts are asked for again.",
-        ["Let the quest run as one script: set `execution.split_failure: warn`."],
+        "An earlier FI stopped this quest because the code did not come as the two scripts it keeps.",
+        "Resume it: FI asks for the two scripts again, and ends the quest without a paper if it still cannot get them.",
+        [],
     ),
     "manifest": (
-        "The run's record does not match the plan. Fix it, or accept it as it is?",
-        "Fix the script as listed, then go on.",
-        ["Accept it: set `engine.run_manifest_check: warn` (the difference is recorded in the evidence)."],
+        "An earlier FI stopped this quest because the run's record did not match the plan.",
+        "Resume it: FI sends the script back to be repaired, and ends the quest without a paper if the difference stands.",
+        [],
     ),
     "amendment": (
         "Approve the change to the frozen protocol?",
@@ -93,10 +94,9 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         ["Go on without approving: the frozen protocol stays as it was."],
     ),
     "numeric": (
-        "The run printed numerical warnings. Fix the script, or accept them?",
-        "Fix experiment.py (a changed script is run again), then go on.",
-        ["Go on unchanged: the warnings are accepted and recorded, and the evidence then does not count the run as "
-         "holding to its protocol."],
+        "An earlier FI stopped this quest because the run printed numerical warnings.",
+        "Resume it: FI sends the script back to be repaired, and ends the quest without a paper if the warnings stand.",
+        [],
     ),
     "oracle": (
         # Only for a stop an earlier FI wrote: the checks no longer stop a quest.
@@ -111,26 +111,27 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         ["Change the simulation yourself first (code/ is yours to edit), then go on: your version is run in full."],
     ),
     "code_layout": (
-        "The model's equations are not yet in a package of their own in code/ (or its unit tests or equation list are "
-        "missing). Fix it yourself, or keep two scripts?",
-        "Fix what is listed in code/, then go on: the folder is read again before anything runs.",
-        ["Keep two scripts: set `execution.code_package: false` in the quest's YAML, then go on."],
+        "An earlier FI stopped this quest because the code lacked the model's equations in a package, their unit tests "
+        "or the equation list.",
+        "Resume it: FI sends the code back to be repaired with what is missing named, and ends the quest without a "
+        "paper if it is still missing.",
+        [],
     ),
     "equation_labels": (
-        "The simulation does not say where it implements each equation of the plan. Label it?",
-        "Add a comment with each missing equation's id (`# E1`) above the code that computes it, then go on.",
-        ["If the equation does not produce the data (it is used on the results), change its role to `analyses` in the "
-         "plan while it is not yet frozen: `--revise-plan \"...\"`."],
+        "An earlier FI stopped this quest because the simulation did not say where it implements each equation.",
+        "Resume it: FI sends the simulation back to be repaired with the missing labels named, and ends the quest "
+        "without a paper if they are still missing.",
+        [],
     ),
     "protocol": (
-        "The experiment does not follow the plan. Fix the script, or change the plan?",
-        "Fix the named script(s) so they follow the plan, then go on.",
-        ["Change the plan's protocol instead (`--revise-plan`), unless it is frozen."],
+        "An earlier FI stopped this quest because the experiment did not follow the plan.",
+        "Resume it: FI repairs the script against the plan, and ends the quest without a paper if it still differs.",
+        [],
     ),
     "replicate_seed_unrepairable": (
-        "The script ignores the seed FI gives each repeat. Fix it, or run without repeats?",
-        "Fix the script so every random draw uses FI_REPLICATE_SEED, then go on.",
-        ["Set `rigor_profile: default`: the result is then reported as a single run."],
+        "An earlier FI stopped this quest because the script ignores the seed FI gives each repeat.",
+        "Resume it: FI asks for the repair again, and ends the quest without a paper if the script still ignores it.",
+        [],
     ),
     "review_unavailable": (
         "The paper is written but could not be reviewed. Try again later?",
@@ -168,8 +169,8 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
     ),
 }
 _CHECK_UNKNOWN = (
-    "A required check could not judge. Fix what stopped it, or go on without it?",
-    "Look at the check's entry in .fi/run.log, fix what stopped it, then go on: it is tried once more.",
+    "A required check could not judge. Try another model or later, or go on without it?",
+    "Look at the check's entry in .fi/run.log; use another model for it, or retry later, then go on: it is tried once more.",
     ["Go on as it is: the missing check is recorded as a gap in the evidence."],
 )
 
@@ -223,23 +224,12 @@ _RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
         "This quest is set up for research, so a change that made a check of correctness worse stops it: the version "
         "kept so far is back in code/; resume to go on with it.",
     ),
-    "equation_labels": dict.fromkeys(
-        (False, True),
-        "This quest is set up for research, so the simulation must say where it implements each equation of the plan: "
-        "add the labels and resume.",
-    ),
-    "code_layout": dict.fromkeys(
-        (False, True),
-        "This quest is set up for research, so its code keeps the model's equations apart, with unit tests and an "
-        "equation list: fix what is listed in code/ and resume, or set `execution.code_package: false` to keep two "
-        "scripts.",
-    ),
 }
 _RESEARCH_INSTEAD_ANY = {
-    False: "This quest is set up for research, so that check cannot be relaxed: fix what it found and resume (FI "
-           "repairs the script), change the plan (`--revise-plan`), or start a new quest set up to explore.",
-    True: "This quest is set up for research and its protocol is frozen, so that check cannot be relaxed: fix what it "
-          "found and resume (FI repairs the script), or start a new quest if the protocol itself is wrong.",
+    False: "This quest is set up for research, so that check cannot be relaxed: resume (FI repairs the script), "
+           "change the plan (`--revise-plan`), or start a new quest set up to explore.",
+    True: "This quest is set up for research and its protocol is frozen, so that check cannot be relaxed: resume (FI "
+          "repairs the script), or start a new quest if the protocol itself is wrong.",
 }
 
 

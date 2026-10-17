@@ -156,24 +156,22 @@ async def test_warnings_the_repairs_do_not_remove_stop_the_quest_and_a_fixed_scr
 
     log = (first.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
     assert calls.count("NumericRepair") == 2, "the repair budget (exec_reflect_max_iterations) was spent"
-    assert "[numeric] paused" in log and "[FI] paused for the run's numeric warnings" in log and "paused for clarify" not in log
-    assert not (first.fi_dir / "clarify_questions.json").exists()
-    descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
-    assert descriptor["kind"] == "numeric" and descriptor["interaction"] == "supply"
-    text = (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "an argument had no effect" in text and "warnings accepted" in text
+    assert "[numeric] paused" not in log and "paused for the run's numeric warnings" not in log
+    assert not (first.fi_dir / "pause.json").exists(), "nobody is asked to fix the script"
+    record = json.loads((first.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert "an argument had no effect" in record["problem"] and "did not remove it" in record["problem"]
+    assert any("sent the script back to be repaired" in t for t in record["tried"])
     assert not (first.quest_root / "paper" / "paper.md").exists()
 
+    # Run again from the run step with a script that no longer warns: the quest goes on.
     (first.quest_root / "code" / "experiment.py").write_text(_QUIET, encoding="utf-8")
     second = Engine(cfg, resume_quest_id=first.quest_id)
-    artifacts = await second.run()
+    artifacts = await second.run(from_step="run")
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
-    assert "the script was changed while the quest was stopped; running it again" in (second.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert not (second.fi_dir / "numeric_stop.json").exists()
 
 
 @pytest.mark.asyncio
-async def test_resuming_without_changing_the_script_accepts_the_warnings(
+async def test_running_again_without_changing_the_script_ends_in_the_same_stop_not_in_accepted_warnings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -181,15 +179,12 @@ async def test_resuming_without_changing_the_script_accepts_the_warnings(
     cfg = _cfg(tmp_path)
     first = Engine(cfg)
     await first.run()
-    repairs = calls.count("NumericRepair")
 
     second = Engine(cfg, resume_quest_id=first.quest_id)
-    artifacts = await second.run()
+    artifacts = await second.run(from_step="run")
 
-    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
-    assert calls.count("NumericRepair") == repairs, "no further repair was asked for"
-    assert "resumed with the script unchanged: the run's warnings are accepted" in (
-        second.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert artifacts.paper_md is None, "warnings that stand are never accepted for a person"
+    assert (second.quest_root / "needs" / "STUCK.json").is_file()
     assert _recorded(second), "the warnings stay on record"
 
 
@@ -283,3 +278,22 @@ def test_a_clean_scan_after_warnings_were_found_does_not_add_a_synthetic_entry(
     monkeypatch.setattr("core.numeric_warnings.scan", lambda *a, **k: [])
     assert engine._scan_numeric_warnings({}, "", None) == []
     assert len(_recorded(engine)) == 1, "a clean scan after warnings (not a crash) adds nothing"
+
+
+@pytest.mark.asyncio
+async def test_the_stop_offers_the_setting_and_running_again_with_it_goes_on_with_the_warnings_noted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_WARNS, repair=_WARNS))
+    first = Engine(_cfg(tmp_path))
+    await first.run()
+    record = json.loads((first.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert "engine.numeric_warnings: warn" in record["choice"] and "--from run" in record["choice"]
+    assert "engine.numeric_warnings: warn" in capsys.readouterr().out
+    assert not (first.fi_dir / "pause.json").exists()
+
+    second = Engine(_cfg(tmp_path, numeric_warnings="warn"), resume_quest_id=first.quest_id)
+    artifacts = await second.run(from_step="run")
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+    assert _recorded(second)[-1]["mode"] == "warn", "the warnings are on record"

@@ -87,7 +87,7 @@ def _fake(protocol: dict[str, Any], simulate: str, analysis: str, calls: list[st
             return _FAKE_RESPONSES["review"]
         if prompt.lstrip().startswith("# Second Opinion on the Checks"):  # the second reading of the plan's checks
             return json.dumps({"checks": [{"name": o["name"], "appropriate": "yes", "discriminating": "yes",
-                                           "well_defined": "yes"} for o in protocol.get("oracles") or []],
+                                           "well_defined": "yes", "why": "it tests the model"} for o in protocol.get("oracles") or []],
                                "summary": "the checks test the model"})
         return _fake_response_for(prompt)
 
@@ -467,10 +467,12 @@ def test_a_paired_metric_printed_without_pair_ids_stops_the_research_quest(
 ) -> None:
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(PAIRED, SIM, ANALYSIS_TRIAL, []))
     engine, artifacts, pauses = _run_through_pauses(_config(tmp_path))
-    assert pauses and "read and edit the plan" not in pauses[-1], pauses
-    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    # Nobody is asked to change the analysis: FI sends it back, and when that does not remove the difference the quest
+    # ends without a paper and says what it tried.
+    assert artifacts.paper_md is None and all("read and edit the plan" in p for p in pauses), pauses
+    record = json.loads((engine.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    text = record["problem"] + " " + " ".join(record["tried"])
     assert "final_size_pair_id" in text, text[:1200]
-    assert _evidence(engine.quest_root)["status"] != "publication_ready"
 
 
 def test_a_paired_metric_with_pair_ids_pairs_trials_that_share_a_seed(

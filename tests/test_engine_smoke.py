@@ -127,6 +127,10 @@ _FAKE_RESPONSES = {
 def _classify(prompt: str) -> str:
     """Routes the canned response based on the leading prompt header."""
     head = prompt.lstrip().splitlines()[0]
+    if head.startswith("# What a Research Topic Asks For"):
+        return "TopicReading"
+    if head.startswith("# Is It In The Plan?"):
+        return "TopicJudging"
     # Prompts whose first line is descriptive prose rather than a section
     # heading — match on a prefix substring.
     prefix = prompt[:200]
@@ -153,6 +157,9 @@ def _classify(prompt: str) -> str:
 def _fake_response_for(prompt: str) -> str:
     head = _classify(prompt)
     return {
+        # What the topic asks for: one comparison and nothing the plan must carry; and nothing left to judge.
+        "TopicReading": json.dumps({"comparisons": [{"what": "the comparison the topic itself asks for"}]}),
+        "TopicJudging": json.dumps({"items": []}),
         "Clarify": _FAKE_RESPONSES["clarify"],
         "Ideation": _FAKE_RESPONSES["ideate"],
         "IdeateReflect": _FAKE_RESPONSES["ideate_reflect"],

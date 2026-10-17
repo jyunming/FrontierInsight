@@ -329,11 +329,11 @@ async def test_warn_records_the_difference_and_the_quest_goes_on(
 
 
 @pytest.mark.asyncio
-async def test_a_script_that_still_differs_stops_the_quest_and_a_fixed_one_is_kept_on_resume(
+async def test_a_script_that_still_differs_ends_in_the_honest_stop_and_asks_nobody_to_edit_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The stop is its own pause (not a clarify), says what differs, and a script the person fixed is used as it is:
-    the model is not asked to write it again."""
+    """After the repairs the script is not run and the quest ends without a paper, saying what differs; the stop is not
+    a pause, and nobody is told to edit the script or the plan."""
     calls: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_BAD, repair=_BAD))
     cfg = _cfg(tmp_path)
@@ -342,29 +342,17 @@ async def test_a_script_that_still_differs_stops_the_quest_and_a_fixed_one_is_ke
 
     log = (first.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
     assert calls.count("ProtocolRepair") == 2, "two repairs were asked for before stopping"
-    assert "[protocol] paused" in log and "[FI] paused for the protocol" in log and "paused for clarify" not in log
-    assert not (first.fi_dir / "clarify_questions.json").exists()
-    descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
-    assert descriptor["kind"] == "protocol" and descriptor["interaction"] == "supply"
-    text = (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "adds [0.8, 1.2, 2] and leaves out [0.9, 1.5]" in text and "plan.md" in text
+    assert "[protocol] paused" not in log and "paused for the protocol" not in log
+    assert not (first.fi_dir / "pause.json").exists()
+    record = json.loads((first.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert "adds [0.8, 1.2, 2] and leaves out [0.9, 1.5]" in record["problem"]
+    assert "edit" not in " ".join(record["tried"]).lower()
     assert json.loads((first.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))["status"] == "stopped"
     assert not (first.quest_root / "paper" / "paper.md").exists()
 
-    (first.quest_root / "code" / "experiment.py").write_text(_GOOD, encoding="utf-8")
-    implementations_before = calls.count("Implementation")
-
-    second = Engine(cfg, resume_quest_id=first.quest_id)
-    artifacts = await second.run()
-
-    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
-    assert calls.count("Implementation") == implementations_before, "the fixed script was written again"
-    assert "agrees with the plan's protocol; keeping it" in (second.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert not (second.fi_dir / "protocol_stop.json").exists()
-
 
 @pytest.mark.asyncio
-async def test_an_unfixed_script_is_written_again_on_resume_and_the_old_stop_is_forgotten(
+async def test_running_the_code_step_again_writes_the_script_again_and_forgets_the_stop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -372,16 +360,16 @@ async def test_an_unfixed_script_is_written_again_on_resume_and_the_old_stop_is_
     cfg = _cfg(tmp_path)
     first = Engine(cfg)
     await first.run()
-    assert (first.fi_dir / "protocol_stop.json").is_file()
+    assert (first.fi_dir / "cannot_repair.json").is_file()
     before = calls.count("Implementation")
 
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_GOOD, repair=None))
     second = Engine(cfg, resume_quest_id=first.quest_id)
-    artifacts = await second.run()
+    artifacts = await second.run(from_step="code")
 
     assert artifacts.paper_md is not None
-    assert calls.count("Implementation") == before + 1, "a script that still differed is written again"
-    assert not (second.fi_dir / "protocol_stop.json").exists(), "a later pass must not adopt an old script"
+    assert calls.count("Implementation") > before, "the script is written again"
+    assert not (second.fi_dir / "cannot_repair.json").exists(), "a later pass must not stop on the old problem"
 
 
 @pytest.mark.asyncio

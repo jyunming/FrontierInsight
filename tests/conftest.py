@@ -106,6 +106,29 @@ def _no_clean_venv_check(request, monkeypatch):
     monkeypatch.setattr(_cp, "verify", lambda *a, **k: {"ok": True, "says": "stub"})
 
 
+#: Tests whose point is the exact order of the scripted replies at the plan step (a list of replies handed out one by one):
+#: the reading of the topic is one more call there and would shift every reply after it, so they run without it. Every
+#: other test runs with the reading on, and the shared fakes (tests/test_engine_smoke.py ``_fake_response_for``) answer it.
+_SCRIPTED_AT_THE_PLAN_STEP = (
+    "test_plan", "test_plan_sources_way_forward", "test_oracle_review", "test_search_block_guards",
+    "test_search_block_asked", "test_protocol_part_asked",
+)
+
+
+@pytest.fixture(autouse=True)
+def _topic_reading_off_where_the_replies_are_scripted(request, monkeypatch):
+    """At the plan step the engine reads what the topic asks for (one call) and looks for it in the plan (a few more).
+    That stays on in every test except the ones listed in ``_SCRIPTED_AT_THE_PLAN_STEP``."""
+    if request.module.__name__.split(".")[-1] not in _SCRIPTED_AT_THE_PLAN_STEP:
+        return
+    from core.engine import Engine
+
+    async def off(self, state):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(Engine, "_cover_the_topic_in_the_plan", off)
+
+
 @pytest.fixture(autouse=True)
 def _no_crossref_retraction_lookup(request, monkeypatch):
     """The literature node looks every DOI up in Crossref for a retraction (core/retractions.py). Outside

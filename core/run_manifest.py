@@ -365,6 +365,177 @@ def _values_listed(result_json: Any, metric_id: str) -> bool:
     return walk(result_json)
 
 
+def _mapping_counts(mapping: dict[str, Any], metric_id: str) -> tuple[int, int]:
+    """``(real values, undefined)`` one mapping holds for ``metric_id``: the finite numbers and the ``null`` / non-finite
+    entries of its ``<id>_values`` list, plus a number under its ``<id>_undefined``."""
+    values_key, undefined_key = f"{metric_id}_values", f"{metric_id}_undefined"
+
+    def number(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    defined = undefined = 0
+    listed = mapping.get(values_key)
+    if isinstance(listed, list):
+        defined = sum(1 for x in listed if number(x) and math.isfinite(float(x)))
+        undefined = sum(1 for x in listed if x is None or (number(x) and not math.isfinite(float(x))))
+    count = mapping.get(undefined_key)
+    if number(count) and math.isfinite(float(count)) and count > 0:
+        undefined += int(count)
+    return defined, undefined
+
+
+def _listed_by_group(result_json: Any, metric_id: str) -> tuple[dict[Any, tuple[int, int]],
+                                                                dict[Any, dict[Any, tuple[int, int]]]]:
+    """``(real values, undefined)`` the analysis lists for ``metric_id``, per key the lists sit under (``None`` for the top
+    level), and the same counts per mapping that holds those keys side by side.
+
+    Mappings of one list (rows of the same table) add up; the same key met again elsewhere is a copy, not more trials, so
+    the largest is kept. A ``<id>_values`` (or ``<id>_undefined``) that is itself a mapping (one list or count per key)
+    is read as one entry per key, the keys side by side in that mapping. The second result, per holding mapping, is
+    what each key beside the others holds there: keys side by side in one mapping are parts of one report (a setting's
+    own name the grid cannot read, an index), so :func:`_listed_counts` may add them up for the lower bound."""
+    values_key, undefined_key = f"{metric_id}_values", f"{metric_id}_undefined"
+    found: dict[tuple[Any, Any], dict[Any, list[int]]] = {}
+
+    def number(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    def add(under: Any, parent: Any, container: Any, counts: tuple[int, int]) -> None:
+        total = found.setdefault((under, parent), {}).setdefault(container, [0, 0])
+        total[0] += counts[0]
+        total[1] += counts[1]
+
+    def walk(node: Any, under: Any, container: Any, parent: Any) -> None:
+        if isinstance(node, dict):
+            listed, undefined = node.get(values_key), node.get(undefined_key)
+            if isinstance(listed, list) or number(undefined):
+                add(under, parent, container if container is not None else id(node), _mapping_counts(node, metric_id))
+            inner = ("inner", id(node))
+            if isinstance(listed, dict):
+                for key, value in listed.items():
+                    if isinstance(value, list):
+                        add(key, id(node), inner, _mapping_counts({values_key: value}, metric_id))
+            if isinstance(undefined, dict):
+                for key, value in undefined.items():
+                    add(key, id(node), inner, _mapping_counts({undefined_key: value}, metric_id))
+            for k, v in node.items():
+                if k in (values_key, undefined_key) and isinstance(v, dict):
+                    continue  # read above, one entry per key
+                walk(v, k, None, id(node))
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, under, id(node), parent)
+
+    walk(result_json, None, None, None)
+    by_under: dict[Any, tuple[int, int]] = {}
+    families: dict[Any, dict[Any, tuple[int, int]]] = {}
+    for (under, parent), by in found.items():
+        counts = (max(t[0] for t in by.values()), max(t[1] for t in by.values()))
+        families.setdefault(parent, {})[under] = counts
+        seen = by_under.get(under, (0, 0))
+        by_under[under] = (max(seen[0], counts[0]), max(seen[1], counts[1]))
+    return by_under, families
+
+
+def _recorded_in_cells(recorded_by_cell: dict[str, Any], metric_id: str, cells: set[frozenset[tuple[str, Any]]],
+                       grid: dict[str, list[Any]]) -> tuple[int, int]:
+    """``(with a value, with none)`` FI's record holds for ``metric_id`` in the given settings."""
+    defined = undefined = 0
+    for key, by_name in recorded_by_cell.items():
+        cell, _why = _canonicalize_cell(key, grid)
+        counts = recorded_counts(by_name, metric_id) if cell in cells else None
+        if counts is not None:
+            defined, undefined = defined + counts[0], undefined + counts[1]
+    return defined, undefined
+
+
+def _listed_counts(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recorded: tuple[int, int],
+                   recorded_by_cell: dict[str, Any] | None) -> tuple[int, int, list[str], int, int]:
+    """``(real values, undefined, excesses)`` the analysis accounts for, counting ONE representation of the trials.
+
+    Lists sitting under a setting's key (``R0=1.5,N=500``, or a part of the setting such as ``R0=1.5``) are the per-setting
+    copy: each setting is counted once (the largest list for it, never the sum of two), and each is held, when FI keeps its
+    record per setting, to that setting's own trials (an entry in ``excesses`` when it lists more). Lists sitting anywhere
+    else are pooled copies: never added to the per-setting ones and never to each other (the largest stands for them), each
+    held to the pooled totals. What the analysis accounts for is the larger of the two representations, so a copy of a
+    short list cannot make up the difference.
+
+    Keys side by side in one mapping that the grid cannot read as settings (``"1"``, ``"2"``, a setting's own name) are
+    parts of one report, like the rows of one table: for the lower bound (the last two numbers returned) they add up, so
+    an honest report keyed that way is not taken for its largest part. They are never held to the upper bound as a sum,
+    since a pooled copy may sit beside them; each one alone still is."""
+    groups, families = _listed_by_group(result_json, metric_id)
+    strata: list[tuple[Any, set[frozenset[tuple[str, Any]]], tuple[int, int]]] = []
+    pooled = [0, 0]
+    excesses: list[str] = []
+    for under, counts in groups.items():
+        cells = _fragment_cells(under, grid) if grid and isinstance(under, str) else None
+        if cells:
+            strata.append((under, cells, counts))
+        else:
+            pooled = [max(pooled[0], counts[0]), max(pooled[1], counts[1])]
+    accepted: set[frozenset[tuple[str, Any]]] = set()
+    per_setting = [0, 0]
+    for under, cells, counts in sorted(strata, key=lambda t: -(t[2][0] + t[2][1])):
+        if cells & accepted:
+            continue  # the same trials already counted under another key
+        accepted |= cells
+        per_setting = [per_setting[0] + counts[0], per_setting[1] + counts[1]]
+        if recorded_by_cell:
+            have_value, have_none = _recorded_in_cells(recorded_by_cell, metric_id, cells, grid)
+            if counts[0] > have_value or counts[1] > have_none or counts[0] + counts[1] > have_value + have_none:
+                excesses.append(f"{counts[0]} value(s) and {counts[1]} undefined for `{under}` where FI's record has "
+                                f"{have_value} with a value and {have_none} with none")
+    defined, undefined = max(per_setting[0], pooled[0]), max(per_setting[1], pooled[1])
+    side_by_side = (0, 0)
+    for members in families.values():
+        parts = [c for under, c in members.items()
+                 if not (grid and isinstance(under, str) and _fragment_cells(under, grid))]
+        total = (sum(c[0] for c in parts), sum(c[1] for c in parts))
+        if total[0] + total[1] > side_by_side[0] + side_by_side[1]:
+            side_by_side = total
+    if side_by_side[0] + side_by_side[1] > defined + undefined:
+        return defined, undefined, excesses, side_by_side[0], side_by_side[1]
+    return defined, undefined, excesses, defined, undefined
+
+
+#: How much of the trials that measured a metric the analysis's values and undefined ones must account for when FI holds the
+#: record of them (the analysis copies the lists FI_TRIALS holds, so this is a tolerance, not a licence to leave trials out).
+_ACCOUNTED = 0.9
+
+
+def recorded_counts(recorded: dict[str, Any] | None, metric_id: str) -> tuple[int, int] | None:
+    """``(trials with a value, trials with none)`` for ``metric_id`` in FI's own record of the trials (``recorded``: each
+    name run_trial returned, with a count per value, as :func:`core.trial_runner.pooled` gives it), or ``None`` when no
+    trial returned that name. A trial whose measurement does not exist (NaN, infinite) returned the name too: it is in
+    the second number, never left out."""
+    counts = (recorded or {}).get(metric_id)
+    if not counts:
+        return None
+    defined = undefined = 0
+    for key, n in counts.items():
+        try:
+            finite = math.isfinite(float(key))
+        except (TypeError, ValueError):
+            finite = False
+        if finite:
+            defined += int(n)
+        else:
+            undefined += int(n)
+    return defined, undefined
+
+
+def derived_metrics(protocol: dict[str, Any] | None, recorded: dict[str, Any] | None) -> list[str]:
+    """The ids of the protocol's `mean` metrics (not `given` a subset) that no trial returned under that name: the analysis
+    derives them from the trials (a quantity per setting, a fit across settings, a time), so the trials hold no per-trial
+    list of them for a count to be checked against. Empty when FI keeps no record of the trials."""
+    if not isinstance(protocol, dict) or not recorded:
+        return []
+    return [str(m["id"]) for m in protocol.get("metrics") or []
+            if isinstance(m, dict) and m.get("kind") == "mean" and m.get("id") and not m.get("given")
+            and recorded_counts(recorded, str(m["id"])) is None]
+
+
 #: What the values of a mean over a subset of the trials may be, said the same way by the check and the repair.
 DERIVED = (
     "Each value in a `<metric>_values` list is one trial's own value as FI_TRIALS holds it for that stratum's settings, "
@@ -645,6 +816,7 @@ def strata_coverage(protocol: dict[str, Any] | None, result_json: Any) -> list[s
 
 def _value_count_findings(
     protocol: dict[str, Any], manifest: dict[str, Any], result_json: Any, *, trial_mode: bool = False,
+    recorded: dict[str, Any] | None = None, recorded_by_cell: dict[str, Any] | None = None,
 ) -> list[tuple[str, bool]]:
     """``(sentence, the analysis listed no values at all)`` for each `kind: "mean"` metric whose claimed trial count is
     not backed by the per-trial values the analysis printed.
@@ -653,7 +825,15 @@ def _value_count_findings(
     is the audit's own fabrication case (10 real trials, 300 claimed): the simulation is sent back. No such list at all
     is the analysis not printing what the contract asks of it, while the simulation's raw files may hold every trial
     (a live quest's did: 100 final sizes per setting on disk, and the rewrite of simulate.py this used to ask for broke
-    the oracle checks it had passed). That one is the analysis's to fix."""
+    the oracle checks it had passed). That one is the analysis's to fix.
+
+    ``recorded`` (FI's own record of what the trials returned, when FI ran them): a mean is counted against the trials that
+    MEASURED it, not against every trial. A trial whose measurement does not exist (an edge that never formed) returned
+    the name with no value: the analysis keeps it as ``null`` in the list, or gives its count as ``<id>_undefined``, and
+    ``values + undefined`` must account for the trials that measured it. A mean no trial returned under its name is
+    derived by the analysis (a quantity per setting, a fit, a time): the trials hold no per-trial list of it, so no trial
+    count is claimed for it (:func:`derived_metrics` says which). ``recorded_by_cell`` is the same record per setting: each
+    per-setting list the analysis prints is then held to its own setting's trials as well (:func:`_listed_counts`)."""
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     runs = _num(protocol.get("runs_per_setting"))
     if result_json is None or not grid or runs is None:
@@ -696,6 +876,53 @@ def _value_count_findings(
                 continue
             if _values_listed(result_json, metric):
                 continue  # every mapping's values are exactly the trials its `<given>_count` counts
+        if recorded and not given:
+            counts = recorded_counts(recorded, metric)
+            if counts is None:
+                continue  # derived by the analysis: no per-trial list of it exists to count against
+            defined, undefined = counts
+            measured = defined + undefined
+            listed_defined, listed_undefined, excesses, accounted_defined, accounted_undefined = _listed_counts(
+                result_json, metric, grid, (defined, undefined), recorded_by_cell)
+            made = (f"in {measured:g} trial(s) of FI's record: {defined:g} with a value and {undefined:g} with none "
+                    "(the measurement does not exist there)")
+            if not _values_listed(result_json, metric) and not accounted_defined and not accounted_undefined:
+                out.append((
+                    f"the metric `{metric}` is a mean over the trials that measured it, {made}, but the analysis's "
+                    f"RESULT_JSON has no `{metric}_values` list at all — the analysis must print the per-trial values "
+                    "it averaged, so the claimed trial count can be checked against them",
+                    True,
+                ))
+            elif (accounted_defined + accounted_undefined < measured * _ACCOUNTED
+                  or (undefined and not accounted_undefined)):
+                gap = ("RESULT_JSON has no `" + metric + "_undefined` count and no null entries for them"
+                       if undefined and not accounted_undefined else "the rest are not accounted for")
+                out.append((
+                    f"the metric `{metric}` is measured {made}; the analysis accounts for {accounted_defined} value(s) + "
+                    f"{accounted_undefined} undefined = {accounted_defined + accounted_undefined}, and {gap}: the "
+                    "values and the "
+                    "undefined ones together must be the trials that measured it, and the undefined ones are reported, "
+                    "never dropped",
+                    True,
+                ))
+            elif (listed_defined > defined or listed_undefined > undefined
+                  or listed_defined + listed_undefined > measured or excesses):
+                # The record is exact: a count above it (a values list longer than the trials that returned a value, an
+                # undefined count above the trials that returned none) is a number FI never recorded, whatever it is for.
+                too_many = list(excesses)
+                if listed_defined > defined:
+                    too_many.append(f"{listed_defined} value(s) where FI's record has {defined:g} trial(s) with a value")
+                if listed_undefined > undefined:
+                    too_many.append(f"{listed_undefined} undefined where FI's record has {undefined:g} trial(s) with none")
+                if listed_defined + listed_undefined > measured:
+                    too_many.append(f"{listed_defined + listed_undefined} in all where {measured:g} trial(s) measured it")
+                out.append((
+                    f"the metric `{metric}` is measured {made}; the analysis reports more than that: "
+                    + "; ".join(too_many) + ". The values and the undefined ones must be what the trials returned, no "
+                    "more: copy the lists FI_TRIALS holds, never add to them",
+                    True,
+                ))
+            continue
         if not _values_listed(result_json, metric):
             out.append((
                 f"the metric `{metric}` is a mean over {over} ({base:g}), but the analysis's "
@@ -769,6 +996,7 @@ def _counts_listed(result_json: Any, key: str) -> bool:
 
 def analysis_output_problems(
     protocol: dict[str, Any], manifest: dict[str, Any] | None, result_json: Any, *, trial_mode: bool = False,
+    recorded: dict[str, Any] | None = None, recorded_by_cell: dict[str, Any] | None = None,
 ) -> list[str]:
     """The differences :func:`problems` reports that are the analysis's to fix, not the simulation's: a mean metric the
     analysis printed no per-trial values for. The caller sends experiment.py back for these, simulate.py for the rest."""
@@ -777,12 +1005,14 @@ def analysis_output_problems(
     # ``trial_mode``: FI ran the trials and holds their record, so a count the analysis's values do not back is the
     # analysis's to fix; under the older contract the simulation's own record is what is in doubt.
     return [sentence for sentence, analysis in _value_count_findings(protocol, manifest, result_json,
-                                                                     trial_mode=trial_mode) if analysis]
+                                                                     trial_mode=trial_mode, recorded=recorded,
+                                                                     recorded_by_cell=recorded_by_cell) if analysis]
 
 
 def problems(
     protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str = "",
-    result_json: dict[str, Any] | None = None, *, trial_mode: bool = False,
+    result_json: dict[str, Any] | None = None, *, trial_mode: bool = False, recorded: dict[str, Any] | None = None,
+    recorded_by_cell: dict[str, Any] | None = None,
 ) -> list[str]:
     """How the run differs from the protocol, one sentence each; empty when the manifest matches it.
 
@@ -867,7 +1097,8 @@ def problems(
                 shown = ", ".join(f"{c}: {n}" for c, n in list(short.items())[:4])
                 out.append(f"the protocol fixes {runs:g} runs per setting; {len(short)} setting(s) ran another number ({shown})")
         out.extend(sentence for sentence, _ in _value_count_findings(protocol, manifest, result_json,
-                                                                     trial_mode=trial_mode))
+                                                                     trial_mode=trial_mode, recorded=recorded,
+                                                                     recorded_by_cell=recorded_by_cell))
 
     listed = manifest.get("failed_trials")
     listed = listed if isinstance(listed, list) else []
@@ -995,11 +1226,41 @@ def directive(found: list[str], protocol: dict[str, Any], *, trial_mode: bool = 
     )
 
 
+_MISSING_KEY = re.compile(r"`([A-Za-z_][\w]*_(?:values|count|total|undefined))`")
+
+
+def missing_keys(found: list[str]) -> list[str]:
+    """The ``<metric>_values`` (or ``_count`` / ``_total``) keys the findings name as absent from the analysis's output,
+    in order, each once."""
+    keys: list[str] = []
+    for line in found:
+        if "no `" in line or "prints no" in line or "has no" in line:
+            for key in _MISSING_KEY.findall(line):
+                if key not in keys:
+                    keys.append(key)
+    return keys
+
+
 def analysis_directive(found: list[str]) -> str:
-    """The repair request for :func:`analysis_output_problems`: the simulation stands, the analysis must print its values."""
+    """The repair request for :func:`analysis_output_problems`: the simulation stands, the analysis must print its values.
+    It names the exact keys that are missing and where the per-trial values are (FI's per-setting results, the file
+    ``FI_TRIALS`` names), so the repair does not have to guess."""
+    keys = missing_keys(found)
+    named = (
+        "\n\nThese keys are missing from RESULT_JSON and must be added: " + ", ".join(f"`{k}`" for k in keys[:12]) + ". "
+        "The per-trial values are already on disk: `json.load(open(os.environ[\"FI_TRIALS\"]))[\"cells\"]` has one entry per "
+        "setting, and `entry[\"metrics\"][<outcome name>][\"values\"]` lists the values of the trials that succeeded "
+        "(`entry[\"metrics\"][<outcome name>][\"trials\"]` the trial each came from). Copy those lists, per setting when "
+        "the metric is reported per setting; do not recompute them."
+    ) if keys else ""
     return (
         "This run finished, and the simulation's raw files stand, but the analysis did not print what the contract asks:\n"
-        + "\n".join(f"- {line}" for line in found[:8])
+        + "\n".join(f"- {line}" for line in found[:8]) + named
+        + ("\n\nA trial whose measurement does not exist (FI_TRIALS holds it as NaN, and counts such trials under "
+           "`non_finite`) is not dropped and not invented: keep it as `null` in `<metric>_values`, or give how many there "
+           "are as `<metric>_undefined`. The numbers with a value plus the undefined ones must be the trials that measured "
+           "it. A metric no trial returns under its own name (a quantity derived per setting, a fit, a time) has no "
+           "per-trial list on disk and is not asked for one." if "measurement does not exist" in " ".join(found) else "")
         + "\n\nRewrite experiment.py (not simulate.py) so that, for each of those metrics, RESULT_JSON carries a "
         "`<metric>_values` list: the per-trial values, read from the raw files, that the metric's mean is computed from "
         "(per setting when the metric is reported per setting). " + NESTING + " " + DERIVED + " Do not invent values: "

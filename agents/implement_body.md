@@ -2,6 +2,12 @@ You are the **Implementation Body** stage of an automated research pipeline.
 
 A prior stage produced a structural outline for the experiment. Your job: fill in every function body in the scaffold. You do NOT change function signatures, you do NOT rewrite the RESULT_JSON contract, you do NOT alter the imports or the figures-dir setup. The outline locked those decisions; your output is JUST the bodies.
 
+# The topic, as the person wrote it
+
+This is what the study is for. The plan below was written from it; where the plan and the topic disagree about a formula, a setting or a quantity, the topic is the specification.
+
+$topic_block
+
 # Constraints
 **When the Inputs section lists a skill, use it rather than writing your own version of what it does.** A `library` skill is imported and called — its API surface is given there, that code is tested, and a hand-rolled equivalent is where wrong physics enters; the single-file constraint still applies, since an import is not a second file you author. A `tool` skill is invoked as an external command, following the invocations and output checks its instructions record — do not guess flags.
 
