@@ -12687,9 +12687,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if str(f.get("id")) in agrees:
                 self._log.info("[equations] the worked example of %s is what its equation as written gives for the same "
                                "inputs, so the code, not the example, is wrong; the plan is not asked about it", f.get("id"))
+        # The function's parameters were fixed by the outline before any code was written: the plan is told them, so a
+        # reworked example cannot name other inputs (the one place a function's inputs come from is the outline).
+        try:
+            outline_specs, _notes = _function_steps.model_functions(state.get("implement_outline") or {}, protocol)
+        except Exception:  # noqa: BLE001 -- without a readable outline there are no fixed parameters to tell
+            outline_specs = []
+        fixed_names = {s.equation: s.params() for s in outline_specs if s.kind == _function_steps.EQUATION}
         asks = [{"id": str(f.get("id")), "formula": " ".join(str(f.get("formula") or "").split()),
                  "example": _equation_tests.example_as_written(protocol, str(f.get("id"))), "why": f.get("status"),
-                 "source": "tests"}
+                 "source": "tests", "names": fixed_names.get(str(f.get("id")))}
                 for f in failures if str(f.get("id")) in by_id and str(f.get("id")) not in agrees
                 and _equation_tests.repairable_by_example(f)]
         return await self._rederive_examples(state, protocol, asks)

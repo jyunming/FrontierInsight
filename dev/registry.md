@@ -621,8 +621,8 @@ same PR that adds, splits or renames one.
   and functions only, and `values_of` / `write_values` / `checks_dir` write the inputs, outputs and tolerances to
   `<quest>/.fi/checks/equation_values.json`, outside `code/`, only at the end of `Engine.run` (`_deliver_check_values`;
   `write` and `code_layout.remove_check_values` take them off disk while code can run) (a person names another folder with `--checks`; no
-  environment variable is read); `is_random` reads a flag on the equation or
-  example, or a formula that says a term follows a distribution (`~N(0,1)`, `~U(a,b)`, "drawn from", "random")). Called
+  environment variable is read); `is_random` reads only the plan's `random` flag, on the equation or
+  example (never the formula's words: `~N(0,1)` defines a term, `gamma(d)` is a coherence function). Called
   by `Engine._equation_gate` (in `_node_execute` before the oracle gate; repairs a failing function alone, then returns
   a failed run for the existing `execute_reflect`), by `_hold_oracle_forms` (missing examples ride in the one request to
   the plan, `_revise_checks_only(equations="example")`) and by `code_layout.project_files`. A test still failing after its repairs, or an outline whose parameters differ from the example's inputs (`parameter_problems`), asks the plan once per equation to work the example out again, unless the example is what the equation as written gives (`equation_value`, recorded as a row's `equation_agrees`; an example its equation does not give is `unusable`) (`rederive_request`; `Engine._rederive_examples`; `with_examples` applies it in `_draft_protocol`; never the code's number). Records: `.fi/equation_tests.json`, `.fi/examples_rederived.json`.
