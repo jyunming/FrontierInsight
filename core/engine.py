@@ -5833,6 +5833,115 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             what="search for the best design", short="the search",
             note="the search for the best design, written by the plan's model", ask_limit=1 if scan_only else None)
 
+    async def _ask_plan_for_the_grid(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """Before any code is written, a ``protocol.grid`` of more settings than FI lists (:func:`core.optimise_search.grid_too_large`,
+        the same count the run stops on) is asked of the plan's model once to rewrite, with the plan's own arithmetic (at most
+        once per plan, counted in ``.fi/grid_asked.json``, so a resume does not ask again). Only the grid and the parts a
+        smaller grid changes with it (``in_each_run``, ``constants``) are kept from the answer. A plan that fits is not asked,
+        and nothing is logged for it. The stop that follows when it still does not fit is :meth:`_grid_too_large_stop`.
+        Returns the design to use and the hash of its plan."""
+        if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
+                or not plan_sha or _optim.has_block(design)):
+            return design, plan_sha
+
+        def problem(now: Any) -> str:
+            protocol = now.get("protocol") if isinstance(now, dict) else None
+            grid = protocol.get("grid") if isinstance(protocol, dict) else None
+            return "" if _optim.has_block(now) else _optimise_search.grid_too_large(grid)
+
+        if not problem(design) or self._grid_asked_of(_GRID_ASKED) > 0:
+            return design, plan_sha  # a fit grid is not asked; a grid asked once is not asked again (FI's own notes change the hash)
+
+        def lacks(now: Any) -> list[str]:
+            return [p for p in [problem(now)] if p]
+
+        def request(now: Any, _text: str) -> str:
+            return _plan.grid_request(state.get("topic") or self.config.topic, problem(now))
+
+        def keep(before: str, answer: dict[str, Any]) -> str:
+            kept = self._keep_only_the_parts(before, answer, ["grid", "in_each_run", "constants"])
+            if kept is None:
+                raise ValueError("your answer has none of the asked parts in a form that can be read; plan.md is unchanged")
+            return kept
+
+        return await self._ask_plan_to_complete(
+            design, plan_sha, lacks=lacks, request=request, keep=keep, file=_GRID_ASKED,
+            what="what fits the settings limit", short="the settings",
+            note="the grid of settings made small enough to run, written by the plan's model", ask_limit=1,
+            extra={"parts": ["grid"]})
+
+    def _grid_asked_of(self, file: str, iteration: int | None = None) -> int:
+        """How many times FI has asked about the grid's size on the model asked now (``iteration``: for a drafted design, in
+        that design round only). Kept by name, not by the plan's hash, because FI's own notes in plan.md change the hash."""
+        try:
+            record = json.loads((self.fi_dir / file).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        if (not isinstance(record, dict) or record.get("model") != self._plan_model_name()
+                or (iteration is not None and record.get("iteration") != iteration)):
+            return 0
+        try:
+            return max(0, int(record.get("count") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    async def _ask_design_for_the_grid(self, state: QuestState, design: Any, *, iteration: int) -> Any:
+        """A design drafted at this step (a redesign: it did not come from ``plan.md``) whose ``protocol.grid`` holds more
+        settings than FI lists is asked of the plan's model once per design round (counted in ``.fi/drafted_grid_asked.json``
+        BEFORE the call, so a resume does not ask again), the way the plan's own grid is (:meth:`_ask_plan_for_the_grid`).
+        Only a grid, ``in_each_run`` and ``constants`` that pass the same reading as the plan's are taken; the rest of the
+        design is untouched. A grid still too large is the stop of :meth:`_grid_too_large_stop`. Returns the design to use."""
+        protocol = design.get("protocol") if isinstance(design, dict) else None
+        if (not isinstance(protocol, dict) or protocol.get("optimisation") or not self._runs_code(state)
+                or self._client is None or _frozen.load(self.quest_root) is not None):
+            return design
+        problem = _optimise_search.grid_too_large(protocol.get("grid"))
+        if not problem or self._grid_asked_of(_DRAFTED_GRID_ASKED, iteration) > 0:
+            return design
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / _DRAFTED_GRID_ASKED).write_text(json.dumps(
+                {"count": 1, "model": self._plan_model_name(), "iteration": iteration, "at": _frozen.now()}) + "\n",
+                encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[design] FI could not write down that it was asking about the redesign's grid, so it did not "
+                              "ask: %r", e)
+            return design
+        self._log.warning("[design] the redesign's grid is too large to run (%s); FI asked the plan's model to rewrite it "
+                          "(1 of 1)", _one_line(problem, 300))
+        self._progress("Asking the model to make the settings of the redesign small enough to run")
+        ask = (_plan.grid_request(state.get("topic") or self.config.topic, problem)
+               + "\n\nThe protocol drafted so far (keep what is usable in it):\n"
+               + json.dumps(protocol, ensure_ascii=False, default=str)[:4000]
+               + "\n\nAnswer with the asked parts alone, as one JSON object whose keys are their names "
+               + "(for example {\"grid\": {...}}).")
+        try:
+            obj = _parse_json_lenient(await self._chat(ask, node="plan_revise"))
+        except Exception as e:  # noqa: BLE001 -- the stop that follows says what was tried
+            if _is_fatal_provider_error(e):
+                raise
+            self._log.warning("[design] the plan's model could not be asked about the redesign's grid: %s", e)
+            return design
+        if isinstance(obj, dict) and isinstance(obj.get("protocol"), dict):
+            obj = obj["protocol"]
+        if not isinstance(obj, dict) or not isinstance(obj.get("grid"), dict):
+            self._log.warning("[design] the plan's model's answer about the redesign's grid had no grid")
+            return design
+        candidate = {k: v for k, v in protocol.items() if k not in ("grid", "in_each_run", "constants")}
+        for part in ("grid", "in_each_run", "constants"):
+            value = obj.get(part) if obj.get(part) is not None else (protocol.get(part) if part != "grid" else None)
+            if value is not None:
+                candidate[part] = value
+        if isinstance(candidate.get("in_each_run"), dict) and isinstance(candidate.get("grid"), dict):
+            candidate["grid"] = {k: v for k, v in candidate["grid"].items() if k not in candidate["in_each_run"]}
+        fixed, why = _plan.normalize_protocol(candidate)
+        if fixed is None or not fixed.get("grid"):
+            self._log.warning("[design] the redesign's grid, as the plan's model wrote it, cannot be read: %s", why)
+            return design
+        self._log.info("[design] the redesign's grid was rewritten by the plan's model: %s",
+                       _optimise_search.grid_too_large(fixed["grid"]) or "it fits now")
+        return {**design, "protocol": {**protocol, **{k: fixed[k] for k in ("grid", "in_each_run", "constants") if k in fixed}}}
+
     def _move_misplaced_parts(self) -> list[str]:
         """A protocol part the plan's model wrote beside ``protocol`` (at the top level of the design block, as the search
         block was in a real plan) is moved under it in plan.md, as a version FI wrote itself, and said in run.log: the
@@ -6090,6 +6199,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if design is not None and sha:
             design, sha = await self._ask_plan_for_the_search(state, design, sha)
             design, sha = await self._ask_plan_for_the_parts(state, design, sha)
+            design, sha = await self._ask_plan_for_the_grid(state, design, sha)
             await self._cover_the_topic_in_the_plan(state)
             self._write_the_ledger(state)
 
@@ -7483,6 +7593,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
               f"({_one_line(missing[0], 200)}); nothing was run (see needs/STUCK.json)")
         return self._stop_before_run(text, "no_search", tried=tried)
 
+    def _grid_too_large_stop(self, state: QuestState) -> QuestState | None:
+        """The honest stop (no paper) for a protocol whose ``grid`` holds more settings than FI lists, reached before any
+        code is written and again before it runs: the same stop, with the same count, that the run gives
+        (:meth:`_stop_too_long`), but at design, after the plan's model was asked once to make the grid smaller
+        (:meth:`_ask_plan_for_the_grid`). ``None`` when the grid fits, for a search (its scan is judged by
+        :meth:`_search_cannot_start_stop`) and for a quest that runs no experiment of its own."""
+        if not self._runs_code(state):
+            return None
+        protocol = self._protocol_block(state)
+        if not isinstance(protocol, dict) or protocol.get("optimisation"):
+            return None
+        said = _optimise_search.grid_too_large(protocol.get("grid"))
+        if not said:
+            return None
+        path = _plan.plan_path(self.quest_root)
+        asked = self._search_record(_plan.sha256(path.read_text(encoding="utf-8")), _GRID_ASKED)[0] if path.is_file() else 0
+        tried = [said,
+                 ("asked the plan's model to rewrite the settings so they are crossed only where they should be, with the "
+                  "count above; the grid was still too large") if asked else
+                 "had no plan's model to ask, or the plan was already settled, so the grid was not rewritten",
+                 "did not cut the grid: FI does not choose which settings or values to leave out"]
+        self._log.warning("[design] the plan's grid is too large to run (%s); stopping, nothing was run", _one_line(said, 400))
+        print(f"[FI] quest {self.quest_id}: {_one_line(said, 300)}; nothing was run (see needs/STUCK.json)")
+        return self._stop_before_run(said, "too_long", tried=tried)
+
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
         """Pause for a person only when the quest's setup stops a search for the best design: the simulation is not a
         script of its own (``execution.split_analysis: false``), or the trials go to a cluster (``execution.background_jobs``:
@@ -8238,6 +8373,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # asked to write it); the design to run is then the plan as rewritten.
             design, plan_sha = await self._ask_plan_for_the_search(state, design, plan_sha)
             design, plan_sha = await self._ask_plan_for_the_parts(state, design, plan_sha)
+            design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha)
         else:
             # A design drafted here (a redesign) did not come from plan.md: its search block is completed the same way.
             design, moved_parts = _plan.hoist_protocol_parts(design)
@@ -8247,6 +8383,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design = await self._complete_a_drafted_search(state, design, iteration=iteration)
             design = await self._complete_drafted_parts(state, design, iteration=iteration)
             design = self._inherit_plan_parts(state, design, iteration=iteration)
+            design = await self._ask_design_for_the_grid(state, design, iteration=iteration)
             self._check_the_ledger_of_a_redesign(state, design)
         self._stop_if_no_settings_to_vary(state, design)
         self._stop_if_the_search_cannot_start(state, design)
@@ -10035,6 +10172,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return topic_stop  # no code is written for a study that leaves out what the topic's question needs
         if (search_stop := self._search_cannot_start_stop(state, state.get("design"))) is not None:
             return search_stop  # no code is written for a search FI could not make (the run step stops the same way)
+        if (grid_stop := self._grid_too_large_stop(state)) is not None:
+            return grid_stop  # no code is written for settings FI would not list (the run step stops the same way)
         await self._shadow("implement", state, taken="implemented the design")
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
@@ -16166,6 +16305,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._stop_if_the_search_cannot_start(state, design_now)
         if (search_stop := self._search_cannot_start_stop(state, design_now)) is not None:
             return search_stop
+        if (grid_stop := self._grid_too_large_stop(state)) is not None:
+            return grid_stop
         if _phased.enabled(self.config):
             # Explore, then confirm: before any code reads the data for the first time, which rows are held back is
             # decided (or, in a research quest that cannot tell which rows belong together, the person is asked).
@@ -19250,9 +19391,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # The study would not finish in the time allowed, even made smaller (core/run_estimate.py): nothing was run.
             said = str((state.get("exec_result") or {}).get("too_long") or "").strip().rstrip(".")
             problem = f"{said}, so nothing was run for the study" if said else "the experiment would not fit the time allowed"
-            tried = ["timed a few real trials of the experiment and added them up",
-                     said or "the total is more than the time allowed"]
-            ended = "the experiment would still take longer than the time allowed"
+            tried = [str(t) for t in (state.get("exec_result") or {}).get("too_long_tried") or []] or [
+                "timed a few real trials of the experiment and added them up",
+                said or "the total is more than the time allowed"]
+            ended = ("the settings of the plan were still more than FI lists"
+                     if (state.get("exec_result") or {}).get("too_long_tried") else
+                     "the experiment would still take longer than the time allowed")
         if reason == "no_search":
             # The plan is a search for the best design and the plan's model could not write a search FI can run.
             said = str((state.get("exec_result") or {}).get("no_search") or "").strip().rstrip(".")
@@ -26071,6 +26215,8 @@ _LEDGER_ASKED = "ledger_asked.json"  # which ledger parts were asked about, in w
 _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger parts: each asked once per quest
 # Asked once per design round, never a stop: the ledger parts, and whether a check on an average holds in every trial.
 _ONCE_PARTS = (*_LEDGER_PARTS, "per_trial")
+_DRAFTED_GRID_ASKED = "drafted_grid_asked.json"  # one request per redesign round, for a drafted grid of more settings than FI lists
+_GRID_ASKED = "grid_asked.json"  # the same bounds, for a grid of more settings than FI lists (one request per plan)
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"
 _TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks

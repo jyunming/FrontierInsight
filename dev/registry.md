@@ -243,6 +243,10 @@ same PR that adds, splits or renames one.
   `Engine._ask_plan_for_the_parts` (`plan.part_request`, `PART_RULES`; record `.fi/protocol_part_asked.json`; only the asked
   parts are kept, `_keep_only_the_parts`). `Engine._stop_if_no_settings_to_vary` stops a sweep that stays unreadable
   (no paper); a study that never listed a sweep, or an unreadable metrics part, goes on and plan.md says so.
+  A grid of more settings than FI lists: `optimise_search.grid_too_large` (the count lives with `grid_size` /
+  `check_listable`, which every runner holds to; returns the plain sentence or `""`), `Engine._ask_plan_for_the_grid`
+  (`plan.grid_request`; one ask per plan through `_ask_plan_to_complete`, record `.fi/grid_asked.json`; keeps only `grid`,
+  `in_each_run`, `constants`), and `Engine._grid_too_large_stop` (the run's `too_long` stop, at implement and execute).
 - `core/optimise.py` — the engine runs the search for the best design: `OptimisationRunner` (the executor stand-in
   `_node_execute` picks when the design has an `optimisation` block and two scripts, instead of
   `trial_runner.TrialsRunner`; it runs the search, then `experiment.py` with `FI_OPTIMISATION` / `FI_BEST_DESIGN`, and
