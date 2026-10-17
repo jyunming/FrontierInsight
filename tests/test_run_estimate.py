@@ -71,16 +71,12 @@ def test_the_progress_line_says_settings_done_and_time_left() -> None:
     assert est.progress_line(0, 0, 0, 0, 0) == ""
 
 
-def test_the_request_to_the_plan_has_the_measured_numbers_and_no_expected_value() -> None:
+def test_the_estimate_keeps_the_measured_ratios_of_each_setting() -> None:
     grid = {"mesh": [8, 16, 32]}
     probes = [est.Probe(None, None, {"mesh": 16}, 100.0), est.Probe("mesh", 0, {"mesh": 8}, 50.0),
               est.Probe("mesh", 2, {"mesh": 32}, 400.0)]
     e = est.estimate(grid, 1000, False, probes)
-    assert e is not None
-    text = est.request(e, 3600.0, 1000, False)
-    assert "3 settings" in text and "1000 runs" in text and "`mesh` = 32 costs 4 times" in text
-    assert "protocol.runs_per_setting" in text and "protocol.grid" in text
-    assert "not a check, a threshold, a tolerance" in text and "expected" not in text.lower()
+    assert e is not None and e.cells == 3 and 4 in e.ratios["mesh"].values()
 
 
 # --- timing a toy simulation ------------------------------------------------------------------------------------------
@@ -111,7 +107,7 @@ def _quest(tmp_path: Path, source: str) -> Path:
 def _measure(root: Path, grid: dict, runs: int, deterministic: bool, limit_s: float = 600.0, executor=None):  # noqa: ANN001, ANN201
     return asyncio.run(est.measure(
         executor or SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", grid,
-        runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=60.0))
+        runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=600.0))
 
 
 def test_a_stochastic_simulation_is_timed_on_two_trials_and_its_cost_follows_its_settings(tmp_path: Path) -> None:
@@ -158,6 +154,19 @@ def _two_axis(corner: float) -> list[est.Probe]:
             est.Probe(est.CORNER, None, {"a": 4, "b": 4}, corner)]
 
 
+def test_a_slow_process_start_does_not_hide_a_costly_end() -> None:
+    # A loaded machine starts each process in 10 s: the whole times are 11 s against 14 s (ratio 1.3), the time inside the
+    # simulation is 1 s against 4 s. The costly end is judged on the latter, so the corner is still timed.
+    grid = {"a": [1, 2, 4], "b": [1, 2, 4]}
+    probes = [est.Probe(None, None, {"a": 2, "b": 2}, 11.0, call_s=1.0),
+              est.Probe("a", 0, {"a": 1, "b": 2}, 10.5, call_s=0.5), est.Probe("a", 2, {"a": 4, "b": 2}, 14.0, call_s=4.0),
+              est.Probe("b", 0, {"a": 2, "b": 1}, 10.5, call_s=0.5), est.Probe("b", 2, {"a": 2, "b": 4}, 14.0, call_s=4.0)]
+    assert est.costly_ends(grid, probes) == {"a": 2, "b": 2}
+    for p in probes:
+        p.call_s = None  # without the split the whole times are all there is, as before
+    assert est.costly_ends(grid, probes) == {}
+
+
 def test_two_costly_settings_are_not_assumed_to_multiply() -> None:
     grid = {"a": [1, 2, 4], "b": [1, 2, 4]}
     assert est.costly_ends(grid, _two_axis(100.0)) == {"a": 2, "b": 2}
@@ -176,11 +185,10 @@ def test_two_costly_settings_are_not_assumed_to_multiply() -> None:
     assert dearer is not None and dearer.seconds > 1.9 * product.seconds
 
 
-def test_the_request_names_the_corner() -> None:
+def test_the_estimate_keeps_the_corner_of_costly_settings() -> None:
     grid = {"a": [1, 2, 4], "b": [1, 2, 4]}
     e = est.estimate(grid, 1, True, _two_axis(100.0))
-    assert e is not None
-    assert "all the costly ends together (`a` = 4, `b` = 4) cost 10 times" in est.request(e, 100.0, 1, True)
+    assert e is not None and e.together["cell"] == {"a": 4, "b": 4} and round(e.together["ratio"]) == 10
 
 
 TWO_AXES = '''
@@ -234,20 +242,6 @@ def test_a_trial_that_runs_out_of_its_allowance_is_a_lower_bound_and_the_rest_is
     assert est.says(e, 3600.0).startswith("FI estimates the experiment takes at least ")
 
 
-def test_what_a_smaller_run_must_keep_is_said_in_plain_words() -> None:
-    before = {"n": [1, 2, 4, 8]}
-    proto = {"precision": {"target_half_width": 0.1}}
-    assert est.smaller_run_problems({}, before, 40, {"n": [1, 8]}, 10, False) == []
-    assert est.smaller_run_problems({}, before, 40, {"n": [2, 4, 8]}, 40, False)[0].startswith("it drops the first or last value")
-    assert "not marked as a numerical resolution" in est.smaller_run_problems({}, before, 40, {"n": [1, 3, 8]}, 10, False)[0]
-    assert est.smaller_run_problems({"numerical_axes": ["n"]}, before, 40, {"n": [1, 3, 8]}, 10, False) == []
-    assert "below the 40" in est.smaller_run_problems(proto, before, 40, {"n": [1, 8]}, 20, False)[0]
-    assert est.smaller_run_problems(proto, before, 400, {"n": [1, 8]}, 100, False) == [], "97 trials are enough for ±0.1"
-    assert est.smaller_run_problems({}, before, 40, before, 40, False) == ["it is not a smaller run"]
-    assert est.smaller_run_problems({}, before, 1, {"n": [1, 8]}, 1, True) == [], "a run once per setting has no runs to cut"
-    assert "changes which settings" in est.smaller_run_problems({}, before, 40, {"m": [1, 8]}, 10, False)[0]
-
-
 MEAN_PLAN = {"metrics": [{"id": "y", "kind": "mean", "estimand": "mean y", "unit": "one run"}],
              "precision": {"target_half_width": 0.5, "metric": "y"}}
 PROP_PLAN = {"metrics": [{"id": "hit", "kind": "proportion", "estimand": "hit rate", "unit": "one run"}],
@@ -271,16 +265,6 @@ def test_the_precision_floor_follows_the_kind_of_the_metric() -> None:
     assert est.runs_floor({**MEAN_PLAN, "min_runs_per_setting": 50}, 400, {"y": 1.0}) == 50
 
 
-def test_a_smaller_run_is_judged_by_the_same_floor() -> None:
-    before = {"n": [1, 2, 4]}
-    assert est.smaller_run_problems(MEAN_PLAN, before, 400, {"n": [1, 4]}, 20, False, {"y": 1.0}) == []
-    assert "below the 16" in est.smaller_run_problems(MEAN_PLAN, before, 400, {"n": [1, 4]}, 15, False, {"y": 1.0})[0]
-    assert "below the 400" in est.smaller_run_problems(MEAN_PLAN, before, 400, {"n": [1, 4]}, 100, False, None)[0]
-    assert "below the 97" in est.smaller_run_problems(PROP_PLAN, before, 400, {"n": [1, 4]}, 96, False, None)[0]
-    assert "keep at least 400 runs per setting" in est.rules(MEAN_PLAN, 400, False, None)
-    assert "keep at least 16 runs per setting" in est.rules(MEAN_PLAN, 400, False, {"y": 1.0})
-
-
 NOISY = '''\
 import time
 
@@ -289,14 +273,19 @@ def run_trial(cell, trial, seed):
 '''
 
 
-def test_the_two_timed_trials_give_the_spread_of_each_metric(tmp_path: Path) -> None:
+def test_the_timed_trials_give_the_spread_of_each_metric(tmp_path: Path) -> None:
+    import statistics
+
     root = _quest(tmp_path, NOISY)
     probes, why = _measure(root, {"n": [1, 2, 4]}, 10, False)
     assert why == "" and probes is not None
     assert all(set(p.spread) == {"y"} for p in probes)
     from core import trial_runner
-    values = [(trial_runner.trial_seed(0, trial_runner.cell_key(probes[0].cell), t) % 7) * 0.5 for t in (0, 1)]
-    assert abs(probes[0].spread["y"] - abs(values[0] - values[1]) / 2 ** 0.5) < 1e-9
+    # Instant trials: all 10 runs of the setting are timed, and the spread is their sample standard deviation.
+    assert probes[0].timed_trials == 10
+    values = [(trial_runner.trial_seed(0, trial_runner.cell_key(probes[0].cell), t) % 7) * 0.5 for t in range(10)]
+    assert abs(probes[0].spread["y"] - statistics.stdev(values)) < 1e-9
+    assert len(probes[0].trials) == 2, "the pilot still reads the first two trials of each setting"
     assert est.spreads_of(probes)["y"] == max(p.spread["y"] for p in probes)
     e = est.estimate({"n": [1, 2, 4]}, 10, False, probes)
     assert e is not None and e.spreads == est.spreads_of(probes)
@@ -304,3 +293,9 @@ def test_the_two_timed_trials_give_the_spread_of_each_metric(tmp_path: Path) -> 
     root2 = _quest(tmp_path / "b", TOY_CELL)
     probes2, _ = _measure(root2, {"n": [1, 3]}, 1, True)
     assert probes2 is not None and all(p.spread == {} for p in probes2)
+
+
+def test_a_smaller_run_timed_again_is_held_to_the_limit_without_the_margin() -> None:
+    e = est.Estimate(seconds=100.0, at_least=False, complete=True, cells=1, trials=1)
+    assert est.known_too_long(e, 120.0) and not est.known_too_long(e, 120.0, timed_again=True)
+    assert est.known_too_long(e, 90.0, timed_again=True)

@@ -870,6 +870,51 @@ def _matches(assertion_path: str, leaf_path: str) -> bool:
     return bool(m and m.group(0) == a)
 
 
+class _PathIndex:
+    """The leaves ``_matches`` would pick for an assertion path, found by lookup instead of by trying every leaf.
+
+    A result that prints every trial's value has millions of leaves (r5 euv: 9.6 million), and trying each one against
+    each assertion kept a quest on this check for more than half an hour. The same leaves come back, in result order.
+    """
+
+    def __init__(self, paths: Any, names: Any = None) -> None:
+        """``names``, when the caller already knows each path's final segment (``_LEAF``'s match, or None for no match),
+        saves finding it again path by path."""
+        paths = paths if isinstance(paths, list) else list(paths)
+        # A path nothing else repeats is kept as its position alone, which is nearly always the case.
+        full: dict[str, Any] = dict(zip(paths, range(len(paths))))
+        if len(full) != len(paths):
+            full = {}
+            for i, path in enumerate(paths):
+                full.setdefault(path, []).append(i)
+        self._full = full
+        last: dict[str, list[int]] = {}
+        if names is None:
+            names = (m.group(0) if (m := _LEAF.search(p)) else None for p in paths)
+        for i, name in enumerate(names):
+            if name is not None:
+                try:
+                    last[name].append(i)
+                except KeyError:
+                    last[name] = [i]
+        self._last = last
+
+    def _exact(self, path: str) -> tuple[int, ...] | list[int]:
+        hit = self._full.get(path)
+        if hit is None:
+            return ()
+        return (hit,) if isinstance(hit, int) else hit
+
+    def matching(self, assertion_path: str) -> list[int]:
+        a = assertion_path.rstrip(".*")
+        found = set(self._exact(assertion_path)) | set(self._exact(a)) | set(self._last.get(a, ()))
+        return sorted(found)
+
+    def any_match(self, assertion_path: str) -> bool:
+        a = assertion_path.rstrip(".*")
+        return assertion_path in self._full or a in self._full or a in self._last
+
+
 # How many settings of one quantity must sit exactly on the same bound before
 # the run is sent back (see "Why several values on a bound fail" above). One is
 # ordinary: a probability of 0 at one working point is often the answer.
@@ -914,9 +959,187 @@ _R0_GROUP_KEY = re.compile(r"^by[_-]?r_?0(?:[_-]|$)", re.IGNORECASE)
 _LEADING_NUMBER = re.compile(r"^(\d+(?:\.\d+)?)")
 
 
-def _walk_leaves(
-    obj: Any, tokens: tuple[tuple[str, Any], ...] = (),
-) -> Any:
+_NA = object()  # a leaf that holds no finite number (a string, null, NaN, a flag)
+
+
+class LeafWalk:
+    """Every leaf of one result, found by a single iterative walk and kept for every check that reads the result.
+
+    A result that prints every trial's value has millions of leaves (r5 euv: 9.6 million). ``violations``,
+    ``bounded_paths`` and ``check_design`` each used to walk all of them again, several times per run. A walk is made
+    on first use and holds the dotted paths, the values and the key boundaries (``tokens``) in parallel lists, with the
+    boundaries shared between the leaves of one container rather than rebuilt for each. The numeric leaves come back
+    in the same order, with the same paths and values, as the recursive walk did.
+    """
+
+    def __init__(self, root: Any) -> None:
+        self.root = root
+        self._built = False
+        self._paths: list[str] = []
+        self._values: list[Any] = []
+        self._ptoks: list[tuple] = []
+        self._last: list[Any] = []
+        self._nums: list[int] | None = None
+        self._num_index: _PathIndex | None = None
+        self._present_index: _PathIndex | None = None
+
+    def _build(self) -> None:
+        if self._built:
+            return
+        self._built = True
+        paths, values, ptoks, lasts = self._paths, self._values, self._ptoks, self._last
+        isfinite = math.isfinite
+        root = self.root
+        container = (dict, list, tuple)
+        if not isinstance(root, container):
+            # A scalar root is the one leaf, named "<root>".
+            paths.append("<root>")
+            ptoks.append(())
+            lasts.append(None)
+            values.append(self._numeric(root))
+            self._finish()
+            return
+        stack: list[tuple[Any, str, tuple, bool]] = []
+
+        def push(obj: Any, prefix: str, tokens: tuple) -> None:
+            if isinstance(obj, dict):
+                stack.append((iter(obj.items()), prefix, tokens, True))
+            else:
+                stack.append((enumerate(obj), prefix, tokens, False))
+
+        push(root, "", ())
+        while stack:
+            it, prefix, tokens, is_dict = stack[-1]
+            descended = False
+            for k, v in it:
+                if is_dict:
+                    ks = str(k)
+                    child = f"{prefix}.{ks}" if prefix else ks
+                    last: Any = ks
+                else:
+                    child = f"{prefix}[{k}]"
+                    last = k
+                if isinstance(v, container):
+                    push(v, child, tokens + ((("k", last) if is_dict else ("i", last)),))
+                    descended = True
+                    break
+                paths.append(child or "<root>")
+                ptoks.append(tokens)
+                lasts.append(last)
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    values.append(_NA)
+                elif isfinite(v):
+                    values.append(float(v))
+                else:
+                    values.append(_NA)
+            if not descended:
+                stack.pop()
+        self._finish()
+
+    @staticmethod
+    def _numeric(v: Any) -> Any:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return _NA
+        return float(v) if math.isfinite(v) else _NA
+
+    def _finish(self) -> None:
+        values = self._values
+        if any(v is _NA for v in values):
+            self._nums = [j for j, v in enumerate(values) if v is not _NA]
+
+    @property
+    def count(self) -> int:
+        """How many numeric leaves the result has."""
+        self._build()
+        return len(self._values) if self._nums is None else len(self._nums)
+
+    def _at(self, i: int) -> int:
+        return i if self._nums is None else self._nums[i]
+
+    def leaf(self, i: int) -> tuple[tuple, str, float]:
+        """The ``i``-th numeric leaf as ``(tokens, dotted_path, value)``."""
+        self._build()
+        j = self._at(i)
+        last = self._last[j]
+        tokens = self._ptoks[j]
+        if last is not None or tokens:
+            tokens = tokens + ((("i", last) if isinstance(last, int) else ("k", last)),)
+        return tokens, self._paths[j], self._values[j]
+
+    def leaves(self) -> Any:
+        for i in range(self.count):
+            yield self.leaf(i)
+
+    def numeric_index(self) -> "_PathIndex":
+        """The index of the numeric leaves' paths, built once."""
+        self._build()
+        if self._num_index is None:
+            at = range(len(self._paths)) if self._nums is None else self._nums
+            self._num_index = _PathIndex([self._paths[j] for j in at], self._names(at))
+        return self._num_index
+
+    def present_index(self) -> "_PathIndex":
+        """The index of every leaf's path, whatever it holds (``null``, NaN, a string, a flag), built once."""
+        self._build()
+        if self._present_index is None:
+            self._present_index = _PathIndex(self._paths, self._names(range(len(self._paths))))
+        return self._present_index
+
+    def _names(self, at: Any) -> list[str | None]:
+        """The final segment ``_LEAF`` finds in each of these leaves' paths. A list item ends in ``]``, so it has none;
+        a key with no ``.``, ``[`` or ``]`` in it is the segment itself; anything else is read off the path."""
+        lasts, paths = self._last, self._paths
+        seen: dict[str, str | None] = {}
+        out: list[str | None] = []
+        for j in at:
+            last = lasts[j]
+            if type(last) is int:
+                out.append(None)
+                continue
+            name = seen.get(last) if last else None  # an empty key's segment depends on the path: not cached
+            if name is None:
+                if last and "." not in last and "[" not in last and "]" not in last:
+                    name = last
+                else:
+                    m = _LEAF.search(paths[j])
+                    name = m.group(0) if m else None
+                if last:
+                    seen[last] = name
+            out.append(name)
+        return out
+
+    def present_paths(self) -> list[str]:
+        self._build()
+        return self._paths
+
+
+class WalkMemo:
+    """The walk of the result a caller last asked about, so the checks that read one result in turn walk it once.
+
+    One per owner (an Engine keeps its own); nothing is shared between owners. A hit needs the very same object and
+    the same top-level shape, so a result that was replaced or grown is walked again.
+    """
+
+    def __init__(self) -> None:
+        self._walk: LeafWalk | None = None
+        self._shape: Any = None
+
+    @staticmethod
+    def _fingerprint(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            return tuple((k, id(v), len(v) if hasattr(v, "__len__") else None) for k, v in obj.items())
+        if isinstance(obj, (list, tuple)):
+            return (len(obj),)
+        return (obj,)
+
+    def get(self, result_json: Any) -> LeafWalk:
+        shape = self._fingerprint(result_json)
+        if self._walk is None or self._walk.root is not result_json or self._shape != shape:
+            self._walk, self._shape = LeafWalk(result_json), shape
+        return self._walk
+
+
+def _walk_leaves(obj: Any) -> Any:
     """Every numeric leaf as ``(tokens, dotted_path, value)``.
 
     Same values and same dotted paths as ``numeric_oracle.flatten_numbers``
@@ -924,32 +1147,13 @@ def _walk_leaves(
     key boundaries the dotted form loses. ``by_N.100.0.9`` is three keys
     (N = 100, R0 = 0.9) and reading it back off the string cannot say so.
     """
-    if isinstance(obj, bool):
-        return
-    if isinstance(obj, (int, float)):
-        if math.isfinite(obj):
-            yield tokens, _dotted(tokens), float(obj)
-        return
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield from _walk_leaves(v, tokens + (("k", str(k)),))
-        return
-    if isinstance(obj, (list, tuple)):
-        for i, v in enumerate(obj):
-            yield from _walk_leaves(v, tokens + (("i", i),))
+    return LeafWalk(obj).leaves()
 
 
-def _present_paths(obj: Any, tokens: tuple[tuple[str, Any], ...] = ()) -> Any:
+def _present_paths(obj: Any) -> Any:
     """The dotted path of every leaf, whatever it holds: a number, ``null``, NaN, a string, a flag. A key reported as
     ``null`` is still reported (the honest answer for a value the method cannot give)."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield from _present_paths(v, tokens + (("k", str(k)),))
-    elif isinstance(obj, (list, tuple)):
-        for i, v in enumerate(obj):
-            yield from _present_paths(v, tokens + (("i", i),))
-    else:
-        yield _dotted(tokens)
+    return iter(LeafWalk(obj).present_paths())
 
 
 def _dotted(tokens: tuple[tuple[str, Any], ...]) -> str:
@@ -1057,6 +1261,7 @@ def _confined_position(
 
 def violations(
     result_json: Any, assertions: list[Assertion], *, code: str = "", zero_expected: Any = (),
+    walk: LeafWalk | None = None,
 ) -> list[Violation]:
     """Every declared bound the result actually breaks.
 
@@ -1069,12 +1274,13 @@ def violations(
     """
     if not assertions:
         return []
-    leaves = list(_walk_leaves(result_json))
-    if not leaves:
+    walk = walk if walk is not None and walk.root is result_json else LeafWalk(result_json)
+    if not walk.count:
         return []
 
     clamps = clamp_constants(code) if code else set()
     literals = numeric_literals(code) if code else set()
+    index = walk.numeric_index()
     out: list[Violation] = []
     for a in assertions:
         # For a value on a bound every cap in the script counts but one proven to be another value's. A value exactly on
@@ -1082,9 +1288,8 @@ def violations(
         # reported as 10).
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
-        for tokens, path, value in leaves:
-            if not _matches(a.path, path):
-                continue
+        for i in index.matching(a.path):
+            tokens, path, value = walk.leaf(i)
             matched.append((tokens, path, value))
             bound = _on_bound(value, a)
             if bound is None:
@@ -1186,14 +1391,16 @@ def _at_bound(
     )
 
 
-def bounded_paths(result_json: Any, design: Any) -> list[str]:
+def bounded_paths(result_json: Any, design: Any, *, walk: LeafWalk | None = None) -> list[str]:
     """The assertion paths this result reports at least one number for."""
-    leaves = [path for _tokens, path, _value in _walk_leaves(result_json)]
-    return [a.path for a in parse_assertions(design) if any(_matches(a.path, p) for p in leaves)]
+    walk = walk if walk is not None and walk.root is result_json else LeafWalk(result_json)
+    index = walk.numeric_index()
+    return [a.path for a in parse_assertions(design) if index.any_match(a.path)]
 
 
 def check_design(
     result_json: Any, design: Any, *, code: str = "", seen: Any = (), zero_expected: Any = (),
+    walk: LeafWalk | None = None,
 ) -> list[Violation]:
     """Parse a design's assertions and apply them.
 
@@ -1203,13 +1410,14 @@ def check_design(
     is the answer (see "Why a count of failures may sit at 0").
     """
     assertions = parse_assertions(design)
-    out = violations(result_json, assertions, code=code, zero_expected={str(p) for p in zero_expected or ()})
+    walk = walk if walk is not None and walk.root is result_json else LeafWalk(result_json)
+    out = violations(result_json, assertions, code=code, zero_expected={str(p) for p in zero_expected or ()}, walk=walk)
     earlier = {str(p) for p in seen or ()}
     if earlier:
-        present = list(_present_paths(result_json))
+        present = walk.present_index()
         out += [
             Violation(a.path, math.nan, a, kind="missing")
             for a in assertions
-            if a.path in earlier and not any(_matches(a.path, p) for p in present)
+            if a.path in earlier and not present.any_match(a.path)
         ]
     return out

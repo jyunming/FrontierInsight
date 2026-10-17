@@ -27,7 +27,9 @@ STATE: dict[str, Any] = {
     "human_feedback": {"action": "refine", "feedback": NOTE},
     "feedback_history": [{"iteration": 1, "text": NOTE}], "refine_written_for": 1,
 }
-T1_PAPER = "# P\n\nAt t=1 the errors were 0.01920 and 0.009394 (Euler) and 3.332e-7 and 1.998e-8 (RK4).\n"
+# A scientific paper opens with its Abstract (FI asks for a missing one in its own call, which these tests do not count).
+T1_PAPER = ("# P\n\n## Abstract\n\nEuler and RK4 are compared on one test equation over [0,1].\n\n## Results\n\n"
+            "At t=1 the errors were 0.01920 and 0.009394 (Euler) and 3.332e-7 and 1.998e-8 (RK4).\n")
 
 
 def _engine(tmp_path: Path) -> Engine:

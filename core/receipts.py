@@ -35,6 +35,7 @@ REQUIRED_INPUTS = {
     "evidence_gate": ("analysis", "cross_check"),
     "design_audit": ("design",),
     "claim_check": ("paper",),
+    "citation_check": ("paper",),
 }
 _HEX = set("0123456789abcdef")
 

@@ -1,0 +1,4046 @@
+{
+ "reviews_total": 6,
+ "send_backs": 1,
+ "repair_calls": 29,
+ "finding_calls": 46,
+ "test_calls": 17,
+ "readings": [
+  {
+   "n": 1,
+   "version": "a64f165fe8347e86",
+   "open": 25,
+   "high": 5,
+   "changing": 13,
+   "ids": [
+    "F-bed59bff",
+    "F-b52b60e9",
+    "F-5fe84345",
+    "F-383ee424",
+    "F-f697e099",
+    "F-6dea3388",
+    "F-8af79976",
+    "F-8fb2301e",
+    "F-40d5dfa3",
+    "F-65642a25",
+    "F-7089d77e",
+    "F-ceb155a2",
+    "F-3797e590",
+    "F-b6300d54",
+    "F-e0c7bf7b",
+    "F-633f6603",
+    "F-bc62bfd8",
+    "F-7dcfa71a",
+    "F-3eb9fe69",
+    "F-06303de3",
+    "F-3bd3cf4d",
+    "F-0052564a",
+    "F-bf5a9a39",
+    "F-1c3ad486",
+    "F-dd82cea0"
+   ]
+  },
+  {
+   "n": 2,
+   "version": "ca591745a55be332",
+   "open": 28,
+   "high": 5,
+   "changing": 21,
+   "ids": [
+    "F-bed59bff",
+    "F-b52b60e9",
+    "F-383ee424",
+    "F-f697e099",
+    "F-65642a25",
+    "F-7089d77e",
+    "F-ceb155a2",
+    "F-3797e590",
+    "F-b6300d54",
+    "F-06303de3",
+    "F-3bd3cf4d",
+    "F-dd82cea0",
+    "F-c631c6ac",
+    "F-f7a2888b",
+    "F-23c6eb6e",
+    "F-670cb979",
+    "F-d32cf5f7",
+    "F-7f65db0e",
+    "F-2ea0b142",
+    "F-3dcd641d",
+    "F-737f62fe",
+    "F-ea25c0cb",
+    "F-89436fb2",
+    "F-886343f4",
+    "F-a6570c3d",
+    "F-dfb22232",
+    "F-9ff1374e",
+    "F-b5fdbb82"
+   ],
+   "improved": false
+  },
+  {
+   "n": 3,
+   "version": "ba6c3ce0543e0895",
+   "open": 16,
+   "high": 5,
+   "changing": 11,
+   "ids": [
+    "F-bed59bff",
+    "F-383ee424",
+    "F-f697e099",
+    "F-6dea3388",
+    "F-8af79976",
+    "F-b6300d54",
+    "F-06303de3",
+    "F-dd82cea0",
+    "F-d32cf5f7",
+    "F-7f65db0e",
+    "F-2ea0b142",
+    "F-3dcd641d",
+    "F-49659a7f",
+    "F-8bd18b30",
+    "F-8d29735e",
+    "F-4fc8a4df"
+   ]
+  },
+  {
+   "n": 4,
+   "version": "56e84241ff9816cb",
+   "open": 17,
+   "high": 7,
+   "changing": 15,
+   "ids": [
+    "F-bed59bff",
+    "F-b52b60e9",
+    "F-383ee424",
+    "F-f697e099",
+    "F-6dea3388",
+    "F-8af79976",
+    "F-b6300d54",
+    "F-06303de3",
+    "F-dd82cea0",
+    "F-d32cf5f7",
+    "F-7f65db0e",
+    "F-2ea0b142",
+    "F-3dcd641d",
+    "F-b5fdbb82",
+    "F-49659a7f",
+    "F-8bd18b30",
+    "F-351b488f"
+   ]
+  },
+  {
+   "n": 5,
+   "version": "fd5883cd95145f97",
+   "open": 13,
+   "high": 5,
+   "changing": 9,
+   "ids": [
+    "F-bed59bff",
+    "F-383ee424",
+    "F-f697e099",
+    "F-6dea3388",
+    "F-8af79976",
+    "F-8fb2301e",
+    "F-b6300d54",
+    "F-2ea0b142",
+    "F-8bd18b30",
+    "F-b3421827",
+    "F-25ba3d2d",
+    "F-c1c8d818",
+    "F-5fde42f7"
+   ]
+  },
+  {
+   "n": 6,
+   "version": "856c1c34c7cc417b",
+   "open": 10,
+   "high": 5,
+   "changing": 7,
+   "ids": [
+    "F-bed59bff",
+    "F-383ee424",
+    "F-f697e099",
+    "F-8fb2301e",
+    "F-40d5dfa3",
+    "F-06303de3",
+    "F-dd82cea0",
+    "F-7f65db0e",
+    "F-2ea0b142",
+    "F-8bd18b30"
+   ]
+  }
+ ],
+ "converged": false,
+ "repaired": false,
+ "read_version": "856c1c34c7cc417b",
+ "issues": {
+  "F-bed59bff": {
+   "id": "F-bed59bff",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_main_computes_dose_to_size_with_deterministic_root_finding: experiment must import before dose-to-size can be checked: 'FI_TRIALS'"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_main_computes_dose_to_size_with_deterministic_root_finding: experiment must import before dose-to-size can be checked: 'FI_TRIALS'"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_main_computes_dose_to_size_with_deterministic_root_finding: experiment must import before dose-to-size can be checked: 'FI_TRIALS'"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_main_computes_dose_to_size_with_deterministic_root_finding: AttributeError: 'function' object has no attribute 'co_names' at line 11"
+    }
+   ],
+   "tests": 2,
+   "wordings": [
+    "Dose-to-size is assigned a hardcoded constant value instead of being computed by deterministic root finding.",
+    "Dose-to-size is assigned a hardcoded constant value instead of being determined by deterministic root finding.",
+    "The dose to size is assigned as a hardcoded literal rather than calibrated by root finding to match the target feature dimension.",
+    "dose_to_size_mJ_cm2 is set to literal constants rather than computed by deterministic root finding.",
+    "The dose-to-size metric is assigned fixed platform constants instead of being solved via deterministic root finding.",
+    "The quantity dose_to_size_mJ_cm2 is set to a literal constant across patterns rather than solved via deterministic root finding."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 2,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 6,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "dosetosizemjcm2",
+   "severity": "high",
+   "changes_result": true,
+   "headline": true,
+   "plan_conflict": false,
+   "where": "experiment.py:223",
+   "text": "The quantity dose_to_size_mJ_cm2 is set to a literal constant across patterns rather than solved via deterministic root finding.",
+   "why": "The plan defines dose-to-size as the deterministic incident dose at which calibrated developed critical dimension matches the target critical dimension for each pattern pair.",
+   "fix": "Implement deterministic root finding over incident dose on the mean latent image to match the developed critical dimension to the target critical dimension for each pattern.",
+   "problem_ids": [
+    "L1"
+   ],
+   "statement": "[high] Where: experiment.py:223\n   What is wrong: The quantity dose_to_size_mJ_cm2 is set to a literal constant across patterns rather than solved via deterministic root finding.\n   Why it is wrong against the plan: The plan defines dose-to-size as the deterministic incident dose at which calibrated developed critical dimension matches the target critical dimension for each pattern pair.\n   How to fix it: Implement deterministic root finding over incident dose on the mean latent image to match the developed critical dimension to the target critical dimension for each pattern.",
+   "test": ".fi/finding_tests/F-bed59bff_2.py",
+   "failure": "test_main_computes_dose_to_size_with_deterministic_root_finding: experiment must import before dose-to-size can be checked: 'FI_TRIALS'",
+   "reason": "no repair passed its test and kept the earlier checks passing (the finding's own test still fails: test_main_computes_dose_to_size_with_deterministic_root_finding: AttributeError: 'function' object has no attribute 'co_name)"
+  },
+  "F-b52b60e9": {
+   "id": "F-b52b60e9",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "the result reports bridge_probability_per_um (Probability that a 1 um line trial contains one or more unintended neighboring-line connections.)",
+    "Line bridging is detected by testing whether the upper and lower halves of a line window overlap when vertically mirrored.",
+    "Line bridging is detected by testing whether the target line component exceeds a fixed row offset rather than identifying connections to neighboring lines.",
+    "The bridge defect detector flags a bridge when a component's row span exceeds 8 nm from the center."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 2,
+   "last_seen": 4,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_line_metrics",
+   "quantity": "bridgeprobabilityperum",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:95",
+   "text": "The bridge defect detector flags a bridge when a component's row span exceeds 8 nm from the center.",
+   "why": "A line bridge is defined as an unintended connection between neighboring lines across pitch, not a local line-width expansion.",
+   "fix": "Identify bridges by detecting topological connections between distinct adjacent lines across the pitch.",
+   "problem_ids": [
+    "L11"
+   ],
+   "statement": "[medium] Where: simulate.py:95\n   What is wrong: The bridge defect detector flags a bridge when a component's row span exceeds 8 nm from the center.\n   Why it is wrong against the plan: A line bridge is defined as an unintended connection between neighboring lines across pitch, not a local line-width expansion.\n   How to fix it: Identify bridges by detecting topological connections between distinct adjacent lines across the pitch.",
+   "test": ".fi/finding_tests/F-b52b60e9_1.py",
+   "failure": "test_line_bridge_detects_connection_to_an_adjacent_line: A connected component joining the intended line to a neighboring line must be reported as a bridge; mirror-overlap of one line is not this metric.",
+   "touched": [
+    "_line_metrics"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-5fe84345": {
+   "id": "F-5fe84345",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "the result reports break_probability_per_um (Probability that a target line is disconnected anywhere in one 1 um line trial.)",
+    "Line breaks are detected by checking for un-developed pixels along a transverse cross-section across all pitches."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic",
+    "metric"
+   ],
+   "file": "simulate.py",
+   "function": "_line_metrics",
+   "quantity": "breakprobabilityperum",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:79",
+   "text": "the result reports break_probability_per_um (Probability that a target line is disconnected anywhere in one 1 um line trial.)",
+   "why": "Line breaks are evaluated by checking for any un-developed pixel along a transverse cross-section instead of verifying line continuity along the target line.",
+   "fix": "Use connected-component labeling along unbroken segments of the longitudinal target line to detect disconnections.",
+   "problem_ids": [
+    "R17",
+    "L2"
+   ],
+   "statement": "[medium] Where: simulate.py:79\n   What is wrong: the plan's metric \"the result reports break_probability_per_um (Probability that a target line is disconnected anywhere in one 1 um line trial.)\" is implemented differently from the plan\n   Why it is wrong against the plan: Line breaks are evaluated by checking for any un-developed pixel along a transverse cross-section instead of verifying line continuity along the target line.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says\n\n[high] Where: simulate.py:79\n   What is wrong: Line breaks are detected by checking for un-developed pixels along a transverse cross-section across all pitches.\n   Why it is wrong against the plan: The plan defines break probability as the probability that a target line is disconnected anywhere in a 1 um trial using connected-component analysis, whereas checking a transverse cross-section through alternating lines and spaces always evaluates to broken.\n   How to fix it: Use connected-component labeling along unbroken segments of the longitudinal target line to detect disconnections.",
+   "test": ".fi/finding_tests/F-5fe84345_1.py",
+   "failure": "test_break_probability_requires_a_disconnected_target_line: A connected target line with a local centerline void was reported as broken; break detection must test longitudinal connectedness, not require every pixel on one transverse center row to be developed.",
+   "touched": [
+    "_line_metrics"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-383ee424": {
+   "id": "F-383ee424",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "plan problem",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the result reports safe_dose_bridge_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the bridge-probability tail falls below 1e-6 for a resist-platform line pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)",
+    "The tail fit routine sets the confidence interval to None instead of calculating the bootstrap uncertainty interval.",
+    "tail_fit sets the 95% confidence interval of the safe dose crossing to None.",
+    "The tail fit returns null for confidence intervals instead of computing the required bootstrap uncertainty.",
+    "The optimization bounds constrain the tail slope to strictly negative values.",
+    "The 95% bootstrap confidence interval for safe dose crossing is returned as null in tail_fit."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 6,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "tail_fit",
+   "quantity": "safedosebridge1e6mjcm2",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:102",
+   "text": "The 95% bootstrap confidence interval for safe dose crossing is returned as null in tail_fit.",
+   "why": "The plan defines the estimand of each safe dose metric to include its 95% bootstrap uncertainty interval.",
+   "fix": "Compute the bootstrap confidence interval of the crossing dose by resampling trials or parameter estimates and recording the empirical quantiles.",
+   "problem_ids": [
+    "L4"
+   ],
+   "statement": "[high] Where: experiment.py:102\n   What is wrong: The 95% bootstrap confidence interval for safe dose crossing is returned as null in tail_fit.\n   Why it is wrong against the plan: The plan defines the estimand of each safe dose metric to include its 95% bootstrap uncertainty interval.\n   How to fix it: Compute the bootstrap confidence interval of the crossing dose by resampling trials or parameter estimates and recording the empirical quantiles.",
+   "reason": "the plan contradicts itself; this is not a fault of the code",
+   "plan_asked": true,
+   "plan_changed": true
+  },
+  "F-f697e099": {
+   "id": "F-f697e099",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_safe_break_dose_uses_an_upper_95_percent_tail_bound: tail_fit raised unexpectedly: [Errno 2] No such file or directory: ''"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_safe_break_dose_uses_an_upper_95_percent_tail_bound: tail_fit raised unexpectedly: [Errno 2] No such file or directory: ''"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_safe_break_dose_uses_an_upper_95_percent_tail_bound: tail_fit raised unexpectedly: [Errno 2] No such file or directory: ''"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_safe_break_dose_uses_an_upper_95_percent_tail_bound: tail_fit raised unexpectedly: [Errno 2] No such file or directory: ''"
+    }
+   ],
+   "tests": 2,
+   "wordings": [
+    "the result reports safe_dose_break_1e6_mJ_cm2 (Incident dose at which the upper 95% confidence bound of the fitted break-probability tail falls below 1e-6 for a resist-platform line pattern.)",
+    "The tail fit function sets the confidence interval of the safe dose crossing to None.",
+    "the result reports safe_dose_break_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the break-probability tail falls below 1e-6 for a resist-platform line pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)",
+    "The complementary log-log tail fitting restricts the slope parameter to strictly negative values and rejects non-negative slopes."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 2,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 6,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "tail_fit",
+   "quantity": "safedosebreak1e6mjcm2",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:89",
+   "text": "The complementary log-log tail fitting restricts the slope parameter to strictly negative values and rejects non-negative slopes.",
+   "why": "Line breaks and merged contacts increase in probability with exposure dose, requiring a positive slope parameter to model their defect tail.",
+   "fix": "Adjust the optimization bounds and convergence checks to allow positive slope parameters for defect mechanisms that increase with dose.",
+   "problem_ids": [
+    "L5"
+   ],
+   "statement": "[high] Where: experiment.py:89\n   What is wrong: The complementary log-log tail fitting restricts the slope parameter to strictly negative values and rejects non-negative slopes.\n   Why it is wrong against the plan: Line breaks and merged contacts increase in probability with exposure dose, requiring a positive slope parameter to model their defect tail.\n   How to fix it: Adjust the optimization bounds and convergence checks to allow positive slope parameters for defect mechanisms that increase with dose.",
+   "test": ".fi/finding_tests/F-f697e099_2.py",
+   "failure": "test_safe_break_dose_uses_an_upper_95_percent_tail_bound: tail_fit raised unexpectedly: [Errno 2] No such file or directory: ''",
+   "reason": "no repair passed its test and kept the earlier checks passing (the finding's own test still fails: test_safe_break_dose_uses_an_upper_95_percent_tail_bound: tail_fit raised unexpectedly: [Errno 2] No such file or directory:)"
+  },
+  "F-6dea3388": {
+   "id": "F-6dea3388",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_safe_dose_missing_uses_upper_95_percent_tail_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: ''"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_safe_dose_missing_uses_upper_95_percent_tail_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: ''"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_safe_dose_missing_uses_upper_95_percent_tail_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: ''"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_safe_dose_missing_uses_upper_95_percent_tail_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: ''"
+    }
+   ],
+   "tests": 2,
+   "wordings": [
+    "the result reports safe_dose_missing_1e6_mJ_cm2 (Incident dose at which the upper 95% confidence bound of the fitted missing-contact-probability tail falls below 1e-6 for a resist-platform contact pattern.)",
+    "the result reports safe_dose_missing_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the missing-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 2,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 5,
+   "kind": "quantity",
+   "kinds": [
+    "metric"
+   ],
+   "file": "experiment.py",
+   "function": "tail_fit",
+   "quantity": "safedosemissing1e6mjcm2",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the result reports safe_dose_missing_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the missing-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)",
+   "why": "The safe dose crossing is reported without its required bootstrap uncertainty interval.",
+   "fix": "",
+   "problem_ids": [
+    "R23"
+   ],
+   "statement": "[medium] Where: experiment.py:111\n   What is wrong: the plan's metric \"the result reports safe_dose_missing_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the missing-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)\" is implemented differently from the plan\n   Why it is wrong against the plan: The safe dose crossing is reported without its required bootstrap uncertainty interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "test": ".fi/finding_tests/F-6dea3388_2.py",
+   "failure": "test_safe_dose_missing_uses_upper_95_percent_tail_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: ''",
+   "reason": "no repair passed its test and kept the earlier checks passing (the finding's own test still fails: test_safe_dose_missing_uses_upper_95_percent_tail_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or direct)"
+  },
+  "F-8af79976": {
+   "id": "F-8af79976",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_merged_contact_safe_dose_fits_increasing_tail_with_95pct_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: '1'"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_merged_contact_safe_dose_fits_increasing_tail_with_95pct_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: '1'"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_merged_contact_safe_dose_fits_increasing_tail_with_95pct_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: '1'"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_merged_contact_safe_dose_fits_increasing_tail_with_95pct_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: '1'"
+    }
+   ],
+   "tests": 2,
+   "wordings": [
+    "the result reports safe_dose_merged_1e6_mJ_cm2 (Incident dose at which the upper 95% confidence bound of the fitted merged-contact-probability tail falls below 1e-6 for a resist-platform contact pattern.)",
+    "The optimization routine rejects any fit where the dose slope coefficient is non-negative.",
+    "the result reports safe_dose_merged_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the merged-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)",
+    "tail_fit constrains the dose-response slope parameter to be strictly negative in optimization bounds and validation."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 2,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 5,
+   "kind": "quantity",
+   "kinds": [
+    "metric"
+   ],
+   "file": "experiment.py",
+   "function": "tail_fit",
+   "quantity": "safedosemerged1e6mjcm2",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the result reports safe_dose_merged_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the merged-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)",
+   "why": "The safe dose crossing is reported without its required bootstrap uncertainty interval.",
+   "fix": "",
+   "problem_ids": [
+    "R24"
+   ],
+   "statement": "[medium] Where: experiment.py:111\n   What is wrong: the plan's metric \"the result reports safe_dose_merged_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the merged-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)\" is implemented differently from the plan\n   Why it is wrong against the plan: The safe dose crossing is reported without its required bootstrap uncertainty interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "test": ".fi/finding_tests/F-8af79976_2.py",
+   "failure": "test_merged_contact_safe_dose_fits_increasing_tail_with_95pct_bound: tail_fit raised FileNotFoundError: [Errno 2] No such file or directory: '1'",
+   "reason": "no repair passed its test and kept the earlier checks passing (the finding's own test still fails: test_merged_contact_safe_dose_fits_increasing_tail_with_95pct_bound: tail_fit raised FileNotFoundError: [Errno 2] No such fi)"
+  },
+  "F-8fb2301e": {
+   "id": "F-8fb2301e",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": false,
+   "outcome": "not demonstrated",
+   "repairs": [],
+   "tests": 1,
+   "wordings": [
+    "the script draws the planned figure stochastic_resist_examples.png"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 6,
+   "kind": "figure",
+   "kinds": [
+    "figure"
+   ],
+   "file": "",
+   "function": "",
+   "quantity": "thescriptdrawstheplannedfigurestochasticresistexamplespng",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the script draws the planned figure stochastic_resist_examples.png",
+   "why": "Figure stochastic_resist_examples.png is not drawn or saved by the script.",
+   "fix": "",
+   "problem_ids": [
+    "R27"
+   ],
+   "statement": "[medium] Where: not stated\n   What is wrong: the plan's figure \"the script draws the planned figure stochastic_resist_examples.png\" is missing from the code\n   Why it is wrong against the plan: Figure stochastic_resist_examples.png is not drawn or saved by the script.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "reason": "the test written for this finding passes on the current code"
+  },
+  "F-40d5dfa3": {
+   "id": "F-40d5dfa3",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "reopened",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "the script draws the planned figure equal_roughness_comparison.png"
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 1,
+   "last_seen": 6,
+   "kind": "figure",
+   "kinds": [
+    "figure"
+   ],
+   "file": "",
+   "function": "",
+   "quantity": "thescriptdrawstheplannedfigureequalroughnesscomparisonpng",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the script draws the planned figure equal_roughness_comparison.png",
+   "why": "Figure equal_roughness_comparison.png is not drawn or saved by the script.",
+   "fix": "",
+   "problem_ids": [
+    "R28"
+   ],
+   "statement": "[medium] Where: not stated\n   What is wrong: the plan's figure \"the script draws the planned figure equal_roughness_comparison.png\" is missing from the code\n   Why it is wrong against the plan: Figure equal_roughness_comparison.png is not drawn or saved by the script.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "test": ".fi/finding_tests/F-40d5dfa3_1.py",
+   "failure": "test_script_saves_equal_roughness_comparison_figure: Could not run the plotting script to check its planned figure: 'FI_TRIALS'",
+   "touched": [
+    "experiment.py"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-65642a25": {
+   "id": "F-65642a25",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the simulation returns what the measure 'poisson_zero_fraction' of the check 'poisson_zero_probability' uses"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "check",
+   "kinds": [
+    "check"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "thesimulationreturnswhatthemeasurepoissonzerofractionofthecheckpoissonzeroprobabilityuses",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the simulation returns what the measure 'poisson_zero_fraction' of the check 'poisson_zero_probability' uses",
+   "why": "The check reports None for the observed value rather than computing the zero-count fraction over validation draws.",
+   "fix": "",
+   "problem_ids": [
+    "R34"
+   ],
+   "statement": "[medium] Where: experiment.py:276\n   What is wrong: the plan's check \"the simulation returns what the measure 'poisson_zero_fraction' of the check 'poisson_zero_probability' uses\" is implemented differently from the plan\n   Why it is wrong against the plan: The check reports None for the observed value rather than computing the zero-count fraction over validation draws.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-7089d77e": {
+   "id": "F-7089d77e",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the simulation returns what the measure 'abs(poisson_variance/sample_mean - 1.0)' of the check 'poisson_variance_mean_ratio' uses"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "check",
+   "kinds": [
+    "check"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "thesimulationreturnswhatthemeasureabspoissonvariancesamplemean10ofthecheckpoissonvariancemeanratiouses",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the simulation returns what the measure 'abs(poisson_variance/sample_mean - 1.0)' of the check 'poisson_variance_mean_ratio' uses",
+   "why": "The check reports None rather than calculating the variance-to-mean deviation from unity on validation draws.",
+   "fix": "",
+   "problem_ids": [
+    "R35"
+   ],
+   "statement": "[medium] Where: experiment.py:277\n   What is wrong: the plan's check \"the simulation returns what the measure 'abs(poisson_variance/sample_mean - 1.0)' of the check 'poisson_variance_mean_ratio' uses\" is implemented differently from the plan\n   Why it is wrong against the plan: The check reports None rather than calculating the variance-to-mean deviation from unity on validation draws.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-ceb155a2": {
+   "id": "F-ceb155a2",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the simulation returns what the measure 'abs(kernel_sum - 1.0)' of the check 'blur_kernel_normalization' uses"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "check",
+   "kinds": [
+    "check"
+   ],
+   "file": "simulate.py",
+   "function": "run_trial",
+   "quantity": "thesimulationreturnswhatthemeasureabskernelsum10ofthecheckblurkernelnormalizationuses",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the simulation returns what the measure 'abs(kernel_sum - 1.0)' of the check 'blur_kernel_normalization' uses",
+   "why": "The measure is hardcoded to a constant zero rather than being computed from a discrete blur kernel.",
+   "fix": "",
+   "problem_ids": [
+    "R36"
+   ],
+   "statement": "[medium] Where: simulate.py:161\n   What is wrong: the plan's check \"the simulation returns what the measure 'abs(kernel_sum - 1.0)' of the check 'blur_kernel_normalization' uses\" is implemented differently from the plan\n   Why it is wrong against the plan: The measure is hardcoded to a constant zero rather than being computed from a discrete blur kernel.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-3797e590": {
+   "id": "F-3797e590",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the simulation returns what the measure 'relative_edge_variance_error' of the check 'chemistry_off_shot_noise_roughness' uses"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "check",
+   "kinds": [
+    "check"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "thesimulationreturnswhatthemeasurerelativeedgevarianceerrorofthecheckchemistryoffshotnoiseroughnessuses",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the simulation returns what the measure 'relative_edge_variance_error' of the check 'chemistry_off_shot_noise_roughness' uses",
+   "why": "The check reports None rather than evaluating edge position variance from chemistry-off simulations.",
+   "fix": "",
+   "problem_ids": [
+    "R37"
+   ],
+   "statement": "[medium] Where: experiment.py:279\n   What is wrong: the plan's check \"the simulation returns what the measure 'relative_edge_variance_error' of the check 'chemistry_off_shot_noise_roughness' uses\" is implemented differently from the plan\n   Why it is wrong against the plan: The check reports None rather than evaluating edge position variance from chemistry-off simulations.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-b6300d54": {
+   "id": "F-b6300d54",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "equation E4 of the plan's model is computed in the code, in a function marked '# E4'"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 5,
+   "kind": "equation",
+   "kinds": [
+    "equation"
+   ],
+   "file": "euv_stochastic_car_vs_mor/model.py",
+   "function": "apply_blur_and_develop",
+   "quantity": "equatione4oftheplansmodeliscomputedinthecodeinafunctionmarkede4",
+   "severity": "medium",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "equation E4 of the plan's model is computed in the code, in a function marked '# E4'",
+   "why": "The function apply_blur_and_develop marked '# E4' evaluates only a single central pixel rather than returning the full [a value from the plan's checks]D developed latent field.",
+   "fix": "",
+   "problem_ids": [
+    "R40"
+   ],
+   "statement": "[medium] Where: euv_stochastic_car_vs_mor/model.py:27\n   What is wrong: the plan's equation \"equation E4 of the plan's model is computed in the code, in a function marked '# E4'\" is implemented differently from the plan\n   Why it is wrong against the plan: The function apply_blur_and_develop marked '# E4' evaluates only a single central pixel rather than returning the full [a value from the plan's checks]D developed latent field.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-e0c7bf7b": {
+   "id": "F-e0c7bf7b",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "The sinusoidal line aerial image varies along the horizontal xx axis instead of the transverse yy axis, rotating the pattern relative to the metrology."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_aerial",
+   "quantity": "ler3sigmanm",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:32",
+   "text": "The sinusoidal line aerial image varies along the horizontal xx axis instead of the transverse yy axis, rotating the pattern relative to the metrology.",
+   "why": "The plan specifies 1 um line trials with pitch modulation transverse to the line length, but modulating along xx creates multiple short 60 nm vertical lines across a 1000 nm field rather than a 1 um long line.",
+   "fix": "Vary the sinusoidal intensity along the transverse yy axis and keep the lines running continuously along the 1 um xx axis.",
+   "problem_ids": [
+    "L1"
+   ],
+   "statement": "[high] Where: simulate.py:32\n   What is wrong: The sinusoidal line aerial image varies along the horizontal xx axis instead of the transverse yy axis, rotating the pattern relative to the metrology.\n   Why it is wrong against the plan: The plan specifies 1 um line trials with pitch modulation transverse to the line length, but modulating along xx creates multiple short 60 nm vertical lines across a 1000 nm field rather than a 1 um long line.\n   How to fix it: Vary the sinusoidal intensity along the transverse yy axis and keep the lines running continuously along the 1 um xx axis.",
+   "test": ".fi/finding_tests/F-e0c7bf7b_1.py",
+   "failure": "test_line_aerial_image_is_constant_along_line_length: Line intensity varies along the horizontal line-length axis; pitch modulation must be transverse so lines remain continuous along xx for LER metrology.",
+   "touched": [
+    "_aerial"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-633f6603": {
+   "id": "F-633f6603",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "not repaired",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_threshold_is_calibrated_at_each_patterns_dose_to_size_edge: Threshold calibration raised NameError: name 'DOSE_TO_SIZE_MJ_CM2' is not defined"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_threshold_is_calibrated_at_each_patterns_dose_to_size_edge: Threshold calibration raised NameError: name 'DOSE_TO_SIZE_MJ_CM2' is not defined"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "the finding's own test still fails: test_threshold_is_calibrated_at_each_patterns_dose_to_size_edge: Threshold calibration raised NameError: name 'DOSE_TO_SIZE_MJ_CM2' is not defined"
+    },
+    {
+     "try": 4,
+     "by": "other",
+     "model": "gemini-3.8-flash-high",
+     "outcome": "rejected",
+     "why": "the reply held no function"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "Development thresholds are calibrated using hardcoded nominal dose constants rather than calibrated edge target values."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 1
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_threshold",
+   "quantity": "dosetosizemjcm2",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": true,
+   "plan_conflict": false,
+   "where": "simulate.py:46",
+   "text": "Development thresholds are calibrated using hardcoded nominal dose constants rather than calibrated edge target values.",
+   "why": "The plan defines the intrinsic development threshold as a critical reaction fraction at the nominal target edge under calibrated dose-to-size conditions.",
+   "fix": "Compute the threshold from the nominal edge reaction level under calibrated deterministic sizing conditions.",
+   "problem_ids": [
+    "L7"
+   ],
+   "statement": "[medium] Where: simulate.py:46\n   What is wrong: Development thresholds are calibrated using hardcoded nominal dose constants rather than calibrated edge target values.\n   Why it is wrong against the plan: The plan defines the intrinsic development threshold as a critical reaction fraction at the nominal target edge under calibrated dose-to-size conditions.\n   How to fix it: Compute the threshold from the nominal edge reaction level under calibrated deterministic sizing conditions.",
+   "test": ".fi/finding_tests/F-633f6603_1.py",
+   "failure": "test_threshold_is_calibrated_at_each_patterns_dose_to_size_edge: Development thresholds must be computed from each pattern's calibrated dose-to-size edge reaction level; using one hardcoded nominal dose makes the CAR line and contact thresholds incorrectly identical.",
+   "reason": "no repair passed its test and kept the earlier checks passing (the reply held no function)"
+  },
+  "F-bc62bfd8": {
+   "id": "F-bc62bfd8",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "The CAR net response subtracts a Poisson quencher draw from generated acids without clipping negative counts at zero."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_develop",
+   "quantity": "latent",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:66",
+   "text": "The CAR net response subtracts a Poisson quencher draw from generated acids without clipping negative counts at zero.",
+   "why": "Physical chemical deprotection and acid concentrations cannot be negative.",
+   "fix": "Clip the net acid count after quencher subtraction to a minimum of zero.",
+   "problem_ids": [
+    "L8"
+   ],
+   "statement": "[medium] Where: simulate.py:66\n   What is wrong: The CAR net response subtracts a Poisson quencher draw from generated acids without clipping negative counts at zero.\n   Why it is wrong against the plan: Physical chemical deprotection and acid concentrations cannot be negative.\n   How to fix it: Clip the net acid count after quencher subtraction to a minimum of zero.",
+   "test": ".fi/finding_tests/F-bc62bfd8_1.py",
+   "failure": "test_car_quencher_cannot_make_latent_response_negative: CAR quencher subtraction produced a negative latent response; net acid counts must be clipped to zero before development.",
+   "touched": [
+    "_develop"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-7dcfa71a": {
+   "id": "F-7dcfa71a",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed `main`, `values`; a repair of a finding that names no function may change one existing function"
+    },
+    {
+     "try": 2,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "rejected",
+     "why": "it changed `main`, `values`; a repair of a finding that names no function may change one existing function"
+    },
+    {
+     "try": 3,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "The script does not draw or save the figure stochastic_resist_examples.png."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 3,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "<module>",
+   "quantity": "stochasticresistexamplespng",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:13",
+   "text": "The script does not draw or save the figure stochastic_resist_examples.png.",
+   "why": "Requirement R27 explicitly mandates drawing and saving stochastic_resist_examples.png.",
+   "fix": "Generate and save stochastic_resist_examples.png showing representative developed resist profiles.",
+   "problem_ids": [
+    "L9"
+   ],
+   "statement": "[medium] Where: experiment.py:13\n   What is wrong: The script does not draw or save the figure stochastic_resist_examples.png.\n   Why it is wrong against the plan: Requirement R27 explicitly mandates drawing and saving stochastic_resist_examples.png.\n   How to fix it: Generate and save stochastic_resist_examples.png showing representative developed resist profiles.",
+   "test": ".fi/finding_tests/F-7dcfa71a_1.py",
+   "failure": "test_experiment_saves_stochastic_resist_examples_figure: experiment execution raised instead of producing figures: AttributeError(\"'list' object has no attribute 'get'\")",
+   "touched": [
+    "experiment.py"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-3eb9fe69": {
+   "id": "F-3eb9fe69",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": true,
+   "outcome": "fixed",
+   "repairs": [
+    {
+     "try": 1,
+     "by": "code",
+     "model": "gpt-5.6-terra",
+     "outcome": "accepted"
+    }
+   ],
+   "tests": 1,
+   "wordings": [
+    "The script does not draw or save the figure equal_roughness_comparison.png."
+   ],
+   "fixed_by": "gpt-5.6-terra",
+   "calls": {
+    "test": 1,
+    "repair": 1,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "<module>",
+   "quantity": "equalroughnesscomparisonpng",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:13",
+   "text": "The script does not draw or save the figure equal_roughness_comparison.png.",
+   "why": "Requirement R28 explicitly mandates drawing and saving equal_roughness_comparison.png.",
+   "fix": "Generate and save equal_roughness_comparison.png comparing platform metrics at matched roughness levels.",
+   "problem_ids": [
+    "L10"
+   ],
+   "statement": "[medium] Where: experiment.py:13\n   What is wrong: The script does not draw or save the figure equal_roughness_comparison.png.\n   Why it is wrong against the plan: Requirement R28 explicitly mandates drawing and saving equal_roughness_comparison.png.\n   How to fix it: Generate and save equal_roughness_comparison.png comparing platform metrics at matched roughness levels.",
+   "test": ".fi/finding_tests/F-3eb9fe69_1.py",
+   "failure": "test_main_saves_equal_roughness_comparison_figure: The experiment does not save figures/equal_roughness_comparison.png for the required equal-roughness comparison.",
+   "touched": [
+    "experiment.py"
+   ],
+   "fixed_by_role": "code"
+  },
+  "F-06303de3": {
+   "id": "F-06303de3",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "reopened",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "Function apply_blur_and_develop evaluates only the central pixel rather than returning the full [a value from the plan's checks]D developed field.",
+    "Function apply_blur_and_develop evaluates only the central pixel rather than returning the full two-dimensional developed field.",
+    "The function marked E4 returns a single boolean scalar at the central pixel rather than the full two-dimensional developed array.",
+    "The function marked '# E4' evaluates and returns only a single scalar boolean for the center pixel.",
+    "The function apply_blur_and_develop evaluates development only at the central pixel rather than returning the two-dimensional developed field."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 1,
+   "last_seen": 6,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "euv_stochastic_car_vs_mor/model.py",
+   "function": "apply_blur_and_develop",
+   "quantity": "e4",
+   "severity": "medium",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "euv_stochastic_car_vs_mor/model.py:30",
+   "text": "The function apply_blur_and_develop evaluates development only at the central pixel rather than returning the two-dimensional developed field.",
+   "why": "Equation E4 defines development as a full two-dimensional field over the spatial coordinates.",
+   "fix": "Return the complete thresholded two-dimensional array instead of indexing at the central pixel.",
+   "problem_ids": [
+    "L7"
+   ],
+   "statement": "[medium] Where: euv_stochastic_car_vs_mor/model.py:30\n   What is wrong: The function apply_blur_and_develop evaluates development only at the central pixel rather than returning the two-dimensional developed field.\n   Why it is wrong against the plan: Equation E4 defines development as a full two-dimensional field over the spatial coordinates.\n   How to fix it: Return the complete thresholded two-dimensional array instead of indexing at the central pixel.",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-3bd3cf4d": {
+   "id": "F-3bd3cf4d",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The measure blur_kernel_normalization is hardcoded to a constant zero."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "run_trial",
+   "quantity": "blurkernelnormalization",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:161",
+   "text": "The measure blur_kernel_normalization is hardcoded to a constant zero.",
+   "why": "Check blur_kernel_normalization requires evaluating the absolute deviation from unity of the discrete Gaussian blur kernel sum.",
+   "fix": "Construct the discrete Gaussian convolution kernel for the specified blur radius and compute the absolute difference between its sum and unity.",
+   "problem_ids": [
+    "L8"
+   ],
+   "statement": "[medium] Where: simulate.py:161\n   What is wrong: The measure blur_kernel_normalization is hardcoded to a constant zero.\n   Why it is wrong against the plan: Check blur_kernel_normalization requires evaluating the absolute deviation from unity of the discrete Gaussian blur kernel sum.\n   How to fix it: Construct the discrete Gaussian convolution kernel for the specified blur radius and compute the absolute difference between its sum and unity.",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-0052564a": {
+   "id": "F-0052564a",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The preflight check poisson_zero_probability reports None for the observed value and does not execute the 200,000-draw validation."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "poissonzerofraction",
+   "severity": "medium",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:199",
+   "text": "The preflight check poisson_zero_probability reports None for the observed value and does not execute the 200,000-draw validation.",
+   "why": "Check poisson_zero_probability requires comparing the observed zero fraction across 200,000 draws to the closed-form Poisson probability.",
+   "fix": "Execute the 200,000 scalar Poisson draws at expected value [a value from the plan's checks] and report the observed zero-count fraction.",
+   "problem_ids": [
+    "L13"
+   ],
+   "statement": "[medium] Where: experiment.py:199\n   What is wrong: The preflight check poisson_zero_probability reports None for the observed value and does not execute the 200,000-draw validation.\n   Why it is wrong against the plan: Check poisson_zero_probability requires comparing the observed zero fraction across 200,000 draws to the closed-form Poisson probability.\n   How to fix it: Execute the 200,000 scalar Poisson draws at expected value [a value from the plan's checks] and report the observed zero-count fraction.",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-bf5a9a39": {
+   "id": "F-bf5a9a39",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The preflight check poisson_variance_mean_ratio reports None rather than computing the variance-to-mean ratio deviation."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "abspoissonvariance",
+   "severity": "medium",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:200",
+   "text": "The preflight check poisson_variance_mean_ratio reports None rather than computing the variance-to-mean ratio deviation.",
+   "why": "Check poisson_variance_mean_ratio requires evaluating the absolute deviation of sample variance divided by sample mean from unity over 200,000 validation draws.",
+   "fix": "Compute sample variance and sample mean from the 200,000 scalar draws and report the absolute deviation of their ratio from unity.",
+   "problem_ids": [
+    "L14"
+   ],
+   "statement": "[medium] Where: experiment.py:200\n   What is wrong: The preflight check poisson_variance_mean_ratio reports None rather than computing the variance-to-mean ratio deviation.\n   Why it is wrong against the plan: Check poisson_variance_mean_ratio requires evaluating the absolute deviation of sample variance divided by sample mean from unity over 200,000 validation draws.\n   How to fix it: Compute sample variance and sample mean from the 200,000 scalar draws and report the absolute deviation of their ratio from unity.",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-1c3ad486": {
+   "id": "F-1c3ad486",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "not flagged",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "Preflight check chemistry_off_shot_noise_roughness reports None for relative_edge_variance_error without executing the edge simulation."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 1,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "relativeedgevarianceerror",
+   "severity": "medium",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:202",
+   "text": "Preflight check chemistry_off_shot_noise_roughness reports None for relative_edge_variance_error without executing the edge simulation.",
+   "why": "Check chemistry_off_shot_noise_roughness requires comparing simulated edge variance over 500 straight aerial edge runs to the analytic Poisson formula.",
+   "fix": "Run the 500 edge trials with chemistry turned off and report the relative difference between simulated and analytic edge variances.",
+   "problem_ids": [
+    "L15"
+   ],
+   "statement": "[medium] Where: experiment.py:202\n   What is wrong: Preflight check chemistry_off_shot_noise_roughness reports None for relative_edge_variance_error without executing the edge simulation.\n   Why it is wrong against the plan: Check chemistry_off_shot_noise_roughness requires comparing simulated edge variance over 500 straight aerial edge runs to the analytic Poisson formula.\n   How to fix it: Run the 500 edge trials with chemistry turned off and report the relative difference between simulated and analytic edge variances.",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-dd82cea0": {
+   "id": "F-dd82cea0",
+   "first_seen": 1,
+   "readings": [
+    {
+     "n": 1,
+     "status": "open",
+     "version": "a64f165fe8347e86"
+    },
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "reopened",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The scalar draw from model.draw_absorbed_photons is computed and discarded without being used in the simulation.",
+    "The scale variable draws an absorbed photon count using the model function but is discarded without being used in image development.",
+    "The scalar photon draw returned by model.draw_absorbed_photons is stored in scale and never used.",
+    "A scalar absorbed photon count is drawn using model.draw_absorbed_photons but the result is discarded and never used."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 1,
+   "last_seen": 6,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_develop",
+   "quantity": "e2",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:59",
+   "text": "A scalar absorbed photon count is drawn using model.draw_absorbed_photons but the result is discarded and never used.",
+   "why": "Photon absorption across the domain is drawn directly from the two-dimensional Poisson rate field, making the scalar call redundant.",
+   "fix": "Remove the unused scalar draw assignment.",
+   "problem_ids": [
+    "L8"
+   ],
+   "statement": "[low] Where: simulate.py:59\n   What is wrong: A scalar absorbed photon count is drawn using model.draw_absorbed_photons but the result is discarded and never used.\n   Why it is wrong against the plan: Photon absorption across the domain is drawn directly from the two-dimensional Poisson rate field, making the scalar call redundant.\n   How to fix it: Remove the unused scalar draw assignment.",
+   "note": "changes nothing the study reports: recorded, not repaired"
+  },
+  "F-c631c6ac": {
+   "id": "F-c631c6ac",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the dependent variable safe_dose_bridge_1e6_mJ_cm2 is computed and reported in the result",
+    "the result reports safe_dose_bridge_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the bridge-probability tail falls below 1e-6 for a resist-platform line pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "dependent variable",
+    "metric"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "safedosebridge1e6mjcm2",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the dependent variable safe_dose_bridge_1e6_mJ_cm2 is computed and reported in the result",
+   "why": "The bridge tail fit rejects non-negative slopes yielding None and does not compute the bootstrap uncertainty interval.",
+   "fix": "",
+   "problem_ids": [
+    "R8",
+    "R21"
+   ],
+   "statement": "[medium] Where: experiment.py:266\n   What is wrong: the plan's dependent variable \"the dependent variable safe_dose_bridge_1e6_mJ_cm2 is computed and reported in the result\" is implemented differently from the plan\n   Why it is wrong against the plan: The bridge tail fit rejects non-negative slopes yielding None and does not compute the bootstrap uncertainty interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says\n\n[medium] Where: experiment.py:266\n   What is wrong: the plan's metric \"the result reports safe_dose_bridge_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the bridge-probability tail falls below 1e-6 for a resist-platform line pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)\" is implemented differently from the plan\n   Why it is wrong against the plan: The bridge tail fit rejects positive slopes returning None and does not calculate the bootstrap confidence interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says"
+  },
+  "F-f7a2888b": {
+   "id": "F-f7a2888b",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the dependent variable safe_dose_break_1e6_mJ_cm2 is computed and reported in the result",
+    "the result reports safe_dose_break_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the break-probability tail falls below 1e-6 for a resist-platform line pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "dependent variable",
+    "metric"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "safedosebreak1e6mjcm2",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the dependent variable safe_dose_break_1e6_mJ_cm2 is computed and reported in the result",
+   "why": "The reported break safe dose does not compute the bootstrap confidence interval.",
+   "fix": "",
+   "problem_ids": [
+    "R9",
+    "R22"
+   ],
+   "statement": "[medium] Where: experiment.py:267\n   What is wrong: the plan's dependent variable \"the dependent variable safe_dose_break_1e6_mJ_cm2 is computed and reported in the result\" is implemented differently from the plan\n   Why it is wrong against the plan: The reported break safe dose does not compute the bootstrap confidence interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says\n\n[medium] Where: experiment.py:267\n   What is wrong: the plan's metric \"the result reports safe_dose_break_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the break-probability tail falls below 1e-6 for a resist-platform line pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)\" is implemented differently from the plan\n   Why it is wrong against the plan: The safe dose result omits the required bootstrap confidence interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says"
+  },
+  "F-23c6eb6e": {
+   "id": "F-23c6eb6e",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the dependent variable safe_dose_missing_1e6_mJ_cm2 is computed and reported in the result",
+    "the result reports safe_dose_missing_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the missing-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "dependent variable",
+    "metric"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "safedosemissing1e6mjcm2",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the dependent variable safe_dose_missing_1e6_mJ_cm2 is computed and reported in the result",
+   "why": "The reported missing contact safe dose does not compute the bootstrap confidence interval.",
+   "fix": "",
+   "problem_ids": [
+    "R10",
+    "R23"
+   ],
+   "statement": "[medium] Where: experiment.py:270\n   What is wrong: the plan's dependent variable \"the dependent variable safe_dose_missing_1e6_mJ_cm2 is computed and reported in the result\" is implemented differently from the plan\n   Why it is wrong against the plan: The reported missing contact safe dose does not compute the bootstrap confidence interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says\n\n[medium] Where: experiment.py:270\n   What is wrong: the plan's metric \"the result reports safe_dose_missing_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the missing-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)\" is implemented differently from the plan\n   Why it is wrong against the plan: The safe dose result omits the required bootstrap confidence interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says"
+  },
+  "F-670cb979": {
+   "id": "F-670cb979",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the dependent variable safe_dose_merged_1e6_mJ_cm2 is computed and reported in the result",
+    "the result reports safe_dose_merged_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the merged-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "dependent variable",
+    "metric"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "safedosemerged1e6mjcm2",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the dependent variable safe_dose_merged_1e6_mJ_cm2 is computed and reported in the result",
+   "why": "The merged contact tail fit rejects non-negative slopes yielding None and does not compute the bootstrap uncertainty interval.",
+   "fix": "",
+   "problem_ids": [
+    "R11",
+    "R24"
+   ],
+   "statement": "[medium] Where: experiment.py:271\n   What is wrong: the plan's dependent variable \"the dependent variable safe_dose_merged_1e6_mJ_cm2 is computed and reported in the result\" is implemented differently from the plan\n   Why it is wrong against the plan: The merged contact tail fit rejects non-negative slopes yielding None and does not compute the bootstrap uncertainty interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says\n\n[medium] Where: experiment.py:271\n   What is wrong: the plan's metric \"the result reports safe_dose_merged_1e6_mJ_cm2 (Incident dose at which the fitted point estimate of the merged-contact-probability tail falls below 1e-6 for a resist-platform contact pattern; its uncertainty is the 95% bootstrap interval of that fitted crossing.)\" is implemented differently from the plan\n   Why it is wrong against the plan: The merged contact tail fit rejects positive slopes returning None and does not calculate the bootstrap confidence interval.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says"
+  },
+  "F-d32cf5f7": {
+   "id": "F-d32cf5f7",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "the script draws the planned figure stochastic_resist_examples.png"
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 4,
+   "kind": "figure",
+   "kinds": [
+    "figure"
+   ],
+   "file": "experiment.py",
+   "function": "plot_stochastic_resist_examples",
+   "quantity": "thescriptdrawstheplannedfigurestochasticresistexamplespng",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "",
+   "text": "the script draws the planned figure stochastic_resist_examples.png",
+   "why": "The figure draws synthetic mock figures using random normal walks and circles rather than simulated stochastic resist images.",
+   "fix": "",
+   "problem_ids": [
+    "R27"
+   ],
+   "statement": "[medium] Where: experiment.py:240\n   What is wrong: the plan's figure \"the script draws the planned figure stochastic_resist_examples.png\" is implemented differently from the plan\n   Why it is wrong against the plan: The figure draws synthetic mock figures using random normal walks and circles rather than simulated stochastic resist images.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says"
+  },
+  "F-7f65db0e": {
+   "id": "F-7f65db0e",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "reopened",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The sinusoidal line aerial image places an intensity minimum along the center row rather than centering a target line feature.",
+    "The line aerial image intensity profile has an intensity trough at the center row evaluated by line metrology.",
+    "The sinusoidal line aerial image formula places an aerial intensity minimum at the domain centerline where line metrics are extracted.",
+    "The sinusoidal aerial image for lines has an intensity minimum at the center row where line metrics samples target line labels."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 1,
+   "last_seen": 6,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_aerial",
+   "quantity": "breakprobabilityperum",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:32",
+   "text": "The sinusoidal aerial image for lines has an intensity minimum at the center row where line metrics samples target line labels.",
+   "why": "Sampling the unexposed intensity valley instead of an exposure peak causes false line break detections on every trial without bridging noise.",
+   "fix": "Shift the phase of the line aerial image so that an intensity peak aligns with the center row, or sample target line labels at an intensity peak location.",
+   "problem_ids": [
+    "L2"
+   ],
+   "statement": "[high] Where: simulate.py:32\n   What is wrong: The sinusoidal aerial image for lines has an intensity minimum at the center row where line metrics samples target line labels.\n   Why it is wrong against the plan: Sampling the unexposed intensity valley instead of an exposure peak causes false line break detections on every trial without bridging noise.\n   How to fix it: Shift the phase of the line aerial image so that an intensity peak aligns with the center row, or sample target line labels at an intensity peak location."
+  },
+  "F-2ea0b142": {
+   "id": "F-2ea0b142",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "open",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "Line edge coordinates are detected across all row indices in the field rather than isolating the target line component.",
+    "The line edge extraction algorithm searches row extrema across the entire column rather than isolating the edges of the target line component.",
+    "High-pass filtering in LER and LWR calculation uses a 1D Gaussian filter with a [a value from the plan's checks] nm standard deviation.",
+    "Line edge detection takes the minimum and maximum rows across the full column of the multi-pitch grating.",
+    "Line edge and width roughness are extracted across the full image height rather than isolating the target line component."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 6,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_line_metrics",
+   "quantity": "ler3sigmanm",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:104",
+   "text": "Line edge and width roughness are extracted across the full image height rather than isolating the target line component.",
+   "why": "The domain spans multiple line periods, so taking global minimum and maximum rows per column measures across separate lines rather than the target line edge.",
+   "fix": "Filter the column edge search to only pixels belonging to the connected component of the target line.",
+   "problem_ids": [
+    "L3"
+   ],
+   "statement": "[high] Where: simulate.py:104\n   What is wrong: Line edge and width roughness are extracted across the full image height rather than isolating the target line component.\n   Why it is wrong against the plan: The domain spans multiple line periods, so taking global minimum and maximum rows per column measures across separate lines rather than the target line edge.\n   How to fix it: Filter the column edge search to only pixels belonging to the connected component of the target line."
+  },
+  "F-3dcd641d": {
+   "id": "F-3dcd641d",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The stochastic resist examples plot generates synthetic random walks and circles rather than visualizing simulated resist images.",
+    "The example figure generates synthetic random walk line edges and toy circular masks instead of displaying simulated stochastic resist images.",
+    "plot_stochastic_resist_examples synthesizes mock figures from random cumulative sums and circles instead of plotting simulated resist images."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 4,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "plot_stochastic_resist_examples",
+   "quantity": "stochasticresistexamplespng",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:224",
+   "text": "plot_stochastic_resist_examples synthesizes mock figures from random cumulative sums and circles instead of plotting simulated resist images.",
+   "why": "The figure stochastic_resist_examples.png must display representative developed resist fields produced by the physical simulation.",
+   "fix": "Render actual developed spatial fields from the simulation output across resist platforms and patterns.",
+   "problem_ids": [
+    "L4"
+   ],
+   "statement": "[high] Where: experiment.py:224\n   What is wrong: plot_stochastic_resist_examples synthesizes mock figures from random cumulative sums and circles instead of plotting simulated resist images.\n   Why it is wrong against the plan: The figure stochastic_resist_examples.png must display representative developed resist fields produced by the physical simulation.\n   How to fix it: Render actual developed spatial fields from the simulation output across resist platforms and patterns."
+  },
+  "F-737f62fe": {
+   "id": "F-737f62fe",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The preflight check poisson_zero_probability reports None for the observed value without executing the validation draws."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "poissonzeroprobability",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:276",
+   "text": "The preflight check poisson_zero_probability reports None for the observed value without executing the validation draws.",
+   "why": "Check poisson_zero_probability requires comparing the observed zero fraction across validation draws to the closed-form Poisson probability.",
+   "fix": "Generate the specified number of Poisson draws at the target mean, calculate the fraction of zero draws, and report the observed value in preflight.",
+   "problem_ids": [
+    "L9"
+   ],
+   "statement": "[medium] Where: experiment.py:276\n   What is wrong: The preflight check poisson_zero_probability reports None for the observed value without executing the validation draws.\n   Why it is wrong against the plan: Check poisson_zero_probability requires comparing the observed zero fraction across validation draws to the closed-form Poisson probability.\n   How to fix it: Generate the specified number of Poisson draws at the target mean, calculate the fraction of zero draws, and report the observed value in preflight."
+  },
+  "F-ea25c0cb": {
+   "id": "F-ea25c0cb",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The preflight check poisson_variance_mean_ratio reports None rather than computing the variance-to-mean ratio deviation."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "poissonvariancemeanratio",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:277",
+   "text": "The preflight check poisson_variance_mean_ratio reports None rather than computing the variance-to-mean ratio deviation.",
+   "why": "Check poisson_variance_mean_ratio requires evaluating the absolute deviation of sample variance divided by sample mean from unity over validation draws.",
+   "fix": "Compute the sample variance and mean across the validation draws and calculate the absolute deviation of their ratio from unity.",
+   "problem_ids": [
+    "L10"
+   ],
+   "statement": "[medium] Where: experiment.py:277\n   What is wrong: The preflight check poisson_variance_mean_ratio reports None rather than computing the variance-to-mean ratio deviation.\n   Why it is wrong against the plan: Check poisson_variance_mean_ratio requires evaluating the absolute deviation of sample variance divided by sample mean from unity over validation draws.\n   How to fix it: Compute the sample variance and mean across the validation draws and calculate the absolute deviation of their ratio from unity."
+  },
+  "F-89436fb2": {
+   "id": "F-89436fb2",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "Preflight check chemistry_off_shot_noise_roughness reports None for relative_edge_variance_error without executing the edge simulation."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "chemistryoffshotnoiseroughness",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:279",
+   "text": "Preflight check chemistry_off_shot_noise_roughness reports None for relative_edge_variance_error without executing the edge simulation.",
+   "why": "Check chemistry_off_shot_noise_roughness requires comparing simulated edge variance over straight aerial edge runs to the analytic Poisson formula.",
+   "fix": "Run the chemistry-off edge simulation runs and compute the relative difference between simulated edge variance and the analytic Poisson edge variance.",
+   "problem_ids": [
+    "L11"
+   ],
+   "statement": "[medium] Where: experiment.py:279\n   What is wrong: Preflight check chemistry_off_shot_noise_roughness reports None for relative_edge_variance_error without executing the edge simulation.\n   Why it is wrong against the plan: Check chemistry_off_shot_noise_roughness requires comparing simulated edge variance over straight aerial edge runs to the analytic Poisson formula.\n   How to fix it: Run the chemistry-off edge simulation runs and compute the relative difference between simulated edge variance and the analytic Poisson edge variance."
+  },
+  "F-886343f4": {
+   "id": "F-886343f4",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "Development thresholds are calibrated using hardcoded nominal dose constants rather than calibrated edge target values."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_threshold",
+   "quantity": "threshold",
+   "severity": "medium",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:46",
+   "text": "Development thresholds are calibrated using hardcoded nominal dose constants rather than calibrated edge target values.",
+   "why": "The plan defines the intrinsic development threshold as a critical reaction fraction at the nominal target edge under calibrated dose-to-size conditions.",
+   "fix": "Calibrate development thresholds using the expected reaction level at the nominal target edge under the deterministic dose-to-size condition.",
+   "problem_ids": [
+    "L13"
+   ],
+   "statement": "[medium] Where: simulate.py:46\n   What is wrong: Development thresholds are calibrated using hardcoded nominal dose constants rather than calibrated edge target values.\n   Why it is wrong against the plan: The plan defines the intrinsic development threshold as a critical reaction fraction at the nominal target edge under calibrated dose-to-size conditions.\n   How to fix it: Calibrate development thresholds using the expected reaction level at the nominal target edge under the deterministic dose-to-size condition."
+  },
+  "F-a6570c3d": {
+   "id": "F-a6570c3d",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The preflight results dictionary omits the planned check poisson_draw_nonnegative."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "poissondrawnonnegative",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:274",
+   "text": "The preflight results dictionary omits the planned check poisson_draw_nonnegative.",
+   "why": "Check poisson_draw_nonnegative is specified in the plan to report the magnitude of any negative absorbed-photon count violation.",
+   "fix": "Add poisson_draw_nonnegative to the preflight dictionary using the value returned from the simulation trial.",
+   "problem_ids": [
+    "L14"
+   ],
+   "statement": "[low] Where: experiment.py:274\n   What is wrong: The preflight results dictionary omits the planned check poisson_draw_nonnegative.\n   Why it is wrong against the plan: Check poisson_draw_nonnegative is specified in the plan to report the magnitude of any negative absorbed-photon count violation.\n   How to fix it: Add poisson_draw_nonnegative to the preflight dictionary using the value returned from the simulation trial."
+  },
+  "F-dfb22232": {
+   "id": "F-dfb22232",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "Function safe_dose_from_cloglog is defined in the package but bypassed in favor of inlined math in the experiment script."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "euv_stochastic_car_vs_mor/model.py",
+   "function": "safe_dose_from_cloglog",
+   "quantity": "e5",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "euv_stochastic_car_vs_mor/model.py:37",
+   "text": "Function safe_dose_from_cloglog is defined in the package but bypassed in favor of inlined math in the experiment script.",
+   "why": "Equation E5 is specified as the model equation for computing the complementary-log-log tail crossing dose.",
+   "fix": "Call safe_dose_from_cloglog from tail_fit instead of inlining the crossing formula.",
+   "problem_ids": [
+    "L16"
+   ],
+   "statement": "[low] Where: euv_stochastic_car_vs_mor/model.py:37\n   What is wrong: Function safe_dose_from_cloglog is defined in the package but bypassed in favor of inlined math in the experiment script.\n   Why it is wrong against the plan: Equation E5 is specified as the model equation for computing the complementary-log-log tail crossing dose.\n   How to fix it: Call safe_dose_from_cloglog from tail_fit instead of inlining the crossing formula."
+  },
+  "F-9ff1374e": {
+   "id": "F-9ff1374e",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The CAR absorbed fraction is computed using hardcoded dictionary parameters in experiment.py rather than calling model.absorption_fraction."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 2,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "beerlambertcarabsorption",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:247",
+   "text": "The CAR absorbed fraction is computed using hardcoded dictionary parameters in experiment.py rather than calling model.absorption_fraction.",
+   "why": "The plan's equation E1 defines the Beer-Lambert absorption fraction formula which should be evaluated via the packaged model function.",
+   "fix": "Call model.absorption_fraction with the CAR platform parameters to compute the absorbed fraction.",
+   "problem_ids": [
+    "L17"
+   ],
+   "statement": "[low] Where: experiment.py:247\n   What is wrong: The CAR absorbed fraction is computed using hardcoded dictionary parameters in experiment.py rather than calling model.absorption_fraction.\n   Why it is wrong against the plan: The plan's equation E1 defines the Beer-Lambert absorption fraction formula which should be evaluated via the packaged model function.\n   How to fix it: Call model.absorption_fraction with the CAR platform parameters to compute the absorbed fraction."
+  },
+  "F-b5fdbb82": {
+   "id": "F-b5fdbb82",
+   "first_seen": 2,
+   "readings": [
+    {
+     "n": 2,
+     "status": "open",
+     "version": "ca591745a55be332"
+    },
+    {
+     "n": 3,
+     "status": "not flagged",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The random number generator in experiment.py is initialized with seed 0 rather than the planned base seed.",
+    "The random number generator in main() is initialized with base seed 0 instead of base seed 20261012."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 1,
+   "last_seen": 4,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "seedpolicy",
+   "severity": "low",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:248",
+   "text": "The random number generator in main() is initialized with base seed 0 instead of base seed 20261012.",
+   "why": "The plan's seed policy explicitly specifies base seed 20261012.",
+   "fix": "Initialize the base random generator stream with seed 20261012.",
+   "problem_ids": [
+    "L8"
+   ],
+   "statement": "[low] Where: experiment.py:248\n   What is wrong: The random number generator in main() is initialized with base seed 0 instead of base seed 20261012.\n   Why it is wrong against the plan: The plan's seed policy explicitly specifies base seed 20261012.\n   How to fix it: Initialize the base random generator stream with seed 20261012."
+  },
+  "F-49659a7f": {
+   "id": "F-49659a7f",
+   "first_seen": 3,
+   "readings": [
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The results JSON file is serialized to disk while runtime_seconds remains zero, before the elapsed time is recorded.",
+    "the result reports runtime_seconds (Total wall-clock runtime of the complete CPU-only study run, measured from study-run start through generation of all requested figures and reported outputs.)",
+    "runtime_seconds measures only the execution time of experiment.py instead of the complete CPU study run."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 4,
+   "kind": "quantity",
+   "kinds": [
+    "logic",
+    "metric"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "runtimeseconds",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:283",
+   "text": "the result reports runtime_seconds (Total wall-clock runtime of the complete CPU-only study run, measured from study-run start through generation of all requested figures and reported outputs.)",
+   "why": "runtime_seconds measures only the post-processing script duration rather than total runtime of the complete study run including trial simulation.",
+   "fix": "Accumulate the runtime of the simulation stage into the total reported runtime.",
+   "problem_ids": [
+    "R20",
+    "L9"
+   ],
+   "statement": "[medium] Where: experiment.py:283\n   What is wrong: the plan's metric \"the result reports runtime_seconds (Total wall-clock runtime of the complete CPU-only study run, measured from study-run start through generation of all requested figures and reported outputs.)\" is implemented differently from the plan\n   Why it is wrong against the plan: runtime_seconds measures only the post-processing script duration rather than total runtime of the complete study run including trial simulation.\n   How to fix it: make the code compute it as the plan states, and put it where the plan says\n\n[low] Where: experiment.py:283\n   What is wrong: runtime_seconds measures only the execution time of experiment.py instead of the complete CPU study run.\n   Why it is wrong against the plan: The plan defines runtime_seconds as the total wall-clock runtime measured from study run start through all output generation.\n   How to fix it: Accumulate the runtime of the simulation stage into the total reported runtime."
+  },
+  "F-8bd18b30": {
+   "id": "F-8bd18b30",
+   "first_seen": 3,
+   "readings": [
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "open",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "open",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The preflight dictionary hardcodes null values and true status rather than recording the outcome of check executions.",
+    "result['preflight'] hardcodes check results as None and literal floats instead of reading the measures returned by validation trials.",
+    "The cell grouping loop unconditionally indexes resist_platform and pattern on all trial cells.",
+    "The preflight report hardcodes nulls and literal values instead of aggregating simulated check measures.",
+    "Preflight check outcomes in the results dictionary are populated with null and literal placeholder values rather than actual check results."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 6,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "preflight",
+   "severity": "medium",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:233",
+   "text": "Preflight check outcomes in the results dictionary are populated with null and literal placeholder values rather than actual check results.",
+   "why": "The plan requires reporting the verified outcome of the preflight checks, but the aggregation script discards check cells and writes static values.",
+   "fix": "Collect the actual check results returned by the trial runner for each check cell and insert them into the preflight results dictionary.",
+   "problem_ids": [
+    "L6"
+   ],
+   "statement": "[medium] Where: experiment.py:233\n   What is wrong: Preflight check outcomes in the results dictionary are populated with null and literal placeholder values rather than actual check results.\n   Why it is wrong against the plan: The plan requires reporting the verified outcome of the preflight checks, but the aggregation script discards check cells and writes static values.\n   How to fix it: Collect the actual check results returned by the trial runner for each check cell and insert them into the preflight results dictionary."
+  },
+  "F-8d29735e": {
+   "id": "F-8d29735e",
+   "first_seen": 3,
+   "readings": [
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The cell grouping loop assumes all cells contain resist_platform, raising an error or failing to process oracle check cells."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 3,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "checks",
+   "severity": "medium",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:242",
+   "text": "The cell grouping loop assumes all cells contain resist_platform, raising an error or failing to process oracle check cells.",
+   "why": "The plan defines check cases without resist platform or pattern that must be processed alongside the study grid.",
+   "fix": "Filter or dispatch non-grid verification cells separately from the resist platform study grid.",
+   "problem_ids": [
+    "L9"
+   ],
+   "statement": "[medium] Where: experiment.py:242\n   What is wrong: The cell grouping loop assumes all cells contain resist_platform, raising an error or failing to process oracle check cells.\n   Why it is wrong against the plan: The plan defines check cases without resist platform or pattern that must be processed alongside the study grid.\n   How to fix it: Filter or dispatch non-grid verification cells separately from the resist platform study grid."
+  },
+  "F-4fc8a4df": {
+   "id": "F-4fc8a4df",
+   "first_seen": 3,
+   "readings": [
+    {
+     "n": 3,
+     "status": "open",
+     "version": "ba6c3ce0543e0895"
+    },
+    {
+     "n": 4,
+     "status": "not flagged",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The complementary log-log crossing dose is computed by an inlined formula instead of invoking the dedicated model function."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 3,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "tail_fit",
+   "quantity": "safedosefromcloglog",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:61",
+   "text": "The complementary log-log crossing dose is computed by an inlined formula instead of invoking the dedicated model function.",
+   "why": "The model package defines a dedicated function to evaluate the safe dose crossing from complementary log-log parameters.",
+   "fix": "Call safe_dose_from_cloglog from the model package to compute the crossing dose from the fitted slope and intercept.",
+   "problem_ids": [
+    "L11"
+   ],
+   "statement": "[low] Where: experiment.py:61\n   What is wrong: The complementary log-log crossing dose is computed by an inlined formula instead of invoking the dedicated model function.\n   Why it is wrong against the plan: The model package defines a dedicated function to evaluate the safe dose crossing from complementary log-log parameters.\n   How to fix it: Call safe_dose_from_cloglog from the model package to compute the crossing dose from the fitted slope and intercept."
+  },
+  "F-351b488f": {
+   "id": "F-351b488f",
+   "first_seen": 4,
+   "readings": [
+    {
+     "n": 4,
+     "status": "open",
+     "version": "56e84241ff9816cb"
+    },
+    {
+     "n": 5,
+     "status": "not flagged",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "Line edge detection computes column-wide minimum and maximum row indices over all active pixels in the domain."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 4,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_line_metrics",
+   "quantity": "lwr3sigmanm",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:106",
+   "text": "Line edge detection computes column-wide minimum and maximum row indices over all active pixels in the domain.",
+   "why": "Because multiple pitches are present across the domain width, taking column extrema spans across multiple lines and spaces rather than tracking the single target line.",
+   "fix": "Trace edges specifically along the boundary of the connected target line component rather than taking column-wide extrema.",
+   "problem_ids": [
+    "L2"
+   ],
+   "statement": "[high] Where: simulate.py:106\n   What is wrong: Line edge detection computes column-wide minimum and maximum row indices over all active pixels in the domain.\n   Why it is wrong against the plan: Because multiple pitches are present across the domain width, taking column extrema spans across multiple lines and spaces rather than tracking the single target line.\n   How to fix it: Trace edges specifically along the boundary of the connected target line component rather than taking column-wide extrema."
+  },
+  "F-b3421827": {
+   "id": "F-b3421827",
+   "first_seen": 5,
+   "readings": [
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The figure stochastic_resist_examples.png is omitted and marked as unavailable."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 5,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "stochasticresistexamplespng",
+   "severity": "high",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:240",
+   "text": "The figure stochastic_resist_examples.png is omitted and marked as unavailable.",
+   "why": "The plan requires generating and saving the planned figure stochastic_resist_examples.png.",
+   "fix": "Render the planned stochastic resist example image and save it to the planned figure file path.",
+   "problem_ids": [
+    "L4"
+   ],
+   "statement": "[high] Where: experiment.py:240\n   What is wrong: The figure stochastic_resist_examples.png is omitted and marked as unavailable.\n   Why it is wrong against the plan: The plan requires generating and saving the planned figure stochastic_resist_examples.png.\n   How to fix it: Render the planned stochastic resist example image and save it to the planned figure file path."
+  },
+  "F-25ba3d2d": {
+   "id": "F-25ba3d2d",
+   "first_seen": 5,
+   "readings": [
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The random number generator for analysis bootstrapping is initialized with a different base seed."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 5,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "experiment.py",
+   "function": "main",
+   "quantity": "seed",
+   "severity": "low",
+   "changes_result": true,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "experiment.py:239",
+   "text": "The random number generator for analysis bootstrapping is initialized with a different base seed.",
+   "why": "The plan's seed policy prescribes using base seed 20261012.",
+   "fix": "Pass the specified base seed to the bootstrap random number generator.",
+   "problem_ids": [
+    "L7"
+   ],
+   "statement": "[low] Where: experiment.py:239\n   What is wrong: The random number generator for analysis bootstrapping is initialized with a different base seed.\n   Why it is wrong against the plan: The plan's seed policy prescribes using base seed 20261012.\n   How to fix it: Pass the specified base seed to the bootstrap random number generator."
+  },
+  "F-c1c8d818": {
+   "id": "F-c1c8d818",
+   "first_seen": 5,
+   "readings": [
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "The blur and development function marked E4 evaluates only the central pixel rather than the [a value from the plan's checks]D field."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 5,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "euv_stochastic_car_vs_mor/model.py",
+   "function": "apply_blur_and_develop",
+   "quantity": "applybluranddevelop",
+   "severity": "medium",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "euv_stochastic_car_vs_mor/model.py:31",
+   "text": "The blur and development function marked E4 evaluates only the central pixel rather than the [a value from the plan's checks]D field.",
+   "why": "Equation E4 defines the complete [a value from the plan's checks]D developed latent field across all image coordinates.",
+   "fix": "Return the complete [a value from the plan's checks]D thresholded binary array instead of indexing the central pixel.",
+   "problem_ids": [
+    "L8"
+   ],
+   "statement": "[medium] Where: euv_stochastic_car_vs_mor/model.py:31\n   What is wrong: The blur and development function marked E4 evaluates only the central pixel rather than the [a value from the plan's checks]D field.\n   Why it is wrong against the plan: Equation E4 defines the complete [a value from the plan's checks]D developed latent field across all image coordinates.\n   How to fix it: Return the complete [a value from the plan's checks]D thresholded binary array instead of indexing the central pixel."
+  },
+  "F-5fde42f7": {
+   "id": "F-5fde42f7",
+   "first_seen": 5,
+   "readings": [
+    {
+     "n": 5,
+     "status": "open",
+     "version": "fd5883cd95145f97"
+    },
+    {
+     "n": 6,
+     "status": "not flagged",
+     "version": "856c1c34c7cc417b"
+    }
+   ],
+   "demonstrated": null,
+   "outcome": "no longer flagged",
+   "repairs": [],
+   "tests": 0,
+   "wordings": [
+    "An absorption count is drawn from the model package but immediately discarded."
+   ],
+   "fixed_by": "",
+   "calls": {
+    "test": 0,
+    "repair": 0,
+    "other": 0
+   },
+   "rounds": 0,
+   "last_seen": 5,
+   "kind": "quantity",
+   "kinds": [
+    "logic"
+   ],
+   "file": "simulate.py",
+   "function": "_develop",
+   "quantity": "drawabsorbedphotons",
+   "severity": "low",
+   "changes_result": false,
+   "headline": false,
+   "plan_conflict": false,
+   "where": "simulate.py:59",
+   "text": "An absorption count is drawn from the model package but immediately discarded.",
+   "why": "The scalar draw is redundant with the full [a value from the plan's checks]D Poisson draw that follows.",
+   "fix": "Remove the unused scalar absorption draw from the development function.",
+   "problem_ids": [
+    "L9"
+   ],
+   "statement": "[low] Where: simulate.py:59\n   What is wrong: An absorption count is drawn from the model package but immediately discarded.\n   Why it is wrong against the plan: The scalar draw is redundant with the full [a value from the plan's checks]D Poisson draw that follows.\n   How to fix it: Remove the unused scalar absorption draw from the development function."
+  }
+ },
+ "same_model": false,
+ "accepted_tests": [
+  ".fi/finding_tests/F-5fe84345_1.py",
+  ".fi/finding_tests/F-b52b60e9_1.py",
+  ".fi/finding_tests/F-e0c7bf7b_1.py",
+  ".fi/finding_tests/F-3eb9fe69_1.py",
+  ".fi/finding_tests/F-40d5dfa3_1.py",
+  ".fi/finding_tests/F-7dcfa71a_1.py",
+  ".fi/finding_tests/F-bc62bfd8_1.py"
+ ],
+ "plan_conflicts": [
+  {
+   "id": "F-383ee424",
+   "text": "the result reports safe_dose_bridge_1e6_mJ_cm2 (Incident dose at which the upper 95% confidence bound of the fitted bridge-probability tail falls below 1e-6 for a resist-platform line pattern.)",
+   "why": "Safe dose is evaluated from the point estimate crossing rather than the upper 95% confidence bound of the fitted tail."
+  }
+ ],
+ "read_problems": [
+  {
+   "id": "R27",
+   "kind": "figure",
+   "text": "the script draws the planned figure stochastic_resist_examples.png",
+   "headline": false,
+   "name": "",
+   "status": "missing",
+   "file": "",
+   "line": null,
+   "note": "Figure stochastic_resist_examples.png is not drawn or saved by the script.",
+   "changes_result": true,
+   "fid": "F-8fb2301e",
+   "file_rel": "",
+   "function": "",
+   "quantities": [
+    "thescriptdrawstheplannedfigurestochasticresistexamplespng"
+   ]
+  },
+  {
+   "id": "R28",
+   "kind": "figure",
+   "text": "the script draws the planned figure equal_roughness_comparison.png",
+   "headline": false,
+   "name": "",
+   "status": "missing",
+   "file": "",
+   "line": null,
+   "note": "Figure equal_roughness_comparison.png is not drawn or saved by the script.",
+   "changes_result": true,
+   "fid": "F-40d5dfa3",
+   "file_rel": "",
+   "function": "",
+   "quantities": [
+    "thescriptdrawstheplannedfigureequalroughnesscomparisonpng"
+   ]
+  },
+  {
+   "id": "L1",
+   "kind": "logic",
+   "text": "The quantity dose_to_size_mJ_cm2 is set to a literal constant across patterns rather than solved via deterministic root finding.",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 223,
+   "note": "The plan defines dose-to-size as the deterministic incident dose at which calibrated developed critical dimension matches the target critical dimension for each pattern pair.",
+   "fix": "Implement deterministic root finding over incident dose on the mean latent image to match the developed critical dimension to the target critical dimension for each pattern.",
+   "severity": "high",
+   "name": "dose_to_size_mJ_cm2",
+   "constant": true,
+   "where": "experiment.py:223",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": true,
+   "fid": "F-bed59bff",
+   "file_rel": "experiment.py",
+   "function": "main",
+   "quantities": [
+    "dosetosizemjcm2"
+   ]
+  },
+  {
+   "id": "L2",
+   "kind": "logic",
+   "text": "The sinusoidal aerial image for lines has an intensity minimum at the center row where line metrics samples target line labels.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 32,
+   "note": "Sampling the unexposed intensity valley instead of an exposure peak causes false line break detections on every trial without bridging noise.",
+   "fix": "Shift the phase of the line aerial image so that an intensity peak aligns with the center row, or sample target line labels at an intensity peak location.",
+   "severity": "high",
+   "name": "break_probability_per_um",
+   "constant": false,
+   "where": "simulate.py:32",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-7f65db0e",
+   "file_rel": "simulate.py",
+   "function": "_aerial",
+   "quantities": [
+    "breakprobabilityperum"
+   ]
+  },
+  {
+   "id": "L3",
+   "kind": "logic",
+   "text": "Line edge and width roughness are extracted across the full image height rather than isolating the target line component.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 104,
+   "note": "The domain spans multiple line periods, so taking global minimum and maximum rows per column measures across separate lines rather than the target line edge.",
+   "fix": "Filter the column edge search to only pixels belonging to the connected component of the target line.",
+   "severity": "high",
+   "name": "ler_3sigma_nm",
+   "constant": false,
+   "where": "simulate.py:104",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-2ea0b142",
+   "file_rel": "simulate.py",
+   "function": "_line_metrics",
+   "quantities": [
+    "ler3sigmanm"
+   ]
+  },
+  {
+   "id": "L4",
+   "kind": "logic",
+   "text": "The 95% bootstrap confidence interval for safe dose crossing is returned as null in tail_fit.",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 102,
+   "note": "The plan defines the estimand of each safe dose metric to include its 95% bootstrap uncertainty interval.",
+   "fix": "Compute the bootstrap confidence interval of the crossing dose by resampling trials or parameter estimates and recording the empirical quantiles.",
+   "severity": "high",
+   "name": "safe_dose_bridge_1e6_mJ_cm2",
+   "constant": false,
+   "where": "experiment.py:102",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-383ee424",
+   "file_rel": "experiment.py",
+   "function": "tail_fit",
+   "quantities": [
+    "safedosebridge1e6mjcm2"
+   ]
+  },
+  {
+   "id": "L5",
+   "kind": "logic",
+   "text": "The complementary log-log tail fitting restricts the slope parameter to strictly negative values and rejects non-negative slopes.",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 89,
+   "note": "Line breaks and merged contacts increase in probability with exposure dose, requiring a positive slope parameter to model their defect tail.",
+   "fix": "Adjust the optimization bounds and convergence checks to allow positive slope parameters for defect mechanisms that increase with dose.",
+   "severity": "high",
+   "name": "safe_dose_break_1e6_mJ_cm2",
+   "constant": false,
+   "where": "experiment.py:89",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-f697e099",
+   "file_rel": "experiment.py",
+   "function": "tail_fit",
+   "quantities": [
+    "safedosebreak1e6mjcm2"
+   ]
+  },
+  {
+   "id": "L6",
+   "kind": "logic",
+   "text": "Preflight check outcomes in the results dictionary are populated with null and literal placeholder values rather than actual check results.",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 233,
+   "note": "The plan requires reporting the verified outcome of the preflight checks, but the aggregation script discards check cells and writes static values.",
+   "fix": "Collect the actual check results returned by the trial runner for each check cell and insert them into the preflight results dictionary.",
+   "severity": "medium",
+   "name": "preflight",
+   "constant": true,
+   "where": "experiment.py:233",
+   "changes_result": true,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-8bd18b30",
+   "file_rel": "experiment.py",
+   "function": "main",
+   "quantities": [
+    "preflight"
+   ]
+  },
+  {
+   "id": "L7",
+   "kind": "logic",
+   "text": "The function apply_blur_and_develop evaluates development only at the central pixel rather than returning the two-dimensional developed field.",
+   "status": "different",
+   "file": "model.py",
+   "line": 30,
+   "note": "Equation E4 defines development as a full two-dimensional field over the spatial coordinates.",
+   "fix": "Return the complete thresholded two-dimensional array instead of indexing at the central pixel.",
+   "severity": "medium",
+   "name": "E4",
+   "constant": false,
+   "where": "euv_stochastic_car_vs_mor/model.py:30",
+   "changes_result": false,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-06303de3",
+   "file_rel": "euv_stochastic_car_vs_mor/model.py",
+   "function": "apply_blur_and_develop",
+   "quantities": [
+    "e4"
+   ]
+  },
+  {
+   "id": "L8",
+   "kind": "logic",
+   "text": "A scalar absorbed photon count is drawn using model.draw_absorbed_photons but the result is discarded and never used.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 59,
+   "note": "Photon absorption across the domain is drawn directly from the two-dimensional Poisson rate field, making the scalar call redundant.",
+   "fix": "Remove the unused scalar draw assignment.",
+   "severity": "low",
+   "name": "E2",
+   "constant": false,
+   "where": "simulate.py:59",
+   "changes_result": false,
+   "plan_conflict": false,
+   "headline": false,
+   "fid": "F-dd82cea0",
+   "file_rel": "simulate.py",
+   "function": "_develop",
+   "quantities": [
+    "e2"
+   ]
+  }
+ ],
+ "version": "9267c9b346521b7c",
+ "requirements": 36,
+ "skipped": "the 6 readings of the code allowed in a quest are spent",
+ "final_read": false
+}

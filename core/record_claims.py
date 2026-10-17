@@ -13,6 +13,9 @@ with none of the words that hedge or deny it, and only when the record says the 
 * the paper calls a result validated or confirmed against known answers while those checks are recorded as unconfirmed
   or failed.
 
+(A value of a quantity FI left out of the results is not on the sheet of keys the writer is given, so a number the writer
+types for it is a typed number: ``core/typed_numbers.py`` finds it.)
+
 When unsure, nothing is flagged: a missing record, an unreadable one or a sentence with any hedge in it gives no hit.
 """
 

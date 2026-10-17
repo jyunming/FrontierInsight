@@ -12,6 +12,7 @@ import pytest
 
 from core import optimisation_plan as op
 from core import plan
+from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import BLOCK, EXTRA, HEAT_SINK, Paused, _engine, _NO_OBJECTIONS
 
 TOPIC = "Find the fin spacing and thickness that minimise the base temperature of a heat sink"
@@ -52,7 +53,7 @@ class Model:
             if answer is None:
                 raise RuntimeError("no answer")
             text = plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")
-            return answer(text) if callable(answer) else answer
+            return as_parts(answer(text) if callable(answer) else answer)
         if not self.drafted:
             self.drafted = True
             return json.dumps({**self.draft, "plan": EXTRA})
@@ -61,7 +62,7 @@ class Model:
     @property
     def requests(self) -> int:
         """Requests, not tries: a reply that cannot be used is asked once more with the reason, inside one request."""
-        return len([p for p in self.asked if "Your last reply could not be used" not in p])
+        return len([p for p in self.asked if "Your previous reply could not be used" not in p])
 
 
 def _complete(text: str) -> str:
@@ -111,23 +112,26 @@ async def test_a_block_still_incomplete_after_two_requests_stops_with_plain_choi
         raise Paused("plan")
 
     monkeypatch.setattr("core.engine.interrupt", interrupted)
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    state = {"topic": TOPIC, "iteration": 0}
+    patch = await eng._node_design(state)  # nobody is asked: no pause, no "try another model"
     assert model.requests == 2 and _record(eng)["count"] == 2
-    shown = (eng.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    for word in ("optimisation block", "plan.md", "YAML", "evaluation_budget", "`optimisation`"):
-        assert word not in shown, word
-    assert "FI asked the plan's model 2 time(s)" in shown and "how many designs the search may try" in shown
-    assert "another model" in shown and op.MEASURE_INSTEAD in shown and "Nothing was run" in shown
-    # A resume checks again and stops again, and does not ask a third time.
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert model.requests == 2
+    assert not (eng.quest_root / "NEXT_STEP.md").is_file()
+    stop = eng._search_cannot_start_stop(state, patch["design"])
+    assert stop is not None
+    shown = stop["exec_result"]["no_search"] + " " + " ".join(stop["exec_result"]["no_search_tried"])
+    for word in ("optimisation block", "plan.md", "YAML", "`optimisation`"):
+        assert word not in stop["exec_result"]["no_search"], word
+    assert "asked the plan's model 2 time(s)" in shown and "how many designs the search may try" in shown
+    assert "another model" not in shown.lower()
+    # A resume checks again and ends the same way, and does not ask a third time.
+    patch = await eng._node_design(state)
+    assert model.requests == 2 and eng._search_cannot_start_stop(state, patch["design"]) is not None
     # Another model for the plan step is asked afresh.
     eng.config.provider.node_models = {"plan_revise": "another-model"}
     model.answers = [_complete]
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert model.requests == 3 and patch["design"]["protocol"]["optimisation"]["evaluation_budget"]["per_start"] == 60
+    assert eng._search_cannot_start_stop(state, patch["design"]) is None
 
 
 @pytest.mark.asyncio
@@ -137,17 +141,22 @@ async def test_a_reply_that_cannot_be_used_counts_as_a_request_and_leaves_the_pl
     def unusable(text: str) -> str:
         return _with_block(text, {"objective": {"quantity": "x"}})  # no direction, no variables
 
-    model = Model(eng, [unusable, unusable, unusable, unusable], _broken_draft())
+    model = Model(eng, [unusable] * 6, _broken_draft())
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     seen = []
     eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert model.requests == 2 and _record(eng)["count"] == 2
+    state = {"topic": TOPIC, "iteration": 0}
+    patch = await eng._node_design(state)
+    assert seen == []
+    assert model.requests == 2 and _record(eng)["count"] == 2  # a form the reader refused is asked again; the same refusal twice ends the asking
     assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
-    steps = " ".join(seen[0]["steps"])
+    stop = eng._search_cannot_start_stop(state, patch["design"])["exec_result"]
+    steps = stop["no_search"] + " " + " ".join(stop["no_search_tried"])
     assert "what the search should make as low or as high as possible" in steps and "asked the plan's model 2 time(s)" in steps
+    # the second request quotes why the first answer was not used
+    assert "Your last answer was not used" not in model.asked[0]
+    assert any("Your last answer was not used" in a and "direction" in a for a in model.asked[1:])
 
 
 @pytest.mark.asyncio
@@ -157,12 +166,12 @@ async def test_a_model_that_gives_no_answer_counts_once_and_a_resume_asks_again(
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen: list[dict[str, Any]] = []
     eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    state = {"topic": TOPIC, "iteration": 0}
+    patch = await eng._node_design(state)
+    assert seen == []
     assert _record(eng)["count"] == 2  # a failed call counts too (the plan step asked once, the design step once)
-    assert "asked the plan's model 2 time(s)" in " ".join(seen[0]["steps"])
-    with pytest.raises(Paused):  # a resume does not ask a broken model again
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert "asked the plan's model 2 time(s)" in " ".join(eng._search_cannot_start_stop(state, patch["design"])["exec_result"]["no_search_tried"])
+    await eng._node_design(state)  # a resume does not ask a broken model again
     assert _record(eng)["count"] == 2
     eng.config.provider.node_models = {"plan_revise": "another-model"}  # another model is asked afresh
     model.answers = [_complete]
@@ -213,11 +222,10 @@ async def test_the_plain_choice_to_measure_instead_needs_the_values_in_the_plan(
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen: list[dict[str, Any]] = []
     eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
-    # The plan lists the setting but no values for it: measuring is not offered (it would be refused), only the other model.
-    assert not any(op.MEASURE_INSTEAD in step for step in seen[0]["steps"])
-    assert any("Try another model" in step for step in seen[0]["steps"]) and not any(step.startswith("2.") for step in seen[0]["steps"])
+    state = {"topic": TOPIC, "iteration": 0}
+    patch = await eng._node_design(state)
+    # Nobody is asked: no pause, and no "try another model" or choice to make.
+    assert seen == [] and eng._search_cannot_start_stop(state, patch["design"]) is not None
 
     async def measure_reply(messages: list[dict[str, str]], **kw: Any) -> str:
         assert op.MEASURE_INSTEAD in messages[-1]["content"]
@@ -270,8 +278,10 @@ async def test_a_stop_without_an_ask_does_not_say_the_model_was_asked(tmp_path: 
     eng._client = None
     seen: list[dict[str, Any]] = []
     eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": TOPIC, "iteration": 0, "clarify_answers": {"study_type": "2"}})
-    steps = " ".join(seen[0]["steps"])
-    assert "did not ask the plan's model" in steps and "asked the plan's model" not in steps.replace("did not ask the plan's model", "")
-    assert "Choose one" not in steps and op.MEASURE_INSTEAD not in steps and "Try another model" in steps
+    state = {"topic": TOPIC, "iteration": 0, "clarify_answers": {"study_type": "2"}}
+    patch = await eng._node_design(state)
+    assert seen == []
+    stop = eng._search_cannot_start_stop(state, patch["design"])["exec_result"]
+    steps = " ".join(stop["no_search_tried"])
+    assert "had no model to ask" in steps and "asked the plan's model" not in steps
+    assert "another model" not in steps.lower() and op.MEASURE_INSTEAD not in steps

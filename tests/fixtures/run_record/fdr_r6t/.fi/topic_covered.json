@@ -1,0 +1,45 @@
+{
+  "judge_calls": 3,
+  "judged": {
+    "43b96a3b9931e1f5b7cd": {
+      "Q3": "covered",
+      "M1": "missing"
+    },
+    "042be5bfb0ab4b4db565": {
+      "Q3": "covered"
+    },
+    "af07b8a1afa4b80e7574": {
+      "Q1": "covered",
+      "Q3": "covered"
+    }
+  },
+  "ever_missing": [
+    "reference for Benjamini-Hochberg",
+    "m",
+    "pi1"
+  ],
+  "mapped": {
+    "power": "power"
+  },
+  "overruled": [],
+  "plan_done": true,
+  "left": [
+    {
+      "kind": "level",
+      "name": "m",
+      "main": true,
+      "axis": "m",
+      "sentence": "The topic states which values of m to use, but the values 200 are not among its settings."
+    },
+    {
+      "kind": "level",
+      "name": "pi1",
+      "main": false,
+      "axis": "pi1",
+      "sentence": "The topic states which values of pi1 to use, but the values 0.05 are not among its settings."
+    }
+  ],
+  "unjudged": [],
+  "asked": 1,
+  "checked_at_design": true
+}

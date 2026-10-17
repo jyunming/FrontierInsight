@@ -1,0 +1,22 @@
+- id: ea_spread
+  estimand: Mean absolute error of Ea fit conditional on a valid fit.
+  kind: mean
+  unit: J/mol
+  cluster: null
+  paired: false
+  family: accuracy
+- id: k_relative_spread_by_temperature
+  estimand: Mean absolute relative error of k fit at each temperature conditional
+    on a valid fit.
+  kind: mean
+  unit: dimensionless
+  cluster: null
+  paired: false
+  family: accuracy
+- id: lnA_spread
+  estimand: Mean absolute error of ln A fit conditional on a valid fit.
+  kind: mean
+  unit: dimensionless
+  cluster: null
+  paired: false
+  family: accuracy

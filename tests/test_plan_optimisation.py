@@ -380,9 +380,10 @@ async def test_the_persons_answer_reaches_the_plan_and_is_kept(tmp_path: Path) -
     assert plan.parse(text).design["study_type"] == "find_best_design"
     assert "You answered that this study should find the best design" in text
     seen = _stop_at_pause(eng)
-    with pytest.raises(Paused):
-        await eng._node_design(state)
-    assert "what the search should make as low or as high as possible" in " ".join(seen[0]["steps"])
+    patch = await eng._node_design(state)  # nobody is asked: the design step goes on, the run step ends in the honest stop
+    assert seen == []
+    stop = eng._search_cannot_start_stop(state, patch["design"])
+    assert stop is not None and "what the search should make as low or as high as possible" in stop["exec_result"]["no_search"]
 
 
 @pytest.mark.asyncio
@@ -486,8 +487,10 @@ async def test_a_topic_that_asks_for_the_best_design_is_not_run_as_a_sweep_when_
     assert plan.parse(text).design["study_type"] == "find_best_design"
     assert "The topic asks to find the best design" in text
     seen = _stop_at_pause(eng)
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": topic, "iteration": 0})
+    state = {"topic": topic, "iteration": 0}
+    patch = await eng._node_design(state)
+    assert seen == [], "nobody is asked"
+    assert eng._search_cannot_start_stop(state, patch["design"]) is not None, "a search is never run as a sweep"
 
 
 @pytest.mark.asyncio
@@ -528,7 +531,10 @@ async def test_an_answer_does_not_hide_what_a_plan_with_a_block_is_missing(tmp_p
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(plan.render("fins", EXTRA, no_budget), encoding="utf-8")
     seen = _stop_at_pause(eng)
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": "fins", "iteration": 0, "clarify_answers": {"study_type": "2"}})
-    steps = " ".join(seen[0]["steps"])
+    state = {"topic": "fins", "iteration": 0, "clarify_answers": {"study_type": "2"}}
+    patch = await eng._node_design(state)
+    assert seen == []
+    stop = eng._search_cannot_start_stop(state, patch["design"])
+    assert stop is not None
+    steps = stop["exec_result"]["no_search"]
     assert "how many designs the search may try" in steps and "the design is a measurement over chosen settings" not in steps

@@ -246,8 +246,8 @@ async def test_a_failed_http_call_and_its_retry_are_in_the_quest_log(monkeypatch
 
 def test_research_cards_offer_only_what_the_engine_allows() -> None:
     card = todo.pause_item("numeric", "stopped", [], profile="research", frozen=True)
-    assert any("Go on unchanged" in a and "does not count the run as holding to its protocol" in a
-               for a in card.alternatives), "research lets the warnings be accepted, and the card says what it costs"
+    assert not any("Go on unchanged" in a or "accepted" in a for a in card.alternatives), \
+        "nobody is offered to accept warnings the repairs did not remove: the quest ends without a paper instead"
 
 
 def test_a_key_in_a_url_is_not_written_to_the_log() -> None:

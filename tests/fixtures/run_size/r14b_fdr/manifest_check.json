@@ -1,0 +1,1235 @@
+{
+ "source": "C:/fi_runs/suite/rounds/r14b/false_discovery/out/1792095593-fdr-bonferroni-vs-bh-0bba0d (final experiment.py run on FI's stored trials.json)",
+ "protocol": {
+  "grid": {
+   "m": [
+    20,
+    200,
+    2000
+   ],
+   "pi1": [
+    0.0,
+    0.05,
+    0.2
+   ]
+  },
+  "runs_per_setting": 1500,
+  "in_each_run": {
+   "procedure": [
+    "uncorrected",
+    "bonferroni",
+    "benjamini_hochberg"
+   ]
+  },
+  "metrics": [
+   {
+    "id": "fdr",
+    "estimand": "E[V/max(R,1)] over independently simulated test families, where V is the number of rejected true nulls and R is the total number of rejections.",
+    "kind": "mean",
+    "unit": "one simulated multiple-testing family",
+    "cluster": null,
+    "paired": true,
+    "family": "All m hypotheses in one simulated family"
+   },
+   {
+    "id": "power",
+    "estimand": "E[S/m1] over simulated families with m1 = m*pi1 > 0, where S is the number of rejected non-null hypotheses.",
+    "kind": "mean",
+    "unit": "one simulated multiple-testing family",
+    "cluster": null,
+    "paired": true,
+    "family": "The m1 non-null hypotheses in one simulated family"
+   },
+   {
+    "id": "any_false_discovery_probability",
+    "estimand": "P(R > 0 | pi1 = 0), estimated from the indicator of one or more rejections in an all-null family.",
+    "kind": "proportion",
+    "unit": "one simulated all-null multiple-testing family",
+    "cluster": null,
+    "paired": true,
+    "family": "All m null hypotheses in one simulated family"
+   }
+  ],
+  "thresholds": {
+   "alpha": 0.05,
+   "q": 0.05,
+   "nonnull_shift": 2.5
+  }
+ },
+ "successful_per_cell": {
+  "m=20,pi1=0.0": 1500,
+  "m=20,pi1=0.05": 1500,
+  "m=20,pi1=0.2": 1500,
+  "m=200,pi1=0.0": 1500,
+  "m=200,pi1=0.05": 1500,
+  "m=200,pi1=0.2": 1500,
+  "m=2000,pi1=0.0": 1500,
+  "m=2000,pi1=0.05": 1500,
+  "m=2000,pi1=0.2": 1500
+ },
+ "recorded_by_cell": {
+  "m=20,pi1=0.0,procedure=uncorrected": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    0,
+    1500
+   ]
+  },
+  "m=20,pi1=0.0,procedure=bonferroni": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    0,
+    1500
+   ]
+  },
+  "m=20,pi1=0.0,procedure=benjamini_hochberg": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    0,
+    1500
+   ]
+  },
+  "m=20,pi1=0.05,procedure=uncorrected": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=20,pi1=0.05,procedure=bonferroni": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=20,pi1=0.05,procedure=benjamini_hochberg": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=20,pi1=0.2,procedure=uncorrected": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=20,pi1=0.2,procedure=bonferroni": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=20,pi1=0.2,procedure=benjamini_hochberg": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=200,pi1=0.0,procedure=uncorrected": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    0,
+    1500
+   ]
+  },
+  "m=200,pi1=0.0,procedure=bonferroni": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    0,
+    1500
+   ]
+  },
+  "m=200,pi1=0.0,procedure=benjamini_hochberg": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    0,
+    1500
+   ]
+  },
+  "m=200,pi1=0.05,procedure=uncorrected": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=200,pi1=0.05,procedure=bonferroni": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=200,pi1=0.05,procedure=benjamini_hochberg": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=200,pi1=0.2,procedure=uncorrected": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=200,pi1=0.2,procedure=bonferroni": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=200,pi1=0.2,procedure=benjamini_hochberg": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=2000,pi1=0.0,procedure=uncorrected": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    0,
+    1500
+   ]
+  },
+  "m=2000,pi1=0.0,procedure=bonferroni": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    0,
+    1500
+   ]
+  },
+  "m=2000,pi1=0.0,procedure=benjamini_hochberg": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    0,
+    1500
+   ]
+  },
+  "m=2000,pi1=0.05,procedure=uncorrected": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=2000,pi1=0.05,procedure=bonferroni": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=2000,pi1=0.05,procedure=benjamini_hochberg": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=2000,pi1=0.2,procedure=uncorrected": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=2000,pi1=0.2,procedure=bonferroni": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  },
+  "m=2000,pi1=0.2,procedure=benjamini_hochberg": {
+   "fdr": [
+    1500,
+    0
+   ],
+   "any_false_discovery_probability": [
+    1500,
+    0
+   ],
+   "power": [
+    1500,
+    0
+   ]
+  }
+ },
+ "result_json": {
+  "by_m": {
+   "20": {
+    "by_pi1": {
+     "0.0": {
+      "by_method": {
+       "benjamini_hochberg": {
+        "any_false_discovery_probability": 0.05533333333333333,
+        "any_false_discovery_probability_ci95": [
+         0.04485824885472669,
+         0.06808015819908805
+        ],
+        "any_false_discovery_probability_count": 83,
+        "any_false_discovery_probability_total": 1500,
+        "any_false_discovery_probability_undefined": 0,
+        "any_false_discovery_probability_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "failed_runs": 0,
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power_undefined": 1500,
+        "power_values": {
+         "__finite__": 0,
+         "__null__": 1500
+        }
+       },
+       "bonferroni": {
+        "any_false_discovery_probability": 0.05466666666666667,
+        "any_false_discovery_probability_ci95": [
+         0.0442585691503609,
+         0.06734991047774742
+        ],
+        "any_false_discovery_probability_count": 82,
+        "any_false_discovery_probability_total": 1500,
+        "any_false_discovery_probability_undefined": 0,
+        "any_false_discovery_probability_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "failed_runs": 0,
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power_undefined": 1500,
+        "power_values": {
+         "__finite__": 0,
+         "__null__": 1500
+        },
+        "theory_any_false_discovery_probability": 0.04883012474683324
+       },
+       "uncorrected": {
+        "any_false_discovery_probability": 0.6653333333333333,
+        "any_false_discovery_probability_ci95": [
+         0.6410581100348438,
+         0.6887638915403496
+        ],
+        "any_false_discovery_probability_count": 998,
+        "any_false_discovery_probability_total": 1500,
+        "any_false_discovery_probability_undefined": 0,
+        "any_false_discovery_probability_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "failed_runs": 0,
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power_undefined": 1500,
+        "power_values": {
+         "__finite__": 0,
+         "__null__": 1500
+        },
+        "theory_any_false_discovery_probability": 0.6415140775914581
+       }
+      }
+     },
+     "0.05": {
+      "by_method": {
+       "benjamini_hochberg": {
+        "failed_runs": 0,
+        "fdr": 0.051666666666666666,
+        "fdr_ci95": [
+         0.041944444444444444,
+         0.06200277777777776
+        ],
+        "fdr_reference_pi0_q": 0.0475,
+        "fdr_undefined": 0,
+        "fdr_upper_margin_to_reference": 0.01450277777777776,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.4066666666666667,
+        "power_ci95": [
+         0.38133333333333336,
+         0.43133333333333335
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        }
+       },
+       "bonferroni": {
+        "failed_runs": 0,
+        "fdr": 0.043333333333333335,
+        "fdr_ci95": [
+         0.03465833333333333,
+         0.053
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.398,
+        "power_ci95": [
+         0.37333333333333335,
+         0.422
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.37940883467403946
+       },
+       "uncorrected": {
+        "failed_runs": 0,
+        "fdr": 0.421411111111111,
+        "fdr_ci95": [
+         0.4041430555555556,
+         0.4383113888888888
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.8106666666666666,
+        "power_ci95": [
+         0.7906666666666666,
+         0.8306666666666667
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.8037649400154937
+       }
+      },
+      "paired_bh_minus_bonferroni_power": {
+       "ci95": [
+        0.004,
+        0.013333333333333334
+       ],
+       "estimate": 0.008666666666666666,
+       "paired_trial_count": 1500,
+       "values": "<list of 1500>"
+      }
+     },
+     "0.2": {
+      "by_method": {
+       "benjamini_hochberg": {
+        "failed_runs": 0,
+        "fdr": 0.0404968253968254,
+        "fdr_ci95": [
+         0.034237817460317455,
+         0.046860476190476195
+        ],
+        "fdr_reference_pi0_q": 0.04000000000000001,
+        "fdr_undefined": 0,
+        "fdr_upper_margin_to_reference": 0.006860476190476188,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.5103333333333333,
+        "power_ci95": [
+         0.4951625,
+         0.5253333333333333
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        }
+       },
+       "bonferroni": {
+        "failed_runs": 0,
+        "fdr": 0.02098888888888889,
+        "fdr_ci95": [
+         0.015910555555555553,
+         0.026744999999999998
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.37216666666666665,
+        "power_ci95": [
+         0.3601625,
+         0.3848375
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.37940883467403946
+       },
+       "uncorrected": {
+        "failed_runs": 0,
+        "fdr": 0.17997460317460318,
+        "fdr_ci95": [
+         0.17134616402116398,
+         0.18850133597883598
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.8001666666666667,
+        "power_ci95": [
+         0.7898333333333334,
+         0.8096666666666666
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.8037649400154937
+       }
+      },
+      "paired_bh_minus_bonferroni_power": {
+       "ci95": [
+        0.1286625,
+        0.14850416666666663
+       ],
+       "estimate": 0.13816666666666666,
+       "paired_trial_count": 1500,
+       "values": "<list of 1500>"
+      }
+     }
+    }
+   },
+   "200": {
+    "by_pi1": {
+     "0.0": {
+      "by_method": {
+       "benjamini_hochberg": {
+        "any_false_discovery_probability": 0.059333333333333335,
+        "any_false_discovery_probability_ci95": [
+         0.04846576891093947,
+         0.07245220269711383
+        ],
+        "any_false_discovery_probability_count": 89,
+        "any_false_discovery_probability_total": 1500,
+        "any_false_discovery_probability_undefined": 0,
+        "any_false_discovery_probability_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "failed_runs": 0,
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power_undefined": 1500,
+        "power_values": {
+         "__finite__": 0,
+         "__null__": 1500
+        }
+       },
+       "bonferroni": {
+        "any_false_discovery_probability": 0.056666666666666664,
+        "any_false_discovery_probability_ci95": [
+         0.04605898663346571,
+         0.06953927527176187
+        ],
+        "any_false_discovery_probability_count": 85,
+        "any_false_discovery_probability_total": 1500,
+        "any_false_discovery_probability_undefined": 0,
+        "any_false_discovery_probability_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "failed_runs": 0,
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power_undefined": 1500,
+        "power_values": {
+         "__finite__": 0,
+         "__null__": 1500
+        },
+        "theory_any_false_discovery_probability": 0.04877652165564883
+       },
+       "uncorrected": {
+        "any_false_discovery_probability": 1.0,
+        "any_false_discovery_probability_ci95": [
+         0.9974455692798185,
+         1.0
+        ],
+        "any_false_discovery_probability_count": 1500,
+        "any_false_discovery_probability_total": 1500,
+        "any_false_discovery_probability_undefined": 0,
+        "any_false_discovery_probability_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "failed_runs": 0,
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power_undefined": 1500,
+        "power_values": {
+         "__finite__": 0,
+         "__null__": 1500
+        },
+        "theory_any_false_discovery_probability": 0.9999649473337512
+       }
+      }
+     },
+     "0.05": {
+      "by_method": {
+       "benjamini_hochberg": {
+        "failed_runs": 0,
+        "fdr": 0.05507989417989418,
+        "fdr_ci95": [
+         0.048219894179894175,
+         0.062038042328042324
+        ],
+        "fdr_reference_pi0_q": 0.0475,
+        "fdr_undefined": 0,
+        "fdr_upper_margin_to_reference": 0.014538042328042323,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.2667333333333333,
+        "power_ci95": [
+         0.2576,
+         0.276135
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        }
+       },
+       "bonferroni": {
+        "failed_runs": 0,
+        "fdr": 0.0251063492063492,
+        "fdr_ci95": [
+         0.019377500000000002,
+         0.0316972619047619
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.16313333333333335,
+        "power_ci95": [
+         0.15713333333333335,
+         0.16940000000000002
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.1633564407506457
+       },
+       "uncorrected": {
+        "failed_runs": 0,
+        "fdr": 0.5305417822304526,
+        "fdr_ci95": [
+         0.5255654036325994,
+         0.535029370800498
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.8055333333333333,
+        "power_ci95": [
+         0.7992000000000001,
+         0.8117350000000001
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.8037649400154937
+       }
+      },
+      "paired_bh_minus_bonferroni_power": {
+       "ci95": [
+        0.09740000000000001,
+        0.10960166666666667
+       ],
+       "estimate": 0.1036,
+       "paired_trial_count": 1500,
+       "values": "<list of 1500>"
+      }
+     },
+     "0.2": {
+      "by_method": {
+       "benjamini_hochberg": {
+        "failed_runs": 0,
+        "fdr": 0.042684370044137665,
+        "fdr_ci95": [
+         0.040425321230491286,
+         0.045111956100387714
+        ],
+        "fdr_reference_pi0_q": 0.04000000000000001,
+        "fdr_undefined": 0,
+        "fdr_upper_margin_to_reference": 0.005111956100387706,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.4700333333333333,
+        "power_ci95": [
+         0.4645,
+         0.47575083333333335
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        }
+       },
+       "bonferroni": {
+        "failed_runs": 0,
+        "fdr": 0.007028440078440079,
+        "fdr_ci95": [
+         0.005262735643985644,
+         0.008919211806711807
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.1652,
+        "power_ci95": [
+         0.16224958333333334,
+         0.16823333333333332
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.1633564407506457
+       },
+       "uncorrected": {
+        "failed_runs": 0,
+        "fdr": 0.19638184832115016,
+        "fdr_ci95": [
+         0.193468670607969,
+         0.1991636022514058
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.8050499999999999,
+        "power_ci95": [
+         0.8019,
+         0.8081675
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.8037649400154937
+       }
+      },
+      "paired_bh_minus_bonferroni_power": {
+       "ci95": [
+        0.30004958333333337,
+        0.3095504166666667
+       ],
+       "estimate": 0.30483333333333335,
+       "paired_trial_count": 1500,
+       "values": "<list of 1500>"
+      }
+     }
+    }
+   },
+   "2000": {
+    "by_pi1": {
+     "0.0": {
+      "by_method": {
+       "benjamini_hochberg": {
+        "any_false_discovery_probability": 0.06666666666666667,
+        "any_false_discovery_probability_ci95": [
+         0.05511785167024167,
+         0.0804293216205823
+        ],
+        "any_false_discovery_probability_count": 100,
+        "any_false_discovery_probability_total": 1500,
+        "any_false_discovery_probability_undefined": 0,
+        "any_false_discovery_probability_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "failed_runs": 0,
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power_undefined": 1500,
+        "power_values": {
+         "__finite__": 0,
+         "__null__": 1500
+        }
+       },
+       "bonferroni": {
+        "any_false_discovery_probability": 0.066,
+        "any_false_discovery_probability_ci95": [
+         0.0545112274826468,
+         0.07970601838247074
+        ],
+        "any_false_discovery_probability_count": 99,
+        "any_false_discovery_probability_total": 1500,
+        "any_false_discovery_probability_undefined": 0,
+        "any_false_discovery_probability_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "failed_runs": 0,
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power_undefined": 1500,
+        "power_values": {
+         "__finite__": 0,
+         "__null__": 1500
+        },
+        "theory_any_false_discovery_probability": 0.048771170027499755
+       },
+       "uncorrected": {
+        "any_false_discovery_probability": 1.0,
+        "any_false_discovery_probability_ci95": [
+         0.9974455692798185,
+         1.0
+        ],
+        "any_false_discovery_probability_count": 1500,
+        "any_false_discovery_probability_total": 1500,
+        "any_false_discovery_probability_undefined": 0,
+        "any_false_discovery_probability_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "failed_runs": 0,
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power_undefined": 1500,
+        "power_values": {
+         "__finite__": 0,
+         "__null__": 1500
+        },
+        "theory_any_false_discovery_probability": 1.0
+       }
+      }
+     },
+     "0.05": {
+      "by_method": {
+       "benjamini_hochberg": {
+        "failed_runs": 0,
+        "fdr": 0.04893803354578121,
+        "fdr_ci95": [
+         0.046705060473330985,
+         0.05118443348895842
+        ],
+        "fdr_reference_pi0_q": 0.0475,
+        "fdr_undefined": 0,
+        "fdr_upper_margin_to_reference": 0.0036844334889584163,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.23314,
+        "power_ci95": [
+         0.22979883333333334,
+         0.23657383333333332
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        }
+       },
+       "bonferroni": {
+        "failed_runs": 0,
+        "fdr": 0.009277056277056278,
+        "fdr_ci95": [
+         0.007440140091390091,
+         0.01131601430976431
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.060466666666666676,
+        "power_ci95": [
+         0.05929316666666666,
+         0.06167333333333334
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.05989840949016435
+       },
+       "uncorrected": {
+        "failed_runs": 0,
+        "fdr": 0.5404285596586863,
+        "fdr_ci95": [
+         0.5390675546757807,
+         0.5418332667943804
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.8041533333333334,
+        "power_ci95": [
+         0.8021265,
+         0.8060466666666666
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.8037649400154937
+       }
+      },
+      "paired_bh_minus_bonferroni_power": {
+       "ci95": [
+        0.1696,
+        0.17564149999999998
+       ],
+       "estimate": 0.17267333333333332,
+       "paired_trial_count": 1500,
+       "values": "<list of 1500>"
+      }
+     },
+     "0.2": {
+      "by_method": {
+       "benjamini_hochberg": {
+        "failed_runs": 0,
+        "fdr": 0.04037270733320032,
+        "fdr_ci95": [
+         0.039711004306284596,
+         0.0410839049184602
+        ],
+        "fdr_reference_pi0_q": 0.04000000000000001,
+        "fdr_undefined": 0,
+        "fdr_upper_margin_to_reference": 0.0010839049184601934,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.46676500000000004,
+        "power_ci95": [
+         0.46490329166666666,
+         0.4686137083333333
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        }
+       },
+       "bonferroni": {
+        "failed_runs": 0,
+        "fdr": 0.0022153788097585498,
+        "fdr_ci95": [
+         0.0017536724729939736,
+         0.002725464797342076
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.06008666666666666,
+        "power_ci95": [
+         0.05951162500000001,
+         0.060685083333333334
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.05989840949016435
+       },
+       "uncorrected": {
+        "failed_runs": 0,
+        "fdr": 0.1987648809930864,
+        "fdr_ci95": [
+         0.1978739156108208,
+         0.1996383120838447
+        ],
+        "fdr_undefined": 0,
+        "fdr_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "power": 0.8045983333333333,
+        "power_ci95": [
+         0.80358,
+         0.8056300833333333
+        ],
+        "power_undefined": 0,
+        "power_values": {
+         "__finite__": 1500,
+         "__null__": 0
+        },
+        "theory_power": 0.8037649400154937
+       }
+      },
+      "paired_bh_minus_bonferroni_power": {
+       "ci95": [
+        0.4049716666666667,
+        0.4085050833333333
+       ],
+       "estimate": 0.4066783333333333,
+       "paired_trial_count": 1500,
+       "values": "<list of 1500>"
+      }
+     }
+    }
+   }
+  },
+  "config": {
+   "alpha": 0.05,
+   "master_seed": 20261015,
+   "nonnull_shift": 2.5,
+   "q": 0.05,
+   "runs_per_setting": 1500
+  },
+  "failed_run_count": 0,
+  "failed_runs": [],
+  "oracles": {}
+ }
+}

@@ -652,8 +652,8 @@ _KNOWN_NODES = frozenset({
 # (`_enforce_protocol`); "skills" -> `_node_select_skills` (the node's own log lines never say
 # "[select_skills]"); "after_literature" -> `_node_pause_after_literature` (same mismatch); "stats"
 # -> `_node_analyze`; "numeric_oracle"/"stat_claims"/"figure_check"/"goal_coverage"/
-# "number_provenance"/"page_limit" -> `_node_review` (the provenance/claim/figure/page-limit audits
-# it runs before accepting or sending back); "auto_collect" -> `_node_auto_collect_data`. Left out
+# "number_provenance"/"page_limit" -> `_node_review` (the reference-value/claim/figure/topic/page-limit checks
+# it runs before accepting or sending back; "number_provenance" is kept for older run logs); "auto_collect" -> `_node_auto_collect_data`. Left out
 # on purpose: "evidence" (written by `run()` after the graph settles, not from inside any one
 # node), "cost" (an ``_ensemble_chat`` line any ensembled node can log), "audit" (the audit-trace
 # wrapper around every node) — none names a single node truthfully.
@@ -1474,6 +1474,17 @@ def make_app(
 
         return JSONResponse({"quest_id": quest_id, "about": about,
                              "text": fi_why.explain(_resolve_quest_root(app.state.output_root, quest_id), about)})
+
+    @app.get("/api/quests/{quest_id}/quality")
+    async def get_quality(quest_id: str) -> JSONResponse:
+        """The quest's quality report (core/quality_report.py, the same text as ``launch.py --quality`` and QUALITY.md):
+        where it went wrong, who caught it, what was fixed, what to try, what it cost. Read from the quest's records."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        from core import quality_report as fi_quality
+
+        report = fi_quality.build(_resolve_quest_root(app.state.output_root, quest_id))
+        return JSONResponse({"quest_id": quest_id, "text": fi_quality.render(report), "report": report})
 
     @app.get("/api/quests/{quest_id}/amendment")
     async def get_amendment(quest_id: str) -> JSONResponse:

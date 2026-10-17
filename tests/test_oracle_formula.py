@@ -284,3 +284,80 @@ def test_after_an_approximate_sign_a_small_gap_is_never_a_slip() -> None:
     value = tri.calculate("(2/pi)*ellipk(sin(pi/8)**2)")
     assert tri.arithmetic_slip(base + f"{value * 1.0005:.5f}", value * 1.0005, 0.001 * exact) is None
     assert tri.arithmetic_slip(base + f"{value * 1.004:.5f}", value * 1.004) is None
+
+
+# --- the special functions of FI's own expected-value working ----------------------------------------------------------
+# A real plan (suite r7, deep-ultraviolet lithography) wrote its expected value with the Bessel function J1, which FI
+# could not compute, so the check rested on the plan's own number.
+
+COHERENCE_ZERO = {"name": "mutual_coherence_first_zero", "kind": "special_case",
+                  "check": "Evaluate the circular-source mutual coherence at the first zero of J1.", "expected": 0.0,
+                  "expected_formula": "2*J1(2*pi*sigma*NA*d_m/lambda_m)/(2*pi*sigma*NA*d_m/lambda_m)",
+                  "tolerance": 1e-10, "tolerance_mode": "absolute",
+                  "case": {"sigma": 0.15915494309189535, "NA": 1.5, "d_m": 5.108941293610016, "lambda_m": 2.0},
+                  "measure": "mutual_coherence"}
+
+
+@pytest.mark.parametrize(("formula", "value"), [
+    ("j0(1)", 0.7651976865579666), ("j1(1)", 0.44005058574493355), ("J0(2.404825557695773)", 0.0),
+    ("j1(-2)", -0.5767248077568734), ("j0(1000)", 0.02478668615242017), ("j0(0)", 1.0),
+    ("erf(1)", 0.8427007929497149), ("0.5*erfc(1.96/sqrt(2))", 0.024997895148220428), ("gamma(5)", 24.0),
+    ("gamma(0.5)**2", 3.141592653589793), ("lgamma(100)", 359.1342053695754),
+])
+def test_the_special_functions_match_scipys(formula: str, value: float) -> None:
+    got = of.evaluate(formula, {}, special=True).value
+    assert got is not None and abs(got - value) <= 1e-14 * max(1.0, abs(value)), (formula, got)
+
+
+def test_a_bessel_function_far_out_or_a_pole_is_not_a_number() -> None:
+    assert of.evaluate("j0(20000)", {}, special=True).value is None
+    assert of.evaluate("gamma(0)", {}, special=True).value is None
+
+
+def test_the_r7_bessel_check_is_computed_by_fi_and_agrees() -> None:
+    value, why = of.formula_value(COHERENCE_ZERO)
+    assert why == "" and value is not None and abs(value) < 1e-15
+    assert [f["state"] for f in of.formula_findings(_protocol(dict(COHERENCE_ZERO)))] == ["agrees"]
+
+
+def test_a_setting_named_like_a_special_function_is_a_setting() -> None:
+    # A damping rate `gamma` or a current `j0` in a check's case is read as that setting; called, it is the function.
+    assert of.evaluate("gamma*2 + gamma(3)", {"gamma": 0.25}, special=True).value == 2.5
+    assert of.evaluate("j0", {}, special=True).missing == ["j0"]
+    assert of.evaluate("sqrt*2", {"sqrt": 1.0}, special=True).unreadable  # an ordinary function never is
+
+
+def test_only_fis_own_expected_formula_uses_the_special_functions() -> None:
+    # A check's own formula is built from what the simulation returns, never through these.
+    assert of.evaluate("erf(x)", {"x": 1.0}).unreadable
+    # Prose (a derivation, a paper's formula) can mean the author's own gamma(T) or j0(x): never read as these.
+    assert tri.calculate("gamma(2)") is None and tri.calculate("j0(1)") is None and tri.calculate("erf(1)") is None
+    assert tri.calculate("ellipk(0.5)") is not None
+    assert tri.arithmetic_slip("derivation: gamma(2) = 0.3", 0.3) is None
+
+
+CORR = {"name": "corr_design_check", "kind": "special_case", "check": "corr", "expected": 0.99975,
+        "expected_formula": "0.0031419/sqrt(1.4e-8+0.0031419**2)", "tolerance": 0.0005, "tolerance_mode": "absolute",
+        "case": {"n_points": 12}, "measure": "corr_theory"}
+
+
+def test_a_formula_value_inside_the_tolerance_but_outside_the_typed_digits_is_the_checks_value() -> None:
+    """Real fault (a live run): typed 0.99975, formula 0.999292 (4.6e-4 apart, tolerance 5e-4). The typed number was kept,
+    the measurement 0.999095 failed against it, and the triage said the expected value was FI's own 0.999292."""
+    protocol = _protocol(CORR)
+    found = of.formula_findings(protocol)
+    assert [f["state"] for f in found] == ["differs"]
+    assert tri.formula_value(CORR, protocol) is None  # not FI's value for the check while the typed number stands
+    out = {**CORR, "expected": found[0]["value"]}
+    assert tri.formula_value(out, protocol) == pytest.approx(0.9992916438)
+    assert abs(0.999095 - out["expected"]) <= out["tolerance"]  # the measurement now passes
+    assert abs(0.998 - out["expected"]) > out["tolerance"]  # a wrong measurement still fails
+
+
+def test_a_typed_number_that_is_the_formula_rounded_is_kept() -> None:
+    rounded = {**CORR, "expected": 0.99929, "tolerance": 0.001}
+    assert of.formula_findings(_protocol(rounded))[0]["state"] == "agrees"
+    zero = {"name": "z", "kind": "special_case", "check": "c", "expected": 0, "expected_formula": "sin(pi)",
+            "tolerance": 1e-9, "tolerance_mode": "absolute", "case": {}, "measure": "z"}
+    assert not of.disagrees(1.2246e-16, 0.0, 1e-9)
+    assert zero["expected"] == 0

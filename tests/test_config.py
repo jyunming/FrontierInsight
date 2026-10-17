@@ -30,6 +30,8 @@ def test_negative_numeric_config_fields_fail_fast() -> None:
     with pytest.raises(ValidationError):
         ExecutionConfig(timeout_s=0)
     with pytest.raises(ValidationError):
+        ExecutionConfig(clean_check_timeout_s=0)
+    with pytest.raises(ValidationError):
         KnowledgeConfig(full_text_fetch_timeout_s=-1)
     with pytest.raises(ValidationError):
         KnowledgeConfig(relevance_min_score=1.5)   # le=1.0 → >1 rejected
@@ -291,7 +293,7 @@ def test_output_config_defaults_roundtrip() -> None:
     dumped = oc.model_dump()
     reconstructed = OutputConfig.model_validate(dumped)
     assert reconstructed.kinds == oc.kinds == ["paper_md", "paper_pdf"]
-    assert reconstructed.paper_format == oc.paper_format == "generic"
+    assert reconstructed.paper_format == oc.paper_format == "article"
     assert reconstructed.output_dir == oc.output_dir == Path("./outputs")
 
 
@@ -438,3 +440,7 @@ def test_from_yaml_accepts_valid_and_legacy_keys(tmp_path: Path) -> None:
     cfg = Config.from_yaml(p)  # must not raise
     assert cfg.provider.node_http_timeout_s["implement"] == 900
     assert cfg.pauses.papers is True  # legacy flag mapped through
+
+
+def test_the_clean_check_of_code_defaults_to_fifteen_minutes() -> None:
+    assert ExecutionConfig().clean_check_timeout_s == 900

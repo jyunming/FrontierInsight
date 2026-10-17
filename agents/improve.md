@@ -6,6 +6,12 @@ independent trials should. FI runs the simulation itself on each check's own set
 names from what the simulation function returns; nothing the code prints, and no result file it writes, is read. The study's own findings are not shown to you and are not what you are improving: a change is
 kept only when it makes a check of correctness better without making another one worse.
 
+## The topic, as the person wrote it
+
+This is what the study is for. The plan below was written from it; where the plan and the topic disagree about a formula, a setting or a quantity, the topic is the specification.
+
+$topic_block
+
 ## The checks (fixed with the protocol; they cannot be changed here)
 
 $criteria_block

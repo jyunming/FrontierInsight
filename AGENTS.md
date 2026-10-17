@@ -8,7 +8,7 @@ Frontier Insight (FI) is a Windows + Linux native automated research pipeline. *
 
 The graph has two paths after `design`. The simulate path is `implement → execute → execute_reflect → improve → analyze` (`improve`, `core/improve.py`, changes the simulation one step at a time against the protocol's checks of correctness, bounded by `engine.improve_rounds`, and sends a kept version back to `execute` once); the no-simulation path (when `state.no_simulation_resolved` is True, decided at `clarify` or via `engine.no_simulation: true` in YAML) is `auto_collect_data → wait_for_data → data_load → analyze`. Both converge at `analyze → cross_check → write → review`.
 
-Three feedback loops: (a) `execute_reflect → execute` — fix a crashed script, bounded by `engine.exec_reflect_max_iterations`; (b) `cross_check → design` — `analyze.next_step ∈ {re_experiment, broaden_lit}` re-routes to design; (c) `review → design` — the classic revise loop. `review` can also go to `write` (only the text is wrong), to `implement` (a computed number is wrong; re-run, a small fixed number of times) and to `human_feedback`; a person's refine goes `human_feedback → write`, and `write → design` only when the writer names a point that needs a new experiment; `evidence_gate → literature` broadens (bounded) and `evidence_gate → design` retries once when the run produced no results. Loops (b) and (c) share `engine.max_iterations` as the budget; loop (a) has its own counter so a broken script doesn't eat the design-iteration budget. `no_simulation_resolved` is sticky across re-entries, so a redesign on a no-sim quest goes back through `auto_collect_data`, not `implement`.
+Three feedback loops: (a) `execute_reflect → execute` — fix a crashed script, bounded by `engine.exec_reflect_max_iterations`; (b) `cross_check → design` — `analyze.next_step == re_experiment` re-routes to design only when FI's own record shows the plan's precision target missed and a larger run fits the time allowed (`broaden_lit` re-enters `literature`); (c) `review → write` — the paper is written again for what the review found; a revise verdict or an objection to the design that no check of FI's confirms is kept in the quality report (`QUALITY.md`) and never changes the design (`review → design` only for a person's note the rewrite left unanswered). `review` can also go to `implement` (a computed number is wrong; re-run, a small fixed number of times) and to `human_feedback`; a person's refine goes `human_feedback → write`, and `write → design` only when the writer names a point that needs a new experiment; `evidence_gate → literature` broadens (bounded) and `evidence_gate → design` retries once when the run produced no results. Loops (b) and (c) share `engine.max_iterations` as the budget; loop (a) has its own counter so a broken script doesn't eat the design-iteration budget. `no_simulation_resolved` is sticky across re-entries, so a redesign on a no-sim quest goes back through `auto_collect_data`, not `implement`.
 
 ## A core requirement: rigorous architecture, simple surface
 
@@ -120,6 +120,30 @@ merge requirements for you).
 - **One external code review of the diff, always.** Every PR gets at least one review from a tool outside this session (Codex CLI, another Claude session, or `agy`) before it opens, even though it slows the PR down — that slowdown is accepted, not a reason to skip it. Write the diff/prompt to a file and have the reviewer produce a written report, not a verbal summary; read it and decide, finding by finding, what to fix.
 - **Re-review after applying that review's fixes, before opening.** A fix for one finding can silently introduce or miss a new bug — a construction site the first fix didn't cover, a fix that only half-applies. Once every finding from the first pass is addressed, run a second, targeted pass that checks each changed file specifically against the finding it was meant to fix (a full fresh review is not required, but skipping this step is not an option). Applying a suggested fix is not the same claim as verifying the fix is correct.
 - **Keep `dev/registry.md` current** in the same PR that adds, splits, or renames a module-level responsibility.
+
+## Splitting work for small, fast models
+
+Many fixes are small and mechanical. A coding agent that delegates work can hand those to a small, fast model (a
+Haiku-class model) and run several at once, keeping a larger model for judgment calls, the engine's core flow in
+`core/engine.py`, and changes that span modules. This works only when each task is small and fully specified.
+
+- **One task, one place.** One file and one function where possible, at most the file plus its test file (and one
+  named line elsewhere). Give each task its own git worktree and branch, created from the current branch head, so no
+  two agents edit the same file.
+- **Say everything the model needs.** The exact location (file, function, approximate line), the real failure it
+  fixes (a concrete input and what goes wrong), the rule to implement in plain words, what must NOT change, the tests
+  to add (including one that fails on the old code), the exact test command, and the commit message.
+- **Name the tests of the callers too.** List not only the changed module's test file but the test files of every
+  module that calls the changed function (find them with grep). A change that passes its own tests can break a
+  consumer: a filter that hid a quantity's name from model input also hid the engine's own repair instruction, and
+  only another module's tests caught it.
+- **Pass means the whole file passes.** The task must say: run every listed test file in full, paste the final
+  summary line, and treat any failure as "not done". Report anything done beyond the spec instead of doing it quietly.
+- **Do not use `git stash`** in a task (the stash stack is shared across worktrees and sessions); to run a test on
+  the old code, copy the file aside and restore it.
+- **Verify before merging.** Read each diff, rerun the listed test files yourself, and cherry-pick only what passes.
+  Reject a change whose rule is riskier than the problem it fixes (for example a rule that removes a loophole but
+  stops honest runs). Run the full suite before any evaluation round or PR, whatever the small tasks reported.
 
 ## Tests
 

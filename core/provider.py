@@ -1059,21 +1059,31 @@ def _cli_effort_args(spec: _CliSpec, level: str) -> list[str]:
     return spec.effort_args(level)
 
 
-#: Hosts whose chat calls are streamed. Long non-streamed requests to Moonshot's Kimi API stalled on the way (zero bytes
-#: until the read timeout, 27k-token prompts, 2026-09-27) while the same request streamed completed; other providers
-#: were not seen to stall, so they keep the plain request.
-_STREAMED_HOSTS = frozenset({"api.moonshot.ai", "api.moonshot.cn"})
-
-
+#: Every direct HTTP provider's chat calls are streamed (OpenAI-compatible ``stream: true``, server-sent events): a
+#: reasoning model can be silent to one plain request for longer than its read timeout (Moonshot's Kimi K3 stalled with
+#: zero bytes until the timeout on 27k-token prompts, 2026-09-27, while the same request streamed completed; the same
+#: holds for Ollama's thinking models, which have their own streamed call). The proxy providers are not streamed: what
+#: they forward is not known. A server that does not take ``stream`` (it answers with the whole reply, or refuses the
+#: field) keeps working: see :func:`_post_streamed` and ``LLMClient._chat_impl``.
 def _http_streams(endpoint: "ResolvedEndpoint") -> bool:
-    """Whether this HTTP endpoint's chat calls are streamed (see :data:`_STREAMED_HOSTS`)."""
-    from urllib.parse import urlparse
+    """Whether this HTTP endpoint's chat calls are streamed (see above)."""
+    # An endpoint built by hand with no provider name (a test double) is not one of FI's providers: sent whole.
+    return endpoint.transport == "http" and endpoint.provider_name in _DIRECT_DEFAULTS
 
-    try:
-        host = (urlparse(endpoint.base_url or "").hostname or "").lower()
-    except ValueError:
+
+def _refuses_streaming(e: "httpx.HTTPStatusError") -> bool:
+    """Whether a streamed call was refused because the server does not take ``stream`` (or ``stream_options``): a client
+    error whose body names it. The same request is then sent whole, and the endpoint is not streamed again."""
+    if getattr(e, "fi_in_stream", False):
         return False
-    return host in _STREAMED_HOSTS
+    response = getattr(e, "response", None)
+    if getattr(response, "status_code", None) not in (400, 404, 405, 415, 422, 501):
+        return False
+    try:
+        said = str(getattr(response, "text", "") or "")
+    except Exception:  # noqa: BLE001 -- a body that cannot be read only loses the detail
+        said = ""
+    return "stream" in said.lower()
 
 
 #: An error sent inside a stream that will clear by itself (read from its type, code and message): tried again, like a
@@ -1090,6 +1100,13 @@ _STREAM_PERMANENT = re.compile(
     r"unauthori[sz]ed|permission denied|permission error|forbidden|not found|quota|insufficient balance|"
     r"insufficient quota|billing|payment required|account suspended|context length exceeded)\b"
 )
+
+
+def _in_stream(exc: "httpx.HTTPStatusError") -> "httpx.HTTPStatusError":
+    """Marks an error that came inside a stream that had started (the server did take the call): never a refusal of
+    ``stream`` itself (:func:`_refuses_streaming`)."""
+    exc.fi_in_stream = True  # type: ignore[attr-defined]
+    return exc
 
 
 def _stream_error(error: Any, request: Any) -> BaseException:
@@ -1114,11 +1131,11 @@ def _stream_error(error: Any, request: Any) -> BaseException:
     # A permanent type or code wins over a hopeful message ("invalid request ... try again with a shorter prompt"),
     # unless the type or code itself says it will clear.
     if _STREAM_PERMANENT.search(norm(kind)) and not _STREAM_TRANSIENT.search(norm(kind)):
-        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request, text=text))
+        return _in_stream(httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request, text=text)))
     if _STREAM_TRANSIENT.search(norm(f"{kind} {message}")):
         return httpx.RemoteProtocolError(text)
     if status is not None and 400 <= int(status) < 500:
-        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request, text=text))
+        return _in_stream(httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request, text=text)))
     return httpx.RemoteProtocolError(text)
 
 
@@ -1291,18 +1308,24 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
 
 
 async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
-                         timeout: float) -> dict[str, Any]:
+                         timeout: float, inactivity: float | None = None,
+                         progress: dict[str, int] | None = None) -> dict[str, Any]:
     """The chat call as a stream, put back together into the shape a plain call returns (``choices[0].message.content``,
-    ``finish_reason``, ``usage``, ``model``).
+    ``finish_reason``, ``usage``, ``model``; the reasoning of a model that streams it, as ``reasoning_content``).
 
-    Time: ``timeout`` (the step's own HTTP timeout) is the limit on silence between two reads (httpx's read timeout);
-    ``timeout`` x :data:`_STREAM_TOTAL_FACTOR` bounds the whole call. A stream kept open by keep-alive comments, or one
-    that trickles for longer than that, fails with ``httpx.ReadTimeout`` and is tried again under the usual rules. Events follow the SSE format
-    (several ``data:`` lines of one event are joined; an event that does not parse is a protocol error, never skipped).
-    An error status raises as ``raise_for_status`` would; an error sent inside the stream is a 4xx-equivalent when
-    retrying cannot fix it (:func:`_stream_error`) and transient otherwise. A stream that ends without a
-    ``finish_reason`` was cut off and is tried again; one that finished without ``[DONE]`` or without usage is kept,
-    with a warning."""
+    Time: ``inactivity`` (default ``timeout``, the step's HTTP timeout) bounds the silence between two events, so a model
+    whose reasoning or answer keeps arriving is not cut off by it and a stalled stream is; only an event that carries
+    data counts, a keep-alive comment does not. ``timeout`` x :data:`_STREAM_TOTAL_FACTOR` bounds the whole call. Both
+    fail with ``httpx.ReadTimeout`` and are tried again under the usual rules. Events follow the SSE format (several
+    ``data:`` lines of one event are joined; an event that does not parse is a protocol error, never skipped). An error
+    status raises as ``raise_for_status`` would; an error sent inside the stream is a 4xx-equivalent when retrying
+    cannot fix it (:func:`_stream_error`) and transient otherwise. A stream that ends without a ``finish_reason`` was cut
+    off and is tried again; one that finished without ``[DONE]`` or without usage is kept, with a warning. A server that
+    ignores ``stream`` and answers with one JSON reply (``Content-Type: application/json``) is read as a plain call.
+    ``progress``: filled with ``chars``, the characters of answer and reasoning received so far, so a stream cut after
+    partial output (paid for, then asked again) can be recorded with an estimate of what it cost."""
+    wait = timeout if inactivity is None else inactivity
+    total = timeout * _STREAM_TOTAL_FACTOR
     options = body.get("stream_options") if isinstance(body.get("stream_options"), dict) else {}
     stream_body = {**body, "stream": True, "stream_options": {**options, "include_usage": True}}
     parts: list[str] = []
@@ -1313,13 +1336,22 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
     finish = None
     done = False
     request = httpx.Request("POST", url)
+    started = time.monotonic()
+    last_event = started  # when the last event that carried data arrived
+    first_any: float | None = None
+    first_thinking: float | None = None
+    first_content: float | None = None
+    silent = f"the model's stream sent nothing for {wait:g} s (its read timeout)"
 
     def take(event_name: str, data_lines: list[str]) -> bool:
         """Fold one event in; True when it was ``[DONE]``."""
-        nonlocal usage, model, finish
+        nonlocal usage, model, finish, last_event, first_any, first_thinking, first_content
         if not data_lines:
             return False
         data = "\n".join(data_lines)
+        now = time.monotonic()
+        last_event = now
+        first_any = (now - started) if first_any is None else first_any
         if data.strip() == "[DONE]":
             return True
         try:
@@ -1343,9 +1375,15 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
             piece = delta.get("content")
             if isinstance(piece, str) and piece:
                 parts.append(piece)
-            thought = as_text(delta.get("reasoning_content") or delta.get("reasoning"))
+                if progress is not None:
+                    progress["chars"] = progress.get("chars", 0) + len(piece)
+                first_content = (now - started) if first_content is None else first_content
+            thought = as_text(delta.get("reasoning_content") or delta.get("reasoning") or delta.get("reasoning_text"))
             if thought:
                 reasoning.append(thought)
+                if progress is not None:
+                    progress["chars"] = progress.get("chars", 0) + len(thought)
+                first_thinking = (now - started) if first_thinking is None else first_thinking
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
                 # Some servers send the usage on the choice that finishes.
@@ -1354,14 +1392,47 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
         return False
 
     try:
-        async with asyncio.timeout(timeout * _STREAM_TOTAL_FACTOR):
-            async with http.stream("POST", url, json=stream_body, headers=headers, timeout=timeout) as r:
+        async with asyncio.timeout(total):
+            async with http.stream("POST", url, json=stream_body, headers=headers,
+                                   timeout=httpx.Timeout(timeout, read=total)) as r:
                 request = r.request
                 if r.status_code >= 400:
                     await r.aread()
                     r.raise_for_status()
+                kind = (r.headers.get("content-type") or "").lower()
+                if "json" in kind and "event-stream" not in kind:
+                    # The server ignored `stream` and answers with the whole reply, as a plain call would.
+                    try:
+                        async with asyncio.timeout(wait):
+                            raw_body = await r.aread()
+                    except TimeoutError:
+                        raise httpx.ReadTimeout(silent) from None
+                    try:
+                        whole = json.loads(raw_body)
+                    except ValueError:
+                        raise httpx.RemoteProtocolError("the model's reply is not JSON") from None
+                    if isinstance(whole, dict) and whole.get("error"):
+                        raise _stream_error(whole["error"], request)
+                    if not isinstance(whole, dict):
+                        raise httpx.RemoteProtocolError("the model's reply is not a JSON object")
+                    return whole
+                lines = r.aiter_lines().__aiter__()
                 event_name, data_lines = "", []
-                async for raw in r.aiter_lines():
+                while True:
+                    left = wait - (time.monotonic() - last_event)
+                    if left <= 0:
+                        raise httpx.ReadTimeout(silent)
+                    # A nested `asyncio.timeout`, not `asyncio.wait_for`: on Python 3.11 `wait_for` can swallow the outer
+                    # whole-call cancellation when it lands just as a line arrives, so the budget never ends.
+                    try:
+                        async with asyncio.timeout(left) as per_line:
+                            raw = await lines.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError:
+                        if not per_line.expired():
+                            raise  # the whole-call budget, handled below
+                        raise httpx.ReadTimeout(silent) from None
                     line = raw.rstrip("\r")
                     if line == "":
                         done = take(event_name, data_lines)
@@ -1381,7 +1452,7 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
                     done = take(event_name, data_lines)
     except TimeoutError:
         raise httpx.ReadTimeout(
-            f"the model's stream did not finish its answer within {timeout * _STREAM_TOTAL_FACTOR:g} s "
+            f"the model's stream did not finish its answer within {total:g} s "
             f"({_STREAM_TOTAL_FACTOR} times the step's {timeout:g} s limit)"
         ) from None
     if finish is None:
@@ -1389,6 +1460,16 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
     if not done or not usage:
         _log.warning("[provider] a streamed answer finished (%s) but the stream sent %s; kept as it is",
                      finish, " and ".join(x for x, ok in (("no [DONE]", done), ("no usage", usage)) if not ok))
+
+    def _s(v: float | None) -> str:
+        return "none" if v is None else f"{v:.0f} s"
+
+    summary = (f"{model or body.get('model') or 'the model'}: first output after {_s(first_any)}, thinking "
+               f"from {_s(first_thinking)}, answer from {_s(first_content)}, done after "
+               f"{_s(time.monotonic() - started)} ({sum(map(len, reasoning))} thinking chars, "
+               f"{sum(map(len, parts))} answer chars)")
+    _log.info("[stream] %s", summary)
+    note_timing(summary)  # the engine writes it in run.log (this module's log does not reach it)
     return {
         "model": model,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(parts) if parts else None,
@@ -2023,16 +2104,90 @@ _CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
 # earlier run here). Matched case-insensitively against the CLI error message
 # (which carries the CLI's stderr). Deliberately separate from the momentary
 # "rate limit exceeded · resets <soon>" case, which IS worth a retry.
+_CLI_AUTH_MARKERS: tuple[str, ...] = (
+    # An expired or refused sign-in: it cannot clear by itself, so it is not tried again (codex CLI: "Failed to
+    # refresh token: Your access token could not be refreshed because your refresh token has expired. Please log
+    # out and sign in again." with "workspace routing discovery unauthorized (401)"). Specific phrases only: a
+    # bare "401" or "unauthorized" could be part of a CLI's ordinary output.
+    "token may be invalid",
+    "run '/login'",
+    "re-authenticate",
+    "refresh token has expired",
+    "refresh token is expired",
+    "failed to refresh token",
+    "access token could not be refreshed",
+    "token has expired",
+    "token is expired",
+    "sign in again",
+    "log in again",
+    "login again",
+    "log out and sign in",
+    "not logged in",
+    "please log in",
+    "please run /login",
+    "login required",
+    "not authenticated",
+    "authentication failed",
+    "authentication_error",
+    "invalid authentication credentials",
+    "unauthorized (401)",
+    "401 unauthorized",
+    "invalid api key",
+    "incorrect api key",
+)
+
 _CLI_FATAL_MARKERS: tuple[str, ...] = (
     "session limit",
     "weekly limit",
     "usage limit reached",
+    "hit your usage limit",      # codex CLI: "You've hit your usage limit. ... try again at 4:51 AM."
     "out of credits",
-    "token may be invalid",
     "copilot requests",          # gh token lacking the Copilot scope
-    "run '/login'",
-    "re-authenticate",
+    *_CLI_AUTH_MARKERS,
 )
+
+_CLI_AUTH_STATUS = re.compile(r"\b(?:http|status)[ :=]*401\b")
+
+
+def _cli_fatal(text: str) -> bool:
+    """Whether a CLI failure's text names a limit or a refused sign-in that does not clear within the run."""
+    text = text.lower()
+    return any(m in text for m in _CLI_FATAL_MARKERS) or bool(_CLI_AUTH_STATUS.search(text))
+
+
+#: What a person runs to sign in to a CLI provider again (``None`` where FI does not know the CLI's login command).
+_CLI_SIGN_IN: dict[str, str] = {
+    "codex_cli": "`codex logout`, then `codex login`",
+    "claude_cli": "`claude`, then type `/login`",
+    "copilot_cli": "`copilot login`",
+    "gemini_cli": "`gemini` and sign in when it asks",
+}
+
+
+def is_auth_error(exc: BaseException) -> bool:
+    """A provider refused the sign-in (an expired or invalid token, a 401, a CLI that says to sign in again). Only a
+    provider's own failure counts: a 401 inside a model's answer text is not an error here."""
+    if isinstance(exc, _CliTransientError):
+        text = str(exc).lower()
+        return any(m in text for m in _CLI_AUTH_MARKERS) or bool(_CLI_AUTH_STATUS.search(text))
+    if isinstance(exc, httpx.HTTPStatusError):
+        sc = getattr(getattr(exc, "response", None), "status_code", None)
+        return sc in (401, 403)
+    return False
+
+
+def sign_in_advice(provider: str, model: str = "") -> str:
+    """One plain message for a sign-in that expired or was refused: which provider and model, what to run, and that
+    ``--resume`` continues. No token or key is ever printed."""
+    who = f"{provider} ({model})" if provider and model else (provider or "the model's provider")
+    how = _CLI_SIGN_IN.get(provider)
+    if how:
+        todo = f"Sign in again: run {how}."
+    elif provider in _CLI_SPECS:
+        todo = f"Sign in to {_CLI_SPECS[provider].argv[0]} again."
+    else:
+        todo = f"Check or replace the key or sign-in for {who}."
+    return f"The sign-in for {who} has expired or was refused. {todo}"
 
 
 def _retry_http_error(exc: BaseException) -> bool:
@@ -2256,7 +2411,7 @@ def _retry_cli_error(exc: BaseException) -> bool:
     if isinstance(exc, OSError):
         return True
     if isinstance(exc, _CliTransientError):
-        return not any(m in str(exc).lower() for m in _CLI_FATAL_MARKERS)
+        return not _cli_fatal(str(exc))
     return False
 
 
@@ -3935,6 +4090,7 @@ class LLMClient:
         # gives them headroom while cheap nodes keep the tight base that
         # catches a hung server fast. Lookup misses fall back to the base.
         self._http_timeout_s = timeout_s
+        self._stream_refused = False  # set when a server answered a streamed call with "I do not take `stream`"
         self._node_http_timeout_s = node_http_timeout_s or {}
         # Last-resort prompt-size guard (total characters across messages).
         # 0 disables. Prevents a runaway prompt from blowing the context
@@ -4305,13 +4461,13 @@ class LLMClient:
             body.update(self.endpoint.extra_body)
         if extra:
             body.update(extra)
-        streams = _http_streams(self.endpoint)
         if "stream" in body:
-            # FI decides whether a call streams (only Moonshot's, see _STREAMED_HOSTS) and reads the answer to match; a
-            # `stream` of your own would leave the answer unreadable (a streamed reply parsed as one JSON document).
+            # FI decides whether a call streams (see _http_streams) and reads the answer to match; a `stream` of your
+            # own would leave the answer unreadable (a streamed reply parsed as one JSON document).
             raise ValueError(
-                "provider.extra_body (or a per-call extra) sets `stream`: FI decides that itself -- it streams calls to "
-                "Moonshot's API and sends every other request whole. Remove `stream` from extra_body."
+                "provider.extra_body (or a per-call extra) sets `stream`: FI decides that itself -- it streams the calls "
+                "of every direct provider and falls back to a whole request when a server does not take it. Remove "
+                "`stream` from extra_body."
             )
         url = self.endpoint.base_url.rstrip("/") + "/chat/completions"
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -4454,18 +4610,42 @@ class LLMClient:
                     try:
                         if native:
                             data = await _post_ollama_streamed(self._http, call_url, request_body, headers, http_timeout)
-                        elif streams:
-                            data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout)
                         else:
-                            r = await self._http.post(
-                                call_url, json=request_body, headers=headers, timeout=http_timeout,
-                            )
-                            # Raise for any error status; the retry predicate
-                            # (_retry_http_error) retries only 5xx / 429, letting a 4xx
-                            # (bad key, quota, content policy, oversized body) surface
-                            # immediately instead of burning the backoff budget.
-                            r.raise_for_status()
-                            data = r.json()
+                            data = None
+                            if _http_streams(self.endpoint) and not self._stream_refused:
+                                progress: dict[str, int] = {}
+                                try:
+                                    data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout,
+                                                                progress=progress)
+                                except httpx.HTTPStatusError as refused_stream:
+                                    if not _refuses_streaming(refused_stream):
+                                        raise
+                                    self._stream_refused = True  # this server does not take `stream`: not asked again
+                                    _log.info("[%s] the server does not take a streamed call (HTTP %s); sending the "
+                                              "request whole", node or "chat", refused_stream.response.status_code)
+                                except Exception as cut:
+                                    if progress.get("chars"):
+                                        # A stream cut after partial output was paid for and is asked again: the cut
+                                        # attempt carries an estimate (about four characters a token) on the error, which the retry hook
+                                        # records, so a call billed twice shows in the record of calls and the cost.
+                                        sent = sum(len(_content_text(m.get("content", ""))) for m in messages)
+                                        cut.usage = {  # type: ignore[attr-defined]
+                                            "prompt_tokens": max(1, sent // self._CHARS_PER_TOKEN),
+                                            "completion_tokens": max(1, progress["chars"] // self._CHARS_PER_TOKEN),
+                                            "total_tokens": max(1, sent // self._CHARS_PER_TOKEN)
+                                            + max(1, progress["chars"] // self._CHARS_PER_TOKEN),
+                                            "estimated": True}
+                                    raise
+                            if data is None:
+                                r = await self._http.post(
+                                    call_url, json=request_body, headers=headers, timeout=http_timeout,
+                                )
+                                # Raise for any error status; the retry predicate
+                                # (_retry_http_error) retries only 5xx / 429, letting a 4xx
+                                # (bad key, quota, content policy, oversized body) surface
+                                # immediately instead of burning the backoff budget.
+                                r.raise_for_status()
+                                data = r.json()
                     except httpx.TimeoutException as e:
                         # Said on the error for whoever sorts the failure (core/crash_kind.py): when every try ended
                         # like this, retrying later will not help; the step needs more time (or a faster model).
@@ -5011,7 +5191,7 @@ def _is_fatal_provider_error(exc: BaseException) -> bool:
     usual failure threshold. Transient blips (5xx, timeouts) trip only after
     repeated failures."""
     if isinstance(exc, _CliTransientError):
-        return any(m in str(exc).lower() for m in _CLI_FATAL_MARKERS)
+        return _cli_fatal(str(exc))
     if isinstance(exc, httpx.HTTPStatusError):
         sc = getattr(getattr(exc, "response", None), "status_code", None)
         return isinstance(sc, int) and (sc in (401, 403, 402) or (sc == 429 and _is_exhausted_quota(exc.response)))

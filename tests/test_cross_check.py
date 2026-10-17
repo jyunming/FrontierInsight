@@ -173,19 +173,19 @@ async def test_cross_check_tolerates_search_failure(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_cross_check_bumps_iteration_on_re_experiment(tmp_path: Path) -> None:
-    """When analyze's `next_step` is `re_experiment` AND budget remains,
-    the cross_check node bumps the shared iteration counter (mirrors
-    review's bump-on-revise behavior). Without this, the re-route
-    would loop forever."""
+    """When analyze's `next_step` is `re_experiment`, budget remains AND FI's precision record agrees (so the router
+    redesigns), the cross_check node bumps the shared iteration counter. Without this, the re-route would loop forever.
+    A request the router will not follow costs no round."""
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     eng._client = type("Stub", (), {"chat": AsyncMock(return_value="{}")})()
     eng.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    state = {"analysis": {"key_findings": ["x"], "next_step": "re_experiment"}, "iteration": 0}
 
-    patch = await eng._node_cross_check({
-        "analysis": {"key_findings": ["x"], "next_step": "re_experiment"},
-        "iteration": 0,
-    })
-    assert patch["iteration"] == 1
+    patch = await eng._node_cross_check(dict(state))
+    assert "iteration" not in patch and eng._route_after_cross_check({**state, **patch}) == "write"
+    eng._precision_missed = lambda s, quiet=False: ["p"]  # type: ignore[method-assign]
+    patch = await eng._node_cross_check(dict(state))
+    assert patch["iteration"] == 1 and eng._route_after_cross_check({**state, **patch}) == "redesign"
 
 
 @pytest.mark.asyncio
@@ -199,6 +199,63 @@ async def test_cross_check_does_not_bump_when_publishing(tmp_path: Path) -> None
         "iteration": 0,
     })
     assert "iteration" not in patch
+
+
+_FAILED_RUN = {
+    "exec_result": {"returncode": 1, "stdout_tail": "Traceback ..."},
+    "result_json": {},
+    "analysis": {
+        "key_findings": ["The execution failed before generating any simulated observations."],
+        "next_step": "re_experiment",
+    },
+    "iteration": 0,
+}
+
+
+@pytest.mark.asyncio
+async def test_cross_check_makes_no_search_or_model_call_when_the_run_has_no_results(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path, max_iter=2))
+    chat_mock = AsyncMock(return_value="{}")
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+    search_mock = AsyncMock(return_value=[])
+    eng.knowledge.asearch = search_mock  # type: ignore[method-assign]
+
+    patch = await eng._node_cross_check(dict(_FAILED_RUN))
+
+    search_mock.assert_not_awaited()
+    chat_mock.assert_not_awaited()
+    assert len(patch["cross_check"]) == 1
+    assert "no results" in patch["cross_check"][0]["summary"]
+    # The analysis's request to run again is not followed on its word: a run with no results goes to the evidence
+    # check, which sends it back to the design once from its own record. The request costs no round.
+    assert "iteration" not in patch
+    assert eng._route_after_cross_check({**_FAILED_RUN, **patch}) == "write"
+
+
+@pytest.mark.asyncio
+async def test_cross_check_still_searches_when_the_run_has_results(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path))
+    chat_mock = AsyncMock(return_value="{}")
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+    search_mock = AsyncMock(return_value=[])
+    eng.knowledge.asearch = search_mock  # type: ignore[method-assign]
+
+    state = {**_FAILED_RUN, "exec_result": {"returncode": 0}, "result_json": {"x": 1.0}}
+    await eng._node_cross_check(state)
+
+    search_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_failed_after_writing_some_results_is_still_checked(tmp_path: Path) -> None:
+    """A run stopped part way (a time limit, a later setting failing) has results: they are checked as before."""
+    eng = Engine(_mk_cfg(tmp_path))
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value="{}")})()
+    search_mock = AsyncMock(return_value=[])
+    eng.knowledge.asearch = search_mock  # type: ignore[method-assign]
+    state = {**_FAILED_RUN, "exec_result": {"returncode": 1, "timed_out": True}, "result_json": {"x": 1.0}}
+    await eng._node_cross_check(state)
+    search_mock.assert_awaited_once()
 
 
 # --- CoVe verification pass ------------------------------------------------
@@ -439,13 +496,81 @@ _CC_NON_EMPTY = [{
 }]
 
 
-def test_route_after_cross_check_re_experiment_routes_to_design(tmp_path: Path) -> None:
+def test_route_after_cross_check_re_experiment_routes_to_design_only_on_fis_precision_record(tmp_path: Path) -> None:
+    # Suite rounds r1-r12: 19 such requests sent 9 quests back to the design, nearly all for a run that failed or left
+    # settings out (a fault of the code); each redesign was then recorded as made after results were seen.
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
-    assert eng._route_after_cross_check({
-        "cross_check": _CC_NON_EMPTY,
-        "analysis": {"next_step": "re_experiment"},
-        "iteration": 0,
-    }) == "redesign"
+    state = {"cross_check": _CC_NON_EMPTY, "iteration": 0,
+             "analysis": {"next_step": "re_experiment", "next_step_reason": "repair the interface and rerun"}}
+    assert eng._route_after_cross_check(state) == "write"
+    assert "FI's record shows no precision target missed" in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+    eng._precision_missed = lambda s, **kw: ["p_reject"]  # type: ignore[method-assign]
+    assert eng._route_after_cross_check(state) == "redesign"
+
+
+def _precision_state(target: float, reps: list[dict] | None = None) -> dict:
+    reps = reps if reps is not None else [{"p": 0.5, "p_count": 10, "p_total": 20},
+                                          {"p": 0.45, "p_count": 9, "p_total": 20}]
+    return {"result_json_replicates": reps,
+            "design": {"protocol": {"precision": {"metric": "p", "target_half_width": target}}}}
+
+
+def test_the_precision_record_is_the_one_the_run_wrote(tmp_path: Path) -> None:
+    """The probability's pooled interval from the counts the run printed, held to the plan's target: 19 of 40 gives a
+    half-width near ±0.15, so a ±0.1 target is missed and a ±0.9 one is reached. Mean-kind quantities carry no such
+    record, so they never send a quest back."""
+    eng = Engine(_mk_cfg(tmp_path, max_iter=2))
+    eng._protocol_block = lambda s: s["design"]["protocol"]  # type: ignore[method-assign]
+    [short] = eng._precision_shortfalls(_precision_state(0.1))
+    assert short["name"] == "p" and short["target"] == 0.1 and short["trials"] == 40
+    assert 0.14 < short["half_width"] < 0.16
+    assert eng._precision_shortfalls(_precision_state(0.9)) == []
+    assert eng._precision_shortfalls(_precision_state(0.1, [{"p": 0.31}, {"p": 0.42}])) == []  # a mean
+    assert eng._precision_shortfalls({}) == []
+
+
+def test_a_missed_precision_sends_the_quest_back_only_when_a_larger_run_fits(tmp_path: Path) -> None:
+    """The run is (half-width / target)^2 times longer, about 2.3x for ±0.15 against ±0.1: FI's own estimate of this
+    run times that must fit the time allowed. No estimate, a run already made smaller, or too long: no redesign."""
+    eng = Engine(_mk_cfg(tmp_path, max_iter=2))
+    eng._protocol_block = lambda s: s["design"]["protocol"]  # type: ignore[method-assign]
+    record = eng.quest_root / ".fi" / "run_estimate.json"
+    state = _precision_state(0.1)
+    assert eng._precision_missed(state) == []  # no estimate
+    record.parent.mkdir(parents=True, exist_ok=True)
+    size = {"cells": 1, "trials": 1}  # the plan in this state has no grid and one run per setting
+
+    def estimate(**fields: object) -> None:
+        record.write_text(json.dumps({**size, "reduced": None, **fields}), encoding="utf-8")
+
+    estimate(estimate_s=100.0, limit_s=300.0, fits=True)
+    assert eng._precision_missed(state) == ["p"]
+    estimate(estimate_s=100.0, limit_s=200.0, fits=True)
+    assert eng._precision_missed(state) == []  # about 230 s, over the 200 allowed
+    estimate(estimate_s=10.0, limit_s=300.0, fits=False, reduced="fewer runs")
+    assert eng._precision_missed(state) == []  # FI already had to make it smaller
+    estimate(estimate_s=10.0, limit_s=300.0, fits=True, cells=4, trials=400)
+    assert eng._precision_missed(state) == []  # the estimate of another design's run (FI times only the first)
+    estimate(estimate_s=100.0, limit_s=300.0, fits=True)
+    unread = {**state, "design": {"protocol": {**state["design"]["protocol"], "runs_per_setting": "many"}}}
+    assert eng._precision_missed(unread) == []  # a size that cannot be read is no estimate of this run, not a crash
+    assert "a run large enough for it would take" in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+def test_a_missed_precision_is_said_in_the_paper_from_the_record(tmp_path: Path) -> None:
+    from core import disclosure
+
+    disclosure.write_precision_record(tmp_path, [{"name": "p", "half_width": 0.152, "target": 0.1, "trials": 40}])
+    text = disclosure.run_record(tmp_path)
+    assert "precision target (a 95% interval of ±0.1) was not reached for p (±0.152 from 40 trials)" in text
+    # FI's own sentence, in its block in the paper, is not a number the writer typed.
+    from core import paper_facts
+
+    paper = disclosure.mark_run_record("# T\n\n## Results\n\np = 0.475.\n\n## Limitations\n\nToy.\n", text)
+    assert "0.152" in paper and not any("0.152" in h for h in paper_facts.typed_hits(paper, None))
+    disclosure.write_precision_record(tmp_path, [])
+    assert not (tmp_path / disclosure.PRECISION_RECORD).exists()
+    assert "precision" not in disclosure.run_record(tmp_path)
 
 
 def test_route_after_cross_check_broaden_lit_routes_to_literature(

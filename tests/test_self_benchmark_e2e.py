@@ -48,9 +48,9 @@ PROTO = {
                   "tolerance": 0.001}],
 }
 SIM = SIM_TRIAL + '\n\ndef oracle():\n    return {"half": 0.5004}\n'
-PAPER = ("# Final size of a toy epidemic\n\nWe ran 300 outbreaks per setting.\n\n## Results\n\n"
+PAPER = ("# Final size of a toy epidemic\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
          "The headline score was 0.987 across the settings. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n")
-CITING = ("# What earlier work says\n\nWe ran 300 outbreaks per setting.\n\n## Results\n\n"
+CITING = ("# What earlier work says\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
           "The headline score was 0.987 across the settings. ![r](figures/result.png)\n\n"
           "Earlier work reports on the exposure and the outcome in children [1].\n\n## References\n1. The source.\n")
 TASK = {
@@ -70,6 +70,19 @@ def _claim_for(prompt: str) -> str:
                                    "evidence": "the source"}], "summary": "one claim"})
 
 
+def _verdicts_for(prompt: str) -> str:
+    """The fake citation reader: each cited line is supported by the planted source whose text the prompt shows."""
+    shown = [src for src in (plant.WAKEFIELD, plant.MADSEN) if src["content"][:60] in prompt]
+    rows = []
+    for line in prompt.split("# The citations", 1)[-1].split("# The sources", 1)[0].splitlines():
+        pid = line.split("|", 1)[0].strip()
+        if "| cites [" in line and pid:
+            ok = bool(shown)
+            rows.append({"id": pid, "supported": ok, "quote": shown[0]["content"][:60] if ok else "",
+                         "why": "" if ok else "the fake reader was shown no planted source"})
+    return json.dumps({"verdicts": rows})
+
+
 def _fake(calls: list[str]):
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         LAST_CALL.set({"provider": "openai", "model": kw.get("model") or "m-default", "reported": True})
@@ -86,11 +99,13 @@ def _fake(calls: list[str]):
             return CITING if ("Ileal-lymphoid" in prompt or "population-based study" in prompt) else PAPER
         if kind == "ClaimCheck" and ("Ileal-lymphoid" in prompt or "population-based study" in prompt):
             return _claim_for(prompt)
+        if prompt.lstrip().startswith("You are the **Citation Reader**"):
+            return _verdicts_for(prompt)
         if prompt.lstrip().startswith("**Persona:"):
             return _FAKE_RESPONSES["review"]
         if prompt.lstrip().startswith("# Second Opinion on the Checks"):  # the second reading of the checks
             return json.dumps({"checks": [{"name": o["name"], "appropriate": "yes", "discriminating": "yes",
-                                           "well_defined": "yes"} for o in PROTO["oracles"]],
+                                           "well_defined": "yes", "why": "it tests the model"} for o in PROTO["oracles"]],
                                "summary": "the checks test the model"})
         return _fake_response_for(prompt)
 
@@ -217,11 +232,19 @@ def test_the_valid_error_filter_keeps_n3_and_s1(bench: dict[str, Any]) -> None:
     assert s1["valid"] is True, s1
 
 
-@pytest.mark.parametrize("error,gate", [("R1", "numbers"), ("R2", "numbers"), ("N3", "oracle"),
+@pytest.mark.parametrize("error,gate", [("R1", "numbers"), ("R2", "claim_check"), ("N3", "oracle"),
                                         ("S1", "run_record"), ("L1", "retractions")])
 def test_fi_catches_each_planted_error(bench: dict[str, Any], error: str, gate: str) -> None:
     o = bench["outcomes"][error]
     assert o["role"] == "planted" and o["valid"] is True, o
+    assert o["let_through"] is False, (error, o["evidence_level"], o["flag_reasons"])
+    if error == "R1":
+        # The planted number sits in FI's table of every setting, which FI fills from its records again before delivery:
+        # the paper delivered no longer states it, which is the error put right, not flagged.
+        planted = json.loads((runner.paths(bench["root"] / "R1")[1] / "plant.json").read_text(encoding="utf-8"))
+        paper = (runner.quest_root(bench["root"] / "R1") / "paper" / "paper.md").read_text(encoding="utf-8")
+        assert planted["planted_value"] not in paper and planted["original_value"] in paper, planted
+        return
     assert not o["would_publish"], (error, o["evidence_level"], o["flag_reasons"])
     assert o["first_gate"] == gate, (error, o["flagged"], o["flag_reasons"])
 

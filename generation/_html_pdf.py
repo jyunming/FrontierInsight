@@ -26,9 +26,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-from generation._figure_captions import blank_lines_around_figures, numbers_off_figure_captions
+from generation._figure_captions import (
+    blank_lines_around_figures,
+    figures_in_own_paragraph,
+    numbers_off_figure_captions,
+)
+from generation._headings import strip_heading_numbers
 from generation._keywords import keywords_block
 from generation._pandoc import HTML_MARKDOWN_READER
+from core.proc_tree import run_tree
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "templates" / "paper" / "_html"
 _CSS_PATH = _ASSETS_DIR / "latexlike.css"
@@ -40,6 +46,13 @@ _THEMES: dict[str, Path] = {
     "latexlike": _ASSETS_DIR / "latexlike.css",
     "briefing": _ASSETS_DIR / "briefing.css",
 }
+
+
+def _run(cmd: list[str], *, timeout: float, cwd: str | None = None) -> "subprocess.CompletedProcess[str]":
+    """Run pandoc or the headless browser. A timeout stops it and every process it
+    started (the browser's helpers would otherwise keep its output open, and the
+    wait for that output had no limit)."""
+    return run_tree(cmd, timeout=timeout, cwd=cwd)
 
 
 def theme_css_path(theme: str) -> Path:
@@ -135,6 +148,18 @@ def raw_tex_outside_math(markdown: str) -> list[str]:
     return found
 
 
+# The line printed at the top of a paper the browser made because LaTeX could not.
+NOT_TYPESET_TEXT = (
+    "Not typeset: this copy was made without LaTeX, so formulas, tables and page breaks "
+    "may look different from a typeset paper."
+)
+NOT_TYPESET_BANNER_HTML = (
+    '<p class="fi-not-typeset" style="border:1px solid #b45309;color:#b45309;'
+    'padding:3pt 6pt;margin:0 0 8pt 0;font:bold 9.5pt sans-serif;text-indent:0;text-align:left">'
+    + NOT_TYPESET_TEXT + "</p>\n"
+)
+
+
 def _split_title(md_text: str) -> tuple[str, str]:
     """Split off the first ``# Heading`` so pandoc renders it in the title
     block (with the author byline) rather than as an in-body H1. Returns
@@ -147,6 +172,16 @@ def _split_title(md_text: str) -> tuple[str, str]:
     return title, body
 
 
+def _numbered_depth(css_path: Path) -> int:
+    """How many heading levels the theme numbers with CSS counters: two for the
+    LaTeX-like theme (sections and subsections), none for the briefing theme."""
+    try:
+        css = css_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    return 2 if "counter(sub)" in css else 1 if "counter(sec)" in css else 0
+
+
 def render_paper_html_pdf(
     paper_md: Path,
     out_pdf: Path,
@@ -157,6 +192,7 @@ def render_paper_html_pdf(
     log: logging.Logger | None = None,
     timeout_s: float = 180.0,
     author_line: tuple[str, ...] = (),
+    not_typeset: str | None = None,
 ) -> tuple[Path | None, str]:
     """Render ``paper_md`` to ``out_pdf`` via pandoc → styled HTML → headless
     browser. Returns ``(out_pdf, "")`` on success or ``(None, reason)``.
@@ -166,7 +202,13 @@ def render_paper_html_pdf(
     ``cwd = out_pdf.parent`` so ``figures/…`` references resolve against the
     copied ``figures/`` dir (same contract the LaTeX path relies on);
     ``--embed-resources`` then inlines the images + any embedded fonts, so
-    the printed PDF is fully self-contained."""
+    the printed PDF is fully self-contained.
+
+    ``not_typeset`` is the reason LaTeX did not make this paper (when it is the
+    fallback for it): the first page then says, in a visible line, that the
+    paper is not typeset. Sections are numbered once: where the theme numbers a
+    heading, a section number the writer typed at its start comes off; where it
+    does not (the briefing theme), the writer's number stays."""
     log = log or logging.getLogger("frontier_insight.paper")
     browser_name, browser_path = browser
     css_path = css_path or _CSS_PATH
@@ -175,14 +217,20 @@ def render_paper_html_pdf(
 
     work = out_pdf.parent
     try:
-        md_text = paper_md.read_text(encoding="utf-8")
+        from core import paper_facts as _paper_facts
+
+        # FI's fact markers would print as text inside math or code.
+        md_text = _paper_facts.without_marks(paper_md.read_text(encoding="utf-8"))
     except OSError as e:
         return None, f"could not read {paper_md}: {e}"
     # Both themes number figures, so the writer's "**Figure 2.**" comes off.
     # A table right under its caption line would print as raw pipes.
     from generation._tables import blank_line_before_tables
 
-    title, body = _split_title(blank_line_before_tables(blank_lines_around_figures(numbers_off_figure_captions(md_text))))
+    prepared = blank_line_before_tables(
+        blank_lines_around_figures(numbers_off_figure_captions(figures_in_own_paragraph(md_text)[0])))
+    # A section number the writer typed comes off only where the theme numbers headings.
+    title, body = _split_title(strip_heading_numbers(prepared, numbered_depth=_numbered_depth(css_path)))
     # The keywords line under the abstract becomes a block the themes style.
     keywords, body = keywords_block(body)
 
@@ -217,6 +265,12 @@ def render_paper_html_pdf(
             len(leftover), ", ".join(leftover[:5]),
         )
 
+    banner_args: list[str] = []
+    if not_typeset is not None:
+        banner = work / "paper_html_banner.html"
+        banner.write_text(NOT_TYPESET_BANNER_HTML, encoding="utf-8")
+        banner_args = ["--include-before-body", banner.name]
+
     pandoc_cmd = [
         pandoc_path, body_md.name,
         "--standalone", "--embed-resources", "--mathml",
@@ -229,14 +283,12 @@ def render_paper_html_pdf(
         "--metadata", f"title={title or 'Untitled'}",
         *byline_args,
         "--metadata", "pagetitle=paper",
+        *banner_args,
         *(["--metadata", "keywords=" + ", ".join(keywords)] if keywords else []),
         "-o", html_path.name,
     ]
     try:
-        pr = subprocess.run(
-            pandoc_cmd, capture_output=True, text=True,
-            cwd=str(work), timeout=timeout_s,
-        )
+        pr = _run(pandoc_cmd, timeout=timeout_s, cwd=str(work))
     except subprocess.TimeoutExpired:
         return None, "pandoc (markdown→HTML) timed out"
     except OSError as e:
@@ -259,8 +311,7 @@ def render_paper_html_pdf(
             html_path.as_uri(),
         ]
         try:
-            br = subprocess.run(
-                browser_cmd, capture_output=True, text=True, timeout=timeout_s)
+            br = _run(browser_cmd, timeout=timeout_s)
         except subprocess.TimeoutExpired:
             return None, f"{browser_name} print-to-pdf timed out"
         except OSError as e:

@@ -154,7 +154,10 @@ OUTPUT_BUNDLES: tuple[Choice, ...] = (
 PAPER_FORMATS: tuple[Choice, ...] = (
     # Scientific venues — keep order in sync with PaperFormat in core/config.py.
     Choice("generic", "generic — scientific paper, IMRAD",
-           "Default for scientific topics. Surveys, comparative reviews, theoretical derivations, brief preprints."),
+           "LaTeX's default article layout; the same IMRAD paper as article."),
+    Choice("article", "article — plain one-column paper, no venue style",
+           "Default for scientific topics: a neutral one-column layout with no conference name or logo. "
+           "Surveys, comparative reviews, theoretical derivations, brief preprints."),
     Choice("neurips", "NeurIPS — ML benchmark / algorithm",
            "Empirical ML, neural networks, learning algorithms, journal-length."),
     Choice("iclr", "ICLR — representation learning",
@@ -535,10 +538,10 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         id="paper_format",
         label="Paper format / venue",
-        prompt="Picks the LaTeX template + writing persona. 'generic' is safe for scientific topics; 'essay' for non-computational humanities/social-science.",
+        prompt="Picks the LaTeX template + writing persona. 'article' is safe for scientific topics; 'essay' for non-computational humanities/social-science.",
         kind="single",
         choices=PAPER_FORMATS,
-        default="generic",
+        default="article",
         mid_quest_editable=True,
         tier=2,
     ),
@@ -1193,7 +1196,7 @@ def smart_default_no_simulation(partial: dict[str, Any]) -> bool:
     report / policy_brief / whitepaper), the typical answer is
     ``no_simulation=True``. Other formats default to False (Python
     can produce data)."""
-    fmt = partial.get("paper_format", "generic")
+    fmt = partial.get("paper_format", "article")
     return fmt in PROSE_FORMATS
 
 
@@ -1233,12 +1236,12 @@ FORMAT_TOPIC_MARKERS: tuple[tuple[str, str], ...] = (
 
 def smart_default_paper_format(partial: dict[str, Any]) -> str:
     """The paper format the topic asks for: a policy brief, a whitepaper, an essay, a report when it says so, an essay
-    for a history / evolution / story-of question; otherwise the generic scientific paper."""
+    for a history / evolution / story-of question; otherwise the plain one-column scientific article."""
     topic = (partial.get("topic") or "").lower()
     for marker, fmt in FORMAT_TOPIC_MARKERS:
         if marker in topic:
             return fmt
-    return "generic"
+    return "article"
 
 
 def smart_default_output_kinds(partial: dict[str, Any]) -> list[str]:
@@ -1260,7 +1263,7 @@ def smart_default_study_depth(partial: dict[str, Any]) -> str:
     The other formats keep the journal-length default unless the
     topic string contains 'survey' / 'review' / 'comparison', which
     bumps to comprehensive review."""
-    fmt = partial.get("paper_format", "generic")
+    fmt = partial.get("paper_format", "article")
     if fmt == "policy_brief":
         return "brief preprint"
     topic = (partial.get("topic") or "").lower()
@@ -1563,7 +1566,7 @@ async def preflight_clarify(
     prompt = (
         prompt_template
         .replace("$topic", topic.strip())
-        .replace("$paper_format", paper_format or "generic")
+        .replace("$paper_format", paper_format or "article")
     )
 
     # Lazy-import the provider layer so this module stays importable

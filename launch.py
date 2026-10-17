@@ -278,6 +278,7 @@ _TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "digest": ("--digest", "A weekly project-manager digest across your quests. `fi tools digest [--days N]`."),
     "portfolio": ("--portfolio", "A cross-quest synthesis, all time. `fi tools portfolio`."),
     "critique": ("--critique", "An adversarial second-pass review of a finished quest. `fi tools critique <quest_id>`."),
+    "quality": ("--quality", "Where a quest went wrong, who caught it, what was fixed and what it cost; with several quests, a table to compare settings. `fi tools quality <quest_or_folder>...`."),
     "rename": ("--rename", "Change the title of a finished or paused quest. `fi tools rename <quest_id> <new title>`."),
     "quests": ("--quests", "Every quest FI has run on this computer, from any folder: its short id, where it is, its title and folder. `fi tools quests [--prune]`."),
     "proposal": ("--proposal", "A pre-quest planning doc from a topic, no run yet. `fi tools proposal \"<topic>\"`."),
@@ -830,6 +831,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "asked for a revision, why the evidence is at its level. Add what to ask about: stop, review, evidence, "
              "reasons (the reasons the model gave at every step), or a step's name (design, execute, write, ...) for "
              "why that step decided what it did. A model's reasons are its own account, not something FI checked.",
+    )
+    mode.add_argument(
+        "--quality",
+        nargs="+",
+        metavar="QUEST_OR_FOLDER",
+        default=None,
+        help="A quest's quality report, read from what it recorded (no model is asked): where it went wrong, who caught "
+             "it, what was fixed, what to try, and what it cost. One quest id (or quest folder) prints its QUALITY.md. "
+             "Several, or a folder of quests, print one row per quest to compare settings, and write quality_table.md and "
+             "quality_table.csv (into the first folder, or into --quality-out).",
+    )
+    p.add_argument(
+        "--quality-out",
+        metavar="DIR",
+        default=None,
+        help="With --quality: write the report (or the table) into DIR instead of beside the quest. The quest is not touched.",
     )
     mode.add_argument(
         "--rename",
@@ -2684,7 +2701,40 @@ async def _finish_outputs(
     summary_path = art.quest_root / "frontier_insight_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"[FI] summary -> {summary_path}")
+    _log_paper_render(cfg, art)
+    # The engine wrote QUALITY.md as its run ended, before paper.pdf and its render
+    # record existed: written again now, its PDF section is there and current.
+    from core import quality_report
+
+    await asyncio.to_thread(quality_report.write_quietly, art.quest_root)
     return summary
+
+
+def _log_paper_render(cfg: Config, art: QuestArtifacts) -> None:
+    """One plain line in the quest's run.log on how paper.pdf was made (typeset, or made
+    by the browser and why, and its pages), from ``.fi/paper_render.json``. The paper
+    generator's own log lines do not reach run.log, and a machine whose files cannot be
+    copied out has only run.log to say it."""
+    if "paper_pdf" not in cfg.output.kinds:
+        return
+    try:
+        from core.engine import _close_quest_logger, _quest_logger
+        from generation.paper import read_render_record, render_line
+
+        quest_root = Path(art.quest_root)
+        if not (quest_root / "paper.pdf").is_file() and read_render_record(quest_root) is None:
+            line = "paper.pdf: not made (no PDF and no record of a render)"
+        else:
+            line = render_line(read_render_record(quest_root))
+        was_open = bool(logging.getLogger(f"frontier_insight.{art.quest_id}").handlers)
+        logger = _quest_logger(art.quest_id, quest_root / ".fi")
+        try:
+            logger.info(line)
+        finally:
+            if not was_open:
+                _close_quest_logger(art.quest_id)
+    except Exception as exc:  # noqa: BLE001 — a log line never changes the quest
+        print(f"[FI] could not write the paper line to run.log: {exc!r}", file=sys.stderr)
 
 
 # `_VALID_PAPER_FORMATS` is derived from `core.config.PaperFormat` in `_import_runtime` (so adding a new template
@@ -2694,8 +2744,8 @@ async def _finish_outputs(
 
 def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
     """Honor the `paper_venue` clarify slot: if the user's YAML left
-    `output.paper_format` at the default `"generic"` AND clarify picked
-    a specific venue, apply the venue choice. We DON'T override an
+    `output.paper_format` at its default (`"article"`, read off the config
+    model) AND clarify picked a different template, apply the venue choice. We DON'T override an
     explicit YAML setting (the user's hand-written value wins) and
     we silently ignore unknown venue strings to avoid pydantic
     rejecting them on a Config validator."""
@@ -2704,14 +2754,15 @@ def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
     )
     if not isinstance(venue, str) or venue not in _VALID_PAPER_FORMATS:
         return
-    if cfg.output.paper_format != "generic":
+    default = type(cfg.output).model_fields["paper_format"].default
+    if cfg.output.paper_format != default:
         # User set an explicit format in YAML; honor that.
         return
-    if venue == "generic":
+    if venue == default:
         return  # nothing to do
     print(
         f"[FI] paper_venue from clarify -> overriding paper_format: "
-        f"generic -> {venue}",
+        f"{default} -> {venue}",
     )
     cfg.output.paper_format = venue  # type: ignore[assignment]
 
@@ -3420,6 +3471,7 @@ async def main_async(args: argparse.Namespace) -> int:
         or bool(getattr(args, "accept_checks", ""))
         or bool(getattr(args, "trace", ""))
         or bool(getattr(args, "why", None))
+        or bool(getattr(args, "quality", None))
         or bool(getattr(args, "rename", None))
         or bool(getattr(args, "quests", False))
         # Listing the steps a quest can be run again from reads its checkpoints only.
@@ -3508,6 +3560,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.why:
             return _show_why(args.why[0], " ".join(args.why[1:]), args.output_root)
+
+        if args.quality:
+            return _show_quality(args.quality, args.output_root, args.quality_out)
 
         if args.rename:
             return _rename_quest(args.rename, args.output_root, title=args.title)
@@ -4410,7 +4465,7 @@ async def _run_new(
     try:
         preflight_cache = await preflight_clarify(
             topic=str(partial.get("topic", "")),
-            paper_format=str(derived.get("paper_format") or "generic"),
+            paper_format=str(derived.get("paper_format") or "article"),
             provider_name=str(partial.get("provider") or "openai"),
             provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
         )
@@ -4547,7 +4602,7 @@ async def _run_new(
                     try:
                         preflight_cache = await preflight_clarify(
                             topic=str(partial.get("topic", "")),
-                            paper_format=str(derived.get("paper_format") or "generic"),
+                            paper_format=str(derived.get("paper_format") or "article"),
                             provider_name=str(partial.get("provider") or "openai"),
                             provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
                         )
@@ -6870,6 +6925,38 @@ def _show_why(quest: str, about: str, output_root: Path) -> int:
     if root is None:
         return 1
     print(why.explain(root, about))
+    return 0
+
+
+def _show_quality(items: list[str], output_root: Path, out_dir: str | None) -> int:
+    """``--quality``: one quest's report (core/quality_report.py), or a table over many quests."""
+    from core import quality_report
+
+    out = Path(out_dir) if out_dir else None
+    folders: list[Path] = []
+    for item in items:
+        path = Path(item).expanduser()
+        if path.is_dir():
+            folders.append(path)
+            continue
+        root = _quest_dir(item, output_root)
+        if root is None:
+            return 1
+        folders.append(root)
+    quests = quality_report.quest_dirs(folders)
+    if not quests:
+        print("[FI] no quest found in " + ", ".join(str(f) for f in folders))
+        return 1
+    if len(quests) == 1:
+        report = quality_report.write(quests[0], out) if out else quality_report.build(quests[0])
+        print(quality_report.render(report))
+        if out:
+            print(f"[FI] written to {out / 'QUALITY.md'}")
+        return 0
+    target = out or (folders[0] if len(folders) == 1 else Path.cwd())
+    _rows, md = quality_report.write_table(folders, target)
+    print(md)
+    print(f"[FI] {len(quests)} quests; written to {Path(target) / 'quality_table.md'} and quality_table.csv")
     return 0
 
 

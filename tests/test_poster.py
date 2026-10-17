@@ -37,6 +37,7 @@ from core.provider import ResolvedEndpoint
 from generation import _cjk
 from generation import poster as poster_mod
 from generation.poster import PosterGenerator, _Block, _Layout, _SHEETS
+from tests.paper_fakes import fake_poster_run
 
 A1 = _SHEETS["a1_portrait"]
 PT_PER_CM = 72 / 2.54
@@ -687,7 +688,7 @@ def _fake_compile(monkeypatch: pytest.MonkeyPatch, engine=("pdflatex", "/fake/pd
         (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+    fake_poster_run(monkeypatch, fake_run)
     return runs
 
 
@@ -913,7 +914,7 @@ async def test_poster_falls_back_to_tectonic_when_pdflatex_missing(
         cwd = Path(_kwargs.get("cwd") or ".")
         (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+    fake_poster_run(monkeypatch, fake_run)
 
     result, art = await _generate(tmp_path, monkeypatch, _reply())
 
@@ -952,10 +953,7 @@ async def test_poster_writes_skip_diagnostic_when_pdf_missing_after_success(
 ) -> None:
     """The engine returned rc=0 but ``poster.pdf`` isn't on disk."""
     monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: ("pdflatex", "/fake/pdflatex.exe"))
-    monkeypatch.setattr(
-        poster_mod.subprocess, "run",
-        lambda cmd, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
-    )
+    fake_poster_run(monkeypatch, lambda cmd, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""))
     result, art = await _generate(tmp_path, monkeypatch, _reply())
     assert "poster_pdf" not in result
     diag = art.quest_root / "poster_pdf_skipped.md"
@@ -979,7 +977,7 @@ async def test_poster_uses_same_engine_discovery_as_paper(
         captured.append(list(cmd))
         (Path(_kwargs.get("cwd") or ".") / "poster.pdf").write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+    fake_poster_run(monkeypatch, fake_run)
 
     await _generate(tmp_path, monkeypatch, _reply())
     assert captured[0][0] == sentinel[1]

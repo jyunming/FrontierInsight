@@ -1,0 +1,233 @@
+{
+ "by_noise_ratio": {
+  "0.001": {
+   "by_num_time_points": {
+    "10": {
+     "attempted_trials": 1200,
+     "by_temperature_K": {
+      "300.0": {
+       "k_coverage_count": 1137,
+       "k_coverage_probability": 0.9475,
+       "k_coverage_probability_wilson_95": [
+        0.9333924593171584,
+        0.9587515951433941
+       ],
+       "k_coverage_total": 1200,
+       "k_relative_bias": -9.907439909027649e-06,
+       "k_relative_bias_student_t_95": [
+        -7.76468039404798e-05,
+        5.783192412242451e-05
+       ],
+       "k_relative_spread": 0.0011960381215951619,
+       "k_relative_spread_bootstrap_95": [
+        0.0011457859383891334,
+        0.001242392508429946
+       ],
+       "k_true_per_s": 19.67488661945756,
+       "ln_k_variance": 1.4020090935228755e-06,
+       "ln_k_variance_student_t_95": [
+        1.4019362578736287e-06,
+        1.4020819291721223e-06
+       ]
+      },
+      "308.9": {
+       "k_coverage_count": 1152,
+       "k_coverage_probability": 0.96,
+       "k_coverage_probability_wilson_95": [
+        0.947365715185829,
+        0.9696985642596552
+       ],
+       "k_coverage_total": 1200,
+       "k_relative_bias": 1.0438626735259823e-05,
+       "k_relative_bias_student_t_95": [
+        -5.553864348624486e-05,
+        7.641589695676451e-05
+       ],
+       "k_relative_spread": 0.0011649257632100802,
+       "k_relative_spread_bootstrap_95": [
+        0.0011223536087752789,
+        0.0012094955032092717
+       ],
+       "k_true_per_s": 34.98744577023172,
+       "ln_k_variance": 1.4020309363047682e-06,
+       "ln_k_variance_student_t_95": [
+        1.401959990454245e-06,
+        1.4021018821552916e-06
+       ]
+      }
+     },
+     "ea_bias_J_per_mol": 1.7595570771214988,
+     "ea_bias_student_t_95": [
+      -0.11897684206867365,
+      3.6380909963116714
+     ],
+     "ea_coverage_count": 1134,
+     "ea_coverage_probability": 0.945,
+     "ea_coverage_probability_wilson_95": [
+      0.9306235915364227,
+      0.9565364179271434
+     ],
+     "ea_coverage_total": 1200,
+     "ea_lnA_correlation": 0.9991426817254461,
+     "ea_lnA_correlation_bootstrap_95": [
+      0.9990397050750712,
+      0.9992315175025606
+     ],
+     "ea_spread_J_per_mol": 33.1682798057832,
+     "ea_spread_bootstrap_95": [
+      31.774899624833576,
+      34.51719479213551
+     ],
+     "failure_count": 0,
+     "fit_failure_probability": 0.0,
+     "fit_failure_probability_wilson_95": [
+      0.0,
+      0.0031910006027349243
+     ],
+     "lnA_bias": 0.0006839498030902706,
+     "lnA_bias_student_t_95": [
+      -2.611621023390642e-05,
+      0.0013940158164144475
+     ],
+     "lnA_coverage_count": 1134,
+     "lnA_coverage_probability": 0.945,
+     "lnA_coverage_probability_wilson_95": [
+      0.9306235915364227,
+      0.9565364179271434
+     ],
+     "lnA_coverage_total": 1200,
+     "lnA_spread": 0.012537260024916825,
+     "lnA_spread_bootstrap_95": [
+      0.012036443464958467,
+      0.01302230713247557
+     ],
+     "valid_trials": 1200
+    }
+   }
+  },
+  "0.1": {
+   "by_num_time_points": {
+    "5": {
+     "attempted_trials": 1200,
+     "by_temperature_K": {
+      "300.0": {
+       "k_coverage_count": 1143,
+       "k_coverage_probability": 0.9525,
+       "k_coverage_probability_wilson_95": [
+        0.9389540987959222,
+        0.9631580456586031
+       ],
+       "k_coverage_total": 1200,
+       "k_relative_bias": 0.021708053228542745,
+       "k_relative_bias_student_t_95": [
+        0.011476279654858219,
+        0.031939826802227275
+       ],
+       "k_relative_spread": 0.18065701413988186,
+       "k_relative_spread_bootstrap_95": [
+        0.17192316251821008,
+        0.18912448515512895
+       ],
+       "k_true_per_s": 19.67488661945756,
+       "ln_k_variance": 0.032690398952420686,
+       "ln_k_variance_student_t_95": [
+        0.032383399369866936,
+        0.03299739853497444
+       ]
+      },
+      "308.9": {
+       "k_coverage_count": 1145,
+       "k_coverage_probability": 0.9541666666666667,
+       "k_coverage_probability_wilson_95": [
+        0.9408156899571746,
+        0.9646191511620082
+       ],
+       "k_coverage_total": 1200,
+       "k_relative_bias": 0.02254495950442273,
+       "k_relative_bias_student_t_95": [
+        0.012022634326282167,
+        0.03306728468256329
+       ],
+       "k_relative_spread": 0.1857871301394756,
+       "k_relative_spread_bootstrap_95": [
+        0.17605802980358398,
+        0.1953977031153869
+       ],
+       "k_true_per_s": 34.98744577023172,
+       "ln_k_variance": 0.03273933662831848,
+       "ln_k_variance_student_t_95": [
+        0.03241967234718436,
+        0.0330590009094526
+       ]
+      }
+     },
+     "ea_bias_J_per_mol": -26.542730485450623,
+     "ea_bias_student_t_95": [
+      -299.80330823968364,
+      246.71784726878238
+     ],
+     "ea_coverage_count": 1139,
+     "ea_coverage_probability": 0.9491666666666667,
+     "ea_coverage_probability_wilson_95": [
+      0.9352426635533438,
+      0.9602240875718663
+     ],
+     "ea_coverage_total": 1200,
+     "ea_lnA_correlation": 0.9990644017711128,
+     "ea_lnA_correlation_bootstrap_95": [
+      0.9989509995415885,
+      0.9991690364562429
+     ],
+     "ea_spread_J_per_mol": 4824.8174867929165,
+     "ea_spread_bootstrap_95": [
+      4629.305491022928,
+      5029.220944566583
+     ],
+     "failure_count": 0,
+     "fit_failure_probability": 0.0,
+     "fit_failure_probability_wilson_95": [
+      0.0,
+      0.0031910006027349243
+     ],
+     "lnA_bias": -0.021458150920935778,
+     "lnA_bias_student_t_95": [
+      -0.12488204633225178,
+      0.08196574449038022
+     ],
+     "lnA_coverage_count": 1137,
+     "lnA_coverage_probability": 0.9475,
+     "lnA_coverage_probability_wilson_95": [
+      0.9333924593171584,
+      0.9587515951433941
+     ],
+     "lnA_coverage_total": 1200,
+     "lnA_spread": 1.82610101769438,
+     "lnA_spread_bootstrap_95": [
+      1.7526383259029799,
+      1.9025445139474004
+     ],
+     "valid_trials": 1200
+    }
+   }
+  }
+ },
+ "checks": {
+  "arrhenius_closed_form_relative_error": 0.0,
+  "arrhenius_log_relation_absolute_error": 4.440892098500626e-15,
+  "concentration_closed_form_absolute_error": 0.0,
+  "concentration_nonunit_initial_absolute_error": 0.0,
+  "endpoint_ratio_absolute_error": 0.0,
+  "max_tolerance_tightening_change_Ea_J_per_mol": 0.0,
+  "monotone_noiseless": true,
+  "noise_free_Ea_fit_J_per_mol": 50000.000000000626,
+  "noise_free_Ea_numerical_error_J_per_mol": 6.257323548197746e-10
+ },
+ "constants": {
+  "A_per_s": 10000000000.0,
+  "Ea_true_J_per_mol": 50000.0,
+  "R_J_per_mol_K": 8.314,
+  "c0_mol_per_l": 1.0,
+  "lnA_true": 23.025850929940457
+ },
+ "runtime_seconds": 5.0582599000044866
+}

@@ -52,7 +52,8 @@ _PROGRAMMING_ERRORS = (AttributeError, KeyError, IndexError, TypeError, NameErro
 _AUTH_WORDS = ("invalid api key", "invalid_api_key", "incorrect api key", "did not accept the api key", "http 401",
                "http 403", "unauthorized", "unauthorised", "authentication", "token may be invalid", "run '/login'",
                "re-authenticate", "not logged in", "please log in", "login required", "copilot requests",
-               "permission denied for model")
+               "permission denied for model", "refresh token", "sign in again", "log out and sign in",
+               "token has expired", "token is expired")
 #: Read only from an error that carries no HTTP answer (a CLI's or the bridge's text): an HTTP 429 is judged by the
 #: provider's own rule, which reads the error's type and code and its Retry-After (a per-minute limit is not a quota).
 _QUOTA_WORDS = ("monthly usage limit", "weekly limit", "session limit", "usage limit reached", "out of credits",
@@ -238,6 +239,21 @@ def _program_name(exc: FileNotFoundError) -> str | None:
     return Path(name).name if name else ""
 
 
+def _sign_in_todo(provider: str) -> str:
+    """The one thing to do for a refused sign-in: the CLI's own login command when FI knows it."""
+    try:
+        from core import provider as _provider
+
+        how = _provider._CLI_SIGN_IN.get(provider)
+        if how:
+            return f"Sign in again: run {how}."
+        if provider in _provider._CLI_SPECS:
+            return f"Sign in to {_provider._CLI_SPECS[provider].argv[0]} again."
+    except Exception:  # noqa: BLE001
+        pass
+    return "Sign in to it again (the setup check, `python launch.py --doctor`, shows how)."
+
+
 def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | None:
     """(say, do) when the failure needs one action on this machine or account, else None."""
     text = _text(exc)
@@ -255,8 +271,9 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
         return (f"The account FI uses for {service} has used up its allowance (a usage limit or credit balance).",
                 "Add credits or wait until the limit resets, then continue the quest.")
     if model_call and (status in (401, 403) or (not has_http_answer and any(w in text for w in _AUTH_WORDS))):
-        return (f"FI could not sign in to {service}.",
-                "Sign in to it again (the setup check, `python launch.py --doctor`, shows how), then continue the quest.")
+        todo = _sign_in_todo(provider)
+        return (f"FI could not sign in to {service}{f' ({model})' if model else ''}: its sign-in has expired or was refused.",
+                f"{todo} Then continue the quest.")
     # Read from the message itself, never from the provider's note (which always names the model).
     names_model = bool(model) and model.lower() in str(exc).lower()
     if model_call and (status == 404 or any(w in text for w in _MODEL_MISSING_WORDS)
@@ -373,12 +390,12 @@ def _detail(exc: BaseException) -> str:
 
 
 def classify(exc: BaseException, *, node: str = "", provider: str = "", model: str = "",
-             retries: int = 0) -> Failure:
+             retries: int = 0, routed: str = "") -> Failure:
     """Sort one failure (see the module doc). Setup problems are checked first (a 429 that says the quota is used up
     is not a passing problem), then passing problems, then FI's own programming errors. Never raises: a failure to sort
     is an unexpected error."""
     try:
-        return _classify(exc, node=node, provider=provider, model=model, retries=retries)
+        return _classify(exc, node=node, provider=provider, model=model, retries=retries, routed=routed)
     except Exception:  # noqa: BLE001 -- sorting must never hide the error it sorts
         return Failure("unknown", "FI stopped on an error it did not expect.", _NOTHING_TO_FIX,
                        type(exc).__name__, node, retries)
@@ -388,7 +405,24 @@ _NOTHING_TO_FIX = ("Nothing for you to fix: continue the quest later and it pick
                    "details are kept for FI's maintainers in quest_failed.md.")
 
 
-def _always_too_slow(exc: BaseException, node: str, provider: str, model: str) -> tuple[str, str] | None:
+_SERVED = re.compile(r"\[FI\] provider=([^,\s]+), transport=([^,\s]+), model=([^,]+?)(?:, node=(.+))?\s*$")
+
+
+def served_by(exc: BaseException) -> tuple[str, str, str] | None:
+    """``(provider, model, node)`` of the call that failed, read from the note every model call attaches to its error
+    (``[FI] provider=openai, transport=http, model=big-model, node=implement``): the provider that actually served the
+    step, which is not the quest's main one when the step runs on its own (``provider.node_providers``). ``None`` when the
+    error carries no such note."""
+    for e in _chain(exc):
+        for note in getattr(e, "__notes__", None) or []:
+            m = _SERVED.search(str(note).strip())
+            if m:
+                return m.group(1), m.group(3).strip(), (m.group(4) or "").strip()
+    return None
+
+
+def _always_too_slow(exc: BaseException, node: str, provider: str, model: str,
+                    routed: str = "") -> tuple[str, str] | None:
     """(say, do) when the provider's own retries of one call all ended in the same timeout (``fi_timeouts`` on the
     error, set by ``LLMClient``): the model needs longer than FI's limit for one answer, so trying again later ends the
     same way. A single timeout, or a mix of failures, is a passing problem and stays ``transient``."""
@@ -400,15 +434,25 @@ def _always_too_slow(exc: BaseException, node: str, provider: str, model: str) -
     except (TypeError, ValueError):
         limit = 0.0
     step = f" the step `{node}`" if node and not node.startswith("(") else " a step"
-    who = f"The model ({model})" if model else "The model"
+    where = f" on {provider}" if routed and provider else ""
+    who = f"The model ({model}{where})" if model else "The model"
     over = f" ({limit:g} s)" if limit else ""
-    return (f"{who} takes longer to answer{step} than FI's time limit for one answer{over}, on every try.",
-            "Raise `provider.http_timeout_s` (or `provider.node_http_timeout_s` for that step), or use a faster model, "
-            "then continue the quest.")
+    say = f"{who} takes longer to answer{step} than FI's time limit for one answer{over}, on every try."
+    if routed:
+        # The step runs on its own provider and model: the main model is not the one that is slow, and its settings are
+        # not the ones to change.
+        return (say, f"Raise `provider.node_http_timeout_s.{routed}` (the time one answer of that step may take), or give "
+                     f"`provider.node_providers.{routed}` a faster model, then continue the quest.")
+    return (say, "Raise `provider.http_timeout_s` (or `provider.node_http_timeout_s` for that step), or use a faster model, "
+                 "then continue the quest.")
 
 
-def _classify(exc: BaseException, *, node: str, provider: str, model: str, retries: int) -> Failure:
+def _classify(exc: BaseException, *, node: str, provider: str, model: str, retries: int, routed: str = "") -> Failure:
     chain = _chain(exc)
+    served = served_by(exc)
+    if served is not None:
+        # Who actually answered (or failed to) is named, not the quest's main provider.
+        provider, model = served[0], served[1]
     detail = _detail(exc)
     where = f" at the step `{node}`" if node and not node.startswith("(") else ""
     for e in chain:
@@ -416,7 +460,7 @@ def _classify(exc: BaseException, *, node: str, provider: str, model: str, retri
         if found:
             return Failure("setup", found[0], found[1], detail, node, retries)
     for e in chain:
-        slow = _always_too_slow(e, node, provider, model)
+        slow = _always_too_slow(e, node, provider, model, routed)
         if slow:
             return Failure("setup", slow[0], slow[1], detail, node, retries)
     if any(_transient(e) for e in chain):

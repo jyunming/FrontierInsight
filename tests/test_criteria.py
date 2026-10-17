@@ -258,3 +258,52 @@ def test_the_methodology_audit_vouches_for_the_design_not_for_the_criteria_added
     design = {"hypothesis": "h", "protocol": {**BASE, "criteria": [ERR]}, "rationale": "x"}
     assert receipts.design_core(design) == receipts.design_core({"hypothesis": "h", "protocol": BASE})
     assert receipts.design_core(design) != receipts.design_core({"hypothesis": "h", "protocol": {**BASE, "grid": {"dt": [1]}}})
+
+
+# The real rows of a quest (fdr, r12): the plan's criterion asked for exactly 0, the check it rests on accepts within
+# 1e-12 and passed at 1.1e-16; the criterion was "not met" on all five runs and the improve step spent a round chasing it.
+_R12_CRITERIA = [
+    {"name": "normal-tail-agreement", "oracle": "normal_tail_second_implementation", "use": "value", "direction": "lower",
+     "target": 0, "tolerance": 1e-12},
+    {"name": "bh-step-up-agreement", "oracle": "bh_step_up_reference", "use": "value", "direction": "lower",
+     "target": 0, "tolerance": 0},
+]
+_R12_JUDGED = [
+    {"name": "normal_tail_second_implementation", "value": 1.1102230246251565e-16, "expected": 0.0, "tolerance": 1e-12,
+     "mode": "absolute", "limit": 1e-12, "passed_by_engine": True, "measured_by": "engine"},
+    {"name": "bh_step_up_reference", "value": 0.0, "expected": 0.0, "tolerance": 0, "mode": "absolute", "limit": 0.0,
+     "passed_by_engine": True, "measured_by": "engine"},
+]
+
+
+def test_a_bar_of_exact_agreement_is_met_where_the_check_agrees() -> None:
+    from core import improve
+
+    rows = cr.evaluate(_R12_CRITERIA, judged=_R12_JUDGED, series={})
+    assert [r["met"] for r in rows] == [True, True]
+    assert rows[0]["met_at"] == 1e-12 and "met_at" not in rows[1]  # the plan's own bar of 0 stands where the check's is 0
+    assert improve.all_met(rows)
+    worse = [{**_R12_JUDGED[0], "value": 2e-12}, _R12_JUDGED[1]]
+    assert cr.evaluate(_R12_CRITERIA, judged=worse, series={})[0]["met"] is False  # outside the check's agreement
+
+
+def test_the_check_s_agreement_never_makes_a_bar_stricter_and_leaves_other_bars_alone() -> None:
+    error = {"name": "e", "oracle": "o", "use": "error", "direction": "lower", "target": 0.0, "tolerance": 0.0}
+    assert cr.check_bar(error, 0.0, 1e-11) == 1e-11
+    assert cr.check_bar({**error, "target": 1e-10}, 0.0, 1e-11) is None  # the plan's bar is already looser
+    assert cr.check_bar({**error, "target": 1e-12}, 0.0, 1e-11) is None  # short of exact: a goal, and it stands
+    assert cr.check_bar({**error, "direction": "target"}, 0.0, 1e-11) is None
+    value = {**error, "use": "value", "target": 0.0}
+    assert cr.check_bar(value, 5.0, 0.1) is None  # a bar that is not about agreeing with the check's expected value
+    assert cr.check_bar({**value, "target": 0.01}, 0.0, 0.1) is None
+    assert cr.check_bar({**value, "direction": "higher", "target": 1.0}, 1.0, 0.05) == 0.95
+    assert cr.check_bar({**error, "oracle": None}, 0.0, 1e-11) is None  # a trials criterion has no check
+
+
+def test_the_plan_says_where_such_a_criterion_is_met() -> None:
+    protocol = {"oracles": [{"name": "normal_tail_second_implementation", "kind": "second_implementation",
+                             "check": "p-values agree", "expected": 0, "tolerance": 1e-12, "tolerance_mode": "absolute",
+                             "reference": "independent second implementation", "case": {"m": 20},
+                             "measure": "max_abs_diff"}]}
+    line = cr.describe(_R12_CRITERIA[0], protocol)
+    assert "met where the check itself agrees" in line and "1e-12" in line and "met at 0 or below" not in line

@@ -20,7 +20,9 @@ import pytest
 import core.engine as engine_mod
 
 AGENTS = Path(__file__).resolve().parent.parent / "agents"
-VAR = re.compile(r"\$(?:\{)?([A-Za-z_][A-Za-z0-9_]*)")
+# ``$$`` is a literal dollar for ``string.Template`` (a prompt writes ``$$E_a$$`` for the math ``$E_a$``): only an odd run
+# of dollars before a name is a slot.
+VAR = re.compile(r"(?<!\$)(?:\$\$)*\$(?:\{)?([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def _substitute_calls() -> dict[str, set[str]]:

@@ -1,0 +1,6 @@
+import numpy as np
+from scipy.special import ndtr
+
+
+def one_sided_p_value(z):
+    return ndtr(-np.asarray(z))

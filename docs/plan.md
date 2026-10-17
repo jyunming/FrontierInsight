@@ -51,8 +51,8 @@ for the layered design see [`architecture.md`](architecture.md).
 - **Analyze re-route** — `analyze.next_step ∈ {re_experiment,
   broaden_lit}` sends control back to `design` (bounded by
   `engine.max_iterations`).
-- **Review-driven revise** — the classic `review.verdict == "revise"`
-  loop, sharing the same `max_iterations` budget.
+- **Review-driven rewrite** — a `review.verdict == "revise"` writes the
+  paper again (its objections kept in the quality report), sharing the same `max_iterations` budget.
 - **Cross-paper check** — after `analyze`, each key finding gets a
   per-finding literature search and a supporting / conflicting /
   neutral classification surfaced into the write prompt.

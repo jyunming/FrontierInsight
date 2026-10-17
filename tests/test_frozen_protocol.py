@@ -147,8 +147,10 @@ def _cfg(tmp_path: Path, **engine: Any) -> Config:
 def _fake(prompts: list[str], *, second_design: dict[str, Any], first_protocol: dict[str, Any] | None = None,
           critique_protocol: dict[str, Any] | None = None):
     """A model whose first design carries ``first_protocol``, whose second design is ``second_design`` merged over the
-    first, and whose first review asks for a revision (so the quest is redesigned once, after its results)."""
-    seen = {"design": 0, "review": 0, "critique": 0}
+    first, and whose first analysis asks to run the experiment again, which FI's precision record (patched for this
+    module) agrees with, so the quest is redesigned once, after its results. A reviewer's revise no longer changes the
+    design."""
+    seen = {"design": 0, "review": 0, "critique": 0, "analysis": 0}
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
@@ -172,15 +174,25 @@ def _fake(prompts: list[str], *, second_design: dict[str, Any], first_protocol: 
             return json.dumps(body)
         if kind == "Implementation":
             return json.dumps({"code": _SCRIPT, "deps": ["matplotlib"]})
-        if kind == "Review":
-            seen["review"] += 1
-            body = json.loads(_FAKE_RESPONSES["review"])
-            if seen["review"] == 1:
-                body.update({"verdict": "revise", "score": 2, "weaknesses": ["the grid is too thin"], "suggestions": ["widen the grid"]})
+        if kind == "Analysis":
+            seen["analysis"] += 1
+            body = json.loads(_FAKE_RESPONSES["analyze"])
+            if seen["analysis"] == 1:
+                body.update({"next_step": "re_experiment", "next_step_reason": "the grid is too thin"})
             return json.dumps(body)
+        if kind == "Writing":
+            # The one-script quest ran no trial checks of FI's, and FI's record requires the paper to say so (a required
+            # paper item); a draft without it costs a review round, which these tests count.
+            return _FAKE_RESPONSES["write"].replace("## References", "## Limitations\n{{not_done:trials-unchecked-all}}\n\n## References")
         return _fake_response_for(prompt)
 
     return fake_chat
+
+
+@pytest.fixture(autouse=True)
+def _precision_missed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FI's record agrees with the analysis's request to run again (the plan's precision target was missed)."""
+    monkeypatch.setattr("core.engine.Engine._precision_missed", lambda self, state, **kw: ["score"])
 
 
 def _frozen(engine: Engine) -> dict[str, Any]:

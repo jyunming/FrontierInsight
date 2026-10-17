@@ -1,6 +1,6 @@
 # Code Against the Plan
 
-A research quest has written its plan and then generated the code that carries it out. You did not write either. Before the code runs, read it as a referee would and say whether it computes what the plan requires it to compute. You are not judging whether the code is correct, fast or well written: only whether each requirement below is in it.
+A research quest has written its plan and then generated the code that carries it out. You did not write either. Before the code runs, read it as a referee would. Your job is to FIND PROBLEMS, not to agree or disagree: say whether it computes what the plan requires, and whether it computes it the way the plan defines it. Every problem goes under `findings` with where it is, what is wrong, why it is wrong and how to fix it. Everything you checked and found no problem with goes under `checked`, one line each saying what you looked at, so that a reply with no problem is never taken for one that did not look.
 
 # Topic
 
@@ -14,9 +14,25 @@ Each requirement has an id. A requirement is a quantity, a figure, a swept param
 $requirements
 ```
 
+# What the plan says about how it is computed
+
+The plan's model (its equations as written), its method, the settings it varies, the statistics it names, and the cases of its checks of correctness. It holds no expected value, and you must not write one.
+
+```json
+$plan
+```
+
 # The code (line numbers on the left)
 
 $code
+
+# What the code gave when FI ran it
+
+FI ran the simulation itself on a few of the plan's settings (a few trials each) before this reading. Read the code with these results: a value that cannot be right for what the plan defines, a setting where trials fail, or a quantity that does not change where the plan says it must, points to a problem in the code. They are a small case, not the study's results.
+
+$small_run
+
+$previous
 
 # What to judge, for each requirement
 
@@ -26,14 +42,35 @@ $code
 
 Say "implemented" only after you found the line. Do not guess about code you were not shown.
 
+# What to judge about the logic
+
+Read the code against the plan for these, and put each fault you find under `findings`:
+
+1. **Equations**: each function marked `# E<n>` computes its equation as the plan writes it: the same normalisation (which length, area, time or amount it is divided or multiplied by), the same units, the same factors and signs.
+2. **Statistics**: each statistic is the one the plan defines, not a neighbour of it: a spread and not a multiple of it, a mean and not a sum, the same estimand, the interval method the plan names, the pooling the plan names.
+3. **Settings**: a quantity the plan says depends on a setting really uses that setting, and is not rescaled or normalised so that the dependence cancels out.
+4. **Steps**: every step the plan's model or method names is in the code (a stage, a term, a boundary or initial condition, a correction); none is skipped, replaced by a shortcut, or computed and then not used.
+5. **Constants**: nothing the code reports is a constant: no returned quantity is a literal, or the same whatever the settings, unless the plan says it is. For such a finding give the name of the returned quantity in `quantity` and set `constant` to true.
+6. **The checks' cases**: the code can be run on each check's case (its settings) and returns what that check's measure uses, and the case is the plan's, not another.
+
+A finding says WHERE (file:line, such as `simulate.py:42`), WHAT is wrong, WHY it is wrong against the plan, and HOW to fix it. Name the term, the factor, the operation or the step. Do not write a value: never say what a number should be, never give an expected value or a tolerance; a fix is an operation ("divide by the cell area, not by the length"), not a result.
+
 # What to return
 
 Return ONE JSON object and nothing else:
 
-{"requirements": [{"id": "<the requirement's id, exactly>", "status": "<implemented | missing | different>", "file": "<file name, or empty when missing>", "line": <line number, or null>, "note": "<for missing or different: what is missing or different, one sentence, naming no expected number; else empty>"}],
+{"requirements": [{"id": "<the requirement's id, exactly>", "status": "<implemented | missing | different>", "file": "<file name, or empty when missing>", "line": <line number, or null>, "note": "<for missing or different: what is missing or different, one sentence, naming no expected number; else empty>", "changes_result": <true when a missing or different requirement changes a number or figure the study reports, else false>}],
+ "findings": [{"where": "<file:line>", "what": "<what is wrong, one sentence>", "why": "<why it is wrong against the plan, one sentence>", "fix": "<how to fix it, one sentence, no value>", "severity": "<high | medium | low>", "quantity": "<the returned quantity, figure, setting or requirement it concerns, as the plan names it, or empty>", "constant": <true when the quantity is a constant, else false>, "changes_result": <true when the fault can change a number or a figure the study reports, false when it changes nothing reported>, "plan_conflict": <true only when the fault is that the PLAN contradicts itself, else false>}],
+ "checked": ["<a requirement or a point of the logic you checked and found no problem with, and what you looked at, one line>"],
  "summary": "<one sentence>"}
 
 Rules:
 
 - Judge every requirement, once.
+- List EVERY finding you have, with no limit on how many, and put the ones that change a reported number or figure first, then the others by severity. Do not leave a finding out because the list is long.
+- One finding per fault. Do not list the same fault twice in other words, and do not list a fault under `findings` and again as a different requirement: put it once, with the quantity it concerns in `quantity`.
+- `changes_result` is true only when, if the fault were left as it is, a number or figure the study reports would be wrong or missing. A dead constant, a missing optional output, a weak internal check or a style point is false.
+- `high` means the quantity the study reports would be wrong because of it; `low` is a matter of care that does not change a number.
+- `plan_conflict`: when two parts of the plan define one thing differently (for example a metric's definition and the method's text say different things), the code cannot satisfy both. Report that as ONE finding with `plan_conflict` true, say in `why` which two parts disagree and what each says, and give no fix for the code: it is not a fault of the code.
+- Do not answer "looks fine". A reply with no `findings`, no `checked`, and no requirement that says where it was found is no review and is asked again.
 - Never write an expected value, a number the result should have, or a tolerance.

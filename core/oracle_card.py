@@ -51,6 +51,7 @@ NAME = "known-answer check"
 _REPAIR_SAID = {
     "applied": "changed the script",
     "set_aside_disputed": "said the check itself is wrong; its code was not used",
+    "disputed_fi_value": "said a check FI computed from the plan's own formula is wrong; its code was not used",
     "not_usable": "gave no usable script; nothing was changed",
     "no_code": "changed nothing",
     "call_failed": "the model did not answer; nothing was changed",
@@ -188,7 +189,8 @@ def locate(script: Path, quest_root: Path, oracle: dict[str, Any], *, trial: boo
     if trial and own is not None:
         measure = own[1]
         wanted = set([measure] if _forms.is_name(measure) else _forms.names(measure))
-        entry = next((e for e in ("run_trial", "run_cell") if e in functions), None)
+        have = {e for e in ("run_trial", "run_cell") if e in functions}
+        entry = _entry_for(script, oracle) if have else None
         if entry is not None and wanted:
             inside = _key_lines(functions[entry], wanted)
             if inside:
@@ -262,7 +264,6 @@ def build(
     disputed_set = {str(n).strip().lower() for n in disputed or []}
     last_checks = attempts[-1].get("checks") if attempts else None
     reported_by_name = {str(c.get("name") or "").strip().lower(): c for c in last_checks or [] if isinstance(c, dict)}
-    entry = next((e for e in ("run_trial", "run_cell") if trial and e in _entries(script)), "run_cell")
     run_text = "; ".join(found) + "\n" + (stderr_tail or "")
     # What FI's own look at the failing checks found (core/oracle_triage.py), in the order it looked.
     triage = [t for a in attempts for t in a.get("triage") or [] if isinstance(t, dict)]
@@ -329,7 +330,7 @@ def build(
             "measured_text": shown_value,
             "measured_by": ("fi" if engine else "script") if value is not None else "",
             "measured_by_text": (
-                (f"FI, which called {entry}() on the check's case itself" if engine else
+                (f"FI, which called {_entry_for(script, oracle) if trial else 'run_cell'}() on the check's case itself" if engine else
                  "the script's own oracle() (FI did not run the simulation for it)" if trial else
                  "the script itself, run with FI_ORACLE=1") if value is not None else ""),
             "tolerance": _num(oracle.get("tolerance")),
@@ -464,6 +465,8 @@ _LOOK_SAID = {
     ("seeds", "noise"): "repeated runs of the same case differ by more than the check allows, so one run cannot meet it",
     ("seeds", "beyond_noise"): "repeated runs of the same case agree with each other, and all miss the expected value",
     ("seeds", "varies"): "a rule every run must keep exactly changes from run to run",
+    ("trials", "undecided"): "the runs of the same case FI could make in the time it had do not tell whether the "
+                             "result meets the check, so the check was not decided",
     ("same_exception", "stopped"): "the same error came back after FI's repair",
     ("arithmetic", "slip"): "the plan's own working, {expression}, gives {computes}, not the {written} it writes, so "
                             "FI does not rely on this check",
@@ -577,6 +580,15 @@ def _whose(proposal: dict[str, Any] | None) -> str:
     the plan's own arithmetic, or a repair."""
     source = (proposal or {}).get("source")
     return "recomputation's" if source == "recompute" else "arithmetic's" if source == "arithmetic" else "repair's"
+
+
+def _entry_for(script: Path, oracle: dict[str, Any] | None) -> str:
+    from .trial_runner import oracle_entry_for
+
+    try:
+        return oracle_entry_for(Path(script), oracle)
+    except ValueError:  # a script that is not UTF-8 text: the card names run_cell
+        return "run_cell"
 
 
 def _entries(script: Path) -> set[str]:

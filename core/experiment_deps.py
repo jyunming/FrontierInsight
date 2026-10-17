@@ -474,8 +474,11 @@ def env_packages(python: Path | str, dists: Iterable[str], modules: Iterable[str
     if not names and not mods:
         return EnvInfo()
     try:
+        from .execution import scrub_secrets  # noqa: PLC0415 -- the query imports the quest's packages: no FI keys
+
         done = subprocess.run([str(python), "-c", _ENV_QUERY, json.dumps({"dists": names, "modules": mods})],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                              env=scrub_secrets())
         if done.returncode != 0:
             return None
         data = json.loads(done.stdout.strip().splitlines()[-1])

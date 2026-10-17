@@ -314,7 +314,9 @@ def _cfg(tmp_path: Path, *, split: bool | str = True, engine: dict[str, Any] | N
     return Config(
         topic="smoke topic for the run manifest", title="manifest-smoke", provider=ProviderConfig(name="openai"),
         engine=EngineConfig(**{"max_iterations": 1, "review_loop": False, "auto_accept_on_pass": True, "execute_replicates": 1,
-                               "pilot_run": False, "oracle_check": "off", **(engine or {})}),
+                               "pilot_run": False, "oracle_check": "off",
+                               # these tests follow the repair and the stop: the check's 'block' mode (the default is 'warn')
+                               "run_manifest_check": "block", **(engine or {})}),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=split, **(execution or {})),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
         pauses=PausesConfig(review="off"),
@@ -343,6 +345,13 @@ def _fake(calls: list[str], *, implement: str, repair: str | None = None, prompt
 
 def _record(engine: Engine) -> dict[str, Any]:
     return json.loads((engine.quest_root / "needs" / "RUN_MANIFEST_CHECK.json").read_text(encoding="utf-8"))
+
+
+def _stuck(engine: Engine) -> str:
+    """The honest stop's record (no paper, nobody asked to change a script): what stood, and what FI tried."""
+    assert not (engine.fi_dir / "pause.json").exists(), "a person was asked to go on"
+    record = json.loads((engine.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    return record["problem"] + " " + " ".join(record["tried"])
 
 
 @pytest.mark.asyncio
@@ -431,7 +440,7 @@ async def test_an_analysis_that_prints_no_values_is_sent_back_alone_and_the_simu
     artifacts = await engine.run()
     assert artifacts.paper_md is not None and calls.count("ExecuteReflect") == 1
     log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert "has no `final_size_values` list at all" in log and "sending experiment.py back (1 of 1)" in log
+    assert "has no `final_size_values` list at all" in log and "sending experiment.py back (1 of 3)" in log
     reflect = next(p for p in prompts if _classify(p) == "ExecuteReflect")
     assert "Rewrite experiment.py (not simulate.py)" in reflect
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8").strip() == SIM_OK.strip()
@@ -449,18 +458,16 @@ async def test_a_simulation_that_still_differs_after_the_repair_stops_the_quest_
     first = Engine(cfg)
     await first.run()
     log = (first.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert "[manifest] paused" in log and "[FI] paused for the two-script contract" in log and "paused for clarify" not in log
-    assert not (first.fi_dir / "clarify_questions.json").exists()
-    descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
-    assert descriptor["kind"] == "manifest" and descriptor["interaction"] == "supply"
-    text = (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "ran another number" in text and "engine.run_manifest_check: warn" in text
+    assert "[manifest] paused" not in log and "paused for the two-script contract" not in log
+    text = _stuck(first)
+    assert "ran another number" in text and "engine.run_manifest_check" not in text
+    assert "back to be repaired 1 time(s)" in text
     assert _record(first)["status"] == "stopped"
     assert not (first.quest_root / "paper" / "paper.md").exists()
 
     (first.quest_root / "code" / "simulate.py").write_text(SIM_OK, encoding="utf-8")
     second = Engine(cfg, resume_quest_id=first.quest_id)
-    artifacts = await second.run()
+    artifacts = await second.run(from_step="run")
     assert artifacts.paper_md is not None and _record(second)["status"] == "self_reported"
 
 
@@ -470,7 +477,7 @@ async def test_a_simulation_that_writes_no_manifest_is_a_difference_of_its_own(t
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_reply(SIM_NO_MANIFEST), repair=SIM_NO_MANIFEST))
     engine = Engine(_cfg(tmp_path))
     await engine.run()
-    assert "run_manifest.json was not written" in (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "run_manifest.json was not written" in _stuck(engine)
 
 
 @pytest.mark.asyncio
@@ -511,10 +518,8 @@ async def test_a_reply_without_both_scripts_runs_as_one_script_by_default_and_st
     strict = Engine(_cfg(tmp_path / "strict", execution={"split_failure": "block"}))
     await strict.run()
     log = (strict.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert "[split] paused" in log and "[FI] paused for the two-script contract" in log and "this quest runs as ONE script" not in log
-    descriptor = json.loads((strict.fi_dir / "pause.json").read_text(encoding="utf-8"))
-    assert descriptor["kind"] == "split"
-    assert "did not hold both scripts" in (strict.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "[split] paused" not in log and "paused for the two-script contract" not in log
+    assert "did not hold both scripts" in _stuck(strict)
     assert not (strict.quest_root / "paper" / "paper.md").exists()
 
 
@@ -528,7 +533,7 @@ async def test_scripts_that_break_the_contract_are_named_and_stop_a_strict_quest
 
     strict = Engine(_cfg(tmp_path / "strict", execution={"split_failure": "block"}))
     await strict.run()
-    assert "simulate.py prints or names RESULT_JSON" in (strict.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "simulate.py prints or names RESULT_JSON" in _stuck(strict)
     assert not (strict.quest_root / "paper" / "paper.md").exists()
 
 
@@ -670,7 +675,7 @@ async def test_when_the_repair_gives_up_the_rejected_runs_numbers_and_figures_do
     assert not list((engine.quest_root / "figures").glob("*.png")), "the 30-trial run's figure was kept"
     assert artifacts.paper_md is None
     assert _record(engine)["status"] == "stopped"
-    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    text = _stuck(engine)
     assert "the simulation does not do what the protocol fixed" in text and "300" in text, text[:900]
 
 
@@ -686,7 +691,7 @@ async def test_with_no_repair_left_a_manifest_difference_still_stops_and_names_i
     artifacts = await engine.run()
     assert artifacts.paper_md is None and "Writing" not in calls
     assert _record(engine)["status"] == "stopped"
-    assert "the simulation does not do what the protocol fixed" in (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "the simulation does not do what the protocol fixed" in _stuck(engine)
 
 
 @pytest.mark.asyncio
@@ -1083,7 +1088,8 @@ def test_values_the_trials_never_produced_are_found_value_by_value(tmp_path: Pat
     near = {"final_size_values": [honest["R0=1.5"]["final_size_values"][0] + 0.01]}
     assert trial_runner.reported_values_not_run(recorded, near), "a different value is not a rounding"
     twice = {"final_size_values": honest["R0=1.5"]["final_size_values"] * 2}
-    assert trial_runner.reported_values_not_run(recorded, twice), "each trial's value counts once"
+    assert trial_runner.reported_values_not_run(recorded, twice) == [], (
+        "each value one of the trials': drawn from them (a resample), not made up; it never counts as the trials")
     # A run record edited after the trials ran no longer matches the ledger's hashes, and says so.
     record_path = root / ".fi" / "trials" / "run.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))

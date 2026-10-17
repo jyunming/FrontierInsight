@@ -191,10 +191,13 @@ def _record_flags(root: Path) -> dict[str, str]:
             flags[gate] = f"{name}: {rec.get('status')}" + (
                 ": " + "; ".join(sorted(_finding_text(p) for p in problems))[:600] if problems else "")
     found = []
-    for name in ("numeric_audit.json", "provenance_audit.json", "statistics_audit.json"):
-        rec = _json(root / "paper" / name)
-        if isinstance(rec, dict) and rec.get("ok") is False:
-            found += [f"paper/{name}: {_finding_text(f)}" for f in rec.get("findings") or []] or [f"paper/{name}"]
+    rec = _json(root / "paper" / "statistics_audit.json")
+    if isinstance(rec, dict) and rec.get("ok") is False:
+        found += [f"paper/statistics_audit.json: {_finding_text(f)}" for f in rec.get("findings") or []] or [
+            "paper/statistics_audit.json"]
+    rec = _json(root / ".fi" / "paper_record_check.json")
+    if isinstance(rec, dict) and rec.get("hits"):
+        found += [f".fi/paper_record_check.json: {_finding_text(f)}" for f in rec.get("hits") or []]
     if found:
         flags["numbers"] = "; ".join(sorted(found))[:1200]
     claims = _json(root / "paper" / "claims.json")
@@ -271,6 +274,16 @@ def _same_reason(text: str) -> str:
     return _DIGITS.sub("#", text).strip().lower()
 
 
+def r1_put_right(plant: dict[str, Any], delivered: str) -> bool:
+    """Whether the delivered paper put R1's planted number right: a number in a block FI fills from its records is
+    filled again before delivery, so the planted number is gone and the original one is back: as often as the paper
+    stated it before the plant (``original_count``; once for an older record). A paper that only lost the planted number
+    (reworded, rounded, its sentence dropped) has not been put right, also when it states the original elsewhere."""
+    planted, original = str(plant.get("planted_value") or ""), str(plant.get("original_value") or "")
+    wanted = max(int(plant.get("original_count") or 1), 1)
+    return bool(planted and original) and planted not in delivered and delivered.count(original) >= wanted
+
+
 def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | None = None,
               role: str | None = None, needs_control: bool = False) -> dict[str, Any]:
     """One run's outcome (see the module docstring). ``control``: the scored control of the same copy and step;
@@ -287,6 +300,10 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
         if (root / name).is_file():
             stop_text = (root / name).read_text(encoding="utf-8", errors="replace")
             break
+    if not stop_text and (root / "needs" / "STUCK.json").is_file():
+        # FI's own honest stop (no paper): what FI could not repair, in its words.
+        stuck = _json(root / "needs" / "STUCK.json")
+        stop_text = str((stuck or {}).get("say") or (stuck or {}).get("problem") or "") if isinstance(stuck, dict) else ""
     if meta.get("error") and not stop_text:
         stop_text = str(meta["error"])
     infra = bool(stop_text) and bool(INFRA_RE.search(stop_text))
@@ -358,6 +375,8 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
     # A planted error let through: the result would be published. For L1, only when the paper also rests on the
     # retracted source: FI keeping it out of a published paper is the check working.
     let_through = would_publish and (error != "L1" or bool(cites_planted))
+    if error == "R1" and r1_put_right(plant, _paper_text(root)):
+        let_through = False
     return {
         "run": run_dir.name, "task": task["task"], "error": error, "role": role, "mode": meta.get("mode"),
         "from_step": meta.get("from_step"), "answer": answer, "evidence_level": level,

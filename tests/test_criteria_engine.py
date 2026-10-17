@@ -24,6 +24,11 @@ CASE_ORACLE = {"name": "rk4 error", "kind": "special_case", "check": "error at t
                "reference": "derivation: y' = -y, y(0) = 1 gives y(1) = exp(-1) = 0.3679"}
 PROTOCOL = {"grid": {"dt": [0.1, 0.05]}, "oracles": [CASE_ORACLE]}
 CRITERION = {"name": "rk4 error small", "oracle": "rk4 error", "direction": "lower", "target": 1e-5, "tolerance": 1e-7}
+# A check the script answers itself (no case FI can run): the plan has nothing FI can judge the code by, so the model is
+# asked. A check FI runs is used as a criterion without asking (test_a_draft_with_a_check_fi_runs_...).
+NO_CASE = {"grid": {"dt": [0.1, 0.05]}, "oracles": [SCRIPT_ORACLE]}
+TRIALS_CRITERION = {"name": "independent trials", "trials": "y_end", "direction": "target", "target": 0.5,
+                    "tolerance": 0.1}
 
 def _config(tmp_path: Path, plan_pause: str = "off") -> Config:
     return Config(
@@ -91,16 +96,16 @@ async def test_a_draft_with_no_criterion_searches_once_asks_again_and_the_plan_c
     search = _Search()
     monkeypatch.setattr("core.knowledge.Knowledge.asearch", search.fn)
     engine = Engine(_config(tmp_path))
-    model = _Model({**PROTOCOL, "metrics": [{"id": "error_rate", "estimand": "e", "kind": "mean", "unit": "run"}]},
-                   [CRITERION, {"name": "headline", "trials": "Error-Rate", "direction": "lower", "tolerance": 1}])
+    model = _Model({**NO_CASE, "metrics": [{"id": "error_rate", "estimand": "e", "kind": "mean", "unit": "run"}]},
+                   [TRIALS_CRITERION, {"name": "headline", "trials": "Error-Rate", "direction": "lower", "tolerance": 1}])
     engine._client = model
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(search.queries) == 1 and "correctness" in search.queries[0]
-    assert len(model.asked) == 1 and "manufactured solutions" in model.asked[0] and '"rk4 error"' in model.asked[0]
+    assert len(model.asked) == 1 and "manufactured solutions" in model.asked[0] and '"final size closed form"' in model.asked[0]
     text = plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
-    assert plan.parse(text).design["protocol"]["criteria"] == [{**CRITERION, "use": "error"}]
+    assert plan.parse(text).design["protocol"]["criteria"] == [TRIALS_CRITERION]
     section = text.split(f"## {plan.CRITERIA_HEADING}", 1)[1].split("\n## ", 1)[0]
-    assert "**rk4 error small**" in section
+    assert "**independent trials**" in section
     # The one the model got wrong is named in the plan, not dropped in silence.
     assert "'headline' is about 'Error-Rate', a headline number of the study" in text
 
@@ -111,7 +116,7 @@ async def test_still_none_and_no_plan_pause_warns_plainly_and_records_that_there
 ) -> None:
     monkeypatch.setattr("core.knowledge.Knowledge.asearch", _Search().fn)
     engine = Engine(_config(tmp_path))
-    engine._client = _Model(PROTOCOL, [])
+    engine._client = _Model(NO_CASE, [])
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     assert "[criteria] the plan has no check of correctness FI can compute" in log and "going on without one" in log
@@ -122,6 +127,37 @@ async def test_still_none_and_no_plan_pause_warns_plainly_and_records_that_there
     assert "(none" in section
     assert "has no criterion FI can measure itself for judging whether the code got better" in text  # Checks already made
     assert not (engine.fi_dir / "pause.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_draft_with_a_check_fi_runs_is_judged_by_that_check_without_a_search_or_a_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search = _Search()
+    monkeypatch.setattr("core.knowledge.Knowledge.asearch", search.fn)
+    engine = Engine(_config(tmp_path))
+    model = _Model(PROTOCOL, [CRITERION])
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert search.queries == [] and model.asked == [], "the plan's own check is the yardstick: no search, no question"
+    text = plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
+    # How far the check lands from its expected value; met within, and a change smaller than, its own tolerance.
+    assert plan.parse(text).design["protocol"]["criteria"] == [
+        {"name": "rk4 error", "oracle": "rk4 error", "use": "error", "direction": "lower", "target": 1e-5,
+         "tolerance": 1e-5}]
+    assert "FI uses the plan's own checks against known answers that it runs: “rk4 error”" in text
+    assert "without asking the model" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+def test_only_checks_fi_runs_and_can_judge_become_criteria() -> None:
+    relative_zero = {**CASE_ORACLE, "name": "relative at 0", "tolerance_mode": "relative"}  # no limit around 0
+    headline = {**CASE_ORACLE, "name": "Error-Rate"}  # a check about the headline number is never a yardstick
+    protocol = {"grid": {"dt": [0.1]}, "metrics": [{"id": "error_rate", "estimand": "e", "kind": "mean", "unit": "run"}],
+                "oracles": [SCRIPT_ORACLE, relative_zero, headline, CASE_ORACLE]}
+    assert [c["name"] for c in cr.from_checks(protocol)] == ["rk4 error"]
+    many = {"grid": {"dt": [0.1]}, "oracles": [{**CASE_ORACLE, "name": f"c{i}"} for i in range(7)]}
+    assert len(cr.from_checks(many)) == cr.MAX
+    assert cr.from_checks(None) == [] and cr.countable({**PROTOCOL, "criteria": cr.from_checks(PROTOCOL)})
 
 
 @pytest.mark.asyncio
@@ -143,7 +179,7 @@ async def test_still_none_with_the_plan_pause_on_says_so_in_one_line_and_asks_no
     # they asked for says in one line what having none means, and nothing more.
     search = _Search()
     monkeypatch.setattr("core.knowledge.Knowledge.asearch", search.fn)
-    model = _Model(PROTOCOL, [])
+    model = _Model(NO_CASE, [])
     monkeypatch.setattr("core.engine.LLMClient.chat", lambda self, messages, **kw: model.chat(messages, **kw))
     engine = Engine(_config(tmp_path, plan_pause="ask"))
     await engine.run()
@@ -291,7 +327,7 @@ async def test_a_person_who_resumes_without_writing_a_criterion_is_not_stopped_a
 ) -> None:
     monkeypatch.setattr("core.knowledge.Knowledge.asearch", _Search().fn)
     engine = Engine(_config(tmp_path, plan_pause="ask"))
-    engine._client = _Model(PROTOCOL, [])
+    engine._client = _Model(NO_CASE, [])
     stops: list[dict[str, Any]] = []
 
     class Stopped(Exception):
@@ -331,3 +367,20 @@ async def test_a_quest_run_through_the_graph_records_its_criteria_after_the_run(
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     assert "[criteria] run 1: none of the checks of correctness was measured by FI itself" in log
     assert "measured by the script itself so not counted" in log
+
+
+def test_criteria_made_from_the_checks_follow_the_checks_as_fis_look_at_them_left_them(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    engine.quest_root.mkdir(parents=True, exist_ok=True)
+    made = cr.from_checks(PROTOCOL)
+    # FI's look at the checks tightened the tolerance after the criteria were made; a criterion the plan wrote stays.
+    tighter = {**CASE_ORACLE, "tolerance": 1e-7}
+    protocol = {**PROTOCOL, "oracles": [tighter, SCRIPT_ORACLE],
+                "criteria": [*made, {"name": "trials", "trials": "y_end", "direction": "target", "target": 0.5,
+                                     "tolerance": 0.1}]}
+    text = plan.render(engine.config.topic, {}, {"hypothesis": "h", "protocol": protocol})
+    plan.plan_path(engine.quest_root).write_text(text, encoding="utf-8")
+    engine._criteria_follow_checks([c["name"] for c in made])
+    criteria = plan.parse(plan.plan_path(engine.quest_root).read_text(encoding="utf-8")).design["protocol"]["criteria"]
+    assert criteria[0]["name"] == "rk4 error" and criteria[0]["target"] == 1e-7 and criteria[0]["tolerance"] == 1e-7
+    assert [c["name"] for c in criteria] == ["rk4 error", "trials"]

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,6 +81,70 @@ def _as_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+#: The parts of the protocol. A model sometimes writes one of them beside ``protocol:`` (at the top level of the design
+#: block) instead of under it; the plan's readers look only under ``protocol``, so the part read as absent.
+PROTOCOL_PARTS = (
+    "optimisation", "grid", "in_each_run", "runs_per_setting", "min_runs_per_setting", "numerical_axes", "thresholds",
+    "constants", "metrics",
+    "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
+)
+
+
+def hoist_protocol_parts(design: Any) -> tuple[Any, list[str]]:
+    """``(design, moved)``: ``design`` with each protocol part written at its top level moved under ``protocol``, and the
+    names moved. A part the protocol already has stays as the protocol has it (the top-level one is then left where it
+    is, and not moved). ``design`` itself is not changed."""
+    if not isinstance(design, dict):
+        return design, []
+    protocol = design.get("protocol")
+    if protocol is not None and not isinstance(protocol, dict):
+        return design, []
+    stray = [k for k in PROTOCOL_PARTS if k in design and design[k] not in (None, "", [], {})
+             and not (isinstance(protocol, dict) and protocol.get(k) is not None)]
+    if not stray:
+        return design, []
+    out = {k: v for k, v in design.items() if k not in stray}
+    out["protocol"] = {**(protocol or {}), **{k: design[k] for k in stray}}
+    return out, stray
+
+
+_ENTRY_NAME = re.compile(r"entry `([^`]+)`|`protocol\.\w+(?:\.\w+)?` `([^`]+)`")
+_ENTRY_INDEX = re.compile(r"entry (\d+)")
+_PART_KEY = re.compile(r"`protocol\.(\w+)(?:\.(\w+))?`")
+
+
+def offending_entry(protocol: Any, why: str | None, limit: int = 500) -> str:
+    """The entry of ``protocol`` that a reader's reason ``why`` names (``entry 2``, ``entry `id```, ``design_variables`
+    `name```), as written, in one short line; ``""`` when the reason names none or it cannot be found."""
+    if not isinstance(protocol, dict) or not why:
+        return ""
+    part = _PART_KEY.search(why)
+    if part is None:
+        return ""
+    value: Any = protocol.get(part.group(1))
+    if part.group(1) == "optimisation" and part.group(2) and isinstance(value, dict):
+        value = value.get(part.group(2))
+    named = _ENTRY_NAME.search(why)
+    index = _ENTRY_INDEX.search(why)
+    found: Any = None
+    if isinstance(value, list):
+        if index and 0 < int(index.group(1)) <= len(value):
+            found = value[int(index.group(1)) - 1]
+        elif named:
+            key = named.group(1) or named.group(2)
+            found = next((v for v in value if isinstance(v, dict) and key in {str(x) for x in v.values()}), None)
+    elif isinstance(value, dict) and named:
+        key = named.group(1) or named.group(2)
+        found = value.get(key)
+    if found is None:
+        return ""
+    try:
+        text = json.dumps(found, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(found)
+    return text if len(text) <= limit else text[:limit] + " ..."
+
+
 def normalize_design(design: Any) -> tuple[dict[str, Any] | None, str | None]:
     """``(design, None)`` when ``design`` can drive the experiment, else ``(None, why)``.
 
@@ -87,6 +152,7 @@ def normalize_design(design: Any) -> tuple[dict[str, Any] | None, str | None]:
     what would send the experiment somewhere else: no hypothesis, or a result bound that is not a bound."""
     if not isinstance(design, dict):
         return None, "the design block is not a mapping of names to values"
+    design, _moved = hoist_protocol_parts(design)  # a part written beside `protocol` belongs under it
     out: dict[str, Any] = dict(design)
     hypothesis = out.get("hypothesis")
     if not isinstance(hypothesis, str) or not hypothesis.strip():
@@ -148,6 +214,35 @@ def _number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _grid_values(axis: Any, values: Any, part: str = "grid") -> tuple[list[Any] | None, str | None]:
+    """``(the values of one grid axis, None)`` or ``(None, why)``.
+
+    An axis takes numbers, names (text), or tuples (a list of equal-length lists of numbers, each inner list being ONE
+    setting, such as an inner and an outer radius). A list that mixes names and numbers is refused with how to write it
+    (it may be a numeric sweep with a stray piece of text, which must not silently become names), and so is a list that
+    mixes tuples with anything else, since there is no single meaning for either."""
+    where = f"`protocol.{part}.{axis}`"
+    if not isinstance(values, list) or not values:
+        return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
+    if all(isinstance(v, (list, tuple)) for v in values):
+        width = len(values[0])
+        if not width or any(len(v) != width or not all(_number(x) and math.isfinite(x) for x in v) for v in values):
+            return None, (f"{where}: when each value is a list, every one must be a list of the same number of numbers "
+                          "(for example [[0.5, 0.8], [0.6, 0.9]]); each list is one setting")
+        return [list(v) for v in values], None
+    if any(isinstance(v, (list, tuple, dict)) for v in values):
+        return None, (f"{where} mixes lists with single values: write every value as a number, every value as text, "
+                      "or every value as a list of numbers of the same length")
+    if all(_number(v) for v in values):
+        return list(values), None
+    if all(isinstance(v, str) and v.strip() for v in values):
+        return [v.strip() for v in values], None
+    if all(_number(v) or (isinstance(v, str) and v.strip()) for v in values):
+        return None, (f"{where} mixes names and numbers: if the values are names, write every one as text in quotes "
+                      "(for example [\"a\", \"3\"]); if they are numbers, write every one as a number, without units or text")
+    return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
+
+
 def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None]:
     """``(protocol, None)`` when the experiment protocol block can be checked against a script, else ``(None, why)``.
 
@@ -166,11 +261,35 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         for axis, values in grid.items():
             if _number(values) or (isinstance(values, str) and values.strip()):
                 values = [values]
-            if (not isinstance(values, list) or not values
-                    or not (all(_number(v) for v in values) or all(isinstance(v, str) and v.strip() for v in values))):
-                return None, f"`protocol.grid.{axis}` must be a non-empty list of numbers, or a non-empty list of names (text), not a mix"
-            fixed[str(axis)] = [v.strip() if isinstance(v, str) else v for v in values]
+            fixed_values, why = _grid_values(axis, values)
+            if why:
+                return None, why
+            fixed[str(axis)] = fixed_values
         out["grid"] = fixed
+    inside = out.get("in_each_run")
+    if inside is not None:
+        # What every run goes through together (core/in_run.py): all five temperatures one fit uses, every procedure applied
+        # to the same simulated data. Not a setting of its own: each run is given the whole list.
+        if not isinstance(inside, dict) or not inside:
+            return None, ("`protocol.in_each_run` must map each thing every run compares inside it (all its values in "
+                          "one run, on the same random numbers) to the list of those values")
+        fixed_inside: dict[str, list[Any]] = {}
+        for factor, values in inside.items():
+            fixed_values, why = _grid_values(factor, values, part="in_each_run")
+            if why:
+                return None, why
+            seen_values = [json.dumps(float(v) if _number(v) else v) for v in fixed_values or []]
+            if len(set(seen_values)) < len(seen_values):
+                return None, (f"`protocol.in_each_run.{factor}` lists the same value twice: each value is compared "
+                              "once, so list every value one time")
+            if len(fixed_values or []) < 2:
+                return None, (f"`protocol.in_each_run.{factor}` has one value: a single value is not compared; it is "
+                              "a fixed setting of the run")
+            if str(factor) in (out.get("grid") or {}):
+                return None, (f"`{factor}` is both a setting of `protocol.grid` (each value run on its own) and in "
+                              "`protocol.in_each_run` (all its values in one run): it is one or the other")
+            fixed_inside[str(factor)] = fixed_values or []
+        out["in_each_run"] = fixed_inside
     runs = out.get("runs_per_setting")
     if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):
         return None, "`protocol.runs_per_setting` must be a whole number of at least 1"
@@ -198,6 +317,12 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         if fixed_metrics is None:
             return None, why
         out["metrics"] = fixed_metrics
+        subset = [str(m.get("id")) for m in fixed_metrics if isinstance(m, dict) and m.get("given")]
+        if subset and out.get("in_each_run"):
+            return None, (f"`protocol.metrics` gives a mean over a subset of the trials (`given`) for {', '.join(subset)}, "
+                          "and `protocol.in_each_run` records a number per value inside each run: the two cannot be "
+                          "combined. Make what each run compares a setting of `protocol.grid` (each value run on its "
+                          "own), or drop `given` and report the mean over every run")
     oracles = out.get("oracles")
     if oracles is not None:
         if isinstance(oracles, (str, dict)):
@@ -250,9 +375,14 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         # `grid`: a protocol is either a sweep or a search, never both.
         from . import optimisation_plan
 
+        if out.get("in_each_run") is not None:
+            return None, ("`protocol.optimisation` and `protocol.in_each_run` cannot both be given: a search for the best "
+                          "design runs one design at a time")
         if out.get("grid") is not None:
             return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
-                          "best design puts a coarse scan run before it in `optimisation.grid`")
+                          "best design puts the settings it compares, and a coarse scan run before it, in "
+                          "`optimisation.grid` (a design variable, or a condition also listed under `optimisation.fixed` "
+                          "with the value the search holds it at)")
         block, why = optimisation_plan.normalize(out["optimisation"])
         if block is None:
             return None, why
@@ -264,6 +394,15 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         # Last, so a cut of the protocol (the claim check shows its first few thousand characters) keeps the grid and
         # the checks, which a long list of equations would push out.
         out["model"] = model
+    if isinstance(out.get("metrics"), list) and any(isinstance(m, dict) and m.get("reference") is not None
+                                                    for m in out["metrics"]):
+        # A metric's reference value is computed from the grid, the fixed settings and the thresholds, and must agree
+        # with the plan's own known-answer checks: all in reach only now (core/reference_values.py).
+        from . import reference_values
+
+        found = reference_values.problems(out)
+        if found:
+            return None, found[0]
     return out, None
 
 
@@ -437,32 +576,132 @@ _PROTOCOL_KEY = re.compile(r"`protocol\.([A-Za-z_]+)")
 
 #: The parts of the protocol that change what is measured: when one cannot be read, FI asks the plan's model to write it
 #: (``Engine._ask_plan_for_the_parts``), and the note says so in these words.
-ASKED_PARTS = ("grid", "metrics", "runs_per_setting", "precision")
+ASKED_PARTS = ("grid", "in_each_run", "metrics", "runs_per_setting", "precision")
 ASK_MARK = "FI asks the plan's model to write"
 PART_RULES = {
     "grid": "`protocol.grid`: the settings the experiment varies, as a mapping from each setting's name to the list of "
             "values it takes. Each list is non-empty and holds only numbers, or only names (text), never a mix: numbers "
             "such as [0.1, 0.2, 0.4], or names such as [euler, rk4]. Take the settings to vary from `variables.independent`, "
             "the method and the topic.",
+    "in_each_run": "`protocol.in_each_run`: what every run goes through together, all its values in one run on the same "
+                   "random numbers (one fit across all of them, every method applied to the same simulated data), as a "
+                   "mapping from each such factor's name to the list of ALL its values: at least two, each listed once, "
+                   "only numbers or only names. A factor listed here is not also a setting of `protocol.grid` (FI takes it "
+                   "out of the grid: a grid setting is run on its own, once per value).",
     "metrics": "`protocol.metrics`: a list; each entry has an `id` (the name the script gives the number), a `kind` "
-               "(`proportion` or `mean`), an `estimand` (text: what the number estimates) and a `unit` (text: what one "
-               "independent observation is).",
+               "(`proportion` or `mean`), an `estimand` (text: what the number estimates), a `unit` (text: what one "
+               "independent observation is) and, optionally, a `label` (the reader's name for the number: words, its "
+               "symbol in $...$ and its unit, e.g. `Activation energy $E_a$ (kJ/mol)`).",
     "runs_per_setting": "`protocol.runs_per_setting`: a whole number of at least 1.",
     "precision": "`protocol.precision`: a mapping with `target_half_width`, a number between 0 and 1, and optionally "
                  "`metric` and `reason` (text).",
+    # The plan's ledger parts (core/plan_ledger.py, core/plan_steps.py): asked once, never a stop.
+    "simplifications": "`protocol.simplifications`: a list; each entry has an `id` (X1, X2, ...), `replaces` (what the topic "
+                       "asks for that the plan leaves out or approximates), `because` (why), `effect` (what this could change "
+                       "in the result) and `probe` (one sentence: how a run could show whether it matters).",
+    "definitions": "`protocol.definitions`: a list with an entry for every metric: `metric` (its id), `defined_as` (one "
+                   "line), `source` (the [n] of a source listed in the plan), `quote` (the passage of that source that states "
+                   "the definition, word for word) and `differs` (empty, or the id of a `simplifications` entry when you "
+                   "define it differently; then leave `quote` empty if you have no source for your own definition).",
+    # A known-answer check on a number the plan declares as an average over trials (core/mc_error.py): asked once.
+    "per_trial": "`protocol.oracles`, for each check named below and nothing else about it: does it hold in every "
+                 "single trial, or only on average over trials? Write each as `{\"name\": \"<the check's name>\", "
+                 "\"per_trial\": true}` when it must hold in every single trial, or `\"per_trial\": false` when it holds "
+                 "only on average over trials (a false discovery rate at most q, an error rate at most alpha; a check that says nothing is read as an average). FI takes "
+                 "only `per_trial` from your answer.",
+    "steps": "`protocol.model.steps`: a list of step cards; each has an `id` (S1, S2, ...), `name`, `does`, `inputs` (a "
+             "mapping of each input's name to its unit), `output`, and optionally `uses` (equation ids of the model), "
+             "`source`, `example` and `relations`. Write the model's other keys again unchanged.",
 }
+
+
+def plan_labels(protocol: Any) -> dict[str, str]:
+    """The reader's name for each quantity the plan names, by the name the code uses for it: the ``label`` of a
+    ``protocol.metrics`` entry (an output) and ``protocol.labels`` (``{name: label}``, a setting of the grid or any other
+    input). A label is words, the symbol in ``$...$`` and the unit (``Activation energy $E_a$ (kJ/mol)``). Both are
+    optional, nothing gates on them, and an old plan without them gives ``{}``; an entry that is not text is skipped."""
+    out: dict[str, str] = {}
+    if not isinstance(protocol, dict):
+        return out
+    labels = protocol.get("labels")
+    if isinstance(labels, dict):
+        for name, label in labels.items():
+            if isinstance(label, str) and label.strip() and str(name).strip():
+                out[str(name).strip()] = " ".join(label.split())
+    metrics = protocol.get("metrics")
+    for metric in metrics if isinstance(metrics, list) else [metrics] if isinstance(metrics, dict) else []:
+        if not isinstance(metric, dict):
+            continue
+        name, label = str(metric.get("id") or "").strip(), metric.get("label")
+        if name and isinstance(label, str) and label.strip():
+            out.setdefault(name, " ".join(label.split()))
+    return out
+
+
+def plan_names(protocol: Any) -> set[str]:
+    """Every name the plan gives a quantity the code handles: the grid's and ``in_each_run``'s settings, the metrics'
+    ids, the names ``protocol.labels`` labels and the inputs of the model's step cards. A figure axis labelled with one
+    of these shows the code's name, not the reader's."""
+    names: set[str] = set(plan_labels(protocol))
+    if not isinstance(protocol, dict):
+        return names
+    for key in ("grid", "in_each_run"):
+        if isinstance(protocol.get(key), dict):
+            names |= {str(k).strip() for k in protocol[key] if str(k).strip()}
+    metrics = protocol.get("metrics")
+    for metric in metrics if isinstance(metrics, list) else []:
+        if isinstance(metric, dict) and str(metric.get("id") or "").strip():
+            names.add(str(metric["id"]).strip())
+    model = protocol.get("model")
+    steps = model.get("steps") if isinstance(model, dict) else None
+    for step in steps if isinstance(steps, list) else []:
+        inputs = step.get("inputs") if isinstance(step, dict) else None
+        if isinstance(inputs, dict):
+            names |= {str(k).strip() for k in inputs if str(k).strip()}
+    return names
 
 
 def part_request(topic: str, unread: dict[str, str]) -> str:
     """The request FI makes of the plan's model, in place of asking a person, for each protocol part that could not be read:
     the sentence that says what could not be read (quoted) and the rule the part must meet. Nothing else may change."""
-    lines = [f"- {PART_RULES[part]}\n  What could not be read: {why}" for part, why in unread.items() if part in PART_RULES]
+    lines = [f"- {PART_RULES[part]}\n  {'What could not be read' if part in ASKED_PARTS else 'What is missing or wrong'}: {why}"
+             for part, why in unread.items() if part in PART_RULES]
+    lead = ("Parts of this plan's protocol could not be read, so the experiment would not run what the study needs."
+            if any(part in ASKED_PARTS for part in unread) else
+            "Some known-answer checks of this plan do not say whether they hold in every single trial or only on average "
+            "over trials." if set(unread) == {"per_trial"} else
+            "Parts of this plan's protocol are missing or incomplete, so the plan does not say what it leaves out or how its "
+            "metrics are defined.")
+    if "per_trial" in unread and set(unread) != {"per_trial"}:
+        lead += (" Some known-answer checks also do not say whether they hold in every single trial or only on average "
+                 "over trials.")
     return (
-        "Parts of this plan's protocol could not be read, so the experiment would not run what the study needs. Write "
+        f"{lead} Write "
         f"each of them again in the design block, from the plan and the topic: “{' '.join(str(topic or '').split())[:600]}”.\n"
         + "\n".join(lines)
         + "\nChange nothing else in the plan: not a check, a threshold, a tolerance or a criterion, and not a part of the "
         "protocol that could be read.")
+
+
+def grid_request(topic: str, problem: str) -> str:
+    """The request FI makes of the plan's model when ``protocol.grid`` holds more settings than FI lists (``problem``, from
+    :func:`core.optimise_search.grid_too_large`: the plan's own arithmetic). It says how the grid is run and what the plan
+    can do; it chooses nothing for the plan."""
+    return (
+        "The experiment in this plan cannot run as written: " + problem + ". The topic: “"
+        + " ".join(str(topic or "").split())[:600] + "”.\n"
+        "How the grid is run:\n"
+        "- FI runs every combination of the values of the settings in `protocol.grid`: each setting multiplies every other.\n"
+        "- Settings that belong to separate parts of the study (each varied on its own, for example one study per method) "
+        "cannot share one grid: together they multiply into a count nobody can run.\n"
+        "Rewrite the plan's settings so the grid fits, in any of these ways:\n"
+        "- keep in `protocol.grid` only the settings that are meant to be crossed with one another;\n"
+        "- hold every other setting at one value, in `protocol.constants`;\n"
+        "- move a factor that each run compares inside it (all its values in one run) to `protocol.in_each_run`, where its "
+        "values do not multiply the settings;\n"
+        "- or give a setting fewer values.\n"
+        "Write `protocol.grid` again, and `protocol.constants` and `protocol.in_each_run` as they must now be (each whole). "
+        "Change nothing else in the plan.")
 
 
 def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
@@ -486,6 +725,14 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
         if key not in out:
             return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
         if key == "metrics":
+            # A reference value that cannot be used is left out, not the metric it belongs to.
+            from . import reference_values
+
+            without, note = reference_values.without_bad_reference(out, why)
+            if without is not None:
+                out = without
+                notes.append(note)
+                continue
             # One metric the check refuses is left out, not the list it is in.
             from . import metric_spec
 
@@ -975,6 +1222,115 @@ def repair_block(block: str) -> tuple[str | None, list[str]]:
     return None, []
 
 
+def _entry_key(entry: Any) -> str | None:
+    if isinstance(entry, dict):
+        for name in ("id", "name"):
+            if entry.get(name) is not None:
+                return str(entry[name])
+    return None
+
+
+def _lost(had: Any, now: Any, depth: int = 2) -> bool:
+    """Whether ``now`` lacks something ``had`` has: a key of a mapping, or a named entry of a list (by its ``id`` or
+    ``name``), looked at ``depth`` levels down (a protocol's parts, and the entries and keys inside each)."""
+    if isinstance(had, dict):
+        if not isinstance(now, dict) or any(k not in now for k in had):
+            return True
+        return depth > 0 and any(_lost(v, now[k], depth - 1) for k, v in had.items())
+    if isinstance(had, list) and any(_entry_key(e) is not None for e in had):
+        if not isinstance(now, list):
+            return True
+        named = {_entry_key(x): x for x in now if _entry_key(x) is not None}
+        return any(_entry_key(e) is not None and (_entry_key(e) not in named
+                                                   or (depth > 0 and _lost(e, named[_entry_key(e)], depth - 1)))
+                   for e in had)
+    return False
+
+
+def _put_back_inside(plan_part: Any, kept: Any) -> list[Any]:
+    """The ways to put back, one at a time, what ``kept`` (the answer's version of a part) lost of the plan's own
+    ``plan_part``: a named entry of a list that is missing added, or one that lost something mended the same way (the
+    plan's own entry when it is neither a list nor a mapping inside); a key of a mapping that is missing or lost something
+    likewise; the answer's own additions beside them stay. The whole part when it is neither."""
+    if isinstance(plan_part, list) and isinstance(kept, list):
+        out: list[Any] = []
+        for entry in plan_part:
+            name = _entry_key(entry)
+            if name is None:
+                continue
+            at = next((i for i, x in enumerate(kept) if _entry_key(x) == name), None)
+            if at is None:
+                out.append([*kept, entry])
+            elif _lost(entry, kept[at]):
+                out.extend([*kept[:at], mended, *kept[at + 1:]] for mended in _put_back_inside(entry, kept[at]))
+        return out
+    if isinstance(plan_part, dict) and isinstance(kept, dict):
+        out = []
+        for key, value in plan_part.items():
+            if key not in kept:
+                out.append({**kept, key: value})
+            elif _lost(value, kept[key]):
+                out.extend({**kept, key: mended} for mended in _put_back_inside(value, kept[key]))
+        return out
+    return [plan_part]
+
+
+def accept_answer(before: Any, after: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(protocol, refused)`` for a model's answer to a request to complete the plan: ``after`` as it is when it can be
+    read whole; otherwise what can be read of it, part by part and entry by entry (:func:`repair_protocol`), with each
+    part or entry of ``before`` (the plan as it was) that the answer broke put back as the plan had it, and one sentence
+    per part or entry of the answer that was not taken (the reader's own reason, to send back to the model). A real plan
+    request lost its whole answer, the metrics it added and the formula's mapping, to one metric whose `kind` the reader
+    refuses. Nothing is loosened: what cannot be read is still not taken. ``(None, reasons)`` when nothing of the answer
+    can be read, or taking it would cost the plan a part it had."""
+    fixed, why = normalize_protocol(after)
+    if fixed is not None:
+        return fixed, []
+    repaired, notes = repair_protocol(after)
+    if repaired is None:
+        return None, notes or [str(why)]
+    base = before if isinstance(before, dict) else {}
+    plan_now = normalize_protocol(base)[0] or base
+    restored = True
+    for _pass in range(16):  # again until nothing more comes back: a part can rest on one put back later in the pass
+        if not restored:
+            break
+        restored = False
+        for key, value in base.items():
+            if key not in repaired:
+                trials = [value]
+            elif isinstance(value, list) and isinstance(repaired[key], list):
+                trials = [e for e in value if _entry_key(e) is not None
+                          and _entry_key(e) not in {_entry_key(x) for x in repaired[key]}]
+            elif isinstance(value, dict) and isinstance(repaired[key], dict):
+                trials = [{k: v} for k, v in value.items() if k not in repaired[key]]
+            else:
+                trials = []
+            for item in trials:  # one at a time, each on what is already kept
+                now = repaired.get(key)
+                option = ([*now, item] if isinstance(now, list) else {**now, **item} if isinstance(now, dict) else item)
+                trial, _ = normalize_protocol({**repaired, key: option})
+                if trial is not None:
+                    repaired, restored = trial, True
+            # Something inside a part lost (an equation of the model, a key of an entry): the plan's own goes back, one
+            # entry or key at a time, each on what is already kept; the answer's additions beside it stay.
+            for _round in range(64):  # bounded: each round puts back one entry or key
+                if not (key in repaired and key in plan_now and _lost(plan_now[key], repaired[key])):
+                    break
+                for option in _put_back_inside(plan_now[key], repaired[key]):
+                    trial, _ = normalize_protocol({**repaired, key: option})
+                    if trial is not None and trial != repaired:
+                        repaired, restored = trial, True
+                        break
+                else:
+                    break
+    # Taken in part only when the part taken adds to the plan and costs it nothing it had, a part or anything in one.
+    gained = any(k not in plan_now or repaired[k] != plan_now[k] for k in repaired)
+    if not gained or _lost(plan_now, repaired, depth=3):
+        return None, notes or [str(why)]
+    return repaired, notes
+
+
 def repair_design(text: str) -> tuple[str | None, list[str]]:
     """``text`` with its design block repaired by :func:`repair_block` (``(None, [])`` when there is no block, the block
     cannot be repaired that way, or it was valid already)."""
@@ -1037,8 +1393,10 @@ def load_design(quest_root: Path) -> tuple[dict[str, Any] | None, str | None]:
     return parsed.design, parsed.error
 
 
-def raw_design_block(text: str) -> dict[str, Any] | None:
-    """The design block of ``text`` as written (not normalised), or ``None`` when it cannot be read."""
+def raw_design_block(text: str, *, as_written: bool = False) -> dict[str, Any] | None:
+    """The design block of ``text`` (not normalised), or ``None`` when it cannot be read. A protocol part written beside
+    ``protocol`` is shown under it (:func:`hoist_protocol_parts`), so every reader finds it where it looks; with
+    ``as_written`` the block is exactly as the file has it."""
     heading = _HEADING_RE.search(text or "")
     fenced = _FENCE_RE.search(text, heading.end()) if heading else None
     if fenced is None:
@@ -1047,7 +1405,9 @@ def raw_design_block(text: str) -> dict[str, Any] | None:
         loaded = yaml.safe_load(fenced.group(1))
     except yaml.YAMLError:
         return None
-    return loaded if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict):
+        return None
+    return loaded if as_written else hoist_protocol_parts(loaded)[0]
 
 
 def edit_design_block(text: str, change: Any) -> str | None:

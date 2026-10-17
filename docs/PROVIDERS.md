@@ -379,6 +379,19 @@ the provider's free model list is asked whether its server answers and has the m
 counts as a different model for the known-answer check review (`oracle_review`): the same model name on two
 providers still counts as one model. The key is read from the environment only; no key goes in the config.
 
+## Long answers are streamed
+
+A reasoning model can think for many minutes before its first word, and a plain request that long with no bytes
+times out. So every direct HTTP provider's chat calls (`openai`, `codex`, `gemini`, `ollama`, `vllm`, and a step on
+its own provider under `node_providers`) are streamed: the answer and the model's reasoning arrive as they are made.
+The step's HTTP timeout (`provider.http_timeout_s`, or `provider.node_http_timeout_s.<step>`) limits the **silence**
+between two pieces, and a piece of the model's reasoning counts as a piece; a keep-alive comment does not. The whole
+call is also bounded, at four times that timeout. A server that does not take streaming (it answers with the whole
+reply, or refuses the request) keeps working: FI sends that request whole and does not ask it to stream again. The
+proxy providers are not streamed. When a step times out on every try, quest_failed.md names the provider and model that
+served that step and the setting to change for it. `run.log` gets one line for each streamed call on when its first
+output, its thinking and its answer began and how long it took.
+
 ## When the provider's server is down or busy
 
 A provider sometimes answers with a server error for a few minutes (an HTTP

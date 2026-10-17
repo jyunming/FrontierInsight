@@ -968,30 +968,19 @@ def _capture(eng: Engine) -> list[str]:
     return seen
 
 
-def test_every_key_finding_reaches_the_check(tmp_path: Path) -> None:
-    """The finding that proves a claim is often the last one the analysis
-    wrote. Nothing may be dropped for its position, and no finding may be cut
-    in half."""
-    findings = [*_sweep_findings(), VALIDATION_FINDING]
-    # The state the old cut could not show: the findings alone exceed 4,000.
-    assert len(json.dumps(findings, indent=2)) > 4000
+def test_the_analysis_prose_is_not_evidence_for_the_paper(tmp_path: Path) -> None:
+    """A real paper said "OLS SD 1,920" where the run's value was 1849.0. The analysis step's own prose carried the same
+    wrong number, and as evidence it made the paper's number check itself. Only the run's results are evidence."""
     eng = _engine(tmp_path)
     seen = _capture(eng)
-    state = {"topic": "t", "paper_md": _paper(tmp_path),
-             "analysis": {"key_findings": findings,
-                          "claims_supported": [{"claim": "The Gillespie implementation is "
-                                                "consistent with the exact finite-state CTMC "
-                                                "at N=100.", "evidence": "All nine exact "
-                                                "threshold probabilities were inside their "
-                                                "Wilson intervals."}]},
-             "literature": []}
+    state = {"topic": "t", "paper_md": _paper(tmp_path, "# Paper\n\nThe OLS SD was 1,920 J/mol.\n"),
+             "analysis": {"key_findings": ["The OLS SD was 1,920 J/mol."],
+                          "claims_supported": [{"claim": "OLS SD is 1,920", "evidence": "1920 J/mol"}]},
+             "result_json": {"ols": {"sd": 1849.0}}, "literature": []}
     asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
     block = _evidence_block(seen[0])
-    assert VALIDATION_FINDING in block
-    for finding in findings:
-        assert finding in block
-    # The claim the analysis says the run supports reaches it too.
-    assert "All nine exact threshold probabilities were inside" in block
+    assert "1849" in block
+    assert "1,920" not in block and "1920" not in block
 
 
 def test_the_results_branch_the_findings_name_reaches_the_check(tmp_path: Path) -> None:
@@ -1023,24 +1012,6 @@ def test_the_results_branch_the_findings_name_reaches_the_check(tmp_path: Path) 
     assert "[101 values, 0 to 0.1]" in block
 
 
-def test_a_finding_is_shown_whole_or_not_at_all() -> None:
-    """Under a budget too small for everything, an item is left out rather
-    than severed — the old cut ended one finding mid-sentence."""
-    from core.engine import _claim_distilled_block
-
-    findings = _sweep_findings(6)
-    block, dropped = _claim_distilled_block({"key_findings": findings}, 1200)
-    assert dropped
-    assert len(block) <= 1200
-    kept = [f for f in findings if f in block]
-    assert kept, "at least one finding should fit"
-    assert len(kept) == len(findings) - dropped
-    # No partial item: every finding in the block is there in full.
-    for finding in findings:
-        head = finding[:60]
-        assert head not in block or finding in block
-
-
 def test_a_long_numeric_array_is_summarised_not_printed() -> None:
     from core.engine import _summarise_long_arrays
 
@@ -1067,19 +1038,16 @@ def test_the_results_are_shown_whole_when_they_fit() -> None:
 
 
 def test_the_evidence_block_stays_within_its_budget() -> None:
-    from core.engine import _claim_distilled_block, _claim_results_block
+    from core.engine import _claim_results_block
 
-    findings = _sweep_findings(40)
     budget = 6000
-    distilled, _ = _claim_distilled_block({"key_findings": findings}, budget)
     results = _claim_results_block(
         {str(i): {"x": list(range(20))} for i in range(400)},
-        query=distilled, budget=budget - len(distilled),
+        query="x", budget=budget,
     )
     # A sweep of hundreds of branches: none of them fits whole, and naming
     # every one of them in the heading would itself overrun the budget.
-    assert len(distilled) <= budget
-    assert len(distilled) + len(results) <= budget
+    assert len(results) <= budget
 
 
 def test_the_check_sees_how_the_study_was_run_and_the_results_the_paper_quotes(tmp_path: Path) -> None:
@@ -1185,3 +1153,141 @@ def test_a_reading_picked_for_relevance_keeps_its_label_and_a_readings_only_sour
     # Room the source's own text leaves goes to its readings.
     short = "Short abstract.\n\n" + _FIGURE_READINGS_MARK + "\n\n" + ("r" * 900)
     assert _format_lit_excerpt(short, "t", budget=1000).count("r") >= 800
+
+
+# --- the method block the claim check is shown ----------------------------
+
+
+def _code_tree(root: Path) -> None:
+    code = root / "code"
+    (code / "pkg").mkdir(parents=True)
+    (code / "tests").mkdir()
+    (code / "__pycache__").mkdir()
+    (code / "simulate.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (code / "experiment.py").write_text("def main():\n    return 2\n", encoding="utf-8")
+    (code / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (code / "pkg" / "model.py").write_text("def cd():\n    return log(dose)  # a heuristic\n", encoding="utf-8")
+    (code / "pkg" / "plots.py").write_text("def draw():\n    pass\n", encoding="utf-8")
+    (code / "tests" / "test_model.py").write_text("def test_x():\n    assert SECRET_TEST\n", encoding="utf-8")
+    (code / "__pycache__" / "junk.py").write_text("JUNK = 1\n", encoding="utf-8")
+
+
+def test_method_block_shows_package_code_in_order(tmp_path: Path) -> None:
+    from core.engine import _claim_method_block
+
+    _code_tree(tmp_path)
+    block = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "code/pkg/model.py" in block and "return log(dose)" in block
+    assert "SECRET_TEST" not in block and "JUNK" not in block
+    # simulate.py, then experiment.py, then the model, the plotting file last
+    order = [block.index(f"### code/{n}") for n in ("simulate.py", "experiment.py", "pkg/model.py", "pkg/plots.py")]
+    assert order == sorted(order)
+    assert "NOT SHOWN" not in block and "THE PLAN" not in block
+
+
+def test_plotting_files_are_matched_by_whole_name_parts() -> None:
+    from core.engine import _claim_code_order
+
+    assert _claim_code_order("pkg/plots.py")[0] == 3 and _claim_code_order("figure_utils.py")[0] == 3
+    assert _claim_code_order("make-charts.py")[0] == 3 and _claim_code_order("viz.py")[0] == 3
+    # a core module whose name only contains such letters is a model module
+    for core in ("draw_samples.py", "renderer.py", "reporting.py", "pkg/configure.py"):
+        assert _claim_code_order(core)[0] == 1, core
+
+
+def test_method_block_says_what_the_budget_cut_and_stops_there(tmp_path: Path, monkeypatch) -> None:
+    from core import engine as _eng
+
+    _code_tree(tmp_path)
+    (tmp_path / "code" / "pkg" / "big.py").write_text("x = 1\n" * 4000, encoding="utf-8")
+    monkeypatch.setattr(_eng, "_CLAIM_CODE_CHARS", 6000)
+    block = _eng._claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "NOT SHOWN" in block and "code/pkg/big.py (cut)" in block
+    assert "more characters of this file not shown" in block
+    # once a file is cut nothing after it is included, even a small file that would fit
+    assert "code/pkg/model.py (not shown)" in block and "return log(dose)" not in block
+    assert "code/pkg/plots.py (not shown)" in block
+    assert "### code/pkg/model.py" not in block and "### code/pkg/plots.py" not in block
+
+
+def test_method_block_labels_protocol_as_the_plan(tmp_path: Path, monkeypatch) -> None:
+    from core import engine as _eng
+
+    monkeypatch.setattr(_eng._frozen, "protocol_of", lambda root: {"model": "Abbe imaging"})
+    block = _eng._claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "THE PLAN (the frozen protocol: what was planned, NOT evidence of what ran)" in block
+    assert "Abbe imaging" in block
+
+
+def test_method_block_carries_fi_record_of_the_trials(tmp_path: Path) -> None:
+    from core.engine import _claim_method_block
+
+    assert "WHAT FI RAN" not in _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    rows = [{"event": "trial", "cell": f"dose={d},resist={r}", "trial": t, "status": "ok"}
+            for d in (20, 40) for r in ("CAR", "MOR") for t in range(5)]
+    rows.append({"event": "trial", "cell": "dose=20,resist=CAR", "trial": 5, "status": "failed"})
+    (raw / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    block = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "WHAT FI RAN (FI's own record" in block
+    assert "4 setting(s), 21 trial(s) in all (20 finished, 1 failed); 5 to 6 trial(s) per setting" in block
+    assert "- dose: 20, 40" in block and "- resist: CAR, MOR" in block
+
+
+def test_method_block_carries_the_engines_check_verdicts(tmp_path: Path) -> None:
+    from core.engine import _claim_method_block
+
+    (tmp_path / "needs").mkdir()
+    (tmp_path / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok", "attempts": [{"judged": [
+        {"name": "energy_conserved", "value": 1.0001, "expected": 1.0, "limit": 0.01, "passed_by_engine": True,
+         "measured_by": "engine"}]}]}), encoding="utf-8")
+    block = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "energy_conserved: measured 1.0001, expected 1 within 0.01: passed" in block
+
+
+def test_a_check_the_reader_flagged_is_marked_not_shown(tmp_path: Path, monkeypatch) -> None:
+    from core import engine as _eng
+
+    (tmp_path / "needs").mkdir()
+    (tmp_path / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok", "attempts": [{"judged": [
+        {"name": "energy_conserved", "value": 1.0, "expected": 1.0, "limit": 0.01, "passed_by_engine": True,
+         "measured_by": "engine"}]}]}), encoding="utf-8")
+    monkeypatch.setattr(_eng._code_review, "flagged_checks", lambda *a, **k: {"energy_conserved": "the check is a constant"})
+    block = _eng._claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "do not say this check passed" in block and "passed_by_engine" not in block
+    assert "energy_conserved: measured 1, expected 1 within 0.01: passed" not in block
+
+
+def test_method_block_open_findings_header_only_when_there_are_some(tmp_path: Path) -> None:
+    from core import code_review as _cr
+    from core.engine import _claim_method_block
+
+    _code_tree(tmp_path)
+    plain = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "SECOND MODEL" not in plain and "No second model" not in plain
+    # a reading that was never made: one neutral line, no reviewer instructions, no header
+    _cr.save(tmp_path, {"skipped": "the same model wrote the code", "read_version": ""})
+    skipped = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "No second model compared the code with the plan" in skipped
+    assert "A SECOND MODEL'S READING" not in skipped and "Open points" not in skipped
+    assert "do not ask for it to be changed" not in skipped
+    # a real reading with something open: our header, the engine's list, no duplicated heading
+    _cr.save(tmp_path, {"read_version": _cr.version(tmp_path / "code"), "version": _cr.version(tmp_path / "code"),
+                        "not_reviewed": ["R1 the model computes the aerial image"]})
+    read = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
+    assert "A SECOND MODEL'S READING OF THE CODE AGAINST THE PLAN (it can be wrong)" in read
+    assert "R1 the model computes the aerial image" in read
+    assert "## Open points" not in read and "do not ask for it to be changed" not in read
+
+
+def test_claim_check_template_fills_every_placeholder() -> None:
+    from string import Template
+
+    text = (Path(__file__).resolve().parent.parent / "agents" / "claim_check.md").read_text(encoding="utf-8")
+    out = Template(text).substitute(topic="T", evidence_block="E", method_block="M", references="R", paper="P")
+    assert "WHAT FI RAN (FI's own record)" in out
+    assert "where the code is shown, it does not ground a claim about how the study was run" in out
+    assert "do not call a claim about that part `unsupported` just because it is not shown" in out
+    assert "a constant in the code is never a result" in out
+    assert "cannot ground a claim that it passed" in out

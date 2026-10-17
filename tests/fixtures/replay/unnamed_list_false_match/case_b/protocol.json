@@ -1,0 +1,23 @@
+{
+ "grid": {
+  "m": [
+   20,
+   200,
+   2000
+  ],
+  "pi1": [
+   0.0,
+   0.05,
+   0.2
+  ],
+  "method": [
+   "uncorrected",
+   "bonferroni",
+   "bh"
+  ],
+  "alpha": [
+   0.05
+  ]
+ },
+ "runs_per_setting": 4000
+}

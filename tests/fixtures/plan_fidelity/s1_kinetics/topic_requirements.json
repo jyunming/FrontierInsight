@@ -1,0 +1,117 @@
+{
+  "factors": [
+    {
+      "name": "temperature",
+      "levels": [],
+      "range": [],
+      "stated": "five temperatures spanning a 10-fold range of k",
+      "main": true
+    },
+    {
+      "name": "noise level",
+      "levels": [],
+      "range": [],
+      "stated": "Vary the noise level",
+      "main": true
+    },
+    {
+      "name": "number of time points",
+      "levels": [],
+      "range": [],
+      "stated": "the number of time points",
+      "main": true
+    },
+    {
+      "name": "sampling times",
+      "levels": [],
+      "range": [
+        0.0,
+        3.0
+      ],
+      "stated": "sampling times from 0 to 3/k at each temperature",
+      "main": false
+    }
+  ],
+  "quantities": [
+    {
+      "name": "bias",
+      "stated": "report bias",
+      "main": true
+    },
+    {
+      "name": "spread of the estimates",
+      "stated": "the spread of the estimates",
+      "main": true
+    },
+    {
+      "name": "coverage of the true value by the 95 percent interval",
+      "stated": "how often the true value falls inside the reported 95 percent interval",
+      "main": true
+    },
+    {
+      "name": "rate constant k at each temperature",
+      "stated": "Fit k at each temperature by nonlinear least squares",
+      "main": true
+    },
+    {
+      "name": "activation energy Ea",
+      "stated": "recover Ea and ln A",
+      "main": true
+    },
+    {
+      "name": "ln A",
+      "stated": "recover Ea and ln A",
+      "main": true
+    },
+    {
+      "name": "correlation between Ea and ln A estimates",
+      "stated": "the Ea and ln A estimates are strongly correlated",
+      "main": false
+    }
+  ],
+  "formulas": [
+    {
+      "name": "first-order concentration decay",
+      "text": "c(t) = c0 * exp(-k * t)",
+      "main": true
+    },
+    {
+      "name": "Arrhenius law for the rate constant",
+      "text": "k = A * exp(-Ea / (R * T))",
+      "main": true
+    }
+  ],
+  "comparisons": [
+    {
+      "what": "Bias, spread and 95 percent interval coverage of the Ea and ln A estimates compared across noise levels.",
+      "between": [
+        "noise level"
+      ]
+    },
+    {
+      "what": "Bias, spread and 95 percent interval coverage of the Ea and ln A estimates compared across numbers of time points.",
+      "between": [
+        "number of time points"
+      ]
+    }
+  ],
+  "constraints": [
+    "Use one Python script with numpy (and scipy where it helps) and matplotlib with the Agg backend.",
+    "Produce two or three figures that answer the question directly, each with the reference or theory value drawn.",
+    "Write a short paper of at most 4 pages.",
+    "Cite only sources actually found and read; say so if a reference cannot be confirmed.",
+    "Run on CPU only in under 60 seconds.",
+    "Use fixed random seeds where the run is random, and state them in the paper.",
+    "Report every number with its uncertainty (for a deterministic result, its numerical error).",
+    "Say when a result is only a check of the code.",
+    "Use known A and Ea to simulate the data.",
+    "Use additive Gaussian noise of a stated size.",
+    "Fit ln k against 1/T with 1/T centred and each point weighted by the variance of its ln k."
+  ],
+  "stated_results": [],
+  "code_files": 1,
+  "reviewer": "claude-sonnet-5-5",
+  "planner": "claude-sonnet-5-5",
+  "same_model": true,
+  "at": "2026-10-15T15:36:50+00:00"
+}

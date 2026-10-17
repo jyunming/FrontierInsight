@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from core import equation_tests as eqt
+from tests.equation_judge_helpers import fi_verdict
 
 # A damped spring: the quality factor Q = sqrt(m k) / c. The wrong version divides by a different quantity.
 SPRING = {"summary": "a mass on a damped spring", "equations": [
@@ -90,7 +91,9 @@ def _run(code: Path) -> tuple[list[dict[str, Any]], str]:
 def _cases(code: Path) -> list[dict[str, Any]]:
     sources = {"spring/model.py": (code / "spring" / "model.py").read_text(encoding="utf-8")}
     located = eqt.locate(PROTOCOL, sources)
-    assert located["E1"] == {"module": "spring.model", "function": "quality", "file": "spring/model.py"}
+    assert {k: located["E1"][k] for k in ("module", "function", "file")} == {
+        "module": "spring.model", "function": "quality", "file": "spring/model.py"}
+    assert [p["name"] for p in located["E1"]["static"]["params"]] == ["m", "k", "c"], "FI's own reading of it"
     assert located["E2"] is None and located["E3"] is None
     return eqt.cases(eqt.example_rows(PROTOCOL), located)
 
@@ -99,6 +102,7 @@ def test_an_equation_implemented_wrongly_is_caught_and_a_correct_one_passes(tmp_
     code = tmp_path / "code"
     _write_package(code, CORRECT)
     eqt.write(code, _cases(code))
+    eqt.write_values(code, _cases(code))   # a person's copy, delivered at the end of a quest
     results, _out = _run(code)
     assert [(r["id"], r["status"]) for r in results] == [("E1", "ok")]
     (code / "spring" / "model.py").write_text(WRONG, encoding="utf-8")
@@ -117,6 +121,7 @@ def test_the_generated_file_is_also_a_pytest_file_and_is_fi_s_not_the_model_s(tm
     code = tmp_path / "code"
     _write_package(code, WRONG)
     path = eqt.write(code, _cases(code))
+    eqt.write_values(code, _cases(code))
     text = path.read_text(encoding="utf-8")
     assert "Written by Frontier Insight (never by the model" in text and "def test_e1():" in text
     done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(path)], cwd=code,
@@ -169,6 +174,110 @@ def test_a_tiny_output_is_held_to_its_size_and_only_an_exact_zero_gets_the_round
     assert tiny["abs"] == 0.0 and zero["abs"] == eqt.ABSOLUTE_FLOOR
     (tmp_path / "m.py").write_text("def f(x):" + chr(10) + "    return 0.0" + chr(10), encoding="utf-8")
     for name, c, want in (("tiny", tiny, "mismatch"), ("zero", zero, "ok")):
-        (tmp_path / "t.py").write_text(eqt.test_source([{**c, "module": "m", "function": "f"}]), encoding="utf-8")
-        done = subprocess.run([sys.executable, "-B", "t.py", "--json"], cwd=tmp_path, capture_output=True, text=True)
-        assert eqt.parse_results(done.stdout)[0]["status"] == want, name
+        one = [{**c, "module": "m", "function": "f"}]
+        assert fi_verdict(one, tmp_path)[0]["status"] == want, name
+
+
+# --- `untestable` is accepted only when something else checks the equation -----------------------------------------------
+
+BARE = {"model": {"equations": [
+    {"id": "E1", "formula": "y = f(x)", "role": "generates", "source": "derivation",
+     "example": {"untestable": "no closed form for its output"}},
+    {"id": "E2", "formula": "z = g(y)", "role": "analyses", "source": "derivation",
+     "example": {"untestable": "read from a trace"}}]}}
+
+
+def test_an_untestable_generating_equation_with_no_other_check_is_unprotected_and_the_plan_is_asked_for_one() -> None:
+    rows = eqt.example_rows(BARE)
+    assert _row(rows, "E1")["state"] == "unprotected" and _row(rows, "E2")["state"] == "untestable"
+    text = eqt.request([r for r in rows if r["state"] in ("missing", "unusable", "unprotected")])
+    assert "E1" in text and "nothing else checks it" in text and "`symmetry`" in text and "E2" not in text
+    notes = eqt.untested_notes(rows, {})
+    assert any("equation E1 is not tested at all" in n for n in notes)
+    assert eqt.untested_core(BARE) == ["E1"]
+    assert "E1 that generates the study's data is not tested at all" in eqt.write_note(BARE)
+
+
+@pytest.mark.parametrize("kind", ["special_case", "invariant", "symmetry", "second_implementation", "conservation"])
+def test_a_check_of_the_right_kind_that_names_the_equation_makes_untestable_acceptable(kind: str) -> None:
+    covered = {**BARE, "oracles": [{"name": "limit_check", "kind": kind, "check": "behaviour of E1 at the limit",
+                                    "expected": 0.0, "reference": "derivation: the limit"}]}
+    row = _row(eqt.example_rows(covered), "E1")
+    assert row["state"] == "untestable" and row["covered_by"] == "limit_check"
+    assert eqt.untested_core(covered) == [] and eqt.write_note(covered) == ""
+    assert "tests it instead" in " ".join(eqt.untested_notes(eqt.example_rows(covered), {}))
+
+
+def test_a_check_that_names_another_equation_or_is_another_kind_does_not_count() -> None:
+    other = {**BARE, "oracles": [{"name": "elsewhere", "kind": "special_case", "check": "E2 at a limit", "expected": 1.0,
+                                  "reference": "derivation: by hand"},
+                                 {"name": "converges", "kind": "convergence_rate", "check": "E1 converges", "expected": 2.0,
+                                  "reference": "derivation: order"}]}
+    assert _row(eqt.example_rows(other), "E1")["state"] == "unprotected"
+
+
+# --- the equation as written, computed on its own example's inputs ------------------------------------------------------
+# In the suite's rounds, 35 of 90 worked examples could be checked against their own equation this way, and none
+# disagreed: the check is insurance before the run, and after a failure it tells the code's fault from the example's.
+
+ARRHENIUS = "k = A * exp(-Ea / (R * T))"  # suite r1 kinetics, verbatim
+ARRHENIUS_INPUTS = {"A": 1e10, "Ea": 50000.0, "R": 8.314, "T": 300.0}
+
+
+@pytest.mark.parametrize(("formula", "inputs", "value"), [
+    (ARRHENIUS, ARRHENIUS_INPUTS, 19.67488661945756),
+    ("k(T) = A * exp(-Ea / (R * T))", ARRHENIUS_INPUTS, 19.67488661945756),
+    ("N_abs = Phi * A * (1 - exp(-alpha * t))", {"Phi": 68.0, "A": 1.0, "alpha": 0.005, "t": 35.0}, 10.9169225876939),
+])
+def test_an_equation_that_defines_one_name_is_computed_on_the_examples_inputs(formula, inputs, value) -> None:  # noqa: ANN001
+    assert abs(eqt.equation_value(formula, inputs) - value) < 1e-9 * value
+
+
+@pytest.mark.parametrize("formula", [
+    "Bonferroni rejects i when p_i <= q/m",                      # a relation
+    "p_i <= q / m",
+    "z_i = mu_i + epsilon_i, epsilon_i ~ N(0,1)",                # a distribution
+    "Ea_hat = -R * b; lnA_hat = a - b * xbar",                    # several definitions
+    "y = log(x)",                                                 # log of which base
+    "y = sin(x)",                                                 # an angle with no unit
+    "y = gamma(x)",                                               # in prose, maybe the author's own gamma
+    "y = c0 * exp(-k * t)",                                       # a name the inputs do not give
+])
+def test_an_equation_fi_cannot_read_for_sure_is_not_judged(formula: str) -> None:
+    assert eqt.equation_value(formula, {"x": 1.0, "q": 0.05, "m": 20.0, "R": 8.3, "b": 1.0, "a": 1.0, "xbar": 0.1,
+                                        "c0": 1.0, "k": 1.0}) is None
+
+
+def _one(formula: str, example: dict[str, Any]) -> dict[str, Any]:
+    return eqt.example_rows({"model": {"equations": [{"id": "E1", "formula": formula, "role": "generates",
+                                                      "example": example}]}})[0]
+
+
+def test_an_example_its_own_equation_gives_is_recorded_as_agreeing() -> None:
+    row = _one(ARRHENIUS, {"inputs": ARRHENIUS_INPUTS, "expected_formula": "A * exp(-Ea / (R * T))"})
+    assert row["state"] == "ok" and row["equation_agrees"] is True
+    assert "equation_agrees" not in _one("y = c0 * exp(-k * t)", {"inputs": {"k": 1.0, "t": 1.0},
+                                                                   "expected_formula": "exp(-k * t)"})
+
+
+def test_an_example_that_contradicts_its_own_equation_is_not_used_and_goes_to_the_one_request() -> None:
+    # No real plan did this yet; a wrong unit factor is the likely way (J against kJ).
+    row = _one(ARRHENIUS, {"inputs": ARRHENIUS_INPUTS, "expected_formula": "A * exp(-Ea / (1000 * R * T))"})
+    assert row["state"] == "unusable" and row["equation_agrees"] is False
+    assert "19.67488662" in row["why"] and "the equation as written gives" in row["why"]
+    asked = eqt.request([row])
+    assert "E1" in asked and "the equation as written gives" in asked
+    # Within the test's own tolerance it agrees: correct code would pass it.
+    near = _one(ARRHENIUS, {"inputs": ARRHENIUS_INPUTS, "expected_formula": "A * exp(-Ea / (R * T)) * (1 + 1e-7)"})
+    assert near["state"] == "ok" and near["equation_agrees"] is True
+
+
+def test_a_left_side_argument_the_right_side_does_not_use_is_not_read() -> None:
+    inputs = {**ARRHENIUS_INPUTS, "T_amb": 298.0}
+    assert eqt.equation_value("k(T) = A * exp(-Ea / (R * T_amb))", inputs) is None
+
+
+def test_an_output_near_zero_that_differs_only_by_round_off_is_not_called_contradicting() -> None:
+    # Held to its size the test would fail; beyond round-off it does not differ: FI does not judge.
+    row = _one("y = a - b", {"inputs": {"a": 1.0, "b": 1.0 - 1e-15}, "expected_formula": "1e-15"})
+    assert row["state"] == "ok" and "equation_agrees" not in row

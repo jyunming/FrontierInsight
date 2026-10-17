@@ -11,6 +11,18 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Files under fixtures/ are data the tests read (some are a real quest's own test files), never tests to collect.
+collect_ignore_glob = ["fixtures/*"]
+
+# On Windows the first platform.uname() runs ``ver`` through subprocess.run, and the
+# PDF reader (pypdfium2) calls it on its first import. A test that replaces
+# subprocess.run with a fake pandoc would record that call as a pandoc command when the
+# paper's page count is the first import of the reader in the process. Asked once here,
+# the answer is cached and no later call runs a command.
+import platform  # noqa: E402
+
+platform.uname()
+
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _NETWORK_LEAKS: dict[str, list[str]] = {}
 
@@ -104,6 +116,41 @@ def _no_clean_venv_check(request, monkeypatch):
     import core.code_project as _cp
 
     monkeypatch.setattr(_cp, "verify", lambda *a, **k: {"ok": True, "says": "stub"})
+
+
+#: Tests whose point is the exact order of the scripted replies at the plan step (a list of replies handed out one by one):
+#: the reading of the topic is one more call there and would shift every reply after it, so they run without it. Every
+#: other test runs with the reading on, and the shared fakes (tests/test_engine_smoke.py ``_fake_response_for``) answer it.
+_SCRIPTED_AT_THE_PLAN_STEP = (
+    "test_plan", "test_plan_sources_way_forward", "test_oracle_review", "test_search_block_guards",
+    "test_search_block_asked", "test_protocol_part_asked",
+)
+
+
+#: Tests whose fake model takes the first call that is not a request for a part as the plan's draft: the reading of the topic
+#: made before the plan would be taken for it.
+_FIRST_REPLY_IS_THE_PLAN = (
+    "test_drafted_search_block", "test_plan_optimisation", "test_plan_model_sources", "test_design_self_critique",
+    "test_design_critique_record", "test_latex_in_model_replies_nodes", "test_run_checks", "test_run_size_replay",
+)
+
+
+@pytest.fixture(autouse=True)
+def _topic_reading_off_where_the_replies_are_scripted(request, monkeypatch):
+    """At the plan step the engine reads what the topic asks for (one call) and looks for it in the plan (a few more).
+    That stays on in every test except the ones listed in ``_SCRIPTED_AT_THE_PLAN_STEP``."""
+    name = request.module.__name__.split(".")[-1]
+    if name not in _SCRIPTED_AT_THE_PLAN_STEP and name not in _FIRST_REPLY_IS_THE_PLAN:
+        return
+    from core.engine import Engine
+
+    async def off(self, state):  # noqa: ANN001
+        return None
+
+    if name in _SCRIPTED_AT_THE_PLAN_STEP:
+        monkeypatch.setattr(Engine, "_cover_the_topic_in_the_plan", off)
+    # The reading is also made before the plan is asked for (so the request can show the list): one more scripted reply.
+    monkeypatch.setattr(Engine, "_read_topic_before_the_prompt", off)
 
 
 @pytest.fixture(autouse=True)
@@ -232,3 +279,27 @@ def _hermetic_pandoc_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "generation._pandoc._pypandoc_pandoc", lambda: None, raising=False,
     )
+
+
+@pytest.fixture
+def this_python(monkeypatch):
+    """Run FI's checks of the generated code (``Engine._run_in_env``) with the interpreter running the tests, from the
+    quest folder: no venv is made. For tests of the finding-by-finding repair, which run small test files."""
+    import asyncio
+    import shutil
+    import subprocess
+
+    from core.engine import Engine
+
+    async def run(self, argv, *, timeout_s=180, env=None):
+        for cache in (self.quest_root / "code").glob("**/__pycache__"):
+            shutil.rmtree(cache, ignore_errors=True)
+
+        def go():
+            done = subprocess.run([sys.executable, "-B", *argv], cwd=self.quest_root, capture_output=True, text=True,
+                                  timeout=timeout_s, env=env)
+            return done.returncode, done.stdout, done.stderr
+
+        return await asyncio.to_thread(go)
+
+    monkeypatch.setattr(Engine, "_run_in_env", run)

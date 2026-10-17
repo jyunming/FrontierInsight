@@ -33,14 +33,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .execution import ExecutionResult
+from .execution import ExecutionResult, scrub_secrets
 
 RAW_DIRNAME = "raw"
 MANIFEST_NAME = "manifest.json"
@@ -264,7 +263,7 @@ class SplitRunner:
         if len(cmd) < 2 or Path(cmd[1]) != self.analysis:
             return await self.inner.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
 
-        env = dict(env if env is not None else os.environ)
+        env = dict(env if env is not None else scrub_secrets())
         index, seed = _int_of(env.get(INDEX_ENV)), _int_of(env.get(SEED_ENV))
         raw_dir = raw_dir_for(self.raw_root, index)
         env[RAW_DIR_ENV] = env_value(raw_dir, self.quest_root)

@@ -270,7 +270,7 @@ def test_r1_changes_a_number_of_the_paper_and_nothing_else(tmp_path: Path) -> No
     text = "# T\n\nIn 2020 we ran 300 runs.\n\nThe mean was 0.987 [1].\n\n## References\n1. A 12.345 B.\n"
     (tmp_path / "paper" / "paper.md").write_text(text, encoding="utf-8")
     rec = plant.plant_r1(tmp_path)
-    assert (rec["original_value"], rec["planted_value"]) == ("0.987", "1.352")
+    assert (rec["original_value"], rec["planted_value"], rec["original_count"]) == ("0.987", "1.352", 1)
     assert (tmp_path / "paper" / "paper.md").read_text(encoding="utf-8") == text.replace("0.987", "1.352")
     with pytest.raises(ValueError, match="nothing was planted"):
         plant.edit_file(tmp_path, "paper/paper.md", "4.567", "1")
@@ -282,6 +282,22 @@ def test_r2_adds_a_number_the_run_never_computed_to_the_writers_answer() -> None
     assert record["call"] == "write#1" and plant.R2_SENTENCE in answers_[("write", 1)]
     with pytest.raises(ValueError):
         plant.plant_r2(Recording([]))
+
+
+def test_r2_has_the_claim_check_judge_the_sentence_it_never_saw_in_the_recording() -> None:
+    """The recorded claim check answered for the draft without the sentence; replayed as it is, it judges a paper it
+    never saw. The planted run's claim check keeps the recorded claims and judges the sentence unsupported."""
+    kept = {"claim": "The mean was 0.5.", "basis": "experiment", "citation_index": None, "quote": "", "evidence": "r"}
+    rec = Recording([{"node": "write", "index": 1, "response": "# T\n\nIntro.\n\nResults."},
+                     {"node": "claim_check", "index": 1, "response": json.dumps({"claims": [kept], "summary": "s"})}])
+    record, answers_ = plant.plant_r2(rec)
+    reply = json.loads(answers_[("claim_check", 1)])
+    assert reply["summary"] == "s" and reply["claims"][0] == kept
+    assert reply["claims"][1]["claim"] == plant.R2_SENTENCE and reply["claims"][1]["basis"] == "unsupported"
+    assert "claim_check_answer" in record
+    with pytest.raises(ValueError, match="not one JSON object"):
+        plant.plant_r2(Recording([{"node": "write", "index": 1, "response": "# T\n\nA.\n\nB."},
+                                  {"node": "claim_check", "index": 1, "response": "no json here"}]))
 
 
 def test_a_code_planter_refuses_a_file_outside_the_code(tmp_path: Path) -> None:
@@ -373,6 +389,19 @@ def test_the_summary_counts_only_valid_planted_runs_and_right_clean_ones() -> No
     assert (s["error_after_publication"]["k"], s["error_after_publication"]["n"]) == (1, 2)
     assert s["detection"]["R1"] == {"numbers": 1, "any": 1} and s["detection"]["N3"] == {"none": 1}
     assert "rate" not in s["calibration"]["statistically_adequate"], "under 10 runs: counts only"
+
+
+def test_an_r1_number_is_put_right_only_when_the_planted_one_is_gone_and_the_original_is_back() -> None:
+    plant_ = {"planted_value": "123.973", "original_value": "90.491"}
+    assert score.r1_put_right(plant_, "| 0.9 | 300 | 90.491 ± 0.033 |")  # FI filled its table from the records again
+    assert not score.r1_put_right(plant_, "| 0.9 | 300 | 123.973 ± 0.033 |")  # delivered as planted
+    assert not score.r1_put_right(plant_, "| 0.9 | 300 | 124.0 ± 0.033 |")  # reworded: the wrong number is still there
+    assert not score.r1_put_right(plant_, "The table was dropped.")  # lost, not put right
+    assert not score.r1_put_right({}, "90.491")
+    # The paper stated it twice and the plant changed the first: the other one alone is not the planted one put right.
+    twice = {**plant_, "original_count": 2}
+    assert not score.r1_put_right(twice, "The size was 90.491. | 0.9 | 300 | dropped |")
+    assert score.r1_put_right(twice, "The size was 90.491. | 0.9 | 300 | 90.491 ± 0.033 |")
 
 
 def test_an_l1_run_published_without_the_retracted_paper_was_not_let_through() -> None:

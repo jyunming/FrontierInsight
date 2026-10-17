@@ -291,6 +291,22 @@ def test_a_value_printed_to_fewer_places_matches_the_trial_it_rounds_from() -> N
     assert _not_among([1.0, 1.0], rec([1.0])) == [1.0], "each trial's value is used once"
 
 
+def test_a_record_read_once_for_many_lists_is_read_again_when_it_changes() -> None:
+    """A check matches many lists against the same record, so the record is read once and kept on it; a record changed
+    after that is read again, and a match never uses up the record itself."""
+    from collections import Counter
+
+    from core.trial_runner import _not_among, _value_key
+
+    record = Counter(_value_key(x) for x in (1.25, 2.5, 3.75))
+    assert _not_among([1.25, 2.5], record) == [] and _not_among([1.25, 2.5], record) == []  # nothing used up between lists
+    assert _not_among([1.2], record) == []  # rounded from 1.25, matched through the kept reading
+    record[_value_key(1.25)] -= 1
+    record[_value_key(9.5)] += 1
+    assert _not_among([1.25], record) == [1.25] and _not_among([1.2], record) == [1.2]  # 1.25 is gone now
+    assert _not_among([9.5], record) == [] and _not_among([10], record) == []  # and 9.5 is there (10 rounds from it)
+
+
 METHOD_SIM = '''
 def run_trial(cell, trial_id, seed):
     return {"err": 1.0 if cell["method"] == "euler" else 0.1}
@@ -326,3 +342,206 @@ def test_no_grid_and_a_script_that_reads_its_setting_is_not_run_with_an_empty_se
     result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=60, env={}))
     assert result.returncode != 0 and "no `grid`" in result.stderr and runner.failed_script == "simulate.py"
     assert runner.last is None
+
+
+# ---- run_trial is ONE trial; run_cell is the setting's own number (the oracle and the harness mean different things) ----
+
+R6T_SHAPE = '''
+def run_trial(m, pi1=None, run_index=0):
+    if isinstance(m, dict):
+        return run_cell(m)
+    return {"fdp": 0.1}
+
+def run_cell(case):
+    return {"fdp": sum(run_trial(case["m"], 0.0, i)["fdp"] for i in range(100)) / 100}
+'''
+
+
+def test_a_run_trial_that_returns_a_cell_aggregate_is_named() -> None:
+    why = trial_runner.trial_aggregates(R6T_SHAPE)
+    assert "run_trial must run ONE trial" in why and "run_cell" in why
+    # Through a helper of the same file, one level down.
+    via = "def _mean(c):\n    return run_cell(c)\n\ndef run_trial(c, t, s):\n    return _mean(c)\n\ndef run_cell(c):\n    return {'y': 1.0}\n"
+    assert "run_trial must run ONE trial" in trial_runner.trial_aggregates(via)
+
+
+def test_a_cell_built_from_trials_and_a_lone_run_trial_are_not_named() -> None:
+    fine = ("def run_trial(c, t, s):\n    return {'y': float(s % 7)}\n\n"
+            "def run_cell(c):\n    return {'y': sum(run_trial(c, i, i)['y'] for i in range(50)) / 50}\n")
+    assert trial_runner.trial_aggregates(fine) == ""
+    assert trial_runner.trial_aggregates("def run_trial(c, t, s):\n    return {'y': 1.0}\n") == ""
+    assert trial_runner.trial_aggregates("def run_trial(:\n") == ""  # unreadable text is not this check's to judge
+
+
+def test_the_ways_around_the_one_trial_rule_are_named_too() -> None:
+    deep = ("def a(c):\n    return run_cell(c)\n\ndef b(c):\n    return a(c)\n\ndef c_(c):\n    return b(c)\n\n"
+            "def run_trial(c, t, s):\n    return c_(c)\n\ndef run_cell(c):\n    return {'y': 1.0}\n")
+    imported = "from other import run_cell as _rc\n\ndef run_trial(c, t, s):\n    return _rc(c)\n"
+    plain_import = "from other import run_cell\n\ndef run_trial(c, t, s):\n    return run_cell(c)\n"
+    alias = "def run_cell(c):\n    return {'y': 1.0}\n\n_run = run_cell\n\ndef run_trial(c, t, s):\n    return _run(c)\n"
+    renamed = "def run_cell(c):\n    return {'y': 1.0}\n\nrun_trial = run_cell\n"
+    table = ("def run_cell(c):\n    return {'y': 1.0}\n\nTABLE = {'a': run_cell}\n\n"
+             "def run_trial(c, t, s):\n    return TABLE['a'](c)\n")
+    lam = "def run_cell(c):\n    return {'y': 1.0}\n\nrun_trial = lambda c, t, s: run_cell(c)\n"
+    module = "import simulate\n\ndef run_cell(c):\n    return {'y': 1.0}\n\ndef run_trial(c, t, s):\n    return simulate.run_cell(c)\n"
+    for name, src in dict(deep=deep, imported=imported, plain_import=plain_import, alias=alias, renamed=renamed,
+                          table=table, lam=lam, module=module).items():
+        assert "run_trial must run ONE trial" in trial_runner.trial_aggregates(src), name
+
+
+def test_a_method_called_run_cell_on_another_object_is_not_this_files_run_cell() -> None:
+    honest = ("def run_trial(c, t, s):\n    sim_cell = make(c)\n    return {'y': sim_cell.run_cell(s)}\n\n"
+              "def run_cell(c):\n    return {'y': 1.0}\n")
+    assert trial_runner.trial_aggregates(honest) == ""
+
+
+def test_a_cell_is_built_from_trials_only_when_it_really_calls_run_trial() -> None:
+    assert trial_runner.cell_runs_trials("def run_trial(c,t,s):\n    return {}\n\ndef run_cell(c):\n    return _m(c)\n\n"
+                                         "def _m(c):\n    return [run_trial(c, i, i) for i in range(3)]\n")
+    assert trial_runner.cell_runs_trials("def run_trial(c,t,s):\n    return {}\n\ndef run_cell(c):\n"
+                                         "    return list(map(run_trial, [c], [0], [0]))\n")
+    assert not trial_runner.cell_runs_trials("def run_trial(c,t,s):\n    return {}\n\ndef run_cell(c):\n    return {'y': 1.0}\n")
+
+
+def test_the_oracle_is_measured_on_the_function_that_means_what_it_measures() -> None:
+    both, trial_only, cell_only = {"run_trial", "run_cell"}, {"run_trial"}, {"run_cell"}
+    mean = {"name": "n", "kind": "special_case"}
+    inv = {"name": "n", "kind": "invariant"}
+    assert trial_runner.oracle_entry(both, mean, cell_runs_trials=True) == "run_cell", "a mean built from the study's trials"
+    assert trial_runner.oracle_entry(both, mean) == "run_trial", "the study runs only run_trial: test that code"
+    assert trial_runner.oracle_entry(both, inv, cell_runs_trials=True) == "run_trial", "an invariant holds in every trial"
+    assert trial_runner.oracle_entry(both, mean, per_trial=True, cell_runs_trials=True) == "run_trial"
+    assert trial_runner.oracle_entry(both, {**mean, "per_trial": True}, cell_runs_trials=True) == "run_trial"
+    assert trial_runner.oracle_entry(both, {**mean, "per_trial": "false"}, cell_runs_trials=True) == "run_cell"
+    assert trial_runner.oracle_entry(trial_only, mean) == "run_trial"
+    assert trial_runner.oracle_entry(cell_only, inv) == "run_cell"
+
+
+def test_a_local_name_that_is_also_run_cell_is_not_the_modules_run_cell() -> None:
+    local = "def run_trial(c, t, s):\n    run_cell = c.get('steps')\n    return {'y': float(run_cell)}\n"
+    param = "def run_trial(run_cell, t, s):\n    return {'y': float(run_cell)}\n"
+    loop = "def run_trial(c, t, s):\n    for run_cell in c['xs']:\n        pass\n    return {'y': 1.0}\n"
+    lam = "run_trial = lambda c, t, run_cell: {'y': run_cell}\n"
+    for src in (local, param, loop, lam, local + "\ndef run_cell(c):\n    return {'y': 1.0}\n"):
+        assert trial_runner.trial_aggregates(src) == "", src
+    # ... while the module's own function is still found when nothing shadows it.
+    assert trial_runner.trial_aggregates("def run_trial(c, t, s):\n    return run_cell(c)\n")
+
+
+# ---- a grid too large to list is refused by its count, before anything is allocated -------------------------------------
+
+
+def _huge_grid() -> dict[str, list[int]]:
+    return {f"axis{i}": list(range(n)) for i, n in enumerate((5, 33, 10, 5, 6, 6, 3, 4, 5, 3, 18, 10, 2))}
+
+
+def test_listing_a_grid_over_the_ceiling_is_refused_quickly_with_a_plain_reason() -> None:
+    import time
+
+    import pytest
+
+    from core import optimise_search
+
+    grid = _huge_grid()
+    started = time.monotonic()
+    for listing in (trial_runner.cells, optimise_search.grid_cells, run_manifest._all_cells):
+        with pytest.raises(ValueError, match=r"the plan asks for 19,245,600,000 settings .*does not list or run more than 500,000"):
+            listing(grid)
+    assert time.monotonic() - started < 1
+
+
+def test_small_grids_are_listed_as_before() -> None:
+    from core import optimise_search
+
+    grid = {"a": [1, 2, 3], "b": ["x", "y"]}
+    assert len(trial_runner.cells(grid)) == len(optimise_search.grid_cells(grid)) == len(run_manifest._all_cells(grid)) == 6
+    assert trial_runner.cells({}) == [{}]
+    assert trial_runner.cells({"n": list(range(optimise_search.MAX_LISTED_SETTINGS))})[-1] == {"n": 499999}
+
+
+def test_the_standalone_run_script_has_the_same_ceiling() -> None:
+    from core import code_project, optimise_search
+
+    assert f"MAX_SETTINGS = {optimise_search.MAX_LISTED_SETTINGS}" in code_project.RUN_SOURCE
+
+
+SNOOP = '''
+import os
+from pathlib import Path
+
+def run_trial(cell, trial_id, seed):
+    here = Path.cwd()
+    out = Path(os.environ.get("FI_RAW_DIR", "raw"))
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"trial{trial_id}.txt").write_text("raw output", encoding="utf-8")
+    (here / "needs").mkdir(exist_ok=True)
+    (here / "needs" / "forged.json").write_text("{}", encoding="utf-8")
+    return {"sees_protocol": float((here / "needs" / "FROZEN_PROTOCOL.json").is_file()),
+            "sees_fi": float((here / ".fi" / "checks").is_dir())}
+'''
+
+
+def test_each_cell_runs_from_a_copy_outside_the_quest_and_its_outputs_come_back(tmp_path: Path) -> None:
+    """review P0-2: FI ran the code with the quest folder as its working directory, so `needs/FROZEN_PROTOCOL.json`
+    was one relative path away. Now a cell runs from a copy of code/ outside the quest: FI's records are not there,
+    what the trial writes under raw/ comes back, and a file it writes anywhere else (a forged needs/) does not."""
+    root = tmp_path / "quest"
+    (root / "needs").mkdir(parents=True)
+    (root / "needs" / "FROZEN_PROTOCOL.json").write_text('{"oracles": []}', encoding="utf-8")
+    (root / ".fi" / "checks").mkdir(parents=True)
+    root2, run = _run(tmp_path, SNOOP, {"k": [1.0]}, runs=2)
+    assert root2 == root and run.ok_trials == 2
+    rows = [r for c in run.cells for r in c.rows if r.get("status") == "ok"]
+    assert len(rows) == 2 and all(r["values"]["sees_protocol"] == 0.0 and r["values"]["sees_fi"] == 0.0
+                                  for r in rows), rows
+    assert (root / "raw" / "trial0.txt").is_file() and (root / "raw" / "trial1.txt").is_file()
+    assert not (root / "needs" / "forged.json").exists()
+
+
+WRITES_ANYWHERE = '''
+from pathlib import Path
+
+def run_trial(cell, trial_id, seed):
+    for rel in ("cache/traj_%d.txt" % trial_id, "outputs/table.csv", "needs/forged.json", ".fi/x.txt", "code/stray.py"):
+        Path(rel).parent.mkdir(parents=True, exist_ok=True)
+        Path(rel).write_text("x", encoding="utf-8")
+    return {"sees_raw": float(Path("raw/old.txt").is_file()), "sees_results": float(Path("data/results").is_dir()),
+            "sees_inputs": float(Path("inputs/table.csv").is_file())}
+'''
+
+
+def test_a_cell_keeps_what_it_writes_outside_fis_folders_gets_only_inputs_and_every_drop_is_logged(
+        tmp_path: Path) -> None:
+    """review pass 2 N5 + N7: a trial that wrote cache/ or outputs/ lost it silently (only raw/ figures/ results/ data/
+    came back, and run_trials logged nothing), and every cell copied all of raw/ data/ figures/ results/ in (12.4 s a
+    cell with 1500 files). Now everything it writes comes back except FI's own folders (needs/, .fi/, code/), each
+    dropped path is in the log, and a cell is given code/, inputs/ and data/ (not data/results/, raw/ or results/)."""
+    import logging
+
+    root = tmp_path / "quest"
+    for rel in ("raw/old.txt", "data/results/r.csv", "inputs/table.csv"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("x", encoding="utf-8")
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(WRITES_ANYWHERE, encoding="utf-8")
+    seen: list[str] = []
+
+    class _Catch(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record.getMessage())
+
+    log = logging.getLogger("test-cell-drops")
+    log.addHandler(_Catch())
+    run = asyncio.run(trial_runner.run_trials(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"),
+        sys.executable, root, "code/simulate.py", {"k": [1.0]}, runs_per_setting=2, base_seed=0, deterministic=False,
+        timeout_s=60, run_id="r1", log=log))
+    rows = [r for c in run.cells for r in c.rows if r.get("status") == "ok"]
+    assert len(rows) == 2 and all(r["values"] == {"sees_raw": 0.0, "sees_results": 0.0, "sees_inputs": 1.0}
+                                  for r in rows), rows
+    assert (root / "cache" / "traj_0.txt").is_file() and (root / "cache" / "traj_1.txt").is_file()
+    assert (root / "outputs" / "table.csv").is_file()
+    assert not (root / "needs").exists() and not (root / ".fi" / "x.txt").exists()
+    assert not (root / "code" / "stray.py").exists()
+    said = "\n".join(seen)
+    assert all(p in said for p in ("needs/forged.json", ".fi/x.txt", "code/stray.py")), said

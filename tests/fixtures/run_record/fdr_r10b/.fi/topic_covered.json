@@ -1,0 +1,52 @@
+{
+  "ledger_left": [
+    "`protocol.simplifications` is incomplete: the topic asks for chance of any false discovery, which the plan neither includes nor names in `simplifications`"
+  ],
+  "unsourced_definitions": [
+    "any_false_discovery_probability",
+    "any_false_discovery_uncertainty",
+    "paired_power_difference",
+    "paired_power_difference_uncertainty",
+    "power",
+    "power_uncertainty",
+    "realized_fdr",
+    "realized_fdr_uncertainty"
+  ],
+  "judge_calls": 4,
+  "judged": {
+    "61bfe71c2de5e4edb44d": {
+      "Q1": "covered",
+      "Q3": "missing",
+      "Q4": "covered",
+      "M1": "missing"
+    },
+    "25e5bd441d15202b4350": {
+      "Q1": "covered",
+      "Q3": "covered",
+      "Q4": "covered"
+    },
+    "07186f49501630e89fc4": {
+      "Q1": "covered",
+      "Q3": "covered",
+      "Q4": "covered"
+    },
+    "c4bbbd7f5e34ac357d87": {
+      "Q1": "covered",
+      "Q3": "covered",
+      "Q4": "covered"
+    }
+  },
+  "ever_missing": [
+    "uncertainty over repeats",
+    "reference"
+  ],
+  "mapped": {
+    "power": "power"
+  },
+  "overruled": [],
+  "plan_done": true,
+  "left": [],
+  "unjudged": [],
+  "asked": 2,
+  "checked_at_design": true
+}

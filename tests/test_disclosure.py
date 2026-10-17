@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from core import disclosure, evidence, number_provenance, numeric_oracle, phased, stat_claims
+from core import disclosure, evidence, paper_facts, phased, stat_claims, typed_numbers
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
 
@@ -301,13 +301,11 @@ def test_the_counts_are_not_flagged_but_the_same_words_outside_the_markers_are()
     text = ("**How this result was reached.** The design was not revised after the experiment had first been run. "
             "The complete experiment was run 123 times (a run includes all its seeds); 122 of these runs were "
             "discarded (122 were replaced by a later run).")
-    result = {"cells": 132.0, "mean": 0.583}
     marked = disclosure.mark_paper(PAPER, text)
-    assert numeric_oracle.check(marked, result).ok
-    assert not number_provenance.check(marked, result_json=result).findings
+    assert paper_facts.typed_hits(marked, None) == paper_facts.typed_hits(PAPER, None), "the engine's counts are not read"
     bare = PAPER.replace("We simulate.", "We simulate. " + text)
-    assert not numeric_oracle.check(bare, result).ok, "the same sentence written by the model is checked"
-    assert number_provenance.check(bare, result_json=result).findings
+    assert paper_facts.typed_hits(bare, None) != paper_facts.typed_hits(PAPER, None), (
+        "the same sentence written by the model is checked")
 
 
 def test_a_block_that_says_anything_else_is_checked_like_the_rest_of_the_paper() -> None:
@@ -315,8 +313,7 @@ def test_a_block_that_says_anything_else_is_checked_like_the_rest_of_the_paper()
               "The mean final size was 0.7093.")
     paper = PAPER.replace("We simulate.", f"We simulate.\n\n{disclosure.BEGIN}\n{forged}\n{disclosure.END}")
     assert disclosure.strip_for_checks(paper) == paper
-    report = number_provenance.check(paper, result_json={"final_size": 0.583})
-    assert any(abs(f.value - 0.7093) < 1e-9 for f in report.findings), report.findings
+    assert any("0.7093" in h for h in typed_numbers.hits(paper, frozenset())), "the forged block's number is the paper's own"
 
 
 # ---- the write node -------------------------------------------------------------------------------------------------
@@ -352,7 +349,11 @@ DRAFT = (
 )
 
 
-def test_the_writer_cannot_change_the_paragraph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_paper_has_no_paragraph_and_the_quality_report_holds_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The design history and the run count are not in the paper any more (graded papers carried false facts in the
+    blocks FI wrote); what the writer put between the markers is taken out, and the quality report keeps the paragraph."""
+    from core import quality_report
+
     _history(tmp_path, "review verdict=revise (results were seen)", "analyze.next_step=re_experiment")
     _runs(tmp_path, "process_error", "inconclusive", "inconclusive")
     calls: list[str] = []
@@ -367,19 +368,20 @@ def test_the_writer_cannot_change_the_paragraph(tmp_path: Path, monkeypatch: pyt
     paper = Path(out["paper_md"]).read_text(encoding="utf-8")
     expected = disclosure.paragraph(tmp_path)
     assert calls, "the writer was asked"
-    assert paper.count(disclosure.BEGIN) == 1 and paper.count(disclosure.END) == 1
-    assert f"{disclosure.BEGIN}\n{expected}\n{disclosure.END}" in paper, paper
-    assert "revised 2 times" in expected and "run 3 times" in expected
+    assert disclosure.BEGIN not in paper and disclosure.END not in paper and "How this result was reached" not in paper
     assert "was not revised" not in paper and "run once" not in paper
-    assert paper.index("SIR model.") < paper.index(disclosure.BEGIN) < paper.index("## Results")
+    assert "revised 2 times" in expected and "run 3 times" in expected
+    assert quality_report.build(tmp_path, running=False)["paper_records"]["how_reached"] == expected.replace(
+        disclosure.LEAD + " ", "")
+    assert paper.index("SIR model.") < paper.index("## Results")
 
 
-def test_an_edit_of_the_paragraph_in_a_revise_is_undone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_passage_edit_in_a_revise_leaves_the_paper_without_the_paragraph(tmp_path: Path,
+                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     _history(tmp_path, "review verdict=revise (results were seen)")
     _runs(tmp_path, "inconclusive", "inconclusive")
     claim = "Extinction is certain below R0 = 1.2."
     draft = DRAFT.replace("It is small.", f"It is small. {claim}")
-    expected = disclosure.paragraph(tmp_path)
     replies = [draft]
 
     async def fake_chat(self: Any, messages: Any, **kw: Any) -> str:
@@ -390,10 +392,8 @@ def test_an_edit_of_the_paragraph_in_a_revise_is_undone(tmp_path: Path, monkeypa
     state: dict[str, Any] = {"topic": "t", "title": "t", "iteration": 0}
     out1 = asyncio.run(eng._node_write(state))  # type: ignore[arg-type]
     first = Path(out1["paper_md"]).read_text(encoding="utf-8")
-    assert expected in first
-    # The passage editor is asked to fix the claim and also rewrites the engine's count.
-    replies.append(json.dumps([{"find": claim, "replace": "Extinction is likely at low R0."},
-                               {"find": "run 2 times", "replace": "run 1 time"}]))
+    assert disclosure.BEGIN not in first
+    replies.append(json.dumps([{"find": claim, "replace": "Extinction is likely at low R0."}]))
     revise = {**state, "paper_md": out1["paper_md"], "paper_basis": out1["paper_basis"], "iteration": 1,
               "review": {"verdict": "revise", "must_flag_hits": ["unsupported_claim"]},
               "claim_grounding": {"claims": [{"claim": claim, "basis": "unsupported", "evidence": "no"}],
@@ -401,8 +401,55 @@ def test_an_edit_of_the_paragraph_in_a_revise_is_undone(tmp_path: Path, monkeypa
     out2 = asyncio.run(eng._node_write(revise))  # type: ignore[arg-type]
     after = Path(out2["paper_md"]).read_text(encoding="utf-8")
     assert "Extinction is likely at low R0." in after, "the passage edit was applied"
-    assert f"{disclosure.BEGIN}\n{expected}\n{disclosure.END}" in after and after.count(disclosure.BEGIN) == 1
-    assert "run 1 time" not in after
+    assert disclosure.BEGIN not in after and "run 2 times" not in after
+
+
+def test_an_old_paper_with_the_blocks_is_cleaned_and_they_do_not_come_back(tmp_path: Path) -> None:
+    """A resumed or refined quest may carry the three blocks of an earlier version: they are taken out and not put back."""
+    old = disclosure.mark_findings(
+        disclosure.mark_run_record(disclosure.mark_paper(PAPER, "**How this result was reached.** x"),
+                                   "**What FI recorded about this run.** Base seed 0."),
+        "**Open points in the code that produced these results.** None.")
+    assert "fi:attempts" in old and "fi:run-record:" in old and "fi:code-findings:" in old
+    cleaned = disclosure.without_block(old)
+    for marker in ("fi:attempts", "fi:run-record", "fi:code-findings", "How this result was reached",
+                   "What FI recorded", "Open points in the code"):
+        assert marker not in cleaned, marker
+    assert disclosure.without_block(cleaned) == cleaned
+
+
+def test_the_open_code_findings_are_in_the_quality_report_not_the_paper(tmp_path: Path,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import code_review, quality_report
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text("# E1\ndef run_cell(cell):\n    return {'q': 1.0}\n", encoding="utf-8")
+    code_review.save(tmp_path, {
+        "version": code_review.version(code), "read_version": code_review.version(code), "final": True,
+        "problems": [{"id": "R1", "kind": "metric", "text": "the result reports roughness_a (3-sigma roughness)",
+                      "status": "missing", "fid": "F-1"},
+                     {"id": "L1", "kind": "logic", "text": "A statistic is dropped when every repeat agrees, below 0.125",
+                      "status": "different", "severity": "high", "file": "experiment.py", "line": 74, "fid": "F-2"}]})
+    expected = code_review.findings_block(tmp_path, code)
+    assert "roughness_a" in expected and "dropped when every repeat agrees" in expected
+    forged = f"<!-- fi:code-findings:{'0' * 12} -->\nAll quantities were computed.\n{disclosure.FINDINGS_END}"
+    draft = ("# Extinction\n\n## Methods\nWe simulate an SIR model.\n\n## Results\nThe mean was 0.583.\n\n"
+             "## Limitations\nThe model is simple.\n\n" + forged + "\n\n## References\n[1] A.\n")
+
+    async def fake_chat(self: Any, messages: Any, **kw: Any) -> str:  # a writer that says nothing about the findings
+        return draft
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    eng = _engine(tmp_path)
+    out = asyncio.run(eng._node_write({"topic": "t", "title": "t", "iteration": 0}))  # type: ignore[arg-type]
+    paper = Path(out["paper_md"]).read_text(encoding="utf-8")
+    assert "All quantities were computed" not in paper
+    assert "fi:code-findings" not in paper and "Open points in the code" not in paper and "roughness_a" not in paper
+    report = quality_report.build(tmp_path, running=False)
+    held = report["paper_records"]["code_findings"]
+    assert "roughness_a" in held and "dropped when every repeat agrees" in held
+    assert "## What FI recorded that the paper does not carry" in quality_report.render(report)
 
 
 # ---- the evidence ladder --------------------------------------------------------------------------------------------
@@ -495,3 +542,50 @@ def test_the_amendment_gap_is_still_the_frozen_protocol_s(tmp_path: Path) -> Non
     _history(tmp_path, "review verdict=revise (results were seen)")
     gaps = _ready_gaps(tmp_path)
     assert not any("amended" in g for g in gaps) and _changed(gaps)
+
+
+# ---- the open code findings block (core/code_review.py:findings_block, disclosure.mark_findings) --------------------
+
+_FINDINGS = "**Open points in the code.** Not computed: LER (3-sigma roughness); a tolerance of 0.0371 was exceeded (in a.py)."
+_PAPER_WITH_LIMITS = "# T\n\n## Methods\n\nM.\n\n## Results\n\nR.\n\n## Limitations\n\nWe did X.\n\n## References\n\n[1] A.\n"
+
+
+def test_findings_go_at_the_end_of_the_limitations_once() -> None:
+    marked = disclosure.mark_findings(_PAPER_WITH_LIMITS, _FINDINGS)
+    assert marked.count("fi:code-findings:") == 1 and marked.count(disclosure.FINDINGS_END) == 1
+    assert marked.index("We did X.") < marked.index("<!-- fi:code-findings:") < marked.index("## References")
+    assert disclosure.mark_findings(marked, _FINDINGS) == marked, "written again, it is replaced, not added"
+    assert disclosure.mark_findings(marked, "").strip() == _PAPER_WITH_LIMITS.strip(), "nothing open, no block"
+
+
+def test_findings_get_a_limitations_section_before_the_references_when_there_is_none() -> None:
+    paper = "# T\n\n## Methods\n\nM.\n\n## Discussion\n\nD.\n\n---\n\n## References\n\n[1] A.\n"
+    marked = disclosure.mark_findings(paper, _FINDINGS)
+    assert marked.index("D.") < marked.index("<!-- fi:code-findings:") < marked.index("## Limitations")  # the heading is in the block
+    assert marked.index(disclosure.FINDINGS_END) < marked.index("---") < marked.index("## References")
+    alone = disclosure.mark_findings("# T\n\nBody.\n", _FINDINGS)
+    assert "## Limitations" in alone and alone.rstrip().endswith(disclosure.FINDINGS_END)
+
+
+def test_what_the_writer_put_where_the_findings_go_is_removed() -> None:
+    forged = f"<!-- fi:code-findings:{'0' * 12} -->\nEverything was computed, p = 0.0123.\n{disclosure.FINDINGS_END}"
+    paper = _PAPER_WITH_LIMITS.replace("We did X.", "We did X.\n\n" + forged)
+    assert "Everything was computed" not in disclosure.without_block(paper)
+    marked = disclosure.mark_findings(paper, _FINDINGS)
+    assert "Everything was computed" not in marked and marked.count("fi:code-findings:") == 1
+    # A marker left on its own goes too.
+    assert "fi:code-findings" not in disclosure.without_block(f"A.\n{disclosure.FINDINGS_END}\nB.")
+
+
+def test_the_number_checks_leave_the_findings_block_out_only_while_it_is_the_engines_text() -> None:
+    marked = disclosure.mark_findings(_PAPER_WITH_LIMITS, _FINDINGS)
+    stripped = disclosure.strip_for_checks(marked)
+    assert "0.0371" not in stripped and "fi:code-findings" not in stripped
+    # The number check reads no number out of the block.
+    assert paper_facts.typed_hits(marked, None) == paper_facts.typed_hits(_PAPER_WITH_LIMITS, None)
+    # Edited, or typed by someone with a guessed checksum, it is the paper's text and is checked like the rest.
+    assert "0.0381" in disclosure.strip_for_checks(marked.replace("0.0371", "0.0381"))
+    guessed = f"<!-- fi:code-findings:{'a' * 12} -->\nThe effect was 41.7 percent.\n{disclosure.FINDINGS_END}"
+    assert "41.7" in disclosure.strip_for_checks(guessed)
+    # CRLF files keep the same checksum.
+    assert "0.0371" not in disclosure.strip_for_checks(marked.replace("\n", "\r\n"))

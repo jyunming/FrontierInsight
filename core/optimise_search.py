@@ -89,7 +89,74 @@ def _fmt(value):
         if value.is_integer() and abs(value) < 1e15:
             return str(int(value))
         return f"{value:.6g}"
+    if isinstance(value, list):
+        leaves = _leaves(value)
+        if len(leaves) > 16:  # a long array is shown by its first values and its size
+            return "[" + ", ".join(_fmt(x) for x in leaves[:8]) + f", ... ({len(leaves)} values)]"
+        return "[" + ", ".join(_fmt(x) for x in value) + "]"
     return str(value)
+
+
+def _leaves(value):
+    return [x for item in value for x in _leaves(item)] if isinstance(value, list) else [value]
+
+
+# --- array design variables --------------------------------------------------------------------------------------------
+# A design variable with a ``shape`` is an array of numbers (``core.optimisation_plan`` checks the block). The search
+# moves in one coordinate per element; a design carries the array back in its shape (a nested list), so the simulation,
+# the ledger and the record see the array, not its elements.
+
+
+def _shape(variable):
+    shape = variable.get("shape")
+    return [int(n) for n in shape] if isinstance(shape, list) else None
+
+
+def _bound_at(bound, index):
+    for i in index:
+        if not isinstance(bound, list):
+            break
+        bound = bound[i]
+    return bound
+
+
+def element_name(name, index):
+    return f"{name}[{','.join(str(i) for i in index)}]"
+
+
+def scalar_variables(variables):
+    """The numbers the search changes: a scalar variable as it is, an array variable as one scalar variable per element
+    (named ``name[i,j]``, with its own ``low`` and ``high``), in row-major order."""
+    out = []
+    for v in variables:
+        shape = _shape(v)
+        if shape is None:
+            out.append(v)
+            continue
+        for index in itertools.product(*[range(n) for n in shape]):
+            out.append({"name": element_name(str(v["name"]), index), "kind": _kind(v), "of": str(v["name"]),
+                        "index": list(index), "low": _bound_at(v["low"], index), "high": _bound_at(v["high"], index),
+                        **({"unit": v["unit"]} if v.get("unit") else {})})
+    return out
+
+
+def _nest(shape, flat):
+    """``flat`` (row-major) as a nested list of ``shape``."""
+    if len(shape) == 1:
+        return list(flat)
+    step = math.prod(shape[1:])
+    return [_nest(shape[1:], flat[i * step:(i + 1) * step]) for i in range(shape[0])]
+
+
+def _flatten_to(shape, value):
+    """The row-major values of a nested list of ``shape`` (``ValueError`` when it is not of that shape)."""
+    if not shape:
+        if isinstance(value, list):
+            raise ValueError("an array has more levels than its shape")
+        return [value]
+    if not isinstance(value, list) or len(value) != shape[0]:
+        raise ValueError(f"an array must be a list of {shape[0]}")
+    return [x for item in value for x in _flatten_to(shape[1:], item)]
 
 
 # --- the design space ------------------------------------------------------------------------------------------------
@@ -102,13 +169,43 @@ class Space:
         self.variables = [dict(v) for v in variables]
         self.names = [str(v["name"]) for v in self.variables]
         self.kinds = [_kind(v) for v in self.variables]
+        # One coordinate per number: an array variable is one coordinate per element.
+        self.scalars = scalar_variables(self.variables)
+        self.scalar_kinds = [_kind(v) for v in self.scalars]
 
     @property
     def dims(self):
-        return len(self.variables)
+        return len(self.scalars)
+
+    def flat(self, design):
+        """The values of a design, one per coordinate (an array variable's elements, row-major)."""
+        out = []
+        for v in self.variables:
+            value = design[str(v["name"])]
+            shape = _shape(v)
+            out.extend(_flatten_to(shape, value) if shape is not None else [value])
+        return out
+
+    def fold(self, flat):
+        """A design from one value per coordinate: an array variable is a nested list of its shape."""
+        design, at = {}, 0
+        for v in self.variables:
+            shape = _shape(v)
+            if shape is None:
+                design[str(v["name"])] = flat[at]
+                at += 1
+            else:
+                n = math.prod(shape)
+                design[str(v["name"])] = _nest(shape, flat[at:at + n])
+                at += n
+        return design
+
+    def element_design(self, flat_by_element):
+        """A design from a mapping of coordinate names (``name`` or ``name[i,j]``) to values, as a library method gives it."""
+        return self.fold([flat_by_element[str(v["name"])] for v in self.scalars])
 
     def value(self, index, u):
-        v, kind = self.variables[index], self.kinds[index]
+        v, kind = self.scalars[index], self.scalar_kinds[index]
         u = 0.5 if not _number(u) else min(1.0, max(0.0, float(u)))
         if kind == "choice":
             values = v["values"]
@@ -121,25 +218,23 @@ class Space:
 
     def design(self, u):
         """The design at a point of the unit cube (clipped into it; whole numbers rounded)."""
-        return {name: self.value(i, u[i]) for i, name in enumerate(self.names)}
+        return self.fold([self.value(i, u[i]) for i in range(self.dims)])
 
     def canonical(self, design):
         """A design with each value in its variable's type: an int for a whole-numbered one, a float otherwise."""
-        out = {}
-        for name, kind, v in zip(self.names, self.kinds, self.variables):
-            value = design[name]
+        flat = []
+        for value, kind, v in zip(self.flat(design), self.scalar_kinds, self.scalars):
             if kind == "integer":
-                out[name] = int(round(float(value)))
+                flat.append(int(round(float(value))))
             elif kind == "choice":
-                out[name] = next((c for c in v["values"] if c == value or str(c) == str(value)), value)
+                flat.append(next((c for c in v["values"] if c == value or str(c) == str(value)), value))
             else:
-                out[name] = min(max(_snap(value), float(v["low"])), float(v["high"]))
-        return out
+                flat.append(min(max(_snap(value), float(v["low"])), float(v["high"])))
+        return self.fold(flat)
 
     def unit(self, design):
         out = []
-        for name, kind, v in zip(self.names, self.kinds, self.variables):
-            value = design[name]
+        for value, kind, v in zip(self.flat(design), self.scalar_kinds, self.scalars):
             if kind == "choice":
                 values = [str(c) for c in v["values"]]
                 index = values.index(str(value)) if str(value) in values else 0
@@ -153,8 +248,11 @@ class Space:
         return json.dumps([design[name] for name in self.names])
 
     def inside(self, design):
-        for name, kind, v in zip(self.names, self.kinds, self.variables):
-            value = design.get(name)
+        try:
+            flat = self.flat(design)
+        except (KeyError, ValueError, TypeError):
+            return False
+        for value, kind, v in zip(flat, self.scalar_kinds, self.scalars):
             if kind == "choice":
                 if not any(value == c for c in v["values"]):
                     return False
@@ -167,18 +265,18 @@ class Space:
     def combos(self):
         """Every design, when every variable is whole-numbered or a choice (``None`` otherwise)."""
         axes = []
-        for kind, v in zip(self.kinds, self.variables):
+        for kind, v in zip(self.scalar_kinds, self.scalars):
             if kind == "choice":
                 axes.append(list(v["values"]))
             elif kind == "integer":
                 axes.append(list(range(int(v["low"]), int(v["high"]) + 1)))
             else:
                 return None
-        return [dict(zip(self.names, combo)) for combo in itertools.product(*axes)]
+        return [self.fold(list(combo)) for combo in itertools.product(*axes)]
 
     def count(self):
         total = 1
-        for kind, v in zip(self.kinds, self.variables):
+        for kind, v in zip(self.scalar_kinds, self.scalars):
             if kind == "choice":
                 total *= len(v["values"])
             elif kind == "integer":
@@ -191,7 +289,7 @@ class Space:
         """The first step of a local search along each coordinate: a tenth of the range, at least one whole number
         or one choice."""
         out = []
-        for kind, v in zip(self.kinds, self.variables):
+        for kind, v in zip(self.scalar_kinds, self.scalars):
             if kind == "choice":
                 out.append(max(0.1, 1.0 / len(v["values"])))
             elif kind == "integer":
@@ -233,10 +331,15 @@ def cell_of(block, design):
 
 def scan_grid(block):
     """The coarse scan as a grid of cells: every fixed condition and search setting at its one value, each design
-    variable over the scan's values (or at the baseline's value when the scan leaves it out)."""
+    variable over the scan's values (or at the baseline's value when the scan leaves it out). A condition held fixed that
+    the scan names is compared over the scan's values: those cells are measured and kept, and none but the cells at the
+    value the plan holds can start the search (:func:`scan_rows`)."""
     grid = block.get("grid") if isinstance(block.get("grid"), dict) else {}
     baseline = block["baseline"]["values"]
     out = {name: [value] for name, value in cell_of(block, {}).items()}
+    for name, values in grid.items():
+        if str(name) in out and isinstance(values, list) and values:
+            out[str(name)] = list(values)
     for v in block["design_variables"]:
         name = str(v["name"])
         values = grid.get(name)
@@ -244,11 +347,24 @@ def scan_grid(block):
     return out
 
 
+def _same(a, b):
+    if _number(a) and _number(b):
+        return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12)
+    return a == b
+
+
 def scan_rows(summary, block):
     """The coarse scan's results (a ``fi.trials/v1`` summary: one entry per setting) as evaluated designs."""
     names = [str(v["name"]) for v in block["design_variables"]]
+    held = cell_of(block, {})
+    compared = [str(k) for k in (block.get("grid") if isinstance(block.get("grid"), dict) else {})
+                if str(k) in held]
     out = []
     for cell in (summary or {}).get("cells") or []:
+        # A cell at another value of a condition the plan holds fixed is a comparison: it is kept in the trial record,
+        # but it is not a design evaluated under the search's conditions, so it never seeds the search.
+        if any(not _same(cell.get("cell", {}).get(k), held[k]) for k in compared):
+            continue
         design = {name: cell["cell"][name] for name in names if name in cell.get("cell", {})}
         if len(design) != len(names):
             continue
@@ -501,6 +617,12 @@ class _Search:
             library = self.method_used.startswith(("scipy:", "optuna:"))
             if not library and self.method_used not in BUILT_IN:
                 self._fall_back(f"{self.method_used} is not a method FI knows")
+            if (not library and self.method_used in ("bounded_local", "global_then_local") and self.space.dims + 1 > self.per_start
+                    and any(_shape(v) is not None for v in self.space.variables)):
+                self.notes.append(
+                    f"the design has {self.space.dims} numbers to change, so a local search needs {self.space.dims + 1} "
+                    f"evaluations just to start; {self.per_start} are allowed from each starting point, so a search may stop "
+                    "before it improves anything (a library method, or more evaluations per starting point, fits better)")
             # The baseline first, always, at the search's settings; then the coarse scan (not counted in the budget).
             yield from self.evaluate(self.baseline, "baseline", 0)
             if isinstance(self.block.get("grid"), dict) and self.block["grid"]:
@@ -725,10 +847,11 @@ class _Search:
             return
 
     def _exhaustive(self):
-        combos = self.space.combos()
-        if combos is None or len(combos) > self.total:
-            why = ("exhaustive needs every variable to be whole-numbered or a choice" if combos is None else
-                   f"exhaustive needs all {len(combos)} combinations within the budget of {self.total} evaluations")
+        count = self.space.count()
+        combos = self.space.combos() if count is not None and count <= self.total else None
+        if combos is None:
+            why = ("exhaustive needs every variable to be whole-numbered or a choice" if count is None else
+                   f"exhaustive needs all {count} combinations within the budget of {self.total} evaluations")
             self._fall_back(why)
             yield from self._local_starts(self._starting_points(), first_cap=self.per_start)
             return
@@ -739,8 +862,9 @@ class _Search:
     # a library's method, run where the library is
 
     def _drive_spec(self, answers, starts):
-        return {"method": self.method_used, "seed": self.seed, "variables": self.space.variables,
-                "baseline": dict(self.baseline), "starts": starts, "per_start": self.per_start, "total": self.total,
+        return {"method": self.method_used, "seed": self.seed, "variables": self.space.scalars,
+                "baseline": {str(v["name"]): x for v, x in zip(self.space.scalars, self.space.flat(self.baseline))},
+                "starts": starts, "per_start": self.per_start, "total": self.total,
                 "answers": answers}
 
     @staticmethod
@@ -796,7 +920,7 @@ class _Search:
             if "u" in ask:
                 design = self.space.design(ask["u"])
             else:
-                design = self.space.canonical(ask["design"])
+                design = self.space.canonical(self.space.element_design(ask["design"]))
                 if not self.space.inside(design):
                     design = self.space.design(self.space.unit(design))
             start = int(ask.get("start") or 0)
@@ -845,8 +969,51 @@ def search(block, *, seed, method=None, rounds=None):
     return (yield from _Search(block, seed, method, rounds).run())
 
 
+#: The most settings FI lists (or runs) from one grid: each listed setting is a dict, about a kilobyte with its key, so this
+#: many is about half a gigabyte; a plan that asks for more is stopped with its count, never cut and never listed.
+MAX_LISTED_SETTINGS = 500_000
+
+
+class TooManySettings(ValueError):
+    """A grid has more settings than FI lists. The message is what a person reads."""
+
+
+def grid_size(grid):
+    """How many settings a grid names: the product of its axes' lengths, counted without listing any."""
+    return math.prod(len(values) for values in grid.values())
+
+
+def check_listable(grid):
+    """Raise :class:`TooManySettings` when listing the whole grid would hold more than :data:`MAX_LISTED_SETTINGS`."""
+    size = grid_size(grid)
+    if size > MAX_LISTED_SETTINGS:
+        raise TooManySettings(
+            f"the plan asks for {size:,} settings (every combination of the settings' values); FI does not "
+            f"list or run more than {MAX_LISTED_SETTINGS:,} settings. Fewer settings or fewer values for each must be "
+            "planned; FI does not choose which to leave out.")
+
+
+def grid_too_large(grid):
+    """``""`` when a protocol's ``grid`` is a size FI lists, else one plain sentence: the count (the same
+    :func:`grid_size` that :func:`check_listable` stops on, which the trial runner, the run manifest and the script's own
+    list all hold to), each setting with its number of values (the most first), and FI's limit. Only ``grid`` multiplies
+    the settings: what every run compares inside it (``in_each_run``) is not in it, and ``constants`` have one value."""
+    if not isinstance(grid, dict) or not grid:
+        return ""
+    listed = {str(k): (v if isinstance(v, (list, tuple)) else [v]) for k, v in grid.items()}
+    counts = {k: len(v) for k, v in listed.items()}
+    size = grid_size(listed)
+    if size <= MAX_LISTED_SETTINGS:
+        return ""
+    axes = ", ".join(f"`{k}` {n} value{'s' if n != 1 else ''}"
+                     for k, n in sorted(counts.items(), key=lambda kv: -kv[1]) if n > 1)
+    return (f"the settings in `protocol.grid` are {size:,} (every combination of the values of its {len(counts)} settings, "
+            f"each multiplying every other): {axes}; FI does not list or run more than {MAX_LISTED_SETTINGS:,}")
+
+
 def grid_cells(grid):
     """Every combination of a grid's values (axes in order), as the trial runner makes them."""
+    check_listable(grid)
     axes = list(grid.items())
     return [dict(zip((a for a, _ in axes), combo)) for combo in itertools.product(*(v for _, v in axes))]
 

@@ -18,7 +18,8 @@ A difference is reported only on evidence that a person would accept, because a 
   (``R0_LIST`` or ``dose_values``, but not ``dose_response``), or, when no name says so, that shares at least half its
   values with the axis. It differs when
   none of the matching lists holds exactly the protocol's values. A list assigned under ``if os.environ.get("FI_PILOT")``
-  is the engine's smoke test, which discards its numbers, and is not read;
+  is the engine's smoke test, which discards its numbers, and is not read; a ``for`` loop in the ANALYSIS script of a
+  quest whose trials FI runs is not read either (see :func:`check`);
 * **runs per setting** differs when the script names counts of runs (``NUM_RUNS``, ``n_samples``, ``TRIALS``...) and none of
   them is the protocol's;
 * a **threshold** differs when its value appears nowhere in the script (as itself, or as a percentage of itself).
@@ -90,6 +91,10 @@ class Mismatch:
     where: str = ""  # "R0_LIST in experiment.py, line 166"; empty when the script holds no such list
     missing: list[float] = field(default_factory=list)  # protocol values the script does not contain at all
 
+    def left_out(self) -> list[float]:
+        """The protocol values of a grid axis that the list found does not hold."""
+        return [v for v in self.expected if not _has(self.found, v)]
+
     def message(self) -> str:
         want = _fmt(self.expected)
         if self.kind == "grid":
@@ -152,6 +157,7 @@ class _Found:
     values: list[float]
     line: int
     script: str
+    positional: bool = False  # a loop variable the body never hands on as an argument: it picks positions or output names
 
 
 def _numeric_sequence(node: ast.AST) -> list[float] | None:
@@ -190,8 +196,9 @@ class _Reader(ast.NodeVisitor):
     """Collects the numeric lists and the scalar counts a script assigns, outside any ``FI_PILOT`` branch and outside the
     known-answer checks' own code (``oracle()``, the ``FI_ORACLE`` branch, a name that says it is the oracle's)."""
 
-    def __init__(self, script: str) -> None:
+    def __init__(self, script: str, loops: bool = True) -> None:
         self.script = script
+        self.loops = loops  # whether a ``for`` loop over literals names a grid axis (see :func:`check`)
         self.lists: list[_Found] = []
         self.scalars: list[_Found] = []
 
@@ -246,10 +253,16 @@ class _Reader(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_For(self, node: ast.For) -> None:  # noqa: N802
-        if isinstance(node.target, ast.Name):
+        if self.loops and isinstance(node.target, ast.Name):
             seq = _numeric_sequence(node.iter)
             if seq is not None:
-                self.lists.append(_Found(node.target.id, seq, node.lineno, self.script))
+                var = node.target.id
+                handed_on = any(
+                    isinstance(call, ast.Call)
+                    and any(isinstance(a, ast.Name) and a.id == var for a in [*call.args, *[k.value for k in call.keywords]])
+                    for stmt in node.body for call in ast.walk(stmt)
+                )
+                self.lists.append(_Found(var, seq, node.lineno, self.script, positional=not handed_on))
         self.generic_visit(node)
 
 
@@ -297,10 +310,18 @@ def rng_reuse(source: str) -> list[tuple[str, int]]:
         for stmt in ast.walk(fn):  # a local that is computed from an argument varies with the call
             if isinstance(stmt, ast.Assign) and _names(stmt.value) & dependent:
                 dependent |= {t.id for t in stmt.targets if isinstance(t, ast.Name)}
-        for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+        def builder(call: ast.AST) -> bool:
+            if not isinstance(call, ast.Call):
+                return False
             func = call.func
-            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
-            if name not in _RNG_BUILDERS or not (call.args or call.keywords):
+            return (func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else "") in _RNG_BUILDERS
+        # A generator is built by the whole expression: ``default_rng(SeedSequence(seed).spawn(n)[start])`` depends on
+        # ``start``, although its inner ``SeedSequence(seed)`` alone does not, so a builder inside another's arguments is
+        # read as part of the outer one.
+        inner = {id(sub) for call in ast.walk(fn) if builder(call)
+                 for arg in [*call.args, *[k.value for k in call.keywords]] for sub in ast.walk(arg) if builder(sub)}
+        for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+            if not builder(call) or id(call) in inner or not (call.args or call.keywords):
                 continue
             used = set().union(*(_names(a) for a in [*call.args, *[k.value for k in call.keywords]]))
             if not used & dependent:
@@ -326,7 +347,7 @@ def _oracle_only_names(tree: ast.AST) -> set[str]:
     return inside - outside
 
 
-def _read(scripts: dict[str, str]) -> tuple[list[_Found], list[_Found], set[float]]:
+def _read(scripts: dict[str, str], loops_in: set[str] | None = None) -> tuple[list[_Found], list[_Found], set[float]]:
     lists: list[_Found] = []
     scalars: list[_Found] = []
     numbers: set[float] = set()
@@ -336,7 +357,7 @@ def _read(scripts: dict[str, str]) -> tuple[list[_Found], list[_Found], set[floa
         except SyntaxError:
             numbers |= code_numbers(source)
             continue
-        reader = _Reader(name)
+        reader = _Reader(name, loops=loops_in is None or name in loops_in)
         reader.visit(tree)
         # A module-level name only the checks' own code reads (``CHECK_RUNS = 20000`` used in ``oracle()`` alone) is
         # theirs too.
@@ -355,12 +376,13 @@ def protocol_numbers(protocol: dict[str, Any] | None) -> list[tuple[float, str]]
     out: list[tuple[float, str]] = []
     if not isinstance(protocol, dict):
         return out
-    grid = protocol.get("grid")
-    if isinstance(grid, dict):
-        for axis, values in grid.items():
+    for part, where in (("grid", "grid"), ("in_each_run", "compared in each run")):
+        grid = protocol.get(part)
+        for axis, values in (grid.items() if isinstance(grid, dict) else []):
             for v in values if isinstance(values, list) else []:
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    out.append((float(v), f"grid {axis}"))
+                for x in (v if isinstance(v, (list, tuple)) else [v]):   # a tuple setting fixes each of its numbers
+                    if isinstance(x, (int, float)) and not isinstance(x, bool):
+                        out.append((float(x), f"{where} {axis}"))
     runs = protocol.get("runs_per_setting")
     if isinstance(runs, (int, float)) and not isinstance(runs, bool):
         out.append((float(runs), "runs per setting"))
@@ -377,38 +399,85 @@ def protocol_numbers(protocol: dict[str, Any] | None) -> list[tuple[float, str]]
     return out
 
 
+def _is_named_for(f: _Found, axis: str) -> bool:
+    axis_tokens = _tokens(str(axis))
+    return bool(axis_tokens) and set(axis_tokens) <= set(_tokens(f.name)) and set(_tokens(f.name)) - set(axis_tokens) <= _LIST_WORDS
+
+
+def _named_loosely(f: _Found, axis: str, want: list[float]) -> bool:
+    """A list whose name carries the axis's name and a list word (PRIMARY_R0_VALUES for R0) and that shares at least half
+    of the axis's values: named after the axis, with a qualifier the strict rule does not know."""
+    axis_tokens = _tokens(str(axis))
+    tokens = set(_tokens(f.name))
+    return (
+        bool(axis_tokens) and set(axis_tokens) <= tokens and bool(tokens & _LIST_WORDS) and not tokens & _INDEX_WORDS
+        and len(f.values) >= 2 and sum(_has(f.values, v) for v in want) >= max(1, len(want) // 2)
+    )
+
+
+def _unnamed_matches(axis: str, want: list[float], grid: dict[str, Any], lists: list[_Found]) -> list[_Found]:
+    """Lists that hold the axis's values under a name that does not say so, for a script outside the trial contract.
+
+    Only a strong match counts, so a list that merely shares a number with the axis is not read as the axis: the axis
+    has at least two values, the list shares at least two of them and all but at most one, it is not a set of positions
+    (by name, or a loop variable the body never hands on), and it is not already the list of another axis of the grid
+    (named after it, or the same set of values)."""
+    if len(want) < 2:
+        return []
+    others = [
+        (o, [float(v) for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)])
+        for o, vals in grid.items() if o != axis and isinstance(vals, list)
+    ]
+    out = []
+    for f in lists:
+        shared = sum(_has(f.values, v) for v in want)
+        if shared < 2 or shared < len(want) - 1 or len(f.values) < 2:
+            continue
+        if set(_tokens(f.name)) & _INDEX_WORDS or f.positional:
+            continue
+        if any(_is_named_for(f, o) or (ov and _same_set(f.values, ov)) for o, ov in others):
+            continue
+        out.append(f)
+    return out
+
+
 _FI_RUNS_TRIALS = re.compile(r"^def\s+(run_trial|run_cell)\s*\(", re.MULTILINE)
 
 
-def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mismatch]:
+def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_loops: bool = False) -> list[Mismatch]:
     """The ways ``scripts`` (file name -> source) contradict ``protocol``; empty when they do not.
 
     Under the trial contract (simulate.py defines ``run_trial`` or ``run_cell``) FI itself hands the simulation every
     setting of the grid, runs ``runs_per_setting`` trials of each and gives the analysis the protocol's thresholds, so
     none of those has to appear in the scripts: a script that names a different grid or run count is still a
-    contradiction, a script that names none is not."""
+    contradiction, a script that names none is not.
+
+    Under that contract a ``for`` loop over literals in the ANALYSIS script is not read as the grid (``analysis_loops``
+    reads it again): the analysis runs nothing of the grid, it only reads FI's record, and a loop there is a computation
+    over settings (an acceptance check that is undefined at ``pi1 = 0``, a figure of two panels), not a definition of
+    them. Whether the analysis leaves a setting out of what it reports is a fact FI counts from its own record after
+    the run (:func:`analysis_suspects`, :func:`core.run_manifest.confirmed`), not a guess from the loop's literals. A
+    loop in the simulation script, and a list the analysis assigns to the axis's name, are read as before."""
     if not isinstance(protocol, dict) or not scripts:
         return []
     fi_runs_trials = bool(_FI_RUNS_TRIALS.search(scripts.get("simulate.py", "")))
-    lists, scalars, numbers = _read(scripts)
+    lists, scalars, numbers = _read(scripts, {"simulate.py"} if fi_runs_trials and not analysis_loops else None)
     out: list[Mismatch] = []
 
-    grid = protocol.get("grid")
-    for axis, values in (grid.items() if isinstance(grid, dict) else []):
+    # What each run compares inside it is handed in by FI as well (the whole list in each run's cell): a script that
+    # names other values for it contradicts the protocol the same way.
+    grid = {**(protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}),
+            **(protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {})}
+    for axis, values in grid.items():
         want = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)] if isinstance(values, list) else []
         if not want:
             continue
-        axis_tokens = _tokens(str(axis))
-        named = [
-            f for f in lists
-            if axis_tokens and set(axis_tokens) <= set(_tokens(f.name))
-            and set(_tokens(f.name)) - set(axis_tokens) <= _LIST_WORDS
-        ]
-        candidates = named or [
-            f for f in lists
-            if len(f.values) >= 2 and sum(_has(f.values, v) for v in want) >= max(1, len(want) // 2)
-            and not set(_tokens(f.name)) & _INDEX_WORDS
-        ]
+        named = [f for f in lists if _is_named_for(f, str(axis))]
+        candidates = (
+            named
+            or [f for f in lists if _named_loosely(f, str(axis), want)]
+            or ([] if fi_runs_trials else _unnamed_matches(axis, want, grid, lists))
+        )
         if candidates:
             if not any(_same_set(f.values, want) for f in candidates):
                 best = max(candidates, key=lambda f: sum(_has(want, v) for v in f.values))
@@ -449,6 +518,16 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
             if not any(_has(numbers, form) for form in forms):
                 out.append(Mismatch("threshold", str(name), [float(v)]))
     return out
+
+
+def analysis_suspects(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mismatch]:
+    """The grid differences that exist only because a ``for`` loop over literals in the analysis script is read as the axis
+    (:func:`check` does not read it under the trial contract): the analysis MAY leave those values out of what it reports.
+    Not a difference yet; :func:`core.run_manifest.confirmed` settles it from FI's record once the analysis has run."""
+    if not isinstance(protocol, dict) or not _FI_RUNS_TRIALS.search(scripts.get("simulate.py", "")):
+        return []
+    settled = {(m.kind, m.name) for m in check(protocol, scripts)}
+    return [m for m in check(protocol, scripts, analysis_loops=True) if m.kind == "grid" and m.found and (m.kind, m.name) not in settled]
 
 
 _CLAIM_WORDS = re.compile(r"converg|scaling|scales|critical|threshold|transition|limit|asymptot|rate", re.IGNORECASE)
@@ -565,7 +644,16 @@ def metric_notes(protocol: dict[str, Any] | None) -> list[str]:
         return []
     metrics = protocol.get("metrics")
     if isinstance(metrics, list) and metrics:
-        return []
+        from . import metric_spec
+
+        notes = metric_spec.known_value_problems(protocol)
+        if isinstance(protocol.get("runs_per_setting"), (int, float)) and not any(
+                m.get("known_value") for m in metric_spec.declared(protocol)):
+            notes.append("No metric declares a known true value (`known_value`), so FI will not measure the reported "
+                         "intervals and standard errors against the truth, and the paper will say that their calibration "
+                         "was not checked; declare one for each number the simulation estimates and knows the true "
+                         "value of, while the plan is a draft.")
+        return notes
     if not isinstance(protocol.get("runs_per_setting"), (int, float)) and not isinstance(protocol.get("precision"), dict):
         return []
     return [

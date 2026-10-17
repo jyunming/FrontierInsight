@@ -1,0 +1,2 @@
+def bonferroni_threshold(alpha, m):
+    return alpha * 0.98 / m

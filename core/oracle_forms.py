@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
+from statistics import NormalDist
 from typing import Any, Callable
 
 from . import oracle_check as _oracle
@@ -59,13 +60,16 @@ def _variadic(fn: Callable[..., float]) -> Callable[..., float]:
 #: The functions a formula may call, and nothing else.
 FUNCTIONS: dict[str, Callable[..., float]] = {
     "abs": abs, "min": _variadic(min), "max": _variadic(max), "sum": _variadic(math.fsum),
-    "sqrt": math.sqrt, "exp": math.exp, "log": math.log, "log10": math.log10, "log2": math.log2,
+    "sqrt": math.sqrt, "exp": math.exp, "log": math.log, "ln": math.log, "log10": math.log10, "log2": math.log2,
     "sin": math.sin, "cos": math.cos, "tan": math.tan, "asin": math.asin, "acos": math.acos, "atan": math.atan,
     "atan2": math.atan2, "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh, "hypot": math.hypot,
     "floor": math.floor, "ceil": math.ceil,
 }
 #: The names a formula may use that are not returned by the simulation.
 CONSTANTS: dict[str, float] = {"pi": math.pi}
+#: The functions that take any number of numbers: a name the simulation returns as one number per value each run
+#: compares (core/in_run.py) is given to them as all those numbers (``max(k_hat) / min(k_hat)``), and is read nowhere else.
+SPREAD_OVER = frozenset({"min", "max", "sum"})
 
 
 def _ellipk(m: float) -> float:
@@ -81,9 +85,56 @@ def _ellipk(m: float) -> float:
     return math.pi / (2 * a)
 
 
+def _bessel(n: int) -> Callable[[float], float]:
+    """The Bessel function of the first kind ``J_n`` (SciPy's ``scipy.special.j0``/``j1``, not the spherical ones):
+    ``(1/2pi) * integral over a full period of cos(n*t - x*sin(t))``, by the trapezoid rule, which is exact to rounding
+    for a smooth periodic integrand once there are more points than ``|x|`` (here ``4|x| + 64``; no SciPy needed)."""
+    def j(x: float) -> float:
+        if abs(x) > 1e4:
+            raise ValueError(f"j{n}(x) is computed here for |x| <= 1e4")
+        points = int(4 * abs(x)) + 64
+        return math.fsum(math.cos(n * t - x * math.sin(t))
+                         for t in (2 * math.pi * k / points for k in range(points))) / points
+    return j
+
+
+_STANDARD_NORMAL = NormalDist()
+
+
+def _ndtr(x: float) -> float:
+    """The standard normal distribution function, SciPy's ``scipy.special.ndtr(x)`` = P(Z <= x)."""
+    return 0.5 * math.erfc(-x / math.sqrt(2.0))
+
+
+def _ndtri(p: float) -> float:
+    """The inverse of :func:`_ndtr`, SciPy's ``scipy.special.ndtri(p)``: the x with P(Z <= x) = p, for 0 < p < 1."""
+    if not 0.0 < p < 1.0:
+        raise ValueError("ndtri(p) needs 0 < p < 1")
+    return _STANDARD_NORMAL.inv_cdf(p)
+
+
+def _erfinv(y: float) -> float:
+    """The inverse error function, SciPy's ``scipy.special.erfinv(y)``, for -1 < y < 1. Odd by construction, and worked
+    out from the tail ``(1 - |y|) / 2``, which is exact in floats (``(y + 1) / 2`` near y = 1 is not)."""
+    if not -1.0 < y < 1.0:
+        raise ValueError("erfinv(y) needs -1 < y < 1")
+    if y == 0.0:
+        return 0.0
+    return math.copysign(-_ndtri((1.0 - abs(y)) / 2.0) / math.sqrt(2.0), y)
+
+
 #: Functions only FI's own working-out of a derivation may use (core/oracle_triage.py::calculate), never a check's
 #: formula: a plan writes its expected value with them, a simulation's returned names are never passed through them.
-SPECIAL_FUNCTIONS: dict[str, Callable[..., float]] = {"ellipk": _ellipk}
+#: General mathematics, no field's own formulas.
+SPECIAL_FUNCTIONS: dict[str, Callable[..., float]] = {
+    "ellipk": _ellipk, "erf": math.erf, "erfc": math.erfc, "gamma": math.gamma, "lgamma": math.lgamma,
+    "j0": _bessel(0), "j1": _bessel(1), "J0": _bessel(0), "J1": _bessel(1),
+    "ndtr": _ndtr, "ndtri": _ndtri, "erfinv": _erfinv,
+}
+#: The special functions a working written in prose (a check's derivation, a paper's formula) is worked out with. Only
+#: ``expected_formula`` is written in a language FI states (:data:`EXPECTED_FORMULA_LANGUAGE`); in prose ``gamma(T)`` or
+#: ``j0(x)`` can be the author's own function, so the others are never read there.
+PROSE_FUNCTIONS: dict[str, Callable[..., float]] = {"ellipk": _ellipk}
 
 _BINARY: dict[type, Callable[[float, float], float]] = {
     ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
@@ -139,7 +190,8 @@ def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None) -
         if isinstance(node, ast.Name):
             if id(node) in calls and node.id not in functions:
                 return None, f"it calls {node.id}(), which is not one of {FUNCTION_LIST}"
-            if id(node) not in calls and node.id in functions:
+            # A special function's name not called is a setting of that name (a damping rate `gamma`, a current `j0`).
+            if id(node) not in calls and node.id in FUNCTIONS:
                 return None, f"it uses the function {node.id} without calling it"
             continue
         if isinstance(node, ast.Constant):
@@ -189,16 +241,23 @@ class Evaluated:
     problem: str = ""
 
 
-def evaluate(text: Any, values: dict[str, Any], *, special: bool = False) -> Evaluated:
+def evaluate(text: Any, values: dict[str, Any], *,
+             special: bool | dict[str, Callable[..., float]] = False) -> Evaluated:
     """``text`` computed from ``values`` (what the simulation returned). Never runs code: the parsed tree is walked
     here, and each constant is a float, so no exponent can grow an integer without bound. ``special``: FI's own
-    working-out of a derivation, which may also call :data:`SPECIAL_FUNCTIONS`."""
-    functions = {**FUNCTIONS, **SPECIAL_FUNCTIONS} if special else FUNCTIONS
+    working-out of an expected value, which may also call :data:`SPECIAL_FUNCTIONS` (``True``) or the ones given."""
+    extra = special if isinstance(special, dict) else SPECIAL_FUNCTIONS if special else {}
+    functions = {**FUNCTIONS, **extra}
     tree, why = _tree(text, functions)
     if tree is None:
         return Evaluated(unreadable=why)
-    missing = [n for n in names(text, functions)
-               if not isinstance(values.get(n), (int, float)) or isinstance(values.get(n), bool)]
+    def number(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    def per_value(v: Any) -> bool:
+        return isinstance(v, list) and bool(v) and all(number(x) for x in v)
+
+    missing = [n for n in names(text, functions) if not number(values.get(n)) and not per_value(values.get(n))]
     if missing:
         return Evaluated(missing=missing)
 
@@ -213,13 +272,25 @@ def evaluate(text: Any, values: dict[str, Any], *, special: bool = False) -> Eva
         if isinstance(node, ast.Constant):
             return real(node.value)
         if isinstance(node, ast.Name):
-            return real(CONSTANTS[node.id] if node.id in CONSTANTS and node.id not in values else values[node.id])
+            if node.id in CONSTANTS and node.id not in values:
+                return real(CONSTANTS[node.id])
+            if per_value(values[node.id]):
+                raise ValueError(f"`{node.id}` is one number per value each run compares: it is read inside min(), "
+                                 "max() or sum(), or the check's case names the value")
+            return real(values[node.id])
         if isinstance(node, ast.UnaryOp):
             return real(_UNARY[type(node.op)](walk(node.operand)))
         if isinstance(node, ast.BinOp):
             return real(_BINARY[type(node.op)](walk(node.left), walk(node.right)))
         if isinstance(node, ast.Call):
-            return real(functions[node.func.id](*[walk(a) for a in node.args]))  # type: ignore[union-attr]
+            name = node.func.id  # type: ignore[union-attr]
+            args: list[float] = []
+            for a in node.args:
+                if name in SPREAD_OVER and isinstance(a, ast.Name) and per_value(values.get(a.id)):
+                    args.extend(real(x) for x in values[a.id])
+                else:
+                    args.append(walk(a))
+            return real(functions[name](*args))
         raise ValueError(f"cannot compute {type(node).__name__}")
 
     try:
@@ -272,6 +343,20 @@ def written_precision(value: Any) -> tuple[int, float] | None:
     if not isinstance(exponent, int):
         return None
     return digits, 0.5 * 10.0 ** exponent
+
+
+def disagrees(value: float, expected: float, limit: float) -> bool:
+    """Whether FI's own computation ``value`` of a check's expected value is another number than the ``expected`` the plan
+    typed: when they differ by more than half a unit of the last place the plan wrote (``0.99975`` is known to 5e-6), or
+    by more than the check's ``limit`` when that is smaller. One value then stands for the check: a formula's value that
+    lies inside the tolerance but outside what the plan wrote is still the plan's working and the typed number its
+    rounding (or slip), and judging a measurement against the weaker of the two lets both be quoted. A typed 0 or a
+    whole number is exact as written and is held to the tolerance only (a calculator's 1e-16 for 0 is no disagreement)."""
+    if math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
+        return False
+    precision = written_precision(expected)
+    reach = min(limit, precision[1]) if precision is not None else limit
+    return abs(value - expected) > reach
 
 
 #: A value written with at least this many significant digits and fewer than a float holds reads as a truncated
@@ -488,9 +573,11 @@ def request(requests: list[str], *, last: bool = True) -> str:
 #: How an ``expected_formula`` is written, generated from the calculator's own function tables so the two cannot drift.
 EXPECTED_FORMULA_LANGUAGE = (
     "the expected value as one formula FI can compute itself: numbers, + - * / ** %, parentheses, pi, the functions "
-    f"{FUNCTION_LIST}, and {', '.join(f'{n}(m)' for n in sorted(SPECIAL_FUNCTIONS))} with m = k**2 (SciPy's "
-    "convention, so ellipk(sin(a/2)**2) for amplitude a), and the settings of the check's `case` by name; angles in "
-    "radians (30 degrees is 30*pi/180)"
+    f"{FUNCTION_LIST}, the special functions erf(x), erfc(x), gamma(x), lgamma(x) (the log of |gamma(x)|), j0(x) and "
+    "j1(x) (also J0(x), J1(x): the Bessel functions of the first kind, not the spherical ones), ellipk(m) with m = k**2, "
+    "ndtr(x) (the standard normal distribution function, P(Z <= x)), ndtri(p) (its inverse) and erfinv(y) (all "
+    "as SciPy names them, so ellipk(sin(a/2)**2) for amplitude a), and the settings of the check's `case` by name; "
+    "angles in radians (30 degrees is 30*pi/180)"
 )
 
 
@@ -613,6 +700,74 @@ AMBIGUOUS_WHY = ("it can be read two ways: write it so it can only be read one w
                  "ln named, ellipk(k**2))")
 
 
+#: The characters a worked sum can be written with; a run of them to the left of an ``=`` is where its expression is.
+_SUM_CHARS = re.compile(r"[0-9A-Za-z_.+\-*/() ]+$")
+#: A number written right after an ``=`` (and not the start of a longer expression).
+_STATED = re.compile(r"\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(?![\w.%]|,\d|\s*[-+*/^(%])")
+#: How far back from an ``=`` a sum is looked for: a sum is short, the prose before it need not be read.
+_SUM_REACH = 200
+#: A number or a sum that is a range or a date (``10-20``, ``2024-10-15``), not a subtraction.
+_RANGE = re.compile(r"^\d+(?:-\d+)+$")
+
+
+def _unit_written(text: str) -> float:
+    """How far a stated number may be from the sum it gives, by how it is written: one unit of the last decimal written
+    (``3.4486`` 1e-4, ``2.9e3`` 100: a decimal may be cut off), half a unit of a whole number (``22026`` 0.5, ``2900`` 50:
+    rounded to the nearest; trailing zeros of a whole number are not counted as digits)."""
+    mantissa, _, exponent = text.lower().lstrip("+-").partition("e")
+    scale = 10.0 ** int(exponent) if exponent else 1.0
+    if "." in mantissa:
+        return 10.0 ** -len(mantissa.split(".", 1)[1]) * scale
+    zeros = len(mantissa) - len(mantissa.rstrip("0"))
+    return 0.5 * 10.0 ** zeros * scale if mantissa.strip("0") else 0.5 * scale
+
+
+def stated_arithmetic(text: Any) -> list[dict[str, Any]]:
+    """The sums ``text`` (a reference, a derivation) works out, ``<expression of numbers, constants and the formula's
+    functions> = <number>``, that FI can compute itself and that come out as another number than the one stated:
+    ``{"expression", "stated", "value"}``. The stated number may differ from the value by one unit of its last written
+    digit (a rounded or a cut-off result); a stated 0 is a claim of exactly zero. Only what is plainly a sum is read: an
+    expression that holds a name (a variable, a word) or a function FI could read two ways (a bare ``log``), one written
+    with ``^`` or a thousands separator, a percent, a range or a date is never judged."""
+    from . import oracle_triage as _triage
+
+    out: list[dict[str, Any]] = []
+    text = str(text or "")
+    for m in re.finditer(r"(?<![<>=!])=(?![=>])", text):
+        right = _STATED.match(text[m.end():])
+        before = text[max(0, m.start() - _SUM_REACH):m.start()]
+        left = _SUM_CHARS.search(before)
+        if right is None or left is None:
+            continue
+        run = left.group(0)
+        ahead = before[:left.start()].rstrip()
+        if ahead.endswith("^") or (ahead.endswith(",") and run[:1].isdigit()):
+            continue  # a power (10^3) or a thousands separator (1,000) the formula language does not read
+        stated = float(right.group(1))
+        # The longest piece of the run that is a sum on its own, starting where a word or the run begins.
+        starts = [0] + [i + 1 for i, c in enumerate(run) if c == " "]
+        for i in starts:
+            piece = run[i:].strip()
+            if not piece or re.search(r"[-+*/^(]\s*$", run[:i]) or (i and piece[0] in "+-*/"):
+                continue
+            if not re.search(r"[-+*/]|\w\(", piece) or names(piece) or _RANGE.match(piece) or _triage.ambiguous(piece):
+                continue
+            result = evaluate(piece, {})
+            if result.value is None:
+                continue
+            # A number written to four digits or more is known only to them, and the sum carries that to its result
+            # (2.006 * 1.654 is not good to more than the digits of 2.006 and 1.654).
+            carried = sum(p[1] / abs(float(c)) for c in re.findall(r"(?<![\w.])\d+\.\d*(?:[eE][-+]?\d+)?|(?<![\w.])\.\d+", piece)
+                          if float(c) != 0 and (p := written_precision(float(c))) and p[0] >= 4)
+            operands = [abs(float(c)) for c in re.findall(r"\d+\.?\d*(?:[eE][-+]?\d+)?|\.\d+", piece)] or [1.0]
+            unit = 1e-9 * max(operands) if stated == 0 else _unit_written(right.group(1))
+            slack = max(unit, 1e-9 * abs(stated), 1e-12) + carried * abs(result.value)
+            if abs(result.value - stated) > slack:
+                out.append({"expression": piece, "stated": right.group(1), "value": result.value})
+            break
+    return out
+
+
 def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | None = None) -> list[dict[str, Any]]:
     """What FI's own computation of each check's expected value found, for the checks FI may correct that can be judged
     (a number ``expected`` and a ``tolerance``): ``{"name", "state", ...}`` with ``state`` ``agrees``, ``missing``,
@@ -627,6 +782,13 @@ def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | 
 
     found: list[dict[str, Any]] = []
     for oracle in _oracle.declared(protocol):
+        # A sum the plan works out in its own words (a reference, a derivation) is computed too: the plan's own hand
+        # arithmetic can be wrong where its `expected_formula` is right (a stated 3.4486 where the sum gives 3.4519).
+        for key, value in oracle.items():
+            if key in ("measure", "expected_formula") or not isinstance(value, str):
+                continue
+            for sw in stated_arithmetic(value):
+                found.append({"name": str(oracle["name"]).strip(), "state": "arithmetic", **sw})
         expected, limit, _mode = _oracle.limit_of(oracle)
         if expected is None or limit is None or not _triage.correctable(oracle):
             continue
@@ -635,7 +797,7 @@ def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | 
         if value is None:
             found.append({"name": name, "state": "missing" if why == "missing" else "unusable", "why": why,
                           "formula": str(oracle.get("expected_formula") or ""), "names": unset})
-        elif abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
+        elif disagrees(value, expected, limit):
             formula = str(oracle.get("expected_formula"))
             if _triage.ambiguous(used or formula):
                 # A formula that can be read two ways (sin(30) for 30 degrees, a bare log, ellipk of a modulus) is never
@@ -648,6 +810,58 @@ def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | 
         else:
             found.append({"name": name, "state": "agrees", "value": value, "expected": expected})
     return found
+
+
+def moved_expected(before: list[dict[str, Any]], after: list[dict[str, Any]],
+                   fixed: dict[str, float] | None = None) -> list[dict[str, Any]]:
+    """The checks whose ``expected`` a rewrite of the plan moved away from what the check's own ``expected_formula`` computes,
+    when the number it had before agreed with that formula: ``{"name", "was" (the rewrite's number), "now" (the earlier
+    one), "formula", "value" (what the formula computes)}``.
+
+    A plan asked to change one check is rewritten whole, and its model can change another check's number on the way (a real
+    plan went from 2.97934584 to 2.9803286656 for a check nobody asked about, the formula unchanged). The earlier number
+    agreed with the plan's own formula, so it comes back. Only a check whose formula, case and measure are the same before and
+    after is looked at (a changed definition is a change of the check, not a slip), and only where FI's own computation of the
+    formula was usable both times; no measured value is read. Nothing here changes a tolerance."""
+    def key(o: Any) -> str:
+        return str(o.get("name") or "").strip() if isinstance(o, dict) else ""
+
+    def read(o: Any) -> Any:
+        # A rewrite by a model is raw text: `tolerance: 1e-06` is a string to YAML (a float is `1.0e-06`).
+        if not isinstance(o, dict):
+            return o
+        out_o = dict(o)
+        for k in ("expected", "tolerance"):
+            if isinstance(out_o.get(k), str):
+                try:
+                    out_o[k] = float(out_o[k])
+                except ValueError:
+                    pass
+        return out_o
+
+    earlier = {key(o): read(o) for o in before if key(o)}
+    out: list[dict[str, Any]] = []
+    for o in (read(x) for x in after):
+        b = earlier.get(key(o))
+        if b is None or not isinstance(o, dict):
+            continue
+        if any(b.get(k) != o.get(k) for k in ("expected_formula", "case", "measure")) or not o.get("expected_formula"):
+            continue
+        exp_b, lim_b, _mode_b = _oracle.limit_of(b)
+        exp_a, lim_a, _mode_a = _oracle.limit_of(o)
+        if exp_b is None or exp_a is None or lim_a is None or lim_b is None or exp_a == exp_b:
+            continue
+        value_b, _why_b = formula_value(b, fixed)
+        value_a, _why_a = formula_value(o, fixed)
+        if value_b is None or value_a is None:
+            continue
+        # (By the tolerance alone, not :func:`disagrees`: an earlier number that lay within the tolerance of the formula
+        # is the one to put back even if the plan wrote it to more digits than the formula reproduces.)
+        agreed = abs(value_b - exp_b) <= lim_b or math.isclose(value_b, exp_b, rel_tol=1e-12, abs_tol=0.0)
+        agrees = abs(value_a - exp_a) <= lim_a or math.isclose(value_a, exp_a, rel_tol=1e-12, abs_tol=0.0)
+        if agreed and not agrees:
+            out.append({"name": key(o), "was": exp_a, "now": exp_b, "formula": str(o["expected_formula"]), "value": value_a})
+    return out
 
 
 def _digits(value: float) -> str:
@@ -673,6 +887,10 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True, fixed:
             lines.append(f"- {f['name']!r}: its `expected_formula` `{f['formula']}` {f['why']}; FI reads it as "
                          f"{_digits(f['value'])} while `expected` says {_digits(f['expected'])}. Give it in a form that "
                          "can only be read one way, and the corrected `expected` if the formula is right.")
+        elif f["state"] == "arithmetic":
+            lines.append(f"- {f['name']!r}: it states `{f['expression']} = {f['stated']}`, but FI computes "
+                         f"{f['expression']} as {_digits(f['value'])}. Correct the number wherever the check uses it "
+                         "(its reference, `measure`, `expected`, `expected_formula`), or the expression if that is wrong.")
         elif f["state"] == "differs":
             lines.append(f"- {f['name']!r}: FI computed your `expected_formula` `{f['formula']}`: it gives "
                          f"{_digits(f['value'])}, but `expected` says {_digits(f['expected'])}. Give the corrected "
@@ -691,7 +909,7 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True, fixed:
 
 def apply_formulas(text: str) -> tuple[str, list[dict[str, Any]]]:
     """``(text, corrections)``: ``text`` (a plan.md) with each check's ``expected`` set to what its ``expected_formula``
-    computes where the two still disagree by more than the check's own tolerance; ``tolerance``, ``tolerance_mode``,
+    computes where the two still disagree (:func:`disagrees`: by more than the typed number's own written precision or the check's tolerance); ``tolerance``, ``tolerance_mode``,
     ``case`` and ``measure`` are never touched. Each correction is ``{"name", "was", "now", "formula"}``."""
     from . import plan as _plan
 

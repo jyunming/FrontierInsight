@@ -46,6 +46,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
+from core import paper_facts as _paper_facts
 from core.config import Config
 from core.engine import (
     QuestArtifacts,
@@ -53,6 +54,7 @@ from core.engine import (
     build_further_reading,
     build_references,
 )
+from core.proc_tree import run_tree
 from core.provider import (
     LLMClient,
     quest_run_log,
@@ -70,6 +72,15 @@ from generation.paper import _sanitize_unicode_for_latex
 
 _log = logging.getLogger("frontier_insight.poster")
 
+
+def _run(cmd: list[str], *, timeout: float, cwd: str | None = None) -> "subprocess.CompletedProcess[str]":
+    """The poster's LaTeX run, the one place a test replaces it (``tests/paper_fakes.fake_poster_run``).
+    A timeout stops the engine together with everything it started (``core.proc_tree.run_tree``):
+    ``subprocess.run`` killed the engine alone and then waited, with no limit, for output a
+    child still held."""
+    return run_tree(cmd, timeout=timeout, cwd=cwd)
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = REPO_ROOT / "agents" / "poster.md"
 TEMPLATE_PATH = REPO_ROOT / "templates" / "poster" / "poster.tex"
@@ -79,6 +90,8 @@ ICON_PNG = REPO_ROOT / "vscode-frontier-insight" / "images" / "fi_glyph_teal.png
 
 _PT_PER_CM = 72 / 2.54
 _MAX_COMPILES = 6
+# One LaTeX compile of the poster; at this limit the engine and everything it started is stopped.
+_COMPILE_TIMEOUT_S = 180
 _MAX_REFERENCES = 8
 _SELECTED_SOURCES = 5
 _MAX_HEADLINE_WORDS = 20
@@ -960,7 +973,7 @@ class PosterGenerator:
         output = self.config.output
         sheet = _SHEETS.get(output.poster_size, _SHEETS["a1_portrait"])
 
-        paper_md = art.paper_md.read_text(encoding="utf-8")
+        paper_md = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8"))  # FI's values stay, its markers go
         figures = _figure_files(art.figures_dir)
         captions = _paper_captions(paper_md)
         literature = art.raw_state.get("literature") or []
@@ -1237,19 +1250,18 @@ class PosterGenerator:
         tectonic accepts the same ``.tex`` and flags as pdflatex."""
         engine_name, engine_path = engine
         try:
-            r = subprocess.run(
+            r = _run(
                 [engine_path, "-interaction=nonstopmode", "-halt-on-error", str(poster_tex)],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                cwd=str(out_dir), timeout=180,
+                cwd=str(out_dir), timeout=_COMPILE_TIMEOUT_S,
             )
         except subprocess.TimeoutExpired:
             return (
                 f"{engine_name}_timeout",
-                f"{engine_name} poster timeout (>180s); skipped",
-                f"The {engine_name} compile took longer than 180s. On a fresh "
+                f"{engine_name} poster timeout (>{_COMPILE_TIMEOUT_S}s); skipped",
+                f"The {engine_name} compile took longer than {_COMPILE_TIMEOUT_S}s. On a fresh "
                 f"tectonic install the first run downloads CTAN packages (~30 s); "
                 f"retry once the cache is populated. If it consistently times out, "
-                f"raise the timeout in `generation/poster.py`.",
+                f"raise `_COMPILE_TIMEOUT_S` in `generation/poster.py`.",
             )
         if r.returncode != 0:
             stdout = (r.stdout or "")[-500:]

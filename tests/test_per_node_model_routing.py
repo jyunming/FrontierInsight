@@ -97,6 +97,12 @@ def test_model_for_node_miss_returns_none(tmp_path: Path) -> None:
 # --- LLMClient.chat — HTTP path per-call model override --------------------
 
 
+@pytest.fixture(autouse=True)
+def _plain_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests read the plain request's body through a mocked ``post``; the streamed call has its own tests."""
+    monkeypatch.setattr("core.provider._http_streams", lambda endpoint: False)
+
+
 @pytest.mark.asyncio
 async def test_http_chat_uses_per_call_model_override() -> None:
     """When `model` is passed to `LLMClient.chat`, the OpenAI-compat

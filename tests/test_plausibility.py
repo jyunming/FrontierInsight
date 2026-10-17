@@ -392,3 +392,165 @@ def test_a_failure_count_the_protocol_names_may_be_zero_everywhere() -> None:
     named = {**rate, "protocol": {"failure_policy": "Failures are counted in `rate`."}}
     assert _zero_expected_paths({**state, "design": prose}) == set()
     assert _zero_expected_paths({**state, "design": named}) == {"rate"}
+
+
+def test_the_path_index_picks_the_leaves_matches_picks_in_result_order() -> None:
+    from core.plausibility import _matches, _PathIndex
+
+    paths = ["cd_nm", "sweep[0].cd_nm", "sweep[1].cd_nm", "a.b.cd_nm", "cd_nm_x", "sweep[2]", "x.cd", "LER_values[3]",
+             "by.cd_nm.y", "<root>", "a.b"]
+    index = _PathIndex(paths)
+    for a in ["cd_nm", "cd_nm.*", "sweep[0].cd_nm", "a.b", "a.b.*", "cd", "y", "LER_values", "missing", "sweep[2]"]:
+        assert index.matching(a) == [i for i, p in enumerate(paths) if _matches(a, p)], a
+        assert index.any_match(a) == any(_matches(a, p) for p in paths), a
+
+
+def test_a_result_with_a_million_values_is_checked_in_seconds() -> None:
+    import time
+
+    from core.plausibility import Assertion, violations
+
+    result = {"mean_ler": 2.0, "ler_values": [1.0] * 500_000, "cells": [{"ler": 1.0, "p": 0.1} for _ in range(100_000)]}
+    assertions = [Assertion(path=f"q{i}", min=0.0, max=1.0, unit="", reason="") for i in range(30)]
+    assertions.append(Assertion(path="ler", min=0.0, max=0.5, unit="", reason=""))
+    started = time.monotonic()
+    found = violations(result, assertions)
+    assert time.monotonic() - started < 30
+    assert len([v for v in found if v.assertion.path == "ler"]) == 100_000
+
+
+# --- one walk per result ---------------------------------------------------------------------------------------------
+
+def _reference_dotted(tokens):
+    out = ""
+    for kind, val in tokens:
+        out = f"{out}[{val}]" if kind == "i" else (f"{out}.{val}" if out else str(val))
+    return out or "<root>"
+
+
+def _reference_leaves(obj, tokens=()):
+    """The recursive walk the iterative one replaced, kept here to pin that it finds the same leaves."""
+    import math
+
+    if isinstance(obj, bool):
+        return
+    if isinstance(obj, (int, float)):
+        if math.isfinite(obj):
+            yield tokens, _reference_dotted(tokens), float(obj)
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _reference_leaves(v, tokens + (("k", str(k)),))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            yield from _reference_leaves(v, tokens + (("i", i),))
+
+
+def _reference_present(obj, tokens=()):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _reference_present(v, tokens + (("k", str(k)),))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            yield from _reference_present(v, tokens + (("i", i),))
+    else:
+        yield _reference_dotted(tokens)
+
+
+_SHAPES = [
+    4.2, "text", None, [], {}, [1.0, 2.0], (1, (2, 3)),
+    {"a": {"b": [1.5, {"c": 2.5}, 0.0]}, "d": 3.5, "e": {"0.9": {"f": -1.0}}, "g": True, "h": None, "s": "x"},
+    {"": 1.0, "k": {"": 2.0, "x": [{"": 3.0}]}, "a.b": 4.0, "c[0]": 5.0, "\n": 6.0},
+    {"by_R0": {"0.9": {"by_N": {"100": [0.1, float("nan"), float("inf"), 2]}}}, "flag": [True, False]},
+    {"cells": [{"ler": 0.1, "p": 0.1}, {"ler": 0.2, "p": "n/a"}, [[1.0], [2.0, [3.0]]]], "ler": 9.0},
+    {"a": {"b": {"c": {"d": {"e": 1.0}}}}, "z": [[], {}, [None]]},
+]
+
+
+@pytest.mark.parametrize("shape", _SHAPES, ids=range(len(_SHAPES)))
+def test_the_iterative_walk_finds_the_leaves_the_recursive_walk_found(shape) -> None:
+    from core.plausibility import LeafWalk, _PathIndex, _walk_leaves
+
+    assert list(_walk_leaves(shape)) == list(_reference_leaves(shape))
+    walk = LeafWalk(shape)
+    assert walk.count == len(list(_reference_leaves(shape)))
+    assert walk.present_paths() == list(_reference_present(shape))
+    # The indexes built from the walk (names read from the keys) pick what an index built path by path picks.
+    ref_paths = [p for _t, p, _v in _reference_leaves(shape)]
+    ref_index = _PathIndex(ref_paths)
+    for a in ["a", "d", "c", "ler", "p", "by_R0", "", "b", "x", "k", "<root>", "a.b", "c[0]", "e.*", "\n", "h", "g"]:
+        assert walk.numeric_index().matching(a) == ref_index.matching(a), a
+        assert walk.numeric_index().any_match(a) == ref_index.any_match(a), a
+    present = _PathIndex(list(_reference_present(shape)))
+    for a in ["a", "h", "s", "g", "z", "flag", "p"]:
+        assert walk.present_index().matching(a) == present.matching(a), a
+
+
+def test_violations_and_check_design_are_the_same_with_a_shared_walk() -> None:
+    from core.plausibility import Assertion, LeafWalk, bounded_paths, check_design, violations
+
+    result = {"cells": [{"ler": 0.1 * i, "p": 0.0} for i in range(30)], "ler": 9.0, "gone": None, "t": {"p": 0.0}}
+    design = {"result_assertions": [
+        {"path": "ler", "min": 0, "max": 1}, {"path": "p", "min": 0, "max": 1}, {"path": "gone", "min": 0, "max": 1},
+        {"path": "nowhere", "min": 0, "max": 1}]}
+    fresh = check_design(result, design, seen=["nowhere", "gone"])
+    walk = LeafWalk(result)
+    shared = check_design(result, design, seen=["nowhere", "gone"], walk=walk)
+    assert [(v.path, v.kind, v.value) for v in shared if v.value == v.value] == [
+        (v.path, v.kind, v.value) for v in fresh if v.value == v.value]
+    assert [v.kind for v in shared] == [v.kind for v in fresh]
+    assert bounded_paths(result, design, walk=walk) == bounded_paths(result, design)
+    assertions = [Assertion(path="ler", min=0.0, max=0.5, unit="", reason="")]
+    assert violations(result, assertions, walk=walk) == violations(result, assertions)
+    # A walk made for another result is not used for this one.
+    other = {"ler": 5.0}
+    assert [v.value for v in violations(other, assertions, walk=walk)] == [5.0]
+
+
+def test_a_result_read_by_every_check_is_walked_once(monkeypatch) -> None:
+    from core import plausibility as pl
+
+    built = []
+    original = pl.LeafWalk._build
+
+    def counting(self):
+        if not self._built:
+            built.append(id(self.root))
+        original(self)
+
+    monkeypatch.setattr(pl.LeafWalk, "_build", counting)
+    result = {"ler_values": [0.3] * 1000, "mean": 0.5, "note": "x"}
+    design = {"result_assertions": [{"path": "mean", "min": 0, "max": 1}, {"path": "ler_values", "min": 0, "max": 1}]}
+    memo = pl.WalkMemo()
+    pl.check_design(result, design, seen=["mean"], walk=memo.get(result))
+    pl.check_design(result, design, seen=["mean"], walk=memo.get(result))
+    pl.bounded_paths(result, design, walk=memo.get(result))
+    assert len(built) == 1
+    # Growing the result, or handing over another one, walks again.
+    result["extra"] = [1.0]
+    pl.bounded_paths(result, design, walk=memo.get(result))
+    pl.bounded_paths({"mean": 1.0}, design, walk=memo.get({"mean": 1.0}))
+    assert len(built) == 3
+    # Without a walk each call still works (and walks for itself).
+    pl.bounded_paths(result, design)
+    assert len(built) == 4
+
+
+def test_two_million_values_are_walked_once_and_quickly() -> None:
+    import time
+
+    from core.plausibility import LeafWalk, check_design
+
+    n = 2_000_000
+    result = {"mean": 0.5, "trials": [{"ler": 0.1, "vals": [0.2] * 4} for _ in range(n // 5)]}
+    design = {"result_assertions": [{"path": "mean", "min": 0, "max": 1}, {"path": "ler", "min": 0, "max": 0.5},
+                                    {"path": "gone", "min": 0, "max": 1}]}
+    walk = LeafWalk(result)
+    started = time.monotonic()
+    assert check_design(result, design, seen=["gone"], walk=walk)[0].kind == "missing"
+    first = time.monotonic() - started
+    started = time.monotonic()
+    for _ in range(3):
+        check_design(result, design, seen=["gone"], walk=walk)
+    assert time.monotonic() - started < max(first, 1.0)  # a repeat reads the kept walk instead of walking again
+    assert first < 30

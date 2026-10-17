@@ -113,7 +113,12 @@ def test_the_plan_says_when_a_protocol_with_runs_declares_no_metric() -> None:
     from core import protocol_check as pc
 
     assert "declares no metric spec" in pc.metric_notes({"runs_per_setting": 300})[0]
-    assert pc.metric_notes({"runs_per_setting": 300, "metrics": [{"id": "p", "kind": "mean", **_ESTIMAND_UNIT}]}) == []
+    # a metric without a known true value: FI will not measure the intervals against the truth, and the plan says so
+    notes = pc.metric_notes({"runs_per_setting": 300, "metrics": [{"id": "p", "kind": "mean", **_ESTIMAND_UNIT}]})
+    assert len(notes) == 1 and "No metric declares a known true value" in notes[0]
+    known = {"true_value": 1.0, "estimate": "p", "standard_error": "p_se", "level": 0.95}
+    assert pc.metric_notes({"runs_per_setting": 300,
+                            "metrics": [{"id": "p", "kind": "mean", **_ESTIMAND_UNIT, "known_value": known}]}) == []
     assert pc.metric_notes({"grid": {"a": [1]}}) == [] and pc.metric_notes(None) == []
 
 

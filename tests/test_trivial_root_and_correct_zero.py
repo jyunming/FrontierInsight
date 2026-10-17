@@ -61,11 +61,14 @@ def test_the_finding_names_the_bracket_rather_than_the_number() -> None:
     assert "bracket" in text and "every one of its settings" in text
 
 
-def test_the_finding_reaches_the_report_through_check() -> None:
-    report = no.check("The deterministic limit is approached as N grows.", V238)
-    assert not report.ok
-    assert report.findings[0].kind == "trivial_reference"
-    assert report.to_dict()["findings"][0]["kind"] == "trivial_reference"
+def test_the_finding_reaches_the_review_as_a_warning() -> None:
+    from types import SimpleNamespace
+
+    from core.engine import Engine
+
+    eng = SimpleNamespace(_log=SimpleNamespace(warning=lambda *a, **k: None, info=lambda *a, **k: None))
+    warnings = Engine._reference_check_hits(eng, {"result_json": V238})  # type: ignore[arg-type]
+    assert len(warnings) == 1 and warnings[0].startswith("trivial_reference:")
 
 
 def test_a_reference_that_varies_is_left_alone() -> None:

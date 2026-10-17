@@ -42,7 +42,13 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 from typing import Any
+
+# What a tolerance of 0 can mean for a computed value: floating-point arithmetic cannot give it more exactly than a few
+# dozen units in its last place (a plan's 0 on a computed p-value failed correct code on a measured 1.1e-16), so 0 is read
+# as "exact to machine precision". A count that is off by 1 still fails; a tolerance above 0 is never widened.
+_ROUNDING = 64 * sys.float_info.epsilon
 
 _LINE_RE = re.compile(r"^\s*ORACLE_JSON:\s*(\{.*\})\s*$", re.MULTILINE)
 
@@ -127,16 +133,18 @@ def _num(value: Any) -> float | None:
 
 def limit_of(oracle: dict[str, Any]) -> tuple[float | None, float | None, str]:
     """``(expected, limit, mode)`` an oracle is judged by: ``limit`` is the largest difference from ``expected`` that counts as
-    agreeing (``None`` when the oracle cannot be judged: no numeric expected or tolerance, or a relative tolerance around 0)."""
+    agreeing (``None`` when the oracle cannot be judged: no numeric expected or tolerance, or a relative tolerance around 0).
+    A tolerance of 0 is read as rounding of a number of the expected value's size (of 1 when the expected value is 0), see
+    ``_ROUNDING``; any other tolerance is used as written."""
     expected, tolerance = _num(oracle.get("expected")), _num(oracle.get("tolerance"))
     mode = "relative" if str(oracle.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
     if expected is None or tolerance is None or tolerance < 0:
         return None, None, mode
-    if mode == "relative":
-        if expected == 0:
-            return expected, None, mode
-        return expected, tolerance * abs(expected), mode
-    return expected, tolerance, mode
+    if mode == "relative" and expected == 0:
+        return expected, None, mode
+    if tolerance == 0:
+        return expected, _ROUNDING * (abs(expected) if expected != 0 else 1.0), mode
+    return expected, tolerance * abs(expected) if mode == "relative" else tolerance, mode
 
 
 def case_of(oracle: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
@@ -716,6 +724,22 @@ def equation_problem(eq: dict[str, Any], sources: list[dict[str, str]]) -> str |
             "from memory does not count; cite a retrieved source by its [n], or write the derivation")
 
 
+_EQUATION_FIELDS = ("reference", "derivation", "measure", "equation", "equations", "check")
+
+
+def equation_ids_in(oracle: dict[str, Any]) -> set[str]:
+    """The ids of the model's equations (``E1``, ``E2`` ...) a check names in its reference, derivation, measure or equation
+    fields, as upper-case ids. Empty when it names none: such a check does not rest on the model."""
+    found: set[str] = set()
+    for key in _EQUATION_FIELDS:
+        value = oracle.get(key)
+        values = value if isinstance(value, (list, tuple)) else [value]
+        for v in values:
+            if isinstance(v, str):
+                found.update(f"E{n}" for n in re.findall(r"(?<![\w.])E(\d+)(?!\w|\.\d)", v))
+    return found
+
+
 def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
                       sources: list[dict[str, str]]) -> str | None:
     """Why the oracle's expected value has no source a reader can check, or ``None`` when it has one."""
@@ -857,9 +881,19 @@ def unjudgeable(oracles: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+def mc_of(check: Any) -> dict[str, Any] | None:
+    """The record of the trials a check was decided on (core/mc_error.py), when it has one with a verdict."""
+    mc = check.get("mc") if isinstance(check, dict) else None
+    return mc if isinstance(mc, dict) and mc.get("verdict") in ("pass", "fail", "undecided") else None
+
+
 def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> list[dict[str, Any]]:
     """What the engine made of each declared oracle: its value as the script reported it, what the protocol expects and allows,
-    and the verdict computed here. For the record in ``needs/ORACLE_CHECK.json``."""
+    and the verdict computed here. For the record in ``needs/ORACLE_CHECK.json``.
+
+    A check FI decided on many trials (core/mc_error.py) carries ``mc`` and the verdict those trials gave: a pass only
+    when three standard errors fit inside the tolerance, and ``passed_by_engine: None`` with ``undecided: True`` when
+    the trials could not decide it (never a pass, never counted as validation)."""
     checks = (reported or {}).get("checks")
     by_name = {str(c.get("name") or "").strip().lower(): c for c in checks if isinstance(c, dict)} if isinstance(checks, list) else {}
     out: list[dict[str, Any]] = []
@@ -869,10 +903,20 @@ def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> li
         expected, limit, mode = limit_of(oracle)
         value = _num(check.get("value")) if check else None
         verdict = None if (value is None or limit is None) else abs(value - expected) <= limit  # type: ignore[operator]
+        mc = mc_of(check)
+        undecided = False
+        if mc is not None and verdict is not None:
+            said = mc.get("verdict")
+            if said == "undecided":
+                verdict, undecided = None, True
+            elif said == "fail":
+                verdict = False
+            # "pass" stands only when the number itself is inside the tolerance too
         out.append({
             "name": name, "value": value, "expected": expected, "tolerance": oracle.get("tolerance"), "mode": mode,
             "limit": limit, "passed_by_engine": verdict, "script_said": (check or {}).get("passed"),
             "measured_by": "engine" if (reported or {}).get("engine_measured") and (check or {}).get("measured_by") == "engine" else "script",
+            **({"mc": mc} if mc else {}), **({"undecided": True} if undecided else {}),
         })
     return out
 
@@ -911,12 +955,13 @@ def engine_passed(judged_list: list[dict[str, Any]]) -> list[str]:
     return [
         str(j["name"]) for j in judged_list
         if j.get("measured_by") == "engine" and _num(j.get("value")) is not None and j.get("passed_by_engine") is True
+        and not j.get("flagged_by_reader")
     ]
 
 
 def not_passed(judged_list: list[dict[str, Any]]) -> list[str]:
     """The names of the judged oracles that got no verdict or failed (``passed_by_engine`` not ``True``)."""
-    return [str(j["name"]) for j in judged_list if j.get("passed_by_engine") is not True]
+    return [str(j["name"]) for j in judged_list if j.get("passed_by_engine") is not True or j.get("flagged_by_reader")]
 
 
 def last_judged(record: Any) -> list[dict[str, Any]]:
@@ -930,6 +975,23 @@ def last_judged(record: Any) -> list[dict[str, Any]]:
     return [j for j in last.get("judged") or [] if isinstance(j, dict) and j.get("name")]
 
 
+def with_reader_flags(judged_list: list[dict[str, Any]], flagged: dict[str, str]) -> list[dict[str, Any]]:
+    """``judged_list`` with each check that the second model's reading of the code flags (``flagged``:
+    :func:`core.code_review.flagged_checks`) marked ``flagged_by_reader`` (the finding's words). The marked check is not
+    counted as passed anywhere: not as independent evidence, not as a criterion met, and the writer is not told it passed.
+    The list given is not changed."""
+    if not flagged:
+        return judged_list
+    by_name = {str(k).strip().lower(): v for k, v in flagged.items()}
+    return [{**j, "flagged_by_reader": by_name[str(j.get("name")).strip().lower()]}
+            if str(j.get("name")).strip().lower() in by_name else j for j in judged_list]
+
+
+def not_shown_words(finding: str) -> str:
+    """The plain sentence for a check the code reader flags (one place, so the note, the report and the gap agree)."""
+    return f"not shown: a second model found that the code that computes this check is flagged ({finding})"
+
+
 def analysis_note(judged_list: list[dict[str, Any]]) -> str:
     """What the analysis is told about the oracles the engine judged before the main run ('' when there were none).
 
@@ -941,6 +1003,9 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
         value, expected, limit = _num(j.get("value")), _num(j.get("expected")), _num(j.get("limit"))
         verdict = {True: "passed", False: "failed"}.get(j.get("passed_by_engine"), "not judged")
         verdict += "" if j.get("measured_by") == "engine" else " (the value is the script's own)"
+        if j.get("flagged_by_reader"):
+            verdict = (not_shown_words(str(j["flagged_by_reader"])) + "; do not say this check passed or that it "
+                       "confirms the code, say that it is not shown")
         disputed = _num(j.get("disputed_expected"))
         if disputed is not None and j.get("passed_by_engine") is False:
             who = {"recompute": "FI's own recomputation of it (another model, not shown the measured value) says",
@@ -954,6 +1019,15 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
                 "but nobody has approved that change, so the check counts as failed (say so: the check failed and its "
                 "expected value is disputed)"
             )
+        mc = mc_of(j)
+        if mc:
+            from . import mc_error as _mc
+
+            how = _mc.words(mc)
+            if j.get("undecided"):
+                verdict = (f"not decided: {_mc.undecided_words(mc, limit)}; say plainly that this check could not be "
+                           "decided at its tolerance and that the result is not validated against it")
+            verdict = (f"{verdict} ({how})" if how else verdict)
         if value is None or expected is None or limit is None:
             lines.append(f"- {j['name']}: {verdict}")
         else:
@@ -999,8 +1073,12 @@ def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, ret
         elif _num(check.get("value")) is None:
             out.append(f"the oracle {name!r} reported no finite numeric `value` (it reported {check.get('value')!r}): the script measures, the engine judges")
         else:
+            from . import mc_error as _mc
+
             value = _num(check.get("value"))
-            if abs(value - expected) > limit:  # type: ignore[operator]
+            mc = mc_of(check)
+            said = (mc or {}).get("verdict")
+            if said == "undecided" or said == "fail" or abs(value - expected) > limit:  # type: ignore[operator]
                 # Who measured it (FI, by running the simulation on the check's case, or the script itself): a person
                 # told "the script measured" goes to change the script's oracle(), which FI never read.
                 by_fi = bool(reported.get("engine_measured")) and check.get("measured_by") == "engine"
@@ -1008,11 +1086,18 @@ def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, ret
                     shown, shown_expected = fmt_pair(value, expected, limit)
                 except (OverflowError, ValueError):  # showing a number must never stop the check that judges it
                     shown, shown_expected = _fmt(value), _fmt(expected)
-                out.append(
-                    f"the oracle {name!r} failed: {'FI measured' if by_fi else 'the script measured'} {shown}, the "
-                    f"protocol expects {shown_expected} within {_fmt(limit)} ({mode} tolerance "
-                    f"{_fmt(_num(oracle.get('tolerance')))})"
-                )
+                how = _mc.words(mc)
+                measured = (f"{'FI measured' if by_fi else 'the script measured'} {shown}" + (f" ({how})" if how else "")
+                            + f", the protocol expects {shown_expected} within {_fmt(limit)} "
+                              f"({mode} tolerance {_fmt(_num(oracle.get('tolerance')))})")
+                if said == "undecided":
+                    out.append(f"the oracle {name!r} was not decided: {measured}; {_mc.undecided_words(mc, limit)}, so "
+                               "the result is not validated against it")
+                elif (mc or {}).get("why") == "failed_trials":
+                    out.append(f"the oracle {name!r} failed: {mc.get('failed_trials')} of {mc.get('started')} trials "  # type: ignore[union-attr]
+                               f"on its case failed; {measured}")
+                else:
+                    out.append(f"the oracle {name!r} failed: {measured}")
             elif check.get("passed") is False:
                 out.append(f"the oracle {name!r} is within its tolerance, but the script reports the check as failed itself: find out why")
     if not out and returncode != 0:
@@ -1039,11 +1124,12 @@ def with_run_problems(run_problems: list[str], found: list[str], oracles: list[d
 
 
 def undisputed(found: list[str], disputed: Any) -> list[str]:
-    """The problems in ``found`` that a repair may still fix: all but a disputed check's value judged outside its
-    tolerance (named in ``disputed``, a check a repair has called wrong). A dispute is about the expected value, so any
-    other problem with a disputed check (not measured, not a number, the simulation failing on its case) and a problem
-    that names no oracle (a crash, no ORACLE_JSON line) is the script's to fix."""
-    heads = tuple(f"the oracle {str(n).strip()!r} failed:" for n in disputed or [])
+    """The problems in ``found`` that a repair may still fix: all but a disputed or set-aside check's value judged
+    outside its tolerance or not decided by its trials (named in ``disputed``: a check a repair has called wrong, or one
+    FI set aside). A dispute is about the expected value, so any other problem with such a check (not measured, not a
+    number, the simulation failing on its case) and a problem that names no oracle (a crash, no ORACLE_JSON line) is
+    the script's to fix."""
+    heads = tuple(f"the oracle {str(n).strip()!r} {how}:" for n in disputed or [] for how in ("failed", "was not decided"))
     return [f for f in found if not (heads and f.startswith(heads))]
 
 
@@ -1068,7 +1154,10 @@ _TRIAL_CONTRACT = (
     "The contract: FI checks the simulation itself. For an oracle that names a `case` and a `measure`, FI calls the "
     "simulation function (run_trial or run_cell in simulate.py) on that case and computes the `measure` (one returned "
     "name, or a formula of them) from the dict it returns, so that function must return every name the measure uses, "
-    "computed by the real simulation. An oracle without a `case` is read from `def oracle() -> dict` in simulate.py, "
+    "computed by the real simulation. If simulate.py defines both, FI calls run_trial (ONE trial) for a check of kind "
+    "invariant and for every other check too, unless run_cell is built from calls to run_trial (a mean or rate over the study's "
+    "own trials), when it calls run_cell; run_trial must "
+    "stay ONE trial and never return or call run_cell. An oracle without a `case` is read from `def oracle() -> dict` in simulate.py, "
     "which computes each such check with the same simulation code and returns its value keyed by the check's name. "
     "There is no FI_ORACLE variable and no ORACLE_JSON line. Nothing the script writes decides pass or fail: the "
     "engine judges each value against the `expected` and `tolerance` the protocol fixes above (for an invariant the "

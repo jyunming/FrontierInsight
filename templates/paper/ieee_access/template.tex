@@ -18,8 +18,16 @@ $endif$
 \else
   \usepackage[utf8]{inputenc}
 \fi
+% Glyphs (generation/paper.py, _prepare_unicode): under XeLaTeX the fallback fonts that set
+% what the text font lacks and the code font; under pdflatex the code's glyphs.
+$if(fi-unicode)$
+\input{fi_unicode.tex}
+$endif$
 \usepackage[margin=0.75in,columnsep=0.25in]{geometry}
 \usepackage{graphicx}
+% A figure given both a width and a height (``{width=80% height=33%}``) keeps its
+% shape and fits inside both, so a tall figure is capped at the height.
+\setkeys{Gin}{keepaspectratio}
 % Required for pandoc-rendered markdown tables (pandoc emits \begin{longtable}).
 \usepackage{longtable}
 % Required for pandoc-rendered table column widths. Pandoc emits column

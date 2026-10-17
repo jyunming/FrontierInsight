@@ -47,6 +47,7 @@ import shutil
 import string
 from pathlib import Path
 
+from core import paper_facts as _paper_facts
 from core.config import Config
 from core.proc_tree import AsyncProcessTree
 from core.engine import (
@@ -262,6 +263,7 @@ class SlideGenerator:
         feedback: str = "",
     ) -> Path:
         paper_md = art.paper_md.read_text(encoding="utf-8") if art.paper_md else ""
+        paper_md = _paper_facts.without_marks(paper_md)  # FI's values stay, its markers go
         figures = []
         if art.figures_dir and art.figures_dir.is_dir():
             figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())

@@ -277,3 +277,63 @@ def test_one_engine_measured_pass_among_several_oracles_is_still_needed_and_enou
     got = evidence.assess(_root(tmp_path / "b", mixed), _state(), settings=ON)
     assert got["levels"]["independently_validated"] is False
     assert any("limit" in g for g in got["all_gaps"]["independently_validated"])
+
+
+# A random study whose simulation defines both functions. The study runs ONLY run_trial, so a check must test that code:
+# a check on a mean is read from run_cell only when run_cell is built from calls to run_trial.
+BUILT_FROM_TRIALS = '''
+def run_trial(cell, trial_id, seed):
+    return {"rate": 0.0 if seed % 2 == 0 else 0.1}
+
+def run_cell(cell):
+    return {"rate": sum(run_trial(cell, i, i)["rate"] for i in range(10)) / 10}
+'''
+# run_cell has a formula of its own: a bug in run_trial (0.9) must not hide behind it.
+OWN_FORMULA = '''
+def run_trial(cell, trial_id, seed):
+    return {"rate": 0.9}
+
+def run_cell(cell):
+    return {"rate": 0.05}
+'''
+MEAN_CHECK = {"name": "global null rate", "kind": "special_case", "check": "rate under the global null", "expected": 0.05,
+              "tolerance": 0.01, "case": {"m": 20}, "measure": "rate"}
+
+
+def test_a_check_on_a_mean_is_measured_on_the_trials_of_run_trial_the_study_runs(tmp_path: Path) -> None:
+    """A check on a mean is measured on as many trials of run_trial as its tolerance needs (core/mc_error.py), not on
+    run_cell's own handful of trials."""
+    checks, problems, found = _measure(tmp_path, BUILT_FROM_TRIALS, [MEAN_CHECK])
+    assert not problems and found == [] and abs(checks[0]["value"] - 0.05) <= 0.01, (checks, problems)
+    assert checks[0]["mc"]["trials"] > 10 and checks[0]["mc"]["verdict"] == "pass"
+
+
+def test_a_run_cell_with_a_formula_of_its_own_does_not_hide_a_bug_in_run_trial(tmp_path: Path) -> None:
+    checks, problems, found = _measure(tmp_path, OWN_FORMULA, [MEAN_CHECK])
+    assert checks[0]["value"] == 0.9 and found, "the check reads the code the study runs, and fails on it"
+
+
+def test_an_explicit_per_trial_check_is_measured_on_one_trial(tmp_path: Path) -> None:
+    checks, problems, _ = _measure(tmp_path, BUILT_FROM_TRIALS, [{**MEAN_CHECK, "per_trial": True}])
+    assert not problems and checks[0]["value"] in (0.0, 0.1), (checks, problems)
+
+
+def test_an_invariant_that_says_nothing_of_per_trial_is_about_the_mean(tmp_path: Path) -> None:
+    """The default reading does not depend on the kind: an unset ``per_trial`` is the mean over trials."""
+    checks, problems, _ = _measure(tmp_path, BUILT_FROM_TRIALS, [{**MEAN_CHECK, "kind": "invariant"}])
+    assert not problems and abs(checks[0]["value"] - 0.05) <= 0.01 and checks[0]["mc"]["read_as"] == "mean", checks
+
+
+_BUGGY_TRIAL = "def run_trial(cell, trial_id, seed):\n    return {'rate': 0.9}\n\n"
+
+
+@pytest.mark.parametrize("body", [
+    "    run_trial(cell, 0, 0)\n    return {'rate': 0.05}\n",                      # a call whose result is dropped
+    "    if False:\n        run_trial(cell, 0, 0)\n    return {'rate': 0.05}\n",   # a call never reached
+    "    print(run_trial)\n    return {'rate': 0.05}\n",                           # a mention, no call
+], ids=["result_dropped", "never_reached", "mention_only"])
+def test_a_run_cell_that_only_mentions_run_trial_does_not_hide_a_bug_in_it(tmp_path: Path, body: str) -> None:
+    checks, problems, found = _measure(tmp_path, _BUGGY_TRIAL + "def run_cell(cell):\n" + body, [MEAN_CHECK])
+    assert checks[0]["value"] == 0.9 and found, "measured on run_trial, the code the study runs, and fails on it"
+
+

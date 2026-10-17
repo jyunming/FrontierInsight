@@ -2,6 +2,8 @@
 
 A research quest has written its plan. Before anything runs, the plan's **checks against known answers** (oracles) are the only thing that can show its simulation is right: FI runs the simulation on each check's small case, computes the check's number from what the simulation returns (`measure`, a returned name or a formula of them), and compares it with the value the plan expects. You did not write this plan. Read it as a referee would, and say whether these checks would catch a wrong simulation.
 
+Your job is to FIND PROBLEMS, not to agree or disagree. Every problem you find goes under `findings`, with where it is, what is wrong, why it is wrong and how to fix it. Everything you checked and found no problem with goes under `checked`, one line each saying what you looked at, so that a reply with no problem is never taken for one that did not look.
+
 # Topic
 
 $topic
@@ -30,6 +32,8 @@ Each kind has one numeric form: an `invariant`, a `symmetry` or a `second_implem
 
 Then say which equations of the model (their ids) the checks together test, and which none of them tests.
 
+Also say, in `findings`, whether anything the topic names is approximated in this model without the plan saying so (an entry in its `simplifications`), and whether each metric's definition matches the source it quotes.
+
 # What to judge, for each equation of the model
 
 The plan's own model lists equations (`equations` above). The code will implement them exactly as written, and the checks' expected values are worked out from them, so an equation that is wrong in the plan makes everything after it wrong while every check still agrees. For each equation, say whether it is the **standard definition** of the quantity it names (including its normalisation: which length, area, time or amount it is divided or multiplied by, and which sign and units), or a correct derivation from the source it cites. If it is not, write the correct equation and give one line saying why. Say "no" only when you can state the correct equation. Say "yes" only when you checked it against the standard definition (or the derivation). If you cannot tell, leave `standard` empty: FI then records that nobody has verified this equation, which is better than a "yes" that was not checked.
@@ -42,11 +46,15 @@ Return ONE JSON object and nothing else:
  "equations_tested": ["<ids>"], "equations_not_tested": ["<ids of equations no check tests>"],
  "equations": [{"id": "<the equation's id, exactly as the plan writes it>", "standard": "<yes | no | empty when you cannot tell>", "correct": "<the correct equation, when standard is no; else empty>", "why": "<one line: what is different, or empty>"}],
  "add": [<zero to two new checks written exactly as the plan writes one: {"name", "kind", "check", "expected", "expected_formula", "tolerance", "tolerance_mode", "reference", "case", "measure"}>],
+ "findings": [{"where": "<the check's name or the equation's id>", "what": "<what is wrong, one sentence>", "why": "<why it is wrong, one sentence>", "fix": "<how to fix it, one sentence>", "severity": "<high | medium | low>"}],
+ "checked": ["<a check or an equation you checked and found no problem with, and what you looked at, one line>"],
  "summary": "<one or two plain sentences for the person who will read the plan>"}
 
 Rules:
 
 - Judge only the checks and the equations: not the hypothesis, the grid or the statistics.
+- Do not answer "looks fine". A reply with no entry in `findings` and none in `checked` is no review and is asked again.
+- Write a number only when it is part of a check you propose; a finding names the term, the factor or the step that is wrong, not the value it should have.
 - Do not judge whether a check's `reference` names a source: FI checks that separately. Judge whether the expected value it gives is the right number for this check.
 - Say "no" only for a reason you can state in the sentence beside it; a check that is fine gets "yes" and an empty note.
 - A check you propose must be one FI can run: a small, fast `case` of the simulation, a `measure` computed from what it returns, a numeric `expected` worked out (and its `reference` saying how, as `derivation: <the steps>`), and a tolerance the method can reach at that case.

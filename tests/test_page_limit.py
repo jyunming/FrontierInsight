@@ -39,11 +39,12 @@ from core.engine import (
 )
 from generation import paper as paper_mod
 from generation.paper import PaperGenerator, small_source_lists
+from tests.paper_fakes import fake_pandoc
 
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "templates" / "paper"
 FORMATS = sorted(p.parent.name for p in TEMPLATES.glob("*/template.tex"))
-ONE_INCH_MARGIN = {"generic", "iclr", "neurips", "report", "whitepaper"}
+ONE_INCH_MARGIN = {"generic", "article", "iclr", "neurips", "report", "whitepaper"}
 
 # The topic of the graded SIR trend runs, word for word.
 SIR_TOPIC = """TOPIC: Compare a deterministic SIR epidemic model (ODE) with its stochastic
@@ -210,6 +211,49 @@ def test_every_template_caps_its_figure_height_unconditionally(fmt: str) -> None
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
+def test_every_template_keeps_a_figures_shape_when_given_a_width_and_a_height(fmt: str) -> None:
+    """pandoc writes ``{width=80%}`` as ``width=0.8\\linewidth,height=\\textheight,keepaspectratio``,
+    with no ``\\pandocbounded`` cap, so a tall figure printed 72% of the text height. Given
+    ``{width=80% height=33%}`` pandoc drops keepaspectratio; the template's Gin default keeps it,
+    so the figure fits inside both."""
+    lines = _code_lines(fmt)
+    if fmt == "article":
+        sty = (TEMPLATES / fmt / "fi_paper.sty").read_text(encoding="utf-8")
+        lines = [line for line in sty.splitlines() if not line.lstrip().startswith("%")]
+    gin = [line for line in lines if line.strip().startswith("\\setkeys{Gin}")]
+    assert gin and "keepaspectratio" in gin[-1], fmt
+
+
+def test_a_tall_figure_given_a_width_and_a_height_is_capped_at_the_height(tmp_path: Path) -> None:
+    from generation._pandoc import find_pandoc
+    from generation._pdf_engine import find_pdf_engine
+    from generation._pdf_measure import measure_pdf
+
+    if find_pandoc(REPO) is None or find_pdf_engine(REPO) is None:
+        pytest.skip("needs pandoc and a LaTeX engine")
+    from PIL import Image
+
+    (tmp_path / "figures").mkdir()
+    Image.new("RGB", (630, 900), "white").save(tmp_path / "figures" / "tall.png")
+    md = tmp_path / "paper.md"
+    md.write_text(
+        "# A Paper\n\n## Abstract\n\nShort.\n\n## Results\n\nText.\n\n"
+        "![A tall figure.](figures/tall.png){width=80% height=33%}\n\nMore text.\n", encoding="utf-8",
+    )
+    pdf, skip = PaperGenerator(_config(tmp_path))._compile_pdf(md, tmp_path)
+    assert skip is None and pdf is not None
+    doc = measure_pdf(pdf)
+    boxes = [box for page in doc.pages for box in page.images if (box[3] - box[1]) > 50]
+    assert boxes, "the figure is not on the page"
+    box = boxes[0]
+    width, height = box[2] - box[0], box[3] - box[1]
+    page = doc.pages[0]
+    # 33% of the text height is under 33% of the page height; uncapped it was over 60%.
+    assert height < 0.33 * page.height, (height, page.height)
+    assert abs(width / height - 630 / 900) < 0.02, (width, height)
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
 def test_templates_with_one_inch_margins_switch_to_two_centimetres(fmt: str) -> None:
     lines = _code_lines(fmt)
     switched = _contains_run(
@@ -273,6 +317,8 @@ def _config(tmp_path: Path, topic: str = "t", **output: Any) -> Config:
 def _fake_toolchain(monkeypatch) -> list[list[str]]:  # noqa: ANN001
     monkeypatch.setattr(paper_mod, "find_pandoc", lambda _root: "/fake/pandoc")
     monkeypatch.setattr(PaperGenerator, "_find_pdf_engine", lambda self: ("pdflatex", "/fake/pdflatex"))
+    # The host's own XeLaTeX would otherwise be used (and its fonts looked up).
+    monkeypatch.setattr(PaperGenerator, "_find_unicode_engine", lambda self, engine: None)
     commands: list[list[str]] = []
 
     def fake_run(cmd, **_kw):  # noqa: ANN001
@@ -280,7 +326,7 @@ def _fake_toolchain(monkeypatch) -> list[list[str]]:  # noqa: ANN001
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
     return commands
 
 
@@ -632,9 +678,11 @@ def test_a_draft_is_measured_from_a_render_in_the_quest_fi_folder(tmp_path: Path
     assert seen["out_dir"] == tmp_path / ".fi" / "page_check"
     assert seen["paper_md"] == tmp_path / "paper" / "paper.md"
     assert seen["figures"] == ["a.png"]
-    # The draft is rendered as paper.pdf will be: LaTeX only, in the venue the
-    # final render uses, and with the same page limit.
-    assert seen["config"].output.html_pdf_fallback is False
+    # The draft is rendered as paper.pdf will be: LaTeX, in the venue the final
+    # render uses, and with the same page limit; when LaTeX fails, the browser
+    # render still gives a page count, so the limit is never left unchecked.
+    assert seen["config"].output.paper_style == "latex"
+    assert seen["config"].output.html_pdf_fallback is True
     assert seen["config"].output.paper_format == "ieee_access"
     assert resolve_page_limit(seen["config"]) == 4
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted({*before, ".fi"})
@@ -665,6 +713,24 @@ def test_a_draft_that_does_not_render_is_skipped_with_one_warning(tmp_path: Path
     for _ in range(2):
         assert asyncio.run(eng._measure_draft_pages(tmp_path / "paper" / "paper.md", {})) is None
     assert len(warnings) == 1 and "no LaTeX engine found" in warnings[0]
+
+
+def test_a_draft_latex_cannot_typeset_is_counted_on_the_browser_render_and_says_so(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    eng = _engine(tmp_path)
+
+    def browser_only(self, paper_md, out_dir, *, extra_lines=0):  # noqa: ANN001, ARG001
+        self.last_render = {"engine": "edge", "typeset": False, "rc": 0,
+                            "reason": "xelatex stopped: Missing character U+2C6F"}
+        return _blank_pdf(Path(out_dir) / "paper.pdf", 5), None
+
+    monkeypatch.setattr(PaperGenerator, "_compile_pdf", browser_only)
+    warnings = _quiet_log(eng)
+    result = asyncio.run(eng._measure_draft_pages(tmp_path / "paper" / "paper.md", {}))
+    assert result is not None and result["pages"] == 5
+    assert len(warnings) == 1
+    assert "could not typeset" in warnings[0] and "U+2C6F" in warnings[0] and "browser render" in warnings[0]
 
 
 @pytest.mark.slow

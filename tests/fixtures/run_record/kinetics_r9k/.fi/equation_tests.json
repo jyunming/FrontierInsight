@@ -1,0 +1,36 @@
+{
+ "equations": {
+  "E1": {
+   "state": "ok",
+   "why": ""
+  },
+  "E2": {
+   "state": "unusable",
+   "why": "its `expected_formula` cannot be computed (it is not a formula ('(' was never closed))"
+  },
+  "E3": {
+   "state": "ok",
+   "why": ""
+  },
+  "E4": {
+   "state": "ok",
+   "why": ""
+  },
+  "E5": {
+   "state": "ok",
+   "why": ""
+  }
+ },
+ "untested_core": [],
+ "not_tested": [
+  "equation E2 is not tested before the run: its worked example cannot be used (its `expected_formula` cannot be computed (it is not a formula ('(' was never closed)))"
+ ],
+ "tested": [
+  "E1",
+  "E3",
+  "E4",
+  "E5"
+ ],
+ "failed": [],
+ "repairs": {}
+}

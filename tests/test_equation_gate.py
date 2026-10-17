@@ -219,19 +219,104 @@ def test_the_code_layout_writes_the_equation_tests_with_the_other_files(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_the_checks_run_from_the_quest_folder_with_paths_relative_to_it_so_a_container_can_run_them(tmp_path: Path) -> None:
+async def test_the_checks_run_from_a_copy_outside_the_quest_with_paths_relative_to_it(tmp_path: Path) -> None:
+    """The functions are measured from a copy of code/ outside the quest folder (core/outside_run.py), named by a random
+    id, with no path into the quest on the command line, and judged in FI's process (core/equation_measure.py)."""
     engine = _engine(tmp_path)
     seen: list[dict[str, Any]] = []
     real = engine.executor.execute
 
     async def spy(cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001
-        seen.append({"cmd": [str(c) for c in cmd], "cwd": cwd})
+        seen.append({"cmd": [str(c) for c in cmd], "cwd": Path(cwd),
+                     "listing": {p.relative_to(cwd).as_posix().split("/")[0] for p in Path(cwd).rglob("*")}})
         return await real(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
 
     engine.executor.execute = spy  # type: ignore[method-assign]
     _plan_md(engine)
     _write_code(engine, GOOD["quality"])
     assert await engine._equation_gate(STATE, None, None) is None
-    assert seen and all(c["cwd"] == engine.quest_root for c in seen)
+    root = engine.quest_root.resolve()
+    assert seen and all(not c["cwd"].is_relative_to(root) and root.name not in str(c["cwd"]) for c in seen)
+    assert all(not ({".fi", "needs"} & c["listing"]) and "code" in c["listing"] for c in seen)
     assert all(str(engine.quest_root) not in " ".join(c["cmd"][1:]) for c in seen), "no host path for a container to miss"
-    assert "code/tests/test_equations.py" in seen[-1]["cmd"]
+    assert seen[-1]["cmd"][2] == "-c" and eqt.TEST_PATH not in " ".join(seen[-1]["cmd"])
+
+
+# --- an equation the plan calls untestable needs another check, asked once and recorded plainly -------------------------------
+
+
+def _untestable_protocol() -> dict[str, Any]:
+    eqs = [SPRING["equations"][0],
+           {**SPRING["equations"][1], "example": {"untestable": "the quality factor is read from a simulated trace"}}]
+    return {**PROTOCOL, "model": {**SPRING, "equations": eqs},
+            "oracles": [{"name": "w_check", "kind": "special_case", "check": "E1 at k=8, m=2", "expected": 2.0,
+                         "expected_formula": "sqrt(8 / 2)", "tolerance": 1e-9, "case": {"c": 0.5}, "measure": "w",
+                         "reference": "derivation: sqrt(4) = 2"}]}
+
+
+def _add_limit_check(block: dict[str, Any]) -> dict[str, Any]:
+    oracles = [*block["protocol"]["oracles"],
+               {"name": "q_limit", "kind": "special_case", "check": "E2 as c grows without bound", "expected": 0.0,
+                "expected_formula": "0", "tolerance": 1e-9, "case": {"c": 1000.0}, "measure": "q",
+                "reference": "derivation: Q = m * w / c goes to 0 as c grows"}]
+    return {**block, "protocol": {**block["protocol"], "oracles": oracles}}
+
+
+@pytest.mark.asyncio
+async def test_an_untestable_core_equation_is_asked_for_another_check_once_and_one_that_comes_is_kept(tmp_path: Path) -> None:
+    protocol = _untestable_protocol()
+    engine = Engine(_config(tmp_path))
+    review = {"checks": [{"name": "w_check", "appropriate": "yes", "discriminating": "yes", "well_defined": "yes"}],
+              "equations_tested": ["E1"], "equations_not_tested": [], "add": [], "summary": "fine"}
+    model = _PlanModel(protocol, review, revise=_add_limit_check)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    asked = [r for r in model.revisions if "nothing else checks it" in r]
+    assert len(asked) == 1, "one request, however many things it asks"
+    assert "E2 (`Q = m * w / c`)" in asked[0] and "`second_implementation`" in asked[0]
+    design = plan.load_design(engine.quest_root)[0]
+    names = [o["name"] for o in design["protocol"]["oracles"]]
+    assert names == ["w_check", "q_limit"]
+    assert eqt.untested_core(design["protocol"]) == [] and eqt.write_note(design["protocol"]) == ""
+    n = len(model.revisions)
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.revisions) == n, "asked once per quest"
+
+
+@pytest.mark.asyncio
+async def test_an_untestable_core_equation_nothing_checks_is_recorded_and_said_in_the_paper_note(tmp_path: Path) -> None:
+    protocol = _untestable_protocol()
+    engine = Engine(_config(tmp_path))
+    review = {"checks": [{"name": "w_check", "appropriate": "yes", "discriminating": "yes", "well_defined": "yes"}],
+              "equations_tested": ["E1"], "equations_not_tested": [], "add": [], "summary": "fine"}
+    model = _PlanModel(protocol, review)  # the plan changes nothing
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len([r for r in model.revisions if "nothing else checks it" in r]) == 1
+    section = _section(engine)
+    assert "equation E2 is not tested at all" in section
+    design = plan.load_design(engine.quest_root)[0]
+    assert eqt.untested_core(design["protocol"]) == ["E2"]
+    assert "E2 that generates the study's data is not tested at all" in eqt.write_note(design["protocol"])
+    # The gate's own record says it too.
+    _write_code(engine, GOOD["quality"])
+    engine._client = _Writer({})
+    assert await engine._equation_gate({"design": {"protocol": design["protocol"]}}, None, None) is None
+    record = json.loads((engine.fi_dir / "equation_tests.json").read_text(encoding="utf-8"))
+    assert record["untested_core"] == ["E2"]
+
+
+@pytest.mark.asyncio
+async def test_an_unprotected_core_equation_and_a_check_without_a_formula_are_asked_in_the_one_request(tmp_path: Path) -> None:
+    protocol = _untestable_protocol()
+    # The check names no formula for its expected value (FI computes it from one): that is asked in the same request.
+    protocol["oracles"] = [{k: v for k, v in o.items() if k != "expected_formula"} for o in protocol["oracles"]]
+    engine = Engine(_config(tmp_path))
+    review = {"checks": [{"name": "w_check", "appropriate": "yes", "discriminating": "yes", "well_defined": "yes"}],
+              "equations_tested": ["E1"], "equations_not_tested": [], "add": [], "summary": "fine"}
+    model = _PlanModel(protocol, review)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    both = [r for r in model.revisions if "nothing else checks it" in r and "expected_formula" in r]
+    assert len(both) == 1 and len(model.revisions) == 1, "one request carries both asks"
+    assert "w_check" in both[0] and "E2" in both[0]

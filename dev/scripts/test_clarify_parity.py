@@ -9,8 +9,8 @@ the returned ``clarify_answers`` satisfies the documented contract:
   ``study_depth``, ``paper_venue``.
 * ``simulatability.default`` (or the bare-string form in auto-mode
   reduction) MUST be one of ``yes`` / ``no`` / ``uncertain``.
-* ``paper_venue`` MUST be one of the nine declared values
-  (generic / neurips / iclr / ieee_access / nature_mi / essay /
+* ``paper_venue`` MUST be one of the ten declared values
+  (generic / article / neurips / iclr / ieee_access / nature_mi / essay /
   report / policy_brief / whitepaper).
 
 Out of scope: ``copilot_cli`` (agentic, broken as a chat backend) and
@@ -60,7 +60,7 @@ REQUIRED_SLOTS = {
 }
 SIMULATABILITY_VALUES = {"yes", "no", "uncertain"}
 PAPER_VENUE_VALUES = {
-    "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+    "generic", "article", "neurips", "iclr", "ieee_access", "nature_mi",
     "essay", "report", "policy_brief", "whitepaper",
 }
 STUDY_DEPTH_VALUES = {"brief preprint", "journal-length", "comprehensive review"}

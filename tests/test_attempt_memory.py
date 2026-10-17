@@ -399,7 +399,9 @@ async def test_a_script_that_fails_the_same_way_twice_is_a_block_at_the_third_ru
 
 
 #: The only fields two runs of the same quest may differ in: when something was recorded and how long it took.
-_TIMING = ("recorded_at", "duration_s", "at")
+# The paper's run record states the measured run time, so the hash of the paper an automatic accept covers differs
+# with it between two runs.
+_TIMING = ("recorded_at", "duration_s", "at", "paper_sha256")
 
 
 def _without_timing(value):

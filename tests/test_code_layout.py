@@ -75,6 +75,7 @@ def _write_tool(code: Path, *, model_py: str = MODEL_PY, simulate: str = SIM_PKG
     for name, text in cl.project_files(code, PROTOCOL, PKG).items():
         (code / name).parent.mkdir(parents=True, exist_ok=True)
         (code / name).write_text(text, encoding="utf-8")
+    cl.write_check_values(code, PROTOCOL)
 
 
 # --- the estimate and the cap ----------------------------------------------------------------------------------------
@@ -262,14 +263,18 @@ def test_a_missing_part_is_a_warning_and_a_stop_only_under_research(tmp_path: Pa
     assert problems and stops == []
     assert "package code/engine_callable/ is missing" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     monkeypatch.setattr(engine.config, "rigor_profile", "research")
-    engine._check_code_layout({"design": {"protocol": PROTOCOL}})
-    assert len(stops) == 1 and stops[0]["kind"] == "code_layout" and stops[0]["payload"]["contract_stage"]
-    assert any("execution.code_package: false" in s for s in stops[0]["steps"])
-    from core import todo
-    assert "package of their own" in todo.advice("code_layout")[0], "the to-do card speaks of this stop"
-    # The person adds the missing parts and resumes: the folder is read again and nothing stops.
+    # Under research the missing parts go to the repair as a failed run, naming them; nobody is asked to edit code.
+    patch = engine._code_problems_stop({"design": {"protocol": PROTOCOL}, "exec_reflect_iter": 0})
+    assert patch is not None and "package code/engine_callable/ is missing" in patch["exec_result"]["stderr_tail"]
+    assert "cannot_repair" not in patch["exec_result"] and stops == []
+    # With the repairs used up the quest ends in the honest stop.
+    last = engine._code_problems_stop({"design": {"protocol": PROTOCOL},
+                                       "exec_reflect_iter": engine.config.engine.exec_reflect_max_iterations})
+    assert last is not None and last["exec_result"]["cannot_repair"] and stops == []
+    # Once the repair has added the missing parts the folder is read again and nothing is sent back.
     _write_tool(code)
-    assert engine._check_code_layout({"design": {"protocol": PROTOCOL}}) == [] and len(stops) == 1
+    assert engine._check_code_layout({"design": {"protocol": PROTOCOL}}) == []
+    assert engine._code_problems_stop({"design": {"protocol": PROTOCOL}, "exec_reflect_iter": 0}) is None
 
 
 def _cfg(tmp_path: Path, **execution: Any) -> Config:
@@ -791,7 +796,76 @@ def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> 
     code = quest / "code"
     _write_tool(code)
     record = {name: hashlib.sha256((code / name).read_bytes()).hexdigest() for name in (cl.METHODS_NAME, cl.TEST_PATH)}
-    (quest / ".fi").mkdir(parents=True)
+    (quest / ".fi").mkdir(parents=True, exist_ok=True)  # FI's check values are already there
     (quest / ".fi" / "code_project.json").write_text(json.dumps(record), encoding="utf-8")
     hashes = attempt_records.script_hashes(quest)
     assert cl.METHODS_NAME not in hashes and cl.TEST_PATH not in hashes and f"{PKG}/model.py" in hashes
+
+
+@pytest.mark.asyncio
+async def test_an_oracle_repair_that_makes_run_trial_return_run_cell_is_not_used(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    engine._trial_mode = True
+    before = (code / "simulate.py").read_text(encoding="utf-8")
+    bad = ("def run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
+           "def run_cell(cell):\n    return {'error': 0.0}\n")
+
+    async def aggregate(prompt, **kw):  # noqa: ANN001
+        return json.dumps({"code": bad, "patch_summary": "the check reads a mean"})
+
+    monkeypatch.setattr(engine, "_chat", aggregate)
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert new is None and not failed and outcome == "not_usable"
+    assert (code / "simulate.py").read_text(encoding="utf-8") == before
+
+
+def test_the_generated_tests_call_run_cell_for_a_mean_and_run_trial_for_an_invariant() -> None:
+    text = cl.oracle_tests({**PROTOCOL, "oracles": [ORACLE, {**ORACLE, "name": "inv", "kind": "invariant"},
+                                                    {**ORACLE, "name": "flag", "per_trial": True}]})
+    import ast
+
+    checks = json.loads(ast.literal_eval(re.search(r"CHECKS = json\.loads\((.+)\)\n", text).group(1)))
+    assert [c["per_trial"] for c in checks] == [False, True, True]
+    assert "calls[0]" in text, "run_cell counts only if it really called run_trial (counted at run time)"
+    compile(text, "test_oracles.py", "exec")
+
+
+@pytest.mark.asyncio
+async def test_a_repair_is_not_used_when_the_new_code_has_the_aggregate_even_if_the_old_had_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    engine._trial_mode = True
+    bad = ("def run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
+           "def run_cell(cell):\n    return {'error': 0.0}\n")
+    (code / "simulate.py").write_text(bad, encoding="utf-8")
+
+    async def aggregate(prompt, **kw):  # noqa: ANN001
+        return json.dumps({"code": bad + "# touched\n", "patch_summary": "something else"})
+
+    monkeypatch.setattr(engine, "_chat", aggregate)
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert new is None and outcome == "not_usable"
+
+
+def test_the_generated_tests_hold_a_run_cell_that_only_mentions_run_trial_to_run_trial(tmp_path: Path) -> None:
+    check = {"name": "rate", "kind": "special_case", "check": "rate", "expected": 0.05, "tolerance": 0.01,
+             "case": {"m": 20}, "measure": "rate"}
+
+    def run(sim: str) -> int:
+        root = tmp_path / str(abs(hash(sim)))
+        (root / "tests").mkdir(parents=True)
+        (root / "simulate.py").write_text(sim, encoding="utf-8")
+        (root / "tests" / "test_oracles.py").write_text(cl.oracle_tests({"oracles": [check]}), encoding="utf-8")
+        cl.write_check_values(root, {"oracles": [check]})
+        return subprocess.run([sys.executable, "tests/test_oracles.py"], cwd=root, capture_output=True).returncode
+
+    builds = ("def run_trial(c, t, s):\n    return {'rate': 0.05}\n\n"
+              "def run_cell(c):\n    return {'rate': run_trial(c, 0, 0)['rate']}\n")
+    mentions = ("def run_trial(c, t, s):\n    return {'rate': 0.9}\n\n"
+                "def run_cell(c):\n    run_trial(c, 0, 0)\n    return {'rate': 0.05}\n")
+    never = ("def run_trial(c, t, s):\n    return {'rate': 0.9}\n\n"
+             "def run_cell(c):\n    if False:\n        run_trial(c, 0, 0)\n    return {'rate': 0.05}\n")
+    assert run(builds) == 0
+    assert run(mentions) == 1, "run_trial was called but its result is dropped for a formula of run_cell's own"
+    assert run(never) == 1

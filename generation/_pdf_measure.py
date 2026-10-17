@@ -87,6 +87,8 @@ class Page:
 @dataclass
 class Document:
     pages: list[Page]
+    # The PDF's Producer field (``MiKTeX pdfTeX-1.40.29``, ``Skia/PDF m155``), or None.
+    producer: str | None = None
 
 
 def available() -> bool:
@@ -119,11 +121,20 @@ def measure_pdf(path: Path | str, *, max_pages: int | None = None) -> Document |
                 pages.append(_measure_page(page, index + 1, raw))
             finally:
                 page.close()
-        return Document(pages)
+        return Document(pages, producer=_producer(pdf))
     except Exception:
         return None
     finally:
         pdf.close()
+
+
+def _producer(pdf) -> str | None:
+    """The PDF's Producer field, or None."""
+    try:
+        value = pdf.get_metadata_dict().get("Producer")
+    except Exception:  # noqa: BLE001 — a PDF without metadata is just not matched
+        return None
+    return str(value).strip() or None if value else None
 
 
 def render_pages(
@@ -451,11 +462,22 @@ _RAW_MATH_RE = re.compile(
 )
 
 
-def _raw_math_findings(page: Page, *, region: str = "page") -> list[dict]:
+# In a paper, a $...$ span counts only when it holds math markup (a command, a script, a
+# brace or an equals sign): a code listing's ``$HOME/$USER`` or R's ``df$a + df$b`` is
+# not math left as text.
+_RAW_MATH_PAPER_RE = re.compile(
+    r"(?<!\\)\$(?=\S)[^$]*?[\\^_{=][^$]*?[^\s\\]\$(?!\d)"
+    r"|" + _RAW_MATH_RE.pattern.split("|", 1)[1]
+)
+
+
+def _raw_math_findings(page: Page, *, region: str = "page", paper: bool = False) -> list[dict]:
     """One finding per page whose text layer shows LaTeX math as text. The
     pptx printed every `$h = 0.5$` of the validation deck, and only the
-    model's look at the screenshots noticed."""
-    shown = [line for line in page.lines if line.visible and _RAW_MATH_RE.search(line.text)]
+    model's look at the screenshots noticed. ``paper`` reads a dollar span as math
+    only when it holds math markup."""
+    pattern = _RAW_MATH_PAPER_RE if paper else _RAW_MATH_RE
+    shown = [line for line in page.lines if line.visible and pattern.search(line.text)]
     if not shown:
         return []
     count = f"{len(shown)} lines show" if len(shown) > 1 else "A line shows"
@@ -1062,10 +1084,292 @@ def _column_gap_findings(page: Page, *, region: str = "page") -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Paper: checks that read the page, not a model's account of it
+
+
+# A producer that is a browser's print path, not a typesetting engine.
+_BROWSER_PRODUCERS = re.compile(r"skia|chrom|headless|edge|webkit|wkhtml|weasy|prince|qt ", re.IGNORECASE)
+# "1 1. Introduction", "3.3 3.3 Coverage": the writer's own number printed after the
+# template's, then a word ("4 4 × 4 grids" is a heading about 4 × 4 grids, not a doubled number).
+_DOUBLED_NUMBER_RE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\1[.):]?\s+[^\W\d_]")
+_LINE_NUMBER_RE = re.compile(r"^\d{1,4}$")
+
+
+def _line_number_ids(page: Page) -> set[int]:
+    """The ``id`` of every line that is a line number in the margin (a review-mode
+    style numbers each line): digits only, at least six of them down one edge, outside
+    the text block. They are not text that ran into the margin. A column of whole
+    numbers inside the text block is a table's column and stays text."""
+    numbers = [line for line in page.lines if line.visible and _LINE_NUMBER_RE.match(line.text)]
+    columns: dict[int, list[Line]] = {}
+    for line in numbers:
+        columns.setdefault(round(line.box[0] / 4), []).append(line)
+    text = [line for line in page.lines if line.visible >= 20]
+    edges = _shared_edges(text)
+    found: set[int] = set()
+    for column in columns.values():
+        if len(column) < 6:
+            continue
+        if edges is not None and not (
+            max(line.box[2] for line in column) <= edges[0] + 1.0
+            or min(line.box[0] for line in column) >= edges[1] - 1.0
+        ):
+            continue
+        found.update(id(line) for line in column)
+    return found
+
+
+def _head_line_ids(doc: Document) -> set[int]:
+    """The ``id`` of every running-header line: the same text (page numbers aside) at
+    the same height near the top of at least two pages, as the whitepaper and policy
+    brief templates print the paper's title. It is not the first row of the page's text."""
+    near_top: list[tuple[tuple[str, int], Line]] = []
+    pages_with: Counter[tuple[str, int]] = Counter()
+    for page in doc.pages:
+        keys = set()
+        for line in page.lines:
+            if line.visible and line.box[1] > 0.88 * page.height:
+                key = (re.sub(r"\d+", "#", line.text.strip()), round(line.box[1] / 2))
+                near_top.append((key, line))
+                keys.add(key)
+        pages_with.update(keys)
+    return {id(line) for key, line in near_top if pages_with[key] >= 2}
+
+
+def _foot_line_ids(doc: Document) -> set[int]:
+    """The ``id`` of every footer line: a page number, or a short line (a running footer, a
+    footer mark) that recurs at the same height near the foot of at least two pages."""
+    heights: Counter[int] = Counter()
+    near_foot: list[Line] = []
+    for page in doc.pages:
+        for line in page.lines:
+            if line.visible and line.box[3] < 0.12 * page.height and len(line.text) <= 30:
+                near_foot.append(line)
+        heights.update({round(line.box[1]) for line in near_foot if line in page.lines})
+    recurring = {y for y, n in heights.items() if n >= 2}
+    return {
+        id(line) for line in near_foot
+        if _LINE_NUMBER_RE.match(line.text) or any(y in recurring for y in range(round(line.box[1]) - 1, round(line.box[1]) + 2))
+    }
+
+
+def _is_figure_box(image: Box, page: Page) -> bool:
+    """A figure, not a full-bleed decoration, a logo or an icon."""
+    if image[2] - image[0] >= 0.9 * page.width or image[3] - image[1] >= 0.9 * page.height:
+        return False
+    return image[3] - image[1] >= 24.0
+
+
+def _bottom_overflow_findings(doc: Document, body_pt: float | None) -> list[dict]:
+    """A line or a figure drawn below the foot of the text area, in the bottom margin
+    or on the footer. A figure LaTeX placed past the last line it had room for sat on
+    the page number and the footer mark of a stored paper, and no check read the bottom
+    margin (only the page edge and the sides).
+
+    The foot of the text area is the lowest text line of the pages before the last (a
+    page's own lowest line is its foot when it is full; pages that end in a float stop
+    higher). With three such pages or more, one whose text goes far below the other two
+    that agree (more than six body lines) is itself the overflow and does not set the foot. Footer
+    lines, page numbers and margin line numbers are not text. Text only a little below the
+    others' (under six lines) is not found, though a figure is: text that low cannot be told
+    from a page that is simply fuller."""
+    if body_pt is None:
+        return []
+    foot_ids = _foot_line_ids(doc)
+    per_page: list[tuple[Page, list[Line], float | None]] = []
+    for page in doc.pages:
+        number_ids = _line_number_ids(page)
+        text = [
+            line for line in page.lines
+            if line.visible and id(line) not in foot_ids and id(line) not in number_ids
+        ]
+        per_page.append((page, text, min((line.box[1] for line in text), default=None)))
+    # The last page ends wherever the text did, so it does not set the foot (with fewer than
+    # three pages before it, the lowest of them does).
+    bottoms = sorted(b for _page, _text, b in per_page[:-1] if b is not None)
+    if not bottoms:
+        bottoms = sorted(b for _page, _text, b in per_page if b is not None)
+    if not bottoms:
+        return []
+    far = max(6.0 * body_pt, 60.0)
+    if len(bottoms) >= 3 and bottoms[1] - bottoms[0] > far and bottoms[2] - bottoms[1] <= far:
+        bottoms = bottoms[1:]          # the lowest page is the overflow, not the foot
+    floor = bottoms[0]
+    tolerance = 0.6 * body_pt
+    found = []
+    for page, text, _bottom in per_page:
+        low = [line for line in text if line.box[3] < floor - tolerance]
+        if low:
+            count = f"{len(low)} lines of text" if len(low) > 1 else "A line of text"
+            found.append(_finding(
+                "bottom_overflow", page.number, "bottom margin",
+                f"{count} sit in the bottom margin, below the text area, starting with \"{low[0].text[:60]}\".",
+                "high", lines_below=len(low),
+            ))
+        for image in page.images:
+            if not _is_figure_box(image, page):
+                continue
+            into = floor - tolerance - image[1]
+            if into > 0:
+                found.append(_finding(
+                    "bottom_overflow", page.number, "bottom margin",
+                    f"A figure reaches {into:.0f} pt into the bottom margin, past the foot of the text area.",
+                    "high", overhang_pt=round(into, 1),
+                ))
+    return found
+
+
+def _doubled_number_findings(doc: Document, body_pt: float | None) -> list[dict]:
+    """A heading that prints its number twice: the template numbers sections and the
+    writer typed the number too (``1 1. Introduction``, ``3.3 3.3 Coverage``). The text
+    pattern decides; a heading's size or weight only confirms a single-part number,
+    because a browser's subsection heading is barely larger than the text and its font
+    may not report bold. A short line with no closing period reads as a heading too."""
+    found = []
+    for page in doc.pages:
+        for line in page.lines:
+            m = _DOUBLED_NUMBER_RE.match(line.text) if line.visible else None
+            if m is None:
+                continue
+            multi_part = "." in m.group(1)
+            heading_like = line.words <= 10 and not line.text.rstrip().endswith((".", ",", ";"))
+            larger = body_pt is not None and line.size > 1.05 * body_pt
+            if line.bold or larger or multi_part or heading_like:
+                found.append(_finding(
+                    "doubled_number", page.number, "heading",
+                    f"A heading prints its number twice: \"{line.text[:60]}\".",
+                    "medium",
+                ))
+    return found
+
+
+def _raw_table_findings(page: Page) -> list[dict]:
+    """Table rows printed as text with their ``|`` bars: pandoc ends a table at a blank
+    line and prints the rest as a paragraph (three of the six rows of a stored table).
+    A row has three bars or more (``| a | b |``); a displayed ``|x̂ − x| ≤ 0.1`` has two
+    and is not one."""
+    raw = [
+        line for line in page.lines
+        if line.visible and (
+            (line.text.lstrip().startswith("|") and line.text.count("|") >= 3)
+            or line.text.count(" | ") >= 4
+        )
+    ]
+    if len(raw) < 3:
+        return []
+    return [_finding(
+        "raw_table", page.number, "table",
+        f"{len(raw)} lines show table rows as text with | bars instead of a table, starting with \"{raw[0].text[:60]}\".",
+        "high", lines_raw=len(raw),
+    )]
+
+
+def _bands(page: Page, skip: set[int]) -> list[tuple[float, float, str, int, float]]:
+    """The text rows of a page, top to bottom, as ``(top, bottom, text, pieces, width)``:
+    the lines that sit on one row (the cells of a table row, a figure's panel titles)
+    joined left to right, how many there are (a wide gap starts a new line, so the cells
+    of a wide table row are several) and how wide the row is. ``skip`` holds the ``id`` of
+    lines that are not text (footers, running headers, line numbers)."""
+    bands: list[list[Line]] = []
+    for line in sorted((l for l in page.lines if l.visible and id(l) not in skip), key=lambda item: -item.box[3]):
+        for band in bands:
+            ref = band[0]
+            high = min(ref.box[3] - ref.box[1], line.box[3] - line.box[1])
+            if min(ref.box[3], line.box[3]) - max(ref.box[1], line.box[1]) > 0.5 * high:
+                band.append(line)
+                break
+        else:
+            bands.append([line])
+    return [
+        (max(l.box[3] for l in band), min(l.box[1] for l in band),
+         " ".join(l.text for l in sorted(band, key=lambda item: item.box[0])),
+         len(band),
+         max(l.box[2] for l in band) - min(l.box[0] for l in band))
+        for band in bands
+    ]
+
+
+def _is_prose_band(band: tuple[float, float, str, int, float], measure: float) -> bool:
+    """A row that is a line of running text, not a table row: one piece, six words or
+    more, at least 60% as wide as the widest row on its page."""
+    return band[3] == 1 and len(band[2].split()) >= 6 and band[4] >= 0.6 * measure
+
+
+def _orphan_table_row_findings(doc: Document, body_pt: float | None) -> list[dict]:
+    """The last row of a table alone on the next page. A table that runs over a page
+    repeats its header at the top of the next one (pandoc's tables do), so a page that
+    opens with rows of text seen on an earlier page (the header, which may wrap over
+    several rows) and then at most one table row before a gap holds one row of a table.
+    A line of prose (one piece of six words or more across most of the page) ends the
+    table, and a page that opens with a line of prose seen before (a repeated sentence)
+    is not one. A table row is a text row of several cells; the further text rows of a
+    cell that wraps (one short piece) belong to it. A running
+    header (the same line at the top of every page) is not the start of the page's text.
+    A table whose header is not repeated is not found."""
+    found = []
+    skip_doc = _foot_line_ids(doc) | _head_line_ids(doc)
+    seen: set[str] = set()       # rows of three words or more, which can open a page
+    seen_all: set[str] = set()   # every row, for the header's further rows
+    step = 1.2 * (body_pt or 10.0) + 2.0     # the space between two rows of one table
+    for page in doc.pages:
+        bands = _bands(page, skip_doc | _line_number_ids(page))
+        measure = max((band[4] for band in bands), default=0.0)
+        if (page.number > 1 and bands and not _is_prose_band(bands[0], measure)
+                and len(bands[0][2].split()) >= 3 and bands[0][2] in seen):
+            head = 1
+            while head < len(bands) and bands[head][2] in seen_all and bands[head - 1][1] - bands[head][0] < step:
+                head += 1
+            body = []
+            for above, below in zip(bands[head - 1:], bands[head:]):
+                if above[1] - below[0] >= step or _is_prose_band(below, measure):
+                    break
+                body.append(below)
+            rows = [band for band in body if band[3] >= 2]
+            if len(rows) <= 1:
+                last = rows[0][2] if rows else bands[head - 1][2]
+                found.append(_finding(
+                    "orphan_table_row", page.number, "table",
+                    f"The page opens with the header of a table that began on the page before and "
+                    f"{'one row' if rows else 'no row'} of it, starting with \"{last[:60]}\".",
+                    "medium", rows=len(rows),
+                ))
+        seen.update(band[2] for band in bands if len(band[2].split()) >= 3)
+        seen_all.update(band[2] for band in bands)
+    return found
+
+
+def _pages_over_limit_findings(doc: Document, page_limit: int | None) -> list[dict]:
+    """The paper is longer than its page limit. Every page counts, References included.
+    Never skipped: a paper whose LaTeX failed is counted too."""
+    if page_limit is None or len(doc.pages) <= page_limit:
+        return []
+    return [_finding(
+        "pages_over_limit", doc.pages[-1].number, "document",
+        f"The paper is {len(doc.pages)} pages and the limit is {page_limit}.",
+        "high", pages=len(doc.pages), page_limit=page_limit,
+    )]
+
+
+def _producer_is_fallback_findings(doc: Document, expect_latex: bool) -> list[dict]:
+    """The PDF came from a browser's print path while LaTeX was expected: formulas,
+    tables and page breaks were not typeset by LaTeX, whatever the pages look like."""
+    producer = getattr(doc, "producer", None)
+    if not expect_latex or not producer or not _BROWSER_PRODUCERS.search(producer):
+        return []
+    return [_finding(
+        "producer_is_fallback", 1, "document",
+        f"The PDF was made by a browser ({producer}), not by LaTeX, so it is not typeset.",
+        "medium", producer=producer,
+    )]
+
+
+# ---------------------------------------------------------------------------
 # Paper
 
 
-def paper_report(doc: Document) -> dict:
+def paper_report(
+    doc: Document, *, page_limit: int | None = None, expect_latex: bool = True,
+) -> dict:
     """Text or figures wider than the text block (an overfull table or a
     figure LaTeX could not fit), content off the page, and text too small.
 
@@ -1073,6 +1377,15 @@ def paper_report(doc: Document) -> dict:
     at the same x, so the edges that many lines share are the margins. In
     a two-column layout both columns' edges are shared, and the outermost
     shared edges bound the block.
+
+    Also, with no model: a line or figure in the bottom margin or on the footer
+    (``bottom_overflow``), a heading numbered twice (``doubled_number``), table rows
+    printed with their ``|`` bars (``raw_table``), LaTeX math shown as text
+    (``raw_markup``), a figure drawn over text (``overlap``), the end of a table alone
+    on a page (``orphan_table_row``), more pages than ``page_limit``
+    (``pages_over_limit``, References included) and a PDF a browser made while LaTeX
+    was expected (``producer_is_fallback``; pass ``expect_latex=False`` for a paper
+    that is meant to come from the browser). Margin line numbers are not text.
     """
     lines = [line for page in doc.pages for line in page.lines if line.visible]
     body_pt = _size_mode(lines)
@@ -1087,7 +1400,11 @@ def paper_report(doc: Document) -> dict:
         findings += _overflow_findings(page)
         findings += _text_overlap_findings(page)
         findings += _column_gap_findings(page)
-        page_lines = [line for line in page.lines if line.visible]
+        findings += _raw_math_findings(page, paper=True)
+        findings += _figure_over_text_findings(page)
+        findings += _raw_table_findings(page)
+        number_ids = _line_number_ids(page)
+        page_lines = [line for line in page.lines if line.visible and id(line) not in number_ids]
         smallest = _smallest_readable_size(page_lines)
         if smallest is not None and smallest < PAPER_MIN_PT - 0.5:
             findings.append(_finding(
@@ -1113,6 +1430,11 @@ def paper_report(doc: Document) -> dict:
                     f"A figure runs {over:.0f} pt into the margin.",
                     object="figure", overhang_pt=round(over, 1),
                 ))
+    findings += _bottom_overflow_findings(doc, body_pt)
+    findings += _doubled_number_findings(doc, body_pt)
+    findings += _orphan_table_row_findings(doc, body_pt)
+    findings += _pages_over_limit_findings(doc, page_limit)
+    findings += _producer_is_fallback_findings(doc, expect_latex)
     half_empty = 0
     for page in doc.pages[:-1]:
         empty = _empty_share(page)

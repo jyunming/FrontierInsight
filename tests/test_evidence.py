@@ -83,7 +83,7 @@ def test_a_quest_that_has_not_run_has_only_the_first_gap(tmp_path: Path) -> None
 
 
 def test_the_run_of_the_audit_passed_every_check_it_had_and_is_still_only_internally_reconciled(tmp_path: Path) -> None:
-    """fr1 of the stored SIR runs: its number, statistics and provenance audits all passed, and nothing held it to a protocol
+    """fr1 of the stored SIR runs: its number and statistics checks all passed, and nothing held it to a protocol
     or an oracle, so all that green said was that the paper copied what the script printed."""
     got = evidence.assess(_quest(tmp_path, protocol=None), _state(design={"hypothesis": "h"}), settings=ON)
     assert got["status"] == "internally_reconciled" and got["next_level"] == "protocol_runtime_matched"
@@ -94,30 +94,55 @@ def test_the_run_of_the_audit_passed_every_check_it_had_and_is_still_only_intern
 
 def test_an_audit_that_found_something_keeps_the_quest_at_executed(tmp_path: Path) -> None:
     root = _quest(tmp_path)
-    (root / "paper" / "numeric_audit.json").write_text(json.dumps({"ok": False, "findings": [1, 2]}), encoding="utf-8")
+    (root / "paper" / "statistics_audit.json").write_text(json.dumps({"ok": False, "findings": [1, 2]}), encoding="utf-8")
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["status"] == "executed" and got["gaps"] == ["the number check reported 2 finding(s)"]
+    assert got["status"] == "executed" and got["gaps"] == ["the statistics check reported 2 finding(s)"]
     empty = evidence.assess(_quest(tmp_path / "e", audits=False), _state(), settings=ON)
     assert empty["status"] == "executed" and empty["gaps"] == ["the paper has not been checked against the results yet"]
 
 
-def test_one_clean_audit_does_not_stand_in_for_the_other_two_never_having_run(tmp_path: Path) -> None:
-    """The counterexample a paper could actually hit: only `numeric_audit.json` was ever written (the statistics and
-    provenance checks crashed before they could write theirs), and that alone must not read as 'all three passed.'"""
+def test_a_point_the_record_check_left_keeps_the_quest_at_executed(tmp_path: Path) -> None:
+    """The check of the paper's numbers against FI's records keeps what it still found after the last review (a typed number no
+    record backs, a key FI could not fill); a clean paper leaves no such file."""
+    root = _quest(tmp_path)
+    assert evidence.assess(root, _state(), settings=ON)["status"] != "executed"
+    (root / ".fi").mkdir(exist_ok=True)
+    (root / ".fi" / "paper_record_check.json").write_text(json.dumps({"hits": ["paper_record_mismatch: x"]}), encoding="utf-8")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["status"] == "executed"
+    assert got["gaps"] == ["the check of the paper's numbers against FI's records reported 1 finding(s)"]
+
+
+@pytest.mark.parametrize("why,words", [("no_records", "the study kept no trial record"),
+                                       ("older_paper", "this paper was written before FI filled in its numbers")])
+def test_a_paper_whose_numbers_fi_did_not_check_is_not_reconciled(tmp_path: Path, why: str, words: str) -> None:
+    """No hits is no evidence of a faithful paper when FI had no record to hold the numbers to (``not_filled_by_fi``); a
+    keyed simulate-path paper (a record with no such key, or no record at all) still reaches the level."""
+    root = _quest(tmp_path)
+    (root / ".fi").mkdir(exist_ok=True)
+    (root / ".fi" / "paper_record_check.json").write_text(json.dumps({"hits": [], "not_filled_by_fi": why}), encoding="utf-8")
+    ok, gaps = evidence._audit_gaps(root)
+    assert not ok and gaps == [f"FI did not check this paper's numbers against its own records ({words})"]
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["status"] == "executed" and got["gaps"] == gaps
+    (root / ".fi" / "paper_record_check.json").write_text(json.dumps({"hits": [], "unmet_items": []}), encoding="utf-8")
+    assert evidence._audit_gaps(root) == (True, [])
+    assert evidence.assess(root, _state(), settings=ON)["status"] != "executed"
+
+
+def test_a_paper_never_checked_does_not_pass_on_the_record_check_alone(tmp_path: Path) -> None:
+    """Only the record check's (empty) file exists and the review never wrote its statistics report: the paper was not checked."""
     root = _quest(tmp_path, audits=False)
-    (root / "paper").mkdir(parents=True, exist_ok=True)
-    (root / "paper" / "numeric_audit.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
+    (root / ".fi").mkdir(exist_ok=True)
+    (root / ".fi" / "paper_record_check.json").write_text(json.dumps({"hits": []}), encoding="utf-8")
     got = evidence.assess(root, _state(), settings=ON)
     assert got["status"] == "executed", got
-    assert any("the statistics check did not run" in g for g in got["gaps"])
-    assert any("the provenance check did not run" in g for g in got["gaps"])
-    assert "numeric" not in " ".join(got["gaps"]), "the one check that did run is not itself a gap"
+    assert got["gaps"] == ["the paper has not been checked against the results yet"]
 
 
 def test_a_skipped_audit_is_not_a_pass_and_not_a_failure(tmp_path: Path) -> None:
     root = _quest(tmp_path)
-    for name in ("numeric_audit", "statistics_audit", "provenance_audit"):
-        (root / "paper" / f"{name}.json").write_text(json.dumps({"ok": True, "skipped": True}), encoding="utf-8")
+    (root / "paper" / "statistics_audit.json").write_text(json.dumps({"ok": True, "skipped": True}), encoding="utf-8")
     assert evidence.assess(root, _state(), settings=ON)["status"] == "executed"
 
 
@@ -268,7 +293,7 @@ def test_a_review_panel_with_a_failed_required_role_is_not_publication_ready(tmp
 def test_a_level_needs_the_one_before_it(tmp_path: Path) -> None:
     """Passing the oracle does not make a run whose paper failed its audit 'validated'."""
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
-    (root / "paper" / "provenance_audit.json").write_text(json.dumps({"ok": False, "findings": [1]}), encoding="utf-8")
+    (root / "paper" / "statistics_audit.json").write_text(json.dumps({"ok": False, "findings": [1]}), encoding="utf-8")
     got = evidence.assess(root, _state(), settings=ON)
     assert got["status"] == "executed" and not got["levels"]["independently_validated"]
     assert "independently_validated" not in got["all_gaps"] or True
@@ -280,7 +305,7 @@ def test_the_one_line_for_the_cli_and_the_chat_is_plain_english_by_default(tmp_p
     is the level's own plain-language claim, not the six-way identifier."""
     got = evidence.assess(_quest(tmp_path, protocol=None), _state(design={"hypothesis": "h"}), settings=ON)
     line = evidence.summary_line(got)
-    assert line.startswith("The number, statistics and provenance audits found the paper faithful")
+    assert line.startswith("FI's checks of the paper's numbers and statistics found the paper faithful")
     assert "internally_reconciled" not in line and "protocol_runtime_matched" not in line
     assert "Next: the plan fixes no protocol" in line
     assert evidence.summary_line({"status": "publication_ready", "gaps": []}).startswith("The review accepted the paper")
@@ -504,13 +529,13 @@ def test_a_record_written_under_the_older_names_is_read_under_the_current_ones(t
                              "independently_validated": False, "statistically_adequate": False, "publication_ready": False}
     assert "renamed" in got["legacy"] and "predates" in got["gaps"][0]
     assert evidence.summary_line(old, technical=True).startswith("internally_reconciled; to reach protocol_runtime_matched")
-    assert evidence.summary_line(old).startswith("The number, statistics and provenance audits found the paper faithful")
+    assert evidence.summary_line(old).startswith("FI's checks of the paper's numbers and statistics found the paper faithful")
     only_audit = evidence.upgrade({"status": "internally_consistent", "levels": {"executed": True, "internally_consistent": True}})
     assert only_audit["status"] == "internally_reconciled"
     failed = evidence.upgrade({"status": "executed", "levels": {"executed": True, "internally_consistent": False},
-                               "all_gaps": {"internally_consistent": ["the number check reported 2 finding(s)"]}})
+                               "all_gaps": {"internally_consistent": ["the statistics check reported 2 finding(s)"]}})
     assert failed["status"] == "executed" and failed["next_level"] == "internally_reconciled"
-    assert failed["all_gaps"] == {"internally_reconciled": ["the number check reported 2 finding(s)"]}
+    assert failed["all_gaps"] == {"internally_reconciled": ["the statistics check reported 2 finding(s)"]}
     fresh = evidence.assess(_quest(tmp_path), _state(), settings=ON)
     assert evidence.upgrade(fresh) is fresh, "a record that already has its ladder is left alone"
     assert evidence.upgrade(None) is None and evidence.upgrade({"nothing": 1}) == {"nothing": 1}
@@ -793,3 +818,26 @@ def test_a_receipt_with_times_that_are_not_times_is_not_believed(tmp_path: Path)
     record = json.loads(path.read_text(encoding="utf-8"))
     path.write_text(json.dumps({**record, "started_at": "yesterday", "completed_at": "later"}), encoding="utf-8")
     assert any("malformed" in g for g in evidence.assess(root, _state(), settings=ON)["gaps"])
+
+
+def test_a_check_the_code_reader_flags_is_not_independent_evidence(tmp_path: Path) -> None:
+    """A second model found that the code that computes the check's measure is itself flagged: the check passed, and shows nothing."""
+    from core import code_review
+
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    code = root / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text("def run_trial(seed):\n    return {}\n", encoding="utf-8")
+    code_review.save(root, {"version": code_review.version(code), "read_version": code_review.version(code), "final": True,
+                            "problems": [{"id": "L1", "kind": "logic", "text": "The closed form check returns its own expected value "
+                                          "without running the simulation", "status": "different", "file": "simulate.py",
+                                          "line": 3, "severity": "medium", "fid": "F-1"}]})
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["status"] == "protocol_runtime_matched"
+    assert any("the check 'closed form' is not shown: a second model found" in g and "line" not in g for g in got["gaps"]), got["gaps"]
+    (code / "simulate.py").write_text("def run_trial(seed):\n    return {'x': 1}\n", encoding="utf-8")  # a later version, not read again
+    assert evidence.assess(root, _state(), settings=ON)["status"] == "protocol_runtime_matched", "the flag sticks"
+    rec = code_review.load(root)  # a newer reading of that version no longer flags it
+    rec.update(version=code_review.version(code), read_version=code_review.version(code), problems=[], final=True)
+    code_review.save(root, rec)
+    assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"

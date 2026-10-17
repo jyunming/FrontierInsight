@@ -216,7 +216,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         topic=str(topic).strip(),
         title=str(raw.get("title", "")),
         output_kinds=list(output.get("kinds") or []),
-        paper_format=str(output.get("paper_format") or "generic"),
+        paper_format=str(output.get("paper_format") or "article"),
         paper_style=str(output.get("paper_style") or "latex"),
         no_simulation=bool(engine.get("no_simulation", False)),
         study_depth=str(overrides.get("study_depth") or "journal-length"),

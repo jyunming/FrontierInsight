@@ -20,6 +20,7 @@ from generation import _cjk
 from generation import paper as paper_mod
 from generation._pandoc import find_pandoc
 from generation.paper import PaperGenerator
+from tests.paper_fakes import fake_pandoc
 
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = sorted((REPO / "templates" / "paper").glob("*/template.tex"))
@@ -57,7 +58,7 @@ def _fake_tools(monkeypatch, *, xelatex=("xelatex", "/fake/xelatex"), font="Micr
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
     return calls
 
 
@@ -78,8 +79,17 @@ def test_a_chinese_author_line_alone_switches_the_engine(tmp_path, monkeypatch):
     assert "--pdf-engine=/fake/xelatex" in calls[0]
 
 
-def test_a_latin_paper_keeps_pdflatex(tmp_path, monkeypatch):
+def test_a_latin_paper_is_typeset_with_xelatex_without_a_cjk_font(tmp_path, monkeypatch):
+    """XeLaTeX sets every glyph as itself, so every paper uses it when it is installed."""
     calls = _fake_tools(monkeypatch)
+    md, out = _paper(tmp_path, "# Probe Title\n\n## Introduction\n\nBody.\n")
+    PaperGenerator(_config(tmp_path, author="Jane Chen"))._compile_pdf(md, out)
+    assert "--pdf-engine=/fake/xelatex" in calls[0]
+    assert not any(part.startswith("fi-cjk-font=") for part in calls[0])
+
+
+def test_a_latin_paper_keeps_pdflatex_when_there_is_no_xelatex(tmp_path, monkeypatch):
+    calls = _fake_tools(monkeypatch, xelatex=None)
     md, out = _paper(tmp_path, "# Probe Title\n\n## Introduction\n\nBody.\n")
     PaperGenerator(_config(tmp_path, author="Jane Chen"))._compile_pdf(md, out)
     assert "--pdf-engine=/fake/pdflatex" in calls[0]

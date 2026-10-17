@@ -19,6 +19,7 @@ import logging
 import string
 from pathlib import Path
 
+from core import paper_facts as _paper_facts
 from core.config import Config
 from core.engine import QuestArtifacts
 from core.provider import (
@@ -139,7 +140,7 @@ class SpeechGenerator:
         if art.paper_md is None:
             return {}
 
-        paper_md = art.paper_md.read_text(encoding="utf-8")
+        paper_md = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8"))  # FI's values stay, its markers go
         slides_outline = ""
         slides_path = out_dir / "slides.md"
         if slides_path.exists():

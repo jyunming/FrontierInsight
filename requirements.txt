@@ -54,6 +54,9 @@ docker>=7.1
 # viztracer enables `--profile` per-quest tracing.
 psutil>=5.9
 
+# The bootstrap / permutation loops of the evidence statistics (core/stats.py) run as array operations.
+numpy>=1.24
+
 # Cross-process lock around a skill's provenance.json. Two quests
 # recording a use of the same skill serialise on it, so neither
 # loses the other's record.
@@ -99,6 +102,11 @@ pillow>=10.0
 # platform, no system binary.
 pypdfium2>=4.30
 
+# Reads which characters each installed font has (`generation/_unicode_fonts.py`), so
+# XeLaTeX sets every character of the paper in a font that has it. MIT, pure Python.
+# Without it any character beyond Latin makes the paper not typeset.
+fonttools>=4.40
+
 # Turns the deck's $...$ LaTeX into MathML, which `generation/_pptx_math.py`
 # writes into slides.pptx as native PowerPoint equations. MIT, pure Python,
 # no dependencies.
@@ -119,6 +127,8 @@ pytest-timeout>=2.3
 hypothesis>=6.100
 # The plot-style and figure-redraw tests draw real figures; without it they skip.
 matplotlib>=3.7
+# The replay tests run real quests' code (tests/fixtures/), which imports scipy as the quests' own venvs did.
+scipy>=1.10
 
 # Optional knowledge-layer source adapter (source-router):
 #   scholarly  → Google Scholar (no official API; rate-limited; EXPERIMENTAL).

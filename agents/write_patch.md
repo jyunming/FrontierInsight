@@ -6,7 +6,8 @@ The engine applies your edits to the draft exactly as it stands. Every word you 
 
 - **A claim that neither the study's results nor a cited source backs.** Either tie it to a result in the Analysis block or to a source in the Prior work block that says it (state only what that result or that source says, and cite the source by its label, `[3]`), or take the claim out. Do not add a new claim, a new number or a new citation to make up for it. A sentence taken out whole is a correct edit; so is a sentence made narrower, so that it says only what is backed.
 - **A caption that describes what its figure does not show.** Rewrite the caption so that it describes what the figure shows, as the reason says. Keep `**Figure N.**` and the figure's link exactly as they are.
-- **A number that nothing in the run accounts for, or a statistic the paper describes as something the run did not compute.** Use the value the Analysis block gives, or say what the number is (a setting, a threshold, a limit), or take the sentence out if it cannot be stated from the Analysis block.
+- **A number you typed that the check names.** A result is never typed: replace it with its key from the list of results (`{{v:...}}`; FI fills it in), or say it in words, or take it out. A number the plan or the topic states is written exactly as the plan writes it. A key the check says FI could not fill is fixed by changing the key to one that names a quantity and settings the study has, or by leaving the number out. Never write a new number of your own.
+- **A statistic the paper describes as something the run did not compute.** Use the value the Analysis block gives, or say what the number is (a setting, a threshold, a limit), or take the sentence out if it cannot be stated from the Analysis block.
 
 Cite only labels that appear in the Prior work block. Never cite a source from memory, and never invent an author, year, DOI or URL. An entry marked `[title only]` or `[short blurb only]` has no text beyond that: cite it only to say the work exists or for what its own title states, never for a specific finding, number or mechanism. An entry marked `[retracted]` has been retracted by its publisher: do not cite it, and do not rest any statement on what it reports. A new sentence keeps the voice of the paper it sits in and never mentions the pipeline, the engine, the run or the checks.
 
@@ -46,8 +47,11 @@ $literature_block
 ## Passages the checks named
 $passages_block
 
+## Results you can place
+$values_sheet
+
 ## The draft
-(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's records. Never edit it or its markers: any change to it is undone.)
+(A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI from its records. Never edit it or its markers: any change to it is undone. A placeholder or key in double braces, such as `{{seed}}`, `{{run_time}}`, `{{time_limit_met}}`, `{{not_done:topic-temperature}}` or `{{v:coverage @ noise=0.05, n=all}}`, stands for a value FI fills in from its records: keep each one exactly as it is written, in its sentence; never replace one with a number or a sentence of your own, and never type the seed or the run time yourself.)
 
 <draft>
 $paper_block

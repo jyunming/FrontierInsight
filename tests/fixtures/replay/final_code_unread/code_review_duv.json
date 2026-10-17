@@ -1,0 +1,31 @@
+{
+ "version": "f3b6b3c2fb3841a9",
+ "reviews_total": 2,
+ "send_backs": 1,
+ "repair_calls": 8,
+ "readings": [
+  {
+   "n": 1,
+   "version": "dc678b16b819b66d",
+   "open": 65,
+   "high": 13
+  },
+  {
+   "n": 2,
+   "version": "f3b6b3c2fb3841a9",
+   "open": 59,
+   "high": 7,
+   "improved": true
+  }
+ ],
+ "repaired": false,
+ "read_version": "f3b6b3c2fb3841a9",
+ "requirements": 54,
+ "reviewer": "gpt-6-sol",
+ "planner": "gpt-5.6-terra",
+ "reported": false,
+ "same_model": false,
+ "converged": true,
+ "final": true,
+ "final_read": false
+}

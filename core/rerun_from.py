@@ -52,7 +52,7 @@ STEPS: dict[str, tuple[str, ...]] = {
     "evidence": ("evidence_gate",),
     "writing": ("write",),
     "claims": ("claim_check",),
-    "review": ("review",),
+    "review": ("review", "citation_check"),
 }
 # Nodes a step loops through without leaving it: the run's repair of a crashed script goes back to execute.
 _WITHIN: dict[str, tuple[str, ...]] = {"run": ("execute_reflect", "improve")}
@@ -96,7 +96,7 @@ REDOES: dict[str, str] = {
     "writing": "writes the paper again from the same analysis, then reviews it",
     "claims": "checks every claim in the paper against the results again, then reviews it (the paper is not written "
               "again)",
-    "review": "reviews the same paper again (and makes the slides and poster from it again)",
+    "review": "reviews the same paper again, reads every citation against its source again (and makes the slides and poster from it again)",
 }
 _ALIASES = {
     "ideate": "ideas", "idea": "ideas", "ideas & literature": "ideas",
@@ -114,10 +114,12 @@ _ALIASES = {
 _DELIVERED = ["slides.md", "slides.html", "slides.pdf", "slides.pptx", "poster.tex", "poster.pdf", "poster.pptx",
               "poster.html", "speech.md", "frontier_insight_summary.json", "NEXT_STEP.md"]
 _PAPER = ["paper", "paper.md", "paper.pdf", "paper.html", "paper_html_body.md", "paper_html_source.html",
-          "paper_html_theme.css", "paper_pdf_source.md", *_DELIVERED]
+          "paper_html_theme.css", "paper_pdf_source.md", ".fi/paper_record_check.json", *_DELIVERED]
 # What the claim check writes into paper/ (the folder itself is the writing step's), and its receipt.
-_CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.json", "paper/numeric_audit.json",
-                "paper/statistics_audit.json", "paper/provenance_audit.json", "needs/receipts/claim_check.json"]
+_CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.json",
+                "paper/statistics_audit.json", "needs/receipts/claim_check.json"]
+# What the citation check, the last step before delivery, leaves: its record, its ledger in paper/, and its receipt.
+_CITATION_CHECK = [".fi/citation_check.json", "paper/citations.json", "paper/CITATIONS.md", "needs/receipts/citation_check.json"]
 # What the evidence gate writes.
 _EVIDENCE = ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json", "needs/STUCK.json"]
 # What the run and its checks leave under needs/ (the run writes them again).
@@ -136,22 +138,26 @@ _FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RU
                 ".fi/oracle_dry_run.json",
                 "code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, "data/auto_collected", *_PAPER]
 # The once-per-plan look at the plan's checks (core/oracle_forms.py): a new plan is looked at again.
-_PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_corrections.json"]
+_PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_corrections.json",
+              ".fi/topic_requirements.json", ".fi/topic_covered.json", ".fi/topic_asked.json", ".fi/topic_design_asked.json",
+              # The plan's parts asked of its model and the ledger of its simplifications belong to the plan written.
+              ".fi/protocol_part_asked.json", ".fi/grid_asked.json", ".fi/drafted_grid_asked.json", ".fi/ledger_asked.json", ".fi/ledger.json"]
 
 _OWN: dict[str, list[str]] = {
-    # The review writes no file of its own; what is made from the reviewed paper is made again after it.
-    "review": _DELIVERED,
-    "claims": [*_CLAIM_CHECK, *_DELIVERED],
-    "writing": [*_PAPER, *_CLAIM_CHECK],
-    "evidence": [*_EVIDENCE, *_PAPER, *_CLAIM_CHECK],
-    "crosscheck": [*_EVIDENCE, *_PAPER, *_CLAIM_CHECK],
+    # The review's own file is its check of the paper against FI's records; what is made from the reviewed paper is made
+    # again after it.
+    "review": [".fi/paper_record_check.json", *_CITATION_CHECK, *_DELIVERED],
+    "claims": [*_CLAIM_CHECK, *_CITATION_CHECK, *_DELIVERED],
+    "writing": [*_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
+    "evidence": [*_EVIDENCE, *_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
+    "crosscheck": [*_EVIDENCE, *_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
     "analysis": _PAPER,
-    "figures": ["figures", "code/web_plots.py", *_EVIDENCE, *_PAPER, *_CLAIM_CHECK],
+    "figures": ["figures", "code/web_plots.py", *_EVIDENCE, *_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
     # The mean-over-seeds redraw is written into code/ by the run.
     "run": ["figures", "raw", "results.json", *_SEARCH, "code/replot_figures.py", "code/replot_figures.json", "code/web_plots.py",
             "data/auto_collected", "needs/RUN_MANIFEST_CHECK.json", "needs/ENVIRONMENT.json",
             # The improve loop's record and saved copies belong to the run they started from.
-            ".fi/improve.json", ".fi/improve", *_PAPER],
+            ".fi/improve.json", ".fi/improve", *_PAPER, *_CITATION_CHECK],
     "code": ["code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
     "skills": ["code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
     # A redesign starts the protocol over: the old one is moved aside, and the run's records with it.
@@ -330,6 +336,9 @@ NODES: dict[str, dict[str, str]] = {
                "sentence": "Reviews the paper. May send it back to Design.",
                "reads": "paper.md", "writes": "review",
                "loop": "revise: back to Design"},
+    "citation_check": {"block": "write", "title": "Check every citation",
+                       "sentence": "Reads each citation against the source's retrieved text and fixes what it does not support.",
+                       "reads": "paper.md, sources", "writes": "citation ledger"},
     "human_feedback": {"block": "write", "title": "Your feedback",
                        "sentence": "Stops for your decision on the paper when the review pauses are on.",
                        "reads": "review", "writes": "your notes"},

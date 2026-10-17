@@ -30,10 +30,10 @@ async def test_failed_calls_count_across_resumes_and_total_chat_calls_stay_withi
     eng = _engine(tmp_path, [])
     model = Model(eng, [], _broken_draft())  # every request raises
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
-    _stop(eng)
+    seen = _stop(eng)
     for _ in range(5):  # a resume each time
-        with pytest.raises(Paused):
-            await eng._node_design({"topic": TOPIC, "iteration": 0})
+        await eng._node_design({"topic": TOPIC, "iteration": 0})  # nobody is asked to pick another model
+    assert seen == []
     record = _record(eng)
     assert record["count"] == 2 and record["calls"] <= 6
     assert len(model.asked) <= 6
@@ -48,11 +48,11 @@ async def test_unusable_answers_never_make_more_than_six_chat_calls(tmp_path: Pa
 
     model = Model(eng, [junk] * 20, _broken_draft())
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
-    _stop(eng)
+    seen = _stop(eng)
     for _ in range(4):
-        with pytest.raises(Paused):
-            await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert len(model.asked) <= 6 and _record(eng)["calls"] <= 6
+        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == []
+    assert len(model.asked) <= 12 and _record(eng)["calls"] <= 12  # six for a request; twelve when the reader named the form it refused
 
 
 @pytest.mark.asyncio
@@ -161,10 +161,10 @@ async def test_no_request_is_made_when_it_cannot_be_written_down(tmp_path: Path,
     monkeypatch.setattr(Path, "write_text", failing)
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    state = {"topic": TOPIC, "iteration": 0}
+    patch = await eng._node_design(state)
     assert model.asked == [], "no marker, no request"
-    assert seen, "the quest went on to the plain stop"
+    assert seen == [] and eng._search_cannot_start_stop(state, patch["design"]) is not None, "the quest went on to the honest stop"
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,109 @@
+% Neutral paper template for Frontier Insight (paper_format: article).
+% Apache-2.0, like the rest of Frontier Insight. One column, Latin Modern, no venue name or
+% kit text, no logo. The look lives in fi_paper.sty (next to this file; generation/paper.py
+% copies it beside the paper source). Variables are the ones generic/template.tex takes.
+\documentclass[11pt,a4paper]{article}
+\usepackage{iftex}
+\ifXeTeX
+  \usepackage{fontspec}
+$if(fi-cjk-font)$
+  \usepackage{xeCJK}
+  \setCJKmainfont{$fi-cjk-font$}
+  \setCJKsansfont{$fi-cjk-font$}
+  \setCJKmonofont{$fi-cjk-font$}
+$endif$
+\else
+  \usepackage[utf8]{inputenc}
+\fi
+% Glyphs (generation/paper.py, _prepare_unicode): under XeLaTeX the fallback fonts that set
+% what the text font lacks and the code font; under pdflatex the code's glyphs.
+$if(fi-unicode)$
+\input{fi_unicode.tex}
+$endif$
+% A paper with a page limit (fi-tight, set by generation/paper.py) gets 2 cm margins.
+$if(fi-tight)$
+\usepackage[margin=2cm]{geometry}
+$else$
+\usepackage[margin=1in]{geometry}
+$endif$
+\usepackage{fi_paper}
+% pandoc writes a pipe table as a longtable with booktabs rules.
+\usepackage{longtable}
+\usepackage{calc}
+\usepackage{array}
+\usepackage{booktabs}
+% A caption-less table is written with this type; longtable then needs the counter.
+\newcounter{none}
+\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\providecommand{\passthrough}[1]{#1}
+% A figure is as wide as the text and at most a third of its height, so two fit on a page with
+% their captions (see the generic template for why the cap matters).
+\makeatletter
+\newsavebox{\FI@figbox}
+\providecommand{\pandocbounded}[1]{%
+  \sbox{\FI@figbox}{#1}%
+  \Gscale@div\@tempa{0.33\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%
+  \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%
+  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi
+  \noindent\scalebox{\@tempa}{\usebox{\FI@figbox}}}
+\makeatother
+% A float waiting for a later page is placed before what follows. The reference list ends the
+% body, and a figure held past it would print among the references; generation/paper.py writes
+% \FIfloatbarrier just before that list. placeins is not used: not every TeX install has it.
+\makeatletter
+\newcommand{\FIfloatbarrier}{\par\ifx\@deferlist\@empty\else\clearpage\fi}
+% Start a new page when less than #1 is left, so a table does not begin on the last line of
+% a page and continue on the next.
+\newcommand{\FIneedspace}[1]{\par\begingroup\dimen@=\pagegoal\advance\dimen@-\pagetotal
+  \ifdim\dimen@<#1\relax\vfil\penalty-10000\fi\endgroup}
+\let\FI@longtable\longtable
+\def\longtable{\FIneedspace{7\baselineskip}\small\FI@longtable}
+\makeatother
+\setlength{\LTpre}{6pt}
+\setlength{\LTpost}{6pt}
+\usepackage{hyperref}
+\usepackage{xurl}
+\urlstyle{same}
+\hypersetup{hidelinks}
+\usepackage{titling}
+$if(highlighting-macros)$
+\usepackage{fancyvrb}
+\usepackage{framed}
+$endif$
+$highlighting-macros$
+
+\pretitle{\begin{center}\Large\bfseries}
+\posttitle{\par\end{center}\vskip 0.5em}
+\preauthor{\begin{center}\normalsize}
+\postauthor{\par\end{center}}
+\predate{\begin{center}\normalsize}
+\postdate{\par\end{center}}
+
+\title{$title$}
+% Author line from output.author / affiliation / contact_email / url (pandoc metadata,
+% escaped for LaTeX). No author set keeps the Frontier Insight byline.
+\author{$if(fi-author)$$fi-author$$else$Frontier Insight$endif$$if(fi-affiliation)$\\{\small $fi-affiliation$}$endif$$if(fi-email)$\\{\small $fi-email$}$endif$$if(fi-url)$\\{\small $fi-url$}$endif$}
+\date{$date$}
+\hypersetup{pdftitle={$title$}, pdfauthor={$if(fi-author)$$fi-author$$else$Frontier Insight$endif$}$if(keywords)$, pdfkeywords={$for(keywords)$$keywords$$sep$, $endfor$}$endif$}
+
+% A visual check that finds a last page holding only a line or two recompiles with
+% fi-extra-lines set: the text area grows that many lines (generation/_visual_check.py).
+$if(fi-extra-lines)$
+\AtBeginDocument{\addtolength{\textheight}{$fi-extra-lines$\baselineskip}\addtolength{\footskip}{-$fi-extra-lines$\baselineskip}}
+$endif$
+
+\begin{document}
+\maketitle
+
+$if(abstract)$
+\begin{abstract}
+$abstract$
+\end{abstract}
+$endif$
+$if(keywords)$
+{\small\raggedright\noindent\textbf{Keywords:} $for(keywords)$$keywords$$sep$, $endfor$\par}\medskip
+$endif$
+
+$body$
+
+\end{document}

@@ -2,6 +2,8 @@ You are the **Design Self-Critique** stage. A draft experiment design has just b
 
 # Your task
 
+Your job is to FIND PROBLEMS, not to agree or disagree. When the design was written by someone else, read it as a referee would: every problem goes under `objections_addressed` with where it is, what is wrong, why it is wrong, how to fix it and how serious it is. Everything you checked and found no problem with goes under `checked_no_problem`, one line each saying what you looked at, so that a reply with no problem is never taken for one that did not look. A reply with nothing in either list is no review and is asked again.
+
 Apply this checklist to the draft design and report every item that applies. Be specific. Vague "consider edge cases" objections are not useful; "the evaluator and the optimizer share the same Gaussian/threshold simulator, so the comparative claim is trivially true — switch to a held-out scoring function" is useful.
 
 Mandatory checklist — if any apply, you MUST patch them:
@@ -9,7 +11,7 @@ Mandatory checklist — if any apply, you MUST patch them:
 1. **Circular evaluation** — does the optimization target (loss, scoring rule, correction model, simulator) share its model / distribution / data with the evaluation metric? If yes, the comparative claim is a training-set report and the design must either (a) introduce an independent evaluator or (b) drop the comparative claim and reframe as a mechanism demonstration.
    **For a search for the best design (`study_type: find_best_design`)** sharing the physical model is the point (the best fin spacing is sought IN that model), so do not ask for an independent model. Ask instead: are the search settings and the check settings really different (`protocol.optimisation.numerical_settings`: the check recomputes the best designs and the baseline at finer values, and with new seeds when there is randomness), and is the claim confined to the model ("better within model M")? The shared approximation, not the shared model, is what an optimiser exploits: a coarse mesh that happens to underestimate the temperature at one spacing.
 
-2. **Single-point evaluation where a sweep is the field norm** — is the design reporting one configuration / one dose / one seed / one budget where the field expects a sweep? If yes, the design must add a sweep across the natural axis OR scope the claim to that one point and remove generalising language.
+2. **Single-point evaluation where a sweep is the field norm** — is the design reporting one configuration / one dose / one seed / one budget where the field expects a sweep? If yes, the design must add a sweep across the natural axis OR scope the claim to that one point and remove generalising language. In a search for the best design (`study_type: find_best_design`) a sweep belongs to the range of a design variable (the search moves it), and every axis of `protocol.optimisation.grid` multiplies the size of the first scan, so do not add axes to that grid.
 
 3. **Weak baseline plan** — does the design specify HOW the comparator(s) will be tuned? "Rule-based OPC with fixed bias" is not a baseline plan; "rule-based OPC with bias tuned to minimise mean CD error on a held-out clip set, separately for 1D and 2D patterns" is. If the baseline is named without a tuning protocol, add one.
 
@@ -23,7 +25,9 @@ Mandatory checklist — if any apply, you MUST patch them:
 
 8. **Arbitrary thresholds** — does a conclusion depend on a cut-off the design chose (an outbreak is "more than 5% of N", a peak is "above 0.1")? Then the design must vary it over a stated set, or justify it from the definition, and say the conclusion has to hold across the set.
 
-9. **Random streams** — do different settings and different runs draw from independent streams, or share one (the same seed rebuilt for every setting makes them correlated without saying so)? The design must say how streams are derived (`protocol.seed_policy`), and a deliberate common-random-numbers design must say so and be analysed as paired.
+9. **Random streams** — do different settings and different runs draw from independent streams, or share one (the same seed rebuilt for every setting makes them correlated without saying so)? The design must say how streams are derived (`protocol.seed_policy`), and a deliberate common-random-numbers design must say so and be analysed as paired. What one run uses all of together
+(the conditions one fit spans, the methods applied to the same simulated data) belongs in `protocol.in_each_run`, not in
+`protocol.grid`: a grid setting is run on its own, with its own random numbers.
 
 10. **Numerical convergence** — if a solver, a grid or a step size is involved, does the design say how it is shown converged (halve the step or the tolerance and compare) and which conservation law or invariant every run must satisfy?
 
@@ -35,11 +39,13 @@ Three more, only for a search for the best design (`study_type: find_best_design
 
 13. **The baseline** — is `optimisation.baseline` a real design that meets every constraint, with a value for every design variable inside its range, and does it say where it comes from? A baseline made up to be easy to beat makes the improvement meaningless. Fix it, and make one oracle check the baseline design.
 
-14. **The ranges** — does every design variable's range have a physical meaning (a spacing above zero, a thickness a workshop can make) and lie where the model holds (`model.holds_for`)? A search pushes the design to the edges of its ranges, which is where a model stops holding. Narrow the range, or say in `model.holds_for` why it holds there.
+14. **The ranges** — does every design variable's range have a physical meaning (a spacing above zero, a thickness a workshop can make) and lie where the model holds (`model.holds_for`)? A search pushes the design to the edges of its ranges, which is where a model stops holding. Narrow the range, or say in `model.holds_for` why it holds there. A design that is a set of numbers (the pixels of a source, a profile) is ONE design variable with a `shape`, for example `{"name": "source", "shape": [5, 5], "kind": "continuous", "low": 0, "high": 1}` and a baseline value that is a list of that shape; never write a list in `low`, `high` or the baseline without declaring the `shape`.
 
 15. **Finer check settings** — is every `check` value of `optimisation.numerical_settings` really finer than its `search` value (smaller for a mesh size or a time step, larger for a count of elements; each level at least 1.1 times finer)? A check at the same or a coarser setting cannot tell a real improvement from a numerical error. Fix the values, or leave `check` out and FI uses half, then a quarter, of the search value. And is the one objective the right one: a second goal belongs in `constraints`, not in the objective.
 
-After identifying issues, produce an amended design. The amended design must match the original JSON shape exactly — same keys, same structure — but with the fields updated to reflect the fixes. If no MUST-FIX objections apply, return the original design unchanged and an empty `objections_addressed` array.
+One more, for every design: **16. Approximated without saying so** (use `other`) - is anything the topic names approximated, replaced or left out without an entry in `protocol.simplifications`, and does each metric's `protocol.definitions` entry match the source it quotes? Add the entry, or correct the definition.
+
+After identifying issues, produce an amended design. The amended design must match the original JSON shape exactly — same keys, same structure — but with the fields updated to reflect the fixes. If no MUST-FIX objections apply, return the original design unchanged, an empty `objections_addressed` array, and in `checked_no_problem` each checklist item you checked and found no problem with.
 
 # Output format
 
@@ -48,8 +54,15 @@ Respond with a single JSON object, no prose, no markdown fence. Print it once: d
 {
   "objections_addressed": [
     {"check": "circular_evaluation | single_point | weak_baseline | pseudo_units | stratum_collapse | precision | estimand | threshold_sensitivity | rng_independence | numerical_convergence | oracle | failed_runs | optimisation_baseline | optimisation_ranges | finer_check | other",
+     "where": "<the part of the design it concerns, such as method or protocol.grid>",
      "objection": "<one specific sentence quoting what's wrong>",
-     "fix": "<one specific sentence describing the change made>"},
+     "why": "<one sentence: why it is wrong>",
+     "fix": "<one specific sentence describing the change made>",
+     "severity": "high | medium | low"},
+    ...
+  ],
+  "checked_no_problem": [
+    {"check": "<a checklist name from the list above>", "note": "<what you looked at and why it is fine, one sentence>"},
     ...
   ],
   "amended_design": {
@@ -63,7 +76,7 @@ Respond with a single JSON object, no prose, no markdown fence. Print it once: d
   }
 }
 
-(If the draft design carries a `protocol` (its `grid`, `runs_per_setting`, `thresholds`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`, `optimisation`), the amended design keeps it and amends it in place: a fix to checks 6 to 15 belongs there. Keep `study_type` as the draft has it. Never drop a key the draft has.)
+(If the draft design carries a `protocol` (its `grid`, `runs_per_setting`, `thresholds`, `constants`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`, `optimisation`), the amended design keeps it and amends it in place: a fix to checks 6 to 15 belongs there. Keep `study_type` as the draft has it. Never drop a key the draft has.)
 
 ---
 

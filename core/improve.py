@@ -707,7 +707,8 @@ def _badness(row: dict[str, Any], value: float) -> float:
 def compare(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Each criterion FI counts, compared on its own between two versions: ``change`` is ``better`` or ``worse`` (by more
     than the criterion's own tolerance), ``same``, ``gained`` (measured now, not before), ``lost`` (measured before, not
-    now) or ``unmeasured``."""
+    now), ``unmeasured``, or ``not compared``: a check whose code a second model flagged in either version (its value may
+    be faked, so it can make neither version look better or worse)."""
     b = {r["name"]: r for r in before if isinstance(r, dict) and r.get("counts")}
     a = {r["name"]: r for r in after if isinstance(r, dict)}
     out: list[dict[str, Any]] = []
@@ -717,7 +718,9 @@ def compare(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[d
         vb = _num(rb.get("value")) if rb else None
         va = _num(ra.get("value")) if ra.get("counts") else None
         tol = abs(_num(row.get("tolerance")) or 0.0)
-        if vb is None and va is None:
+        if rb.get("flagged") or ra.get("flagged"):
+            change = "not compared"
+        elif vb is None and va is None:
             change = "unmeasured"
         elif vb is None:
             # Measured now and not before: better only when it meets its bar; otherwise nothing to compare it with.
@@ -727,6 +730,8 @@ def compare(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[d
         else:
             db, da = _badness(row, vb), _badness(row, va)
             change = "better" if da < db - tol else "worse" if da > db + tol else "same"
+            if rb.get("met") is True and ra.get("met") is False:
+                change = "worse"  # it no longer meets its bar, however small the step that took it there
         out.append({"name": name, "before": vb, "after": va, "tolerance": tol, "change": change,
                     "met": ra.get("met") if ra else None})
     return out
@@ -770,7 +775,8 @@ def values_line(rows: list[dict[str, Any]], comparison: list[dict[str, Any]] | N
 def series_of(run: Any, names: set[str] | list[str]) -> dict[str, dict[str, list[float]]]:
     """Each trial number's values per setting, in trial order, from a :class:`core.trial_runner.TrialRun`."""
     out: dict[str, dict[str, list[float]]] = {}
-    for cell in getattr(run, "cells", None) or []:
+    cells = run.record_cells() if callable(getattr(run, "record_cells", None)) else getattr(run, "cells", None) or []
+    for cell in cells:
         rows = sorted((r for r in cell.rows if r.get("status") == "ok"), key=lambda r: r.get("trial") or 0)
         for name in names:
             values = [v for v in ((r.get("values") or {}).get(name) for r in rows) if _num(v) is not None]

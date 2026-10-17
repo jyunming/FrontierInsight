@@ -25,18 +25,18 @@ def test_the_card_puts_the_pause_first_then_everything_else_waiting(tmp_path: Pa
     (root / "needs").mkdir(parents=True)
     (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "warned"}), encoding="utf-8")
     (root / "needs" / "WANTED_PAPERS.md").write_text("- a paper\n", encoding="utf-8")
-    item = todo.pause_item("numeric", "the run's numerics warned", ["Fix experiment.py, then resume."])
+    item = todo.pause_item("figures", "the figure model cannot read images", ["Choose a model that reads images, then resume."])
     items = todo.write(root, fi, "q1", item)
     card = (root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert card.startswith("# Action needed — the run's numerics warned")
+    assert card.startswith("# Action needed — the figure model cannot read images")
     for part in ("## What to decide", "## Recommended", "## Or", "## What to do", "## Also waiting for you",
                  "the known-answer checks", "WANTED_PAPERS", "## Then go on", "--resume q1"):
         assert part in card, part
-    assert [i.kind for i in items] == ["numeric", "warned", "papers"]
+    assert [i.kind for i in items] == ["figures", "warned", "papers"]
     saved = json.loads((fi / todo.TODO_NAME).read_text(encoding="utf-8"))
-    assert saved["items"][0]["blocking"] and saved["items"][0]["recommended"].startswith("Fix experiment.py")
+    assert saved["items"][0]["blocking"] and saved["items"][0]["recommended"].startswith("Choose a model that can read images")
     text = todo.text(fi)
-    assert text.splitlines()[0] == "[FI] Waiting for you: the run's numerics warned" and "Recommended:" in text
+    assert text.splitlines()[0] == "[FI] Waiting for you: the figure model cannot read images" and "Recommended:" in text
 
 
 def test_a_call_site_can_give_its_own_recommendation(tmp_path: Path) -> None:
@@ -80,4 +80,8 @@ def test_papers_supplied_since_and_a_clean_source_record_are_not_listed(tmp_path
     assert todo.waiting(root) == []
     (root / ".fi" / "source_failures.json").write_text(json.dumps({"total": 2}), encoding="utf-8")
     assert [i.kind for i in todo.waiting(root)] == ["sources"]
-    assert todo.advice("split")[1] == "Go on: the two scripts are asked for again."
+    assert "asks for the two scripts again" in todo.advice("split")[1]
+    for kind in ("split", "manifest", "numeric", "code_layout", "equation_labels", "protocol", "replicate_seed_unrepairable"):
+        decide, recommended, alternatives = todo.advice(kind)
+        assert "Resume it" in recommended and alternatives == [], kind
+        assert not any(w in (decide + recommended).lower() for w in ("fix the script", "set `", "edit")), kind
