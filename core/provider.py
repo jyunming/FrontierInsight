@@ -818,7 +818,9 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # A user who sets any of these caching variables themselves keeps their own choice.
         env_default=(("DISABLE_PROMPT_CACHING", "1"),),
         env_default_override=("DISABLE_PROMPT_CACHING", "DISABLE_PROMPT_CACHING_SONNET", "DISABLE_PROMPT_CACHING_OPUS",
-                              "DISABLE_PROMPT_CACHING_HAIKU", "FORCE_PROMPT_CACHING_5M", "ENABLE_PROMPT_CACHING_1H"),
+                              "DISABLE_PROMPT_CACHING_HAIKU", "DISABLE_PROMPT_CACHING_FABLE",
+                              "DISABLE_PROMPT_CACHING_MYTHOS", "FORCE_PROMPT_CACHING_5M", "ENABLE_PROMPT_CACHING_1H",
+                              "ENABLE_PROMPT_CACHING_1H_BEDROCK"),
         model_flag="--model",   # provider.model = "opus" / "sonnet" / "claude-opus-4-7"
         image_input="stream_json",
         # `claude --effort <level>` (Claude Code 2.1.x). Checked against the
