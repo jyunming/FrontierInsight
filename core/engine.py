@@ -15640,8 +15640,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _apply_expected_formulas(self, path: Path) -> list[dict[str, Any]]:
         """Before the protocol is frozen and before anything ran (the callers' guard), once per quest (``formulas`` in
-        ``.fi/oracle_review.json``): a check whose ``expected_formula`` still gives another number than its ``expected``,
-        by more than the check's own tolerance, takes the formula's value (the plan's own working, computed exactly;
+        ``.fi/oracle_review.json``): a check whose ``expected_formula`` still gives another number than its ``expected``
+        (by more than the typed number's written precision or the check's tolerance, see ``oracle_forms.disagrees``), takes the formula's value (the plan's own working, computed exactly;
         a number written from memory is the weaker of the two). The tolerance, mode, case and measure are never
         touched and no measured value is used. Recorded as the engine's change, never a person's. A check whose
         formula is still missing or unusable is left exactly as it was."""
@@ -15680,7 +15680,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.warning("[oracle] %s", line)
             self._note_engine_change(names, reason=(
                 "Before anything ran, FI computed each of these expected values itself from the plan's own formula and "
-                "it differed from the number the plan wrote by more than the check's tolerance, so the check uses the "
+                "it differed from the number the plan wrote (by more than that number's own digits), so the check uses the "
                 "formula's value (worked out before any run): "
                 + "; ".join(f"{c['name']!r} {c['was']:.10g} -> {c['now']:.10g}" for c in corrections) + "."))
             path.write_text(new_text, encoding="utf-8")

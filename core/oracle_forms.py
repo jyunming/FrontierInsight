@@ -345,6 +345,20 @@ def written_precision(value: Any) -> tuple[int, float] | None:
     return digits, 0.5 * 10.0 ** exponent
 
 
+def disagrees(value: float, expected: float, limit: float) -> bool:
+    """Whether FI's own computation ``value`` of a check's expected value is another number than the ``expected`` the plan
+    typed: when they differ by more than half a unit of the last place the plan wrote (``0.99975`` is known to 5e-6), or
+    by more than the check's ``limit`` when that is smaller. One value then stands for the check: a formula's value that
+    lies inside the tolerance but outside what the plan wrote is still the plan's working and the typed number its
+    rounding (or slip), and judging a measurement against the weaker of the two lets both be quoted. A typed 0 or a
+    whole number is exact as written and is held to the tolerance only (a calculator's 1e-16 for 0 is no disagreement)."""
+    if math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
+        return False
+    precision = written_precision(expected)
+    reach = min(limit, precision[1]) if precision is not None else limit
+    return abs(value - expected) > reach
+
+
 #: A value written with at least this many significant digits and fewer than a float holds reads as a truncated
 #: decimal (0.367879 for exp(-1)), not an exact one (0.5, 2, 0.25).
 _TRUNCATED_DIGITS = (5, 13)
@@ -783,7 +797,7 @@ def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | 
         if value is None:
             found.append({"name": name, "state": "missing" if why == "missing" else "unusable", "why": why,
                           "formula": str(oracle.get("expected_formula") or ""), "names": unset})
-        elif abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
+        elif disagrees(value, expected, limit):
             formula = str(oracle.get("expected_formula"))
             if _triage.ambiguous(used or formula):
                 # A formula that can be read two ways (sin(30) for 30 degrees, a bare log, ellipk of a modulus) is never
@@ -841,6 +855,8 @@ def moved_expected(before: list[dict[str, Any]], after: list[dict[str, Any]],
         value_a, _why_a = formula_value(o, fixed)
         if value_b is None or value_a is None:
             continue
+        # (By the tolerance alone, not :func:`disagrees`: an earlier number that lay within the tolerance of the formula
+        # is the one to put back even if the plan wrote it to more digits than the formula reproduces.)
         agreed = abs(value_b - exp_b) <= lim_b or math.isclose(value_b, exp_b, rel_tol=1e-12, abs_tol=0.0)
         agrees = abs(value_a - exp_a) <= lim_a or math.isclose(value_a, exp_a, rel_tol=1e-12, abs_tol=0.0)
         if agreed and not agrees:
@@ -893,7 +909,7 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True, fixed:
 
 def apply_formulas(text: str) -> tuple[str, list[dict[str, Any]]]:
     """``(text, corrections)``: ``text`` (a plan.md) with each check's ``expected`` set to what its ``expected_formula``
-    computes where the two still disagree by more than the check's own tolerance; ``tolerance``, ``tolerance_mode``,
+    computes where the two still disagree (:func:`disagrees`: by more than the typed number's own written precision or the check's tolerance); ``tolerance``, ``tolerance_mode``,
     ``case`` and ``measure`` are never touched. Each correction is ``{"name", "was", "now", "formula"}``."""
     from . import plan as _plan
 
