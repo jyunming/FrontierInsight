@@ -377,6 +377,10 @@ class QuestState(TypedDict, total=False):
     #: The draft was written under the rule that FI fills every result number (the writer was given the sheet of keys), so
     #: the typed-number check holds it to that rule; a draft from an older build, or a study with no trial record, is not.
     paper_keys: bool
+    #: The draft was made by editing passages of the earlier one (the passage editor, or the one edit of the sentences with
+    #: numbers FI did not fill that a whole-paper draft gets when no round is left, ``Engine._typed_pass_hits``), not by the
+    #: whole-paper writer: the review takes out what is left in it.
+    draft_edited: bool
     # Two-stage implement scaffold from ``_node_implement_outline``.
     # Carries ``{scaffold, functions, data_flow, constants,
     # result_json_template, deps}`` for the body node to consume.
@@ -3511,6 +3515,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "[route] must_flag_hits=%s include objections to the design that no check of FI's confirms — writing "
                 "the paper again; the objections are kept in QUALITY.md and the design is not changed", must_flag,
             )
+            return "rewrite"
+        # No round is left and the draft has numbers FI did not fill: those sentences are edited once (outside
+        # engine.max_iterations) before any of them is taken out. The review held the take-out back for this edit, so
+        # every route below, each of which delivers the draft, waits for it; the routes above (a contradiction of FI's
+        # records, the experiment run again) write or run again, and the next review asks for the edit again.
+        if review.get("typed_pass_hits"):
+            self._log.info(
+                "[route] no round is left and %d sentence(s) hold numbers FI did not fill — editing those sentences once "
+                "before any number is taken out (outside engine.max_iterations)", len(review["typed_pass_hits"]))
             return "rewrite"
         if self.config.pauses.review == "ask":
             return "human_feedback"
@@ -20014,7 +20027,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         """The trial record and plan the paper's result keys are filled from (core/paper_values.py); ``None`` without a
         trial record or when it cannot be read."""
         try:
-            return _paper_values.records_of(self.quest_root, self._protocol_block(state))
+            rec = _paper_values.records_of(self.quest_root, self._protocol_block(state))
+            if rec is not None:
+                rec.topic = str(self.config.topic or "")  # a {{calc:...}} may use the topic's numbers, as R1 allows them
+            return rec
         except Exception as e:  # noqa: BLE001 -- the keys then read "not recorded"; the paper is not held to the rule
             self._log.warning("[write] FI's trial record could not be read for the paper's result numbers (%s: %s)",
                               type(e).__name__, str(e)[:200])
@@ -20089,8 +20105,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
                                   protocol=protocol)
         left = int(self.config.engine.max_iterations) - int(state.get("iteration", 0) or 0) - 1
+        # A draft the whole-paper writer wrote gets one edit of those passages first (_typed_pass_hits): nothing is taken out
+        # of it until that edit has been made and checked.
+        deferred = bool(self._typed_pass_hits(paper_md, state))
         removed: list[tuple[str, str]] = []
-        if keyed and left <= 0 and _paper_facts.typed_hits(
+        if keyed and left <= 0 and not deferred and _paper_facts.typed_hits(
                 paper_md, _paper_facts.plan_protocol(self.quest_root, protocol), topic):
             removed = self._take_out_typed_numbers(state, protocol)
             if removed:
@@ -20101,7 +20120,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A result key FI could not fill is no better than a typed number once no round is left to fix it: it is taken out
         # the same way (a sentence that carried only such keys goes, any other place reads the same marker) and listed.
         dropped: list[dict[str, str]] = []
-        if keyed and left <= 0 and _paper_values.unfilled_in(paper_md):
+        if keyed and left <= 0 and not deferred and _paper_values.unfilled_in(paper_md):
             dropped = self._take_out_unfilled_keys(state)
             if dropped:
                 path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
@@ -20115,10 +20134,39 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         _paper_facts.keep_check(self.quest_root, hits, paper_md, removed=removed, not_filled=not_filled, dropped=dropped)
         for hit in hits:
             self._log.warning("[record_check] %s", hit)
-        if hits and left <= 0:
+        if hits and left <= 0 and deferred:
+            self._log.info("[record_check] no review round is left, so the sentences with numbers FI did not fill are "
+                           "edited once more (outside engine.max_iterations) before any of them is taken out")
+        elif hits and left <= 0:
             self._log.warning("[record_check] %d point(s) of FI's record are still wrong or missing in the paper and no review "
                               "round is left to rewrite it; they are in .fi/paper_record_check.json and QUALITY.md", len(hits))
         return hits
+
+    def _typed_pass_hits(self, paper_md: str, state: QuestState) -> list[str]:
+        """The hits of the one edit a draft gets before FI takes anything out of it: when no review round is left, a draft
+        under the rule that FI fills every result number, written by the whole-paper writer (not by this edit), with a
+        number the writer typed that R1 does not allow or a key FI could not fill. ``[]`` otherwise.
+
+        Every take-out in real quests followed a whole-paper rewrite in the last round (to shorten the paper, after the study
+        was run again, for a hit no passage holds): the new draft typed numbers and no round was left to fix them. Edited
+        once, with FI's record of the run and ``{{calc:...}}`` at hand, almost all of them come back as FI's values or in
+        words; what is still there after the edit is taken out (:meth:`_paper_record_hits`). One edit per whole-paper draft,
+        and those are capped (engine.max_iterations, the shortening and record rewrites), so this always ends."""
+        if not state.get("paper_keys") or state.get("draft_edited"):
+            return []
+        if int(self.config.engine.max_iterations) - int(state.get("iteration", 0) or 0) - 1 > 0:
+            return []
+        try:
+            topic = str(self.config.topic or "")
+            plan = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))
+            hits = _paper_facts.typed_hits(paper_md, plan, topic) + _paper_facts.value_hits(paper_md, self.quest_root)
+            # Only a hit that quotes its sentence can be edited (the passage editor refuses a round with any other, such as
+            # the count of typed numbers past the first sentences); the numbers of the rest are taken out after the edit.
+            return [h for h in hits if paper_patch._QUOTED in h]
+        except Exception as e:  # noqa: BLE001 -- no edit: the take-out runs as it did
+            self._log.warning("[record_check] the sentences to edit once more could not be found (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            return []
 
     def _take_out_typed_numbers(self, state: QuestState, protocol: dict[str, Any] | None) -> list[tuple[str, str]]:
         """The paper with each number the writer typed that is not a number of the plan or the topic replaced by
@@ -20207,7 +20255,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A person's notes are answered by the whole-paper writer, which reads them (the passage editor does not).
         # A request the run could not carry out is told to the whole-paper writer, which the passage editor is not.
         reported = bool(state.get("extend_missed") or state.get("layout_missed"))
-        markdown = None if refine_round or reported else await self._patch_flagged_passages(state, persona_block)
+        # No round is left and the review held back the take-out of numbers FI did not fill (_typed_pass_hits): only those
+        # sentences are edited, and a draft that cannot be edited stays as it was (a whole new paper would type new ones).
+        # Not when the review sent the paper back for a contradiction of FI's records (that rewrite answers it, and the
+        # review after it asks for this edit again), nor for a request the run could not carry out, nor on a draft that
+        # was itself edited (a review's hits left in the state are not asked for twice).
+        review_now = state.get("review") or {}
+        typed_pass = [] if (refine_round or reported or state.get("draft_edited") or any(
+            _hit_name(h) == _record_claims.HIT for h in review_now.get("must_flag_hits") or [])) \
+            else list(review_now.get("typed_pass_hits") or [])
+        if typed_pass:
+            self._log.info("[write] editing the %d sentence(s) with numbers FI did not fill, once, before any is taken out",
+                           len(typed_pass))
+            markdown = await self._patch_flagged_passages(
+                {**state, "review": {**(state.get("review") or {}), "must_flag_hits": typed_pass}}, persona_block,
+                otherwise="the draft is kept as it was and the review takes those numbers out")
+            if markdown is None:
+                markdown = self._kept_draft(state) or None
+        else:
+            markdown = None if refine_round or reported else await self._patch_flagged_passages(state, persona_block)
+        edited = markdown is not None
         # A draft edited from an earlier one is under the rule its earlier draft was; a whole paper is under it when the
         # writer was given the sheet of keys (a study with no trial record has none, and an older paper is never held to it).
         keyed = bool(state.get("paper_keys")) if markdown is not None else False
@@ -20248,7 +20315,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         unreported: list[str] = []
         reasked = False
         if not refine_round:
+            asked_of = markdown
             markdown, unreported, reasked = await self._report_what_the_extension_added(state, persona_block, markdown)
+            if markdown is not asked_of:
+                edited = False  # the whole-paper writer wrote it again for what the extension added
         from generation._keywords import keep_one_keywords_form
 
         # A scientific paper has an Abstract, whichever pass wrote this draft (first, revise or shortening): its structure is
@@ -20336,6 +20406,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         out: QuestState = {
             "paper_md": str(paper_path), "literature": literature,
             "paper_basis": _paper_basis(state), "paper_keys": keyed,
+            # An edited draft had its chance to fix the numbers FI did not fill; the review takes out what is left in it.
+            "draft_edited": edited,
             "refine_needs_experiment": needs_experiment,
             "refine_extend": extend if not needs_experiment else [],
             # A layout note waits through an extended run (its figures are drawn again after the paper is written).
@@ -20450,7 +20522,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return markdown
         return _paper_sections.with_abstract(markdown, text)
 
-    async def _patch_flagged_passages(self, state: QuestState, persona_block: str) -> str | None:
+    def _kept_draft(self, state: QuestState) -> str:
+        """The draft on disk as the passage editor would have been given it (FI's values as their placeholders), for a write
+        that keeps it as it was; ``""`` when there is none."""
+        try:
+            path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+            return _paper_facts.to_placeholders(Path(path).read_text(encoding="utf-8")) if path else ""
+        except (OSError, UnicodeDecodeError):
+            return ""
+
+    def _patch_record_block(self, state: QuestState) -> str:
+        """What the passage editor is given of FI's records: FI's record of the run (its placeholders, such as
+        ``{{settings}}``) and the sheet of result keys, as the whole-paper writer is given them, so a number the check names
+        can be put back through FI's own placeholder instead of being worded away."""
+        try:
+            section = _paper_facts.writer_section(
+                self.quest_root, topic=str(self.config.topic or ""),
+                fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+        except Exception as e:  # noqa: BLE001 -- a record FI cannot read is left out, never a reason to stop
+            self._log.warning("[write] FI's record of the run could not be given to the editor (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            section = ""
+        sheet = self._values_sheet(state) if state.get("paper_keys") else ""
+        return (f"{section}\n\n{sheet}".strip() or
+                "(none: this paper was not written with FI's result keys)")
+
+    async def _patch_flagged_passages(self, state: QuestState, persona_block: str, *,
+                                      otherwise: str = "writing the whole paper again") -> str | None:
         """The earlier draft with the passages the review named edited, or
         ``None`` when this round writes the whole paper.
 
@@ -20505,7 +20603,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 captions=_review_items(review.get("figure_caption_warnings")),
             )
         if reason:
-            self._log.info("[write] writing the whole paper again: %s", reason)
+            self._log.info("[write] %s: %s", otherwise, reason)
             return None
         located = sum(1 for p in passages if p.located)
         prompt = self._prompts["write_patch"].substitute(
@@ -20516,8 +20614,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 state, audience=self.config.output.audience, mark_thin=True, **self._lit_kwargs(state),
             ),
             passages_block=paper_patch.format_passages(passages),
-            values_sheet=(self._values_sheet(state) if state.get("paper_keys") else "") or
-            "(none: this paper was not written with FI's result keys)",
+            values_sheet=self._patch_record_block(state),
             paper_block=previous,
         )
         self._log.info(
@@ -20528,16 +20625,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             reply = await self._chat(prompt, node="write.patch")
         except Exception as e:  # noqa: BLE001 - the whole-paper call below is what a real outage stops
             self._log.warning(
-                "[write] the call for edits failed (%s: %s); writing the whole paper again",
-                type(e).__name__, str(e)[:200],
+                "[write] the call for edits failed (%s: %s); %s",
+                type(e).__name__, str(e)[:200], otherwise,
             )
             return None
         try:
             patched = paper_patch.apply_edits(previous, end, paper_patch.parse_edits(reply))
         except paper_patch.PatchError as e:
             self._log.warning(
-                "[write] the edits could not be used (%s); writing the whole paper again. "
-                "The reply began: %r", e, " ".join(str(reply).split())[:160],
+                "[write] the edits could not be used (%s); %s. "
+                "The reply began: %r", e, otherwise, " ".join(str(reply).split())[:160],
             )
             return None
         self._log.info(
@@ -22451,6 +22548,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             review["must_flag_hits"] += record_hits
             # Forced, and text-only: what the paper states about the run against FI's records (core/paper_facts.py).
             review["must_flag_hits"] += self._paper_record_hits(paper_md, state)
+            typed_pass = self._typed_pass_hits(paper_md, state)
+            if typed_pass:
+                review["typed_pass_hits"] = typed_pass
             # Forced as well: nothing checked this draft's citations.
             review["must_flag_hits"] += _citations_unchecked(state)
             # And a draft over the page limit.
@@ -22648,6 +22748,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         stated_hits = self._paper_record_hits(paper_md, state)
         if stated_hits:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *stated_hits]
+        typed_pass = self._typed_pass_hits(paper_md, state)
+        if typed_pass:
+            review["typed_pass_hits"] = typed_pass
         unchecked = _citations_unchecked(state)
         if unchecked:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *unchecked]
