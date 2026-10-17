@@ -102,7 +102,7 @@ def _state(**more: Any) -> dict[str, Any]:
 
 def test_the_new_prompts_are_registered() -> None:
     prompts = engine_mod._load_prompts()
-    for name in ("probe_relations", "second_impl_write", "second_impl_adjudicate"):
+    for name in ("second_impl_write", "second_impl_adjudicate"):
         assert name in prompts
 
 

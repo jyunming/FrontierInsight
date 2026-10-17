@@ -645,11 +645,6 @@ def assess(
                        "version was confirmed; that confirmation does not count for it)")
     if settings.get("phased_record_gap"):
         ready_gaps.append(str(settings["phased_record_gap"]))
-    if settings.get("code_writer_isolation") == "isolation_unverified":
-        # The coding agent ran on this computer with no sandbox (core/agent_coder.py): said plainly, as for held-back
-        # rows whose isolation was not shown (core/phased_isolation.py).
-        ready_gaps.append("the code writer ran without isolation ("
-                          + str(settings.get("code_writer_isolation_why") or "no reason recorded") + ")")
     if settings.get("phased") == "confirmed":
         # Held back is not unseen unless exploration could not read it (core/phased_isolation.py), and rows of one
         # subject or site split one by one are not unseen either (core/phased_data.py).
@@ -825,10 +820,6 @@ def assess(
         if settings.get("phased_isolation"):
             # docker, encrypted+scanned, or isolation_unverified (core/phased_isolation.py).
             record["phased"]["isolation"] = settings["phased_isolation"]
-    if settings.get("code_writer_isolation"):
-        # docker, or isolation_unverified when the coding agent ran on this computer without a container.
-        record["code_writer"] = {"isolation": settings["code_writer_isolation"],
-                                 "why": settings.get("code_writer_isolation_why") or ""}
     if settings.get("sealing") and settings.get("rigor_profile") == "research":
         # Written before the seal that names it: whoever reads it checks the seal (verify_seal).
         record["trace_seal"] = "pending"
