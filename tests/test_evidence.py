@@ -113,6 +113,23 @@ def test_a_point_the_record_check_left_keeps_the_quest_at_executed(tmp_path: Pat
     assert got["gaps"] == ["the check of the paper's numbers against FI's records reported 1 finding(s)"]
 
 
+@pytest.mark.parametrize("why,words", [("no_records", "the study kept no trial record"),
+                                       ("older_paper", "this paper was written before FI filled in its numbers")])
+def test_a_paper_whose_numbers_fi_did_not_check_is_not_reconciled(tmp_path: Path, why: str, words: str) -> None:
+    """No hits is no evidence of a faithful paper when FI had no record to hold the numbers to (``not_filled_by_fi``); a
+    keyed simulate-path paper (a record with no such key, or no record at all) still reaches the level."""
+    root = _quest(tmp_path)
+    (root / ".fi").mkdir(exist_ok=True)
+    (root / ".fi" / "paper_record_check.json").write_text(json.dumps({"hits": [], "not_filled_by_fi": why}), encoding="utf-8")
+    ok, gaps = evidence._audit_gaps(root)
+    assert not ok and gaps == [f"FI did not check this paper's numbers against its own records ({words})"]
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["status"] == "executed" and got["gaps"] == gaps
+    (root / ".fi" / "paper_record_check.json").write_text(json.dumps({"hits": [], "unmet_items": []}), encoding="utf-8")
+    assert evidence._audit_gaps(root) == (True, [])
+    assert evidence.assess(root, _state(), settings=ON)["status"] != "executed"
+
+
 def test_a_paper_never_checked_does_not_pass_on_the_record_check_alone(tmp_path: Path) -> None:
     """Only the record check's (empty) file exists and the review never wrote its statistics report: the paper was not checked."""
     root = _quest(tmp_path, audits=False)

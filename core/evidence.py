@@ -164,7 +164,10 @@ def _audit_gaps(quest_root: Path) -> tuple[bool, list[str]]:
     not a pass either. The check of the paper's numbers against FI's records (core/paper_facts.py) keeps what it found in
     ``.fi/paper_record_check.json`` and removes it when the paper is clean: what remains in it after the last review is a point
     of the paper that still disagrees with FI's records (a typed number no record backs, a key FI could not fill).
-    A report that is missing altogether means the review has not checked this paper yet, said once, plainly.
+    A report that is missing altogether means the review has not checked this paper yet, said once, plainly. The record also
+    says, in ``not_filled_by_fi``, when FI could not hold the paper's numbers to its own records at all (``no_records``: the
+    study kept no per-setting trial record; ``older_paper``: the paper was written before FI filled its result numbers in); an
+    absent key means they were checked. Nothing found is then no evidence of a faithful paper, so that is a gap.
     """
     report = _json(quest_root / "paper" / "statistics_audit.json")
     if not isinstance(report, dict):
@@ -176,6 +179,11 @@ def _audit_gaps(quest_root: Path) -> tuple[bool, list[str]]:
     hits = record.get("hits") if isinstance(record, dict) else None
     if isinstance(hits, list) and hits:
         gaps.append(f"the check of the paper's numbers against FI's records reported {len(hits)} finding(s)")
+    not_checked = str(record.get("not_filled_by_fi") or "") if isinstance(record, dict) else ""
+    if not_checked:
+        gaps.append("FI did not check this paper's numbers against its own records ("
+                    + ("this paper was written before FI filled in its numbers" if not_checked == "older_paper"
+                       else "the study kept no trial record") + ")")
     return not report.get("skipped") and not gaps, gaps
 
 

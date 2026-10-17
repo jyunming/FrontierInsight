@@ -12,10 +12,11 @@ recorder wrote; never from the script's claims):
 Only what the analysis reports is judged (a quantity nobody reports is a diagnostic), a setting echoed back is not a
 result, and a value of exactly 0 or 1 is never read as stuck at a bound (an indicator or a probability is allowed to be
 there). A quantity the plan expects to stay put (what an invariant, symmetry or second-implementation check measures when
-that is one bare name, a declared bound) is exempt.
+that is one bare name, a check of any other kind whose bare measure the plan does not list as a metric, a declared bound) is
+exempt.
 
 Only a quantity the plan itself says is estimated from the data (:func:`plan_estimates`: the plan's metrics, the names of a
-known value, the metric the run's size is set for, what a special-case check measures) is questioned: sent back, then left
+known value, the metric the run's size is set for) is questioned: sent back, then left
 out. Any other flat quantity (a theory value that depends on the fixed design only, a design constant, a count) is kept in the
 results and the limitations say, from FI's record, that it was identical at all the settings (:func:`kept_note`). The
 all-identical case is :mod:`core.flat_output`'s; this is the quantity that is flat while others are not.
@@ -302,22 +303,24 @@ def _quantity_problems_in(cells: list[dict[str, Any]], reported: set[str], exemp
 
 #: The kinds of check whose measured quantity is expected to be the same everywhere (a worst violation of an invariant).
 _EXPECTED_KINDS = ("invariant", "symmetry", "second_implementation")
-#: The kinds of check whose measured quantity is a value the plan expects to learn from the data (a special case, a published value).
-_MEASURED_KINDS = ("special_case", "published_value")
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 
 def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
-    """Names the plan itself expects to stay put: what a check of an invariant, a symmetry or a second implementation measures
-    when the measure IS that one name (``bh_scipy_disagree``), and the keys of the plan's declared bounds or limits. A name
-    that is only an operand of a measure's expression (``abs(Ea_hat - Ea_polyfit)``) is not exempt: what the check measures is
-    the expression, and ``Ea_hat`` in it is still the plan's own estimate."""
+    """Names the plan itself expects to stay put. A check's own measure, when it IS one bare name, is not a data estimate
+    unless the plan lists it as one of its metrics (:func:`plan_estimates`): a worst violation (invariant, symmetry, second
+    implementation) is expected to stay put whatever it is called, and what a check of any other kind measures at its fixed
+    case (a known answer for fixed inputs, such as ``bh_fixed_rejections``) is the same at every setting by construction.
+    Also the keys of the plan's declared bounds or limits. A name that is only an operand of a measure's expression
+    (``abs(Ea_hat - Ea_polyfit)``) is not exempt: what the check measures is the expression, and ``Ea_hat`` in it is still
+    the plan's own estimate."""
     from . import oracle_check as _oracle
 
+    estimated = plan_estimates(protocol)
     out: set[str] = set()
     for o in _oracle.declared(protocol):
         measure = str(o.get("measure") or "").strip()
-        if _oracle.kind_of(o) in _EXPECTED_KINDS and _IDENT.fullmatch(measure):
+        if _IDENT.fullmatch(measure) and (_oracle.kind_of(o) in _EXPECTED_KINDS or measure not in estimated):
             out.add(measure)
     for key in ("bounds", "limits"):
         block = (protocol or {}).get(key) if isinstance(protocol, dict) else None
@@ -327,12 +330,11 @@ def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
 
 
 def plan_estimates(protocol: dict[str, Any] | None) -> set[str]:
-    """Names the frozen plan says are estimated or measured from the trials, from fields it already has: each metric's id, the
-    names of a metric's declared known value (its estimate, its standard error, the two ends of its interval), the metric
-    the run's size is set for (``precision.metric``), and what a special-case or published-value check measures when that is
-    one bare name (an expression is not a name). A theory value, a design constant or a count is not among them."""
-    from . import oracle_check as _oracle
-
+    """Names the frozen plan says are estimated from the trials, from fields it already has: each metric's id, the names of a
+    metric's declared known value (its estimate, its standard error, the two ends of its interval) and the metric the run's
+    size is set for (``precision.metric``). What a check measures is not read here: a check measures either a metric the plan
+    already lists or a quantity at a fixed case (:func:`expected_constants`). A theory value, a design constant or a count is
+    not among them."""
     p = protocol if isinstance(protocol, dict) else {}
     out: set[str] = set()
     for m in p.get("metrics") if isinstance(p.get("metrics"), list) else []:
@@ -347,10 +349,6 @@ def plan_estimates(protocol: dict[str, Any] | None) -> set[str]:
     precision = p.get("precision")
     if isinstance(precision, dict) and precision.get("metric"):
         out.add(str(precision["metric"]))
-    for o in _oracle.declared(p):
-        measure = str(o.get("measure") or "").strip()
-        if _oracle.kind_of(o) in _MEASURED_KINDS and _IDENT.fullmatch(measure):
-            out.add(measure)
     return out
 
 
