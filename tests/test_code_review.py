@@ -515,6 +515,23 @@ def _record(tmp_path: Path, *, missing: int = 2, logic: bool = True, **extra: An
     return root, code
 
 
+def test_a_headline_computed_differently_never_stops_as_not_computed_and_a_missing_one_still_does(tmp_path: Path) -> None:
+    # Live: p2 fdr (53cafd) stopped "the code does not compute the study's main quantity" on a finding that said it is
+    # computed, differently (the run's repeat count; an extra all-null value), whose name is a sentence no result key has.
+    root, code = _record(tmp_path, missing=0, logic=False)
+    rec = cr.load(root)
+    rec["problems"] = [{"id": "R1", "kind": "dependent variable", "status": "different", "headline": True, "fid": "F-h",
+                        "name": "realised false discovery rate E[V/max(R,1)] for every m and pi1",
+                        "text": "the dependent variable realised false discovery rate is computed and reported"}]
+    cr.save(root, rec)
+    result = {"fdr_bh": [0.04, 0.05]}
+    assert cr.resolve_headline(root, code, result) == [] and cr.headline_missing(root, code) == []
+    rec["problems"][0]["status"] = "missing"
+    cr.save(root, rec)
+    assert cr.headline_missing(root, code) == [rec["problems"][0]["text"]]
+    assert cr.resolve_headline(root, code, result) == [rec["problems"][0]["text"]]
+
+
 def test_the_note_names_every_kind_of_open_finding_not_only_the_missing_quantities(tmp_path: Path) -> None:
     root, code = _record(tmp_path)
     note = cr.write_note(root, code)

@@ -629,7 +629,7 @@ def headline_missing(quest_root: Path, code_dir: Path) -> list[str]:
     """The headline requirements the code is still said to miss. (A problem of logic is not a missing quantity: see
     :func:`headline_constant`.)"""
     return [v["text"] for v in not_computed(quest_root, code_dir)
-            if v.get("headline") and not v.get("contradicted") and v.get("kind") != "logic"]
+            if v.get("headline") and not v.get("contradicted") and v.get("kind") != "logic" and v.get("status") == MISSING]
 
 
 def headline_constant(quest_root: Path, code_dir: Path) -> list[str]:
@@ -910,18 +910,20 @@ def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any
 def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     """After a run: of the headline requirements a reader still called missing, those the run's results do not hold
     either (the quest then stops, honestly). The ones the results do hold are recorded as a disagreement between the
-    reader and the results (the reader was wrong, and the paper is not told they were not computed)."""
+    reader and the results (the reader was wrong, and the paper is not told they were not computed). Only a requirement
+    the reader called missing: one it called computed differently from the plan is computed, by its own reading, so it
+    never stops the quest as "not computed" (the paper says it is not as the plan defines it, and FI leaves its values out
+    of the results unless its own record contradicts the reader: :meth:`core.result_checks.ResultChecks._code_reader_findings`)."""
     record = load(quest_root)
     if not record.get("final") or record.get("version") != version(code_dir):
         return []
     absent: list[str] = []
     changed = False
     for v in record.get("problems") or []:
-        if not isinstance(v, dict) or not v.get("headline") or v.get("contradicted") or v.get("kind") == "logic":
+        if (not isinstance(v, dict) or not v.get("headline") or v.get("contradicted") or v.get("kind") == "logic"
+                or v.get("status") != MISSING):
             continue
         if in_results(str(v.get("name") or ""), result):
-            if v.get("status") == DIFFERENT:
-                continue  # computed under another definition: the results holding a value does not say the reader was wrong
             v["contradicted"] = True
             changed = True
         else:
