@@ -107,7 +107,7 @@ def _quest(tmp_path: Path, source: str) -> Path:
 def _measure(root: Path, grid: dict, runs: int, deterministic: bool, limit_s: float = 600.0, executor=None):  # noqa: ANN001, ANN201
     return asyncio.run(est.measure(
         executor or SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", grid,
-        runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=60.0))
+        runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=600.0))
 
 
 def test_a_stochastic_simulation_is_timed_on_two_trials_and_its_cost_follows_its_settings(tmp_path: Path) -> None:

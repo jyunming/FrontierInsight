@@ -181,6 +181,7 @@ async def test_the_gate_sets_a_check_with_a_slip_aside_from_the_repairs_and_offe
                         execution=ExecutionConfig(sandbox="venv"), knowledge=KnowledgeConfig(enabled=False),
                         output=OutputConfig(output_dir=tmp_path / "out")))
     eng._oracle_proposals, eng._oracle_disputed, eng._oracle_set_aside, eng._oracle_noisy = {}, set(), {}, set()
+    eng._oracle_undecided = set()
     same = oracle_triage.recompute_entry(EXACT_90, "agrees", 1.1803415, MEASURED, PENDULUM_RECHECK, model="gemma",
                                          same_model=True)
     eng._recompute_expected = AsyncMock(return_value=(same, True))  # type: ignore[method-assign]
@@ -208,6 +209,7 @@ def _engine_with_plan(tmp_path: Path, oracle: dict[str, Any]) -> Engine:
                         execution=ExecutionConfig(sandbox="venv"), knowledge=KnowledgeConfig(enabled=False),
                         output=OutputConfig(output_dir=tmp_path / "out")))
     eng._oracle_proposals, eng._oracle_disputed, eng._oracle_set_aside, eng._oracle_noisy = {}, set(), {}, set()
+    eng._oracle_undecided = set()
     eng.quest_root.mkdir(parents=True, exist_ok=True)
     design = {"hypothesis": "h", "method": "m", "protocol": {"grid": {"amplitude_deg": [5, 90]}, "oracles": [oracle]}}
     text = plan.render("pendulum", {}, design)
@@ -915,6 +917,7 @@ async def test_which_function_a_check_runs_is_decided_per_check_not_once_for_all
                         execution=ExecutionConfig(sandbox="venv"), knowledge=KnowledgeConfig(enabled=False),
                         output=OutputConfig(output_dir=tmp_path / "out")))
     eng._oracle_proposals, eng._oracle_disputed, eng._oracle_set_aside, eng._oracle_noisy = {}, set(), {}, set()
+    eng._oracle_undecided = set()
     eng._trial_mode = True
     seed = eng.quest_root / "code" / "simulate.py"
     seed.parent.mkdir(parents=True, exist_ok=True)
@@ -963,6 +966,7 @@ async def test_a_failing_check_fi_computed_itself_is_not_worked_out_again_by_a_m
                         execution=ExecutionConfig(sandbox="venv"), knowledge=KnowledgeConfig(enabled=False),
                         output=OutputConfig(output_dir=tmp_path / "out")))
     eng._oracle_proposals, eng._oracle_disputed, eng._oracle_set_aside, eng._oracle_noisy = {}, set(), {}, set()
+    eng._oracle_undecided = set()
     eng._recompute_expected = AsyncMock(side_effect=AssertionError("no model is asked"))  # type: ignore[method-assign]
     seed = eng.quest_root / "code" / "simulate.py"
     seed.parent.mkdir(parents=True, exist_ok=True)
