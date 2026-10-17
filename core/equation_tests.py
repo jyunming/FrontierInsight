@@ -23,8 +23,7 @@ inputs and which returns the equation's output as one number. The outline step n
 (``"method"``), the plan's own numerical setting decides (``"tolerance"`` and ``"tolerance_mode"``, required with a
 method); a stated tolerance without a method can only make the test tighter. FI never invents a looser one.
 
-**An equation whose output is a random draw** (``"example": {"random": true, ...}``, or a formula that names a
-distribution) is tested on the distribution, not on one call: ``expected_formula`` is the distribution's MEAN for those
+**An equation whose output is a random draw** (``"example": {"random": true, ...}``, the plan's own flag) is tested on the distribution, not on one call: ``expected_formula`` is the distribution's MEAN for those
 inputs (and ``variance_formula``, when the plan states it, its variance). The test calls the function ``DRAWS`` times
 with fixed seeds (a numpy generator seeded once and passed as the parameter ``rng``, or ``seed`` = 0, 1, 2, ... when the
 function takes that), and holds the mean of the draws to ``SIGMAS`` standard errors of the stated mean (the standard
@@ -129,29 +128,18 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
-#: A formula that names a distribution or says its value is drawn: the equation's output is then a random draw.
-_DISTRIBUTIONS = (r"poisson|binomial|bernoulli|gaussian|normal|uniform|exponential|gamma|beta|lognormal|geometric|"
-                  r"weibull|multinomial|student|chi|cauchy|laplace|logistic|categorical")
-_DRAW_WORDS = re.compile(
-    rf"\b(?:{_DISTRIBUTIONS})\s*\(|\b(?:drawn|sampled|generated|simulated) from\b|\brandomly (?:drawn|sampled|generated)\b"
-    r"|\b(?:random|stochastic) (?:draw|sample|variate|variable|noise|term|error|perturbation|fluctuation)s?\b"
-    # a term said to follow a distribution: `x ~ N(0, 1)`, `x ~ Normal`, `x ~ U(a, b)`, `x ~ Poisson(lam)`
-    rf"|[~∼]\s*(?:[A-Za-z][A-Za-z0-9_]{{0,15}}\s*\(|(?:{_DISTRIBUTIONS})\b)"
-    rf"|\bdistributed (?:as|according to|like)\b|\bfollows? (?:an? )?(?:{_DISTRIBUTIONS})\b", re.IGNORECASE)
-
-
 def is_random(equation: dict[str, Any]) -> bool:
-    """Whether the equation's output is a random draw: the plan marked its example (or the equation) ``"random": true``,
-    or the equation's formula says a term follows a distribution (``Poisson(...)``, ``x ~ N(0, 1)``, ``x ~ U(a, b)``,
-    "distributed as") or that its value is drawn or random. Conservative on purpose: a deterministic function that is
-    taken for a random one is still held to the strict rule (see the module text), so nothing is loosened."""
+    """Whether the equation's output is a random draw: the plan marked its example (or the equation) ``"random": true``.
+    Only that record decides. The formula's words never do (a ``~ N(0, 1)`` that defines a term of the formula, or the
+    ``gamma(d)`` of a coherence function, is not a statement that the example's output is a draw: an example whose inputs
+    already fix the output is a plain function of them, and the draw belongs to the step that generates its inputs); the
+    plan is told to flag a random output (:data:`EXAMPLE_RULE`), and an unflagged draw fails the exact test, which puts
+    the example back to the plan with that rule."""
     example = equation.get("example")
     unset = (None, False, "", 0, "false", "False")
     if isinstance(example, dict) and example.get("random") not in unset:
         return True
-    if equation.get("random") not in unset:  # the plan wrote the flag beside the example instead of inside it
-        return True
-    return bool(_DRAW_WORDS.search(_text(equation.get("formula"))))
+    return equation.get("random") not in unset  # the plan wrote the flag beside the example instead of inside it
 
 
 _DEFINES = re.compile(r"^\s*([A-Za-z_]\w*)\s*=(?!=)")
@@ -464,7 +452,10 @@ def rederive_request(items: list[dict[str, Any]]) -> str:
     for it in items:
         why = _COULD_NOT_MEET.get(it.get("why"), _text(it.get("why")))
         written = json.dumps(it.get("example"), ensure_ascii=False, default=str) if it.get("example") is not None else "none"
-        lines.append(f"- {it['id']} (`{it['formula']}`): the example you gave, `{written}`, could not be met: {why}.")
+        names = [n for n in (it.get("names") or []) if n not in (*RNG_PARAMS, SEED_PARAM) and not n.startswith("*")]
+        fixed = (f" The function for it is already planned with the parameters ({', '.join(names)}): give the example's "
+                 "`inputs` under exactly those names." if names else "")
+        lines.append(f"- {it['id']} (`{it['formula']}`): the example you gave, `{written}`, could not be met: {why}.{fixed}")
     return ("FI tested each equation of the model before the study ran, from the worked example the plan gave. For the "
             "equations below the example could not be met by code that follows the equation as written, so the example "
             "may be the fault. Work each one out again from its equation as it is written: `inputs` are that equation's own "

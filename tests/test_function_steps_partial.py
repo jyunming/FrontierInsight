@@ -160,7 +160,10 @@ async def test_an_example_whose_inputs_are_not_the_outline_s_parameters_is_fi_s_
            *PROTOCOL["model"]["equations"][1:]]
     protocol = {"model": {**PROTOCOL["model"], "equations": eqs}}
     model = _ModuleModel({k: [v] for k, v in GOOD.items()}, module_replies=[""])
-    specs, _ = fs.model_functions(OUTLINE, protocol)
+    # FI's own reading of the outline now names the example's inputs, so a mismatch is possible only for a spec made before
+    # the example changed (here: made from the earlier protocol); the filler still does not blame the function for it.
+    assert fs.model_functions(OUTLINE, protocol)[0][0].params() == ["k", "mass"]
+    specs, _ = fs.model_functions(OUTLINE, PROTOCOL)
     outcome = await _filler(tmp_path, model, protocol=protocol).run_all(specs)
     assert outcome.status == "done" and len(model.prompts) == 3
     assert "does not fit the outline's function" in fs.load(tmp_path)["unchecked"]["frequency"]

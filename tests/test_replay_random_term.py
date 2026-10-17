@@ -58,14 +58,12 @@ def test_the_equation_that_states_a_distribution_is_a_random_one_with_its_stated
     assert row["expected"] == 2.5 and row["variance"] == 1.0
 
 
-def test_a_formula_that_says_a_term_follows_a_distribution_is_read_as_random_without_any_flag() -> None:
-    for formula in ("y = a + e, e ~ N(0, 1)", "y = a + e where e ~ Normal", "y = a + u, u ~ U(0, 1)",
-                    "y = a + e with e∼Poisson(2)", "y = a + e, e is drawn from a wide band", "y = a + random noise",
-                    "y = a + e, e distributed as a standard normal"):
-        assert eqt.is_random({"formula": formula}), formula
-    for formula in ("y = a * b", "y = exp(-k * t)", "FDR_BH = pi0 * 0.05", "p = 1 - Phi(z)",
-                    "y = a * b with the random seed fixed", "n = number of non-random walks"):
+def test_only_the_plans_flag_makes_an_equation_a_random_one_never_the_words_of_its_formula() -> None:
+    for formula in ("y = a + e, e ~ N(0, 1)", "p_i = 1 - Phi(z_i), with z_i = eps_i + delta*h_i, eps_i ~ N(0,1)",
+                    "gamma(d) = 2 J1(u)/u", "y = a + e, e is drawn from a wide band", "y = a * b"):
         assert not eqt.is_random({"formula": formula}), formula
+        assert eqt.is_random({"formula": formula, "random": True}), formula
+        assert eqt.is_random({"formula": formula, "example": {"inputs": {"a": 1}, "random": True}}), formula
 
 
 def test_a_correct_random_implementation_passes(tmp_path: Path) -> None:
