@@ -6378,7 +6378,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return [g["sentence"] for g in current["gaps"]]
 
         def request(now: Any, _text: str) -> str:
-            return _topic_req.request(self.config.topic, current["gaps"], search=_optim.has_block(now))
+            return _topic_req.request(self.config.topic, current["gaps"], search=_optim.has_block(now), req=req)
 
         return await self._ask_plan_to_complete(
             design, plan_sha, lacks=lacks, request=request,
@@ -6467,7 +6467,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                               "; ".join(g["sentence"] for g in gaps)[:300], asks,
                               _SEARCH_ASKS + (_SCHEMA_RETRY_ASKS if schema else 0))
             self._progress("Asking the model to add what the topic asks for to the design")
-            ask = (_topic_req.request(self.config.topic, gaps, search=_optim.has_block(design))
+            ask = (_topic_req.request(self.config.topic, gaps, search=_optim.has_block(design), req=req)
                    + "\n\nThe design drafted so far:\n" + json.dumps(design, ensure_ascii=False, default=str)[:8000]
                    + "\n\nAnswer with the whole design as one JSON object, with what was asked added.")
             if problem:
