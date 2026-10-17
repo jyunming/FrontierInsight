@@ -22225,7 +22225,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # inventing new ways to write a number. A wrong number in the
             # paper is bad; silently burning the iteration budget on a
             # correct one is worse, so the findings are surfaced to the human
-            # (log, paper/numeric_audit.json, and the human-review panel in all
+            # (log and the human-review panel in all
             # three interfaces) and the verdict is left to the reviewer.
             numeric_warnings = self._reference_check_hits(state)
             if numeric_warnings:
