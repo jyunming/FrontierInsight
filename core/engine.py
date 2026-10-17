@@ -11906,12 +11906,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if not _code_review.may_read(record, final=final, after_run_repair=after_run_repair):
                 if final:
                     cap = _code_review.read_cap(final=True, after_run_repair=after_run_repair)
+                    # A flag sticks: what the last reading left open stays open for this version, which no one read
+                    # (core/code_review.py:still_open), so the paper's limitations and the gate still see it.
+                    kept = ({"problems": _code_review.still_open(record), "final": True}
+                            if record.get("read_version") else {})
                     record = {**_code_review.carried(record), "version": version, "requirements": len(reqs),
-                              "skipped": f"the {cap} readings of the code allowed in a quest are spent"}
+                              "skipped": f"the {cap} readings of the code allowed in a quest are spent", **kept}
                     _code_review.save(self.quest_root, record)
                     self._log.warning("[code_review] %s%s", _code_review.plain_lines(record),
-                                      "; the final version of the code was not read again by another model"
-                                      if record.get("read_version") else "")
+                                      "; the final version of the code was not read again by another model, so what the "
+                                      "last reading left open stays open" if record.get("read_version") else "")
+                    self._code_review_outcome(record)
                 else:
                     self._log.info("[code_review] the code was repaired; the last reading is kept for the version that will "
                                    "run, so it is read just before the run")
