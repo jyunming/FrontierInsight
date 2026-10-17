@@ -1047,8 +1047,9 @@ def _axis_choices(grid, sub):
     return out
 
 
-#: Counting the settings that two or more sub-studies share is exact up to this many sub-studies (it takes 2^n steps);
-#: beyond it the count is the sum of the sub-studies', which is at most what the study has.
+#: Counting the settings that two or more sub-studies share by inclusion-exclusion takes 2^n steps, so it is done for up to this
+#: many sub-studies; beyond it :func:`grid_size` lists the settings to count them when the sum of the parts is under the limit
+#: FI lists, and otherwise gives that sum (an upper bound: the study is stopped for its size either way).
 MAX_EXACT_SUB_STUDIES = 12
 
 
@@ -1081,8 +1082,14 @@ def grid_weight(grid, weights=None):
 
 def grid_size(grid):
     """How many settings a grid names, counted without listing any: the product of its axes' lengths; for a grid with
-    sub-studies, the settings in at least one of them (a setting two of them share is counted once)."""
-    return grid_weight(grid)
+    sub-studies, the settings in at least one of them (a setting two of them share is counted once). Always the length of
+    :func:`grid_cells`, except above :data:`MAX_EXACT_SUB_STUDIES` sub-studies and more settings than FI lists, where it is the
+    sum of the sub-studies' (at least the count, over the limit either way)."""
+    subs = getattr(grid, "sub_studies", None)
+    total = grid_weight(grid)
+    if subs and len(subs) > MAX_EXACT_SUB_STUDIES and total <= MAX_LISTED_SETTINGS:
+        return sum(1 for _ in iter_grid_indexes(grid))
+    return total
 
 
 def sub_study_sizes(grid):

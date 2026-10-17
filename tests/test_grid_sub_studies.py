@@ -73,6 +73,17 @@ def test_the_union_count_equals_the_list_for_random_overlaps() -> None:
         assert search.grid_size(grid) == len(cells) == len({tuple(c.items()) for c in cells})
 
 
+def test_the_count_is_the_length_of_the_list_beyond_the_parts_counted_by_inclusion_exclusion() -> None:
+    axes = {f"a{i}": list(range(3)) for i in range(6)}
+    subs = [{"vary": [f"a{i % 6}", f"a{(i + 1) % 6}"]} for i in range(14)]  # 14 overlapping parts
+    grid = search.study_grid({"grid": axes, "sub_studies": subs})
+    assert len(grid.sub_studies) > search.MAX_EXACT_SUB_STUDIES
+    assert search.grid_size(grid) == len(search.grid_cells(grid)) < sum(n for _, n in search.sub_study_sizes(grid))
+    big = search.study_grid({"grid": {f"b{i}": list(range(60)) for i in range(4)},
+                             "sub_studies": [{"vary": [f"b{i % 4}", f"b{(i + 1) % 4}", f"b{(i + 2) % 4}"]} for i in range(14)]})
+    assert search.grid_size(big) > search.MAX_LISTED_SETTINGS and search.grid_too_large(big)  # over the limit either way
+
+
 def test_what_each_run_compares_inside_it_is_crossed_with_every_setting() -> None:
     grid = search.with_everywhere(search.study_grid(_protocol()), {"method": ["x", "y"]})
     cells = search.grid_cells(grid)
