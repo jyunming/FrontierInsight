@@ -18,6 +18,8 @@ Four things in that section count as what ran, besides the code:
 
 If part of the code is listed as NOT SHOWN, do not call a claim about that part `unsupported` just because it is not shown: ground it as you would have without the code (the plan or the scripts that are shown may ground it), unless a finding of the second model's reading says the code does not do it, and then it is `unsupported`. If a second model's findings listed there say the code does not do what the claim says, the claim is `experiment` only when the code shown plainly does it.
 
+A value between `<!-- fi:v {{v:...}} -->` and `<!-- /fi:v -->` was filled in by FI from its own records, not typed by the writer: take the number as true and judge the claim's words ("BH controls the false discovery rate at every setting", "higher at larger noise", "better than the baseline") against it, never the number. The key inside the marker names the quantity and the settings it was computed for, so a claim that says the number is something else, or from another setting, is `unsupported`.
+
 Be strict and honest: when a claim asserts a specific number about a RESULT, that number MUST appear in the evidence block (for `experiment`) or in the cited source — otherwise it is `unsupported`. A specific number in a claim about HOW the study was run (a step size, a constant, a setting) may be grounded by the code shown or by FI's record; a constant in the code is never a result. Prefer `unsupported` over a generous benefit-of-the-doubt label. Do not invent a `citation_index` that doesn't correspond to a real claim-supporting reference.
 
 # Output format

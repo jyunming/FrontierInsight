@@ -652,8 +652,8 @@ _KNOWN_NODES = frozenset({
 # (`_enforce_protocol`); "skills" -> `_node_select_skills` (the node's own log lines never say
 # "[select_skills]"); "after_literature" -> `_node_pause_after_literature` (same mismatch); "stats"
 # -> `_node_analyze`; "numeric_oracle"/"stat_claims"/"figure_check"/"goal_coverage"/
-# "number_provenance"/"page_limit" -> `_node_review` (the provenance/claim/figure/page-limit audits
-# it runs before accepting or sending back); "auto_collect" -> `_node_auto_collect_data`. Left out
+# "number_provenance"/"page_limit" -> `_node_review` (the reference-value/claim/figure/topic/page-limit checks
+# it runs before accepting or sending back; "number_provenance" is kept for older run logs); "auto_collect" -> `_node_auto_collect_data`. Left out
 # on purpose: "evidence" (written by `run()` after the graph settles, not from inside any one
 # node), "cost" (an ``_ensemble_chat`` line any ensembled node can log), "audit" (the audit-trace
 # wrapper around every node) — none names a single node truthfully.

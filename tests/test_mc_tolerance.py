@@ -309,13 +309,16 @@ def test_a_check_whose_trials_all_agree_is_judged_as_before(tmp_path: Path) -> N
     assert "mc" not in checks[0] and "mc" not in judged[0], "deterministic: unchanged"
 
 
-def test_a_rule_is_read_on_a_mean_only_when_the_check_says_so() -> None:
-    """A rule each trial keeps is per trial unless the check declares ``per_trial: false``, whatever the protocol's
-    metrics are; a quantity is a mean unless it declares ``per_trial: true``."""
+def test_a_check_is_read_on_a_mean_unless_it_says_per_trial_true() -> None:
+    """A check that leaves ``per_trial`` unset is about the mean over trials, whatever its kind (the s1 bound
+    ``max(0, fdr_bh - 0.04)`` is an FDR, a mean; one trial's proportion can be anything); only ``per_trial: true``
+    makes it a rule of every trial. Fails on the reading that took an unset rule per trial."""
     assert "fdr_bh" in mc.mean_names(PROTOCOL)
-    assert not mc.reads_a_mean(BOUND), "a declared mean metric is not a declaration that the check is on a mean"
+    assert "per_trial" not in BOUND and BOUND["kind"] == "invariant", "the bound as the planner wrote it"
+    assert mc.reads_a_mean(BOUND), "an unset per_trial on the graded s1 bound is the mean"
     assert mc.reads_a_mean(MEAN_BOUND) and mc.reads_a_mean({**BOUND, "per_trial": "false"})
-    assert not mc.reads_a_mean(ORACLES["bh_superset_of_bonferroni"]), "a per-trial count"
+    assert mc.reads_a_mean(ORACLES["bh_superset_of_bonferroni"]), "unset: the mean, whatever the kind"
+    assert not mc.reads_a_mean({**ORACLES["bh_superset_of_bonferroni"], "per_trial": True}), "a per-trial count, said"
     assert not mc.reads_a_mean({**BOUND, "per_trial": True}), "per_trial: true always means every trial"
     assert mc.reads_a_mean(ORACLES["bonferroni_power_exact"]), "a special case is a number of the setting"
     assert not mc.reads_a_mean({**ORACLES["bonferroni_power_exact"], "per_trial": True})
@@ -589,10 +592,10 @@ FDP_AT_MOST_ONE = {"name": "fdp_at_most_one", "kind": "invariant", "check": "a f
 
 @pytest.mark.parametrize("planted", [False, True])
 def test_c_an_invariant_on_a_declared_mean_is_judged_on_every_trial(tmp_path: Path, planted: bool) -> None:
-    """P0-3. A rule each trial keeps, on a name the plan declares a mean (``fdr_bh``), is never averaged unless the
-    check says so: FDP + 1.2 in most trials fails, as it did on one trial before."""
+    """A rule each trial keeps, on a name the plan declares a mean (``fdr_bh``), says ``per_trial: true`` and is then
+    never averaged: FDP + 1.2 in most trials fails, as it did on one trial before. (Unset, a check is about the mean.)"""
     edits = {'out["fdr_" + s] = float(fdp)': 'out["fdr_" + s] = float(fdp) + (1.2 if V >= 1 else 0.0)'} if planted else None
-    _c, problems, judged, found = _measure(_quest(tmp_path, simulate=edits), [FDP_AT_MOST_ONE], timeout_s=60)
+    _c, problems, judged, found = _measure(_quest(tmp_path, simulate=edits), [{**FDP_AT_MOST_ONE, "per_trial": True}], timeout_s=60)
     assert judged[0]["passed_by_engine"] is (not planted), (judged, problems, found)
     if planted:
         assert judged[0]["value"] >= 0.2 and found
@@ -615,10 +618,10 @@ TWO_CHECK = {"name": "two_counts_agree", "kind": "second_implementation", "check
 @pytest.mark.parametrize("bug, passes", [("0", True), ("rng.choice((-1, 1))", False)])
 def test_d_two_implementations_that_disagree_by_one_in_each_trial_fail_at_a_tolerance_of_0(
         tmp_path: Path, bug: str, passes: bool) -> None:
-    """P0-3. Both counts are declared means, yet +1 in one trial and -1 in another is a disagreement in every trial:
-    never averaged away, and a tolerance of 0 is never widened."""
+    """Both counts are declared means, yet +1 in one trial and -1 in another is a disagreement in every trial: said
+    ``per_trial: true``, it is never averaged away, and a tolerance of 0 is never widened."""
     root = _synth(tmp_path, TWO.replace("BUG", bug))
-    _c, problems, judged, found = _plain(root, [TWO_CHECK], timeout_s=60,
+    _c, problems, judged, found = _plain(root, [{**TWO_CHECK, "per_trial": True}], timeout_s=60,
                                          mean_names=frozenset({"count_a", "count_b"}))
     assert judged[0]["passed_by_engine"] is passes, (judged, problems)
     assert bool(found) is not passes
@@ -992,12 +995,14 @@ def test_a_paired_design_gives_the_check_the_seeds_of_the_reported_trials(tmp_pa
 # --- the s1 bound, as the plan wrote it and as the plan should write it ---------------------------------------------
 
 
-def test_the_s1_bound_as_frozen_is_a_rule_of_every_trial_and_fails_as_on_base(tmp_path: Path) -> None:
-    """P0-3(b). The bound is kind ``invariant`` with no word that it is on an average: it is judged on every trial, the
-    worst one counts, and it fails as it did on one trial (FI does not guess from the metrics that it is a mean)."""
-    _c, problems, judged, found = _measure(_quest(tmp_path), [BOUND], timeout_s=60)
-    assert judged[0]["passed_by_engine"] is False and found, (judged, problems)
-    assert judged[0]["value"] >= 0.0188235 - 1e-6, "never better than trial 0 alone"
+def test_the_s1_bound_as_frozen_is_about_the_mean_and_passes_correct_code(tmp_path: Path) -> None:
+    """The bound as the s1 plan froze it (kind ``invariant``, no ``per_trial``) is about the mean FDR: the correct
+    simulation passes it (read per trial it failed: trial 0's false discovery proportion was 1/17 against a bound of
+    0.04), it is judged on the mean, and ``per_trial: true`` still makes it a rule of every trial."""
+    assert "per_trial" not in BOUND
+    checks, problems, judged, found = _measure(_quest(tmp_path), [BOUND], timeout_s=60)
+    assert judged[0]["passed_by_engine"] is True and not found, (judged, problems)
+    assert checks[0]["mc"]["read_as"] == "mean"
 
 
 # --- the plan is asked once whether a check on an average holds in every trial or on average --------------------------
@@ -1114,7 +1119,7 @@ async def test_an_answer_that_does_not_say_leaves_the_check_judged_on_every_tria
     if first == 2:
         assert "`per_trial` true or false" in model.asked[1]
     checks = _plan_checks(engine)
-    assert "per_trial" not in checks["bh_fdr_upper_bound"] and not mc.reads_a_mean(checks["bh_fdr_upper_bound"])
+    assert "per_trial" not in checks["bh_fdr_upper_bound"] and mc.reads_a_mean(checks["bh_fdr_upper_bound"])
     assert "a check still does not say" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
     design, sha = engine._design_from_plan()
     await engine._ask_plan_for_the_parts(state, design, sha)
@@ -1162,4 +1167,4 @@ def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_pat
     after = {o["name"]: o for o in plan.raw_design_block(kept)["protocol"]["oracles"]}
     assert after["fdp_le_one"]["per_trial"] is True
     assert "per_trial" not in after["counts_agree"], after["counts_agree"]
-    assert not mc.reads_a_mean(after["counts_agree"])
+    assert mc.reads_a_mean(after["counts_agree"]), "unset: the mean"

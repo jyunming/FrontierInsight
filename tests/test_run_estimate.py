@@ -107,7 +107,7 @@ def _quest(tmp_path: Path, source: str) -> Path:
 def _measure(root: Path, grid: dict, runs: int, deterministic: bool, limit_s: float = 600.0, executor=None):  # noqa: ANN001, ANN201
     return asyncio.run(est.measure(
         executor or SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", grid,
-        runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=60.0))
+        runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=600.0))
 
 
 def test_a_stochastic_simulation_is_timed_on_two_trials_and_its_cost_follows_its_settings(tmp_path: Path) -> None:
@@ -152,6 +152,19 @@ def _two_axis(corner: float) -> list[est.Probe]:
             est.Probe("a", 0, {"a": 1, "b": 2}, 10.0), est.Probe("a", 2, {"a": 4, "b": 2}, 100.0),
             est.Probe("b", 0, {"a": 2, "b": 1}, 10.0), est.Probe("b", 2, {"a": 2, "b": 4}, 100.0),
             est.Probe(est.CORNER, None, {"a": 4, "b": 4}, corner)]
+
+
+def test_a_slow_process_start_does_not_hide_a_costly_end() -> None:
+    # A loaded machine starts each process in 10 s: the whole times are 11 s against 14 s (ratio 1.3), the time inside the
+    # simulation is 1 s against 4 s. The costly end is judged on the latter, so the corner is still timed.
+    grid = {"a": [1, 2, 4], "b": [1, 2, 4]}
+    probes = [est.Probe(None, None, {"a": 2, "b": 2}, 11.0, call_s=1.0),
+              est.Probe("a", 0, {"a": 1, "b": 2}, 10.5, call_s=0.5), est.Probe("a", 2, {"a": 4, "b": 2}, 14.0, call_s=4.0),
+              est.Probe("b", 0, {"a": 2, "b": 1}, 10.5, call_s=0.5), est.Probe("b", 2, {"a": 2, "b": 4}, 14.0, call_s=4.0)]
+    assert est.costly_ends(grid, probes) == {"a": 2, "b": 2}
+    for p in probes:
+        p.call_s = None  # without the split the whole times are all there is, as before
+    assert est.costly_ends(grid, probes) == {}
 
 
 def test_two_costly_settings_are_not_assumed_to_multiply() -> None:

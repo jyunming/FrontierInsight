@@ -266,8 +266,10 @@ import os, json
 
 
 def run_cell(cell):
-    with open("count.txt", "a", encoding="utf-8") as fh:
+    with open(r"__COUNT__", "a", encoding="utf-8") as fh:
         fh.write("1\\n")
+    with open(r"__CWD__", "a", encoding="utf-8") as fh:
+        fh.write(os.getcwd() + "\\n")
     x, y = cell["x"], cell["y"]
     if cell.get("x", 0) > 4.5:
         raise RuntimeError("the solver diverged")
@@ -310,6 +312,9 @@ def _quest(tmp_path: Path, simulate: str = SIMULATE) -> Path:
     root = tmp_path / "quest"
     (root / "code").mkdir(parents=True)
     (root / ".fi").mkdir()
+    # The runs count themselves in a file by absolute path (beside the quest, not in it), so the count does not depend on
+    # the folder the simulation runs in.
+    simulate = simulate.replace("__COUNT__", str(tmp_path / "count.txt")).replace("__CWD__", str(tmp_path / "cwd.txt"))
     (root / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
     return root
 
@@ -323,7 +328,7 @@ def _ledger(root: Path) -> list[dict[str, Any]]:
 
 
 def _count(root: Path) -> int:
-    path = root / "count.txt"
+    path = root.parent / "count.txt"
     return len(path.read_text(encoding="utf-8").splitlines()) if path.is_file() else 0
 
 
@@ -396,6 +401,20 @@ async def test_a_coarse_scan_runs_first_through_the_trial_runner_and_is_not_coun
     assert (root / "raw" / "trials.json").is_file(), "the scan is the trial runner's, so the analysis can plot it"
     assert run.record["evaluations"]["scan"] == 6 and run.record["evaluations"]["search"] <= 20
     assert _count(root) == len(rows)
+
+
+@pytest.mark.asyncio
+async def test_baseline_scan_and_search_evaluations_run_outside_the_quest_folder(tmp_path: Path) -> None:
+    root = _quest(tmp_path)
+    await _run(root, _protocol(grid={"x": [-4.0, 0.0, 4.0], "y": [-2.0, 2.0]}, search_method="global_then_local",
+                               evaluation_budget={"starts": 2, "per_start": 10}))
+    rows = [r for r in _ledger(root) if r.get("event") == "evaluation"]
+    assert {"baseline", "scan"} <= {r["stage"] for r in rows} and {r["stage"] for r in rows} - {"baseline", "scan"}, "a search stage too"
+    cwds = (tmp_path / "cwd.txt").read_text(encoding="utf-8").splitlines()
+    assert len(cwds) == len(rows)
+    quest = root.resolve()
+    for cwd in cwds:
+        assert not Path(cwd).resolve().is_relative_to(quest), f"an evaluation ran inside the quest folder: {cwd}"
 
 
 @pytest.mark.asyncio
@@ -563,7 +582,7 @@ E2E_ORACLE = {"name": "energy of the baseline", "kind": "special_case", "check":
               "case": {"x": 0.0, "y": 0.0}, "measure": "f"}
 E2E_SIMULATE = '''\
 def run_cell(cell):
-    with open("count.txt", "a", encoding="utf-8") as fh:
+    with open(r"__COUNT__", "a", encoding="utf-8") as fh:
         fh.write("1\\n")
     x, y = cell["x"], cell["y"]
     f = cell["scale"] * ((x - 2) ** 2 + (y + 1) ** 2)  # E1
@@ -616,7 +635,7 @@ async def test_a_search_for_the_best_design_runs_through_execute_with_a_fake_mod
             return json.dumps(body)
         if kind == "Implementation":
             prompts.append(prompt)
-            return (f"```python\n# file: simulate.py\n{E2E_SIMULATE}\n```\n```python\n# file: experiment.py\n"
+            return (f"```python\n# file: simulate.py\n{E2E_SIMULATE.replace('__COUNT__', str(tmp_path / 'count.txt'))}\n```\n```python\n# file: experiment.py\n"
                     f"{E2E_ANALYSIS}\n```\nDEPS: matplotlib\n")
         return _fake_response_for(prompt)
 
@@ -649,7 +668,7 @@ async def test_a_search_for_the_best_design_runs_through_execute_with_a_fake_mod
     assert check["ledger_sha256"] == best["ledger_sha256"]
     # The simulation's own count of its calls: the oracle's one case, the search once (no replicate seeds, no second
     # search), then the check's evaluations.
-    assert _count(root) == best["evaluations"]["search"] + 1 + check["evaluations"]["check"]
+    assert _count(tmp_path / "quest") == best["evaluations"]["search"] + 1 + check["evaluations"]["check"]
     result = artifacts.raw_state["result_json"]
     assert result["fi_search"]["best_objective"] == best["best"]["objective"], "FI's own numbers ride with the result"
     assert result["fi_search"]["check"]["verdict"] == "verified"

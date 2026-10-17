@@ -89,20 +89,7 @@ def _text(value: Any, limit: int = 300) -> str:
     return " ".join(str(value if value is not None else "").replace("`", "'").split())[:limit]
 
 
-#: The kind of a requirement that asks the reader to confirm a ``# constant by design`` mark in the code.
-MARK_KIND = "constant by design"
-
-
-def constant_marks(code_dir: Path) -> list[Any]:
-    """The valid ``# constant by design`` marks in the code (:func:`core.degenerate_results.design_marks`)."""
-    from . import degenerate_results as _degenerate
-    from . import grid_keys as _grid_keys
-
-    return _degenerate.design_marks(_grid_keys.code_files(Path(code_dir)))
-
-
-def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
-                 marks: list[Any] | None = None) -> list[dict[str, Any]]:
+def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     """The plan's required outputs, as ``{"id", "kind", "text", "headline"}`` (R1, R2 ...): the dependent variables, the
     metrics, the planned figures, the swept parameters, the checks' measures and the equations the simulation computes
     its data with. Names and descriptions only, never a number the code must reproduce."""
@@ -144,8 +131,6 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
             add("check", f"the simulation returns what the measure '{measure}' of the check '{_text(o['name'], 60)}' uses")
     for eid in _oracle.generating_equations(protocol):
         add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`")
-    for mark in marks or []:
-        add(MARK_KIND, mark.asks(), name=mark.key())
     return out
 
 
@@ -475,7 +460,15 @@ CARRIED = ("reviews_total", "send_backs", "repair_calls", "finding_calls", "test
 
 
 def carried(record: dict[str, Any]) -> dict[str, Any]:
-    return {k: record[k] for k in CARRIED if k in record}
+    """What a record for a new version of the code starts from: the quest-wide counters and the history of the readings,
+    and, once a version was read, what the last reading left open (:func:`still_open`, as ``problems`` of a finished
+    record). A flag sticks: a version no one reads (the readings are spent, a reading fails, the reader is the model that
+    wrote the code) keeps those findings, so the paper's limitations and the gate still see them; a reading of the new
+    version replaces them."""
+    out = {k: record[k] for k in CARRIED if k in record}
+    if record.get("read_version"):
+        out.update(problems=still_open(record), final=True)
+    return out
 
 
 def earlier_block(previous: list[dict[str, Any]]) -> str:
@@ -636,7 +629,7 @@ def headline_missing(quest_root: Path, code_dir: Path) -> list[str]:
     """The headline requirements the code is still said to miss. (A problem of logic is not a missing quantity: see
     :func:`headline_constant`.)"""
     return [v["text"] for v in not_computed(quest_root, code_dir)
-            if v.get("headline") and not v.get("contradicted") and v.get("kind") != "logic"]
+            if v.get("headline") and not v.get("contradicted") and v.get("kind") != "logic" and v.get("status") == MISSING]
 
 
 def headline_constant(quest_root: Path, code_dir: Path) -> list[str]:
@@ -917,18 +910,20 @@ def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any
 def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     """After a run: of the headline requirements a reader still called missing, those the run's results do not hold
     either (the quest then stops, honestly). The ones the results do hold are recorded as a disagreement between the
-    reader and the results (the reader was wrong, and the paper is not told they were not computed)."""
+    reader and the results (the reader was wrong, and the paper is not told they were not computed). Only a requirement
+    the reader called missing: one it called computed differently from the plan is computed, by its own reading, so it
+    never stops the quest as "not computed" (the paper says it is not as the plan defines it, and FI leaves its values out
+    of the results unless its own record contradicts the reader: :meth:`core.result_checks.ResultChecks._code_reader_findings`)."""
     record = load(quest_root)
     if not record.get("final") or record.get("version") != version(code_dir):
         return []
     absent: list[str] = []
     changed = False
     for v in record.get("problems") or []:
-        if not isinstance(v, dict) or not v.get("headline") or v.get("contradicted") or v.get("kind") == "logic":
+        if (not isinstance(v, dict) or not v.get("headline") or v.get("contradicted") or v.get("kind") == "logic"
+                or v.get("status") != MISSING):
             continue
         if in_results(str(v.get("name") or ""), result):
-            if v.get("status") == DIFFERENT:
-                continue  # computed under another definition: the results holding a value does not say the reader was wrong
             v["contradicted"] = True
             changed = True
         else:
@@ -1106,6 +1101,19 @@ def _names_check(finding: str, name: str) -> bool:
     return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
 
 
+def still_open(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """The findings of the latest reading still open after the repairs that followed it: the record's ``problems``, or,
+    when a later reading failed, the ``read_problems`` it carried, less what a test showed fixed or a later reading no
+    longer names. A flag sticks: these stay open for a later version of the code no one has read (a repair after the run,
+    a round of the improve loop) until a reading of that version no longer flags them."""
+    from . import code_findings as _issues
+
+    found = record["problems"] if "problems" in record else record.get("read_problems")
+    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    return [v for v in (found if isinstance(found, list) else []) if isinstance(v, dict)
+            and (issues.get(v.get("fid")) or {}).get("outcome") not in (_issues.FIXED, _issues.GONE)]
+
+
 def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[str, str]:
     """The checks of correctness (``names``) that an OPEN finding of the second model's reading of the code concerns, as
     ``{name: the finding in its own words}`` (no line number). A check is evidence only if the code that computes its measure
@@ -1122,21 +1130,12 @@ def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[s
     record = load(quest_root)
     if not record:
         return {}
-    if "problems" in record:
-        if record.get("version") == version(code_dir) and not record.get("final"):
-            return {}  # a reading in progress: the gate has not finished with this version
-        found = record["problems"]
-    else:
-        found = record.get("read_problems")  # the latest reading's findings survive a reading that failed
-    from . import code_findings as _issues
-
-    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    if "problems" in record and record.get("version") == version(code_dir) and not record.get("final"):
+        return {}  # a reading in progress: the gate has not finished with this version
     out: dict[str, str] = {}
-    for v in found if isinstance(found, list) else []:
-        if not isinstance(v, dict) or v.get("contradicted") or v.get("plan_conflict"):
+    for v in still_open(record):
+        if v.get("contradicted") or v.get("plan_conflict"):
             continue
-        if (issues.get(v.get("fid")) or {}).get("outcome") in (_issues.FIXED, _issues.GONE):
-            continue  # a repair a test showed, or a later reading that no longer names it, settled it
         text = _plain_text(v.get("text"))
         for name in names:
             if name not in out and _names_check(f"{v.get('text') or ''}", str(name)):

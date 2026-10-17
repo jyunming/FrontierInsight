@@ -33,18 +33,37 @@ from . import in_run as _in_run
 from . import oracle_forms as _forms
 from . import plan as _plan
 from . import run_estimate as _estimate
+from .result_checks import TYPED_RECORD
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
 from . import typed_results as _typed
 
 #: How many times, in all, a simulation that returns typed-in numbers is sent back.
 TYPED_RESULT_REPAIRS = 2
-TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
 #: In ``.fi/``: the settings FI took out of the grid because the simulation never reads them.
 NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
 #: How many crashes inside the code, shown by a finding's test during the code review, go to the crash repair in a quest.
 REVIEW_CRASHES = 2
+
+# A number is written precisely enough to be recognised as a value (so that a note never repeats a left-out one): three
+# significant digits, or two written to four decimals ("0.0068"). Below that a number is a round figure, a setting or a label.
+_MIN_SIG_DIGITS = 3
+_LOW_PRECISION_SIG_DIGITS = 2
+_LOW_PRECISION_MIN_DECIMALS = 4
+
+
+def _carries_enough_precision(token: str) -> bool:
+    """Is this number written precisely enough to be recognised as a value?"""
+    t = token.lstrip("-+").replace(",", "")
+    decimals = len(t.split(".", 1)[1]) if "." in t else 0
+    if "." in t:
+        whole, frac = t.split(".", 1)
+        whole = whole.lstrip("0")
+        sig = len(whole) + len(frac) if whole else len(frac.lstrip("0")) or len(frac)
+    else:
+        sig = len(t.strip("0")) or 1
+    return sig >= _MIN_SIG_DIGITS or (sig >= _LOW_PRECISION_SIG_DIGITS and decimals >= _LOW_PRECISION_MIN_DECIMALS)
 
 
 def _one(text: str, limit: int = 400) -> str:
@@ -230,7 +249,9 @@ class RunChecksMixin:
         typed = getattr(self, "_typed_result_keys", None)
         if typed is None:
             # A fresh process (a resume at a later node): the pass that left them out wrote its record, which is what stands.
-            typed = {str(k) for k in _read_json(self.quest_root / "needs" / TYPED_RECORD).get("removed_quantities") or []}  # type: ignore[attr-defined]
+            from . import result_checks as _checks
+
+            return set(_checks.left_out_by_record(self.quest_root))  # type: ignore[attr-defined]
         return set(typed) | self._result_check_keys()  # type: ignore[attr-defined]
 
     def _without_typed_results(self, result_json: Any) -> Any:
@@ -351,8 +372,6 @@ class RunChecksMixin:
     def _withhold_left_out_values(self, text: str) -> str:
         """``text`` (a note a model reads) with any number written precisely enough to be recognised that equals a value of a
         quantity left out of the results replaced by plain words: a note that says why a quantity is out never repeats it."""
-        from .number_provenance import _carries_enough_precision
-
         values: list[float] = []
         for name in (TYPED_RECORD, "RESULT_CHECK.json"):
             removed = _read_json(self.quest_root / "needs" / name).get("removed_values")  # type: ignore[attr-defined]

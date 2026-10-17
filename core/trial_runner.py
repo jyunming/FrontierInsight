@@ -279,6 +279,8 @@ def record_cells(runs: list[CellRun]) -> list[CellRun]:
                            timed_out=run.timed_out, stderr=run.stderr, load_error=run.load_error,
                            rows=[{**r, "values": _in_run.split(r.get("values"))[0]} if r.get("status") == "ok" else dict(r)
                                  for r in run.rows]))
+        if not any(_in_run.split(r.get("values"))[1] for r in run.rows if r.get("status") == "ok"):
+            continue  # the run returned no number per value: no value has a record (core/in_run.py summary_cells)
         for level in run.levels:
             lk = _in_run.level_key(level)
             out.append(CellRun(key=_in_run.record_key(run.key, lk), cell={**run.cell, **level}, planned=run.planned,

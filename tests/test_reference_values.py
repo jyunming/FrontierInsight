@@ -21,7 +21,6 @@ from typing import Any
 import pytest
 
 from core import grid_keys, metric_spec, oracle_forms, plan, results_by_setting as rbs, trial_table
-from core import number_provenance as npv
 from core import reference_values as rv
 from tests import reference_values_plans as P
 
@@ -82,7 +81,7 @@ def test_an_old_protocol_without_references_is_still_valid_and_reads_no_referenc
     assert {q["status"] for q in computed["quantities"]} == {"no reference"}
     built = _build("fdr_s1", protocol)
     assert len(built.distinct.settings) == 9
-    assert all("No reference" in t.caption and "reference" not in t.columns for t in built.tables)
+    assert all("no reference value" in t.caption and "reference" not in t.columns for t in built.tables)
 
 
 def test_the_plans_references_pass_the_plan_check() -> None:
@@ -175,7 +174,7 @@ def test_the_bh_reference_column_matches_arises_printed_table() -> None:
 def test_bh_power_has_no_reference_the_calculator_cannot_solve_a_fixed_point() -> None:
     built = _build("fdr_s1", P.fdr_protocol())
     table = _table(built, "power_bh")
-    assert "reference" not in table.columns and "No reference: the plan gives no reference for it" in table.caption
+    assert "reference" not in table.columns and "It has no reference value to compare with." in table.caption and "the plan gives" not in table.caption
     # ARIS's printed limit is not FI's: it is the m -> infinity root of an equation, which FI does not compute
     assert "0.466" in (ARIS / "tab_pow.tex").read_text(encoding="utf-8")
 
@@ -412,83 +411,8 @@ def test_the_trial_table_is_unchanged_by_reading_it_through_summaries(tmp_path: 
 
 # --- the provenance false alarm (paper/provenance_audit.json of the FDR quest flagged 0.177, 0.198, 0.0415, 0.384) ---
 
-SIX = ("0.177", "0.198", "0.0415", "0.384", "0.679", "0.9995")
 
-
-def _flagged(paper: str, monkeypatch: pytest.MonkeyPatch, *, new: bool) -> set[str]:
-    """The numbers of ``paper`` the provenance check flags, replayed against FI's per-setting table of the FDR quest
-    (the stdout RESULT_JSON of the run is not in the fixture, so only the thresholds stand in for it: every number the
-    table does not account for is flagged here, more than in the live audit)."""
-    monkeypatch.setattr(npv, "MAX_FINDINGS", 1000)
-    rows = trial_table.rows_of(_summaries("fdr_s1"))
-    if new:
-        kwargs = rbs.provenance_inputs(rows, _build("fdr_s1", P.fdr_protocol()))
-    else:
-        kwargs = {"trial_table": trial_table.traceable(rows)}
-    report = npv.check(paper, result_json={"thresholds": {"alpha": 0.05, "delta": 2.5}}, **kwargs)
-    return {f.token for f in report.findings}
-
-
-def test_the_six_numbers_are_accounted_for_by_setting_and_reference(monkeypatch: pytest.MonkeyPatch) -> None:
-    paper = (P.FIXTURES / "fdr_s1" / "paper.md").read_text(encoding="utf-8")
-    before = _flagged(paper, monkeypatch, new=False)
-    assert {"0.177", "0.198", "0.0415", "0.384"} <= before  # as the live audit
-    assert {"0.642", "0.0475", "0.379"} <= before  # exact references the paper quotes, from nowhere FI recorded
-    after = _flagged(paper, monkeypatch, new=True)
-    assert not set(SIX) & after, after
-    assert not {"0.642", "0.0475", "0.379"} & after
-    assert after < before
-
-
-def test_a_planted_number_is_still_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
-    paper = (P.FIXTURES / "fdr_s1" / "paper.md").read_text(encoding="utf-8")
-    sentence = "At π1 = 0.2 it was 0.177, 0.198 and 0.199 for m = 20, 200, 2000"
-    assert sentence in paper
-    wrong = paper.replace(sentence, sentence.replace("0.177", "0.1771"))
-    assert "0.1771" in _flagged(wrong, monkeypatch, new=True)
-    # a number of the table, but of another setting: fdr_uncorrected at m = 20, pi1 = 0.05 is 0.415, and this
-    # sentence names pi1 = 0.2 (the paragraph mentions 0.05 elsewhere; the sentence does not)
-    other = paper.replace(sentence, sentence.replace("0.177", "0.415"))
-    assert "0.415" in _flagged(other, monkeypatch, new=True)
-    # in the table, under "Bonf. power" in the row of m = 20, pi1 = 0.05: 0.370 is the lower end of the interval of
-    # Bonferroni power at m = 20, pi1 = 0.2, another row's number (three decimals, and printed nowhere else in the
-    # paper: a token the paper also prints in a sentence that names it is accounted for there, as before)
-    row = "| 20 | 0.05 | 0.047 | 0.0475 | 0.046 | 0.384 | 0.393 |"
-    assert row in paper and "0.370" not in paper
-    swapped = paper.replace(row, row.replace("0.384", "0.370"))
-    assert "0.370" in _flagged(swapped, monkeypatch, new=True)
-    # and a value of another quantity under that header: uncorrected power at m = 20, pi1 = 0.2 is 0.798
-    assert "0.798" not in paper
-    assert "0.798" in _flagged(paper.replace(row, row.replace("0.384", "0.798")), monkeypatch, new=True)
-    # the very same number where it belongs is accounted for
-    assert "0.384" not in _flagged(paper, monkeypatch, new=True)
-
-
-def test_a_column_headed_by_another_quantity_does_not_name_the_value() -> None:
-    text = ("**Table 1.** Realised FDR and power.\n\n| m | π1 | BH FDR | Bonf. power |\n|---|---|---|---|\n"
-            "| 20 | 0.05 | 0.384 | 0.1 |\n")
-    places = npv._setting_contexts(text, "0.384")
-    assert len(places) == 1 and places[0].label == "BH FDR"
-    # a table of many three-decimal numbers, so that no match is accepted as too rare to be luck
-    table: dict[str, Any] = {}
-    settings: dict[str, Any] = {}
-    for i, m in enumerate(range(20, 8020, 20)):
-        for j, p in enumerate((0.05, 0.2)):
-            mean = 0.1 + ((2 * i + j) * 7 % 890) / 1000
-            if round(mean, 3) != 0.384:
-                table[f"m={m},pi1={p}.fdr_bh"] = {"mean": mean}
-            settings[f"m={m},pi1={p}"] = {"m": m, "pi1": p}
-    table["m=20,pi1=0.05.power_bonferroni"] = {"mean": 0.38375}
-
-    def flagged(paper: str) -> set[str]:
-        return {f.token for f in npv.check(paper, result_json={"x": 1.5}, trial_table=table,
-                                           trial_settings=settings).findings}
-
-    assert "0.384" in flagged(text)
-    assert "0.384" not in flagged(text.replace("| BH FDR | Bonf. power |", "| Bonf. power | BH FDR |"))
-
-
-# --- the engine: what the writer gets, and the provenance check's pools ------------------------------------------------
+# --- the engine: what the writer gets ---------------------------------------------------------------------------------
 
 
 def _quest_with_a_dead_axis(root: Path) -> dict[str, Any]:
@@ -533,219 +457,12 @@ def test_the_writer_gets_every_setting_when_the_trial_table_is_too_long(tmp_path
     prompt = next(p for p in seen if "FI's tables of every setting" in p)
     assert "2 distinct settings" in prompt and "found no read of `t`" in prompt and "| 120 |" in prompt
     assert "FI's table of what every trial gave" not in prompt
-    # the provenance check reads the pooled setting, named by its setting, and the reference values
-    state = {"result_json": {"x": 1.5}}
-    report = eng._provenance_report("At s = 1 the mean of y was 0.2200 against the reference 0.2000; at s = 2, 0.4200 "
-                                    "against the reference 0.4000. Not 0.2371.", state)  # type: ignore[arg-type]
-    assert not report.skipped and {f.token for f in report.findings} == {"0.2371"}
 
 
 # --- review of the branch: each probe of C:\fi_compare\reviews\scratch_ref as a test -----------------------------------
 
-LIST_SENTENCE = "At π1 = 0.2 it was 0.177, 0.198 and 0.199 for m = 20, 200, 2000"
-
-
-def _fdr_paper() -> str:
-    return (P.FIXTURES / "fdr_s1" / "paper.md").read_text(encoding="utf-8")
-
-
-def _in_results(paper: str, paragraph: str) -> str:
-    """``paper`` with ``paragraph`` at the end of its Results (text added after the reference list is not read by the
-    check at all, so a probe appended there tests nothing)."""
-    assert "\n## Discussion" in paper
-    return paper.replace("\n## Discussion", f"\n{paragraph}\n\n## Discussion", 1)
-
-
-@pytest.mark.parametrize("edit, wrong", [
-    # a permuted list: the m = 2000 value given for m = 20 and the reverse
-    (lambda p: p.replace(LIST_SENTENCE, "At π1 = 0.2 it was 0.199, 0.198 and 0.177 for m = 20, 200, 2000"),
-     {"0.177", "0.199"}),
-    # two settings swapped
-    (lambda p: _in_results(p, "Uncorrected FDR at π1 = 0.2 was 0.198 at m = 20 and 0.177 at m = 200."),
-     {"0.177", "0.198"}),
-    # a stray number: "20 repeats" is not m = 20
-    (lambda p: _in_results(p, "With 20 repeats per figure point, the uncorrected FDR at m = 200, π1 = 0.2 was 0.177."),
-     {"0.177"}),
-    # alpha = 0.05 is not pi1 = 0.05 (uncorrected FDR at m = 200, pi1 = 0.05 is 0.533; the sentence names no pi1, and
-    # the paragraph names the quantity)
-    (lambda p: _in_results(p, "Uncorrected testing raised the FDR. At α = 0.05 it was 0.533 at m = 200."), {"0.533"}),
-])
-def test_a_number_is_named_only_beside_its_own_setting(monkeypatch: pytest.MonkeyPatch, edit: Any,
-                                                       wrong: set[str]) -> None:
-    paper = _fdr_paper()
-    assert LIST_SENTENCE in paper and "0.533" not in paper
-    flagged = _flagged(edit(paper), monkeypatch, new=True)
-    assert wrong <= flagged, flagged
-
-
-@pytest.mark.parametrize("sentence", [
-    "Uncorrected FDR at π1 = 0.2 was 0.177 at m = 20 and 0.198 at m = 200.",
-    "With 20 repeats per figure point, the uncorrected FDR at m = 20, π1 = 0.2 was 0.177.",
-    "Uncorrected testing raised the FDR. At π1 = 0.05 it was 0.533 at m = 200.",
-    "Uncorrected testing gave an FDR of 0.533 at $m = 200$, $\\pi_1 = 0.05$.",
-])
-def test_the_same_numbers_beside_their_own_settings_are_accounted_for(monkeypatch: pytest.MonkeyPatch,
-                                                                     sentence: str) -> None:
-    flagged = _flagged(_in_results(_fdr_paper(), sentence), monkeypatch, new=True)
-    assert not {"0.177", "0.198", "0.533"} & flagged, flagged
-    # the same sentence beside another setting is read, and flagged
-    if "0.533" in sentence:
-        wrong = sentence.replace("m = 200", "m = 2000")
-        assert "0.533" in _flagged(_in_results(_fdr_paper(), wrong), monkeypatch, new=True)
-
-
-FDR_AXES = [{"m": m, "pi1": p} for m in (20, 200, 2000) for p in (0.0, 0.05, 0.2)]
-SOLVER_AXES = [{"m": m, "solver": s} for m in (20, 40) for s in ("euler", "rk4")]
-ABSTRACT = ("BH power at π1 = 0.2 stayed near 0.47–0.50, so BH's power advantage grew from 0.9 percentage points "
-            "(m = 20, π1 = 0.05) to 40.6 points (m = 2000, π1 = 0.2).")
-LINE_36 = ("Several cells lie slightly above it, such as 0.058 at m = 200, π1 = 0 (interval 0.051–0.066) and 0.0415 "
-           "against 0.04 at m = 200, π1 = 0.2 (interval 0.040–0.043).")
-LINE_34 = ("At π1 = 0 its FDR was 0.653 (95% Wilson interval 0.638–0.667) at m = 20 against an exact 0.642, and 1.0 at "
-           "m = 200 and 2000.")
-
-
-@pytest.mark.parametrize("axes, sentence, token, named", [
-    (FDR_AXES, "At π1 = 0.2 it was 0.199, 0.198 and 0.177 for m = 20, 200, 2000", "0.177", {"pi1": 0.2, "m": 2000}),
-    (FDR_AXES, "At π1 = 0.2 it was 0.177, 0.198 and 0.199 for m = 20, 200, 2000", "0.177", {"pi1": 0.2, "m": 20}),
-    (FDR_AXES, "Uncorrected FDR at π1 = 0.2 was 0.198 at m = 20 and 0.177 at m = 200.", "0.198", {"pi1": 0.2, "m": 20}),
-    (FDR_AXES, "Uncorrected FDR at π1 = 0.2 was 0.198 at m = 20 and 0.177 at m = 200.", "0.177", {"pi1": 0.2, "m": 200}),
-    (FDR_AXES, "With 20 repeats per figure point, the uncorrected FDR at m = 200, π1 = 0.2 was 0.177.", "0.177",
-     {"m": 200, "pi1": 0.2}),
-    (FDR_AXES, "At α = 0.05 it was 0.533 at m = 200.", "0.533", {"m": 200}),
-    (FDR_AXES, LINE_36, "0.0415", {"m": 200, "pi1": 0.2}),
-    (FDR_AXES, "At π1 = 0.05 BH power was 0.393, 0.267 and 0.234, still well above Bonferroni except at m = 20.",
-     "0.234", {"pi1": 0.05}),
-    (FDR_AXES, ABSTRACT, "40.6", {"m": 2000, "pi1": 0.2}),
-    (FDR_AXES, ABSTRACT, "0.9", {"m": 20, "pi1": 0.05}),
-    (FDR_AXES, LINE_34, "0.653", {"pi1": 0.0, "m": 20}),
-    # ", and" between two numbers joins two clauses, not a list: 0.642 is the exact value at m = 20 the sentence sets
-    # 0.653 against
-    (FDR_AXES, LINE_34, "0.642", {"pi1": 0.0, "m": 20}),
-    (FDR_AXES, "At $m = 200$, $\\pi_1 = 0.05$ it was 0.533.", "0.533", {"m": 200, "pi1": 0.05}),
-    (SOLVER_AXES, "For RK4 at m = 20 it was 0.396.", "0.396", {"solver": "rk4", "m": 20}),
-    (SOLVER_AXES, "At m = 20 it was 0.396 for Euler and 0.512 for RK4.", "0.512", {"m": 20, "solver": "rk4"}),
-])
-def test_the_settings_named_beside_a_number(axes: list[dict[str, Any]], sentence: str, token: str,
-                                            named: dict[str, Any]) -> None:
-    flat = npv.normalise(sentence)
-    at = re.search(r"(?<![\d.])" + re.escape(token) + r"(?!\d)", flat)
-    assert at is not None
-    rows = npv._named_beside(flat, npv._axes_of(axes), at.start())
-    assert rows is not None and len(rows) == 1
-    assert rows[0] == named
-
-
-def test_one_number_for_several_settings() -> None:
-    flat = "At π1 = 0 the uncorrected FDR was 1.0 at m = 200 and 2000."
-    rows = npv._named_beside(flat, npv._axes_of(FDR_AXES), flat.index("1.0 at"))
-    assert rows == [{"pi1": 0.0, "m": 200}, {"pi1": 0.0, "m": 2000}]
-
 
 # --- the second review of the branch ---
-
-CONTRASTS = ("versus", "vs.", "compared with", "but", "while", "against", "rising to", "whereas", "than")
-
-
-@pytest.mark.parametrize("join", CONTRASTS + ("and then",))
-def test_a_setting_across_a_contrast_word_loses_to_one_on_the_number_s_side(monkeypatch: pytest.MonkeyPatch, join: str) -> None:
-    """Uncorrected FDR at pi1 = 0.2: m = 20 is 0.177, m = 200 is 0.198. Swapped, each number is named beside the other
-    setting and flagged; in order, each is accounted for."""
-    swapped = f"At π1 = 0.2 the uncorrected FDR was 0.198 at m = 20 {join} 0.177 at m = 200."
-    flagged = _flagged(_in_results(_fdr_paper(), swapped), monkeypatch, new=True)
-    assert {"0.177", "0.198"} <= flagged, flagged
-    right = f"At π1 = 0.2 the uncorrected FDR was 0.177 at m = 20 {join} 0.198 at m = 200."
-    assert not {"0.177", "0.198"} & _flagged(_in_results(_fdr_paper(), right), monkeypatch, new=True)
-
-
-@pytest.mark.parametrize("sentence, token, named", [
-    ("At π1 = 0.2 the uncorrected FDR was 0.198 at m = 20 versus 0.177 at m = 200.", "0.177", {"pi1": 0.2, "m": 200}),
-    ("At π1 = 0.2 the uncorrected FDR was 0.198 at m = 20 versus 0.177 at m = 200.", "0.198", {"pi1": 0.2, "m": 20}),
-    # a setting inside another bracketed clause is not this number's; the nearer one is
-    ("At π1 = 0.2 the uncorrected FDR was 0.199 at m = 20 (m = 200: 0.198).", "0.199", {"pi1": 0.2, "m": 20}),
-    # a setting in brackets binds to the number it brackets, even after an earlier number in the sentence
-    ("Over 4000 trials, uncorrected FDR (m = 20, π1 = 0.2) was 0.199.", "0.199", {"m": 20, "pi1": 0.2}),
-    ("Uncorrected FDR (m = 20, π1 = 0.2) was 0.199.", "0.199", {"m": 20, "pi1": 0.2}),
-    # ... but one right after a number is that number's
-    ("BH FDR was 0.0415 (m = 200, π1 = 0.2) and 0.199 at m = 2000.", "0.199", {"m": 2000}),
-    # two settings of one axis at the same distance: the axis is named, by neither (no value fits)
-    ("At π1 = 0.2 and m = 200 (m = 20 per block), the uncorrected FDR was 0.177.", "0.177",
-     {"pi1": 0.2, "m": npv._NOT_A_VALUE}),
-])
-def test_two_settings_of_one_axis_never_unname_it(sentence: str, token: str, named: dict[str, Any]) -> None:
-    flat = npv.normalise(sentence)
-    at = re.search(r"(?<![\d.])" + re.escape(token) + r"(?!\d)", flat)
-    assert at is not None
-    assert npv._named_beside(flat, npv._axes_of(FDR_AXES), at.start()) == [named]
-
-
-@pytest.mark.parametrize("sentence, token", [
-    ("At π1 = 0.2 the uncorrected FDR was 0.199 at m = 20 (m = 200: 0.198).", "0.199"),
-    ("Over 4000 trials, uncorrected FDR (m = 20, π1 = 0.2) was 0.199.", "0.199"),
-    ("At π1 = 0.2 and m = 200 (m = 20 per block), the uncorrected FDR was 0.177.", "0.177"),
-    (r"At \(\pi_1 = 0.2\) the uncorrected FDR was 0.199 at \(m = 20\).", "0.199"),  # TeX's \( is no bracket
-])
-def test_a_number_beside_the_wrong_setting_is_flagged(monkeypatch: pytest.MonkeyPatch, sentence: str,
-                                                      token: str) -> None:
-    assert token in _flagged(_in_results(_fdr_paper(), sentence), monkeypatch, new=True)
-
-
-KIN_AXES = [{"sigma": s, "n_points": n} for s in (0.01, 0.02, 0.05) for n in (8, 12, 40)]
-
-
-def test_only_an_axis_s_full_name_names_it() -> None:
-    """``n_points`` is named as ``n_points`` (or by its value of a text axis), never as ``n``: an ``n = 400`` of runs
-    would otherwise name it, and erase or contradict the setting the sentence does name."""
-    axes = npv._axes_of(KIN_AXES)
-    assert "n" not in axes.by_name and axes.by_name["npoints"] == "n_points"
-    for sentence, named in (
-            ("At σ = 0.02 with 12 points the Ea coverage was 0.925 (n = 400).", {"sigma": 0.02}),
-            ("At σ = 0.02 and n_points = 12 the Ea coverage was 0.925 (n = 400 runs).", {"sigma": 0.02, "n_points": 12}),
-            ("At σ = 0.05 and n_points = 40 (n = 12 replicate fits) the SD was 1556 J/mol.",
-             {"sigma": 0.05, "n_points": 40})):
-        flat = npv.normalise(sentence)
-        at = flat.index("0.925" if "0.925" in flat else "1556")
-        assert npv._named_beside(flat, axes, at) == [named], sentence
-
-
-def _solver_study() -> tuple[dict[str, Any], dict[str, Any], dict[tuple[int, str], float]]:
-    """80 settings, m x solver (a text axis): a value per setting, every one of them distinct."""
-    import random
-
-    rng = random.Random(7)
-    table: dict[str, Any] = {}
-    settings: dict[str, Any] = {}
-    means: dict[tuple[int, str], float] = {}
-    pool = rng.sample([k for k in range(100, 1000) if k not in (396, 512)], 80)
-    for i, m in enumerate(range(20, 820, 20)):
-        for j, solver in enumerate(("euler", "rk4")):
-            mean = pool[2 * i + j] / 1000
-            if (m, solver) == (20, "euler"):
-                mean = 0.396
-            if (m, solver) == (20, "rk4"):
-                mean = 0.512
-            label = f"m={m},solver={solver}"
-            table[f"{label}.energy_drift"] = {"n": 400, "mean": mean, "sd": 0.1, "ci_lower": mean - 0.0098,
-                                              "ci_upper": mean + 0.0098}
-            settings[label] = {"m": m, "solver": solver}
-            means[(m, solver)] = mean
-    assert len(set(means.values())) == 80
-    return table, settings, means
-
-
-@pytest.mark.parametrize("text, flagged", [
-    ("We compared the energy drift of the two solvers across m. For RK4 at m = 20 it was 0.396.", {"0.396"}),
-    ("We compared the energy drift of the two solvers across m. For Euler at m = 20 it was 0.396.", set()),
-    ("We compared the energy drift of the two solvers. At m = 20 it was 0.396 for Euler and 0.512 for RK4.", set()),
-    ("We compared the energy drift of the two solvers. At m = 20 it was 0.512 for Euler and 0.396 for RK4.",
-     {"0.396", "0.512"}),
-    ("**Table 1.** Energy drift.\n\n| m | solver | energy drift |\n|---|---|---|\n| 20 | rk4 | 0.396 |\n", {"0.396"}),
-    ("**Table 1.** Energy drift.\n\n| m | solver | energy drift |\n|---|---|---|\n| 20 | euler | 0.396 |\n", set()),
-])
-def test_a_text_valued_setting_must_be_named_too(monkeypatch: pytest.MonkeyPatch, text: str, flagged: set[str]) -> None:
-    monkeypatch.setattr(npv, "MAX_FINDINGS", 1000)
-    table, settings, _ = _solver_study()
-    report = npv.check(text, result_json={"dt": 0.01}, trial_table=table, trial_settings=settings)
-    assert {f.token for f in report.findings} == flagged
 
 
 # P0-3: a setting read inside a lambda or a closure is read
@@ -814,52 +531,6 @@ def test_cells_whose_failures_differ_are_not_pooled() -> None:
 
 
 # P1-1: a reference value is accounted for only where the paper states it as a reference
-
-ROW_20 = "| 20 | 0.2 | 0.041 | 0.040 | 0.041 | 0.378 | 0.503 | 12.6 (12.0–13.1) |"
-POWER_SENTENCE = "Bonferroni power falling with m, from 0.378 to 0.163 to 0.060 at π1 = 0.2"
-
-
-@pytest.mark.parametrize("edit", [
-    lambda p: p.replace(ROW_20, ROW_20.replace("0.378", "0.3794")),  # the table cell of the measured power
-    lambda p: p.replace(POWER_SENTENCE, POWER_SENTENCE.replace("0.378", "0.3794")),  # the sentence of the measured
-])
-def test_a_reference_presented_as_the_measured_result_is_flagged(monkeypatch: pytest.MonkeyPatch, edit: Any) -> None:
-    paper = _fdr_paper()
-    assert ROW_20 in paper and POWER_SENTENCE in paper and "0.3794" not in paper
-    assert "0.3794" in _flagged(edit(paper), monkeypatch, new=True)  # measured 0.3779, the exact reference 0.3794
-
-
-@pytest.mark.parametrize("sentence, flagged", [
-    ("The measured Bonferroni any-false-discovery rate at m = 200, π1 = 0 was 0.04878.", True),
-    ("Matching the exact formula, the Bonferroni any-false-discovery rate at m = 200, π1 = 0 was 0.04878.", True),
-    ("The exact Bonferroni any-false-discovery rate at m = 200, π1 = 0 is 0.04878.", False),
-    ("The exact Bonferroni any-false-discovery rate at m = 20, π1 = 0 is 0.04878.", True),  # it is m = 200's
-])
-def test_a_reference_is_accounted_for_where_it_is_stated_as_one(monkeypatch: pytest.MonkeyPatch, sentence: str,
-                                                               flagged: bool) -> None:
-    """1 - (1 - 0.05/200)**190 = 0.04878 is FI's reference of the Bonferroni any-false-discovery rate at m = 200,
-    pi1 = 0; the run measured 0.055 there."""
-    assert ("0.04878" in _flagged(_in_results(_fdr_paper(), sentence), monkeypatch, new=True)) is flagged
-
-
-def test_the_reference_pool_accepts_no_number_by_luck(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The probe's 5 x 5 x 5 plan: 125 references. A number equal to one of them is accounted for where the sentence
-    states it as the reference, and nowhere else."""
-    monkeypatch.setattr(npv, "MAX_FINDINGS", 1000)
-    protocol = {"grid": {"alpha": [0.01, 0.02, 0.05, 0.1, 0.2], "delta": [0.5, 1.0, 1.5, 2.0, 2.5],
-                         "m": [10, 20, 50, 100, 200]},
-                "metrics": [{"id": "power", "estimand": "p", "kind": "proportion", "unit": "a run",
-                             "reference": {"formula": "1 - ndtr(ndtri(1 - alpha/m) - delta)"}}]}
-    pool = rv.pool(rv.compute(protocol, rv.grid_settings(protocol)))
-    tokens = sorted({f"{v:.3f}" for v in pool.values() if 0.1 < v < 0.999})
-    assert len(tokens) > 20
-    plain = "\n\n".join(f"In run {i} the power was {t}." for i, t in enumerate(tokens))
-    report = npv.check(plain, result_json={"x": 1.5}, references=pool)
-    assert {f.token for f in report.findings} == set(tokens)
-    stated = "\n\n".join(f"In case {i} the exact power is {t}." for i, t in enumerate(tokens))
-    assert not npv.check(stated, result_json={"x": 1.5}, references=pool).findings
-    after = "\n\n".join(f"In case {i} the power was {t}, as the exact formula gives." for i, t in enumerate(tokens))
-    assert {f.token for f in npv.check(after, result_json={"x": 1.5}, references=pool).findings} == set(tokens)
 
 
 # P1-3: no verdict the interval is too wide to give

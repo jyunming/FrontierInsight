@@ -993,6 +993,24 @@ def check_listable(grid):
             "planned; FI does not choose which to leave out.")
 
 
+def grid_too_large(grid):
+    """``""`` when a protocol's ``grid`` is a size FI lists, else one plain sentence: the count (the same
+    :func:`grid_size` that :func:`check_listable` stops on, which the trial runner, the run manifest and the script's own
+    list all hold to), each setting with its number of values (the most first), and FI's limit. Only ``grid`` multiplies
+    the settings: what every run compares inside it (``in_each_run``) is not in it, and ``constants`` have one value."""
+    if not isinstance(grid, dict) or not grid:
+        return ""
+    listed = {str(k): (v if isinstance(v, (list, tuple)) else [v]) for k, v in grid.items()}
+    counts = {k: len(v) for k, v in listed.items()}
+    size = grid_size(listed)
+    if size <= MAX_LISTED_SETTINGS:
+        return ""
+    axes = ", ".join(f"`{k}` {n} value{'s' if n != 1 else ''}"
+                     for k, n in sorted(counts.items(), key=lambda kv: -kv[1]) if n > 1)
+    return (f"the settings in `protocol.grid` are {size:,} (every combination of the values of its {len(counts)} settings, "
+            f"each multiplying every other): {axes}; FI does not list or run more than {MAX_LISTED_SETTINGS:,}")
+
+
 def grid_cells(grid):
     """Every combination of a grid's values (axes in order), as the trial runner makes them."""
     check_listable(grid)

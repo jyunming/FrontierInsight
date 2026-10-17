@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from core import disclosure, evidence, number_provenance, numeric_oracle, phased, stat_claims
+from core import disclosure, evidence, paper_facts, phased, stat_claims, typed_numbers
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
 
@@ -301,13 +301,11 @@ def test_the_counts_are_not_flagged_but_the_same_words_outside_the_markers_are()
     text = ("**How this result was reached.** The design was not revised after the experiment had first been run. "
             "The complete experiment was run 123 times (a run includes all its seeds); 122 of these runs were "
             "discarded (122 were replaced by a later run).")
-    result = {"cells": 132.0, "mean": 0.583}
     marked = disclosure.mark_paper(PAPER, text)
-    assert numeric_oracle.check(marked, result).ok
-    assert not number_provenance.check(marked, result_json=result).findings
+    assert paper_facts.typed_hits(marked, None) == paper_facts.typed_hits(PAPER, None), "the engine's counts are not read"
     bare = PAPER.replace("We simulate.", "We simulate. " + text)
-    assert not numeric_oracle.check(bare, result).ok, "the same sentence written by the model is checked"
-    assert number_provenance.check(bare, result_json=result).findings
+    assert paper_facts.typed_hits(bare, None) != paper_facts.typed_hits(PAPER, None), (
+        "the same sentence written by the model is checked")
 
 
 def test_a_block_that_says_anything_else_is_checked_like_the_rest_of_the_paper() -> None:
@@ -315,8 +313,7 @@ def test_a_block_that_says_anything_else_is_checked_like_the_rest_of_the_paper()
               "The mean final size was 0.7093.")
     paper = PAPER.replace("We simulate.", f"We simulate.\n\n{disclosure.BEGIN}\n{forged}\n{disclosure.END}")
     assert disclosure.strip_for_checks(paper) == paper
-    report = number_provenance.check(paper, result_json={"final_size": 0.583})
-    assert any(abs(f.value - 0.7093) < 1e-9 for f in report.findings), report.findings
+    assert any("0.7093" in h for h in typed_numbers.hits(paper, frozenset())), "the forged block's number is the paper's own"
 
 
 # ---- the write node -------------------------------------------------------------------------------------------------
@@ -453,9 +450,6 @@ def test_the_open_code_findings_are_in_the_quality_report_not_the_paper(tmp_path
     held = report["paper_records"]["code_findings"]
     assert "roughness_a" in held and "dropped when every repeat agrees" in held
     assert "## What FI recorded that the paper does not carry" in quality_report.render(report)
-    # The paper's own numbers are read; the number checks have nothing of FI's to leave out.
-    assert "0.583" in [n[1] for n in numeric_oracle.extract_paper_numbers(paper)]
-    assert "0.125" not in [n[1] for n in numeric_oracle.extract_paper_numbers(paper)]
 
 
 # ---- the evidence ladder --------------------------------------------------------------------------------------------
@@ -587,9 +581,8 @@ def test_the_number_checks_leave_the_findings_block_out_only_while_it_is_the_eng
     marked = disclosure.mark_findings(_PAPER_WITH_LIMITS, _FINDINGS)
     stripped = disclosure.strip_for_checks(marked)
     assert "0.0371" not in stripped and "fi:code-findings" not in stripped
-    # Neither number check reads a number out of the block.
-    assert numeric_oracle.extract_paper_numbers(marked) == numeric_oracle.extract_paper_numbers(_PAPER_WITH_LIMITS)
-    assert number_provenance.paper_numbers(marked) == number_provenance.paper_numbers(_PAPER_WITH_LIMITS)
+    # The number check reads no number out of the block.
+    assert paper_facts.typed_hits(marked, None) == paper_facts.typed_hits(_PAPER_WITH_LIMITS, None)
     # Edited, or typed by someone with a guessed checksum, it is the paper's text and is checked like the rest.
     assert "0.0381" in disclosure.strip_for_checks(marked.replace("0.0371", "0.0381"))
     guessed = f"<!-- fi:code-findings:{'a' * 12} -->\nThe effect was 41.7 percent.\n{disclosure.FINDINGS_END}"

@@ -102,8 +102,8 @@ def test_every_cut_is_an_item_with_its_numbers_and_a_paper_that_leaves_it_out_is
     # The writer places it as {{not_done:<id>}} in the Limitations; FI puts the sentence there from its record.
     assert items[0].id == "fewer-runs" and "{{not_done:fewer-runs}}" in paper_facts.writer_section(root, topic="t")
     bare = "# P\n\n## Limitations\nThe grid is coarse.\n"
-    hits = paper_facts.placement_hits(bare, root)
-    assert len(hits) == 1 and hits[0].startswith("paper_record_mismatch:") and "not_done:fewer-runs" in hits[0]
+    assert paper_facts.placement_hits(bare, root) == []  # FI places it itself, so nothing is sent back
+    assert "The experiment ran 195 runs per setting" in paper_facts.render(paper_facts.place_items(bare, root), root).text
     placed = bare + "{{not_done:fewer-runs}}\n"
     assert paper_facts.placement_hits(paper_facts.render(placed, root).text, root) == []
     assert "The experiment ran 195 runs per setting instead of the 1000" in paper_facts.render(placed, root).text
@@ -114,7 +114,7 @@ def test_the_item_says_when_the_precision_was_not_known_and_when_below_the_minim
     assert "below the plan's minimum of 400" in text and "not known before the run" in text
     # A cut for FI's own limit is named too.
     own = paper_facts.fewer_runs_text(_reduced(limit="execution.timeout_s", plan_minimum=100))
-    assert "FI's time limit for one run" in own and "below the plan's minimum" not in own
+    assert "the time limit for one run" in own and "below the plan's minimum" not in own
     # No fewer runs, no item.
     assert paper_facts.fewer_runs_text(_reduced(to={"runs_per_setting": 1000})) == ""
     assert not paper_facts.required_items(_quest(tmp_path, _reduced(to={"runs_per_setting": 1000})))
@@ -179,12 +179,12 @@ def test_a_warned_difference_is_an_item_in_plain_words(tmp_path: Path) -> None:
     root = _quest(tmp_path, manifest={"status": "warned", "problems": ["the metric `final_size` is measured ..."],
                                       "headline": headline})
     items = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.RUN_DIFFERENCE]
-    assert [i.name for i in items] == ["difference from the run record"] and headline in items[0].text
-    assert paper_facts.placement_hits("# P\n\nNothing.\n", root)
+    assert [i.name for i in items] == ["difference from the run record"] and "(for final_size: ...)" in items[0].text
+    assert f"{{{{not_done:{items[0].id}}}}}" in paper_facts.place_items("# P\n\nNothing.\n", root)
     placed = f"# P\n\n## Limitations\n{{{{not_done:{items[0].id}}}}}\n"
     assert paper_facts.placement_hits(paper_facts.render(placed, root).text, root) == []
-    assert "does not match what the analysis reports" in paper_facts.render(placed, root).text
+    assert "do not all match the record of the trials" in paper_facts.render(placed, root).text
     # Without a plain sentence, the first finding stands for it; an ok record gives no item.
     first = _quest(tmp_path / "b", manifest={"status": "warned", "problems": ["one", "two"]})
-    assert "one (and 1 more)" in paper_facts.required_items(first)[0].text
+    assert "differ in 2 places." in paper_facts.required_items(first)[0].text
     assert not paper_facts.required_items(_quest(tmp_path / "c", manifest={"status": "ok", "problems": []}))

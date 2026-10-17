@@ -85,7 +85,7 @@ def _as_list(value: Any) -> list[str]:
 #: block) instead of under it; the plan's readers look only under ``protocol``, so the part read as absent.
 PROTOCOL_PARTS = (
     "optimisation", "grid", "in_each_run", "runs_per_setting", "min_runs_per_setting", "numerical_axes", "thresholds",
-    "metrics",
+    "constants", "metrics",
     "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
 )
 
@@ -607,7 +607,7 @@ PART_RULES = {
     "per_trial": "`protocol.oracles`, for each check named below and nothing else about it: does it hold in every "
                  "single trial, or only on average over trials? Write each as `{\"name\": \"<the check's name>\", "
                  "\"per_trial\": true}` when it must hold in every single trial, or `\"per_trial\": false` when it holds "
-                 "only on average over trials (a false discovery rate at most q, an error rate at most alpha). FI takes "
+                 "only on average over trials (a false discovery rate at most q, an error rate at most alpha; a check that says nothing is read as an average). FI takes "
                  "only `per_trial` from your answer.",
     "steps": "`protocol.model.steps`: a list of step cards; each has an `id` (S1, S2, ...), `name`, `does`, `inputs` (a "
              "mapping of each input's name to its unit), `output`, and optionally `uses` (equation ids of the model), "
@@ -681,6 +681,27 @@ def part_request(topic: str, unread: dict[str, str]) -> str:
         + "\n".join(lines)
         + "\nChange nothing else in the plan: not a check, a threshold, a tolerance or a criterion, and not a part of the "
         "protocol that could be read.")
+
+
+def grid_request(topic: str, problem: str) -> str:
+    """The request FI makes of the plan's model when ``protocol.grid`` holds more settings than FI lists (``problem``, from
+    :func:`core.optimise_search.grid_too_large`: the plan's own arithmetic). It says how the grid is run and what the plan
+    can do; it chooses nothing for the plan."""
+    return (
+        "The experiment in this plan cannot run as written: " + problem + ". The topic: “"
+        + " ".join(str(topic or "").split())[:600] + "”.\n"
+        "How the grid is run:\n"
+        "- FI runs every combination of the values of the settings in `protocol.grid`: each setting multiplies every other.\n"
+        "- Settings that belong to separate parts of the study (each varied on its own, for example one study per method) "
+        "cannot share one grid: together they multiply into a count nobody can run.\n"
+        "Rewrite the plan's settings so the grid fits, in any of these ways:\n"
+        "- keep in `protocol.grid` only the settings that are meant to be crossed with one another;\n"
+        "- hold every other setting at one value, in `protocol.constants`;\n"
+        "- move a factor that each run compares inside it (all its values in one run) to `protocol.in_each_run`, where its "
+        "values do not multiply the settings;\n"
+        "- or give a setting fewer values.\n"
+        "Write `protocol.grid` again, and `protocol.constants` and `protocol.in_each_run` as they must now be (each whole). "
+        "Change nothing else in the plan.")
 
 
 def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:

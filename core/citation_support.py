@@ -494,6 +494,49 @@ def settle(site: Site, labels: set[str], own_numbers: Any, claim_unsupported: bo
     return "drop_citation", plain, left
 
 
+#: Words that point back at the sentence before: a sentence starting with one cannot stand once that sentence is gone.
+_POINTS_BACK = frozenset({"neither", "either", "both", "none", "this", "that", "these", "those", "such", "it", "they"})
+
+
+#: Words a sentence cannot end on (articles, prepositions, conjunctions, auxiliaries; not "a", which ends sentences as a
+#: symbol: "at per-test level a."): a sentence ending on one has lost the
+#: noun it was about. The class is closed (it does not grow with the wording of a paper); it is used for the one question
+#: a citation taken out leaves, whether the bracket was the object of the sentence ("against the text of [3].").
+_CANNOT_END = frozenset("""an the of in on at by for to from with without within into onto over under between among against
+    toward towards through during about after before as than via per and or but nor if whether that which who whose whom
+    is are was were be been being has have had do does did will would can could may might shall should must not""".split())
+
+
+def cut_off(sentence: str) -> bool:
+    """Whether ``sentence`` ends on a word no sentence ends on, as one does when its citation was the object of the last
+    words ("We did not verify it against the text of.")."""
+    stripped = sentence.rstrip()
+    stripped = re.sub(r"[\s*_)\]\"'.!?:;,]+$", "", stripped)
+    last = re.search(r"([A-Za-z]+)$", stripped)
+    return bool(last) and last.group(1).lower() in _CANNOT_END and len(stripped) < len(sentence.rstrip())
+
+
+def referrer_end(paper: str, site: Site) -> tuple[int, str]:
+    """``(end, why)`` for a sentence about to be cut out whole: ``(site.end, "")`` when the next sentence of its paragraph
+    does not point back at it, ``(end of that sentence, "")`` when the next sentence starts with a word that points back
+    ("Neither was run", "This holds...") and has no number and no citation of its own (it goes with it: left alone it
+    would refer to nothing), and ``(-1, why)`` when it points back but carries a number or a citation (then the
+    sentence is kept, with only its citation taken out)."""
+    end = references_start(paper)
+    units = _pp.sentence_units(paper[:end])
+    nxt = next(((a, b, blk) for a, b, blk in units if a >= site.end), None)
+    cur = next((blk for a, b, blk in units if a <= site.start < b), None)
+    if nxt is None or nxt[2] != cur:
+        return site.end, ""
+    text = paper[nxt[0]:nxt[1]]
+    first = re.match(r"[\s*_(\"']*([A-Za-z]+)", text)
+    if not first or first.group(1).lower() not in _POINTS_BACK:
+        return site.end, ""
+    if re.search(r"\d", text) or CITE_RE.search(text):
+        return -1, "left in the paper with its citation taken out: the next sentence refers back to it"
+    return nxt[1], ""
+
+
 def _apply(paper: str, edits: list[tuple[int, int, str]]) -> str:
     """The paper with each ``(start, end, replacement)`` made, from the end back so the spans stay true. A sentence cut
     out takes one of the spaces beside it."""
@@ -677,7 +720,25 @@ async def check_paper(
             new_text = plan["text"]
         else:
             new_text = rewrite_brackets(site.text, remove=set(labels))
-        edits.append((site.start, site.end, new_text))
+        if (new_text and plan.get("action") in ("drop_citation", "drop_clause") and cut_off(new_text)
+                and cut_off(site.text) is False):
+            # The citation was the object of the sentence's last words: without it the sentence stops mid-phrase and
+            # cannot be repaired by taking a word out, so it goes whole when it holds no result of the study.
+            if (site.kind in ("prose", "list") and not any(n in own_numbers for n in _numbers(site.text))
+                    and keeps_shape(site, "")):
+                plan, new_text = {"action": "drop_sentence", "text": ""}, ""
+                note = note or "the sentence was about the source itself and could not stand without it"
+            else:
+                note = note or "left in the paper with its citation taken out: the sentence now ends cut off"
+        cut_end = site.end
+        if not new_text:
+            cut_end, why = referrer_end(paper, site)
+            if cut_end < 0:  # something refers back to the sentence and cannot go with it: only its citation goes
+                cut_end, new_text = site.end, rewrite_brackets(site.text, remove=set(labels))
+                plan, note = {"action": "drop_citation", "text": ""}, note or why
+            elif cut_end > site.end:
+                note = note or "the next sentence, which referred back to it, was taken out with it"
+        edits.append((site.start, cut_end, new_text))
         plan.update(final=new_text, fell_back=fell_back, note=note)
         plans[sk] = plan
     new_paper = _apply(paper, edits) if edits else paper
@@ -793,6 +854,47 @@ def new_record(paper: str, previous: dict[str, Any] | None) -> dict[str, Any]:
 def ledger(result: Result, *, reader: str, same_model: bool | None) -> dict[str, Any]:
     return {"counts": result.counts, "reader": reader, "reader_is_writer": same_model,
             "judge_failed": result.judge_failed, "citations": [r.as_dict() for r in result.rows]}
+
+
+def renumber_text(text: str, mapping: dict[int, int]) -> str:
+    """``text`` with the source numbers in its brackets changed by ``mapping`` (old number to new); web-page labels and a
+    number the map does not name stay as they are."""
+    spans = [(m.start(), m.end()) for m in _NOT_PROSE_RE.finditer(text)]
+
+    def one(m: re.Match[str]) -> str:
+        if text[m.end():m.end() + 1] == "(" or any(a <= m.start() < b for a, b in spans):
+            return m.group(0)
+        labels = [str(mapping.get(int(x), x)) if x.isdigit() else x for x in labels_in(m.group(1))]
+        return f"[{_bracket_text(labels)}]"
+
+    return CITE_RE.sub(one, text)
+
+
+def relabel_ledger(data: dict[str, Any], mapping: dict[int, int]) -> dict[str, Any]:
+    """The ledger of the check with its citations named by the numbers of the paper as it is delivered. The check judges
+    the paper under the numbers it had; the sources are then numbered again (those no longer cited go, the rest close
+    up), so a ledger left as judged would call one source by one number and the paper by another. A citation that
+    stands (backed, or put in by the check) is shown with its sentence and number as delivered; one that was fixed is
+    named ``was N`` with the sentence as it was before the fix, and what it became is shown with the new numbers."""
+    rows: list[dict[str, Any]] = []
+    for r in data.get("citations") or []:
+        r = dict(r)
+        stands = r.get("status") == "supported" or str(r.get("action") or "").startswith("added")
+        label = str(r.get("label") or "")
+        if stands:
+            r["sentence"] = renumber_text(str(r.get("sentence") or ""), mapping)
+            if label.isdigit():
+                r["label"] = str(mapping.get(int(label), label))
+        else:
+            if label.isdigit():
+                r["label"] = f"was {label}"
+            if r.get("new_sentence"):
+                r["new_sentence"] = renumber_text(str(r["new_sentence"]), mapping)
+            nl = str(r.get("new_label") or "")
+            if nl.isdigit():
+                r["new_label"] = str(mapping.get(int(nl), nl))
+        rows.append(r)
+    return {**data, "citations": rows}
 
 
 def render_md(data: dict[str, Any]) -> str:

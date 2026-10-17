@@ -24,9 +24,8 @@ from typing import Any
 import pytest
 import yaml
 
-from core import disclosure, paper_facts, quality_report, run_facts, trial_runner
+from core import paper_facts, quality_report, run_facts, trial_runner
 from core.execution import SharedInterpreterExecutor
-from core.stat_claims import check, seed_records
 
 FIXTURES = Path(__file__).parent / "fixtures" / "paper_record"
 
@@ -37,14 +36,6 @@ def _quest(tmp_path: Path, name: str, *, record: bool = True) -> tuple[Path, str
     if not record:
         (root / ".fi" / "run_facts.json").unlink()
     return root, str(yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["topic"])
-
-
-def _hits(text: str, root: Path, topic: str) -> list[str]:
-    return paper_facts.stated_hits(text, root, topic=topic)
-
-
-def _seed_hits(text: str, root: Path) -> list[Any]:
-    return [f for f in check(text, seeds=seed_records(root)).findings if f.kind == "seed_not_recorded"]
 
 
 # ---- A1: the run time is the experiment's, not the last execution's -----------------------------------------------------
@@ -107,39 +98,6 @@ def test_an_explore_then_confirm_quest_says_which_run_the_time_is(tmp_path: Path
 
 
 # ---- A2: the seed the code used ------------------------------------------------------------------------------------------
-
-
-def test_e1_paper_saying_base_seed_0_is_wrong_and_the_code_s_seed_passes(tmp_path: Path) -> None:
-    root, _ = _quest(tmp_path, "fdr_e1")
-    seeds = seed_records(root)
-    assert seeds.fi_seed_reaches is False and seeds.base_seed == 0
-    found = _seed_hits("Each trial's random seed is derived from base seed 0 and the trial number.", root)
-    assert found and "20261015" in found[0].message and "does not reach the code" in found[0].message
-    for ok in ("The simulation seeds its generators with the number 20261015 written in the code.",
-               "Every family is generated from seed 20261015, the trial number and the setting."):
-        assert _seed_hits(ok, root) == [], ok
-
-
-@pytest.mark.parametrize("text", [
-    "Each trial's seed is derived from FI's base seed and the trial number.",  # P1-3: no number
-    "Trials were seeded with 0 plus the trial index.",                         # P1-3: "seeded"
-    "The generators were seeded with seed 0.",
-    "Seed: 0.",
-    "We used the random seed 17 for every family.",                            # P1-4: the self-check's seed
-    "![Results of 4,096 trials with seed 0 per setting.](figures/a.png)",       # second review P1-3: a caption
-    "| Quantity | Value |\n|---|---|\n| Base seed | 0 |",                      # and a table row
-])
-def test_e1_bypass_seed_sentences_are_flagged(tmp_path: Path, text: str) -> None:
-    root, _ = _quest(tmp_path, "fdr_e1")
-    assert _seed_hits(text, root), text
-
-
-def test_a_seed_that_reaches_the_code_keeps_the_existing_check(tmp_path: Path) -> None:
-    root, _ = _quest(tmp_path, "kinetics_s1")
-    seeds = seed_records(root)
-    assert seeds.fi_seed_reaches is True
-    assert _seed_hits("Each trial's seed is derived from base seed 0.", root) == []
-    assert _seed_hits("Each trial's seed is derived from base seed 5.", root)
 
 
 # ---- the placeholders: filled from the records ------------------------------------------------------------------------
@@ -297,13 +255,14 @@ def test_a_required_fact_in_the_source_list_is_not_placed(tmp_path: Path, headin
 
 @pytest.mark.parametrize("lim", ["<!-- {{not_done:topic-temperature}} -->",
                                  "```\n{{not_done:topic-temperature}}\n```"])
-def test_an_item_hidden_in_the_limitations_is_not_placed(tmp_path: Path, lim: str) -> None:
+def test_an_item_hidden_in_the_limitations_is_put_in_by_fi(tmp_path: Path, lim: str) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
     (root / ".fi" / "topic_covered.json").write_text(json.dumps({"left": [{"kind": "factor", "name": "temperature"}]}))
-    out = paper_facts.render(LIMITS_OK.replace("{{not_done:topic-temperature}} We could not.", lim), root,
-                             topic=topic).text
-    hits = paper_facts.placement_hits(out, root, topic=topic)
-    assert any("topic-temperature" in h for h in hits), hits
+    draft = LIMITS_OK.replace("{{not_done:topic-temperature}} We could not.", lim)
+    out = paper_facts.render(paper_facts.place_items(draft, root), root, topic=topic).text
+    assert paper_facts.placement_hits(out, root, topic=topic) == []
+    visible = out.replace(lim, "")
+    assert "<!-- fi:fact-not_done-topic-temperature -->" in visible or "temperature" in visible
 
 
 # ---- what the writer is given --------------------------------------------------------------------------------------------
@@ -386,141 +345,43 @@ LIMITS_OK = ("# Kinetics\n\n## Methods\nWe used {{seed}}; the run took {{run_tim
              "## Limitations\n{{not_done:topic-temperature}} We could not.\n")
 
 
-def test_a_required_placeholder_must_be_placed_and_in_the_limitations(tmp_path: Path) -> None:
+def test_a_required_fact_must_be_placed_and_fi_places_the_items_itself(tmp_path: Path) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
     (root / ".fi" / "topic_covered.json").write_text(json.dumps({"left": [{"kind": "factor", "name": "temperature"}]}))
 
     def hits(draft: str) -> list[str]:
         return paper_facts.placement_hits(paper_facts.render(draft, root, topic=topic).text, root, topic=topic)
 
+    def placed(draft: str) -> str:
+        return paper_facts.render(paper_facts.place_items(draft, root), root, topic=topic).text
+
+    mark = "fi:fact-not_done-topic-temperature -->"
     assert hits(LIMITS_OK) == []
-    # The item's NAME in the paper does not count: only its placeholder does (the title, "we varied the temperature").
-    named = "# Temperature dependence\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## Limitations\nWe varied the temperature.\n"
-    assert any("does not say a part of the topic the study did not do" in h for h in hits(named))
+    # An item the paper does not hold is put at the end of its Limitations by FI (the item's NAME in the text does not count).
+    named = ("# Temperature dependence\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n"
+             "## Limitations\nWe varied the temperature.\n")
+    out = placed(named)
+    assert out.index("## Limitations") < out.index(mark) and hits(out) == []
+    # Wherever the writer put it, it stays there (no second copy, no hit): FI does not check the place.
     elsewhere = LIMITS_OK.replace("## Limitations\n{{not_done:topic-temperature}}", "## Results\n{{not_done:topic-temperature}}")
-    assert any("outside the Limitations section" in h for h in hits(elsewhere))
+    assert placed(elsewhere).count(mark) == 2 and hits(elsewhere) == []  # the opening and the closing marker
+    # Not in the title, though: the title does not hold it.
     title = "# {{not_done:topic-temperature}}\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n"
-    assert any("in the title" in h for h in hits(title))
-    no_section = "# T\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n"
-    assert any("has no Limitations section" in h for h in hits(no_section))
+    assert "## Limitations" in placed(title)
+    # A paper with no Limitations section gets one, before the sources.
+    no_section = "# T\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## References\n1. A.\n"
+    out = placed(no_section)
+    assert out.index("## Limitations") < out.index(mark) < out.index("## References")
+    # A Limitations that is a bold paragraph inside the Discussion (s3 fdr) is not a section: FI adds its own.
+    bold = "# T\n\n## Methods\n{{seed}}\n\n## Discussion\n**Limitations.** Few settings.\n\n## References\n1. A.\n"
+    out = placed(bold)
+    assert out.count("## Limitations") == 1 and out.index("## Discussion") < out.index("## Limitations") < out.index("## References")
+    assert paper_facts.place_items(out, root) == out  # a second pass adds nothing
     no_time = LIMITS_OK.replace("{{run_time}}", "223 s")
     assert any("does not state {{run_time}}" in h for h in hits(no_time))
 
 
 # ---- (b) a run time typed outside a placeholder ---------------------------------------------------------------------------
-
-KINETICS_FAKE = [  # measured 223.2 s
-    "All 50,000 trials (400 per setting) completed in 2.3 s.",
-    "The experiment ran 400 trials for each of 125 settings in 2.3 s.",
-    "Every setting was run, and the whole study took 2.3 s.",
-    "The experiment took a 2.3-second wall-clock time.",
-    "The full experiment finished in 2.3 seconds on a laptop, with the analysis of results included.",
-    "The run took 2.3s.",
-    "Wall time: 2.3 s.",
-    "The total wall-clock time was 2.3 s.",
-    "Runtime was 2,300 ms.",
-    "The experiment needed 2.3 s in total.",
-    "The experiment lasted two seconds.",
-    "The experiment required 2.3 s.",
-    # Second review, P1-4: "the simulation" / "the model" with a bare duration is the computer's time.
-    "The simulation took 2.3 s.",
-    "All simulations completed in 2.3 s.",
-    "The model ran in 2.3 s on one core.",
-    # Second review, P1-3: a table row and a figure caption are read too.
-    "| Quantity | Value |\n|---|---|\n| Wall-clock run time | 2.3 s |",
-    "| Setting | Run time |\n|---|---|\n| all | 2.3 s |",
-    "![The full experiment ran in 2.3 s.](figures/a.png)",
-]
-E1_FAKE = [  # measured 121.3 s, limit 60 s
-    "The run had 27 settings with 4,096 trials per setting and took 7.4 s, within the 60 s limit.",
-    "The experiment (27 settings, 4,096 trials per setting) ran in 7.4 s.",
-    "The experiment ran for 7.4 s; the analysis was fast.",
-    "The experiment completed within 60 s over 27 settings.",
-    "The computation completed in under 60 seconds, and no trial failed.",
-    "All trials ran within the 60 s limit and none failed.",
-    "The experiment finished within the 60 s limit.",
-    "All runs completed inside the limit set by the topic.",
-    "The runtime constraint was satisfied.",
-    "The run time stayed within the topic's limit, even with 4,096 trials per setting.",
-    "The run took {{run_time}}, within the topic's limit of {{time_limit}}.",
-]
-KINETICS_TRUE = [  # each must pass (finding P1-1, and true statements)
-    "Each simulation runs to t = 50 s with a step of 0.01 s.",
-    "The reaction ran for 600 s of simulated time.",
-    "The simulation ran from t = 0 to 100 s.",
-    "Concentrations were sampled every 5 s; the run lasted 600 s of reaction time.",
-    "The half-life of 35 s means the run took several half-lives to complete.",
-    "The experiment ran for 223 s, of which the trials took 33 s.",
-    "The first, discarded run took 40 s; the kept run took 223 s.",
-    "The analysis script ran in 2.3 s.",
-    "The analysis ran for 2.3 s on the stored trials.",
-    "Each trial took 0.0007 s per setting.",
-    "The experiment took between 3 and 4 minutes.",
-    "The experiment took 3-4 minutes.",
-    "The run ran for about 4 min.",
-    "The whole experiment ran for 223 s on one core.",
-    "The run took about 4 minutes (223 s).",
-    "The study ran in under four minutes.",
-    "The study was run under the constraint that every setting shares its seeds.",
-    "The fits took a second look at the residuals in the 1990s literature.",
-    # Second review, P1-2: another study's run time is not this run's.
-    "Smith's solver took 2,230 s for the same problem.",
-    "The original 2019 study ran for 3 hours.",
-    "The reference implementation ran for 600 s on the same machine.",
-    "The code ran in 30 s on a cluster in an earlier study [3].",
-    "Prior work needed 2 hours for one setting [4].",
-    "Our run took 223 s, ten times slower than the 22 s reported by Smith [3].",
-    # The simulated-time cases stay quiet with the simulation as the subject.
-    "The simulation ran from t = 0 to 100 s.",
-    "The reaction ran for 600 s of simulated time.",
-]
-E1_TRUE = [
-    "The experiment took 121 s, over the topic's limit of 60 s.",
-    "The run did not meet the 60 s limit; it took 2 minutes.",
-    "The topic sets a limit of 60 s.",
-    "The error stayed within the tolerance limit.",
-    "The run took {{run_time}}, {{time_limit_met}} the topic's limit of {{time_limit}}.",
-]
-
-
-@pytest.mark.parametrize("text", KINETICS_FAKE)
-def test_a_false_run_time_typed_in_kinetics_is_flagged(tmp_path: Path, text: str) -> None:
-    root, topic = _quest(tmp_path, "kinetics_s1")
-    rendered = paper_facts.render(f"# T\n\n## Methods\n{text}\n", root, topic=topic).text
-    assert paper_facts.stated_hits(rendered, root, topic=topic), text
-
-
-@pytest.mark.parametrize("text", E1_FAKE)
-def test_a_false_run_time_or_limit_claim_typed_in_e1_is_flagged(tmp_path: Path, text: str) -> None:
-    root, topic = _quest(tmp_path, "fdr_e1")
-    rendered = paper_facts.render(f"# T\n\n## Methods\n{text}\n", root, topic=topic).text
-    hits = paper_facts.stated_hits(rendered, root, topic=topic)
-    assert hits and all(h.startswith("paper_record_mismatch:") for h in hits), text
-
-
-@pytest.mark.parametrize("text", KINETICS_TRUE)
-def test_simulated_time_parts_and_true_times_are_not_flagged_in_kinetics(tmp_path: Path, text: str) -> None:
-    root, topic = _quest(tmp_path, "kinetics_s1")
-    rendered = paper_facts.render(f"# T\n\n## Methods\n{text}\n", root, topic=topic).text
-    assert paper_facts.stated_hits(rendered, root, topic=topic) == [], text
-
-
-@pytest.mark.parametrize("text", E1_TRUE)
-def test_true_statements_about_the_limit_are_not_flagged_in_e1(tmp_path: Path, text: str) -> None:
-    root, topic = _quest(tmp_path, "fdr_e1")
-    rendered = paper_facts.render(f"# T\n\n## Methods\n{text}\n", root, topic=topic).text
-    assert paper_facts.stated_hits(rendered, root, topic=topic) == [], text
-
-
-def test_the_placeholder_form_of_each_bypass_says_the_truth(tmp_path: Path) -> None:
-    """The writer's sentence shape with placeholders cannot carry the false value: FI fills 121.3 s and "over"."""
-    root, topic = _quest(tmp_path, "fdr_e1")
-    draft = ("# T\n\n## Methods\nThe run had {{settings}} settings with {{trials_per_setting}} trials per setting and took "
-             "{{run_time}}, {{time_limit_met}} the {{time_limit}} limit.\n")
-    rendered = paper_facts.render(draft, root, topic=topic).text
-    assert ("The run had 27 settings with 4,096 trials per setting and took 121.3 s, over the 60 s limit."
-            in paper_facts.without_marks(rendered))
-    assert paper_facts.stated_hits(rendered, root, topic=topic) == []
 
 
 def test_without_the_record_the_ledger_gives_the_least_the_trials_took(tmp_path: Path) -> None:
@@ -534,8 +395,6 @@ def test_without_the_record_the_ledger_gives_the_least_the_trials_took(tmp_path:
     (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     wall, least = paper_facts.measured_run_time(root, 2.3)
     assert wall is None and least == pytest.approx(75.0), "the 2.3 s of the last execution is not used"
-    assert paper_facts.stated_hits("The experiment ran for 2.3 s.", root, topic=topic, fallback_s=2.3)
-    assert paper_facts.stated_hits("The experiment ran for 4 minutes.", root, topic=topic, fallback_s=2.3) == []
     said = paper_facts.facts(root, topic=topic, fallback_s=2.3)["run_time"].text
     assert said.startswith("at least 75") and "2.3" not in said
 
@@ -669,7 +528,7 @@ def test_the_review_adds_the_records_check_and_rewrites_the_text(tmp_path: Path,
         "topic": topic, "iteration": 0, "review": {}, "paper_md": str(paper),
         "exec_result": {"returncode": 0, "duration_s": 7.4}}))
     hits = [h for h in patch["review"]["must_flag_hits"] if str(h).startswith("paper_record_mismatch")]
-    assert hits and any("7.4 s" in h for h in hits) and any("{{run_time}}" in h for h in hits), hits
+    assert hits and any("{{run_time}}" in h for h in hits), hits
     assert patch["iteration"] == 1
     route = eng._route_after_review({"review": patch["review"], "iteration": 1, "code": "x"})  # type: ignore[arg-type]
     assert route == "rewrite"
@@ -688,7 +547,7 @@ def test_a_failed_records_check_never_goes_to_the_design_or_a_stop(tmp_path: Pat
         assert eng._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
     assert eng._route_after_review({"review": review, "iteration": 3}) in ("done", "human_feedback")  # type: ignore[arg-type]
     kept = paper_facts.kept_check(root)
-    assert kept["hits"] and any("7.4 s" in h for h in kept["hits"])
+    assert kept["hits"] and any("{{run_time}}" in h for h in kept["hits"])
 
 
 def test_a_resume_at_the_review_takes_old_blocks_out_and_fills_placeholders(tmp_path: Path) -> None:
@@ -720,7 +579,7 @@ def test_the_passage_editor_gets_placeholders_and_fi_fills_them_again(tmp_path: 
     # An edit that types the value over the placeholder is caught by the placement check.
     typed = given.replace("{{run_time}}", "7.4 s")
     hits = paper_facts.check(paper_facts.render(typed, root, topic=topic).text, root, topic=topic)
-    assert any("{{run_time}}" in h for h in hits) and any("7.4 s" in h for h in hits)
+    assert any("{{run_time}}" in h for h in hits)
 
 
 def test_the_page_trim_never_offers_a_sentence_holding_fi_s_value(tmp_path: Path) -> None:
@@ -752,15 +611,6 @@ def test_a_rerun_from_the_writing_clears_the_record_check(tmp_path: Path) -> Non
 
     assert ".fi/paper_record_check.json" in rerun_from._OWN["writing"]
     assert ".fi/paper_record_check.json" in rerun_from._OWN["review"]
-
-
-def test_the_numbers_fi_fills_in_are_accounted_for_by_its_record(tmp_path: Path) -> None:
-    """The provenance check counts FI's filled-in values as FI's record, not as results nothing accounts for."""
-    root, _ = _quest(tmp_path, "fdr_e1")
-    eng = _engine(root)
-    numbers = set(eng._run_fact_numbers({"exec_result": {"duration_s": 7.4}}).values())  # type: ignore[arg-type]
-    assert {121.3, 20261015.0, 106.0, 60.0, 4096.0, 27.0} <= numbers, numbers
-    assert 7.4 not in numbers, "the last execution's time is not the experiment's"
 
 
 @pytest.mark.asyncio

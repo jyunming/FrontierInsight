@@ -213,6 +213,29 @@ def test_named_levels_held_as_numbers_are_left_to_a_reader_not_passed() -> None:
     assert tr.gaps_from(req, coded, {"F1": "covered"}) == ([], [])
 
 
+_CORRECTION = {"factors": [{"name": "correction", "levels": ["uncorrected", "Bonferroni", "Benjamini-Hochberg"], "main": True}]}
+
+
+def test_a_level_given_by_an_abbreviation_is_left_to_a_reader_and_a_level_with_no_value_left_is_a_gap() -> None:
+    """The topic names three methods; the plan compares all three inside each run but names the third ``bh``. A name match
+    cannot tell ``bh`` from ``holm``: the reader decides (and sees the values), and it is a gap without a reader only when
+    no value is left over that could stand for the missing level."""
+    req = tr.parse(_CORRECTION)
+    abbreviated = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "bh"]}}})
+    assert tr.match(req, abbreviated) == ([], ["F1"])
+    assert tr.gaps_from(req, abbreviated, {"F1": "covered"}) == ([], [])
+    other = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "holm"]}}})
+    assert tr.match(req, other) == ([], ["F1"]), "a different method looks the same to a name match: the reader says"
+    assert tr.gaps_from(req, other, {"F1": "missing"})[0][0]["kind"] == "factor"
+    assert tr.gaps_from(req, other, {}) == ([], ["correction"]), "no judgement is not a pass: named as unchecked"
+    short = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni"]}}})
+    gaps, unresolved = tr.match(req, short)
+    assert unresolved == [] and [g["kind"] for g in gaps] == ["level"]
+    assert "Benjamini-Hochberg" in gaps[0]["sentence"] and "it has bonferroni, uncorrected" in gaps[0]["sentence"]
+    named = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "benjamini_hochberg"]}}})
+    assert tr.match(req, named) == ([], [])
+
+
 def test_the_topic_reading_is_a_reading_of_the_plan_not_of_the_checks_in_the_quality_report() -> None:
     from core import quality_report as qr
 

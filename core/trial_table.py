@@ -12,8 +12,7 @@ and its truth, a power from two counts) is not here; the table covers what the t
 that is the same in every trial of every setting (a setting echoed back, a constant) and a trial index are left out:
 they have no spread to report.
 
-Written to ``paper/results_table.md`` beside the paper, given to the writer while it is short enough, and read by
-the provenance check as numbers the run computed.
+Written to ``paper/results_table.md`` beside the paper and given to the writer while it is short enough.
 """
 
 from __future__ import annotations
@@ -26,12 +25,14 @@ from pathlib import Path
 from typing import Any
 
 from core import stats as _stats
+from core.result_checks import left_out_by_record as _left_out_by_record
 
 #: The table goes into the writer's evidence only up to this many rows; a longer one stays in its file.
 WRITER_MAX_ROWS = 200
 
 
 def _record(quest_root: Path) -> list[dict[str, Any]]:
+    """The cells of ``raw/trials.json`` that carry metrics, without a quantity FI left out of the results."""
     try:
         data = json.loads((Path(quest_root) / "raw" / "trials.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -39,7 +40,12 @@ def _record(quest_root: Path) -> list[dict[str, Any]]:
     cells = data.get("cells") if isinstance(data, dict) else None
     if not isinstance(cells, list):
         return []
-    return [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
+    gone = set(_left_out_by_record(quest_root))  # the one source of what FI left out (core/result_checks.py)
+    out = [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
+    if not gone:
+        return out
+    # FI's own record (raw/trials.json) is unchanged; what the writer and the reader are shown has no left-out quantity.
+    return [{**c, "metrics": {k: v for k, v in c["metrics"].items() if str(k) not in gone}} for c in out]
 
 
 def _values(metric: Any) -> list[float]:
@@ -133,12 +139,6 @@ def rows(quest_root: Path) -> list[dict[str, Any]]:
     return rows_of(summaries(_record(quest_root)))
 
 
-def settings(table: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Each row's setting label with its settings (``{"m=20,pi1=0.2": {"m": 20, "pi1": 0.2}}``), for the provenance
-    check's reading of which setting a sentence or a table row names."""
-    return {r["setting"]: dict(r.get("cell") or {}) for r in table}
-
-
 def _num(x: Any) -> str:
     return "" if x is None else f"{x:.6g}"
 
@@ -173,16 +173,9 @@ def write(quest_root: Path) -> list[dict[str, Any]]:
     return table
 
 
-def traceable(table: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """The rows by ``setting.value``, for the provenance check: numbers the run computed."""
-    return {f"{r['setting']}.{r['metric']}": {k: r[k] for k in ("n", "mean", "sd", "ci_lower", "ci_upper")
-                                               if r[k] is not None}
-            for r in table}
-
-
 def write_note(table: list[dict[str, Any]]) -> str:
     """The writer's note: the table itself, while it has at most ``WRITER_MAX_ROWS`` rows; ``""`` otherwise (a longer
-    one stays in its file and in the provenance check)."""
+    one stays in its file)."""
     if not table or len(table) > WRITER_MAX_ROWS:
         return ""
     return ("FI's table of what every trial gave, per setting (also in paper/results_table.md). Take a number about "

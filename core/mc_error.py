@@ -14,10 +14,9 @@ judges with them. The first rule is that a check the trials cannot decide is nev
 * **Which checks are read as a mean over trials** (:func:`reads_a_mean`). A check of a quantity (a special case, a
   published value, a convergence rate) is a number of the setting, which for a random study is its mean over trials;
   ``per_trial: true`` makes it a rule of every trial instead. A rule (an invariant, a symmetry, a second implementation:
-  its violation, expecting 0) holds in every trial and is judged on every trial FI runs, the worst one deciding
-  (:func:`worst`), unless the check itself says it is a rule on the average over trials (``per_trial: false``: a bound
-  on a false discovery RATE, an error rate). The protocol's metrics never decide this: a number the plan declares as a
-  mean is still a number each trial has, and a rule each trial keeps is never averaged away.
+  its violation, expecting 0) is read the same way: on the mean over trials unless the check says ``per_trial: true``,
+  and then it is judged on every trial FI runs, the worst one deciding (:func:`worst`). The protocol's metrics never decide this: a number the plan declares as a
+  mean is still a number each trial has.
 * **The number** of a mean check is the check's formula applied to the means of the names over the trials
   (``max(0, mean(fdr) - 0.04)``) only when every name it uses is one the protocol declares among its ``metrics`` as a
   mean or a proportion over runs (the plan then says each is an expected value). Otherwise it is the mean of the formula
@@ -133,7 +132,7 @@ def unsaid_reading(protocol: dict[str, Any] | None) -> list[str]:
     implementation) whose ``measure`` uses a number the protocol declares as a mean or proportion over runs
     (:func:`mean_names`), with ``per_trial`` unset. Whether such a rule holds in every single trial or only on average is
     a fact about the science, so FI asks the plan once (the plan step's per-part request) and never guesses it; a check
-    still unsaid keeps its kind's reading (:func:`reads_a_mean`). A check of a quantity is read on the mean already and
+    still unsaid is read on the mean over trials (:func:`reads_a_mean`). A check of a quantity is read on the mean already and
     is not asked about (``per_trial: true`` would only make a random quantity a rule of every trial)."""
     if not isinstance(protocol, dict):
         return []
@@ -150,13 +149,13 @@ def unsaid_reading(protocol: dict[str, Any] | None) -> list[str]:
 
 
 def reads_a_mean(oracle: dict[str, Any]) -> bool:
-    """Whether ``oracle``'s number is a mean over trials (see the module docstring): a check of a quantity unless it says
-    ``per_trial: true``; a rule (an invariant, a symmetry, a second implementation) only when it says ``per_trial:
-    false``. Nothing else decides it."""
-    flag = per_trial_flag(oracle)
-    if flag is not None:
-        return not flag
-    return _oracle.kind_of(oracle) not in _forms.VIOLATION_KINDS
+    """Whether ``oracle``'s number is a mean over trials (see the module docstring): every check unless it says
+    ``per_trial: true`` (a rule of every single trial, the worst trial deciding). A check that says nothing is about the
+    mean: a rule such as a false discovery rate at most q is a mean over trials, and a single trial's proportion can be
+    anything, so reading it per trial fails correct code (the graded s1 plan, measured on the offline bench: reading the
+    unset case as the mean caught 4 of 4 planted faults with 0 of 2 false stops, the per-trial reading 4 of 4 with 1 of 2).
+    Nothing else decides it, not the check's kind."""
+    return per_trial_flag(oracle) is not True
 
 
 def measure_names(measure: str, returned: dict[str, Any] | None = None) -> list[str]:

@@ -34,7 +34,7 @@ MOVES = {
     "figures": ["figures", "code/web_plots.py", "needs/receipts/evidence_gate.json", "paper", "paper.pdf"],
     "crosscheck": ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json", "paper", "paper.pdf", "slides.md"],
     "evidence": ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json", "paper", "paper.pdf"],
-    "claims": ["paper/claims.json", "paper/CLAIMS.md", "paper/numeric_audit.json", "needs/receipts/claim_check.json",
+    "claims": ["paper/claims.json", "paper/CLAIMS.md", "paper/statistics_audit.json", "needs/receipts/claim_check.json",
                "slides.pdf", "poster.pdf"],
 }
 STAYS = {

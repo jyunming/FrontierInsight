@@ -16,7 +16,6 @@ import yaml
 
 from core import code_review as cr
 from core import quality_report
-from core import record_claims
 from tests.test_code_review import _engine
 
 FIXTURE = Path(__file__).parent / "fixtures" / "replay" / "quantity_other_than_planned"
@@ -134,27 +133,11 @@ def test_the_quantities_are_left_out_of_the_results_and_the_writer_is_told(tmp_p
     assert _keys(_result()) - left == _keys(stripped)
 
 
-def test_the_paper_that_quotes_the_left_out_numbers_is_flagged(tmp_path: Path) -> None:
-    engine = _quest(tmp_path)
-    _run(engine, _result())
-    paper = (FIXTURE / "paper_excerpt.md").read_text(encoding="utf-8")
-    hits = engine._record_contradiction_hits(paper, {"iteration": 0})
-    left = _left_out_keys()
-    assert any("4824.8" in h and any(f"`{k}`" in h for k in left) for h in hits), hits
-    assert all(h.startswith(record_claims.HIT + ":") for h in hits)
-    # A paper that leaves them out, and says so, is not flagged; nor is a number that is not theirs.
-    clean = ("The coverage stayed near 0.9467 in every setting. The spread of the estimates is left out of this paper: the "
-             "code computes it differently from the plan's definition.")
-    assert engine._record_contradiction_hits(clean, {"iteration": 0}) == []
-
-
 def test_a_number_a_kept_quantity_also_holds_is_not_taken_for_a_left_out_one() -> None:
     result = {"a_spread": [3.25, 7.5], "a_other": 3.25}
     from core.result_checks import _values_left_out
 
     assert _values_left_out(result, {"a_spread"}) == {"a_spread": [7.5]}
-    assert record_claims.quoted_left_out("We found 3.25 and 1.2.", {"a_spread": [3.25]}) != []  # no kept holder given here
-    assert record_claims.quoted_left_out("We found 3.25.", {}) == []
 
 
 def test_the_quality_report_says_what_was_left_out_and_why(tmp_path: Path) -> None:

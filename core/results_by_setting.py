@@ -44,6 +44,7 @@ from typing import Any
 from . import grid_keys as _grid_keys
 from . import oracle_forms as _forms
 from . import reference_values as _refs
+from . import result_checks as _result_checks
 from . import trial_table as _trial_table
 from . import unread_settings as _unread
 
@@ -158,6 +159,12 @@ class Setting:
     cells: list[str]
     metrics: dict[str, dict[str, Any]]
     copies: int = 0  # cells left out of the counts because they gave the very same trials as another
+    level: dict[str, Any] = field(default_factory=dict)  # a value compared inside each run: not a setting of the plan
+
+
+def _run_setting(s: "Setting") -> str:
+    """The setting of the plan a record belongs to: its settings without a value compared inside each run."""
+    return json.dumps({k: v for k, v in s.setting.items() if k not in s.level}, default=str)
 
 
 @dataclass
@@ -166,6 +173,12 @@ class Distinct:
     unread: list[str]
     notes: list[str] = field(default_factory=list)
     values: list[str] = field(default_factory=list)
+
+    @property
+    def n_settings(self) -> int:
+        """How many settings the plan's grid fixes: the settings that differ in more than a value compared inside each
+        run. (A record per such value is a row of a table, not another setting.)"""
+        return len({_run_setting(s) for s in self.settings})
 
 
 def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, unread: list[str]) -> Distinct:
@@ -199,17 +212,20 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
             if len(items) > 1 and _differs(items, whole):
                 apart = True
                 break
-            merged[name] = whole
+            if any(name in c["metrics"] for c in members):  # a record that never returned a value has no row for it
+                merged[name] = whole
         if apart and len(members) > 1:
             kept_apart.append(_label(setting))
             for c in members:
                 own = dict(c.get("cell") or {})
                 out.append(Setting(own, _label(own), [c["key"]], {n: dict(c["metrics"][n]) for n in values
-                                                                  if c["metrics"].get(n)}))
+                                                                  if c["metrics"].get(n)},
+                                   level=dict(c.get("level") or {})))
             continue
         copied += dropped
         joined += len(members) > 1
-        out.append(Setting(setting, _label(setting), [c["key"] for c in members], merged, dropped))
+        out.append(Setting(setting, _label(setting), [c["key"] for c in members], merged, dropped,
+                           dict(members[0].get("level") or {})))
     axes = " and ".join(f"`{a}`" for a in unread)
     if joined:
         notes.append(f"FI found no read of {axes} in the simulation's code, so grid cells that differ only there are one "
@@ -332,6 +348,9 @@ class Built:
     tables: list[Table]
     notes: list[str]
     rows: list[dict[str, Any]]  # one per quantity and distinct setting, every number (for the CSV and the checks)
+    # What FI noticed about its own reading of the code. Never reader text: the caller logs it (run.log), the paper and
+    # the writer's note do not carry it.
+    diagnostics: list[str] = field(default_factory=list)
 
 
 def _quantities(protocol: dict[str, Any] | None, values: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
@@ -365,8 +384,9 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
     unread, why = unread_axes(protocol, files, formula_names)
     found = distinct(summarised, protocol, unread)
     notes = list(found.notes)
+    diagnostics: list[str] = []
     if why and _refs.grid_axes(protocol):
-        notes.append(f"Every grid axis is treated as read: {why}.")
+        diagnostics.append(f"Every grid axis is treated as read: {why}.")
     quantities, left = _quantities(protocol, found.values)
     computed = _refs.compute(protocol, [s.setting for s in found.settings], set(found.values), judged)
     by_metric = {q["metric"]: q for q in computed["quantities"]}
@@ -374,11 +394,11 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
     for r in computed["by_setting"]:
         at[(r["metric"], json.dumps(r["setting"], default=str))] = r
     if left:
-        notes.append("Not in these tables, because no trial returns them (they are computed from several values): "
-                     + ", ".join(f"`{m}`" for m in left) + ".")
+        notes.append("These quantities have no table of their own, because no single trial returns them (each is worked out "
+                     "from several values of a setting): " + ", ".join(f"`{m}`" for m in left) + ".")
     axes = [a for a in _refs.grid_axes(protocol) if a not in set(found.unread)]
     levels = list(dict.fromkeys(k for s in found.settings for k in s.setting if k not in axes))
-    columns_axes = axes + levels
+    all_levels = levels
     tables: list[Table] = []
     rows: list[dict[str, Any]] = []
     for value, metric in quantities:
@@ -387,6 +407,8 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
         stats = []
         for s in found.settings:
             summary = s.metrics.get(value)
+            if summary is None:  # this record never returned the value: no row for it, not a row of zeros
+                continue
             if summary and summary.get("n"):
                 lower, upper, method = _trial_table.interval(summary)
             else:
@@ -394,7 +416,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                 method = ""
             stats.append((s, summary, lower, upper, method))
         status = (q or {}).get("status", "no reference")
-        why_none = (q or {}).get("why") or ("the plan declares no metric for it" if not metric else "")
+        why_none = (q or {}).get("why") or ""
         if q and status == "computed":
             raw: Any = next((m.get("reference") for m in metrics or [] if isinstance(m, dict) and m.get("id") == metric),
                             {})
@@ -412,6 +434,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                 computed["by_setting"] = [r for r in computed["by_setting"] if r["metric"] != metric]
         binary = all((summary or {}).get("binary", True) for _, summary, *_ in stats if summary and summary.get("n"))
         has_ref = status == "computed"
+        columns_axes = axes + [k for k in all_levels if any(k in s.setting for s, *_ in stats)]  # only the levels this table has
         cols = [*columns_axes, "n", f"{value}", *([] if binary else ["SD"]), *(["reference", "comparison"] if has_ref else [])]
         align = ["r"] * len(columns_axes) + ["r", "r"] + ([] if binary else ["r"]) + (["r", "l"] if has_ref else [])
         body: list[list[str]] = []
@@ -441,7 +464,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                          "ci_lower": lower, "ci_upper": upper, "interval": method, "reference": ref,
                          "reference_kind": kind if ref is not None else "", "comparison": verdict})
         how = " and ".join(sorted(m for m in methods if m)) or "no interval"
-        caption = (f"`{value}` at each of the {len(found.settings)} settings: mean ± half-width of its 95% interval "
+        caption = (f"`{value}` at each of the {len({_run_setting(s) for s, *_ in stats})} settings: mean ± half-width of its 95% interval "
                    f"({how}) over the n trials that returned it.")
         if has_ref:
             ref_q = q or {}
@@ -455,12 +478,12 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
             caption += (f" `{TOO_FEW}`: fewer than {MIN_TRIALS_TO_JUDGE} trials, or an interval wider than "
                         f"{MAX_HALF_WIDTH_SHARE:.0%} of the reference either side.")
         else:
-            caption += f" No reference: {why_none}."
+            caption += " It has no reference value to compare with" + (f": {why_none}." if why_none else ".")
         tables.append(Table(label=f"fi-results-{re.sub(r'[^A-Za-z0-9]+', '-', value).strip('-').lower()}",
                             caption=caption, columns=cols, align=align, rows=body, value=value))
     if not quantities:
         notes.append("The trials returned no value that varies, so there is nothing to tabulate.")
-    return Built(found, computed, tables, notes, rows)
+    return Built(found, computed, tables, notes, rows, diagnostics)
 
 
 # --- renderings (pure) -------------------------------------------------------------------------------------------------
@@ -585,7 +608,7 @@ def writer_note(trial_rows: list[dict[str, Any]], built: Built | None, cap: int 
         return _trial_table.write_note(trial_rows)
     if built is None or not built.tables:
         return ""
-    head = (f"FI's tables of every setting the study computed ({len(built.distinct.settings)} distinct settings; "
+    head = (f"FI's tables of every setting the study computed ({built.distinct.n_settings} distinct settings; "
             "also in paper/results_by_setting.md, every number in paper/results_by_setting.csv). Each value is the mean "
             "± the half-width of its 95% interval; the reference is computed by FI from the frozen plan. Take a number "
             "about these values from here rather than working it out again.")
@@ -617,14 +640,26 @@ def paper_block(built: Built | None, cap: int | None = None) -> str:
     else:
         cut = _slice(built)
         if not 0 < sum(len(t.rows) for t in cut) <= cap:
-            return (f"FI's tables of every setting the study computed ({len(built.distinct.settings)} settings) are too "
-                    f"long for the paper: they are in {files}.\n")
+            return (f"Results for all {built.distinct.n_settings} settings are in the supplementary table "
+                    "`paper/results_by_setting.csv`.\n")
         tables = cut
         lead = [f"FI's tables of every setting have more rows than fit here; the full tables are in {files}."]
     return "\n\n".join([*lead, *notes, *(markdown(t).rstrip("\n") for t in tables)]) + "\n"
 
 
-# --- the files, and the pools for the provenance check -----------------------------------------------------------------
+# --- the files ------------------------------------------------------------------------------------------------------
+
+
+def _without_left_out(protocol: dict[str, Any] | None, quest_root: Path) -> dict[str, Any] | None:
+    """The protocol as this table reads it: a metric of a quantity FI left out of the results (core/result_checks.py
+    :func:`~core.result_checks.left_out_by_record`) is not listed, so no line names it. The frozen protocol itself is unchanged."""
+    gone = set(_result_checks.left_out_by_record(quest_root))
+    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    if not gone or not isinstance(metrics, list):
+        return protocol
+    kept = [m for m in metrics
+            if not (isinstance(m, dict) and ({str(m.get("id") or "").strip(), _refs.value_name(m)} & gone))]
+    return {**protocol, "metrics": kept} if len(kept) != len(metrics) else protocol
 
 
 def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
@@ -635,6 +670,7 @@ def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
     if not cells:
         return [], None
     summarised = _trial_table.summaries(cells)
+    protocol = _without_left_out(protocol, Path(quest_root))
     built = build(summarised, protocol, _grid_keys.code_files(Path(quest_root) / "code"), judged)
     return _trial_table.rows_of(summarised), built
 
@@ -664,42 +700,3 @@ def write(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[s
     (paper / "reference_values.json").write_text(json.dumps(built.references, indent=2, default=str) + "\n",
                                                  encoding="utf-8")
     return built
-
-
-def traceable(built: Built) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """``(the pooled settings' numbers by ``label.value``, each label's settings that tell it apart)`` for the
-    provenance check's per-setting table pool (:func:`core.number_provenance.check` ``trial_table`` and
-    ``trial_settings``)."""
-    numbers: dict[str, dict[str, Any]] = {}
-    for r in built.rows:
-        if r.get("mean") is None:
-            continue
-        numbers[f"{r['setting']}.{r['value']}"] = {k: r[k] for k in ("n", "mean", "sd", "ci_lower", "ci_upper")
-                                                   if r.get(k) is not None}
-    return numbers, varying_settings({s.label: s.setting for s in built.distinct.settings})
-
-
-def provenance_inputs(trial_rows: list[dict[str, Any]], built: Built | None) -> dict[str, Any]:
-    """The keyword arguments of :func:`core.number_provenance.check` that hold FI's own per-setting numbers:
-    ``trial_table`` (every grid cell, and every pooled setting), ``trial_settings`` (each label's settings that tell it
-    apart) and ``references`` (the reference values FI computed)."""
-    table = _trial_table.traceable(trial_rows)
-    settings = varying_settings(_trial_table.settings(trial_rows))
-    references: dict[str, float] = {}
-    if built is not None:
-        numbers, pooled_settings = traceable(built)
-        table = {**table, **numbers}
-        settings = {**settings, **pooled_settings}
-        references = _refs.pool(built.references)
-    return {"trial_table": table, "trial_settings": settings, "references": references}
-
-
-def varying_settings(settings: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Each label's settings, cut to those that take more than one value across ``settings`` (only they tell a row
-    apart)."""
-    values: dict[str, set[str]] = {}
-    for s in settings.values():
-        for k, v in s.items():
-            values.setdefault(k, set()).add(json.dumps(v, default=str))
-    varying = {k for k, vs in values.items() if len(vs) > 1}
-    return {label: {k: v for k, v in s.items() if k in varying} for label, s in settings.items()}

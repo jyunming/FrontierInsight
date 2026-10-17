@@ -35,7 +35,9 @@ from pathlib import PurePosixPath
 PATCHABLE_HITS = {
     "unsupported_claim": "claim",
     "figure_caption": "caption",
-    "unsourced_number": "number",
+    # A typed number, or a result key FI could not fill (core/typed_numbers.py, core/paper_facts.py). Only when the hit quotes
+    # its sentence: the same name also covers a placeholder the paper does not hold at all, which no passage names.
+    "paper_record_mismatch": "number",
     "mislabelled_statistic": "statistic",
 }
 _NOT_A_PASSAGE = {
@@ -43,6 +45,8 @@ _NOT_A_PASSAGE = {
     "figure_missing": "a planned figure is missing from the draft, which the write step puts back",
     "citations_unchecked": "the claim check did not run, so no passage was named",
 }
+
+_QUOTED = " \u2014 \u201c"
 
 # A passage the engine cannot match to a sentence is still handed to the model;
 # one it matches is handed over as the paper's own words. A sentence must cover
@@ -64,7 +68,6 @@ _CITE_RE = re.compile(r"\[(?:W?\d+(?:\s*[–-]\s*\d+)?(?:\s*[,;]\s*W?\d+(?:\s*[�
 _LATEX_DELIM_RE = re.compile(r"\\[()\[\]]|\$")
 _WORD_RE = re.compile(r"[a-z0-9]+(?:\.[0-9]+)?")
 _FIGURE_FILE_RE = re.compile(r"figures/([^\s\"'`)]+)")
-_FURTHER_NUMBERS_RE = re.compile(r"A further \d+ number")
 _STOPWORDS = frozenset(
     "a an the of and or to in on at by for with from as is are was were be been it its "
     "this that these those which than then so if not no".split()
@@ -230,8 +233,8 @@ def plan_passages(
         return [], "the review flags unsupported claims but the claim check lists none"
     if "figure_caption" in names and not captions:
         return [], "the review flags a figure caption but no finding names the figure"
-    if any(_FURTHER_NUMBERS_RE.search(text) for _n, text in hits):
-        return [], "the check lists only some of the numbers it could not trace"
+    if any(name == "paper_record_mismatch" and _QUOTED not in text for name, text in hits):
+        return [], "a record check names no passage (a placeholder the paper does not hold, or typed numbers it lists only in part)"
     units = sentence_units(paper[:end])
     passages: list[Passage] = []
     for claim in claims:
@@ -247,7 +250,7 @@ def plan_passages(
         if PATCHABLE_HITS[name] not in ("number", "statistic"):
             continue
         body = text.split(":", 1)[1].strip() if ":" in text[:60] else text.strip()
-        message, sep, context = body.rpartition(" — “")
+        message, sep, context = body.rpartition(_QUOTED)
         context = context.rstrip("”").strip() if sep else ""
         located, how = locate_passage(context, paper, end, units) if context else ("", "")
         passages.append(Passage(PATCHABLE_HITS[name], context or body, message if sep else "", located, how))
@@ -257,7 +260,7 @@ def plan_passages(
 _KIND_LABEL = {
     "claim": "A claim that neither the study's results nor a cited source backs",
     "caption": "A caption that describes what its figure does not show",
-    "number": "A number that nothing in the run accounts for",
+    "number": "A number the writer typed that is not a number of the plan (or a result key FI could not fill)",
     "statistic": "A statistic the paper describes as something the run did not compute",
 }
 

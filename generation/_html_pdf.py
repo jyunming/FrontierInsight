@@ -26,7 +26,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from generation._figure_captions import blank_lines_around_figures, numbers_off_figure_captions
+from generation._figure_captions import (
+    blank_lines_around_figures,
+    figures_in_own_paragraph,
+    numbers_off_figure_captions,
+)
 from generation._headings import strip_heading_numbers
 from generation._keywords import keywords_block
 from generation._pandoc import HTML_MARKDOWN_READER
@@ -223,7 +227,8 @@ def render_paper_html_pdf(
     # A table right under its caption line would print as raw pipes.
     from generation._tables import blank_line_before_tables
 
-    prepared = blank_line_before_tables(blank_lines_around_figures(numbers_off_figure_captions(md_text)))
+    prepared = blank_line_before_tables(
+        blank_lines_around_figures(numbers_off_figure_captions(figures_in_own_paragraph(md_text)[0])))
     # A section number the writer typed comes off only where the theme numbers headings.
     title, body = _split_title(strip_heading_numbers(prepared, numbered_depth=_numbered_depth(css_path)))
     # The keywords line under the abstract becomes a block the themes style.

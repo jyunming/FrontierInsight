@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from core import equation_tests as eqt, plan
+from core import equation_tests as eqt, function_steps as fs, plan
 from tests.test_equation_gate import _engine
 
 FORMULA = "p_defect(dose) = 1-exp(-exp(beta0 + beta1*dose_mj_cm2))"
@@ -182,7 +182,8 @@ def test_parameters_that_are_not_the_examples_inputs_are_found_before_any_code_i
 
 
 @pytest.mark.asyncio
-async def test_an_outline_whose_parameters_are_not_the_examples_inputs_asks_the_plan_once_before_any_code(tmp_path: Path) -> None:
+async def test_an_outline_whose_parameters_are_not_the_examples_inputs_is_given_the_examples_not_asked_of_the_plan(
+        tmp_path: Path) -> None:
     engine, model, state = _setup(tmp_path, BAD_EXAMPLE, GOOD_EXAMPLE)
     outline = {"scaffold": "x = 1", "functions": [
         {"name": "cloglog_defect_probability", "signature": "def cloglog_defect_probability(beta0, beta1, dose_mj_cm2) -> float:",
@@ -190,10 +191,10 @@ async def test_an_outline_whose_parameters_are_not_the_examples_inputs_asks_the_
     import shutil
 
     shutil.rmtree(engine.quest_root / "code")  # nothing is written yet: the outline has just been made
+    specs, _notes = fs.model_functions(outline, engine._protocol_block(state))
+    assert [s.params() for s in specs] == [["line_width_sd_nm"]], "FI sets the function's parameters from the example's inputs"
+    aligned = engine._outline_with_example_names(state, outline)
+    assert aligned["functions"][0]["signature"] == "def cloglog_defect_probability(*, line_width_sd_nm) -> float:"
     await engine._fill_model_functions(state, outline)
-    assert len(model.revisions) == 1
-    asked = model.revisions[0].split("# What the person asked for", 1)[1]
-    assert "planned with the parameters (beta0, beta1, dose_mj_cm2)" in asked and "line_width_sd_nm" in asked
-    assert _plan_example(engine) == GOOD_EXAMPLE
-    await engine._fill_model_functions(state, outline)
-    assert len(model.revisions) == 1, "once per equation"
+    assert model.revisions == [], "the plan is not asked to rename its example to the outline's words"
+    assert _plan_example(engine) == BAD_EXAMPLE

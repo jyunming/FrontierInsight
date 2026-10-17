@@ -563,11 +563,11 @@ def test_a_missed_precision_is_said_in_the_paper_from_the_record(tmp_path: Path)
     disclosure.write_precision_record(tmp_path, [{"name": "p", "half_width": 0.152, "target": 0.1, "trials": 40}])
     text = disclosure.run_record(tmp_path)
     assert "precision target (a 95% interval of ±0.1) was not reached for p (±0.152 from 40 trials)" in text
-    # FI's own sentence, in its block in the paper, is not a number the paper's number check holds against the run.
-    from core import number_provenance
+    # FI's own sentence, in its block in the paper, is not a number the writer typed.
+    from core import paper_facts
 
     paper = disclosure.mark_run_record("# T\n\n## Results\n\np = 0.475.\n\n## Limitations\n\nToy.\n", text)
-    assert "0.152" in paper and number_provenance.check(paper, result_json={"p": 0.475}).ok
+    assert "0.152" in paper and not any("0.152" in h for h in paper_facts.typed_hits(paper, None))
     disclosure.write_precision_record(tmp_path, [])
     assert not (tmp_path / disclosure.PRECISION_RECORD).exists()
     assert "precision" not in disclosure.run_record(tmp_path)

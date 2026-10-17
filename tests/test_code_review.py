@@ -364,6 +364,55 @@ async def test_after_the_cap_the_final_version_is_said_not_to_have_been_read_aga
     assert cr.load(again.quest_root)["reviews_total"] == 3, "a resume keeps the count"
 
 
+@pytest.mark.asyncio
+async def test_what_the_last_reading_left_open_stays_open_for_a_version_no_one_read(tmp_path: Path) -> None:
+    # Live: p2 kinetics (1792232341) was repaired after the run with the readings spent; the 18 findings the last reading
+    # left open, a high-severity one among them, were dropped from the record, and the paper's limitations named none.
+    engine = _engine(tmp_path)
+    reader = _Reader()
+    reader.missing = ("planned figure",)
+    engine._client = reader
+    sim = engine.quest_root / "code" / "simulate.py"
+    for i in range(cr.MAX_REVIEWS):
+        sim.write_text(SIM_FULL + f"# v{i}" + chr(10), encoding="utf-8")
+        await engine._code_review_gate(STATE, final=True)
+    read = [v["text"] for v in cr.not_computed(engine.quest_root, sim.parent)]
+    assert read, "the last reading leaves the figure open"
+    sim.write_text(SIM_FULL + "# repaired after the run" + chr(10), encoding="utf-8")
+    await engine._code_review_gate(STATE, final=True)
+    record = cr.load(engine.quest_root)
+    assert "allowed in a quest" in record["skipped"] and record["final_read"] is False
+    assert [v["text"] for v in cr.not_computed(engine.quest_root, sim.parent)] == read
+    assert read[0] in cr.write_note(engine.quest_root, sim.parent)
+    block = cr.findings_block(engine.quest_root, sim.parent)
+    assert read[0] in block and "final code was not read again" in block
+    assert "stays open" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_reading_that_fails_keeps_what_the_last_one_left_open(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    reader = _Reader()
+    reader.missing = ("planned figure",)
+    engine._client = reader
+    sim = engine.quest_root / "code" / "simulate.py"
+    sim.write_text(SIM_FULL + "# v0" + chr(10), encoding="utf-8")
+    await engine._code_review_gate(STATE, final=True)
+    read = [v["text"] for v in cr.not_computed(engine.quest_root, sim.parent)]
+    assert read
+
+    async def broken(messages, **kw):  # noqa: ANN001
+        raise RuntimeError("the provider is down")
+
+    reader.chat = broken  # type: ignore[method-assign]
+    sim.write_text(SIM_FULL + "# v1" + chr(10), encoding="utf-8")
+    await engine._code_review_gate(STATE, final=True)
+    record = cr.load(engine.quest_root)
+    assert "failed" in record.get("error", "") and record["final_read"] is False
+    assert [v["text"] for v in cr.not_computed(engine.quest_root, sim.parent)] == read
+    assert read[0] in cr.write_note(engine.quest_root, sim.parent)
+
+
 class _Partial(_Reader):
     """Answers only the first requirement of a request, unless told to answer the rest when asked again."""
 
@@ -464,6 +513,23 @@ def _record(tmp_path: Path, *, missing: int = 2, logic: bool = True, **extra: An
            "issues": {"F-l2": {"outcome": "not demonstrated"}}, "converged": False, **extra}
     cr.save(root, rec)
     return root, code
+
+
+def test_a_headline_computed_differently_never_stops_as_not_computed_and_a_missing_one_still_does(tmp_path: Path) -> None:
+    # Live: p2 fdr (53cafd) stopped "the code does not compute the study's main quantity" on a finding that said it is
+    # computed, differently (the run's repeat count; an extra all-null value), whose name is a sentence no result key has.
+    root, code = _record(tmp_path, missing=0, logic=False)
+    rec = cr.load(root)
+    rec["problems"] = [{"id": "R1", "kind": "dependent variable", "status": "different", "headline": True, "fid": "F-h",
+                        "name": "realised false discovery rate E[V/max(R,1)] for every m and pi1",
+                        "text": "the dependent variable realised false discovery rate is computed and reported"}]
+    cr.save(root, rec)
+    result = {"fdr_bh": [0.04, 0.05]}
+    assert cr.resolve_headline(root, code, result) == [] and cr.headline_missing(root, code) == []
+    rec["problems"][0]["status"] = "missing"
+    cr.save(root, rec)
+    assert cr.headline_missing(root, code) == [rec["problems"][0]["text"]]
+    assert cr.resolve_headline(root, code, result) == [rec["problems"][0]["text"]]
 
 
 def test_the_note_names_every_kind_of_open_finding_not_only_the_missing_quantities(tmp_path: Path) -> None:

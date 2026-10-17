@@ -141,10 +141,12 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
 
 #: The parts of a metric's ``known_value``: what FI needs to measure the reported uncertainty against the truth itself.
 KNOWN_VALUE_HELP = (
-    "`known_value` holds `true_value` (a number, or the name of a threshold or of a grid parameter that holds it, on the "
+    "`known_value` holds `true_value` (a number, or the name of a threshold, of a constant or of a grid parameter that holds it, on the "
     "estimate's own scale), `estimate` (the name run_trial returns for the estimate), `standard_error` (the name it returns "
     "for its standard error) and/or `interval` ([the name of the lower end, the name of the upper end]), and `level` (the "
-    "interval's level, for example 0.95)")
+    "interval's level, for example 0.95), and, when the interval is the estimate plus and minus one multiple of its "
+    "standard error in every setting, `degrees_of_freedom` (the whole number of the t distribution whose quantile is the "
+    "multiple, or \"normal\" for the normal quantile; leave it out when the multiple changes between settings)")
 
 
 def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
@@ -179,22 +181,60 @@ def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
     if isinstance(level, bool) or not isinstance(level, (int, float)) or not 0.5 < float(level) < 1.0:
         return None, where + "`known_value.level` must be the interval's level, a number between 0.5 and 1 (for example 0.95)"
     out["level"] = float(level)
+    if raw.get("degrees_of_freedom") is not None:
+        df = raw["degrees_of_freedom"]
+        if not (df == "normal" or isinstance(df, int) and not isinstance(df, bool) and df >= 1):
+            return None, (where + "`known_value.degrees_of_freedom` must be a whole number from 1 (the t distribution the "
+                          "interval's multiple comes from) or \"normal\"")
+        if "standard_error" not in out or "interval" not in out:
+            return None, (where + "`known_value.degrees_of_freedom` says the interval is the estimate plus and minus a "
+                          "multiple of the standard error, so it needs both `standard_error` and `interval`")
+        out["degrees_of_freedom"] = df
     return out, ""
 
 
+def fixed_numbers(protocol: dict[str, Any] | None, thresholds: dict[str, Any] | None = None) -> dict[str, float]:
+    """The numbers the plan fixes by name: its ``constants`` and its ``thresholds`` (``thresholds``: the ones the run
+    recorded, which win over the plan's). A name whose value is not a number is left out."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    out: dict[str, float] = {}
+    for part in (protocol.get("constants"), protocol.get("thresholds"), thresholds):
+        for name, value in (part.items() if isinstance(part, dict) else ()):
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                out[str(name)] = float(value)
+    return out
+
+
+def fixed_value(truth: Any, fixed: dict[str, float]) -> float | None:
+    """A declared true value as a number from the plan's own fixed numbers: the number itself, the name of one of them,
+    or a formula of them that FI computes (``log(k_ref) + Ea / (R * T_ref)``); ``None`` when it is none of these."""
+    if isinstance(truth, (int, float)) and not isinstance(truth, bool):
+        return float(truth) if math.isfinite(truth) else None
+    if not isinstance(truth, str):
+        return None
+    if truth in fixed:
+        return fixed[truth]
+    from . import oracle_forms
+
+    if oracle_forms.is_name(truth):
+        return None
+    return oracle_forms.evaluate(truth, fixed).value
+
+
 def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
-    """A declared true value that names neither a threshold nor a grid parameter of the protocol, one sentence each."""
+    """A declared true value that is neither a number, nor a threshold, a constant or a grid parameter of the protocol, nor
+    a formula of the numbers it fixes, one sentence each."""
     if not isinstance(protocol, dict):
         return []
-    thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
+    fixed = fixed_numbers(protocol)
     axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
     out = []
     for spec in declared(protocol):
         truth = (spec.get("known_value") or {}).get("true_value")
-        if isinstance(truth, str) and truth not in thresholds and truth not in axes:
-            out.append(f"The metric `{spec['id']}` declares its true value as `{truth}`, which is neither a threshold nor a "
-                       "grid parameter of the protocol, so FI cannot measure its uncertainty against it; give the number, "
-                       "or the name of the threshold or grid parameter that holds it.")
+        if isinstance(truth, str) and truth not in axes and fixed_value(truth, fixed) is None:
+            out.append(f"The metric `{spec['id']}` declares its true value as `{truth}`, which is neither a threshold, a "
+                       "constant nor a grid parameter of the protocol, so FI cannot measure its uncertainty against it; "
+                       "give the number, or the name of the threshold, constant or grid parameter that holds it.")
     return out
 
 

@@ -91,7 +91,7 @@ async def test_a_difference_gone_on_with_under_warn_is_an_item_the_paper_must_na
     assert record["status"] == "warned" and calls.count("ExecuteReflect") == 0, "recorded, not sent back"
     assert "leaves out trials of one setting" in record["headline"] and "R0=0.9" in record["headline"]
     items = [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.RUN_DIFFERENCE]
-    assert [i.name for i in items] == [paper_facts.RUN_DIFFERENCE_NAME] and record["headline"] in items[0].text
+    assert [i.name for i in items] == [paper_facts.RUN_DIFFERENCE_NAME] and record["headline"].replace("`", "") in items[0].text
 
 
 @pytest.mark.asyncio

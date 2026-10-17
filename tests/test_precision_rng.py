@@ -107,11 +107,16 @@ def test_a_stream_built_from_the_seed_alone_inside_a_function_called_for_every_s
     assert pc.rng_reuse(REUSED) == [("cell", 6)]
     assert pc.rng_reuse(REUSED.replace("default_rng(seed)", "RandomState(seed)")) == [("cell", 6)]
     assert pc.rng_reuse(REUSED.replace("rng = np.random.default_rng(seed)", "np.random.seed(seed)")) == [("cell", 6)]
+    # Nesting changes nothing when the whole expression still depends on the seed alone.
+    assert pc.rng_reuse(REUSED.replace("default_rng(seed)", "default_rng(np.random.SeedSequence(seed))")) == [("cell", 6)]
+    assert pc.rng_reuse(REUSED.replace("default_rng(seed)", "default_rng(np.random.SeedSequence(seed).spawn(4)[0])")) == [("cell", 6)]
 
 
 @pytest.mark.parametrize("code", [
     REUSED.replace("default_rng(seed)", "default_rng([seed, R0, N])"),                    # varies with the arguments
     REUSED.replace("default_rng(seed)", "default_rng(np.random.SeedSequence([seed, N]))"),
+    # A live DUV stop: each start's own stream, spawned from the base seed; the inner SeedSequence alone uses only it.
+    REUSED.replace("default_rng(seed)", "default_rng(np.random.SeedSequence(seed).spawn(max(int(N) + 1, 12))[int(N)])"),
     REUSED.replace("    seed = int", "    base = R0 * N\n    seed = int(base) + int"),        # a local computed from them
     "import numpy as np\ndef one(N):\n    return np.random.default_rng(0).random(N)\none(5)\n",    # called once
     "import numpy as np\ndef make():\n    return np.random.default_rng(0)\nfor _ in range(3):\n    make()\n",  # no arguments

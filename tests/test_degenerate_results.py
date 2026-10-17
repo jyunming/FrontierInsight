@@ -240,7 +240,7 @@ def test_the_request_names_each_thing_and_ends_with_the_instruction() -> None:
     text = dr.directive(f, q)
     assert text.startswith("FI looked at what the run produced, and some of it shows nothing:")
     assert "`level` is 2.5" in text and "`a.png`, panel \"Trend\" draws no data" in text
-    assert "if that is not what the model should give" in text
+    assert "estimated from the trials' data: compute it from this trial's data" in text
     assert text.rstrip().endswith("Change nothing else.")
     note = dr.writer_note(f, q)
     assert "`level`" in note and "`a.png`" in note and "limitations" in note and "left out" in note
@@ -258,6 +258,8 @@ def _engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Engine:
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
     ))
     eng._trial_mode = True
+    named = ["gain", "level", "capped"]   # the plan names these as estimated from the data (a flat one is questioned)
+    eng._protocol_block = lambda state: {"metrics": [{"id": n} for n in named]}  # type: ignore[method-assign]
     root = eng.quest_root
     (root / "raw").mkdir(parents=True, exist_ok=True)
     record = {"cells": [{"cell": c["cell"], "metrics": {n: {"values": v} for n, v in c["metrics"].items()}}
@@ -359,158 +361,158 @@ async def test_a_figure_that_stays_but_has_no_point_at_some_settings_is_not_drop
 # ---- a constant that is expected -----------------------------------------------------------------------------------------
 
 
-def test_the_directive_is_neutral_about_a_flat_quantity() -> None:
+def test_the_directive_asks_for_the_quantity_to_be_computed_and_offers_no_mark() -> None:
     q = dr.quantity_problems(_cells(gain=lambda r: 3 * r, level=2.5), REPORTED, set())
     text = dr.directive([], q)
-    assert "if that is not what the model should give, compute it from the inputs" in text
-    assert "if it is expected, keep it and mark the line with `# constant by design: <reason>`" in text
-    assert "or do not return it" not in text
+    assert "estimated from the trials' data: compute it from this trial's data as the plan defines it" in text
+    assert "constant by design" not in text and "mark the line" not in text and "or do not return it" not in text
 
 
-def test_what_the_plan_expects_to_stay_put_is_exempt() -> None:
+def test_what_the_plan_expects_to_stay_put_is_exempt_when_a_check_measures_that_one_name() -> None:
     protocol = {"oracles": [
-        {"name": "c", "kind": "invariant", "measure": "abs(total_out - total_in) / total_in", "expected": 0, "case": {"rate": 1}},
+        {"name": "c", "kind": "invariant", "measure": "total_drift", "expected": 0, "case": {"rate": 1}},
+        {"name": "e", "kind": "invariant", "measure": "abs(total_out - total_in) / total_in", "expected": 0, "case": {"rate": 1}},
         {"name": "l", "kind": "special_case", "measure": "gain", "expected": 1, "case": {"rate": 1}}], "limits": {"ceiling": 5}}
     names = dr.expected_constants(protocol)
-    assert {"total_out", "total_in", "ceiling"} <= names and "gain" not in names
-    assert _flags(_cells(gain=lambda r: 3 * r, total_in=2.5), REPORTED | {"total_in"}, names) == []
+    assert names == {"total_drift", "ceiling"}, "an operand of an expression is the plan's own quantity, not a constant"
+    assert _flags(_cells(gain=lambda r: 3 * r, total_drift=0.0), REPORTED | {"total_drift"}, names) == []
+    assert "gain" in dr.plan_estimates(protocol), "a check with no grid case measures an estimate: unchanged"
 
 
-SOURCED = "the reference level taken from the study's source table"
-MODULE_MARK = (
-    'LEVEL = 2.5  # constant by design: ' + SOURCED + '\n\n'
-    'def run_cell(cell):\n    return {"gain": 3 * cell["rate"], "level": LEVEL}\n')
+FDR_PLAN = {"grid": {"m": [20, 200, 2000], "pi1": [0.0, 0.05, 0.2]}, "in_each_run": {"method": ["uncorrected", "bh"]},
+            "metrics": [{"id": "fdr_bh", "kind": "mean"}],
+            "oracles": [{"name": "bh_fdr_reference", "kind": "special_case", "measure": "fdr_bh", "expected": 0.04,
+                         "case": {"m": 200, "pi1": 0.2}},
+                        {"name": "bh_pvector", "kind": "special_case", "measure": "bh_fixed_rejections", "expected": 3,
+                         "case": {"m": 4, "pi1": 0.0}}]}
 
 
-def test_a_mark_counts_only_on_the_assignment_of_a_named_constant_with_a_reason_that_names_a_source() -> None:
-    marks = dr.design_marks({"simulate.py": MODULE_MARK})
-    assert [(m.name, m.line, m.scope, m.reason) for m in marks] == [("LEVEL", 1, "", SOURCED)]
-    local = ('def run_cell(cell):\n    cap = 6.0  # constant by design: the cap given in the study\'s source table\n'
-             '    return {"capped": min(cell["rate"], cap)}\n')
-    assert [(m.name, m.scope) for m in dr.design_marks({"simulate.py": local})] == [("cap", "run_cell")]
-    # on the return line, on a comment of its own, with a one-word reason, or with none: no mark
-    direct = 'def run_cell(cell):\n    return {"level": 2.5}  # constant by design: the reference level from the table\n'
-    assert dr.design_marks({"simulate.py": direct}) == []
-    assert dr.design_marks({"simulate.py": "# constant by design: from the source table\nx = 1\n"}) == []
-    assert dr.design_marks({"simulate.py": "X = 1  # constant by design: conserved\n"}) == []
-    assert dr.design_marks({"simulate.py": "X = 1  # constant by design:\n"}) == []
-    assert dr.design_marks({"simulate.py": "X = 1  # constant\n"}) == []
+def test_a_check_on_fixed_inputs_is_flat_by_construction_and_a_data_estimate_still_is_not() -> None:
+    """The real fdr plan: ``bh_fixed_rejections`` (a special case at ``m = 4``, which the study does not run; fixed p-values,
+    expected 3) is 3 at every setting; ``fdr_bh`` (a metric, checked at a setting the study runs) is an estimate."""
+    plan = FDR_PLAN
+    reported = {"fdr_bh", "bh_fixed_rejections"}
+    exempt = dr.expected_constants(plan)
+    assert exempt == {"bh_fixed_rejections"} and dr.plan_estimates(plan) == {"fdr_bh"}
+    varying = _cells(fdr_bh=lambda r: 0.01 * r, bh_fixed_rejections=3)
+    assert dr.split_flat(dr.quantity_problems(varying, reported, exempt), plan) == ([], [])
+    assert [q.name for q in dr.quantity_problems(varying, reported, set())] == ["bh_fixed_rejections"]
+    planted = _cells(fdr_bh=0.04, bh_fixed_rejections=3, pany_bh=lambda r: r)
+    judged, kept = dr.split_flat(dr.quantity_problems(planted, reported | {"pany_bh"}, exempt), plan)
+    assert [q.name for q in judged] == ["fdr_bh"] and kept == []
 
 
-def test_a_mark_is_accepted_only_for_a_quantity_computed_from_the_marked_constant(tmp_path: Path) -> None:
-    files = {"simulate.py": MODULE_MARK.replace('"level": LEVEL', '"level": LEVEL, "other": 7.0')}
-    got = dr.accepted_marks(files, ["level", "other", "gain"], tmp_path, tmp_path)
-    assert list(got) == ["level"] and got["level"][1] == dr.UNCONFIRMED
-    helper = ('LEVEL = 2.5  # constant by design: ' + SOURCED + '\n\ndef scaled(x):\n    return LEVEL * x\n\n'
-              'def run_cell(cell):\n    total = scaled(1.0)\n    return {"level": total}\n')
-    assert list(dr.accepted_marks({"simulate.py": helper}, ["level"], tmp_path, tmp_path)) == ["level"]
-    assert dr.accepted_marks({"simulate.py": "def broken(:\n"}, ["level"], tmp_path, tmp_path) == {}
+def test_a_check_s_measure_is_a_data_estimate_when_its_case_is_one_of_the_study_s_settings() -> None:
+    on_grid = {"grid": {"nsr": [0.01, 0.02, 0.1], "n_pts": [5, 10]}, "in_each_run": {"method": ["a", "b"]},
+               "oracles": [{"name": "r", "kind": "special_case", "measure": "ea_est", "case": {"nsr": 0.1 + 1e-12, "n_pts": 10}},
+                           {"name": "s", "kind": "published_value", "measure": "other_est", "case": {"method": "A", "alpha": 0.05}}]}
+    assert dr.plan_estimates(on_grid) == {"ea_est", "other_est"} and dr.expected_constants(on_grid) == set()
+    off = {"grid": {"m": [20, 200]}, "oracles": [{"name": "r", "kind": "published_value", "measure": "x", "case": {"m": 4}}]}
+    assert dr.expected_constants(off) == {"x"} and dr.plan_estimates(off) == set()
+    listed = off | {"metrics": [{"id": "x"}]}
+    assert dr.expected_constants(listed) == set(), "a quantity the plan lists as its own estimate is never exempt"
+    for case in (None, {}, {"alpha": 0.05}):
+        none = {"grid": {"m": [20, 200]}, "oracles": [{"name": "r", "kind": "special_case", "measure": "x", "case": case}]}
+        assert dr.plan_estimates(none) == {"x"} and dr.expected_constants(none) == set(), case
 
 
-def _review(eng: Engine, status: str | None, name: str = "LEVEL", more: dict[str, str] | None = None) -> None:
-    """The different-model code review's record for the code as it is now: ``status`` for the mark named ``name``, and
-    ``more`` ({mark key: status}) for others."""
-    from core import code_review as cr
-    from core import grid_keys as gk
-
-    code = eng.quest_root / "code"
-    keys = {m.name: m.key() for m in dr.design_marks(gk.code_files(code))}
-    wanted = {} if status is None else {keys.get(name, name): status}
-    wanted.update(more or {})
-    verdicts = [{"id": f"R{i}", "kind": cr.MARK_KIND, "name": k, "status": st, "text": "t", "headline": False}
-                for i, (k, st) in enumerate(wanted.items(), start=1)]
-    cr.save(eng.quest_root, {"version": cr.version(code), "read_version": cr.version(code), "verdicts": verdicts,
-                              "problems": [], "final": True})
+def test_a_planted_constant_on_a_noise_free_check_s_estimate_is_still_sent_back() -> None:
+    """The r5k plan: ``ea_est`` is checked at ``nsr = 0`` (the study's noise-free end, beside 0.01 to 0.2): a data estimate."""
+    plan = {"grid": {"nsr": [0.01, 0.05, 0.2], "n_pts": [5, 10]}, "metrics": [{"id": "ea_cov"}],
+            "oracles": [{"name": "n", "kind": "special_case", "measure": "ea_est", "expected": 50000, "case": {"nsr": 0, "n_pts": 10}}]}
+    assert dr.expected_constants(plan) == set() and "ea_est" in dr.plan_estimates(plan)
+    planted = _cells(ea_est=50000.0, ea_cov=lambda r: r)
+    judged, _kept = dr.split_flat(dr.quantity_problems(planted, {"ea_est", "ea_cov"}, dr.expected_constants(plan)), plan)
+    assert [q.name for q in judged] == ["ea_est"]
+    fixed = plan | {"grid": {"nsr": [0.01, 0.05, 0.2], "n_pts": [5, 10]}, "oracles": [
+        {"name": "n", "kind": "special_case", "measure": "ea_est", "case": {"nsr": 0.5, "n_pts": 10}}]}
+    assert dr.expected_constants(fixed) == {"ea_est"}, "a non-zero value the axis does not run is a fixed input"
 
 
-def _flat_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str) -> Engine:
+def test_the_quantities_the_plan_says_are_estimated_from_the_data_are_read_from_fields_it_already_has() -> None:
+    names = dr.plan_estimates(KINETICS_PLAN | {"metrics": KINETICS_PLAN["metrics"] + [{"id": "theory_corr_ref", "kind": "mean"}]})
+    assert names == {"Ea_hat", "Ea_se", "Ea_lo", "Ea_hi", "coverage_Ea", "theory_corr_ref"}
+    assert "Ea_polyfit" not in names, "an operand of a check's expression is not named by the plan as an estimate"
+    assert dr.plan_estimates(None) == set() and dr.plan_estimates({}) == set()
+    flat = dr.quantity_problems(_cells(Ea_hat=lambda r: r, Ea_hat_known=0.5, theory_corr=0.99, coverage_Ea=0.95),
+                                {"Ea_hat", "Ea_hat_known", "theory_corr", "coverage_Ea"}, set())
+    judged, kept = dr.split_flat(flat, KINETICS_PLAN)
+    assert [q.name for q in judged] == ["coverage_Ea"] and sorted(q.name for q in kept) == ["Ea_hat_known", "theory_corr"]
+    assert "`theory_corr` was identical (0.99) at all 8 settings" in dr.kept_note(kept) and "limitations" in dr.kept_note(kept)
+
+
+# ---- only what the plan says is estimated from the data is questioned -------------------------------------------------------
+
+#: A kinetics-shaped plan: the estimate and its coverage are named, the theory value is not.
+KINETICS_PLAN = {
+    "metrics": [{"id": "Ea_hat", "known_value": {"estimate": "Ea_hat", "standard_error": "Ea_se", "interval": ["Ea_lo", "Ea_hi"]}},
+                {"id": "coverage_Ea"}],
+    "precision": {"metric": "coverage_Ea"},
+    "oracles": [
+        {"name": "coverage_Ea_benign", "kind": "special_case", "measure": "coverage_Ea", "expected": 0.95},
+        {"name": "polyfit_agrees", "kind": "second_implementation", "measure": "abs(Ea_hat - Ea_polyfit)", "expected": 0}],
+}
+
+
+def _kinetics_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **flat: float) -> Engine:
+    """An engine whose last run varied ``Ea_hat`` and ``Ea_bias`` with the setting and held every quantity in ``flat`` at one number."""
     eng = _engine(tmp_path, monkeypatch)
-    (eng.quest_root / "code").mkdir(exist_ok=True)
-    (eng.quest_root / "code" / "simulate.py").write_text(code, encoding="utf-8")
-    (eng.quest_root / "figures" / "empty_one.png").unlink()  # only the flat quantity is in question here
+    eng._protocol_block = lambda state: KINETICS_PLAN  # type: ignore[method-assign]
+    (eng.quest_root / "figures" / "empty_one.png").unlink()
+    cells = _cells(Ea_hat=lambda r: 50.0 + r, Ea_bias=lambda r: 0.1 * r, **flat)
+    (eng.quest_root / "raw" / "trials.json").write_text(json.dumps({"cells": [
+        {"cell": c["cell"], "metrics": {n: {"values": v} for n, v in c["metrics"].items()}} for c in cells]}), encoding="utf-8")
     return eng
 
 
+def _kinetics_run(*names: str) -> ExecutionResult:
+    return ExecutionResult(0, "RESULT_JSON: " + json.dumps({"Ea_hat": 51.0, "Ea_bias": 0.1, **{n: 0.9 for n in names}}), "", 1.0, False)
+
+
 @pytest.mark.asyncio
-async def test_a_marked_named_constant_the_second_model_confirms_is_accepted_and_noted_never_dropped(
+async def test_a_flat_quantity_the_plan_does_not_name_is_kept_and_stated_never_sent_back_or_stripped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    eng = _flat_engine(tmp_path, monkeypatch, MODULE_MARK)
-    _review(eng, "implemented")
-    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
-    assert result.returncode == 0, "confirmed: nothing is sent back"
-    record = json.loads((eng.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
-    assert record["removed_quantities"] == [] and "confirmed by a second model" in record["note"]
+    """The live s4 case: the theory correlation depends on the fixed design only, so it is the same at every setting."""
+    eng = _kinetics_engine(tmp_path, monkeypatch, theory_corr=0.999074)
+    result, _ = await eng._results_match_run({"iteration": 0}, _kinetics_run("theory_corr"), None, True)
+    assert result.returncode == 0, "nothing is sent back for a number the plan does not say is estimated"
+    assert eng._left_out_quantities() == set() and "theory_corr" in result.stdout
+    assert eng._without_typed_results({"Ea_hat": 51.0, "theory_corr": 0.999074}) == {"Ea_hat": 51.0, "theory_corr": 0.999074}
     note = eng._run_checks_note()
-    assert "constant by design" in note and "limitations" in note and "not independently confirmed" not in note
-    assert eng._left_out_quantities() == set()
+    assert "`theory_corr`" in note and "identical (0.999074) at all 8 settings" in note and "limitations" in note
 
 
 @pytest.mark.asyncio
-async def test_a_mark_the_second_model_rejects_counts_as_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    eng = _flat_engine(tmp_path, monkeypatch, MODULE_MARK)
-    _review(eng, "different")
-    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
-    assert result.returncode == 1 and "`level` is 2.5" in result.stderr and "# constant by design: <reason>" in result.stderr
+async def test_a_flat_estimate_the_plan_names_is_still_sent_back_then_left_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _kinetics_engine(tmp_path, monkeypatch, coverage_Ea=0.95)
+    for _ in (1, 2):
+        result, script = await eng._results_match_run({"iteration": 0}, _kinetics_run("coverage_Ea"), None, True)
+        assert result.returncode == 1 and script == "simulate.py" and "`coverage_Ea` is 0.95" in result.stderr
+    result, _ = await eng._results_match_run({"iteration": 0}, _kinetics_run("coverage_Ea"), None, True)
+    assert result.returncode == 0 and eng._left_out_quantities() == {"coverage_Ea"}
 
 
 @pytest.mark.asyncio
-async def test_a_mark_nobody_else_read_is_accepted_but_the_paper_says_the_writer_declared_it(
+async def test_a_check_measuring_an_expression_does_not_hide_the_plans_own_estimate_in_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    eng = _flat_engine(tmp_path, monkeypatch, MODULE_MARK)  # no review record at all: not run, or the reader is the writer
-    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
-    assert result.returncode == 0
-    note = eng._run_checks_note()
-    assert "declared by the code's own writer and not independently confirmed" in note and "limitations" in note
-    _review(eng, None)  # read, but this mark was not among the verdicts
-    assert dr.accepted_marks({"simulate.py": MODULE_MARK}, ["level"], eng.quest_root, eng.quest_root / "code")["level"][1] == dr.UNCONFIRMED
+    """A planted ``fdr_bh = 0.05`` (the nominal level typed in) passed because ``abs(fdr_bh - 0.05)`` is a check's measure."""
+    plan = {"metrics": [{"id": "fdr_bh"}],
+            "oracles": [{"name": "fdr_at_level", "kind": "invariant", "measure": "abs(fdr_bh - 0.05)", "expected": 0},
+                        {"name": "second_bh", "kind": "second_implementation", "measure": "bh_scipy_disagree", "expected": 0}]}
+    assert "fdr_bh" not in dr.expected_constants(plan) and "bh_scipy_disagree" in dr.expected_constants(plan)
+    eng = _kinetics_engine(tmp_path, monkeypatch, fdr_bh=0.05, bh_scipy_disagree=0.0)
+    eng._protocol_block = lambda state: plan  # type: ignore[method-assign]
+    result, script = await eng._results_match_run({"iteration": 0}, _kinetics_run("fdr_bh", "bh_scipy_disagree"), None, True)
+    assert result.returncode == 1 and "`fdr_bh` is 0.05" in result.stderr and "bh_scipy_disagree" not in result.stderr
 
 
 @pytest.mark.asyncio
-async def test_a_typed_in_result_returned_directly_is_flagged_whatever_its_line_says(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake = ('def run_cell(cell):\n    return {"gain": 3 * cell["rate"], "level": 2.5}  # constant by design: the reference level '
-            'from the table\n')
-    eng = _flat_engine(tmp_path, monkeypatch, fake)
-    _review(eng, "implemented")
-    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
-    assert result.returncode == 1 and "`level` is 2.5" in result.stderr
-    # the same flat quantity with no mark at all is flagged too
-    (eng.quest_root / "code" / "simulate.py").write_text(fake.split("  #")[0] + "\n", encoding="utf-8")
-    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
-    assert result.returncode == 1
-
-
 @pytest.mark.asyncio
-async def test_a_marked_plateau_passes_and_the_same_plateau_unmarked_does_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    code = ('CAP = 6.0  # constant by design: the cap given in the study\'s source table\n\n'
-            'def run_cell(cell):\n    return {"gain": cell["rate"], "capped": min(cell["rate"] * 2.0, CAP)}\n')
-    eng = _flat_engine(tmp_path, monkeypatch, code)
-    record = {"cells": [{"cell": c["cell"], "metrics": {n: {"values": v} for n, v in c["metrics"].items()}}
-                        for c in _cells(gain=lambda r: r, capped=lambda r: min(r * 2.0, 6.0))]}
-    (eng.quest_root / "raw" / "trials.json").write_text(json.dumps(record), encoding="utf-8")
-    run = ExecutionResult(0, "RESULT_JSON: " + json.dumps({"gain": 1.0, "capped": 6.0}), "", 1.0, False)
-    _review(eng, "implemented", name="CAP")
-    result, _ = await eng._results_match_run({"iteration": 0}, run, None, True)
-    assert result.returncode == 0
-    (eng.quest_root / "code" / "simulate.py").write_text(code.replace("  # constant by design: the cap given in the study's source table", ""),
-                                                          encoding="utf-8")
-    result, _ = await eng._results_match_run({"iteration": 0}, run, None, True)
-    assert result.returncode == 1
-
-
-def test_the_code_reviews_checklist_asks_about_each_mark_without_a_number() -> None:
-    from core import code_review as cr
-
-    marks = dr.design_marks({"simulate.py": MODULE_MARK})
-    reqs = cr.requirements({}, {}, marks=marks)
-    asked = [r for r in reqs if r["kind"] == cr.MARK_KIND]
-    assert len(asked) == 1 and asked[0]["name"] == "simulate.py:1:-:LEVEL" and "simulate.py line 1" in asked[0]["text"]
-    assert "2.5" not in asked[0]["text"] and "not a stand-in for a result" in asked[0]["text"]
-
-
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_dropping_a_figure_removes_exactly_that_file_and_keeps_its_sibling_formats(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -525,62 +527,3 @@ async def test_dropping_a_figure_removes_exactly_that_file_and_keeps_its_sibling
     assert (eng.fi_dir / "figure_records" / "empty_one.json").exists(), "the record stays while another format needs it"
     eng._drop_figures(["empty_one.svg"])
     assert not (eng.fi_dir / "figure_records" / "empty_one.json").exists() and (folder / "empty_one_other.png").exists()
-
-
-# ---- marks are identified by where they are ---------------------------------------------------------------------------------
-
-SAME_NAME = {
-    "simulate.py": ('import helper\n\nLEVEL = 2.5  # constant by design: ' + SOURCED + '\n\n'
-                    'def run_cell(cell):\n    return {"level": LEVEL, "second": helper.give()}\n'),
-    "helper.py": ('LEVEL = 4.5  # constant by design: the second reference from the study\'s own source\n\n'
-                  'def give():\n    return LEVEL\n'),
-}
-
-
-def test_two_marks_with_one_name_are_told_apart_by_file_and_line(tmp_path: Path) -> None:
-    marks = dr.design_marks(SAME_NAME)
-    assert sorted(m.key() for m in marks) == ["helper.py:1:-:LEVEL", "simulate.py:3:-:LEVEL"]
-    got = dr.accepted_marks(SAME_NAME, ["level", "second"], tmp_path, tmp_path)
-    assert got["level"][0].script == "simulate.py" and got["second"][0].script == "helper.py"
-    from core import code_review as cr
-
-    reqs = cr.requirements({}, {}, marks=marks)
-    asked = [r for r in reqs if r["kind"] == cr.MARK_KIND]
-    assert sorted(r["name"] for r in asked) == ["helper.py:1:-:LEVEL", "simulate.py:3:-:LEVEL"]
-    assert any("helper.py line 1" in r["text"] for r in asked) and any("simulate.py line 3" in r["text"] for r in asked)
-
-
-@pytest.mark.asyncio
-async def test_two_same_named_marks_are_judged_separately_and_a_rejected_one_stays_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    eng = _flat_engine(tmp_path, monkeypatch, "x = 1\n")
-    for name, text in SAME_NAME.items():
-        (eng.quest_root / "code" / name).write_text(text, encoding="utf-8")
-    from core import code_review as cr
-
-    def write(first: str, second: str) -> None:
-        code = eng.quest_root / "code"
-        cr.save(eng.quest_root, {"version": cr.version(code), "read_version": cr.version(code), "problems": [], "final": True,
-                                  "verdicts": [{"id": "R1", "kind": cr.MARK_KIND, "name": "simulate.py:3:-:LEVEL", "status": first,
-                                                "text": "t", "headline": False},
-                                               {"id": "R2", "kind": cr.MARK_KIND, "name": "helper.py:1:-:LEVEL", "status": second,
-                                                "text": "t", "headline": False}]})
-
-    code = eng.quest_root / "code"
-    from core import grid_keys as gk
-
-    write("implemented", "different")
-    got = dr.accepted_marks(gk.code_files(code), ["level", "second"], eng.quest_root, code)
-    assert list(got) == ["level"] and got["level"][1] == dr.CONFIRMED, "the confirmed one is accepted, the rejected one is not"
-    write("different", "implemented")
-    got = dr.accepted_marks(gk.code_files(code), ["level", "second"], eng.quest_root, code)
-    assert list(got) == ["second"]
-
-
-def test_an_unused_nested_function_does_not_link_a_mark_to_a_quantity(tmp_path: Path) -> None:
-    code = ('LEVEL = 2.5  # constant by design: ' + SOURCED + '\n\n'
-            'def run_cell(cell):\n    def never_called():\n        return LEVEL\n    return {"level": cell["rate"] * 2.0}\n')
-    assert dr.accepted_marks({"simulate.py": code}, ["level"], tmp_path, tmp_path) == {}
-    called = code.replace('return {"level": cell["rate"] * 2.0}', 'return {"level": never_called()}')
-    assert list(dr.accepted_marks({"simulate.py": called}, ["level"], tmp_path, tmp_path)) == ["level"]

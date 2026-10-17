@@ -36,10 +36,10 @@ def _results(tmp_path: Path, protocol: dict[str, Any], source: str, function: st
     return found
 
 
-def test_a_random_equation_is_marked_by_the_plan_or_by_a_formula_that_names_a_distribution() -> None:
+def test_a_random_equation_is_marked_by_the_plan_and_never_by_the_words_of_its_formula() -> None:
     assert eqt.example_rows(COUNT)[0]["random"] is True
     named = _protocol("N = Poisson(rate * t)", {"inputs": {"rate": 4.0, "t": 2.5}, "expected_formula": "rate * t"})
-    assert eqt.example_rows(named)[0]["random"] is True, "a formula that names a distribution is read as a draw"
+    assert eqt.example_rows(named)[0]["random"] is False, "a formula's words are not the plan's flag"
     plain = _protocol("y = rate * t", {"inputs": {"rate": 4.0, "t": 2.5}, "expected_formula": "rate * t"})
     row = eqt.example_rows(plain)[0]
     assert row["random"] is False and row["variance"] is None
@@ -97,9 +97,10 @@ def test_a_stated_variance_is_held_too(tmp_path: Path) -> None:
 
 
 def test_a_deterministic_function_is_never_judged_by_the_statistical_rule(tmp_path: Path) -> None:
-    # The formula names a distribution, so the equation is read as a draw; the function does not vary, so the strict
-    # relative 1e-6 rule applies: a result off by 1e-3 of its size fails, however many draws are taken.
-    density = _protocol("p = Normal(x, mu, s)", {"inputs": {"x": 1.0, "mu": 0.0}, "expected_formula": "x - mu"})
+    # A function that does not vary is held to the strict relative 1e-6 rule, flagged as a draw or not: a result off by
+    # 1e-3 of its size fails, however many draws are taken.
+    density = _protocol("p = Normal(x, mu, s)", {"inputs": {"x": 1.0, "mu": 0.0}, "expected_formula": "x - mu",
+                                                 "random": True})
     assert eqt.example_rows(density)[0]["random"] is True
     exact = "# E1\ndef level(x, mu):\n    return x - mu\n"
     off = "# E1\ndef level(x, mu):\n    return (x - mu) * 1.001\n"
@@ -115,3 +116,27 @@ def test_a_plain_deterministic_equation_is_unchanged(tmp_path: Path) -> None:
 
 def test_the_plan_is_told_how_to_mark_a_random_equation() -> None:
     assert "\"random\": true" in eqt.EXAMPLE_RULE and "MEAN" in eqt.EXAMPLE_RULE and "variance_formula" in eqt.EXAMPLE_RULE
+
+
+# The replay of a quest that stopped (fdr, "p-values from a z-test"): the formula defines a term with `eps ~ N(0,1)`, and
+# the worked example gives the statistic z and its p-value 1-ndtr(z). The example has no draw, so the function is a plain
+# function of z; read as a random draw, the function written from the outline was asked to draw and could never agree.
+Z_TEST = _protocol("p_i = 1 - Phi(z_i), with z_i = eps_i + delta*h_i, eps_i ~ N(0,1), h_i in {0,1}",
+                   {"inputs": {"z": 2.8}, "expected_formula": "1-ndtr(z)"}, eid="E1")
+
+
+def test_an_example_with_no_draw_is_a_plain_function_though_its_formula_defines_a_random_term(tmp_path: Path) -> None:
+    assert eqt.example_rows(Z_TEST)[0]["random"] is False
+    ok = "from scipy.special import ndtr\n\n# E1\ndef pvalue(z):\n    return float(1 - ndtr(z))\n"
+    wrong = ("import numpy as np\nfrom scipy.special import ndtr\n\n# E1\ndef pvalue(z, rng=None):\n"
+             "    rng = rng or np.random.default_rng()\n    return float(ndtr(-(rng.standard_normal() + z)))\n")
+    assert _results(tmp_path, Z_TEST, ok, "pvalue")[0]["status"] == eqt.OK
+    assert _results(tmp_path, Z_TEST, wrong, "pvalue")[0]["status"] == eqt.MISMATCH, "still fails: it computes another thing"
+
+
+def test_the_plan_is_told_the_parameters_the_outline_fixed_when_it_reworks_an_example() -> None:
+    item = {"id": "E1", "formula": "y = a*b", "example": {"inputs": {"a": 1}}, "why": eqt.MISMATCH,
+            "names": ["alpha", "beta", "rng", "*args"]}
+    text = eqt.rederive_request([item])
+    assert "already planned with the parameters (alpha, beta)" in text and "exactly those names" in text
+    assert "already planned" not in eqt.rederive_request([{**item, "names": None}])

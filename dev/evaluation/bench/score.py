@@ -191,10 +191,13 @@ def _record_flags(root: Path) -> dict[str, str]:
             flags[gate] = f"{name}: {rec.get('status')}" + (
                 ": " + "; ".join(sorted(_finding_text(p) for p in problems))[:600] if problems else "")
     found = []
-    for name in ("numeric_audit.json", "provenance_audit.json", "statistics_audit.json"):
-        rec = _json(root / "paper" / name)
-        if isinstance(rec, dict) and rec.get("ok") is False:
-            found += [f"paper/{name}: {_finding_text(f)}" for f in rec.get("findings") or []] or [f"paper/{name}"]
+    rec = _json(root / "paper" / "statistics_audit.json")
+    if isinstance(rec, dict) and rec.get("ok") is False:
+        found += [f"paper/statistics_audit.json: {_finding_text(f)}" for f in rec.get("findings") or []] or [
+            "paper/statistics_audit.json"]
+    rec = _json(root / ".fi" / "paper_record_check.json")
+    if isinstance(rec, dict) and rec.get("hits"):
+        found += [f".fi/paper_record_check.json: {_finding_text(f)}" for f in rec.get("hits") or []]
     if found:
         flags["numbers"] = "; ".join(sorted(found))[:1200]
     claims = _json(root / "paper" / "claims.json")

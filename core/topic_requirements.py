@@ -250,7 +250,7 @@ def compared_axes(req: Any, design: Any, protocol: Any = None) -> dict[str, str]
         for axis in plan["axes"]:
             if wanted and _tokens(axis) and (_tokens(axis) <= wanted or wanted <= _tokens(axis)):
                 out.setdefault(str(axis), str(factor["name"]))
-        keys = {_name_key(factor.get("name")), _name_key(factor.get("text"))} - {""}
+        keys = _map_keys(req, "factors", factor)
         for entry in entries:
             by = str(entry.get("by") or "")
             if _name_key(entry.get("item")) in keys and by.startswith("setting:"):
@@ -369,7 +369,17 @@ def _covers(values: list[Any], factor: dict[str, Any]) -> str | None:
             return None  # numbers standing for named levels: a reader judges them
         have_tokens = [_tokens(h) for h in have]
         missing = [w for w in wanted if not any(_tokens(w) <= t or t <= _tokens(w) for t in have_tokens if t)]
-        return f"the levels {', '.join(str(m) for m in missing[:6])} are not among its settings" if missing else ""
+        if not missing:
+            return ""
+        # A name cannot tell an abbreviation from another level (``bh`` for Benjamini-Hochberg, ``holm`` for nothing the topic
+        # states): it is a gap here only when no value is left over that could stand for the missing level, and otherwise a
+        # reader judges (the values left over are shown to it with the settings).
+        spare = [h for h, t in zip(have, have_tokens)
+                 if not any(t and (_tokens(w) <= t or t <= _tokens(w)) for w in wanted)]
+        if len(spare) >= len(missing):
+            return None
+        return (f"the levels {', '.join(str(m) for m in missing[:6])} are not among its settings"
+                + (f" (it has {', '.join(sorted(have)[:8])})" if have else ""))
     rng = factor.get("range") or []
     if len(rng) == 2 and not numbers:
         return None
@@ -389,6 +399,16 @@ def _name_key(text: Any) -> str:
     return " ".join(re.sub(r"[^0-9a-zA-Z]+", " ", str(text or "")).lower().split())
 
 
+def _map_keys(req: dict[str, Any], kind: str, item: dict[str, Any]) -> set[str]:
+    """What a ``protocol.topic_map`` entry's ``item`` may be for this topic item: FI's own id for it (``F11``, the one the
+    request lists, :func:`request`), or its name or formula as FI wrote it."""
+    keys = {_name_key(item.get("name")), _name_key(item.get("text"))}
+    for index, other in enumerate(req.get(kind) or []):
+        if other is item:
+            keys.add(_name_key(_item_id(kind, index)))
+    return keys - {""}
+
+
 def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[str, Any]) -> tuple[str, str] | None:
     """What the plan itself says covers a topic item (``protocol.topic_map``: ``item`` = the item's name or formula, ``by`` =
     ``setting:<name>`` / ``metric:<id>`` / ``equation:<id>``), checked here and not taken on trust: ``("ok", element)`` when
@@ -396,7 +416,7 @@ def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[
     stated levels or a range, its values cover them; ``("judge", element)`` when it exists and covers them but its name is
     unrelated (an axis whose values merely happen to fit): only a reader's confirmation makes that a cover; ``("bad",
     why)`` when it does not exist or does not cover; ``None`` when the plan maps nothing for the item."""
-    wanted = {_name_key(item.get("name")), _name_key(item.get("text"))} - {""}
+    wanted = _map_keys(req, kind, item)
     entries = [m for m in plan.get("topic_map") or [] if _name_key(m.get("item")) in wanted]
     if not entries:
         return None
@@ -443,11 +463,17 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
     gaps: list[dict[str, Any]] = []
     unresolved: list[str] = []
     for i, factor in enumerate(req.get("factors") or []):
-        wanted = _tokens(factor["name"])
-        axis = next((a for a in plan["axes"] if wanted and (_tokens(a) <= wanted or wanted <= _tokens(a)) and _tokens(a)), None)
-        mapped = mapping_of(req, plan, "factors", factor) if axis is None else None
+        # What the plan itself says covers the item comes first, checked (the setting exists, its name relates to the
+        # item's words, its values cover the topic's): a name match picks the first setting whose words fit, and
+        # ``sigma_conventional`` fits "conventional sigma for ambit" as well as the plan's own ``sigma_conventional_ambit``.
+        mapped = mapping_of(req, plan, "factors", factor)
         if mapped is not None and mapped[0] == "ok":
             continue
+        if mapped is not None and mapped[0] == "judge":
+            unresolved.append(_item_id("factors", i))
+            continue
+        wanted = _tokens(factor["name"])
+        axis = next((a for a in plan["axes"] if wanted and (_tokens(a) <= wanted or wanted <= _tokens(a)) and _tokens(a)), None)
         if axis is None and not compared(req, factor):
             # The topic uses its values (all of them in each run, a range every run covers) and compares no result across
             # them: it is not a setting the study must sweep. Asking for one put five values fitted together into the grid
@@ -592,11 +618,26 @@ def mapped_items(req: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False) -> str:
+def _item_lines(req: dict[str, Any] | None) -> list[str]:
+    """FI's list of what the topic asks for, one line per item with FI's id for it, as :func:`request` shows it."""
+    lines = []
+    for kind in _SECTIONS:
+        for index, item in enumerate((req or {}).get(kind) or []):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("text") or ""
+            values = item.get("levels") or ([f"{item['range'][0]:g} to {item['range'][1]:g}"] if item.get("range") else [])
+            lines.append(f"- {_item_id(kind, index)}: {name}" + (f" ({', '.join(str(v) for v in values[:8])})" if values else ""))
+    return lines
+
+
+def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False, req: dict[str, Any] | None = None) -> str:
     """The request to the plan's model for what the topic asks and the plan lacks. Nothing else may change. ``search``:
     the plan is a search for the best design, which has no ``protocol.grid`` beside its block (the settings to compare
-    belong to the block's own scan, ``protocol.optimisation.grid``)."""
+    belong to the block's own scan, ``protocol.optimisation.grid``). ``req``: FI's reading of the topic, listed with its
+    ids so the plan's ``protocol.topic_map`` names each item by FI's id (a name the model rewords matches nothing)."""
     lines = [f"- {g['sentence']}" for g in gaps]
+    items = _item_lines(req)
     where = (
         "A setting to vary or compare is a key of `protocol.optimisation.grid` with every value the topic states (this "
         "plan is a search for the best design, so do NOT write a `protocol.grid`): either one of the design variables, or "
@@ -618,10 +659,13 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False) -> 
         "states is an equation of `protocol.model.equations`, written as the topic writes it; if the plan needs another "
         "formula in its place, keep that one and say in its `source` that it replaces the topic's, and why. Also say, in "
         "`protocol.topic_map`, which element of the plan covers each thing the topic asks for (the ones above and the ones the "
-        "plan already has): a list of entries `item` (the name of the factor or quantity, or the formula, as the topic "
-        "words it) and `by` (`setting:<the key in protocol.grid or protocol.optimisation.grid, or the design variable>`,`metric:<the metric id>` or "
+        "plan already has): a list of entries `item` ("
+        + ("FI's id for it, exactly as in the list below, such as `F1`" if items else
+           "the name of the factor or quantity, or the formula, as the topic words it")
+        + ") and `by` (`setting:<the key in protocol.grid or protocol.optimisation.grid, or the design variable>`,`metric:<the metric id>` or "
         "`equation:<the equation id>`). FI checks that each named element exists and covers what the topic states. Change "
-        "nothing else: not a check, a threshold, a tolerance, a criterion, or a setting the plan already has right.")
+        "nothing else: not a check, a threshold, a tolerance, a criterion, or a setting the plan already has right."
+        + ("\n\nWhat FI read the topic to ask for, with its id for each:\n" + "\n".join(items) if items else ""))
 
 
 def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) -> dict[str, Any] | None:

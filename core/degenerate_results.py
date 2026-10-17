@@ -11,11 +11,15 @@ recorder wrote; never from the script's claims):
 
 Only what the analysis reports is judged (a quantity nobody reports is a diagnostic), a setting echoed back is not a
 result, and a value of exactly 0 or 1 is never read as stuck at a bound (an indicator or a probability is allowed to be
-there). A quantity the plan expects to stay put (what an invariant, symmetry or second-implementation check measures, a declared
-bound) is exempt, and one whose line the code marks ``# constant by design: <reason>`` is accepted and noted in the
-limitations, never dropped (the mark must sit on the assignment of a named constant the returned value uses, with a reason
-that names a source, and the different-model code review confirms or rejects it; unreviewed, it is noted as the writer's
-own declaration). The all-identical case is :mod:`core.flat_output`'s; this is the quantity that is flat while others are not.
+there). A quantity the plan expects to stay put (what an invariant, symmetry or second-implementation check measures when
+that is one bare name, a check of any other kind whose bare measure the plan does not list as a metric, a declared bound) is
+exempt.
+
+Only a quantity the plan itself says is estimated from the data (:func:`plan_estimates`: the plan's metrics, the names of a
+known value, the metric the run's size is set for) is questioned: sent back, then left
+out. Any other flat quantity (a theory value that depends on the fixed design only, a design constant, a count) is kept in the
+results and the limitations say, from FI's record, that it was identical at all the settings (:func:`kept_note`). The
+all-identical case is :mod:`core.flat_output`'s; this is the quantity that is flat while others are not.
 """
 
 from __future__ import annotations
@@ -27,7 +31,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import grid_keys as _grid_keys
 from . import reported_settings as _rs
 
 #: A series is read only when it has at least this many points (a two-point line is a reference line).
@@ -298,21 +301,67 @@ def _quantity_problems_in(cells: list[dict[str, Any]], reported: set[str], exemp
     return out
 
 
-MARK = re.compile(r"#\s*constant by design\s*:?\s*(.*)$", re.IGNORECASE)
 #: The kinds of check whose measured quantity is expected to be the same everywhere (a worst violation of an invariant).
 _EXPECTED_KINDS = ("invariant", "symmetry", "second_implementation")
+#: The kinds of check whose measured quantity is a value the plan expects to learn from the data (a special case, a published value).
+_MEASURED_KINDS = ("special_case", "published_value")
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 
+def _same_value(a: Any, b: Any) -> bool:
+    if (isinstance(a, (int, float)) and not isinstance(a, bool) and isinstance(b, (int, float)) and not isinstance(b, bool)):
+        return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12)
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _is_off(value: Any) -> bool:
+    """A numeric 0 (no noise, no spread): the axis switched off."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+
+
+def _runs_on_fixed_inputs(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> bool:
+    """Whether a check's ``case`` names a value of a study axis (``grid`` or ``in_each_run``) that the axis does not run: the
+    check then runs on its own fixed inputs, not on a setting of the study, and what it measures is the same whatever the
+    setting. A case that is one of the study's settings (each axis it names at a value the axis runs), one with no case, and
+    one that names no axis are not. One exception, an added rule and not a derived fact: a 0 on an axis whose values are all
+    above 0 (``nsr = 0`` beside 0.01 to 0.2) is that axis switched off, the noise-free end of the study itself, and the
+    estimate it measures there is still computed by the study's own pipeline (``ea_est``); it is not told apart from a
+    setting."""
+    case = oracle.get("case")
+    p = protocol if isinstance(protocol, dict) else {}
+    if not isinstance(case, dict):
+        return False
+    for block in ("grid", "in_each_run"):
+        axes = p.get(block)
+        for axis, values in (axes.items() if isinstance(axes, dict) else ()):
+            if axis not in case or not isinstance(values, (list, tuple)) or any(_same_value(case[axis], v) for v in values):
+                continue
+            numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            if _is_off(case[axis]) and numbers and len(numbers) == len(values) and all(v > 0 for v in numbers):
+                continue
+            return True
+    return False
+
+
 def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
-    """Names the plan itself expects to stay put: what a check of an invariant, a symmetry or a second implementation measures,
-    and the keys of the plan's declared bounds or limits."""
+    """Names the plan itself expects to stay put: what a check of an invariant, a symmetry or a second implementation measures
+    when the measure IS that one bare name (``bh_scipy_disagree``); what a special-case or published-value check measures when
+    that is one bare name and the check runs on its own fixed inputs, a case that is no setting of the study
+    (:func:`_runs_on_fixed_inputs`: ``bh_fixed_rejections`` at ``m = 4`` when the study runs ``m`` at 20, 200 and 2000), unless
+    the plan lists the name as an estimate of its own; and the keys of the plan's declared bounds or limits. A name that is only
+    an operand of a measure's expression (``abs(Ea_hat - Ea_polyfit)``) is not exempt: what the check measures is the
+    expression, and ``Ea_hat`` in it is still the plan's own estimate."""
     from . import oracle_check as _oracle
 
+    own = _own_estimates(protocol)
     out: set[str] = set()
     for o in _oracle.declared(protocol):
-        if _oracle.kind_of(o) in _EXPECTED_KINDS:
-            out |= set(_IDENT.findall(str(o.get("measure") or "")))
+        measure = str(o.get("measure") or "").strip()
+        if not _IDENT.fullmatch(measure):
+            continue
+        kind = _oracle.kind_of(o)
+        if kind in _EXPECTED_KINDS or (kind in _MEASURED_KINDS and measure not in own and _runs_on_fixed_inputs(o, protocol)):
+            out.add(measure)
     for key in ("bounds", "limits"):
         block = (protocol or {}).get(key) if isinstance(protocol, dict) else None
         if isinstance(block, dict):
@@ -320,178 +369,50 @@ def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
     return out
 
 
-#: A reason must say where the constant comes from: at least this many words.
-MIN_REASON_WORDS = 3
-_ENTRIES = ("run_cell", "run_trial")
-
-
-@dataclass
-class Mark:
-    """A ``# constant by design: <reason>`` on the assignment of a named constant."""
-
-    script: str
-    line: int
-    name: str
-    reason: str
-    scope: str  # "" for a module-level constant, else the function it is local to
-
-    def key(self) -> str:
-        """What names this mark in the review's checklist and verdicts: where it is, not only what it is called."""
-        return f"{self.script}:{self.line}:{self.scope or '-'}:{self.name}"
-
-    def valid(self) -> bool:
-        return len(self.reason.split()) >= MIN_REASON_WORDS
-
-    def asks(self) -> str:
-        """The requirement the second model confirms or rejects (no number in it)."""
-        return (f"the constant `{self.name}` ({self.script} line {self.line}{', in ' + self.scope if self.scope else ''}) is declared constant by design (\"{self.reason}\"): "
-                "it is a genuine fixed constant of the study that the reason names a source for, and a returned quantity may "
-                "rest on it; it is not a stand-in for a result the code should compute")
-
-
-def design_marks(files: dict[str, str]) -> list[Mark]:
-    """Every ``# constant by design: <reason>`` that sits on the line of an assignment to one name (a module-level or a local
-    constant) and has a reason of at least :data:`MIN_REASON_WORDS` words. A mark anywhere else (a ``return`` line, a
-    comment of its own) is no mark."""
-    import ast
-
-    out: list[Mark] = []
-    for script, text in files.items():
-        lines = text.splitlines()
-        marked = {i + 1: m.group(1).strip() for i, line in enumerate(lines) if (m := MARK.search(line))}
-        if not marked:
+def _own_estimates(protocol: dict[str, Any] | None) -> set[str]:
+    """The names the plan lists as estimates itself: each metric's id, the names of a metric's declared known value (its
+    estimate, its standard error, the two ends of its interval) and the metric the run's size is set for."""
+    p = protocol if isinstance(protocol, dict) else {}
+    out: set[str] = set()
+    for m in p.get("metrics") if isinstance(p.get("metrics"), list) else []:
+        if not isinstance(m, dict):
             continue
-        try:
-            tree = ast.parse(text)
-        except (SyntaxError, ValueError):
-            continue
-
-        def visit(node: ast.AST, scope: str) -> None:
-            for child in ast.iter_child_nodes(node):
-                inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope
-                target = None
-                if isinstance(child, ast.Assign) and len(child.targets) == 1 and isinstance(child.targets[0], ast.Name):
-                    target = child.targets[0].id
-                elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name) and child.value is not None:
-                    target = child.target.id
-                if target:
-                    for ln in range(child.lineno, (getattr(child, "end_lineno", child.lineno) or child.lineno) + 1):
-                        if ln in marked:
-                            mark = Mark(script, child.lineno, target, marked[ln], scope)
-                            if mark.valid():
-                                out.append(mark)
-                            break
-                visit(child, inner)
-
-        visit(tree, "")
+        if m.get("id"):
+            out.add(str(m["id"]))
+        known = m.get("known_value")
+        if isinstance(known, dict):
+            out |= {str(known[k]) for k in ("estimate", "standard_error") if known.get(k)}
+            out |= {str(v) for v in known.get("interval") or [] if v}
+    precision = p.get("precision")
+    if isinstance(precision, dict) and precision.get("metric"):
+        out.add(str(precision["metric"]))
     return out
 
 
-def _uses(files: dict[str, str], mark: Mark, key: str) -> bool:
-    """Whether the dictionary ``run_cell`` / ``run_trial`` return holds ``key`` computed from the marked constant: through
-    assignments and through the functions that use it, read from each function's own statements. Anything not read in full is
-    not a use."""
-    import ast
+def plan_estimates(protocol: dict[str, Any] | None) -> set[str]:
+    """Names the frozen plan says are estimated or measured from the trials, from fields it already has: what it lists itself
+    (:func:`_own_estimates`) and what a special-case or published-value check measures when that is one bare name (an
+    expression is not a name) and the check's case is a setting of the study or names none; a check on its own fixed inputs
+    measures a constant (:func:`expected_constants`). A theory value, a design constant or a count is not among them."""
+    from . import oracle_check as _oracle
 
-    functions: dict[str, tuple[ast.AST, str]] = {}
-    defined: dict[str, set[str]] = {}
-    for script, text in files.items():
-        try:
-            tree = ast.parse(text)
-        except (SyntaxError, ValueError):
-            return False
-        defined[script] = {t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                functions.setdefault(node.name, (node, script))
-
-    def refers(fn: ast.AST, script: str) -> bool:
-        """Whether the function's own statements mean this mark's constant by its name."""
-        if mark.scope:
-            return script == mark.script and fn.name == mark.scope and any(  # type: ignore[attr-defined]
-                isinstance(n, ast.Name) and n.id == mark.name for n in _grid_keys.own_scope_nodes(fn))
-        if script == mark.script:
-            return any(isinstance(n, ast.Name) and n.id == mark.name for n in _grid_keys.own_scope_nodes(fn))
-        # another file means it only by importing it (not by defining a constant of the same name itself)
-        return mark.name not in defined.get(script, set()) and any(
-            (isinstance(n, ast.Name) and n.id == mark.name) or (isinstance(n, ast.Attribute) and n.attr == mark.name)
-            for n in _grid_keys.own_scope_nodes(fn))
-
-    def names(node: ast.AST) -> set[str]:
-        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-
-    def calls(nodes: list[ast.AST]) -> set[str]:
-        return {(n.func.id if isinstance(n.func, ast.Name) else n.func.attr if isinstance(n.func, ast.Attribute) else "")
-                for n in nodes if isinstance(n, ast.Call)} - {""}
-
-    affected = {n for n, (fn, script) in functions.items() if refers(fn, script)}
-    grew = True
-    while grew:
-        grew = False
-        for n, (fn, _script) in functions.items():
-            if n not in affected and calls(_grid_keys.own_scope_nodes(fn)) & affected:
-                affected.add(n)
-                grew = True
-    for entry in _ENTRIES:
-        if entry not in functions:
-            continue
-        fn, script = functions[entry]
-        own: list[ast.AST] = []
-        stack = list(ast.iter_child_nodes(fn))
-        while stack:
-            node = stack.pop()
-            own.append(node)
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-                stack.extend(ast.iter_child_nodes(node))
-        tainted = {mark.name} if refers(fn, script) else set()
-        for _ in range(8):
-            before = len(tainted)
-            for node in own:
-                if isinstance(node, ast.Assign) and (names(node.value) & tainted or calls(list(ast.walk(node.value))) & affected):
-                    tainted |= {t.id for tt in node.targets for t in ast.walk(tt) if isinstance(t, ast.Name)}
-            if len(tainted) == before:
-                break
-        returns = [n for n in own if isinstance(n, ast.Return)]
-        if not returns or not all(isinstance(r.value, ast.Dict) for r in returns):
-            continue
-        for r in returns:
-            for k, v in zip(r.value.keys, r.value.values):
-                if isinstance(k, ast.Constant) and k.value == key and (
-                        names(v) & tainted or calls(list(ast.walk(v))) & affected):
-                    return True
-    return False
-
-
-CONFIRMED, REJECTED, UNCONFIRMED = "confirmed", "rejected", "unconfirmed"
-
-
-def confirmation(quest_root: Path, code_dir: Path, mark: Mark) -> str:
-    """What the different-model code review said of this mark: ``confirmed``, ``rejected``, or ``unconfirmed`` when no other
-    model read this version of the code with the mark in it (the review was not run, or the reader is the writer)."""
-    from . import code_review as _review
-
-    record = _review.load(quest_root)
-    if record.get("read_version") != _review.version(code_dir):
-        return UNCONFIRMED
-    for v in record.get("verdicts") or []:
-        if isinstance(v, dict) and v.get("kind") == _review.MARK_KIND and v.get("name") == mark.key():
-            return CONFIRMED if v.get("status") == _review.IMPLEMENTED else REJECTED
-    return UNCONFIRMED
-
-
-def accepted_marks(files: dict[str, str], names: list[str], quest_root: Path, code_dir: Path) -> dict[str, tuple[Mark, str]]:
-    """``{quantity: (its mark, confirmed | unconfirmed)}`` for each of ``names`` whose value is computed from a valid mark that
-    the other model did not reject. A rejected mark counts as none."""
-    marks = design_marks(files)
-    out: dict[str, tuple[Mark, str]] = {}
-    for name in names:
-        for mark in marks:
-            if _uses(files, mark, name):
-                state = confirmation(quest_root, code_dir, mark)
-                if state != REJECTED:
-                    out[name] = (mark, state)
-                    break
+    out = _own_estimates(protocol)
+    for o in _oracle.declared(protocol):
+        measure = str(o.get("measure") or "").strip()
+        if _oracle.kind_of(o) in _MEASURED_KINDS and _IDENT.fullmatch(measure) and not _runs_on_fixed_inputs(o, protocol):
+            out.add(measure)
     return out
+
+
+def split_flat(quantities: list[QuantityProblem], protocol: dict[str, Any] | None
+               ) -> tuple[list[QuantityProblem], list[QuantityProblem]]:
+    """``(judged, kept)``: a flat quantity is judged (sent back, then left out) only when the plan says it is estimated from
+    the data (:func:`plan_estimates`, the same name matching as for a setting); any other flat quantity is kept and stated in
+    the limitations from FI's record. A theory value, a design constant and a count are flat by nature, and a name the plan
+    never ties to the data is not a name FI can say is wrong."""
+    named = plan_estimates(protocol)
+    judged = [q for q in quantities if any(q.name == n or _rs.names_setting(q.name, n) or _rs.names_setting(n, q.name) for n in named)]
+    return judged, [q for q in quantities if q not in judged]
 
 
 def directive(figures: list[FigureProblem], quantities: list[QuantityProblem]) -> str:
@@ -499,13 +420,29 @@ def directive(figures: list[FigureProblem], quantities: list[QuantityProblem]) -
     lines = [f"- {p.says()}" for p in (*quantities[:6], *figures[:6])]
     text = "FI looked at what the run produced, and some of it shows nothing:\n" + "\n".join(lines)
     if quantities:
-        text += ("\n\nFor each quantity named above: if that is not what the model should give, compute it from the inputs "
-                 "(no fixed number, no clamp); if it is expected, keep it and mark the line with "
-                 "`# constant by design: <reason>`.")
+        text += ("\n\nThe plan says each quantity named above is estimated from the trials' data: compute it from this trial's "
+                 "data as the plan defines it (no fixed number, no clamp).")
     if figures:
         text += ("\n\nDraw each panel from the saved results (every panel needs data, each point at the setting it was run at); "
                  "a panel with nothing to show is removed, not left empty.")
     return text + " Change nothing else."
+
+
+def kept_says(q: QuantityProblem) -> str:
+    """One kept flat quantity, in plain words, from FI's own record of the trials."""
+    if q.kind == "constant":
+        return f"`{q.name}` was identical ({q.value:g}) at all {q.cells} settings"
+    return f"`{q.name}` was at {q.value:g}, the largest or smallest value it takes anywhere, at {q.at} of the {q.cells} settings"
+
+
+def kept_note(kept: list[QuantityProblem]) -> str:
+    """For the writer: flat quantities the plan does not say are estimated from the data stay in the results; the limitations
+    say what FI saw."""
+    shown = "; ".join(kept_says(q) for q in kept[:6])
+    one = len(kept) == 1
+    return (f"FI's record of the trials shows that {shown}. The plan does not say {'it is' if one else 'they are'} estimated from "
+            f"the data, so {'it stays' if one else 'they stay'} in the results. Say plainly, in the limitations, "
+            f"what the record shows of {'it' if one else 'each of them'}, as stated here.")
 
 
 def plain_note(figures: list[FigureProblem], quantities: list[QuantityProblem]) -> str:

@@ -334,3 +334,30 @@ def test_only_fis_own_expected_formula_uses_the_special_functions() -> None:
     assert tri.calculate("gamma(2)") is None and tri.calculate("j0(1)") is None and tri.calculate("erf(1)") is None
     assert tri.calculate("ellipk(0.5)") is not None
     assert tri.arithmetic_slip("derivation: gamma(2) = 0.3", 0.3) is None
+
+
+CORR = {"name": "corr_design_check", "kind": "special_case", "check": "corr", "expected": 0.99975,
+        "expected_formula": "0.0031419/sqrt(1.4e-8+0.0031419**2)", "tolerance": 0.0005, "tolerance_mode": "absolute",
+        "case": {"n_points": 12}, "measure": "corr_theory"}
+
+
+def test_a_formula_value_inside_the_tolerance_but_outside_the_typed_digits_is_the_checks_value() -> None:
+    """Real fault (a live run): typed 0.99975, formula 0.999292 (4.6e-4 apart, tolerance 5e-4). The typed number was kept,
+    the measurement 0.999095 failed against it, and the triage said the expected value was FI's own 0.999292."""
+    protocol = _protocol(CORR)
+    found = of.formula_findings(protocol)
+    assert [f["state"] for f in found] == ["differs"]
+    assert tri.formula_value(CORR, protocol) is None  # not FI's value for the check while the typed number stands
+    out = {**CORR, "expected": found[0]["value"]}
+    assert tri.formula_value(out, protocol) == pytest.approx(0.9992916438)
+    assert abs(0.999095 - out["expected"]) <= out["tolerance"]  # the measurement now passes
+    assert abs(0.998 - out["expected"]) > out["tolerance"]  # a wrong measurement still fails
+
+
+def test_a_typed_number_that_is_the_formula_rounded_is_kept() -> None:
+    rounded = {**CORR, "expected": 0.99929, "tolerance": 0.001}
+    assert of.formula_findings(_protocol(rounded))[0]["state"] == "agrees"
+    zero = {"name": "z", "kind": "special_case", "check": "c", "expected": 0, "expected_formula": "sin(pi)",
+            "tolerance": 1e-9, "tolerance_mode": "absolute", "case": {}, "measure": "z"}
+    assert not of.disagrees(1.2246e-16, 0.0, 1e-9)
+    assert zero["expected"] == 0

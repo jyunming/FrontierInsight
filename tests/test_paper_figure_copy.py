@@ -516,3 +516,54 @@ def test_the_bootstrap_records_the_titles_the_copy_drops(tmp_path: Path) -> None
         "ax.set_title('dashed: true 50 kJ/mol'); fig.suptitle('All runs at T = 300 K')\n"
         "fig.savefig('figures/x.png')\n"))
     assert record["paper_dropped"] == ["All runs at T = 300 K", "dashed: true 50 kJ/mol"]
+
+
+# ---- where each panel sits, for the caption ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("layout", "places"), [
+    ("plt.subplots(1, 2)", ["left", "right"]),
+    ("plt.subplots(2, 1)", ["top", "bottom"]),
+    ("plt.subplots(1, 3)", ["left", "centre", "right"]),
+    ("plt.subplots(2, 2)", ["top left", "top right", "bottom left", "bottom right"]),
+    ("plt.subplots()", [""]),
+])
+def test_the_record_says_where_each_panel_sits(tmp_path: Path, layout: str, places: list[str]) -> None:
+    from core.engine import _panel_place
+
+    record = _run_script(tmp_path, (
+        "import matplotlib, os\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nimport numpy as np\n"
+        "os.makedirs('figures', exist_ok=True)\n"
+        f"fig, axes = {layout}\n"
+        "for i, ax in enumerate(np.atleast_1d(axes).ravel()):\n"
+        "    ax.plot([0, 1, 2], [i, i + 1, i + 3], label=f's{i}'); ax.set_title(f'panel {i}')\n"
+        "fig.savefig('figures/x.png')\n"
+    ))
+    assert [_panel_place(ax["grid"]) for ax in record["axes"]] == places
+
+
+def test_the_writer_is_told_a_side_by_side_figure_is_left_and_right() -> None:
+    # The live kinetics run (round s3): Figure 1 drew its two panels side by side, the writer saw only "panel 1,
+    # panel 2" and captioned them "Top ... Bottom ...". The grids are that run's own record.
+    from core.engine import _figure_list_for_prompt, _figure_record_note
+
+    record = {"file": "fig1.png", "axes": [
+        {"title": "Bias of recovered E_a", "grid": [1, 2, 0, 1, 0, 1], "series": []},
+        {"title": "Spread of E_a", "grid": [1, 2, 0, 1, 1, 2], "series": []}]}
+    note = _figure_record_note(record)
+    assert 'left panel, "Bias of recovered E_a"' in note and 'right panel, "Spread of E_a"' in note
+    assert "top" not in note and "bottom" not in note
+    listing = _figure_list_for_prompt({"figures": ["fig1.png"], "figure_records": {"fig1.png": record}})
+    assert "Where a panel sits (left, right, top, bottom) is FI's record" in listing
+    # A record from before the grid was kept says nothing about place, rather than guess one.
+    old = {"axes": [{"title": "a", "series": []}, {"title": "b", "series": []}]}
+    assert "panel" not in _figure_record_note(old)
+    assert "Where a panel sits" not in _figure_list_for_prompt({"figures": ["o.png"], "figure_records": {"o.png": old}})
+
+
+def test_a_panel_spanning_the_grid_or_an_odd_grid_gets_no_guess() -> None:
+    from core.engine import _panel_place
+
+    assert _panel_place([2, 2, 0, 1, 0, 2]) == "top"            # spans both columns
+    assert _panel_place([4, 1, 1, 2, 0, 1]) == "row 2 of 4"
+    assert _panel_place(None) == "" and _panel_place([1, 2]) == "" and _panel_place([1, 2, 0, 1, 5, 6]) == ""

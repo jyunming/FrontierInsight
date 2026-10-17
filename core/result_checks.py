@@ -20,6 +20,7 @@ They live here and not in ``engine.py`` so the node only calls :meth:`ResultChec
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,7 +29,6 @@ from typing import Any
 from . import code_reach as _code_reach
 from . import code_review as _code_review
 from . import degenerate_results as _degenerate
-from . import grid_keys as _grid_keys
 from . import reported_settings as _reported
 
 #: Why a quantity a failing test showed wrong is left out, as the must-fix hit for a paper that quotes it says it.
@@ -38,6 +38,7 @@ SHOWN_FAULT_WHY = "a test FI ran on the code that produced the results shows the
 REPAIRS = 2
 _COUNTER = "result_checks.json"
 RECORD = "RESULT_CHECK.json"
+TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
 ANALYSIS = "analysis"
 SIMULATION = "simulation"
 
@@ -62,6 +63,20 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
+    """The quantities FI left out of the results, each with the check's own note: what the results check
+    (``needs/RESULT_CHECK.json``) and the typed-number check (``needs/TYPED_RESULTS_CHECK.json``) wrote as
+    ``removed_quantities``. The one place that names them; the analysis (core/run_checks.py) and the paper's values
+    (core/paper_values.py) both read it."""
+    out: dict[str, str] = {}
+    for name in (RECORD, TYPED_RECORD):
+        record = _read_json(Path(quest_root) / "needs" / name)
+        note = str(record.get("note") or "")
+        for k in record.get("removed_quantities") or []:
+            out.setdefault(str(k), note)
+    return out
 
 
 def _values_left_out(result_json: Any, keys: set[str]) -> dict[str, list[float]]:
@@ -229,19 +244,10 @@ class ResultChecksMixin:
         figures = sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _e._FIGURE_SUFFIXES) if folder.is_dir() else []
         drawn = _degenerate.figure_problems(self.fi_dir / "figure_records", figures)  # type: ignore[attr-defined]
         protocol = self._protocol_block(state)  # type: ignore[attr-defined]
-        quantities = _degenerate.quantity_problems(
+        found = _degenerate.quantity_problems(
             cells, reported, self._typed_result_exempt(state) | _degenerate.expected_constants(protocol))  # type: ignore[attr-defined]
-        marks = _degenerate.accepted_marks(_grid_keys.code_files(self.quest_root / "code"), [q.name for q in quantities],  # type: ignore[attr-defined]
-                                           self.quest_root, self.quest_root / "code")  # type: ignore[attr-defined]
-        self._result_marked = []
-        for q in quantities:
-            if q.name in marks:
-                mark, how = marks[q.name]
-                said = (f"`{q.name}` is {'the same at every setting' if q.kind == 'constant' else 'at a bound for most settings'} "
-                        f"by design ({mark.reason}; `{mark.name}`, {mark.script} line {mark.line}")
-                self._result_marked.append(said + ("; confirmed by a second model)" if how == _degenerate.CONFIRMED else
-                                                   "; declared by the code's own writer and not independently confirmed)"))
-        quantities = [q for q in quantities if q.name not in marks]
+        quantities, kept = _degenerate.split_flat(found, protocol)
+        self._result_kept = [_degenerate.kept_note(kept)] if kept else []
         if not (drawn or quantities):
             return []
         return [Found("degenerate_results", SIMULATION if quantities else ANALYSIS, _degenerate.directive(drawn, quantities),
@@ -295,8 +301,10 @@ class ResultChecksMixin:
         if result.returncode != 0:
             return result, failed_script
         result_json = _e._extract_result_json(result.stdout or "")
-        self._result_marked = []
-        found = self._result_findings(state, result_json) if getattr(self, "_trial_mode", False) else []
+        self._result_kept = []
+        # Off the event loop: the comparison reads every trial value, and with --fleet a blocked loop stalls the other quests.
+        found = (await asyncio.to_thread(self._result_findings, state, result_json)
+                 if getattr(self, "_trial_mode", False) else [])
         # What a second model found the code computes otherwise cannot be repaired here (its repairs were spent before the run).
         # A run that drew none of the planned figures still has its results: they stand, and the writer is told there is
         # no figure. Sent back like a failed run, a repair that gave up would have thrown the results away and stopped the
@@ -304,8 +312,8 @@ class ResultChecksMixin:
         standing = [*self._code_reader_findings(result_json), *self._figure_gap_findings(set()),
                     *self._no_figures_standing(state)]
         if not found and not standing:
-            if self._result_marked:
-                self._write_marked(record_path)
+            if self._result_kept:
+                self._write_kept(record_path)
             return result, failed_script
         used = self._result_counter(state)
         repair_left = (int(state.get("exec_reflect_iter", 0) or 0) < self.config.engine.exec_reflect_max_iterations  # type: ignore[attr-defined]
@@ -338,7 +346,7 @@ class ResultChecksMixin:
                   "checks": [{"kind": f.kind, "note": f.note, **({"quantity": f.quantity, "keys": f.keys} if f.quantity else {})}
                              for f in found],
                   "note": "; ".join(f.note for f in found),
-                  "say": "\n\n".join([*(f.say for f in found), *self._marked_say()])}
+                  "say": "\n\n".join([*(f.say for f in found), *self._kept_say()])}
         try:
             record_path.parent.mkdir(parents=True, exist_ok=True)
             record_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
@@ -391,19 +399,14 @@ class ResultChecksMixin:
         except OSError as exc:
             self._log.warning("[evidence_gate] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
 
-    def _marked_say(self) -> list[str]:
-        marked = getattr(self, "_result_marked", None) or []
-        if not marked:
-            return []
-        loose = [m for m in marked if "not independently confirmed" in m]
-        return ["The code marks " + "; ".join(marked) + ". Keep these values, and say plainly, in the limitations, that "
-                "they are constant by design and not measured"
-                + (", and that the constant was declared by the code's own writer and not independently confirmed." if loose else ".")]
+    def _kept_say(self) -> list[str]:
+        """For the writer: the flat quantities the plan does not say are estimated from the data, kept and stated."""
+        return list(getattr(self, "_result_kept", None) or [])
 
-    def _write_marked(self, record_path: Path) -> None:
-        """A quantity the code marks ``# constant by design`` is accepted and noted in the limitations, never dropped."""
-        record = {"removed_quantities": [], "removed_figures": [], "checks": [], "note": "; ".join(self._result_marked),
-                  "say": "\n\n".join(self._marked_say())}
+    def _write_kept(self, record_path: Path) -> None:
+        """Flat quantities the plan does not name are kept in the results and stated in the limitations, never dropped."""
+        record = {"removed_quantities": [], "removed_figures": [], "checks": [], "note": "; ".join(self._result_kept),
+                  "say": "\n\n".join(self._kept_say())}
         try:
             record_path.parent.mkdir(parents=True, exist_ok=True)
             record_path.write_text(json.dumps(record, indent=1), encoding="utf-8")

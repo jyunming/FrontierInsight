@@ -131,6 +131,7 @@ def model_functions(outline: dict[str, Any] | None, protocol: dict[str, Any] | N
     exactly what it always gave."""
     equations = {_eqt._text(e["id"]).upper(): _eqt._text(e["id"]) for e in _eqt.eligible(protocol)}
     cards = {c["id"].upper(): c for c in _plan_steps.parse(protocol)[0] if _STEP_ID.fullmatch(c["id"])}
+    rows = {r["id"]: r for r in _eqt.example_rows(protocol)}
     notes: list[str] = []
     specs: dict[str, Spec] = {}
     seen_eq: set[str] = set()
@@ -156,6 +157,8 @@ def model_functions(outline: dict[str, Any] | None, protocol: dict[str, Any] | N
         if not name.isidentifier() or not sig.startswith("def ") or not _signature_ok(sig, name):
             notes.append(f"the outline's signature for {label} cannot be read ({sig[:80] or 'none'})")
             continue
+        if not is_step and eid in rows:  # the example's names, set by FI: the outline's own are only its reading of them
+            sig = example_signature(sig, rows[eid])
         deps = [_eqt._text(d) for d in (item.get("depends_on") if isinstance(item.get("depends_on"), list) else [])]
         purpose = _eqt._text(item.get("one_line_purpose")) or name
         if is_step:
@@ -214,6 +217,111 @@ def _signature_ok(sig: str, name: str) -> bool:
     except SyntaxError:
         return False
     return isinstance(node, ast.FunctionDef) and node.name == name
+
+
+def example_signature(sig: str, row: dict[str, Any]) -> str:
+    """``sig`` with the parameters of the plan's worked example for the equation it implements. The example's ``inputs`` are
+    the plan's own record, frozen before any code is written; the outline is the code-writing model's reading of the same
+    equation and can name the same quantities differently. The test calls the function by the example's names, so those
+    are its parameters: FI sets them, rather than asking the plan to rename its example to the outline's words.
+
+    A signature the test can already call (:func:`core.equation_tests.parameter_problems`: every input is a parameter, no
+    parameter without a default is missing from the inputs) is returned as it was, as is one with ``*args``/``**kwargs`` or
+    a row whose example is not usable. Otherwise the inputs come first, in the outline's order for the names it had
+    (annotations kept) and the example's order for the rest, without defaults; then what the outline gave a default
+    (a setting of the function, not an input) as it was; for a random equation ``rng`` when the outline gave none. An
+    outline parameter with no default that is not an input of the example is dropped: the test cannot give it a value.
+    A signature FI rewrote takes its parameters by keyword only (``def f(*, ...)``)."""
+    if row.get("state") != "ok":
+        return sig
+    try:
+        node = ast.parse(sig.rstrip().rstrip(":") + ":\n    pass").body[0]
+    except SyntaxError:
+        return sig
+    if not isinstance(node, ast.FunctionDef):
+        return sig
+    a = node.args
+    names = _param_names(node)
+    if _eqt.parameter_problems([row], {row["id"]: (names, Spec(node.name, sig, "", "").required_params())}) == {}:
+        return sig
+    if a.vararg or a.kwarg:
+        return sig
+    positional = [*a.posonlyargs, *a.args]
+    defaults: dict[str, ast.expr | None] = {x.arg: None for x in [*positional, *a.kwonlyargs]}
+    for x, d in zip(positional[len(positional) - len(a.defaults):], a.defaults):
+        defaults[x.arg] = d
+    for x, d in zip(a.kwonlyargs, a.kw_defaults):
+        defaults[x.arg] = d
+    had = {x.arg: x for x in [*positional, *a.kwonlyargs]}
+    inputs = list(row["inputs"])
+    ordered = [n for n in had if n in inputs] + [n for n in inputs if n not in had]
+    out = []
+    for n in ordered:
+        x = had.get(n)
+        out.append(f"{n}: {ast.unparse(x.annotation)}" if x is not None and x.annotation is not None else n)
+    fi_supplied = (*_eqt.RNG_PARAMS, _eqt.SEED_PARAM)  # given by the test for a random equation, whatever the outline wrote
+    for n, x in had.items():
+        if n not in inputs and (defaults[n] is not None or (row.get("random") and n in fi_supplied)):
+            d = defaults[n]
+            out.append(ast.unparse(x) if d is None else
+                       f"{ast.unparse(x)}{' = ' if x.annotation is not None else '='}{ast.unparse(d)}")
+    if row.get("random") and not any(n in fi_supplied for n in had):
+        out.append("rng")
+    returns = f" -> {ast.unparse(node.returns)}" if node.returns is not None else ""
+    # Keyword-only: code written against the outline's order (a resumed quest, a function repaired alone) then fails at
+    # the call, loudly, instead of passing its values to the wrong parameters.
+    return f"def {node.name}(*, {', '.join(out)}){returns}:"
+
+
+def align_outline(outline: dict[str, Any] | None, protocol: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
+    """``(outline, what changed)``: the outline with each equation's function given the parameters of the plan's example
+    (:func:`example_signature`), in ``functions[].signature`` and in the scaffold's ``def`` line, so the request that
+    writes the study shows the signature the tests and the repairs hold the function to. The outline given is not changed;
+    the sentences name the function, the equation and the old and new parameters."""
+    if not isinstance(outline, dict) or not isinstance(outline.get("functions"), list):
+        return outline or {}, []
+    rows = {r["id"].upper(): r for r in _eqt.example_rows(protocol)}
+    equations = {_eqt._text(e["id"]).upper() for e in _eqt.eligible(protocol)}
+    functions: list[Any] = []
+    notes: list[str] = []
+    scaffold = outline.get("scaffold")
+    for item in outline["functions"]:
+        row = rows.get(_eqt._text(item.get("implements")).upper()) if isinstance(item, dict) else None
+        sig = _eqt._text(item.get("signature")) if row is not None else ""
+        name = _eqt._text(item.get("name")) if row is not None else ""
+        if (row is None or _eqt._text(item.get("implements")).upper() not in equations or not sig.startswith("def ")
+                or not _signature_ok(sig, name)):
+            functions.append(item)
+            continue
+        new = example_signature(sig, row)
+        if new == sig:
+            functions.append(item)
+            continue
+        functions.append({**item, "signature": new})
+        notes.append(f"{name} ({row['id']}): ({sig[sig.index('(') + 1:sig.rindex(')')]}) -> "
+                     f"({new[new.index('(') + 1:new.rindex(')')]})")
+        if isinstance(scaffold, str):
+            scaffold = _scaffold_with_signature(scaffold, name, new)
+    if not notes:
+        return outline, []
+    return {**outline, "functions": functions, **({"scaffold": scaffold} if isinstance(scaffold, str) else {})}, notes
+
+
+def _scaffold_with_signature(scaffold: str, name: str, signature: str) -> str:
+    """The scaffold with the ``def`` header of ``name`` replaced by ``signature`` (kept as it was when the scaffold does not
+    parse or the header and the first statement share a line)."""
+    try:
+        tree = ast.parse(scaffold)
+    except SyntaxError:
+        return scaffold
+    node = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name), None)
+    if node is None or not node.body or node.body[0].lineno <= node.lineno:
+        return scaffold
+    lines = scaffold.splitlines(keepends=True)
+    start = node.decorator_list[-1].end_lineno if node.decorator_list else node.lineno - 1
+    indent = " " * node.col_offset
+    lines[start:node.body[0].lineno - 1] = [indent + signature + "\n"]
+    return "".join(lines)
 
 
 def _in_order(specs: list[Spec]) -> list[Spec]:

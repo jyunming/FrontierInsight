@@ -397,6 +397,13 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
         ident = str(m["id"]).strip()
         raw = m.get("reference")
         name = value_name(m)
+        if trial_names is not None and name not in trial_names and raw is not None and ident in trial_names:
+            # The plan names the value its reference is for by a name the trials never return (a "<id>_ref" it made up),
+            # but the trials do return the metric itself: the reference is for that, as `value` defaults to the id. A
+            # reference for a value no trial returns stays "no reference".
+            name = ident
+            if isinstance(raw, dict):
+                raw = {**raw, "value": ident}
         if trial_names is not None and name not in trial_names:
             missing: dict[str, Any] = {"metric": ident, "value": None, "status": "no reference",
                                        "why": f"the trials return no value named {name!r}"}
@@ -406,7 +413,7 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
             continue
         if raw is None:
             quantities.append({"metric": ident, "value": name, "status": "no reference",
-                               "why": "the plan gives no reference for it"})
+                               "why": ""})
             continue
         shape = shape_problem(raw)
         if shape:
@@ -430,14 +437,3 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
             value, why = value_at(ref, s, given)
             rows.append({"metric": ident, "value": name, "setting": dict(s), "reference": value, "why": why})
     return {"quantities": quantities, "by_setting": rows}
-
-
-def pool(computed: dict[str, Any]) -> dict[str, float]:
-    """The reference values computed, by ``metric.setting``, for the provenance check (a pool of their own)."""
-    out: dict[str, float] = {}
-    for r in computed.get("by_setting") or []:
-        value = _num(r.get("reference"))
-        if value is not None:
-            label = ",".join(f"{k}={v}" for k, v in (r.get("setting") or {}).items())
-            out[f"{r['metric']}.{label}"] = value
-    return out

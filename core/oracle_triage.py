@@ -241,8 +241,8 @@ def formula_value(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> fl
         tree, _ = _forms._tree(text, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
         if tree is None or not any(isinstance(n, (ast.BinOp, ast.Call, ast.Name)) for n in ast.walk(tree)):
             return None  # a number restated is not a working FI computed
-        if abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
-            return None
+        if _forms.disagrees(value, expected, limit):
+            return None  # the check does not use this value (a frozen protocol keeps what it froze): never claimed as its own
     except Exception:  # noqa: BLE001 -- a formula FI cannot compute (or compare) decides nothing
         return None
     return value

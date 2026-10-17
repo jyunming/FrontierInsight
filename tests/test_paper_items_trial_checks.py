@@ -60,8 +60,8 @@ def test_intervals_not_measured_against_the_truth_are_an_item_with_the_reason(tm
                                                    "not_checked": [trial_checks.NO_DECLARATION]}})
     [item] = _items(root, paper_facts.CALIBRATION)
     assert item.id == "calibration-all"
-    assert item.sentence == ("FI did not measure the reported intervals and standard errors against the true values: the "
-                             "plan gives no true value to compare them with.")
+    assert item.sentence == ("The coverage of the reported intervals, and the accuracy of their standard errors, were not "
+                             "checked against known true values.")
     assert "known_value" not in item.sentence and "run_trial" not in item.sentence
     # a search says why in its own words
     _checks(root, {"settings": 2, "calibration": {"quantities": [], "checked": False,
@@ -72,7 +72,7 @@ def test_intervals_not_measured_against_the_truth_are_an_item_with_the_reason(tm
     why = "`coverage` (ea): no setting had 10 or more trials with these values (and some spread of the estimate), too few to judge"
     _checks(root, {"settings": 2, "calibration": {"quantities": [], "checked": False, "not_checked": [why]}})
     [item] = _items(root, paper_facts.CALIBRATION)
-    assert "too few to judge" in item.sentence
+    assert "too few" not in item.sentence and "`" not in item.sentence  # the reason is in the quality report
     section = paper_facts.writer_section(root, topic="t")
     assert "{{not_done:calibration-all}}" in section
 
@@ -102,7 +102,7 @@ def test_trials_fi_did_not_run_itself_are_an_item(tmp_path: Path) -> None:
     trial_checks.record_not_run(root, "one_script")
     [item] = _items(root, paper_facts.TRIALS_UNCHECKED)
     assert item.id == "trials-unchecked-all"
-    assert "did not count its failed trials" in item.sentence
+    assert "failed trials were not counted" in item.sentence
     assert _items(root, paper_facts.CALIBRATION) == []
     q = SimpleNamespace(trial_checks=trial_checks.read_record(root))
     summary = quality_report._trial_checks_summary(q)  # type: ignore[arg-type]

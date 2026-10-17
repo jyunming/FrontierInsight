@@ -40,6 +40,7 @@ def _engine(tmp_path: Path) -> Engine:
                         execution=ExecutionConfig(sandbox="venv"), knowledge=KnowledgeConfig(enabled=False),
                         output=OutputConfig(output_dir=tmp_path / "out")))
     eng._oracle_proposals, eng._oracle_disputed, eng._oracle_set_aside, eng._oracle_noisy = {}, set(), {}, set()
+    eng._oracle_undecided = set()
     eng.quest_root.mkdir(parents=True, exist_ok=True)
     return eng
 

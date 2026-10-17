@@ -39,7 +39,7 @@ import yaml
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterator, TypedDict, get_args
+from typing import Any, Awaitable, Callable, TypedDict, get_args
 
 # User-supplied async function that collects answers to clarify-node
 # questions. Receives the ``clarify_questions`` dict and must return
@@ -91,6 +91,8 @@ from . import phased as _phased
 from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure
 from . import paper_facts as _paper_facts
+from . import paper_values as _paper_values
+from . import typed_numbers as _typed_numbers
 from . import run_facts as _run_facts
 from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
@@ -100,6 +102,7 @@ from . import trial_runner as _trial_runner
 from . import goal_coverage
 from . import citation_support as _cs
 from . import paper_patch
+from . import paper_sections as _paper_sections
 from . import paper_trim
 from . import plan as _plan
 from . import criteria as _criteria
@@ -371,6 +374,9 @@ class QuestState(TypedDict, total=False):
     run_manifest_analysis_only: bool
     figure_data_repairs: int
     record_rewrites: int
+    #: The draft was written under the rule that FI fills every result number (the writer was given the sheet of keys), so
+    #: the typed-number check holds it to that rule; a draft from an older build, or a study with no trial record, is not.
+    paper_keys: bool
     # Two-stage implement scaffold from ``_node_implement_outline``.
     # Carries ``{scaffold, functions, data_flow, constants,
     # result_json_template, deps}`` for the body node to consume.
@@ -699,7 +705,6 @@ _FI_PROVIDER_NAMES = frozenset(get_args(_ProviderName)) - {"vscode_extension"}
 #: Why FI asks the plan to work an equation's example out again (core/engine.py ``_rederive_examples``), by source.
 _REDERIVE_BECAUSE = {
     "tests": "could not be met by code that follows its formula",
-    "parameters": "names other inputs than the parameters the outline gave its function",
 }
 
 class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
@@ -5828,6 +5833,115 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             what="search for the best design", short="the search",
             note="the search for the best design, written by the plan's model", ask_limit=1 if scan_only else None)
 
+    async def _ask_plan_for_the_grid(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """Before any code is written, a ``protocol.grid`` of more settings than FI lists (:func:`core.optimise_search.grid_too_large`,
+        the same count the run stops on) is asked of the plan's model once to rewrite, with the plan's own arithmetic (at most
+        once per plan, counted in ``.fi/grid_asked.json``, so a resume does not ask again). Only the grid and the parts a
+        smaller grid changes with it (``in_each_run``, ``constants``) are kept from the answer. A plan that fits is not asked,
+        and nothing is logged for it. The stop that follows when it still does not fit is :meth:`_grid_too_large_stop`.
+        Returns the design to use and the hash of its plan."""
+        if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
+                or not plan_sha or _optim.has_block(design)):
+            return design, plan_sha
+
+        def problem(now: Any) -> str:
+            protocol = now.get("protocol") if isinstance(now, dict) else None
+            grid = protocol.get("grid") if isinstance(protocol, dict) else None
+            return "" if _optim.has_block(now) else _optimise_search.grid_too_large(grid)
+
+        if not problem(design) or self._grid_asked_of(_GRID_ASKED) > 0:
+            return design, plan_sha  # a fit grid is not asked; a grid asked once is not asked again (FI's own notes change the hash)
+
+        def lacks(now: Any) -> list[str]:
+            return [p for p in [problem(now)] if p]
+
+        def request(now: Any, _text: str) -> str:
+            return _plan.grid_request(state.get("topic") or self.config.topic, problem(now))
+
+        def keep(before: str, answer: dict[str, Any]) -> str:
+            kept = self._keep_only_the_parts(before, answer, ["grid", "in_each_run", "constants"])
+            if kept is None:
+                raise ValueError("your answer has none of the asked parts in a form that can be read; plan.md is unchanged")
+            return kept
+
+        return await self._ask_plan_to_complete(
+            design, plan_sha, lacks=lacks, request=request, keep=keep, file=_GRID_ASKED,
+            what="what fits the settings limit", short="the settings",
+            note="the grid of settings made small enough to run, written by the plan's model", ask_limit=1,
+            extra={"parts": ["grid"]})
+
+    def _grid_asked_of(self, file: str, iteration: int | None = None) -> int:
+        """How many times FI has asked about the grid's size on the model asked now (``iteration``: for a drafted design, in
+        that design round only). Kept by name, not by the plan's hash, because FI's own notes in plan.md change the hash."""
+        try:
+            record = json.loads((self.fi_dir / file).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        if (not isinstance(record, dict) or record.get("model") != self._plan_model_name()
+                or (iteration is not None and record.get("iteration") != iteration)):
+            return 0
+        try:
+            return max(0, int(record.get("count") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    async def _ask_design_for_the_grid(self, state: QuestState, design: Any, *, iteration: int) -> Any:
+        """A design drafted at this step (a redesign: it did not come from ``plan.md``) whose ``protocol.grid`` holds more
+        settings than FI lists is asked of the plan's model once per design round (counted in ``.fi/drafted_grid_asked.json``
+        BEFORE the call, so a resume does not ask again), the way the plan's own grid is (:meth:`_ask_plan_for_the_grid`).
+        Only a grid, ``in_each_run`` and ``constants`` that pass the same reading as the plan's are taken; the rest of the
+        design is untouched. A grid still too large is the stop of :meth:`_grid_too_large_stop`. Returns the design to use."""
+        protocol = design.get("protocol") if isinstance(design, dict) else None
+        if (not isinstance(protocol, dict) or protocol.get("optimisation") or not self._runs_code(state)
+                or self._client is None or _frozen.load(self.quest_root) is not None):
+            return design
+        problem = _optimise_search.grid_too_large(protocol.get("grid"))
+        if not problem or self._grid_asked_of(_DRAFTED_GRID_ASKED, iteration) > 0:
+            return design
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / _DRAFTED_GRID_ASKED).write_text(json.dumps(
+                {"count": 1, "model": self._plan_model_name(), "iteration": iteration, "at": _frozen.now()}) + "\n",
+                encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[design] FI could not write down that it was asking about the redesign's grid, so it did not "
+                              "ask: %r", e)
+            return design
+        self._log.warning("[design] the redesign's grid is too large to run (%s); FI asked the plan's model to rewrite it "
+                          "(1 of 1)", _one_line(problem, 300))
+        self._progress("Asking the model to make the settings of the redesign small enough to run")
+        ask = (_plan.grid_request(state.get("topic") or self.config.topic, problem)
+               + "\n\nThe protocol drafted so far (keep what is usable in it):\n"
+               + json.dumps(protocol, ensure_ascii=False, default=str)[:4000]
+               + "\n\nAnswer with the asked parts alone, as one JSON object whose keys are their names "
+               + "(for example {\"grid\": {...}}).")
+        try:
+            obj = _parse_json_lenient(await self._chat(ask, node="plan_revise"))
+        except Exception as e:  # noqa: BLE001 -- the stop that follows says what was tried
+            if _is_fatal_provider_error(e):
+                raise
+            self._log.warning("[design] the plan's model could not be asked about the redesign's grid: %s", e)
+            return design
+        if isinstance(obj, dict) and isinstance(obj.get("protocol"), dict):
+            obj = obj["protocol"]
+        if not isinstance(obj, dict) or not isinstance(obj.get("grid"), dict):
+            self._log.warning("[design] the plan's model's answer about the redesign's grid had no grid")
+            return design
+        candidate = {k: v for k, v in protocol.items() if k not in ("grid", "in_each_run", "constants")}
+        for part in ("grid", "in_each_run", "constants"):
+            value = obj.get(part) if obj.get(part) is not None else (protocol.get(part) if part != "grid" else None)
+            if value is not None:
+                candidate[part] = value
+        if isinstance(candidate.get("in_each_run"), dict) and isinstance(candidate.get("grid"), dict):
+            candidate["grid"] = {k: v for k, v in candidate["grid"].items() if k not in candidate["in_each_run"]}
+        fixed, why = _plan.normalize_protocol(candidate)
+        if fixed is None or not fixed.get("grid"):
+            self._log.warning("[design] the redesign's grid, as the plan's model wrote it, cannot be read: %s", why)
+            return design
+        self._log.info("[design] the redesign's grid was rewritten by the plan's model: %s",
+                       _optimise_search.grid_too_large(fixed["grid"]) or "it fits now")
+        return {**design, "protocol": {**protocol, **{k: fixed[k] for k in ("grid", "in_each_run", "constants") if k in fixed}}}
+
     def _move_misplaced_parts(self) -> list[str]:
         """A protocol part the plan's model wrote beside ``protocol`` (at the top level of the design block, as the search
         block was in a real plan) is moved under it in plan.md, as a version FI wrote itself, and said in run.log: the
@@ -6085,6 +6199,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if design is not None and sha:
             design, sha = await self._ask_plan_for_the_search(state, design, sha)
             design, sha = await self._ask_plan_for_the_parts(state, design, sha)
+            design, sha = await self._ask_plan_for_the_grid(state, design, sha)
             await self._cover_the_topic_in_the_plan(state)
             self._write_the_ledger(state)
 
@@ -6201,8 +6316,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._note_not_done([], kind="in_each_run")
             return
         reason = str(why).split("; " + _plan.ASK_MARK)[0].strip().rstrip(".")
-        again = ", even when FI asked the plan's model to write it again once" if asked_again else ""
-        sentence = (f"{reason}{again}. So FI did not record a comparison of those values inside each run, and there is no "
+        again = ", even when the plan was written again once" if asked_again else ""
+        sentence = (f"{reason}{again}. So no comparison of those values inside each run was recorded, and there is no "
                     "result per value of them")
         before = [e for e in self._topic_covered_read().get("not_done") or [] if isinstance(e, dict)
                   and e.get("kind") == "in_each_run"]
@@ -6371,7 +6486,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return [g["sentence"] for g in current["gaps"]]
 
         def request(now: Any, _text: str) -> str:
-            return _topic_req.request(self.config.topic, current["gaps"], search=_optim.has_block(now))
+            return _topic_req.request(self.config.topic, current["gaps"], search=_optim.has_block(now), req=req)
 
         return await self._ask_plan_to_complete(
             design, plan_sha, lacks=lacks, request=request,
@@ -6460,7 +6575,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                               "; ".join(g["sentence"] for g in gaps)[:300], asks,
                               _SEARCH_ASKS + (_SCHEMA_RETRY_ASKS if schema else 0))
             self._progress("Asking the model to add what the topic asks for to the design")
-            ask = (_topic_req.request(self.config.topic, gaps, search=_optim.has_block(design))
+            ask = (_topic_req.request(self.config.topic, gaps, search=_optim.has_block(design), req=req)
                    + "\n\nThe design drafted so far:\n" + json.dumps(design, ensure_ascii=False, default=str)[:8000]
                    + "\n\nAnswer with the whole design as one JSON object, with what was asked added.")
             if problem:
@@ -6950,8 +7065,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if part == "per_trial":
                     lines.append("FI asked the plan's model whether each check on an average over trials holds in every "
                                  "single trial or only on average, and "
-                                 + ("a check still does not say (it is judged as its kind is: a rule on every trial, a "
-                                    "quantity on the average)" if part in left else "every such check says it now") + ".")
+                                 + ("a check still does not say (it is read as an average over trials)" if part in left else "every such check says it now") + ".")
                 elif part in _LEDGER_PARTS:
                     lines.append(f"FI asked the plan's model to write `protocol.{part}` again, and "
                                  + ("it still has gaps (the experiment goes on; the paper says so)" if part in left
@@ -7478,6 +7592,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, but FI could not make the search "
               f"({_one_line(missing[0], 200)}); nothing was run (see needs/STUCK.json)")
         return self._stop_before_run(text, "no_search", tried=tried)
+
+    def _grid_too_large_stop(self, state: QuestState) -> QuestState | None:
+        """The honest stop (no paper) for a protocol whose ``grid`` holds more settings than FI lists, reached before any
+        code is written and again before it runs: the same stop, with the same count, that the run gives
+        (:meth:`_stop_too_long`), but at design, after the plan's model was asked once to make the grid smaller
+        (:meth:`_ask_plan_for_the_grid`). ``None`` when the grid fits, for a search (its scan is judged by
+        :meth:`_search_cannot_start_stop`) and for a quest that runs no experiment of its own."""
+        if not self._runs_code(state):
+            return None
+        protocol = self._protocol_block(state)
+        if not isinstance(protocol, dict) or protocol.get("optimisation"):
+            return None
+        said = _optimise_search.grid_too_large(protocol.get("grid"))
+        if not said:
+            return None
+        # Read the way the asks count themselves (by the model asked, not plan.md's hash, which FI's own notes change).
+        asked = self._grid_asked_of(_GRID_ASKED) + self._grid_asked_of(_DRAFTED_GRID_ASKED)
+        tried = [said,
+                 ("asked the plan's model to rewrite the settings so they are crossed only where they should be, with the "
+                  "count above; the grid was still too large") if asked else
+                 "had no plan's model to ask, or the plan was already settled, so the grid was not rewritten",
+                 "did not cut the grid: FI does not choose which settings or values to leave out"]
+        self._log.warning("[design] the plan's grid is too large to run (%s); stopping, nothing was run", _one_line(said, 400))
+        print(f"[FI] quest {self.quest_id}: {_one_line(said, 300)}; nothing was run (see needs/STUCK.json)")
+        return self._stop_before_run(said, "too_long", tried=tried, advice=(
+            "or ask in words for fewer settings to be crossed (`--revise-plan \"<what to change>\"`): more time does not "
+            "help, FI does not list that many settings."))
 
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
         """Pause for a person only when the quest's setup stops a search for the best design: the simulation is not a
@@ -8234,6 +8375,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # asked to write it); the design to run is then the plan as rewritten.
             design, plan_sha = await self._ask_plan_for_the_search(state, design, plan_sha)
             design, plan_sha = await self._ask_plan_for_the_parts(state, design, plan_sha)
+            design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha)
         else:
             # A design drafted here (a redesign) did not come from plan.md: its search block is completed the same way.
             design, moved_parts = _plan.hoist_protocol_parts(design)
@@ -8243,6 +8385,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design = await self._complete_a_drafted_search(state, design, iteration=iteration)
             design = await self._complete_drafted_parts(state, design, iteration=iteration)
             design = self._inherit_plan_parts(state, design, iteration=iteration)
+            design = await self._ask_design_for_the_grid(state, design, iteration=iteration)
             self._check_the_ledger_of_a_redesign(state, design)
         self._stop_if_no_settings_to_vary(state, design)
         self._stop_if_the_search_cannot_start(state, design)
@@ -10000,6 +10143,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 (text or "")[:300],
             )
             return {"implement_outline": {}}
+        outline = self._outline_with_example_names(state, outline)
         n_funcs = len(outline.get("functions") or [])
         n_const = len(outline.get("constants") or [])
         self._log.info(
@@ -10008,19 +10152,37 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         )
         return {"implement_outline": outline}
 
+    def _outline_with_example_names(self, state: QuestState, outline: dict[str, Any]) -> dict[str, Any]:
+        """The outline with the parameters of each equation's function set to the inputs of the plan's worked example for it
+        (:func:`core.function_steps.align_outline`): the plan's example is its own record, frozen before any code, and the
+        outline is only the code-writing model's reading of the same equation. FI sets the names itself, so the outline, the
+        equation tests and the repair guard (:meth:`_outline_signatures`) name the same parameters, and no one is asked to
+        rename anything. Nothing is changed when the names already agree."""
+        try:
+            protocol = self._protocol_block(state)
+            aligned, changed = _function_steps.align_outline(outline, protocol if isinstance(protocol, dict) else None)
+        except Exception as e:  # noqa: BLE001 -- the outline as written is still usable
+            self._log.warning("[implement_outline] could not set the functions' parameters from the plan's examples (%r)", e)
+            return outline
+        for line in changed:
+            self._log.info("[implement_outline] the parameters of %s are the inputs of the plan's worked example", line)
+        return aligned
+
     async def _node_implement(self, state: QuestState) -> QuestState:
         self._forget_cannot_repair()  # the code is written again: an earlier problem does not stop the new code
         if (topic_stop := self._topic_unmet_stop()) is not None:
             return topic_stop  # no code is written for a study that leaves out what the topic's question needs
         if (search_stop := self._search_cannot_start_stop(state, state.get("design"))) is not None:
             return search_stop  # no code is written for a search FI could not make (the run step stops the same way)
+        if (grid_stop := self._grid_too_large_stop(state)) is not None:
+            return grid_stop  # no code is written for settings FI would not list (the run step stops the same way)
         await self._shadow("implement", state, taken="implemented the design")
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
             return {**_FRESH_SCRIPT, **kept, "refine_extend": []}
         extend = [str(p).strip() for p in state.get("refine_extend") or [] if str(p).strip()]
         # A number the person asked to have added extends the script that exists; the scaffold is for a first script.
-        outline = {} if extend else state.get("implement_outline") or {}
+        outline = {} if extend else self._outline_with_example_names(state, state.get("implement_outline") or {})
         body_prompt = self._prompts.get("implement_body")
         if outline and outline.get("scaffold") and body_prompt is not None:
             self._log.info(
@@ -10677,12 +10839,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     figures = None  # the run drew none: a paper citing one is not judged here
             hits = _record_claims.contradictions(
                 text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
-                oracle=self._oracle_record_read(), figures_on_disk=figures,
-                left_out=(checked := _read_json_or_none_path(self.quest_root / "needs" / "RESULT_CHECK.json") or {}).get(
-                    "removed_values"),
-                left_out_why=checked.get("removed_why"),
-                left_out_typed=(_read_json_or_none_path(self.quest_root / "needs" / "TYPED_RESULTS_CHECK.json") or {}).get(
-                    "removed_values"))
+                oracle=self._oracle_record_read(), figures_on_disk=figures)
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
             self._log.warning("[record_check] could not compare the paper with FI's records (%r)", exc)
             return []
@@ -10769,6 +10926,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._manifest_analysis_problems: list[str] = []
         # The findings of numbers FI's trials never produced (core/run_manifest.py FABRICATED): never record-only.
         self._manifest_fabricated: list[str] = []
+        # The findings that only say the analysis printed no per-trial list for a mean FI holds trial by trial: kept apart
+        # from the differences of the record (core/run_manifest.py UNPRINTED).
+        self._manifest_unprinted: list[str] = []
         self._manifest_differences: list[dict[str, Any]] = []  # what FI counted: where the analysis lists more than ran
         self._manifest_note = ""  # a plain sentence for the record, when the run was compared in a way worth saying
         if self.config.engine.run_manifest_check == "off":
@@ -10848,6 +11008,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                                                     recorded_by_cell=per_cell)
             # The kind each finding was given where it was made; from here on the findings are plain sentences.
             self._manifest_fabricated = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.FABRICATED]
+            self._manifest_unprinted = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.UNPRINTED]
             self._manifest_analysis_problems = [str(f) for f in self._manifest_analysis_problems]
             return ("differs" if found else "ok"), [str(f) for f in found]
         if self.config.rigor_profile == "research":
@@ -10882,6 +11043,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._manifest_analysis_problems = _run_manifest.analysis_output_problems(protocol, manifest, result_json)
         # The older contract's record is the simulation's own statement, never the level FI's own record reaches.
         return ("differs" if found else "self_reported"), found
+
+    def _grid_values_left_out(self, state: QuestState) -> list[str]:
+        """Grid values the analysis script names only some of (a ``for`` loop over literals, which the protocol check does
+        not stop on under the trial contract) that FI's own count of the run shows it reports no trials for. Empty when
+        there is no such loop, or the analysis reports every setting."""
+        protocol = self._protocol_of(state)
+        if protocol is None or not getattr(self, "_trial_mode", False):
+            return []
+        suspects = _protocol.analysis_suspects(protocol, self._scripts_on_disk())
+        return _run_manifest.confirmed(suspects, list(getattr(self, "_manifest_differences", None) or [])) if suspects else []
 
     def _manifest_stop(self, found: list[str], attempts: int) -> QuestState:
         """The run's record still differs from the frozen protocol after the repairs (``engine.run_manifest_check: block``):
@@ -11225,6 +11396,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "[protocol] the script holds to the plan's protocol%s",
                 "" if len(attempts) == 1 else f" (after {len(attempts) - 1} repair(s))",
             )
+            for suspect in _protocol.analysis_suspects(protocol, self._scripts_on_disk()):
+                self._log.info("[protocol] the analysis loops over only %s of %s; after the run FI checks, from its own count of "
+                               "the trials, that the analysis reports every setting", suspect.found, suspect.name)
             return code, deps
         if self.config.engine.protocol_check == "warn":
             self._log.warning("[protocol] the script still differs from the plan's protocol: %s", "; ".join(m.message() for m in final))
@@ -11836,8 +12010,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return None
         design = state.get("design") if isinstance(state.get("design"), dict) else {}
         protocol = self._protocol_block(state)
-        reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None,
-                                        marks=_code_review.constant_marks(code))
+        reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None)
         if not reqs:
             return None
         review_node = self._review_node("code_review")
@@ -11845,8 +12018,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if _round:
                 # A plan the plan's model rewrote to resolve a contradiction is the plan the next reading is made against.
                 protocol = self._protocol_block(state)
-                reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None,
-                                                marks=_code_review.constant_marks(code)) or reqs
+                reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None) or reqs
             version = _code_review.version(code)
             record = _code_review.load(self.quest_root)
             if record.get("read_version") == version and record.get("version") == version:
@@ -11875,12 +12047,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if not _code_review.may_read(record, final=final, after_run_repair=after_run_repair):
                 if final:
                     cap = _code_review.read_cap(final=True, after_run_repair=after_run_repair)
+                    # What the last reading left open stays open for this version, which no one read (carried).
                     record = {**_code_review.carried(record), "version": version, "requirements": len(reqs),
                               "skipped": f"the {cap} readings of the code allowed in a quest are spent"}
                     _code_review.save(self.quest_root, record)
                     self._log.warning("[code_review] %s%s", _code_review.plain_lines(record),
-                                      "; the final version of the code was not read again by another model"
-                                      if record.get("read_version") else "")
+                                      "; the final version of the code was not read again by another model, so what the "
+                                      "last reading left open stays open" if record.get("read_version") else "")
+                    self._code_review_outcome(record)
                 else:
                     self._log.info("[code_review] the code was repaired; the last reading is kept for the version that will "
                                    "run, so it is read just before the run")
@@ -11982,6 +12156,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         record["checked"] = listed[:40]
         record["problems"] = [*_code_review.problems(verdicts), *logic]
         record["read_problems"] = list(record["problems"])  # carried: a later reading that fails does not lose the flags
+        record.pop("final", None)  # this reading's findings replace the carried ones, and may be repaired
         _code_review.note_reading(record, version, record["problems"], code)
         self._log.info("[code_review] %s; %s", _code_review.plain_lines(record), _code_review.metrics_line(record))
         if not record["problems"]:
@@ -12461,23 +12636,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return False
             protocol = self._protocol_block(state)
             specs, notes = _function_steps.model_functions(outline, protocol if isinstance(protocol, dict) else None)
-            if specs and isinstance(protocol, dict):
-                # The function's parameters are the example's inputs (core/equation_tests.py): both are known before any
-                # code is written, so a disagreement of names is put to the plan now (once), not found by a failing test.
-                problems = _equation_tests.parameter_problems(
-                    _equation_tests.example_rows(protocol),
-                    {s.equation: (s.params(), s.required_params()) for s in specs
-                     if s.kind == _function_steps.EQUATION})
-                if problems:
-                    by_id = {str(eq["id"]).strip(): eq for eq in _equation_tests.eligible(protocol)}
-                    changed = await self._rederive_examples(state, protocol, [
-                        {"id": eid, "formula": " ".join(str(by_id[eid].get("formula") or "").split()),
-                         "example": by_id[eid].get("example"), "why": why, "source": "parameters"}
-                        for eid, why in problems.items() if eid in by_id])
-                    if changed:
-                        protocol = self._protocol_block(state)
-                        specs, notes = _function_steps.model_functions(
-                            outline, protocol if isinstance(protocol, dict) else None)
             if not specs:
                 self._log.info("[implement] the model's functions are written with the rest of the code (%s)",
                                "; ".join(notes) or "the outline names no function per equation")
@@ -12672,18 +12830,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if str(f.get("id")) in agrees:
                 self._log.info("[equations] the worked example of %s is what its equation as written gives for the same "
                                "inputs, so the code, not the example, is wrong; the plan is not asked about it", f.get("id"))
+        # The function's parameters are the first example's inputs (FI set them when it read the outline) and the code is
+        # written against them: the plan is told them, so a reworked example keeps the same input names.
+        try:
+            outline_specs, _notes = _function_steps.model_functions(state.get("implement_outline") or {}, protocol)
+        except Exception:  # noqa: BLE001 -- without a readable outline there are no fixed parameters to tell
+            outline_specs = []
+        fixed_names = {s.equation: s.params() for s in outline_specs if s.kind == _function_steps.EQUATION}
         asks = [{"id": str(f.get("id")), "formula": " ".join(str(f.get("formula") or "").split()),
                  "example": _equation_tests.example_as_written(protocol, str(f.get("id"))), "why": f.get("status"),
-                 "source": "tests"}
+                 "source": "tests", "names": fixed_names.get(str(f.get("id")))}
                 for f in failures if str(f.get("id")) in by_id and str(f.get("id")) not in agrees
                 and _equation_tests.repairable_by_example(f)]
         return await self._rederive_examples(state, protocol, asks)
 
     async def _rederive_examples(self, state: QuestState, protocol: dict[str, Any] | None,
                                  asks: list[dict[str, Any]]) -> list[str]:
-        """Ask the plan, once per equation and per reason (``tests``: code could not meet the example; ``parameters``: the
-        outline's function takes other names than the example's inputs), to work the worked example of each equation in
-        ``asks`` out again from the equation as written: ``id``, ``formula``, ``example`` (as written), ``why``.
+        """Ask the plan, once per equation and per reason (``tests``: code could not meet the example), to work the worked
+        example of each equation in ``asks`` out again from the equation as written: ``id``, ``formula``, ``example`` (as
+        written), ``why``.
 
         The request holds the equation, the example as written and the kind of failure, never the number the code gave and
         never the code. Only the asked equations' ``example`` is kept from the rewrite (:meth:`_revise_checks_only` keeps
@@ -15625,8 +15790,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _apply_expected_formulas(self, path: Path) -> list[dict[str, Any]]:
         """Before the protocol is frozen and before anything ran (the callers' guard), once per quest (``formulas`` in
-        ``.fi/oracle_review.json``): a check whose ``expected_formula`` still gives another number than its ``expected``,
-        by more than the check's own tolerance, takes the formula's value (the plan's own working, computed exactly;
+        ``.fi/oracle_review.json``): a check whose ``expected_formula`` still gives another number than its ``expected``
+        (by more than the typed number's written precision or the check's tolerance, see ``oracle_forms.disagrees``), takes the formula's value (the plan's own working, computed exactly;
         a number written from memory is the weaker of the two). The tolerance, mode, case and measure are never
         touched and no measured value is used. Recorded as the engine's change, never a person's. A check whose
         formula is still missing or unusable is left exactly as it was."""
@@ -15665,7 +15830,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.warning("[oracle] %s", line)
             self._note_engine_change(names, reason=(
                 "Before anything ran, FI computed each of these expected values itself from the plan's own formula and "
-                "it differed from the number the plan wrote by more than the check's tolerance, so the check uses the "
+                "it differed from the number the plan wrote (by more than that number's own digits), so the check uses the "
                 "formula's value (worked out before any run): "
                 + "; ".join(f"{c['name']!r} {c['was']:.10g} -> {c['now']:.10g}" for c in corrections) + "."))
             path.write_text(new_text, encoding="utf-8")
@@ -16140,6 +16305,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._stop_if_the_search_cannot_start(state, design_now)
         if (search_stop := self._search_cannot_start_stop(state, design_now)) is not None:
             return search_stop
+        if (grid_stop := self._grid_too_large_stop(state)) is not None:
+            return grid_stop
         if _phased.enabled(self.config):
             # Explore, then confirm: before any code reads the data for the first time, which rows are held back is
             # decided (or, in a research quest that cannot tell which rows belong together, the person is asked).
@@ -16620,12 +16787,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         manifest_attempts_next = manifest_attempts if (result.returncode != 0 or manifest_status in ("not_run", "pending")) else 0
         manifest_analysis_only = False
         acting: list[str] = []
+        unprinted_recorded: list[str] = []  # warn: what the analysis did not print, kept in the record for QUALITY.md
         if manifest_found:
             mode = self.config.engine.run_manifest_check
             # What is acted on: every finding under block; under warn only the numbers FI's trials never produced (they
             # are sent back and stop the quest like under block), the rest being recorded.
             fabricated_found = set(getattr(self, "_manifest_fabricated", []) or [])
             acting = [f for f in manifest_found if f in fabricated_found] if mode == "warn" else list(manifest_found)
+            if mode == "warn" and (left_out := self._grid_values_left_out(state)):
+                # The analysis names only some of an axis's values (read from its code) and FI's own count shows it reports
+                # no trials for them: a fact about the report, not a note. Its findings are acted on like under block.
+                self._log.warning("[run_manifest] %s; the analysis is sent back", "; ".join(left_out))
+                acting = list(dict.fromkeys([*acting, *(f for f in manifest_found if f in set(self._manifest_analysis_problems))]))
             budget = int(self.config.engine.run_manifest_repair_attempts)
             by_request = self._goes_beyond_protocol_by_request()
             protocol_now = self._protocol_of(state)
@@ -16643,8 +16816,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     "; ".join(manifest_found), "; ".join(by_request),
                 )
             elif mode == "warn" and not acting:
-                manifest_status = "warned"
-                self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join(manifest_found))
+                # What the analysis does not print of trials FI holds whole is not a difference in the record: the log has
+                # it, the paper (core/paper_facts.py) and the quality report do not.
+                unprinted = [f for f in manifest_found if f in set(self._manifest_unprinted)]
+                manifest_found = [f for f in manifest_found if f not in unprinted]
+                unprinted_recorded = unprinted
+                manifest_status = "warned" if manifest_found else "ok"
+                self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join([*manifest_found, *unprinted]))
             elif manifest_attempts < _manifest_repair_budget(
                     budget, set(acting) <= set(self._manifest_analysis_problems)):
                 manifest_status = "repairing"
@@ -16680,6 +16858,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._run_manifest_record({
             "status": manifest_status, "problems": manifest_found, "attempts": manifest_attempts_next or manifest_attempts,
             "failed_trials": getattr(self, "_manifest_failed_trials", 0) or 0,
+            **({"unprinted": list(unprinted_recorded)} if unprinted_recorded else {}),
             **({"note": self._manifest_note} if getattr(self, "_manifest_note", "") else {}),
             **({"headline": warned_headline} if warned_headline else {}),
         })
@@ -19212,9 +19391,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # The study would not finish in the time allowed, even made smaller (core/run_estimate.py): nothing was run.
             said = str((state.get("exec_result") or {}).get("too_long") or "").strip().rstrip(".")
             problem = f"{said}, so nothing was run for the study" if said else "the experiment would not fit the time allowed"
-            tried = ["timed a few real trials of the experiment and added them up",
-                     said or "the total is more than the time allowed"]
-            ended = "the experiment would still take longer than the time allowed"
+            tried = [str(t) for t in (state.get("exec_result") or {}).get("too_long_tried") or []] or [
+                "timed a few real trials of the experiment and added them up",
+                said or "the total is more than the time allowed"]
+            ended = ("the settings of the plan were still more than FI lists"
+                     if (state.get("exec_result") or {}).get("too_long_tried") else
+                     "the experiment would still take longer than the time allowed")
         if reason == "no_search":
             # The plan is a search for the best design and the plan's model could not write a search FI can run.
             said = str((state.get("exec_result") or {}).get("no_search") or "").strip().rstrip(".")
@@ -19281,7 +19463,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
                or reason == "flat" or headline_missing else
                "or try another model for the code (`provider.node_models.implement`)." if reason == "shown_fault_open" else
-               "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
+               (str((state.get("exec_result") or {}).get("too_long_advice") or "")
+                or "or allow more time (`execution.timeout_s`), or a smaller study in the plan.") if reason == "too_long" else
                "or try another model for the code (`provider.node_models.implement`)." if reason == "cannot_repair" else
                "or ask for a change in words (`--revise-plan \"<what to change>\"`)." if reason in ("no_search", "topic_unmet") else
                "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
@@ -19673,8 +19856,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             evidence_note = f"{evidence_note}\n\n{run_note}".strip()
         if drafted_note := self._drafted_parts_note():
             evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
-        if numbers_note := self._analysis_numbers_note(state):
-            evidence_note = f"{evidence_note}\n\n{numbers_note}".strip()
         try:
             trial_rows = _trial_table.write(self.quest_root)
             try:  # every setting with its reference value (core/results_by_setting.py), for a table too long to give
@@ -19684,6 +19865,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 by_setting = None
                 # An earlier run's tables must not go into this paper.
                 (self.quest_root / _results_by_setting.PAPER_BLOCK).unlink(missing_ok=True)
+            for d in (by_setting.diagnostics if by_setting else []):  # FI's own reading of the code: the log, not the paper
+                self._log.info("[write] %s", d)
             table_note = _results_by_setting.writer_note(trial_rows, by_setting)
         except Exception as e:  # noqa: BLE001 -- the table is a help to the writer, never a reason to stop
             self._log.warning("[write] FI's table of the trials could not be written (%s)", e)
@@ -19783,13 +19966,36 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except Exception as e:  # noqa: BLE001 -- the paper's {{seed}} reads the code again when it is filled
             self._log.warning("[write] the code's seed could not be put on record (%s: %s)", type(e).__name__, str(e)[:200])
         try:
-            return _paper_facts.writer_section(
+            section = _paper_facts.writer_section(
                 self.quest_root, topic=str(self.config.topic or ""),
                 fallback_s=(state.get("exec_result") or {}).get("duration_s"))
         except Exception as e:  # noqa: BLE001 -- a record FI cannot read is left out, never a reason to stop
             self._log.warning("[write] FI's record of the run could not be given to the writer (%s: %s)",
                               type(e).__name__, str(e)[:200])
-            return ""
+            section = ""
+        sheet = self._values_sheet(state)
+        return f"{section}\n\n{sheet}".strip() if sheet else section
+
+    def _paper_records(self, state: QuestState) -> Any:
+        """The trial record and plan the paper's result keys are filled from (core/paper_values.py); ``None`` without a
+        trial record or when it cannot be read."""
+        try:
+            return _paper_values.records_of(self.quest_root, self._protocol_block(state))
+        except Exception as e:  # noqa: BLE001 -- the keys then read "not recorded"; the paper is not held to the rule
+            self._log.warning("[write] FI's trial record could not be read for the paper's result numbers (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            return None
+
+    def _values_sheet(self, state: QuestState) -> str:
+        """The "Results you can place" block the writer is given (the rule in plain words and the sheet of keys,
+        core/paper_values.py), and the note that this draft is written under it (``self._sheet_given``). ``""`` for a study
+        with no trial record: its paper is not held to the rule."""
+        sheet = _paper_values.writer_block(self._paper_records(state))
+        self._sheet_given = bool(sheet)
+        if not sheet:
+            self._log.info("[write] this study has no per-setting trial record, so FI fills in no result number and the "
+                           "paper is not held to the rule that the writer types none (QUALITY.md says so)")
+        return sheet
 
     def _render_paper_facts(self, markdown: str, state: QuestState) -> str:
         """``markdown`` with every placeholder of the run's facts filled from FI's records (core/paper_facts.py); a
@@ -19797,7 +20003,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         placeholders as they are, and the review's check then finds them unfilled."""
         try:
             out = _paper_facts.render(markdown, self.quest_root, topic=str(self.config.topic or ""),
-                                      fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+                                      fallback_s=(state.get("exec_result") or {}).get("duration_s"),
+                                      records=self._paper_records(state))
         except Exception as e:  # noqa: BLE001
             self._log.warning("[write] FI could not fill the paper's facts of the run from its records (%s: %s)",
                               type(e).__name__, str(e)[:200])
@@ -19805,6 +20012,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if out.unfilled:
             self._log.warning("[write] FI has no record for %s in the paper; it reads \"not recorded\" there (listed in "
                               "QUALITY.md)", ", ".join("{{" + u + "}}" for u in out.unfilled))
+        _paper_values.write_record(self.quest_root, list(out.values))
+        for v in out.values:
+            if v.hit:
+                self._log.warning("[write] %s", v.hit.text())
         return out.text
 
     def _refresh_paper_facts(self, state: QuestState) -> None:
@@ -19816,9 +20027,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return
         try:
             before = Path(path).read_text(encoding="utf-8")
-            after = self._render_paper_facts(_disclosure.without_block(before), state)
+            after = self._render_paper_facts(
+                _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
             if before.rstrip() != after.rstrip() and (
-                    _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before):
+                    _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before
+                    or "fi:fact-" in after or "fi:v " in before or "fi:v " in after):
                 Path(path).write_text(after, encoding="utf-8")
                 self._log.info("[review] took FI's old blocks out of the paper and filled its facts of the run from the "
                                "records again before checking it")
@@ -19827,20 +20040,99 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _paper_record_hits(self, paper_md: str, state: QuestState) -> list[str]:
         """Must-fix hits for the paper against FI's records (core/paper_facts.py): a required placeholder missing (the seed,
-        the run time, whether the run kept to the topic's limit; each thing the study did not do, in the Limitations), a
-        run time typed outside a placeholder that the measurement contradicts, a limit claim it contradicts. Text-only: the
-        paper is written again, the design is not touched and the quest is not stopped. What is still unmet when the
-        rounds are used up is kept in ``.fi/paper_record_check.json`` (the quality report prints it) and said in the run log."""
-        hits = _paper_facts.check(paper_md, self.quest_root, topic=str(self.config.topic or ""),
-                                  fallback_s=(state.get("exec_result") or {}).get("duration_s"))
-        _paper_facts.keep_check(self.quest_root, hits, paper_md)
+        the run time, whether the run kept to the topic's limit; each thing the study did not do, in the Limitations) and,
+        for a paper written under the rule that FI fills every result number, a result key FI could not fill and a number
+        the writer typed that is not a number of the plan or the topic (core/typed_numbers.py). Text-only: the paper is
+        written again, the design is not touched and the quest is not stopped.
+
+        When no review round is left to write the paper again, each typed number still in it is taken out and replaced by
+        "[number removed]", and listed in ``.fi/paper_record_check.json`` (QUALITY.md prints it): FI does not deliver a
+        number it did not fill and no record backs. What else is still unmet is kept there too, and said in the run log."""
+        keyed = bool(state.get("paper_keys"))
+        topic = str(self.config.topic or "")
+        fallback = (state.get("exec_result") or {}).get("duration_s")
+        protocol = self._protocol_block(state)
+        hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
+                                  protocol=protocol)
+        left = int(self.config.engine.max_iterations) - int(state.get("iteration", 0) or 0) - 1
+        removed: list[tuple[str, str]] = []
+        if keyed and left <= 0 and _paper_facts.typed_hits(
+                paper_md, _paper_facts.plan_protocol(self.quest_root, protocol), topic):
+            removed = self._take_out_typed_numbers(state, protocol)
+            if removed:
+                path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+                paper_md = Path(path).read_text(encoding="utf-8")
+                hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
+                                          protocol=protocol)
+        # A result key FI could not fill is no better than a typed number once no round is left to fix it: it is taken out
+        # the same way (a sentence that carried only such keys goes, any other place reads the same marker) and listed.
+        dropped: list[dict[str, str]] = []
+        if keyed and left <= 0 and _paper_values.unfilled_in(paper_md):
+            dropped = self._take_out_unfilled_keys(state)
+            if dropped:
+                path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+                paper_md = Path(path).read_text(encoding="utf-8")
+                hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
+                                          protocol=protocol)
+        # A paper not held to the rule says why in QUALITY.md: the study has no trial record to fill from, or the paper
+        # was written before FI filled result numbers.
+        not_filled = "" if keyed else (
+            "older_paper" if (self.quest_root / "raw" / "trials.json").is_file() else "no_records")
+        _paper_facts.keep_check(self.quest_root, hits, paper_md, removed=removed, not_filled=not_filled, dropped=dropped)
         for hit in hits:
             self._log.warning("[record_check] %s", hit)
-        left = int(self.config.engine.max_iterations) - int(state.get("iteration", 0) or 0) - 1
         if hits and left <= 0:
             self._log.warning("[record_check] %d point(s) of FI's record are still wrong or missing in the paper and no review "
                               "round is left to rewrite it; they are in .fi/paper_record_check.json and QUALITY.md", len(hits))
         return hits
+
+    def _take_out_typed_numbers(self, state: QuestState, protocol: dict[str, Any] | None) -> list[tuple[str, str]]:
+        """The paper with each number the writer typed that is not a number of the plan or the topic replaced by
+        "[number removed]" (core/typed_numbers.py), written to disk: ``(number, sentence)`` for each. The claim check's
+        receipt moves to the new draft, which only lost numbers and added no claim."""
+        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not path or not Path(path).is_file():
+            return []
+        try:
+            before = Path(path).read_bytes()
+            plan = _typed_numbers.plan_numbers(_paper_facts.plan_protocol(self.quest_root, protocol),
+                                               str(self.config.topic or ""))
+            text, taken = _typed_numbers.remove(before.decode("utf-8"), plan)
+            if not taken:
+                return []
+            Path(path).write_text(text, encoding="utf-8")
+            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
+                                 "FI took numbers the writer typed out of the checked draft and added no claim")
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[record_check] the typed numbers could not be taken out of the paper (%s)", e)
+            return []
+        self._log.warning("[record_check] no round is left to write the paper again, so %d number(s) the writer typed that FI "
+                          "did not fill and the plan does not state were replaced by \"%s\" and are listed in QUALITY.md",
+                          len(taken), _typed_numbers.REMOVED)
+        return taken
+
+    def _take_out_unfilled_keys(self, state: QuestState) -> list[dict[str, str]]:
+        """The paper with each result key FI could not fill taken out (core/paper_facts.py::take_out_unfilled), written to
+        disk: ``key``, ``sentence`` and ``how`` for each. Nothing is put in their place, so no number is invented, and the
+        claim check's receipt moves to the new draft, which only lost text and added no claim."""
+        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not path or not Path(path).is_file():
+            return []
+        try:
+            before = Path(path).read_bytes()
+            text, taken = _paper_facts.take_out_unfilled(before.decode("utf-8"))
+            if not taken:
+                return []
+            Path(path).write_text(text, encoding="utf-8")
+            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
+                                 "FI took out values it could not fill and added no claim")
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[record_check] the values FI could not fill could not be taken out of the paper (%s)", e)
+            return []
+        self._log.warning("[record_check] no round is left to write the paper again, so %d value(s) FI could not fill were "
+                          "taken out (%d sentence(s) removed, the rest replaced by \"%s\") and are listed in QUALITY.md",
+                          len(taken), sum(1 for t in taken if t["how"] == "sentence removed"), _paper_facts.REPLACED)
+        return taken
 
     async def _check_code_project(self) -> None:
         """Run ``code/`` as a person would (clean environment, only requirements.txt) once per version of the code and
@@ -19880,8 +20172,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A request the run could not carry out is told to the whole-paper writer, which the passage editor is not.
         reported = bool(state.get("extend_missed") or state.get("layout_missed"))
         markdown = None if refine_round or reported else await self._patch_flagged_passages(state, persona_block)
+        # A draft edited from an earlier one is under the rule its earlier draft was; a whole paper is under it when the
+        # writer was given the sheet of keys (a study with no trial record has none, and an older paper is never held to it).
+        keyed = bool(state.get("paper_keys")) if markdown is not None else False
         if markdown is None:
+            self._sheet_given = False
             markdown = await self._write_whole_paper(state, persona_block, refine_round=refine_round)
+            keyed = bool(getattr(self, "_sheet_given", False))
         # Whatever the writer put where the engine's paragraph goes is not the paper's text: out before any step reads
         # the draft (its citations, figures and numbers), and the engine's own goes in at the end (core/disclosure.py).
         markdown = _best_report.without_block(_disclosure.without_block(markdown))
@@ -19918,6 +20215,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             markdown, unreported, reasked = await self._report_what_the_extension_added(state, persona_block, markdown)
         from generation._keywords import keep_one_keywords_form
 
+        # A scientific paper has an Abstract, whichever pass wrote this draft (first, revise or shortening): its structure is
+        # checked here, not its wording, and a draft without one has it written from the draft itself.
+        if not persona_block:
+            markdown = await self._ensure_abstract(state, markdown)
         # A scientific paper shows its keywords; a persona's paper keeps them
         # in a comment. A writer that gave both keeps the one its format uses.
         markdown = keep_one_keywords_form(markdown, visible=not persona_block)
@@ -19972,9 +20273,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # FI's tables of every setting (core/results_by_setting.py): where the writer put {{results_table}}, else before
         # the discussion; filled from FI's records with the facts below, so no number of them is typed by a model.
         markdown = _paper_facts.place_blocks(markdown, self.quest_root)
+        # A new draft is not yet measured against the page limit: an earlier draft's measurement is not this one's.
+        (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
+        # What the study did not do (core/paper_facts.py): each item the writer did not place is put in the Limitations by FI.
+        markdown = _paper_facts.place_items(markdown, self.quest_root)
         # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
         # placeholder (core/paper_facts.py).
         markdown = self._render_paper_facts(markdown, state)
+        # A figure shares its paragraph with text (a run-in label, a sentence): pandoc then draws it inline, with no
+        # caption and no float. Each goes into a paragraph of its own here, so the PDF, slides and poster all read it so.
+        from generation._figure_captions import figures_in_own_paragraph
+
+        markdown, n_figures_moved = figures_in_own_paragraph(markdown)
+        if n_figures_moved:
+            self._log.info("[write] %d figure(s) moved into a paragraph of their own", n_figures_moved)
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -19987,7 +20299,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._maybe_pause_for_user_input(state, "before_review")
         out: QuestState = {
             "paper_md": str(paper_path), "literature": literature,
-            "paper_basis": _paper_basis(state),
+            "paper_basis": _paper_basis(state), "paper_keys": keyed,
             "refine_needs_experiment": needs_experiment,
             "refine_extend": extend if not needs_experiment else [],
             # A layout note waits through an extended run (its figures are drawn again after the paper is written).
@@ -20082,6 +20394,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         )
         return markdown, said(still), True
 
+    async def _ensure_abstract(self, state: QuestState, markdown: str) -> str:
+        """``markdown`` with an ``## Abstract`` (core/paper_sections.py). A draft without one is not sent whole again: the
+        Abstract alone is asked for, from the draft, once; a reply that is empty or fails leaves the draft as it was and the
+        log says so."""
+        if not _paper_sections.missing_abstract(markdown):
+            return markdown
+        self._log.warning("[write] the draft has no Abstract; asking for it from the draft")
+        try:
+            reply = await self._chat(self._prompts["write_abstract"].substitute(
+                topic=state.get("topic") or self.config.topic, paper=markdown), node="write.abstract")
+        except Exception as exc:  # noqa: BLE001 -- the draft that exists is kept
+            self._log.warning("[write] the Abstract could not be written (%s); the draft is kept without one", exc)
+            return markdown
+        lines = [ln for ln in str(reply).strip().splitlines() if not ln.lstrip().startswith("#")]
+        text = " ".join(" ".join(lines).split())
+        if len(text.split()) < 40:
+            self._log.warning("[write] the reply was not an Abstract; the draft is kept without one")
+            return markdown
+        return _paper_sections.with_abstract(markdown, text)
+
     async def _patch_flagged_passages(self, state: QuestState, persona_block: str) -> str | None:
         """The earlier draft with the passages the review named edited, or
         ``None`` when this round writes the whole paper.
@@ -20148,6 +20480,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 state, audience=self.config.output.audience, mark_thin=True, **self._lit_kwargs(state),
             ),
             passages_block=paper_patch.format_passages(passages),
+            values_sheet=(self._values_sheet(state) if state.get("paper_keys") else "") or
+            "(none: this paper was not written with FI's result keys)",
             paper_block=previous,
         )
         self._log.info(
@@ -20396,6 +20730,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return {"claim_grounding": grounding, "claim_check_failed": failed}
 
     async def _node_citation_check(self, state: QuestState) -> QuestState:
+        """The last step before the paper is delivered: its citations are read against their sources
+        (:meth:`_check_citations`), then the paper as delivered is measured against the page limit, and one still over it
+        says so in its Limitations from that measurement (:meth:`_state_page_overrun`). The review states an overrun only
+        when it has used up its shortening rewrites, and a paper can also leave the review loop earlier (its other
+        findings out of rounds), so the delivered paper is measured here, whatever route brought it."""
+        out = await self._check_citations(state)
+        limit = resolve_page_limit(self.config)
+        paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
+        if limit is not None and paper_path and Path(paper_path).is_file():
+            measured = await self._measure_draft_pages(Path(paper_path), {**state, **out})  # type: ignore[arg-type]
+            if measured is not None and int(measured["pages"]) > limit:
+                pages = await self._state_page_overrun({**state, **out}, Path(paper_path), limit,  # type: ignore[arg-type]
+                                                       int(measured["pages"]))
+                self._log.warning("[page_limit] the paper as delivered renders to %d pages, over the limit of %d: "
+                                  "its Limitations say so", pages, limit)
+        return out
+
+    async def _check_citations(self, state: QuestState) -> QuestState:
         """Read every citation of the paper that is about to be delivered against the retrieved text of its source, and
         fix what that text does not support (core/citation_support.py). It runs last: after the review, the rewrites and
         the page-limit fit, so nothing can add a citation after it. A person is never asked; the paper is never stopped
@@ -20499,8 +20851,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         final = paper
         new_literature = literature
         if result.changed:
-            final, new_literature = _finalize_after_citation_edits(result.paper, literature, audience)
+            final, new_literature, numbering = _finalize_with_numbering(result.paper, literature, audience)
         data = _cs.ledger(result, reader=reader, same_model=same)
+        if result.changed:
+            data = _cs.relabel_ledger(data, numbering)  # named by the numbers the delivered paper has
         c = result.counts
         summary = {**c, "reader": reader, "reader_is_writer": same, "judge_failed": result.judge_failed}
         # Everything a resume needs to put the state back is in the record BEFORE the paper is written.
@@ -21284,84 +21638,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             )
         return found
 
-    def _numeric_oracle_hits(
-        self, paper_md: str, state: QuestState,
-    ) -> list[str]:
-        """Deterministic number check; returns one advisory string per finding.
-
-        Runs on the FULL paper text, not the 16 000-character slice the
-        review prompt gets — a wrong number in a late results table is
-        exactly the kind this is here to catch.
-
-        Writes ``paper/numeric_audit.json`` either way, so a clean run
-        leaves evidence that the check ran rather than silence that could
-        equally mean it was skipped. Best-effort throughout: an oracle
-        failure must never be quest-fatal, because it would block a paper
-        over a bug in the checker rather than a bug in the paper.
-        """
+    def _reference_check_hits(self, state: QuestState) -> list[str]:
+        """A reference quantity of the results that is exactly 0 at every setting of a sweep (core/numeric_oracle.py): what a
+        root finder returning the trivial root of its bracket looks like. A check on the results, not on the paper; one
+        advisory string per finding, kept in the review as ``numeric_oracle_warnings``. Never raises."""
         try:
             from core import numeric_oracle
 
-            # A paper reports the mean over the seeds and its interval, which
-            # seed 0's RESULT_JSON does not hold.
-            intervals = _replicate_result_intervals(state)
-            results = {**(state.get("result_json") or {})}
-            if intervals:
-                results["mean_over_seeds"] = intervals
-            # The settings the run was given (the topic's grid, the design's
-            # variables and method): a paper that prints ``R0 = 1.5`` is
-            # quoting its setup, not a result that happens to sit near one.
-            report = numeric_oracle.check(
-                paper_md, results,
-                declared=numeric_oracle.declared_numbers(
-                    state.get("design"), state.get("topic"),
-                ),
-            )
+            findings = numeric_oracle.trivial_reference_findings(state.get("result_json"))
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
             self._log.warning("[numeric_oracle] check failed (%s); skipping", e)
             return []
-
-        try:
-            paper_dir = self.quest_root / "paper"
-            paper_dir.mkdir(parents=True, exist_ok=True)
-            (paper_dir / "numeric_audit.json").write_text(
-                json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as e:
-            self._log.warning("[numeric_oracle] could not write audit: %s", e)
-
-        if report.skipped:
-            self._log.info("[numeric_oracle] skipped — %s", report.skip_reason)
-            return []
-        if report.ok:
-            self._log.info(
-                "[numeric_oracle] %d paper numbers vs %d results: all consistent",
-                report.paper_numbers, report.result_numbers,
-            )
-            return []
-
-        for f in report.findings:
+        for f in findings:
             self._log.warning("[numeric_oracle] %s: %s", f.kind, f.describe())
-        # One hit per contradicted number, each naming the value and the
-        # result path, so the rewrite has something specific to act on
-        # instead of "a number is wrong somewhere".
-        #
-        # Labelled by the finding's OWN kind — ``transposed``,
-        # ``formula_slip`` (the paper's own arithmetic; no result path),
-        # ``near_miss``, ``trivial_reference`` — rather than one blanket
-        # ``unverified_number:`` prefix over all of them. That prefix
-        # argues with the trivial-reference finding it is pasted onto:
-        # "unverified_number: `deterministic_final_size` is exactly 0 at
-        # every one of its settings" describes a number that was in fact
-        # computed and exported correctly. What is unverified there is not
-        # the number but the bracket the root finder was handed, which is
-        # exactly what the finding's own text says. A label that
-        # contradicts the sentence under it makes the reader decide which
-        # half to believe, and the label is the half they read first.
-        return [
-            f"{f.kind}: {f.describe()}" for f in report.findings
-        ]
+        return [f"{f.kind}: {f.describe()}" for f in findings]
 
     def _statistics_claim_hits(
         self, paper_md: str, state: QuestState,
@@ -21372,8 +21662,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         whether it is the QUANTITY the paper says it is — a Bonferroni
         threshold printed as a p-value, an effect-size claim the run's own
         comparisons contradict, a t-interval labelled "exact binomial", a
-        figure's axis limit printed as a bin count, a major-outbreak
-        probability called the chance the disease vanishes.
+        major-outbreak probability called the chance the disease vanishes.
 
         Forced, unlike the numeric oracle: every finding is a recomputation
         against this run's own replicates that can NAME the contradiction,
@@ -21390,22 +21679,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             from core import stat_claims
 
             replicates = list(state.get("result_json_replicates") or [])
-            comparison_stats: dict[str, Any] = {}
-            if len(replicates) >= stat_claims.MIN_SEEDS:
-                # Uncapped, unlike the analyze aggregate: "for ALL pairwise
-                # comparisons" is a claim about every comparison, and the
-                # cap of 24 hid 12 of the 36 one real quest made.
-                comparison_stats = self._comparison_stats(
-                    state, replicates, max_effect_sizes=10**9, assertions=_replicate_assertions(state),
-                )
             report = stat_claims.check(
                 _paper_facts.without_blocks(paper_md),
                 result_json=state.get("result_json") or {},
                 intervals=_replicate_result_intervals(state),
-                comparison_stats=comparison_stats,
-                figure_records=state.get("figure_records") or {},
                 n_seeds=len(replicates),
-                seeds=stat_claims.seed_records(self.quest_root),
             )
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
             self._log.warning("[stat_claims] check failed (%s); skipping", e)
@@ -21508,150 +21786,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return _optimise_refine.hint(block)
         except Exception:  # noqa: BLE001 -- a hint
             return ""
-
-    def _provenance_report(self, text: str, state: QuestState) -> Any:
-        """``number_provenance.check`` of ``text`` against everything this run can account for: the results, the
-        replicates and their aggregates, the figures, the configuration, the design and the known-answer checks."""
-        from core import number_provenance
-
-        # FI's own tables of every setting are its record, printed: the check reads the writer's text.
-        text = _paper_facts.without_blocks(text)
-        replicates = list(state.get("result_json_replicates") or [])
-        assertions = _replicate_assertions(state)
-        comparison_stats: dict[str, Any] = {}
-        aggregate: dict[str, Any] = {}
-        if replicates:
-            aggregate = _aggregate_result_json_replicates(
-                replicates, assertions=assertions, kinds=_replicate_metric_kinds(state),
-            )
-        if len(replicates) >= 2:
-            comparison_stats = self._comparison_stats(
-                state, replicates, max_effect_sizes=10**9, assertions=assertions,
-            )
-        try:
-            config_dump: Any = self.config.model_dump(mode="json")
-        except Exception:  # noqa: BLE001 - the config is a convenience here
-            config_dump = None
-        try:  # FI's per-setting numbers, named by setting, and its own reference values (core/results_by_setting.py)
-            per_setting = _results_by_setting.provenance_inputs(
-                *_results_by_setting.from_quest(self.quest_root, self._protocol_block(state), self._judged_checks()))
-        except Exception as e:  # noqa: BLE001 - fall back to the trial table alone
-            self._log.warning("[number_provenance] FI's table of every setting could not be read (%s)", e)
-            per_setting = {"trial_table": _trial_table.traceable(_trial_table.rows(self.quest_root))}
-        return number_provenance.check(
-            text,
-            result_json=state.get("result_json") or {},
-            replicates=replicates,
-            intervals=_replicate_result_intervals(state),
-            aggregate=aggregate,
-            figure_records=state.get("figure_records") or {},
-            comparison_stats=comparison_stats,
-            config=config_dump,
-            design=state.get("design") or {},
-            oracle_checks=self._judged_checks(),
-            n_seeds=len(replicates),
-            optimisation=(_best_report.records(self.quest_root)
-                          if _optimise.block_of(self._protocol_block(state)) is not None else None),
-            run_facts=self._run_fact_numbers(state),
-            **per_setting,
-        )
-
-    def _run_fact_numbers(self, state: QuestState) -> dict[str, float]:
-        """The numbers FI's own record of the run accounts for: the measured run time, and every number FI fills into the
-        paper through a placeholder (the code's seed and where it is, the trial counts, the topic's limit, the sentences of
-        what the study did not do). They are FI's record, not results; a paper that quotes them quotes the record."""
-        fallback = (state.get("exec_result") or {}).get("duration_s")
-        out: dict[str, float] = {}
-        try:
-            wall = _paper_facts.measured_run_time(self.quest_root, fallback)[0]
-            if wall is not None:
-                out["duration_s"] = float(wall)
-            out.update(_paper_facts.fact_numbers(self.quest_root, topic=str(self.config.topic or ""), fallback_s=fallback))
-        except Exception as e:  # noqa: BLE001 -- a record FI cannot read accounts for nothing
-            self._log.warning("[numbers] FI's record of the run could not be read (%s: %s)", type(e).__name__, str(e)[:200])
-        return out
-
-    def _analysis_numbers_note(self, state: QuestState) -> str:
-        """The numbers of the analysis that nothing in this run accounts for, for the writer, who copies its numbers
-        from the analysis: the same check the paper gets, run before the paper is written. A real quest's analysis gave
-        an SD of 1,920 where the run computed 1,849.0, and the paper printed it. ``""`` when every number traces, the
-        run recorded nothing, or the check fails."""
-        texts = [s for s in _strings_of(state.get("analysis")) if any(ch.isdigit() for ch in s)]
-        if not texts:
-            return ""
-        from core import number_provenance
-
-        try:
-            report = self._provenance_report("\n\n".join(texts), state)
-        except Exception as e:  # noqa: BLE001 - a note, never a reason to stop
-            self._log.warning("[number_provenance] the analysis could not be checked (%s); skipping", e)
-            return ""
-        if report.skipped or report.ok:
-            return ""
-        listed = "; ".join(f"{f.token} (\u201c{f.context[:120]}\u201d)" for f in report.findings)
-        # The check lists at most MAX_FINDINGS distinct numbers; a full list means there may be more.
-        more = "; and others like them" if len(report.findings) >= number_provenance.MAX_FINDINGS else ""
-        self._log.warning("[number_provenance] the analysis gives number(s) nothing in this run accounts for: %s",
-                          listed[:600])
-        return ("FI checked the numbers of the analysis against everything this run recorded. These match nothing it "
-                f"computed: {listed}{more}. Do not print them; give the value the run computed for that quantity, or "
-                "leave the sentence out.")
-
-    def _number_provenance_hits(
-        self, paper_md: str, state: QuestState,
-    ) -> list[str]:
-        """Numbers the paper prints that nothing in this run accounts for.
-
-        The numeric oracle asks whether a number is NEAR a result and ignores
-        one that is far from every result; this asks whether the number came
-        from anywhere at all. A graded paper's Table 1 printed eight cells
-        matching no value the run computed, no replicate and none of the
-        three-seed aggregates, and every existing check passed it.
-
-        The aggregates are the reason this is possible rather than a machine
-        for flagging correct papers: a paper reports the MEAN over the seeds
-        and its interval, and seed 0's ``RESULT_JSON`` holds neither. Measured
-        on that paper, checking against ``RESULT_JSON`` alone makes all eleven
-        of its *correct* headline numbers untraceable too.
-
-        Forced, and text-only (``_TEXT_ONLY_HITS``): the experiment ran and
-        recorded its results, so the route is ``rewrite`` and an unsourced
-        number never sends the experiment back to be run again.
-
-        Writes ``paper/provenance_audit.json`` either way, so a clean run
-        leaves evidence the check ran. Best-effort throughout: a bug in the
-        checker must never block a paper.
-        """
-        try:
-            report = self._provenance_report(paper_md, state)
-        except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
-            self._log.warning("[number_provenance] check failed (%s); skipping", e)
-            return []
-
-        try:
-            paper_dir = self.quest_root / "paper"
-            paper_dir.mkdir(parents=True, exist_ok=True)
-            (paper_dir / "provenance_audit.json").write_text(
-                json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as e:
-            self._log.warning("[number_provenance] could not write audit: %s", e)
-
-        if report.skipped:
-            self._log.info("[number_provenance] skipped — %s", report.skip_reason)
-            return []
-        if report.ok:
-            self._log.info(
-                "[number_provenance] all %d paper numbers trace to this run "
-                "(%d values it can account for)",
-                report.paper_numbers, report.traceable_values,
-            )
-            return []
-
-        for f in report.findings:
-            self._log.warning("[number_provenance] %s", f.describe())
-        return [f"unsourced_number: {f.describe()}" for f in report.findings]
 
     def _figure_caption_hits(self, paper_md: str, state: QuestState) -> list[str]:
         """Captions naming a series their figure draws flat or not at all.
@@ -21933,6 +22067,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._log.info("[page_limit] the draft is still over the limit after %d sentences were taken out", len(taken))
         return None
 
+    async def _state_page_overrun(self, state: QuestState, paper_path: Path, limit: int, pages: int) -> int:
+        """The paper stays over its page limit: FI's measurement goes on record (``.fi/page_limit.json``), FI puts the
+        sentence that says so in the Limitations (core/paper_facts.py ``PAGE_LIMIT``), and the paper that now carries it is
+        measured again, since the sentence is a few lines of its own. Returns the page count of the paper as it stands,
+        which is the one the sentence states (twice at most: a sentence that tips the paper onto one more page is stated
+        with that page)."""
+        for _ in range(2):
+            _paper_facts.write_page_record(self.quest_root, pages, limit, final=True)
+            try:
+                before = paper_path.read_text(encoding="utf-8")
+                after = self._render_paper_facts(
+                    _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
+                if after != before:
+                    paper_path.write_text(after, encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                self._log.warning("[page_limit] the paper could not be given its sentence on the page limit (%s)", e)
+                break
+            again = await self._measure_draft_pages(paper_path, state)
+            if again is None or int(again["pages"]) == pages:
+                break
+            pages = int(again["pages"])
+        if pages <= limit:  # the sentence was the only thing over: nothing to state
+            _paper_facts.write_page_record(self.quest_root, pages, limit, final=False)
+        return pages
+
     async def _page_limit_review(
         self, state: QuestState, paper_path: str | Path | None,
     ) -> tuple[list[str], dict[str, Any] | None]:
@@ -21987,6 +22146,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 )
         if pages <= limit:
             self._log.info("[page_limit] the draft renders to %d pages; the limit is %d", pages, limit)
+            _paper_facts.write_page_record(self.quest_root, pages, limit, final=False)
             return [], record
         if done >= _PAGE_LIMIT_REWRITES:
             record["exceeded_after_rewrites"] = True
@@ -21994,6 +22154,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "[page_limit] the draft renders to %d pages, over the limit of %d, after %d shortening "
                 "rewrites; recorded in the review, not forced again", pages, limit, done,
             )
+            record["pages"] = await self._state_page_overrun(state, Path(paper_path), limit, pages)
             return [], record
         words = _words_to_cut(pages, limit, float(measured.get("last_page_empty") or 0.0))
         record["words_to_cut"] = words
@@ -22220,9 +22381,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # inventing new ways to write a number. A wrong number in the
             # paper is bad; silently burning the iteration budget on a
             # correct one is worse, so the findings are surfaced to the human
-            # (log, paper/numeric_audit.json, and the human-review panel in all
+            # (log and the human-review panel in all
             # three interfaces) and the verdict is left to the reviewer.
-            numeric_warnings = self._numeric_oracle_hits(paper_md, state)
+            numeric_warnings = self._reference_check_hits(state)
             if numeric_warnings:
                 review["numeric_oracle_warnings"] = numeric_warnings
             figure_warnings = self._figure_caption_hits(paper_md, state)
@@ -22237,11 +22398,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # paper mislabels is caught by recomputing it, so the finding can
             # name the contradiction instead of guessing at one.
             review["must_flag_hits"] += self._statistics_claim_hits(paper_md, state)
-            # Forced too, and for the same reason: a number that matches
-            # nothing the run computed, nothing it configured and nothing it
-            # drew is a set membership test, not a reading of prose. It goes
-            # quiet on a run that recorded no results.
-            review["must_flag_hits"] += self._number_provenance_hits(paper_md, state)
             # A figure the design planned and the run drew that the paper
             # leaves out is a set difference, not a reading of prose, so it
             # cannot misfire the way the number check can: it is forced.
@@ -22425,7 +22581,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # The same advisory arithmetic check as the single-reviewer path, and
         # kept out of must_flag_hits for the same reason: the iteration bump
         # below reads only must_flag_hits, so a finding costs no budget.
-        numeric_warnings = self._numeric_oracle_hits(paper_md, state)
+        numeric_warnings = self._reference_check_hits(state)
         if numeric_warnings:
             review["numeric_oracle_warnings"] = numeric_warnings
         figure_warnings = self._figure_caption_hits(paper_md, state)
@@ -22439,13 +22595,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         stat_hits = self._statistics_claim_hits(paper_md, state)
         if stat_hits:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *stat_hits]
-        # Forced on this path as well: panel mode once skipped the numeric
-        # oracle entirely, so asking for more reviewers meant fewer checks.
-        provenance_hits = self._number_provenance_hits(paper_md, state)
-        if provenance_hits:
-            review["must_flag_hits"] = [
-                *(review.get("must_flag_hits") or []), *provenance_hits,
-            ]
         # Forced, as on the single-reviewer path.
         missing_figures = _missing_planned_figures(paper_md, state)
         for hit in missing_figures:
@@ -24965,6 +25114,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "write", "review",
         "write_patch",      # a revise for flagged passages: edits, not a new paper
         "write_trim",       # a draft a little over its page limit: sentences to take out
+        "write_abstract",   # a scientific paper whose draft has no Abstract: the Abstract alone, from the draft
         "replot_layout",    # a refine that only asks for the figures arranged again: redraw from saved data
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
@@ -26066,6 +26216,8 @@ _LEDGER_ASKED = "ledger_asked.json"  # which ledger parts were asked about, in w
 _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger parts: each asked once per quest
 # Asked once per design round, never a stop: the ledger parts, and whether a check on an average holds in every trial.
 _ONCE_PARTS = (*_LEDGER_PARTS, "per_trial")
+_DRAFTED_GRID_ASKED = "drafted_grid_asked.json"  # one request per redesign round, for a drafted grid of more settings than FI lists
+_GRID_ASKED = "grid_asked.json"  # the same bounds, for a grid of more settings than FI lists (one request per plan)
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"
 _TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks
@@ -26239,13 +26391,14 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
   "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it and keeps every setting; only the topic's own time limit may take them below it (down to 10), and the paper then says so; leave out for a deterministic study>,
   "thresholds": {"<name>": <value>},
+  "constants": {"<name>": <value>},
   "seed_policy": "<how randomness is seeded: one independent stream per setting and run, or say why streams are shared>",
   "failure_policy": "<how a trial that fails (a solver that does not converge, an exception) is treated: counted as a failure, excluded and reported, or retried; every failed trial is listed by the run>",
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
   "labels": {"<each grid parameter and each other quantity a figure plots, named as the code names it>": "<the reader's name for it: words, its symbol in $...$ and its unit, for example Activation energy $E_a$ (kJ/mol)>"},
-  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "label": "<the reader's name for the number, written the same way>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every grid setting uses the same random numbers, so settings are compared trial by trial; false otherwise (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>", "known_value": {"true_value": <the true value the simulation generates the data with, on the estimate's own scale: a number, or the name of the threshold or of the grid parameter that holds it>, "estimate": "<the name run_trial returns for the trial's estimate of it>", "standard_error": "<the name run_trial returns for that estimate's standard error>", "interval": ["<the name of the lower end of the trial's interval>", "<the name of its upper end>"], "level": <the interval's level, for example 0.95>}, "undefined_when": {"<grid parameter>": [<the values where this number truly has no value, so a trial returns none there>]}, @@REFERENCE_FIELD@@}],
+  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "label": "<the reader's name for the number, written the same way>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every grid setting uses the same random numbers, so settings are compared trial by trial; false otherwise (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>", "known_value": {"true_value": <the true value the simulation generates the data with, on the estimate's own scale: a number, or the name of the threshold, of the `constants` entry or of the grid parameter that holds it>, "estimate": "<the name run_trial returns for the trial's estimate of it>", "standard_error": "<the name run_trial returns for that estimate's standard error>", "interval": ["<the name of the lower end of the trial's interval>", "<the name of its upper end>"], "level": <the interval's level, for example 0.95>, "degrees_of_freedom": <only when the interval is the estimate plus and minus one multiplier of its standard error in every setting: the whole number of the t distribution whose quantile is the multiplier (the plan's own statement, for example 3), or "normal" for the normal quantile; leave it out when the multiplier changes between settings>}, "undefined_when": {"<grid parameter>": [<the values where this number truly has no value, so a trial returns none there>]}, @@REFERENCE_FIELD@@}],
   "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "expected_formula": "<for a check that is not an invariant, a symmetry or a second implementation: @@FORMULA@@>", "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<how the number is computed from what that run returns: one name the simulation function returns, or a formula of them, e.g. abs(P_out - P_in) / P_in>"}],
   "model": {
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
@@ -26256,9 +26409,11 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "criteria": [{"name": "<short name>", "what": "<one sentence>", "oracle": "<the name of one of the oracles above>", "use": "<error (how far it lands from its expected value, the default) | value (the measured value itself)>", "direction": "<lower | higher | target>", "target": <a number: for lower the most it may be, for higher the least, for target the value aimed at>, "tolerance": <a number: how close to the target counts as met, and how much a later version may change before it counts as worse>}]
 }
 
+`constants` lists every other number the method uses that is neither a grid value nor a threshold nor a setting of the model: a quantile of a distribution (1.96 for a 95% interval), a physical constant (the gas constant R), a conversion factor. Give each a name and its value. The paper may state these numbers and only these (and the plan's own settings and thresholds): any other number in the paper's text must come from FI's records, and FI refuses a number the plan does not state. Leave `constants` out when the method uses none.
+
 `model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead. @@EXAMPLE@@
 
-Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. On a random simulation FI runs each check's case many times: an `invariant`, a `symmetry` or a `second_implementation` must hold in every run (the worst run counts), and any other check is judged on the average over the runs; a rule that holds only on average over repeats (a false discovery rate at most q, an error rate at most alpha) says `"per_trial": false`, and a quantity that must hold in every single run says `"per_trial": true`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
+Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. On a random simulation FI runs each check's case many times: a check that says nothing of `per_trial` is judged on the average over the runs (a false discovery rate at most q and an error rate at most alpha are averages, and one run's proportion can be anything); a check that must hold in every single run, the worst run counting (a conserved quantity), says `"per_trial": true`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
 `criteria` are how a later version of the code will be judged better or worse: two to five checks of correctness that FI computes itself after every run, never the study's own finding. A criterion on a number in `metrics` or `precision` is refused, because judging the code by its result would reward bending the code towards the result. Each takes its number from exactly one of: an oracle above, by its name (`"use": "error"` for how far it lands from its expected value, such as the gap between an observed and a claimed convergence order; `"use": "value"` for the measured value, such as the worst drift of a conserved quantity), best one with a `case` so that FI runs it itself (a number the script's own `oracle()` reports is shown but never counts); or `"trials": "<a number every trial returns>"` in place of `oracle`, whose value is how fast the standard error of its mean shrinks as trials are added (use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more). Give each its own `tolerance`, from the method's known error or the noise of the measurement. Leave `criteria` out only when nothing FI can compute says whether the code is right.
 
@@ -26266,7 +26421,7 @@ Each oracle's `kind` is one of six: `special_case` (a special or limiting case w
 
 @@STEPS@@
 
-`known_value` is for a number the simulation estimates and knows the true value of (a parameter it generates the data with and then recovers): give the true value, the names run_trial returns for the estimate and for its standard error and/or the two ends of its interval, and the interval's level. FI then counts itself, from the trials, how far the estimates lie from the true value, whether the standard errors match the spread of the estimates, and, when the two ends of the interval are named, how often that interval covers the true value (FI judges coverage only from the interval the trial reports, so name its two ends when the code computes one, for example a t interval); a code whose uncertainty is wrong is sent back. Give the true value on the scale of the estimate (the log of a value when the estimate is a log). Leave `known_value` out for a number with no known true value; the paper then says its uncertainty was not checked against the truth. Leave `undefined_when` out unless the number truly has no value at some settings.
+`known_value` is for a number the simulation estimates and knows the true value of (a parameter it generates the data with and then recovers): give the true value, the names run_trial returns for the estimate and for its standard error and/or the two ends of its interval, and the interval's level. FI then counts itself, from the trials, how far the estimates lie from the true value, whether the standard errors match the spread of the estimates, and, when the two ends of the interval are named, how often that interval covers the true value (FI judges coverage only from the interval the trial reports, so name its two ends when the code computes one, for example a t interval); a code whose uncertainty is wrong is sent back. When your design fixes the interval's multiplier (t with 3 degrees of freedom, or the normal quantile), give it as `degrees_of_freedom`: FI then recovers the multiplier the code used from the trials' own intervals and standard errors and sends the code back if it differs from yours. Give the true value on the scale of the estimate (the log of a value when the estimate is a log). A true value the study fixes (an activation energy of 50 kJ/mol the data are generated with, and the log of a frequency factor that follows from it) goes into `constants` under a name, with its number, and `true_value` names it; a true value that follows from other constants may instead be written as a formula of their names (for example `log(k_ref) + Ea / (R * T_ref)`), which FI computes itself. Leave `known_value` out for a number with no known true value; the paper then says its uncertainty was not checked against the truth. Leave `undefined_when` out unless the number truly has no value at some settings.
 
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 
@@ -27161,6 +27316,13 @@ def _reorder_literature(literature: list[Any], order: list[str]) -> list[Any]:
 
 
 def _finalize_after_citation_edits(markdown: str, literature: list[Any], audience: str) -> tuple[str, list[Any]]:
+    text, ordered, _mapping = _finalize_with_numbering(markdown, literature, audience)
+    return text, ordered
+
+
+def _finalize_with_numbering(
+    markdown: str, literature: list[Any], audience: str,
+) -> tuple[str, list[Any], dict[int, int]]:
     """The paper after the citation check took citations out or put one in: the sources it cites are numbered again in
     the order the text first cites them, ``## References`` lists exactly those, and the literature is reordered to
     match. Everything after the References (Further reading as the page-limit fit left it) is kept as it is."""
@@ -27182,7 +27344,7 @@ def _finalize_after_citation_edits(markdown: str, literature: list[Any], audienc
         text = text + "\n"
     if after:
         text = text.rstrip() + "\n\n" + after
-    return text, ordered
+    return text, ordered, mapping
 
 
 def cited_references(
@@ -28429,18 +28591,6 @@ def _series_at(
     return vals
 
 
-def _strings_of(value: Any) -> Iterator[str]:
-    """Every string a JSON value holds, at any depth (not its keys)."""
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _strings_of(v)
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            yield from _strings_of(v)
-
-
 def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, Any]]:
     """Each result's mean and 95% CI over the seeds, by dotted path, for the
     checks that compare the paper with the results: a paper reports the mean
@@ -29096,10 +29246,6 @@ _TEXT_ONLY_HITS = frozenset({
     # the numbers are right and the words around them are wrong, so the paper
     # is written again and the experiment is left alone.
     "mislabelled_statistic",
-    # A number the paper prints that nothing in the run accounts for. The
-    # experiment ran and recorded its results; the paper quotes a figure none
-    # of them holds, so what needs rewriting is the prose, not the experiment.
-    "unsourced_number",
     # A person's refine point the paper does not answer: the writer said it needs no new experiment (a point that
     # does goes to the design from the writing step), so the paper is written again.
     "user_feedback_unaddressed",
@@ -29110,6 +29256,8 @@ _TEXT_ONLY_HITS = frozenset({
     "paper_record_mismatch",
 })
 _UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
+
+
 # How many times a paper that claims what FI's own records contradict is written again before the quest ends with no paper.
 _RECORD_REWRITES = 2
 
@@ -29748,6 +29896,13 @@ def _figure_list_for_prompt(state: QuestState) -> str:
             )
         else:
             lines.append(f"- figures/{f}" + _figure_record_note(records.get(f), n_seeds=n_seeds))
+    if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
+           if isinstance(ax, dict)):
+        lines.append(
+            "Where a panel sits (left, right, top, bottom) is FI's record of the saved figure: a caption or sentence "
+            "that points to a panel by place uses these words, and one that does not need them names the panel by "
+            "what it shows."
+        )
     if any((records.get(f) or {}).get("replicate_mean") for f in figs):
         lines.append(
             "A figure drawn as the mean of several seeds shows each line at its mean, "
@@ -29889,8 +30044,50 @@ def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
             # What the paper copy changed (sizes in inches, text sizes in pt) stays in the file for a person: its
             # numbers are not the figure's, and the number check would otherwise trace a paper's "6.3" or "15" to them.
             data.pop("paper", None)
+            _attach_unlabelled_lines(data, folder / f"{Path(name).stem}.seed0.json")
             records[name] = data
     return records
+
+
+#: matplotlib's names for a line style that is not a solid line, as a reader calls it.
+_NOT_SOLID = {"--": "dashed", "dashed": "dashed", ":": "dotted", "dotted": "dotted", "-.": "dash-dotted",
+              "dashdot": "dash-dotted"}
+
+
+def _attach_unlabelled_lines(record: dict[str, Any], lines_path: Path) -> None:
+    """Add to each panel of ``record`` the dashed, dotted or dash-dotted lines the figure draws that its legend does not
+    name, as ``unlabelled_lines`` (``style``, ``count``, ``min``, ``max`` of their y values), from the full line list the
+    recorder keeps next to it (``<stem>.seed0.json``). The series list holds the labelled series only, so a theory or
+    reference line drawn without a label was nowhere in the record, and a caption could deny it unchecked. A solid
+    unlabelled line (a family of runs), a marker or an error-bar cap is not one. Nothing is added when the line list is
+    missing or does not match the panels."""
+    try:
+        full = json.loads(lines_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    panels, drawn = record.get("axes"), full.get("axes") if isinstance(full, dict) else None
+    if not isinstance(panels, list) or not isinstance(drawn, list) or len(panels) != len(drawn):
+        return
+    for panel, got in zip(panels, drawn):
+        if not isinstance(panel, dict) or not isinstance(got, dict):
+            continue
+        groups: dict[str, dict[str, Any]] = {}
+        for line in got.get("lines") or []:
+            if not isinstance(line, dict) or not str(line.get("label") or "").startswith("_"):
+                continue
+            style = _NOT_SOLID.get(str(line.get("linestyle")))
+            if style is None or str(line.get("marker") or "None").lower() not in ("none", "", " ") \
+                    or len(line.get("x") or []) < 2:
+                continue
+            ys = [float(v) for v in line.get("y") or []
+                  if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+            if not ys:
+                continue
+            group = groups.setdefault(style, {"style": style, "count": 0, "min": min(ys), "max": max(ys)})
+            group["count"] += 1
+            group["min"], group["max"] = min(group["min"], min(ys)), max(group["max"], max(ys))
+        if groups:
+            panel["unlabelled_lines"] = list(groups.values())
 
 
 def _record_numbers(record: Any) -> list[tuple[float, ...]]:
@@ -30049,6 +30246,26 @@ def _figure_overlap_directive(findings: list[str]) -> str:
     )
 
 
+_PANEL_ROWS = {2: ("top", "bottom"), 3: ("top", "middle", "bottom")}
+_PANEL_COLS = {2: ("left", "right"), 3: ("left", "centre", "right")}
+
+
+def _panel_place(grid: Any) -> str:
+    """Where a panel sits on its figure, in a caption's words ("left", "top right", "row 2 of 4"), from the cell of the
+    subplot grid the saved figure put it in (``[rows, cols, row start, row stop, col start, col stop]``, recorded on
+    savefig by core/plot_style.py); "" for a figure's only panel, a panel that spans the grid, or no grid recorded."""
+    if not (isinstance(grid, list) and len(grid) == 6 and all(isinstance(v, int) for v in grid)):
+        return ""
+    rows, cols, r0, r1, c0, c1 = grid
+
+    def axis(n: int, start: int, stop: int, named: dict[int, tuple[str, ...]], kind: str) -> str:
+        if n <= 1 or (start == 0 and stop >= n) or not 0 <= start < n:
+            return ""
+        return named[n][start] if n in named else f"{kind} {start + 1} of {n}"
+
+    return " ".join(w for w in (axis(rows, r0, r1, _PANEL_ROWS, "row"), axis(cols, c0, c1, _PANEL_COLS, "column")) if w)
+
+
 def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None) -> str:
     """What a figure draws, for the writer: each panel's title, y axis and series.
     ``n_seeds`` is how many replicate seeds ran, when known."""
@@ -30057,6 +30274,9 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
         if not isinstance(ax, dict):
             continue
         bits = [f'"{ax["title"]}"'] if ax.get("title") else []
+        where = _panel_place(ax.get("grid"))
+        if where:
+            bits.insert(0, f"{where} panel")
         ylim = ax.get("ylim") or []
         if len(ylim) == 2:
             bits.append(
@@ -30079,6 +30299,10 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
             series.append(f"{s.get('label')} {span}{tail}")
         if series:
             bits.append("series: " + "; ".join(series))
+        for group in ax.get("unlabelled_lines") or []:
+            k = int(group["count"])
+            bits.append(f'also draws {k} {group["style"]} line{"s" if k > 1 else ""} with no legend label '
+                        f'({group["min"]:.3g} to {group["max"]:.3g})')
         if bits:
             panels.append(", ".join(bits))
     note = (" — " + " | ".join(panels)) if panels else ""

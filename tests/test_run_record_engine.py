@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from core import disclosure, numeric_oracle
+from core import disclosure, typed_numbers
 from tests.test_disclosure import _engine
 
 FIXTURES = Path(__file__).parent / "fixtures" / "run_record"
@@ -52,7 +52,7 @@ def test_the_paper_has_no_run_record_and_the_writer_gets_the_facts(tmp_path: Pat
     held = quality_report.build(root, running=False)["paper_records"]["run_record"]
     assert "base seed 0" in held
     # The numbers of the paper are read as before; FI's record has nothing in the paper to leave out.
-    numbers = [n[1] for n in numeric_oracle.extract_paper_numbers(paper)]
+    numbers = [n.token for n in typed_numbers.numbers(paper)]
     assert "0.049" in numbers
 
 

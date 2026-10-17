@@ -136,3 +136,103 @@ def blank_lines_around_figures(markdown: str) -> str:
         if is_figure and i + 1 < len(lines) and lines[i + 1].strip():
             out.append("")
     return "\n".join(out)
+
+
+# A figure image: ``![caption](figures/<file>)`` with an optional {attributes} block. The caption may hold [3]-style citations.
+_FIGURE_IMAGE_RE = re.compile(r"!\[(?:[^\[\]]|\[[^\[\]]*\])*\]\(figures/[^)\s]+\)(?:\{[^}]*\})?")
+# Text that is only a bold run-in label ("**Spread.**"): a heading for the paragraph, not a sentence.
+_RUN_IN_LABEL_RE = re.compile(r"^\*\*[^*\n]{1,60}\*\*$")
+# A block that is not plain prose: a list item, table row, quote, heading, HTML or comment, or another image.
+_NOT_PROSE_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\||>|#|<|!\[)")
+
+
+def figures_in_own_paragraph(markdown: str) -> tuple[str, int]:
+    """``(markdown, n)``: each figure image that shares its paragraph with text (or with another image) moved into a
+    paragraph of its own, right after the paragraph it was in; ``n`` is how many were moved.
+
+    Pandoc captions, numbers and floats an image only when it is alone in its paragraph; elsewhere it is an inline
+    image at its natural width, with no caption. After the paragraph, not before it, because the text a figure sits in
+    is the text that discusses it, and splitting nothing but the image out keeps every sentence where the writer put it.
+    When the rest of the paragraph is only a bold run-in label ("**Spread.**"), the label would be left alone, so it
+    goes to the front of the next prose paragraph (the figure stands between), which is the text that label heads.
+    Code blocks, list items, table rows and quotes are left as they are, and so are images that are not in
+    ``figures/``. Applying it twice changes nothing."""
+    lines = markdown.split("\n")
+    # Blocks: ("blank", [lines]) or ("text", [lines]); a fenced code block is one block whatever it holds.
+    items: list[tuple[str, list[str]]] = []
+    cur: list[str] = []
+    fence = None
+    for line in lines:
+        m = _FENCE_RE.match(line)
+        if m:
+            fence = None if fence == m.group(1) else (fence or m.group(1))
+        if fence is None and not m and not line.strip():
+            if cur:
+                items.append(("text", cur))
+                cur = []
+            items.append(("blank", [line]))
+        else:
+            cur.append(line)
+    if cur:
+        items.append(("text", cur))
+
+    def in_fence(block: list[str]) -> bool:
+        return bool(_FENCE_RE.match(block[0]))
+
+    def prose(block: list[str]) -> bool:
+        return not in_fence(block) and _NOT_PROSE_RE.match(block[0]) is None
+
+    moved = 0
+    pending_label, label_slot = "", 0
+    out_items: list[tuple[str, list[str]]] = []
+    for kind, block in items:
+        if kind == "blank":
+            out_items.append((kind, block))
+            continue
+        if pending_label:
+            if prose(block):
+                block = [pending_label + " " + block[0].lstrip(), *block[1:]]
+            else:
+                # No prose after the label: it stays ahead of its figure(s), where they were written.
+                out_items[label_slot:label_slot] = [("text", [pending_label]), ("blank", [""])]
+            pending_label = ""
+        if in_fence(block) or _NOT_PROSE_RE.match(block[0]) and not block[0].lstrip().startswith("!["):
+            out_items.append((kind, block))
+            continue
+        images: list[str] = []
+        rest: list[str] = []
+        for line in block:
+            found = _FIGURE_IMAGE_RE.findall(line)
+            if not found:
+                rest.append(line)
+                continue
+            images.extend(found)
+            parts = _FIGURE_IMAGE_RE.split(line)
+            text = parts[0].rstrip()
+            for part in parts[1:]:
+                part = part.lstrip()
+                text = text + (" " if text and part else "") + part
+            if text.strip():
+                rest.append(text.strip() if len(parts) > 1 and not parts[0].strip() else text)
+        residue = bool("".join(rest).strip())
+        if not images or (len(images) == 1 and not residue):
+            out_items.append((kind, block))
+            continue
+        moved += len(images)
+        sep = ("blank", [""])
+        if residue:
+            label = "\n".join(rest).strip()
+            if _RUN_IN_LABEL_RE.match(label):
+                pending_label, label_slot = label, len(out_items)
+            else:
+                out_items.append(("text", rest))
+                out_items.append(sep)
+        for k, image in enumerate(images):
+            out_items.append(("text", [image]))
+            if k + 1 < len(images) or pending_label:
+                out_items.append(sep)
+    if pending_label:
+        out_items[label_slot:label_slot] = [("text", [pending_label]), ("blank", [""])]
+    if not moved:
+        return markdown, 0
+    return "\n".join(line for _k, block in out_items for line in block), moved
