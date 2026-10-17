@@ -310,10 +310,18 @@ def rng_reuse(source: str) -> list[tuple[str, int]]:
         for stmt in ast.walk(fn):  # a local that is computed from an argument varies with the call
             if isinstance(stmt, ast.Assign) and _names(stmt.value) & dependent:
                 dependent |= {t.id for t in stmt.targets if isinstance(t, ast.Name)}
-        for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+        def builder(call: ast.AST) -> bool:
+            if not isinstance(call, ast.Call):
+                return False
             func = call.func
-            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
-            if name not in _RNG_BUILDERS or not (call.args or call.keywords):
+            return (func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else "") in _RNG_BUILDERS
+        # A generator is built by the whole expression: ``default_rng(SeedSequence(seed).spawn(n)[start])`` depends on
+        # ``start``, although its inner ``SeedSequence(seed)`` alone does not, so a builder inside another's arguments is
+        # read as part of the outer one.
+        inner = {id(sub) for call in ast.walk(fn) if builder(call)
+                 for arg in [*call.args, *[k.value for k in call.keywords]] for sub in ast.walk(arg) if builder(sub)}
+        for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+            if not builder(call) or id(call) in inner or not (call.args or call.keywords):
                 continue
             used = set().union(*(_names(a) for a in [*call.args, *[k.value for k in call.keywords]]))
             if not used & dependent:
