@@ -41,6 +41,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from . import in_run as _in_run
 from . import reference_values as _refs
 from . import results_by_setting as _rbs
 from . import stats as _stats
@@ -354,6 +355,14 @@ class Records:
             names.extend(m for m in c["metrics"] if m not in names)
         return names
 
+    def in_run_axes(self) -> list[str]:
+        """The axes whose values are compared inside each run (the plan's ``in_each_run``, and the ``level`` a value's own
+        record carries): the values of such an axis come from the same trials, so no key pools them."""
+        names: list[str] = [str(k) for k in (_in_run.of(self.protocol) or {})]
+        for c in self.cells:
+            names.extend(k for k in (c.get("level") or {}) if k not in names)
+        return [k for k in names if k in self.axes()]
+
 
 def _unkeyable(name: str) -> bool:
     return bool(re.search(r"[,|{}=@]", name)) or len(name) > 40
@@ -416,6 +425,17 @@ def _matching(rec: Records, where: dict[str, Pick], metric: str) -> list[dict[st
     carrying = [c for c in cells if metric in c["metrics"]]
     if not carrying:
         raise _Unfilled(f"no trials of {metric} at that setting" if cells else "no trials at that combination of settings")
+    for axis in rec.in_run_axes():
+        if where.get(axis, Pick("value")).kind != "all":
+            continue
+        levels = list(dict.fromkeys(json.dumps(c["cell"][axis], default=str) for c in carrying if axis in c["cell"]))
+        if len(levels) > 1:
+            names = ", ".join(str(next(c["cell"][axis] for c in carrying if axis in c["cell"]
+                                       and json.dumps(c["cell"][axis], default=str) == lv)) for lv in levels)
+            raise _Unfilled(
+                f"{rec.short(axis)} is compared inside each run: its values ({names}) are computed from the same trials, "
+                f"so FI does not pool them (the same trials would be counted once per value). Name one value of it, "
+                f"e.g. {rec.short(axis)}={names.split(', ')[0]}")
     if rec.unread:
         seen: set[tuple[str, str]] = set()
         out = []
@@ -1064,9 +1084,16 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
                 if line:
                     pooled.append(line)
         if varied:
-            line = _sheet_line(rec, metric, {a: Pick("all") for a in varied}, sets)
-            if line:
-                pooled.append(line)
+            # A pooled line over the grid's axes: an axis compared inside each run is never pooled, so it is pinned to each of
+            # its values in turn (a metric that is one number per run has no such axis in its cells and is pooled whole).
+            inside = [a for a in varied if a in rec.in_run_axes()]
+            combos: list[dict[str, Any]] = [{}]
+            for a in inside:
+                combos = [dict(base, **{a: v}) for base in combos for v in usable[a]]
+            for pin in combos:
+                line = _sheet_line(rec, metric, {a: (pin[a] if a in pin else Pick("all")) for a in varied}, sets)
+                if line:
+                    pooled.append(line)
     head = ("Results you can place (FI fills each key in from its records; never type a result). "
             "A line shows the key and what it will read as.")
     body = full + ["Pooled (the trials of the other axes together; sd is the within-setting pooled SD):"] + pooled
