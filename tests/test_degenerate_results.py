@@ -374,13 +374,35 @@ def test_what_the_plan_expects_to_stay_put_is_exempt_when_a_check_measures_that_
         {"name": "e", "kind": "invariant", "measure": "abs(total_out - total_in) / total_in", "expected": 0, "case": {"rate": 1}},
         {"name": "l", "kind": "special_case", "measure": "gain", "expected": 1, "case": {"rate": 1}}], "limits": {"ceiling": 5}}
     names = dr.expected_constants(protocol)
-    assert names == {"total_drift", "ceiling"}, "an operand of an expression is the plan's own quantity, not a constant"
+    assert names == {"total_drift", "gain", "ceiling"}, "an operand of an expression is the plan's own quantity, not a constant"
     assert _flags(_cells(gain=lambda r: 3 * r, total_drift=0.0), REPORTED | {"total_drift"}, names) == []
+    assert "gain" in names, "a fixed-input answer the plan does not list as a metric is not a data estimate"
+    listed = dr.expected_constants(protocol | {"metrics": [{"id": "gain"}]})
+    assert listed == {"total_drift", "ceiling"}, "a check's measure that the plan lists as a metric is still an estimate"
+
+
+def test_a_fixed_input_plan_check_is_flat_by_construction_and_a_data_estimate_still_is_not() -> None:
+    """The real fdr plan: ``bh_fixed_rejections`` (a special case, fixed p-values, expected 3) is 3 at every setting; ``fdr_bh``
+    (a metric the other special case measures) is an estimate and constant is still a fault."""
+    plan = {"metrics": [{"id": "fdr_bh", "kind": "mean"}],
+            "oracles": [{"name": "bh_fdr_reference", "kind": "special_case", "measure": "fdr_bh", "expected": 0.04},
+                        {"name": "bh_pvector", "kind": "special_case", "measure": "bh_fixed_rejections", "expected": 3,
+                         "case": {"m": 4}}]}
+    reported = {"fdr_bh", "bh_fixed_rejections"}
+    exempt = dr.expected_constants(plan)
+    assert exempt == {"bh_fixed_rejections"}
+    varying = _cells(fdr_bh=lambda r: 0.01 * r, bh_fixed_rejections=3)
+    assert dr.split_flat(dr.quantity_problems(varying, reported, exempt), plan) == ([], [])
+    assert [q.name for q in dr.quantity_problems(varying, reported, set())] == ["bh_fixed_rejections"]
+    planted = _cells(fdr_bh=0.04, bh_fixed_rejections=3, pany_bh=lambda r: r)
+    judged, kept = dr.split_flat(dr.quantity_problems(planted, reported | {"pany_bh"}, exempt), plan)
+    assert [q.name for q in judged] == ["fdr_bh"] and kept == []
 
 
 def test_the_quantities_the_plan_says_are_estimated_from_the_data_are_read_from_fields_it_already_has() -> None:
     names = dr.plan_estimates(KINETICS_PLAN | {"metrics": KINETICS_PLAN["metrics"] + [{"id": "theory_corr_ref", "kind": "mean"}]})
     assert names == {"Ea_hat", "Ea_se", "Ea_lo", "Ea_hi", "coverage_Ea", "theory_corr_ref"}
+    assert "coverage_Ea" in names
     assert "Ea_polyfit" not in names, "an operand of a check's expression is not named by the plan as an estimate"
     assert dr.plan_estimates(None) == set() and dr.plan_estimates({}) == set()
     flat = dr.quantity_problems(_cells(Ea_hat=lambda r: r, Ea_hat_known=0.5, theory_corr=0.99, coverage_Ea=0.95),
