@@ -394,3 +394,88 @@ def test_the_sheet_and_the_rules_tell_the_writer_to_use_vs(s5):
     assert "| vs " in pv.sheet(s5).split("Compare with a value each setting sets")[1]
     rules = " ".join(pv.WRITER_RULES.split())
     assert "| vs <theory value>" in rules and "Do not type above, below" in rules
+
+
+# --- a quantity FI left out is not offered or filled; an axis named by a sentence is keyed by FI's short name ----------
+
+_SENTENCE = "uncorrected, Bonferroni and Benjamini-Hochberg applied to the same simulated p-values"
+
+
+def _tiny_cells(axis_names=("m", "method")) -> list[dict]:
+    a, b = axis_names
+    cells = []
+    for m in (20, 200):
+        for method in ("uncorrected", "bh"):
+            cells.append({"cell": {a: m, b: method}, "key": f"{m}-{method}",
+                          "metrics": {"fdr": {"values": [0.04 + m / 10000, 0.05, 0.06, 0.05]},
+                                      "bh_fixed_rejections": {"values": [3.0, 3.0, 3.0, 3.0]}}})
+    return cells
+
+
+def _quest(tmp_path: Path, cells, **records) -> Path:
+    (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / "needs").mkdir(exist_ok=True)
+    for name, body in records.items():
+        (tmp_path / "needs" / name).write_text(json.dumps(body), encoding="utf-8")
+    return tmp_path
+
+
+def test_a_quantity_the_results_check_left_out_is_not_offered_or_filled(tmp_path):
+    q = _quest(tmp_path, _tiny_cells(), **{"RESULT_CHECK.json": {
+        "removed_quantities": ["bh_fixed_rejections"], "note": "it is 3 at every setting"}})
+    rec = pv.records_of(q, None)
+    assert "bh_fixed_rejections" not in rec.metrics()
+    assert "bh_fixed_rejections" not in pv.sheet(rec)
+    got = pv.resolve("{{v:bh_fixed_rejections:mean @ m=20, method=all}}", rec)
+    assert not got.filled and got.text == pv.NOT_RECORDED
+    assert "FI left bh_fixed_rejections out of the results" in got.hit.reason and "3 at every setting" in got.hit.reason
+    # positive: another quantity of the same record is still offered and filled
+    ok = pv.resolve("{{v:fdr:mean @ m=20, method=all}}", rec)
+    assert ok.filled and ok.text != pv.NOT_RECORDED
+    assert "{{v:fdr:mean_ci @ m=20, method=all}}" in pv.sheet(rec)
+
+
+def test_a_quantity_the_typed_number_check_left_out_is_not_filled_and_a_vs_operand_too(tmp_path):
+    q = _quest(tmp_path, _tiny_cells(), **{"TYPED_RESULTS_CHECK.json": {
+        "removed_quantities": ["bh_fixed_rejections"], "note": "typed into the code"}})
+    rec = pv.records_of(q, None)
+    assert not pv.resolve("{{v:bh_fixed_rejections @ m=20, method=all}}", rec).filled
+    assert not pv.resolve("{{v:fdr @ m=20, method=all | diff bh_fixed_rejections}}", rec).filled
+    assert pv.resolve("{{v:fdr @ m=20, method=all}}", rec).filled
+
+
+def test_without_either_record_nothing_is_left_out(tmp_path):
+    rec = pv.records_of(_quest(tmp_path, _tiny_cells()), None)
+    assert rec.left_out == {} and "bh_fixed_rejections" in rec.metrics()
+    assert pv.resolve("{{v:bh_fixed_rejections @ m=20, method=all}}", rec).filled
+
+
+def test_one_function_names_what_was_left_out_for_the_analysis_and_the_paper(tmp_path):
+    from core import result_checks as rc
+
+    q = _quest(tmp_path, _tiny_cells(), **{"RESULT_CHECK.json": {"removed_quantities": ["a"], "note": "n1"},
+                                           "TYPED_RESULTS_CHECK.json": {"removed_quantities": ["b"], "note": "n2"}})
+    assert rc.left_out_by_record(q) == {"a": "n1", "b": "n2"}
+
+
+def test_an_axis_named_by_a_sentence_is_keyed_by_its_short_name(tmp_path):
+    cells = _tiny_cells(("m", _SENTENCE))
+    q = _quest(tmp_path, cells)
+    rec = pv.records_of(q, {"in_each_run": {_SENTENCE: ["uncorrected", "bh"]}})
+    assert rec.aliases()[_SENTENCE] == "compared" and rec.aliases()["m"] == "m"
+    sheet = pv.sheet(rec)
+    assert _SENTENCE not in sheet and "compared=" in sheet
+    keys = [k for k in __import__("re").findall(r"\{\{v:[^{}]*\}\}", sheet) if "@" in k and "<" not in k]
+    assert keys and all(pv.resolve(k, rec).filled for k in keys)
+    assert pv.resolve("{{v:fdr @ m=20, compared=bh}}", rec).filled
+    # the short name is told to the writer, not the sentence
+    assert "compared" in pv.writer_block(rec).split("The settings it varied:")[1].splitlines()[0]
+    # a missing axis is reported by its short name
+    assert "compared" in pv.resolve("{{v:fdr @ m=20}}", rec).hit.reason
+
+
+def test_axes_with_plain_names_are_unchanged_by_the_short_names(tmp_path):
+    rec = pv.records_of(_quest(tmp_path, _tiny_cells()), None)
+    assert rec.aliases() == {"m": "m", "method": "method"}
+    assert pv.resolve("{{v:fdr @ m=20, method=bh}}", rec).filled

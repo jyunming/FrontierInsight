@@ -37,6 +37,7 @@ SHOWN_FAULT_WHY = "a test FI ran on the code that produced the results shows the
 REPAIRS = 2
 _COUNTER = "result_checks.json"
 RECORD = "RESULT_CHECK.json"
+TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
 ANALYSIS = "analysis"
 SIMULATION = "simulation"
 
@@ -61,6 +62,20 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
+    """The quantities FI left out of the results, each with the check's own note: what the results check
+    (``needs/RESULT_CHECK.json``) and the typed-number check (``needs/TYPED_RESULTS_CHECK.json``) wrote as
+    ``removed_quantities``. The one place that names them; the analysis (core/run_checks.py) and the paper's values
+    (core/paper_values.py) both read it."""
+    out: dict[str, str] = {}
+    for name in (RECORD, TYPED_RECORD):
+        record = _read_json(Path(quest_root) / "needs" / name)
+        note = str(record.get("note") or "")
+        for k in record.get("removed_quantities") or []:
+            out.setdefault(str(k), note)
+    return out
 
 
 def _values_left_out(result_json: Any, keys: set[str]) -> dict[str, list[float]]:

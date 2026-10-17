@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -296,7 +296,45 @@ class Records:
     cells: list[dict[str, Any]]
     protocol: dict[str, Any] | None = None
     unread: tuple[str, ...] = ()
+    #: The quantities FI left out of the results (name -> the check's note); no key reads one (:func:`left_out_of`).
+    left_out: dict[str, str] = field(default_factory=dict)
     _refs_cache: dict[str, Any] = field(default_factory=dict)
+    _alias_cache: dict[str, str] | None = None
+
+    def aliases(self) -> dict[str, str]:
+        """FI's short name for each axis whose own name a key cannot hold (a name with a comma, ``=``, ``@``, ``|`` or a brace,
+        such as a whole sentence naming the values compared inside each run): ``compared`` for a value the plan compares
+        inside each run, else its first words as a slug, made unique among the axes. Every other axis keeps its name. The sheet shows the short name; a key may use either."""
+        if self._alias_cache is None:
+            names: list[str] = []
+            for c in self.cells:
+                names.extend(k for k in c["cell"] if k not in names)
+            taken = {n for n in names if not _unkeyable(n)}
+            out: dict[str, str] = {}
+            for n in names:
+                if not _unkeyable(n):
+                    out[n] = n
+                    continue
+                inside = (self.protocol or {}).get("in_each_run") if isinstance(self.protocol, dict) else None
+                base = ("compared" if isinstance(inside, dict) and n in inside
+                        else "_".join(re.findall(r"[A-Za-z0-9]+", n)[:3]).lower()[:30] or "axis")
+                short, i = base, 2
+                while short in taken:
+                    short, i = f"{base}_{i}", i + 1
+                taken.add(short)
+                out[n] = short
+            self._alias_cache = out
+        return self._alias_cache
+
+    def short(self, axis: str) -> str:
+        return self.aliases().get(axis, axis)
+
+    def real(self, name: str) -> str:
+        """The axis a key's axis name stands for (its own name, or the short name FI gave it)."""
+        for axis, short in self.aliases().items():
+            if name == short:
+                return axis
+        return name
 
     def axes(self) -> dict[str, list[Any]]:
         """Every axis the cells carry and its values, in the record's order (an unread axis is not one)."""
@@ -317,21 +355,33 @@ class Records:
         return names
 
 
-def from_cells(cells: list[Any], protocol: dict[str, Any] | None = None, unread: list[str] | tuple[str, ...] = ()) -> Records:
-    kept = [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict) and c["metrics"]
-            and isinstance(c.get("cell"), dict)]
-    return Records(kept, protocol, tuple(unread))
+def _unkeyable(name: str) -> bool:
+    return bool(re.search(r"[,|{}=@]", name)) or len(name) > 40
+
+
+def from_cells(cells: list[Any], protocol: dict[str, Any] | None = None, unread: list[str] | tuple[str, ...] = (),
+               left_out: dict[str, str] | None = None) -> Records:
+    """The records of ``cells``; a quantity in ``left_out`` is not kept in them (it is not offered and no key fills it)."""
+    gone = left_out or {}
+    kept = []
+    for c in cells:
+        if not (isinstance(c, dict) and isinstance(c.get("metrics"), dict) and isinstance(c.get("cell"), dict)):
+            continue
+        metrics = {k: v for k, v in c["metrics"].items() if k not in gone}
+        if metrics:
+            kept.append({**c, "metrics": metrics})
+    return Records(kept, protocol, tuple(unread), dict(gone))
 
 
 def load(quest_root: Path | str, protocol: dict[str, Any] | None = None,
-         unread: list[str] | tuple[str, ...] = ()) -> Records | None:
+         unread: list[str] | tuple[str, ...] = (), left_out: dict[str, str] | None = None) -> Records | None:
     """The quest's records; ``None`` without a readable ``raw/trials.json`` (the paper's keys are then all not recorded)."""
     try:
         data = json.loads((Path(quest_root) / "raw" / "trials.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     cells = data.get("cells") if isinstance(data, dict) else None
-    return from_cells(cells, protocol, unread) if isinstance(cells, list) else None
+    return from_cells(cells, protocol, unread, left_out) if isinstance(cells, list) else None
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -344,17 +394,17 @@ def _check_where(rec: Records, where: dict[str, Pick], *, allow_each: bool = Tru
     axes = rec.axes()
     for name, pick in where.items():
         if name in rec.unread:
-            raise _Unfilled(f"{name} is an axis nothing reads; FI pools it, do not name it")
+            raise _Unfilled(f"{rec.short(name)} is an axis nothing reads; FI pools it, do not name it")
         if name not in axes:
-            raise _Unfilled(f"{name} is not an axis of the record (its axes: {', '.join(axes) or 'none'})")
+            raise _Unfilled(f"{name} is not an axis of the record (its axes: {', '.join(rec.short(a) for a in axes) or 'none'})")
         if pick.kind == "value" and not any(_same(pick.value, v) for v in axes[name]):
-            raise _Unfilled(f"{name}={pick.value} is not a setting of the record (it has "
+            raise _Unfilled(f"{rec.short(name)}={pick.value} is not a setting of the record (it has "
                             f"{', '.join(str(v) for v in axes[name])})")
         if pick.kind == "each" and not allow_each:
             raise _Unfilled("each is only for a key with a reducer")
     missing = [a for a in rec.varied() if a not in where]
     if missing:
-        raise _Unfilled(f"the key does not name every axis the study varies; missing: {', '.join(missing)} "
+        raise _Unfilled(f"the key does not name every axis the study varies; missing: {', '.join(rec.short(a) for a in missing)} "
                         "(say =<value>, =all or =each)")
 
 
@@ -744,6 +794,24 @@ def _inputs(rec: Records, key: Key) -> dict[str, Any]:
         return {}
 
 
+def _in_axis_names(rec: Records, key: Key) -> Key:
+    """``key`` with each axis named by the short name FI gave it turned back to the axis's own name."""
+    def back(where: dict[str, Pick] | None) -> dict[str, Pick] | None:
+        return None if where is None else {rec.real(a): p for a, p in where.items()}
+
+    return replace(key, where=back(key.where) or {}, operand_where=back(key.operand_where))
+
+
+def _check_left_out(rec: Records, key: Key) -> None:
+    """A key that names a quantity FI left out of the results is not recorded, and says why."""
+    named = [key.metric, key.operand_metric] + ([key.form_arg] if key.form in ("corr", "corr_ci") else [])
+    for name in named:
+        if name and name in rec.left_out:
+            note = rec.left_out[name].strip().rstrip(".")
+            raise _Unfilled(f"FI left {name} out of the results" + (f": {note}" if note else "")
+                            + "; say in the limitations that it was left out, do not report it")
+
+
 def resolve(text: str, rec: Records | None) -> Value:
     """The key's value rendered, or ``not recorded`` with a :class:`Hit` saying why. Never a guess."""
     shown = text.strip()
@@ -754,6 +822,8 @@ def resolve(text: str, rec: Records | None) -> Value:
         key = parse(shown)
         if rec is None or not rec.cells:
             raise _Unfilled("this study has no per-setting trial record")
+        key = _in_axis_names(rec, key)
+        _check_left_out(rec, key)
         if key.metric not in rec.metrics():
             raise _Unfilled(f"{key.metric} is not a value the trials recorded (they recorded: {', '.join(rec.metrics())})")
         _check_where(rec, key.where)
@@ -862,7 +932,9 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     """The quest's records for the keys: its trial record, the frozen plan, and the grid axes the simulation never reads
     (their cells are pooled, as the tables of every setting pool them). ``None`` without a trial record."""
     root = Path(quest_root)
-    rec = load(root, protocol)
+    from . import result_checks as _checks
+
+    rec = load(root, protocol, left_out=_checks.left_out_by_record(root))
     if rec is None or not rec.cells:
         return rec
     try:
@@ -911,29 +983,32 @@ def _addressable(value: Any) -> bool:
     return not re.search(r"[,|{}=@]", str(value)) and str(value).strip() == str(value) and str(value) != ""
 
 
-def _line_key(metric: str, form: str, where: dict[str, Any]) -> str:
+def _line_key(metric: str, form: str, where: dict[str, Any], short: dict[str, str] | None = None) -> str:
+    short = short or {}
     return "{{v:" + metric + (f":{form}" if form != "mean" else "") + " @ " + ", ".join(
-        f"{a}={_text_of(v) if not isinstance(v, Pick) else v.kind}" for a, v in where.items()) + "}}"
+        f"{short.get(a, a)}={_text_of(v) if not isinstance(v, Pick) else v.kind}" for a, v in where.items()) + "}}"
 
 
 def _sheet_line(rec: Records, metric: str, where: dict[str, Any], sets: frozenset[str] = frozenset()) -> str | None:
-    key = _line_key(metric, "mean" if metric in sets else "mean_ci", where)  # a value a setting sets has no interval
+    short = rec.aliases()
+    key = _line_key(metric, "mean" if metric in sets else "mean_ci", where, short)  # a value a setting sets has no interval
     shown = resolve(key, rec)
     if shown.hit:
         return None
     parts = [f"{key} -> {shown.text}"]
     if metric in sets:
         return "- " + parts[0]
-    sd = resolve(_line_key(metric, "sd", where), rec)
+    sd = resolve(_line_key(metric, "sd", where, short), rec)
     if sd.filled:
-        parts.append(f"sd {_line_key(metric, 'sd', where)} -> {sd.text}")
-    ref = resolve(_line_key(metric, "ref", where), rec)
+        parts.append(f"sd {_line_key(metric, 'sd', where, short)} -> {sd.text}")
+    ref = resolve(_line_key(metric, "ref", where, short), rec)
     if ref.filled:
-        parts.append(f"reference {_line_key(metric, 'ref', where)} -> {ref.text}")
+        parts.append(f"reference {_line_key(metric, 'ref', where, short)} -> {ref.text}")
     return "- " + "; ".join(parts)
 
 
 def _set_by_setting_line(rec: Records, varied: list[str]) -> str:
+    varied = [rec.short(a) for a in varied]
     """The sheet's line on the quantities each setting sets (a theory line): no pooled line is offered for them, so this
     says how to compare a measured value with one. ``""`` when the record has none."""
     names = set_by_setting(rec)
@@ -1035,9 +1110,9 @@ def writer_block(rec: Records | None) -> str:
     if not has_keys(rec):
         return ""
     assert rec is not None
-    varied = ", ".join(rec.varied()) or "none (one setting)"
+    varied = ", ".join(rec.short(a) for a in rec.varied()) or "none (one setting)"
     head = (f"The study's quantities: {', '.join(rec.metrics())}. The settings it varied: {varied}"
-            + (f". Settings the simulation never reads, pooled by FI: {', '.join(rec.unread)}" if rec.unread else "") + ".")
+            + (f". Settings the simulation never reads, pooled by FI: {', '.join(rec.short(a) for a in rec.unread)}" if rec.unread else "") + ".")
     return WRITER_RULES + "\n" + head + "\n\n" + sheet(rec)
 
 

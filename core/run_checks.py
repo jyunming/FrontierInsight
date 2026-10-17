@@ -33,13 +33,13 @@ from . import in_run as _in_run
 from . import oracle_forms as _forms
 from . import plan as _plan
 from . import run_estimate as _estimate
+from .result_checks import TYPED_RECORD
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
 from . import typed_results as _typed
 
 #: How many times, in all, a simulation that returns typed-in numbers is sent back.
 TYPED_RESULT_REPAIRS = 2
-TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
 #: In ``.fi/``: the settings FI took out of the grid because the simulation never reads them.
 NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
@@ -249,7 +249,9 @@ class RunChecksMixin:
         typed = getattr(self, "_typed_result_keys", None)
         if typed is None:
             # A fresh process (a resume at a later node): the pass that left them out wrote its record, which is what stands.
-            typed = {str(k) for k in _read_json(self.quest_root / "needs" / TYPED_RECORD).get("removed_quantities") or []}  # type: ignore[attr-defined]
+            from . import result_checks as _checks
+
+            return set(_checks.left_out_by_record(self.quest_root))  # type: ignore[attr-defined]
         return set(typed) | self._result_check_keys()  # type: ignore[attr-defined]
 
     def _without_typed_results(self, result_json: Any) -> Any:
