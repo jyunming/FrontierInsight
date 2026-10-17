@@ -10443,7 +10443,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             package = self._package_in_use(state)
             if package:
                 await asyncio.to_thread(_code_layout.write_check_values, self.quest_root / "code",
-                                        self._protocol_block(state))
+                                        self._protocol_block(state), self._outline_equation_names(state))
         except Exception as exc:  # noqa: BLE001 -- a convenience for a person, not part of the result
             self._log.warning("[code] could not write the values code/tests/ compares with: %s", exc)
 
@@ -10472,7 +10472,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self.quest_root, deps=deps, protocol=protocol,
                 title=str(state.get("title") or ""), question=question, split=self._split_on(state),
                 log=self._log,
-                extra_files=_code_layout.project_files(self.quest_root / "code", protocol, package) if package else None,
+                extra_files=(_code_layout.project_files(self.quest_root / "code", protocol, package,
+                                                        self._outline_equation_names(state)) if package else None),
                 readme_files=_code_layout.readme_lines(package) if package else None,
             )
             if note:
@@ -12257,7 +12258,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         out: dict[str, str] = {}
         if isinstance(protocol, dict) and _equation_tests.eligible(protocol):
             rows = _equation_tests.example_rows(protocol)
-            located = _equation_tests.locate(protocol, self._equation_sources())
+            located = _equation_tests.locate(protocol, self._equation_sources(), self._outline_equation_names(state))
             case_list = _equation_tests.cases(rows, located)
             if case_list:
                 _equation_tests.write(self.quest_root / "code", case_list)
@@ -12519,7 +12520,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     return family
         return name or None
 
-    async def _equation_test_failures(self, protocol: dict[str, Any], exec_env: Any) -> str:
+    async def _equation_test_failures(self, protocol: dict[str, Any], exec_env: Any,
+                                      names: dict[str, str] | None = None) -> str:
         """The plan's equation tests run once on the package as it is (no repair, no request): ``""`` when none fails or the plan
         has none to run, else the failing equations' ids (or why the started tests gave no results)."""
         if self.config.engine.oracle_check == "off" or not (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
@@ -12527,7 +12529,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not _equation_tests.eligible(protocol):
             return ""
         rows = _equation_tests.example_rows(protocol)
-        located = _equation_tests.locate(protocol, self._equation_sources())
+        located = _equation_tests.locate(protocol, self._equation_sources(), names)
         case_list = _equation_tests.cases(rows, located)
         if not case_list:
             return ""
@@ -12586,7 +12588,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return await filler.still_passes(by_name[name])
 
             async def verify_package() -> str:
-                return await self._equation_test_failures(protocol, exec_env)
+                return await self._equation_test_failures(protocol, exec_env, self._outline_equation_names(state))
 
             before = self._package_snapshot()
             result = await _second_impl.second_versions(
@@ -12709,7 +12711,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # One more pass than the repairs allow: it is made only when the plan has worked a failing example out again.
         for attempt in range(_function_steps.REPAIRS + 2):
             sources = self._equation_sources()
-            located = _equation_tests.locate(protocol, sources)
+            located = _equation_tests.locate(protocol, sources, self._outline_equation_names(state))
             case_list = _equation_tests.cases(rows, located)
             notes = _equation_tests.untested_notes(rows, located)
             record["not_tested"] = notes
@@ -12949,18 +12951,50 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except OSError as e:
             self._log.warning("[plan] could not write %s: %r", path.name, e)
 
-    def _outline_signatures(self, state: QuestState) -> dict[str, str]:
-        """The parameters the outline fixed for each function that implements an equation of the plan's model: the
-        function's name to its ``def`` line. They are the one authority for those parameters (the equation tests call
-        the function by them): a repair keeps them, never the parameters some earlier repair left. ``{}`` when the code
-        was not written from an outline that names a function per equation."""
+    def _outline_equation_specs(self, state: QuestState) -> list[Any]:
+        """The outline's function for each equation of the plan's model (:func:`core.function_steps.model_functions`);
+        ``[]`` when the code was not written from an outline that names a function per equation."""
         protocol = self._protocol_block(state)
         try:
             specs, _notes = _function_steps.model_functions(state.get("implement_outline") or {},
                                                             protocol if isinstance(protocol, dict) else None)
-        except Exception:  # noqa: BLE001 -- without a readable outline there is no fixed signature to hold to
+        except Exception:  # noqa: BLE001 -- without a readable outline no function is named for an equation
+            return []
+        return [s for s in specs if s.kind == _function_steps.EQUATION]
+
+    def _outline_equation_names(self, state: QuestState) -> dict[str, str]:
+        """Each equation's id to the function the outline names for it: the one the equation tests call
+        (:func:`core.equation_tests.locate`), so a ``# E<n>`` label on a helper never makes the helper the tested one."""
+        return {s.equation: s.name for s in self._outline_equation_specs(state)}
+
+    def _outline_signatures(self, state: QuestState) -> dict[str, str]:
+        """The parameters a repair must keep for each function that implements an equation of the plan's model: the
+        function's name to its ``def`` line. For a function an equation test calls, the outline's: the tests call it by
+        them, so a repair keeps them, never the parameters some earlier repair left. For one no test calls, the
+        parameters it has now in ``code/``: nothing calls it by the outline's, and the code its callers were written
+        against is what a repair must not break (a first-written function can differ from the outline, and holding it to
+        the outline refused every repair of the file). ``{}`` when the code was not written from an outline that names a
+        function per equation."""
+        specs = self._outline_equation_specs(state)
+        if not specs:
             return {}
-        return {s.name: s.signature for s in specs if s.kind == _function_steps.EQUATION}
+        fixed = {s.name: s.signature for s in specs}
+        try:
+            protocol = self._protocol_block(state)
+            protocol = protocol if isinstance(protocol, dict) else None
+            sources = self._equation_sources()
+            located = _equation_tests.locate(protocol, sources, {s.equation: s.name for s in specs})
+            tested = {str(c["function"]) for c in _equation_tests.cases(_equation_tests.example_rows(protocol), located)}
+        except Exception:  # noqa: BLE001 -- unreadable code: every function held to the outline, as before
+            return fixed
+        for name in fixed:
+            if name in tested:
+                continue
+            node = next((n for text in sources.values() for n in [_function_steps._find(text, name)] if n is not None),
+                        None)
+            if node is not None:
+                fixed[name] = f"def {name}({ast.unparse(node.args)}):"
+        return fixed
 
     async def _repair_equation_function(self, failure: dict[str, Any], sources: dict[str, str],
                                         located: dict[str, dict[str, str] | None],

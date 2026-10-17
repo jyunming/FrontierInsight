@@ -559,16 +559,25 @@ def _labels(source: str) -> list[tuple[int, str, str | None]]:
     return found
 
 
-def equation_map(protocol: dict[str, Any] | None, sources: dict[str, str]) -> list[dict[str, Any]]:
-    """For each ``generates`` equation of the plan: where the package computes it, from its label. ``file`` and
-    ``function`` are ``None`` when no function of the package carries the label."""
+def equation_map(protocol: dict[str, Any] | None, sources: dict[str, str],
+                 names: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """For each ``generates`` equation of the plan: where the package computes it, the function the code outline names
+    for it when that function is there (``names``, as :func:`core.equation_tests.locate` reads it), else from its label.
+    ``file`` and ``function`` are ``None`` when neither finds one."""
+    from . import function_steps as _steps
+
     equations = {str(e.get("id") or "").strip(): e for e in
                  (((protocol or {}).get("model") or {}).get("equations") or []) if isinstance(e, dict)}
     labelled = {rel: _labels(text) for rel, text in sorted(sources.items())}
+    by_outline = {str(k).strip().upper(): str(v).strip() for k, v in (names or {}).items() if str(v or "").strip()}
     rows = []
     for eid in _oracle.generating_equations(protocol):
-        where = next(((rel, fn, line) for rel, found in labelled.items() for line, text, fn in found
-                      if fn and _oracle._labelled_in(eid, text)), None)
+        name = by_outline.get(eid.upper())
+        node = next(((rel, n) for rel, text in sorted(sources.items())
+                     for n in [_steps._find(text, name) if name else None] if n is not None), None)
+        where = (node[0], name, node[1].lineno) if node else next(
+            ((rel, fn, line) for rel, found in labelled.items() for line, text, fn in found
+             if fn and _oracle._labelled_in(eid, text)), None)
         rows.append({"id": eid, "formula": str((equations.get(eid) or {}).get("formula") or ""),
                      "file": where[0] if where else None, "function": where[1] if where else None,
                      "line": where[2] if where else None})
@@ -583,7 +592,8 @@ def methods_text(protocol: dict[str, Any] | None, rows: list[dict[str, Any]], pa
     model = (protocol or {}).get("model")
     summary_text = model.get("summary") if isinstance(model, dict) else model if isinstance(model, str) else ""
     lines = ["# Methods: where each equation is computed", "",
-             "Written by Frontier Insight from the plan's model and the equation labels in the code (`# E1`). It follows "
+             "Written by Frontier Insight from the plan's model, the code's outline and the equation labels in the code "
+             "(`# E1`). It follows "
              "the code each time the code changes.", ""]
     if summary_text:
         lines += [f"**The model:** {' '.join(str(summary_text).split())}", ""]
@@ -767,19 +777,22 @@ def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
     return text
 
 
-def _equation_cases(code_dir: Path, protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _equation_cases(code_dir: Path, protocol: dict[str, Any] | None,
+                    names: dict[str, str] | None = None) -> list[dict[str, Any]]:
     from . import equation_tests as _eqt
 
     sources = dict(package_sources(code_dir))
     if (Path(code_dir) / "simulate.py").is_file():
         sources["simulate.py"] = (Path(code_dir) / "simulate.py").read_text(encoding="utf-8")
-    return _eqt.cases(_eqt.example_rows(protocol), _eqt.locate(protocol, sources))
+    return _eqt.cases(_eqt.example_rows(protocol), _eqt.locate(protocol, sources, names))
 
 
-def project_files(code_dir: Path, protocol: dict[str, Any] | None, package: str) -> dict[str, str]:
+def project_files(code_dir: Path, protocol: dict[str, Any] | None, package: str,
+                  names: dict[str, str] | None = None) -> dict[str, str]:
     """What FI writes into ``code/`` for the package layout: the equation list and the checks as unit tests. The values
-    the tests compare with are not among them: :func:`write_check_values` writes those outside ``code/``."""
-    rows = equation_map(protocol, package_sources(code_dir))
+    the tests compare with are not among them: :func:`write_check_values` writes those outside ``code/``. ``names``:
+    the function the code outline names for each equation (:func:`core.equation_tests.locate`)."""
+    rows = equation_map(protocol, package_sources(code_dir), names)
     files = {METHODS_NAME: methods_text(protocol, rows, package)}
     tests = oracle_tests(protocol)
     if tests:
@@ -787,13 +800,14 @@ def project_files(code_dir: Path, protocol: dict[str, Any] | None, package: str)
     # One small test per equation, from the plan's own worked example (core/equation_tests.py).
     from . import equation_tests as _eqt
 
-    cases = _equation_cases(code_dir, protocol)
+    cases = _equation_cases(code_dir, protocol, names)
     if cases:
         files[_eqt.TEST_PATH] = _eqt.test_source(cases)
     return files
 
 
-def write_check_values(code_dir: Path, protocol: dict[str, Any] | None) -> list[Path]:
+def write_check_values(code_dir: Path, protocol: dict[str, Any] | None,
+                       names: dict[str, str] | None = None) -> list[Path]:
     """Write what the tests of :func:`project_files` compare with (the checks' expected values and tolerances, the worked
     examples' inputs and outputs) into the quest's ``.fi/checks/``, beside ``code/`` and outside it; a file with nothing
     to hold is removed. Called once the quest's code has run for the last time (``Engine._deliver_check_values``): a
@@ -810,7 +824,7 @@ def write_check_values(code_dir: Path, protocol: dict[str, Any] | None) -> list[
         written.append(path)
     else:
         path.unlink(missing_ok=True)
-    cases = _equation_cases(code_dir, protocol)
+    cases = _equation_cases(code_dir, protocol, names)
     eq = _eqt.write_values(code_dir, cases)
     if eq is not None:
         written.append(eq)

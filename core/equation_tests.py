@@ -11,8 +11,8 @@ the plan gives ONE worked example:
 or, when the equation has no closed form for its output, ``"example": {"untestable": "<why>"}``. FI computes the output
 with its own calculator (:func:`core.oracle_forms.formula_value`; the formula may use only the example's inputs, never
 a guessed or remembered number), and writes the test itself (:func:`test_source`, template code, never model-written):
-``tests/test_equations.py`` imports the function that implements the equation (the one labelled ``# E<n>``, found by
-:func:`locate`) and calls it with the inputs.
+``tests/test_equations.py`` imports the function that implements the equation (the one the code outline names for it,
+else the one labelled ``# E<n>``; found by :func:`locate`) and calls it with the inputs.
 
 The contract with the code: the function is a top-level function whose parameters are named exactly as the example's
 inputs and which returns the equation's output as one number. The outline step names one function per equation
@@ -545,19 +545,33 @@ def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str]
 # --- finding the function that implements an equation -----------------------------------------------------------------
 
 
-def locate(protocol: dict[str, Any] | None, sources: dict[str, str]) -> dict[str, dict[str, Any] | None]:
-    """For each equation that gets an example: the importable top-level function labelled ``# E<n>`` (a comment on or
-    above it, or in its docstring), as ``{"module", "function", "file", "static"}`` (``static``: FI's own reading of
-    it, :func:`static_facts`); ``None`` when there is none. ``sources``:
+def locate(protocol: dict[str, Any] | None, sources: dict[str, str],
+           names: dict[str, str] | None = None) -> dict[str, dict[str, Any] | None]:
+    """For each equation that gets an example: the importable top-level function that implements it, as
+    ``{"module", "function", "file", "static"}`` (``static``: FI's own reading of it, :func:`static_facts`); ``None``
+    when there is none. ``names`` (the equation's id to the function the code outline names for it, ``implements``)
+    decides when that function is there: the outline is where the function and its parameters were fixed before any
+    body was written. Otherwise it is the function labelled ``# E<n>`` (a comment on or above it, or in its docstring);
+    a label alone can name a helper the outline's function calls. ``sources``:
     ``{"<package>/model.py": text, "simulate.py": text}`` (a script that runs when imported, ``experiment.py``, is
     never one of them). A package is preferred to ``simulate.py``."""
     from . import code_layout as _layout
+    from . import function_steps as _steps
 
-    labelled = {rel: _layout._labels(text) for rel, text in sorted(sources.items(), key=lambda kv: (kv[0] == "simulate.py", kv[0]))}
+    ordered = sorted(sources.items(), key=lambda kv: (kv[0] == "simulate.py", kv[0]))
+    labelled = {rel: _layout._labels(text) for rel, text in ordered}
+    by_outline = {_text(k).upper(): _text(v) for k, v in (names or {}).items() if _text(v)}
     out: dict[str, dict[str, str] | None] = {}
     for eq in eligible(protocol):
         eid = _text(eq["id"])
         found = None
+        name = by_outline.get(eid.upper())
+        if name:
+            rel = next((rel for rel, text in ordered if _steps._find(text, name) is not None), None)
+            if rel is not None:
+                out[eid] = {"module": module_of(rel), "function": name, "file": rel,
+                            "static": static_facts(sources[rel], name)}
+                continue
         for rel, items in labelled.items():
             for _line, text, fn in items:
                 if fn and "." not in fn and _oracle._labelled_in(eid, text):
@@ -598,7 +612,8 @@ from the plan's own worked example: the inputs are the plan's, and the output is
 
     python -m pytest tests/test_equations.py        (or: python tests/test_equations.py)
 
-Each test imports the function labelled with the equation (`# E1`) and calls it with the example's inputs, by name.
+Each test imports the function that computes the equation (the one the code's outline names for it, else the one
+labelled with the equation, `# E1`) and calls it with the example's inputs, by name.
 The inputs and the output are not in this folder: Frontier Insight writes them into the quest's
 `.fi/checks/{values_name}` (next to `code/`) once the quest's code has run for the last time. Run the tests inside the quest folder, or name the folder
 that holds that file: python tests/test_equations.py --checks <folder>.
