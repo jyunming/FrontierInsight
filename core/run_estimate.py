@@ -139,6 +139,8 @@ class Probe:
     per_trial_s: float | None = None
     #: How many trials of the setting were timed.
     timed_trials: int = 0
+    #: The time the timed trials spent inside the simulation itself (without the process start and the loading), when known.
+    call_s: float | None = None
 
     def at(self, runs: int, runs_now: int) -> "Probe":
         """This setting's cost with ``runs`` runs instead of ``runs_now``."""
@@ -195,6 +197,14 @@ ENUM_LIMIT = 50000
 CORNER = "together"
 
 
+def _cost_ratio(p: Probe, base: Probe) -> float:
+    """How many times the base a setting costs, for deciding which ends are costly. The time inside the simulation is compared
+    when both were measured: a slow process start (a loaded machine) is the same for both and would hide a costly end."""
+    if p.call_s is not None and base.call_s is not None and base.call_s > 0:
+        return max(p.call_s / base.call_s, p.seconds / base.seconds if p.seconds > 0 else 0.0)
+    return p.seconds / base.seconds
+
+
 def costly_ends(grid: dict[str, list[Any]], probes: list[Probe]) -> dict[str, int]:
     """For each setting whose timed end costs at least :data:`COSTLY` times the base, the index of its costlier end."""
     base = next((p for p in probes if p.axis is None), None)
@@ -202,7 +212,7 @@ def costly_ends(grid: dict[str, list[Any]], probes: list[Probe]) -> dict[str, in
         return {}
     out: dict[str, int] = {}
     for name, _values in axes_of(grid):
-        ends = [(p.seconds / base.seconds, p.index) for p in probes if p.axis == name and p.index is not None]
+        ends = [(_cost_ratio(p, base), p.index) for p in probes if p.axis == name and p.index is not None]
         if ends:
             ratio, index = max(ends)
             if ratio >= COSTLY and index is not None:
@@ -332,7 +342,7 @@ async def measure(
         if cached and key in cached:
             hit = cached[key]
             probes.append(Probe(axis, index, cell, hit.seconds, hit.at_least, dict(hit.spread), [dict(t) for t in hit.trials],
-                                hit.fixed_s, hit.per_trial_s, hit.timed_trials))
+                                hit.fixed_s, hit.per_trial_s, hit.timed_trials, hit.call_s))
             return True, ""
         left = budget_s - (time.monotonic() - started)
         if probes and left < 5:
@@ -443,7 +453,7 @@ async def _time_one(
                     spread[name] = max(spread.get(name, 0.0), statistics.stdev(xs))  # the sample standard deviation
     return Probe(None, None, cell, max(seconds, 1e-6), spread=spread,
                  trials=[dict(r.get("values") or {}) for r in done[:2]], fixed_s=fixed, per_trial_s=per_trial,
-                 timed_trials=len(done)), ""
+                 timed_trials=len(done), call_s=sum(durations)), ""
 
 
 # ---- the correctness pilot -----------------------------------------------------------------------------------------------
