@@ -90,6 +90,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from core.disclosure import recorded_seeds, strip_for_checks
+from core.run_facts import seed_verdict
 from core.numeric_oracle import flatten_numbers
 
 # A replicated run needs at least this many seeds before its spread means
@@ -693,14 +694,22 @@ _CODE_SEED = re.compile(
     r"\b(?:default_rng|RandomState|seed|manual_seed|PRNGKey|Random|SeedSequence)\s*\(\s*(-?[0-9]+)\s*\)"
     r"|\b(?i:(?:base_|random_|rng_|global_|master_|root_)?seed|random_state)\s*=\s*(-?[0-9]+)\b"
 )
-_SEED_VERB = r"(?:\s*(?:value\s+)?(?:of|=|:|was|is|equal\s+to|set\s+to))?\s*"
+_SEED_VERB = r"(?:\s*(?:value\s+)?(?:of|=|:|was|is|equal\s+to|set\s+to|with|from|at|to|using))?\s*"
 # The number must end there: "seed of 1,537 trials" is not seed 1, and "seed 3 of 10" is the third of ten seeds.
 _SEED_NUMBER = r"(-?[0-9]+)(?![0-9]|[.,][0-9])(?!\s*(?:of|out\s+of|/)\s*[0-9])"
 _BASE_SEED = re.compile(
     rf"\b(?:base|master|root|global)[\s_-]+(?:random[\s_-]+)?seed\b{_SEED_VERB}{_SEED_NUMBER}", re.I,
 )
-# One seed, never "seeds" (a list or range of trial numbers) and never a count ("10 seeds").
-_ONE_SEED = re.compile(rf"(?<![\w-])(?:random[\s_-]+)?seed\b{_SEED_VERB}{_SEED_NUMBER}", re.I)
+# One seed, never "seeds" (a list or range of trial numbers) and never a count ("10 seeds"); "seeded with 0" is one.
+_ONE_SEED = re.compile(rf"(?<![\w-])(?:random[\s_-]+)?seed(?:ed)?\b{_SEED_VERB}{_SEED_NUMBER}", re.I)
+# A value FI filled into the paper from its records (core/paper_facts.py), with its markers.
+_FACT_SPAN = re.compile(r"<!-- fi:fact-([\w-]+) -->.*?<!-- /fi:fact-\1 -->", re.S)
+# A statement that the trials' seeds come from FI's base seed, with or without a number: wrong when the code never uses
+# the seed FI gives each trial.
+_FI_SEED = re.compile(
+    r"\b(?:base|master|root|global)[\s_-]+(?:random[\s_-]+)?seeds?\b|\bFI['’]?s\s+(?:\w+\s+)?seeds?\b"
+    r"|\bseeds?\s+(?:that\s+|which\s+)?FI\s+(?:gives|gave|assigns|assigned|passes|passed|provides|provided|derives|derived)\b",
+    re.I)
 
 
 @dataclass(frozen=True)
@@ -711,6 +720,17 @@ class SeedRecords:
     base_seed: int | None = None
     trial_seeds: frozenset[int] = frozenset()
     code_seeds: tuple[tuple[str, int], ...] = ()
+    #: Whether the seed FI gives each trial reaches the simulation (``core/run_facts.py:seed_verdict``): ``False`` when
+    #: it does not, so the base seed and the trial seeds in the records are not the code's seeds; ``None`` when FI cannot
+    #: tell (or there is no ``run_trial``).
+    fi_seed_reaches: bool | None = None
+    #: When it does not reach: the seeds written into the code that seed the trials' generators, with where they are
+    #: (``("code/simulate.py:106", 20261015)``). Not every seed in the code: a self-check's own seed is not the run's.
+    driving_seeds: tuple[tuple[str, int], ...] = ()
+    #: Why it does not reach, in plain words.
+    why: str = ""
+    #: The verdict itself (``reaches`` / ``does_not_reach`` / ``partly`` / ``unknown`` / ``no_entry``).
+    verdict: str = ""
 
 
 def seed_records(quest_root: Path) -> SeedRecords:
@@ -730,7 +750,37 @@ def seed_records(quest_root: Path) -> SeedRecords:
         for no, line in enumerate(lines, 1):
             for m in _CODE_SEED.finditer(line.split("#", 1)[0]):
                 code.append((f"{rel.as_posix()}:{no}", int(m.group(1) or m.group(2))))
-    return SeedRecords(base_seed=base, trial_seeds=trials, code_seeds=tuple(code))
+    verdict = seed_verdict(root)
+    have = set(code)
+    code += [(lit["where"], lit["value"]) for lit in verdict["code_seeds"] if (lit["where"], lit["value"]) not in have]
+    return SeedRecords(base_seed=base, trial_seeds=trials, code_seeds=tuple(code),
+                       fi_seed_reaches=verdict["fi_seed_reaches"],
+                       driving_seeds=tuple((d["where"], d["value"]) for d in verdict.get("driving_seeds") or []),
+                       why=str(verdict.get("why") or ""), verdict="" if verdict.get("verdict") == "no_entry" else str(verdict.get("verdict") or ""))
+
+
+def _check_unknown_seeds(sents: list[str], seeds: SeedRecords) -> list[StatFinding]:
+    """FI cannot tell from the code whether the seed it gives each trial reaches the simulation: a sentence saying the
+    trials are seeded from FI's base seed (or from FI's seeds: the base seed, a trial seed) claims what nobody knows."""
+    fi_numbers = set(seeds.trial_seeds) | ({seeds.base_seed} if seeds.base_seed is not None else set())
+    out: list[StatFinding] = []
+    for s in sents:
+        hit = next((m for m in _FI_SEED.finditer(s)), None)
+        if hit is None:
+            hit = next((m for m in [*_BASE_SEED.finditer(s), *_ONE_SEED.finditer(s)]
+                        if int(m.group(1)) in fi_numbers), None)
+        if hit is None:
+            continue
+        out.append(StatFinding(
+            kind="seed_not_recorded",
+            message=(
+                f"the paper says the trials are seeded from FI's seeds, but FI could not tell from the code whether the "
+                f"seed it gives each trial reaches the simulation ({seeds.why or 'FI cannot follow it'}). Write "
+                f"{{{{seed}}}} and FI puts in what it knows."
+            ),
+            context=_ctx(s, hit.start()),
+        ))
+    return out
 
 
 def _check_seeds(sents: list[str], seeds: SeedRecords | None, values: dict[str, float]) -> list[StatFinding]:
@@ -739,11 +789,56 @@ def _check_seeds(sents: list[str], seeds: SeedRecords | None, values: dict[str, 
     Silent unless FI holds the run's real seeds: a "base seed N" is checked only against a study record's base seed,
     and a "seed N" only when FI's ledger holds every trial's seed. A seed is accepted when it is the base seed, a
     trial seed, a seed written in the code or a result named for a seed."""
-    if seeds is None or (seeds.base_seed is None and not seeds.trial_seeds):
+    if seeds is None or (seeds.base_seed is None and not seeds.trial_seeds and seeds.fi_seed_reaches is not False):
         return []
     where: dict[int, str] = {}
     for loc, value in seeds.code_seeds:
         where.setdefault(value, loc)
+    if seeds.verdict == "unknown":
+        return _check_unknown_seeds(sents, seeds)
+    # The seed FI gives each trial does not reach the code: only the seeds written into the code that seed the trials'
+    # generators are the run's (a self-check's own seed elsewhere in the code is not).
+    ignored = seeds.fi_seed_reaches is False
+    if ignored:
+        driving: dict[int, str] = {}
+        for loc, value in seeds.driving_seeds:
+            driving.setdefault(value, loc)
+        written = ", ".join(f"{v} ({loc})" for v, loc in list(driving.items())[:3]) or "none that FI found"
+        why = seeds.why or "run_trial does not use it"
+        out_ignored: list[StatFinding] = []
+        said: set[tuple[str, int]] = set()
+        for s in sents:
+            numbered: list[tuple[int, int]] = []
+            for m in list(_BASE_SEED.finditer(s)) + list(_ONE_SEED.finditer(s)):
+                n = int(m.group(1))
+                numbered.append((m.start(), n))
+                if n in driving or (s, n) in said:
+                    continue
+                said.add((s, n))
+                out_ignored.append(StatFinding(
+                    kind="seed_not_recorded",
+                    message=(
+                        f"the paper gives seed {n} as the run's seed, but the seed FI gives each trial does not reach the "
+                        f"code ({why}), so FI's base seed and trial seeds are not the run's seeds. The seeds the code's "
+                        f"trials are drawn with are: {written}. Write {{{{seed}}}} and FI puts in the seed the code used."
+                    ),
+                    context=_ctx(s, m.start()),
+                ))
+            # Said without a number that is the code's ("derived from FI's base seed"): as wrong.
+            for m in _FI_SEED.finditer(s):
+                if any(n in driving for _p, n in numbered) or (s, -1) in said:
+                    continue
+                said.add((s, -1))
+                out_ignored.append(StatFinding(
+                    kind="seed_not_recorded",
+                    message=(
+                        f"the paper says the run's seeds come from FI's base seed, but the seed FI gives each trial does "
+                        f"not reach the code ({why}). The seeds the code's trials are drawn with are: {written}. Write "
+                        f"{{{{seed}}}} and FI puts in the seed the code used."
+                    ),
+                    context=_ctx(s, m.start()),
+                ))
+        return out_ignored
     recorded = set(seeds.trial_seeds) | set(where)
     if seeds.base_seed is not None:
         recorded.add(seeds.base_seed)
@@ -810,6 +905,30 @@ def _series_extremes(figure_records: dict[str, Any]) -> set[float]:
     return out
 
 
+def _tables_as_words(text: str) -> str:
+    """``text`` with each Markdown table row read as sentences: every cell with its column's header ("Seed: 5."), and a
+    two-column row also as "name: value." The line under the header row is dropped."""
+    out: list[str] = []
+    header: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            header = []
+            out.append(line)
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+            continue
+        if not header:
+            header = cells
+            continue
+        said = [f"{h}: {c}." for h, c in zip(header, cells) if h and c]
+        if len(cells) == 2 and all(cells):
+            said.append(f"{cells[0]}: {cells[1]}.")
+        out.append(" ".join(said))
+    return "\n".join(out)
+
+
 def check(
     paper_text: str,
     *,
@@ -863,7 +982,12 @@ def check(
         sents, figure_records, values, _series_extremes(figure_records),
     )
     findings += _check_probability_complement(sents, values)
-    findings += _check_seeds(sents, seeds, values)
+    # The seed FI put in through the paper's {{seed}} is FI's record, not the writer's statement: only what the writer typed
+    # is held to the records (core/paper_facts.py).
+    # A figure's caption is the writer's text too ("![... with seed 0 per setting.](...)"): read as its words.
+    # A table's cell is read with its column's header ("Seed: 5."), a two-column row as "name: value".
+    seed_text = _tables_as_words(re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1 ", _FACT_SPAN.sub(" ", paper_text)))
+    findings += _check_seeds(sentences(normalise(seed_text)), seeds, values)
 
     seen: set[str] = set()
     for f in findings:

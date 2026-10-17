@@ -107,7 +107,8 @@ def parse(obj: Any) -> dict[str, Any] | None:
         rng = [n for n in (_number(v) for v in (item.get("range") if isinstance(item.get("range"), list) else [])) if n is not None]
         factors.append({"name": name, "levels": _levels(item.get("levels")),
                         "range": sorted(rng[:2]) if len(rng) == 2 else [],
-                        "stated": _text(item.get("stated")), "main": item.get("main") is True})
+                        "stated": _text(item.get("stated")), "main": item.get("main") is True,
+                        **({"compared": item["compared"]} if isinstance(item.get("compared"), bool) else {})})
     quantities: list[dict[str, Any]] = []
     for item in obj.get("quantities") if isinstance(obj.get("quantities"), list) else []:
         item = item if isinstance(item, dict) else {"name": item}
@@ -132,12 +133,154 @@ def parse(obj: Any) -> dict[str, Any] | None:
                if _text(r, 200)]
     if not (factors or quantities or formulas or comparisons):
         return None
+    files = code_files(obj)
     return {"factors": factors[:20], "quantities": quantities[:30], "formulas": formulas[:12],
-            "comparisons": comparisons[:12], "constraints": constraints[:30], "stated_results": results[:20]}
+            "comparisons": comparisons[:12], "constraints": constraints[:30], "stated_results": results[:20],
+            **({"code_files": files} if files is not None else {})}
+
+
+def code_files(req: Any) -> int | None:
+    """How many files of code the topic asks for (the reader's ``code_files``: a whole number, ``1`` for one script),
+    or ``None`` when it does not say. Read from the reader's structured answer only, never from the topic's prose."""
+    value = req.get("code_files") if isinstance(req, dict) else None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return value if isinstance(value, int) and 1 <= value <= 1000 else None
 
 
 def is_empty(req: Any) -> bool:
     return not (isinstance(req, dict) and any(req.get(k) for k in _SECTIONS))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the topic's own words, and what it compares
+# ---------------------------------------------------------------------------------------------------------------------
+
+def _sentences(topic: Any) -> list[str]:
+    """The topic's sentences, each on one line as written (a line break or ``.``/``!``/``?`` and a space ends one)."""
+    out: list[str] = []
+    for line in str(topic or "").splitlines():
+        for piece in re.split(r"(?<=[.!?])\s+", line.strip()):
+            piece = " ".join(piece.split())
+            if piece:
+                out.append(piece)
+    return out
+
+
+def _squash(text: Any) -> str:
+    return " ".join(str(text or "").lower().replace("`", "'").split())
+
+
+def topic_sentence(topic: Any, stated: Any = "", text: Any = "", limit: int = 320) -> str:
+    """The topic's own sentence for an item, word for word: the sentence that holds ``stated`` (the phrase the topic's
+    reader copied), else, for an item the reader wrote in its own words (``text``: a constraint, a comparison), the one
+    sentence that holds most of its words (at least two, and at least three in five of them). ``""`` when the topic has
+    no such sentence: the item is then shown only as the reader wrote it."""
+    sentences = _sentences(topic)
+    if not sentences:
+        return ""
+    want = _squash(stated)
+    if len(want) >= 3:
+        for sentence in sentences:
+            if want in _squash(sentence):
+                return sentence[:limit]
+        # A phrase that runs over two sentences of the topic: the first one it starts in.
+        joined = _squash(" ".join(sentences))
+        if want in joined:
+            head = want[:40]
+            for sentence in sentences:
+                if head and head in _squash(sentence):
+                    return sentence[:limit]
+    words = _tokens(text)
+    if len(words) >= 2:
+        best, best_share = "", 0.0
+        for sentence in sentences:
+            share = len(words & _tokens(sentence)) / len(words)
+            if share > best_share:
+                best, best_share = sentence, share
+        if best_share >= 0.6:
+            return best[:limit]
+    return ""
+
+
+def carries_result(text: Any, req: Any = None) -> bool:
+    """Whether ``text`` states a result: a sentence such as "the expected value is ..." or one that holds a result the
+    topic's reader listed (``stated_results``). Such a sentence is never quoted to the plan or in plan.md."""
+    text = str(text or "")
+    if not text.strip():
+        return False
+    if _RESULT_MARKERS.search(text):
+        return True
+    squashed = _squash(text)
+    for result in (req.get("stated_results") if isinstance(req, dict) else None) or []:
+        said = result.get("stated") or result.get("text") if isinstance(result, dict) else result
+        said = _squash(said)
+        if len(said) >= 3 and said in squashed:
+            return True
+    return False
+
+
+def quotable(topic: Any, req: Any, stated: Any = "", text: Any = "") -> str:
+    """What may be quoted for an item: the topic's own sentence (:func:`topic_sentence`), else the reader's copied phrase,
+    and ``""`` when that sentence or phrase states a result (:func:`carries_result`)."""
+    sentence = topic_sentence(topic, stated, text)
+    if sentence:
+        return "" if carries_result(sentence, req) else sentence
+    phrase = " ".join(str(stated or "").split())[:320]
+    return "" if not phrase or carries_result(phrase, req) else phrase
+
+
+def compared_axes(req: Any, design: Any, protocol: Any = None) -> dict[str, str]:
+    """``{setting of the plan: the topic's factor}`` for each factor the topic compares (:func:`compared`), placed as the
+    plan check places it: a setting whose name matches the factor's words, or the setting the plan's own topic map
+    (``protocol.topic_map``) gives for it."""
+    if not isinstance(req, dict):
+        return {}
+    plan = view(design, protocol)
+    entries = [m for m in plan.get("topic_map") or [] if isinstance(m, dict)]
+    out: dict[str, str] = {}
+    for factor in req.get("factors") or []:
+        if not isinstance(factor, dict) or not factor.get("name") or not compared(req, factor):
+            continue
+        wanted = _tokens(factor["name"])
+        for axis in plan["axes"]:
+            if wanted and _tokens(axis) and (_tokens(axis) <= wanted or wanted <= _tokens(axis)):
+                out.setdefault(str(axis), str(factor["name"]))
+        keys = {_name_key(factor.get("name")), _name_key(factor.get("text"))} - {""}
+        for entry in entries:
+            by = str(entry.get("by") or "")
+            if _name_key(entry.get("item")) in keys and by.startswith("setting:"):
+                out.setdefault(by.split(":", 1)[1].strip(), str(factor["name"]))
+    return out
+
+
+def compared(req: Any, factor: Any) -> bool:
+    """Whether the topic compares results across the values of ``factor`` (so each value is a setting the study runs on
+    its own, or every value is compared inside each run), and not only uses them: five values fitted together in each run,
+    a range every run samples. The reader's own answer (``compared``) when it gave one. A reading made before the reader was
+    asked that: ``True`` when the topic states the factor's levels or range (values to cover, as before), and otherwise,
+    when the reader listed the topic's comparisons, whether one of them names the factor; ``True`` when it listed none."""
+    if not isinstance(factor, dict):
+        return True
+    if isinstance(factor.get("compared"), bool):
+        return factor["compared"]
+    if factor.get("levels") or factor.get("range"):
+        return True
+    comparisons = [c for c in (req.get("comparisons") if isinstance(req, dict) else None) or []
+                   if isinstance(c, dict) and c.get("between")]
+    if not comparisons:
+        return True
+    name = _tokens(factor.get("name"))
+    for comparison in comparisons:
+        for entry in comparison.get("between") or []:
+            words = _tokens(entry)
+            if words and name and (words <= name or name <= words):
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -305,6 +448,11 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
         mapped = mapping_of(req, plan, "factors", factor) if axis is None else None
         if mapped is not None and mapped[0] == "ok":
             continue
+        if axis is None and not compared(req, factor):
+            # The topic uses its values (all of them in each run, a range every run covers) and compares no result across
+            # them: it is not a setting the study must sweep. Asking for one put five values fitted together into the grid
+            # as five settings, each run five times over.
+            continue
         if axis is None:
             unresolved.append(_item_id("factors", i))
             continue
@@ -343,15 +491,18 @@ def item_of(req: dict[str, Any], ident: str) -> tuple[str, dict[str, Any]] | Non
 def gap(kind: str, item: dict[str, Any], *, why: str = "", axis: str = "") -> dict[str, Any]:
     """One thing the topic asks for that the plan does not have, with the sentence a person reads."""
     name = item.get("name") or item.get("text") or ""
+    stated = " ".join(str(item.get("stated") or "").split())
     if kind == "factor":
         levels = item.get("levels") or ([f"{item['range'][0]:g} to {item['range'][1]:g}"] if item.get("range") else [])
         sentence = (f"The topic says to vary or compare {name}"
                     + (f" ({', '.join(str(x) for x in levels[:8])})" if levels else "")
+                    + (f" (its words: “{stated}”)" if stated else "")
                     + ", but the plan's settings do not include it.")
     elif kind == "level":
         sentence = f"The topic states which values of {name} to use, but {why}."
     elif kind == "quantity":
-        sentence = f"The topic asks to report {name}, but the plan does not measure it."
+        sentence = (f"The topic asks to report {name}" + (f" (its words: “{stated}”)" if stated else "")
+                    + ", but the plan does not measure it.")
     else:
         sentence = (f"The topic states the formula `{item.get('text')}`, but the plan's model does not use it and does not "
                     "say why it uses another.")
@@ -455,7 +606,10 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False) -> 
         "`protocol.topic_map` that `optimisation` covers it. "
         if search else
         "A setting to vary or compare is a key of `protocol.grid` with every value the topic states (or, for a search for "
-        "the best design, a design variable of `protocol.optimisation` with its range, and its value in `protocol.optimisation.baseline.values`). ")
+        "the best design, a design variable of `protocol.optimisation` with its range, and its value in `protocol.optimisation.baseline.values`). "
+        "When the topic's words put all its values into each run (one fit across all of them, every method applied to the "
+        "same simulated data), it is a key of `protocol.in_each_run` with all its values instead, not a setting of "
+        "`protocol.grid`: a grid setting is run on its own, once per value. ")
     return (
         "The topic asks for things this plan does not yet include:\n" + "\n".join(lines)
         + f"\n\nThe topic: “{' '.join(str(topic or '').split())[:1500]}”\n\n"
@@ -596,29 +750,42 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
 # ---------------------------------------------------------------------------------------------------------------------
 
 def plan_lines(req: dict[str, Any], gaps: list[dict[str, Any]], *, reviewer: str, same_model: bool | None,
-               unjudged: list[str] | None = None) -> list[str]:
-    """What plan.md says in *What the topic asks for*, in plain words."""
+               unjudged: list[str] | None = None, topic: str = "") -> list[str]:
+    """What plan.md says in *What the topic asks for*, in plain words, each factor and quantity with the topic's own
+    sentence for it (``topic``; the reader's copied phrase when the topic is not given)."""
     who = ("another model than the plan's" if same_model is False else
            "the plan's own model (no other model is named for `oracle_review`)" if same_model else "a model")
     lines = [f"> Read from the topic by {who}{f' ({reviewer})' if reviewer else ''}, then looked for in the plan.", ""]
     open_names = {g["name"] for g in gaps}
     unchecked = set(unjudged or [])
+
+    def words(item: dict[str, Any]) -> str:
+        said = quotable(topic, req, item.get("stated"))
+        return f" The topic: “{said}”" if said else ""
+
     for factor in req.get("factors") or []:
         levels = factor.get("levels") or ([f"{factor['range'][0]:g} to {factor['range'][1]:g}"] if factor.get("range") else [])
-        lines.append(f"- To vary or compare: {factor['name']}" + (f" ({', '.join(str(x) for x in levels[:8])})" if levels else "")
+        head = ("- To vary or compare: " if compared(req, factor) else
+                "- To use as the topic states, in every run (it compares no result across it, so it is not a setting to "
+                "sweep): ")
+        lines.append(f"{head}{factor['name']}" + (f" ({', '.join(str(x) for x in levels[:8])})" if levels else "")
                      + (" - NOT in the plan's settings" if factor["name"] in open_names else
-                        " - could not be checked against the plan" if factor["name"] in unchecked else "") + ".")
+                        " - could not be checked against the plan" if factor["name"] in unchecked else "")
+                     + "." + words(factor))
     for quantity in req.get("quantities") or []:
         lines.append(f"- To report: {quantity['name']}" + (" - NOT measured in the plan" if quantity["name"] in open_names else
-                                                                " - could not be checked against the plan" if quantity["name"] in unchecked else "") + ".")
+                                                                " - could not be checked against the plan" if quantity["name"] in unchecked else "")
+                     + "." + words(quantity))
     for formula in req.get("formulas") or []:
         lines.append(f"- Formula the topic states: `{formula['text']}`"
                      + (" - NOT in the plan's model" if formula["name"] in open_names else
                       " - could not be checked against the plan" if formula["name"] in unchecked else "") + ".")
     for comparison in req.get("comparisons") or []:
-        lines.append(f"- To compare: {comparison['what']}")
+        said = quotable(topic, req, text=comparison["what"])
+        lines.append(f"- To compare: {comparison['what']}" + (f" (the topic: “{said}”)" if said else ""))
     for constraint in req.get("constraints") or []:
-        lines.append(f"- Constraint: {constraint}")
+        said = quotable(topic, req, text=constraint)
+        lines.append(f"- Constraint: {constraint}" + (f" (the topic: “{said}”)" if said and _squash(said) != _squash(constraint) else ""))
     return lines
 
 
@@ -643,8 +810,9 @@ def write_note(quest_root: Any) -> str:
                      "formulas), so the plan was not held against it. Say plainly in the limitations that this was not checked.")
     if left:
         sentences = "; ".join(str(g.get("sentence") or "").rstrip(".") for g in left if isinstance(g, dict))
-        parts.append(f"The topic asked for more than this study did: {sentences}. FI states this in its own record of the run "
-                     "at the end of the limitations; do not write a result for them.")
+        parts.append(f"The topic asked for more than this study did: {sentences}. Say in the limitations that the study did not "
+                     "do each of them, through the not_done placeholders listed under FI's record of this run (below); "
+                     "do not write a result for them.")
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
@@ -665,9 +833,9 @@ def write_note(quest_root: Any) -> str:
     constraints = [str(c).strip().rstrip(".").strip() for c in (raw if isinstance(raw, list) else [])]
     constraints = [c for c in constraints if c]
     if constraints:
-        parts.append(f"The topic set these requirements on the study and the paper: {'; '.join(constraints)}. FI's own record "
-                     "of the run, at the end of the limitations, states the seeds and the run time against the topic's limit; "
-                     "do not state them again. For each other requirement the study did not meet (the code files, the "
+        parts.append(f"The topic set these requirements on the study and the paper: {'; '.join(constraints)}. State the seed "
+                     "the code used and the measured run time against the topic's limit in the Methods, from FI's record of "
+                     "this run (below). For each other requirement the study did not meet (the code files, the "
                      "uncertainty of every number), say plainly in the limitations that it was not met and why; never leave "
                      "one out silently, and never claim one was met unless the record shows it.")
     return " ".join(parts)
@@ -727,17 +895,37 @@ def code_block(topic: Any, req: Any = None, *, limit: int = 6000, scrub: Any = N
     return body + tail
 
 
-#: The most characters the checklist shown to the plan may take.
-CHECKLIST_LIMIT = 1900
+#: Where the topic's words win over FI's own defaults, and where they never do.
+PRECEDENCE = ("For what to vary, which values, how many runs, how long a run may take, how many code files there are and "
+              "the page limit, the topic's words hold over FI's other instructions; FI's checks, its tests and its rules "
+              "about results always apply, whatever the topic says")
 
 
-def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT) -> str:
+#: The most characters the checklist shown to the plan may take (each item carries the topic's own sentence for it).
+CHECKLIST_LIMIT = 4200
+
+
+def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT, topic: Any = "") -> str:
     """The topic's requirements as plain lines the plan is shown before it is written (``""`` for an empty or failed
-    reading): factors with their stated levels or range, quantities to report, stated formulas and constraints. Never
-    ``stated_results`` (a plan is not shown the answer). Pure; at most ``limit`` characters, what does not fit is counted
-    in a last line."""
+    reading): factors with their stated levels or range, quantities to report, stated formulas, the comparisons and
+    constraints, each with the topic's own sentence for it (:func:`topic_sentence`; the reader's copied phrase when
+    ``topic`` is not given), so a reader's short name never stands in for what the topic says. A factor the topic uses
+    without comparing a result across it is said to be that, not a setting to vary. Never ``stated_results`` (a plan is
+    not shown the answer). Pure; at most ``limit`` characters, what does not fit is counted in a last line."""
     if not isinstance(req, dict) or is_empty(req):
         return ""
+
+    shown: dict[str, str] = {}
+
+    def said(stated: Any = "", text: Any = "") -> str:
+        words = quotable(topic, req, stated, text)
+        if not words:
+            return ""
+        if words in shown:  # a sentence quoted in full above is named by its mark
+            return f" — the topic {shown[words]}"
+        shown[words] = f"[T{len(shown) + 1}]"
+        return f" — the topic {shown[words]}: “{words}”"
+
     lines: list[str] = []
     for item in req.get("factors") or []:
         if not isinstance(item, dict) or not item.get("name"):
@@ -745,23 +933,38 @@ def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT) -> str:
         levels = item.get("levels") or []
         rng = item.get("range") or []
         if levels:
-            shown = ", ".join(f"{v:g}" if isinstance(v, float) else str(v) for v in levels[:10])
-            detail = f": {shown}" + (f" (and {len(levels) - 10} more)" if len(levels) > 10 else "")
+            listed = ", ".join(f"{v:g}" if isinstance(v, float) else str(v) for v in levels[:10])
+            detail = f": {listed}" + (f" (and {len(levels) - 10} more)" if len(levels) > 10 else "")
         else:
             detail = f": {rng[0]:g} to {rng[1]:g}" if len(rng) == 2 else ""
-        lines.append(f"- vary or compare {item['name']}{detail}")
+        if compared(req, item):
+            lines.append(f"- vary or compare {item['name']}{detail}{said(item.get('stated'))}")
+        else:
+            lines.append(f"- use {item['name']}{detail} as the topic states it, in every run; the topic compares no result "
+                         "across it, so it is not a setting of `protocol.grid` (all its values together in each run go in "
+                         f"`protocol.in_each_run`){said(item.get('stated'))}")
     for item in req.get("quantities") or []:
         if isinstance(item, dict) and item.get("name"):
-            lines.append(f"- report {item['name']}")
+            lines.append(f"- report {item['name']}{said(item.get('stated'))}")
     for item in req.get("formulas") or []:
         if isinstance(item, dict) and item.get("text"):
             name = str(item.get("name") or "").strip()
             lines.append(f"- formula{' ' + name if name else ''}: {str(item['text'])[:160]}")
+    for item in req.get("comparisons") or []:
+        if isinstance(item, dict) and item.get("what"):
+            lines.append(f"- compare: {str(item['what'])[:200]}{said(text=item['what'])}")
     for text in req.get("constraints") or []:
-        if str(text).strip():
+        if not str(text).strip():
+            continue
+        words = quotable(topic, req, text=text)
+        if not words:
             lines.append(f"- constraint: {str(text)[:160]}")
+        elif words not in shown:  # the topic's own sentence in place of the reader's words
+            lines.append(f"- constraint{said(text=text).replace(' — the topic', ', the topic', 1)}")
+        else:  # its sentence is quoted above already
+            lines.append(f"- constraint: {str(text)[:160]} (the topic {shown[words]})")
     head = ("What the topic asks for (each item must appear as a setting, a metric or an equation of the plan, "
-            "or be named in `simplifications`):")
+            "or be named in `simplifications`). " + PRECEDENCE + ":")
     out = [head]
     used = len(head)
     for i, line in enumerate(lines):

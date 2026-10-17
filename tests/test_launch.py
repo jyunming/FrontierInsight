@@ -548,12 +548,19 @@ def _art_with_venue(tmp_path: Path, venue: object) -> QuestArtifacts:
 
 
 def test_paper_venue_override_applies_when_yaml_is_default(tmp_path: Path) -> None:
-    """User wrote `paper_format: generic` (or left default) AND clarify
+    """User wrote `paper_format: article` (or left the default) AND clarify
     picked `neurips` — override applies."""
     cfg = _make_cfg(tmp_path)
-    assert cfg.output.paper_format == "generic"
+    assert cfg.output.paper_format == "article"
     launch._apply_paper_venue_override(cfg, _art_with_venue(tmp_path, "neurips"))
     assert cfg.output.paper_format == "neurips"
+
+
+def test_paper_venue_override_applies_generic_over_the_default(tmp_path: Path) -> None:
+    """`generic` is an ordinary template now: clarify picking it replaces the default `article`."""
+    cfg = _make_cfg(tmp_path)
+    launch._apply_paper_venue_override(cfg, _art_with_venue(tmp_path, "generic"))
+    assert cfg.output.paper_format == "generic"
 
 
 def test_paper_venue_override_respects_explicit_yaml(tmp_path: Path) -> None:
@@ -572,7 +579,7 @@ def test_paper_venue_override_ignores_unknown_venue(tmp_path: Path) -> None:
     launch._apply_paper_venue_override(
         cfg, _art_with_venue(tmp_path, "made-up-venue"),
     )
-    assert cfg.output.paper_format == "generic"
+    assert cfg.output.paper_format == "article"
 
 
 def test_paper_venue_override_handles_missing_clarify_answers(tmp_path: Path) -> None:
@@ -580,7 +587,7 @@ def test_paper_venue_override_handles_missing_clarify_answers(tmp_path: Path) ->
     cfg = _make_cfg(tmp_path)
     art = QuestArtifacts(quest_id="q", quest_root=tmp_path, raw_state={})
     launch._apply_paper_venue_override(cfg, art)
-    assert cfg.output.paper_format == "generic"
+    assert cfg.output.paper_format == "article"
 
 
 def test_main_catches_keyboard_interrupt_cleanly(

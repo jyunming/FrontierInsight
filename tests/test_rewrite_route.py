@@ -61,7 +61,7 @@ def test_an_objection_to_the_design_rewrites_the_paper_and_keeps_the_design(tmp_
 
 
 def test_an_objection_is_recorded_stated_in_the_paper_and_not_counted_again(tmp_path: Path) -> None:
-    """The first review's objection goes into FI's record, which the limitations state; the next review raising it
+    """The first review's objection goes into FI's record (printed in QUALITY.md); the next review raising it
     again is not counted, so it neither costs a round nor sends the paper back once more."""
     from core import disclosure
 
@@ -79,10 +79,26 @@ def test_an_objection_is_recorded_stated_in_the_paper_and_not_counted_again(tmp_
     assert again["objections_repeated"] == ["single_point_eval"]
     assert eng._route_after_review({"review": again, "iteration": 1}) == "done"  # type: ignore[arg-type]
 
-    eng.config.engine.max_iterations = 1  # no rewrite follows: nothing is recorded
+
+def test_an_objection_raised_only_in_the_last_round_is_recorded_and_in_quality_md(tmp_path: Path) -> None:
+    """Second review (d): no rewrite follows the last round, and its objection used to go nowhere: the routing skips a
+    repeated one, so a paper could carry no trace of it. It is in the record and in QUALITY.md."""
+    from core import disclosure, quality_report
+
+    eng = _engine(tmp_path, max_iterations=1)
+    last = {"verdict": "revise", "must_flag_hits": ["[methodologist] circular_evaluation: the test set is the training set"],
+            "blocking": "The model is scored on the data it was fitted to."}
+    assert eng._note_design_objections({"iteration": 0}, last) == last["must_flag_hits"]  # type: ignore[arg-type]
+    assert disclosure.stated_objections(tmp_path) == {"circular_evaluation"}
+    assert '"The model is scored on the data it was fitted to"' in disclosure.run_record(tmp_path)
+    md = quality_report.render(quality_report.build(tmp_path, running=False))
+    assert "A reviewer objected to the design" in md and "scored on the data it was fitted to" in md
+
+    # An objection without the reviewer's reason is said as the reviewer wrote it.
     disclosure.clear_objections(tmp_path)
-    eng._note_design_objections({"iteration": 0}, dict(first))  # type: ignore[arg-type]
-    assert disclosure.stated_objections(tmp_path) == set()
+    eng._note_design_objections({"iteration": 0}, {"verdict": "accept", "must_flag_hits": ["single_point_eval"]})  # type: ignore[arg-type]
+    md = quality_report.render(quality_report.build(tmp_path, running=False))
+    assert "single point eval" in md
 
 
 def test_two_objections_written_as_prose_are_two_and_each_is_said_as_written(tmp_path: Path) -> None:

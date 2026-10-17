@@ -23,6 +23,7 @@ from generation import paper as paper_mod
 from generation._pandoc import find_pandoc
 from generation.paper import PaperGenerator, _author_metadata_args
 from generation.slides import SlideGenerator, _with_author_line
+from tests.paper_fakes import fake_pandoc
 
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = sorted((REPO / "templates" / "paper").glob("*/template.tex"))
@@ -111,7 +112,7 @@ def test_latex_compile_passes_the_author_line_to_pandoc(
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-1.4 fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     paper_md = tmp_path / "paper.md"
@@ -146,10 +147,11 @@ def test_a_real_latex_compile_prints_special_characters_in_the_author_line(tmp_p
     assert pdf is not None, skip
     doc = measure_pdf(pdf, max_pages=1)
     text = " ".join(line.text for line in doc.pages[0].lines)
-    # The OT1 font draws \_ as a rule rather than a glyph, so the PDF's text
-    # layer reads it as a space although the page shows an underscore.
+    # Under pdflatex the OT1 font draws \_ as a rule rather than a glyph, so the
+    # PDF's text layer reads it as a space although the page shows an underscore;
+    # XeLaTeX sets the underscore itself.
     for value in AUTHOR.values():
-        assert value.replace("_", " ") in text
+        assert value in text or value.replace("_", " ") in text
 
 
 # ---------------------------------------------------------------------------

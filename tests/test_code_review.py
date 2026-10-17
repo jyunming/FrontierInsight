@@ -227,7 +227,9 @@ async def test_what_is_still_missing_after_the_repairs_is_not_reported_and_the_p
     assert "decay.png" in note and "not computed" in note and "limitations" in note
     # Other code, other record: the note follows the code that ran.
     (engine.quest_root / "code" / "simulate.py").write_text(SIM_OTHER, encoding="utf-8")
-    assert "changed afterwards" in cr.write_note(engine.quest_root, engine.quest_root / "code")
+    q, c = engine.quest_root, engine.quest_root / "code"
+    assert cr.write_note(q, c) == "", "the writer is not told the code was read before it changed"
+    assert "changed afterwards" in cr.findings_block(q, c), "the quality report says it"
 
 
 HEADLINE = "the dependent variable quality_factor is computed and reported in the result"
@@ -289,12 +291,14 @@ async def test_a_code_version_that_ran_without_a_successful_reading_is_disclosed
     engine._client = _Fails()
     assert await engine._code_review_gate(STATE) is None
     note = cr.write_note(engine.quest_root, engine.quest_root / "code")
-    assert "not compared with the plan by another model" in note and "the call failed" in note
+    assert note == "", "the writer is not told that no second model read the code"
+    block = cr.findings_block(engine.quest_root, engine.quest_root / "code")
+    assert "not compared with the plan by another model" in block and "the call failed" in block, "the quality report says it"
     # The same model as the writer, and the cap: also disclosed.
     same = _engine(tmp_path / "b", other=False)
     same._client = _Reader()
     await same._code_review_gate(STATE)
-    assert "the reader is the model that wrote the code" in cr.write_note(same.quest_root, same.quest_root / "code")
+    assert "the reader is the model that wrote the code" in cr.findings_block(same.quest_root, same.quest_root / "code")
     capped = _engine(tmp_path / "c")
     capped._client = _Reader()
     for i in range(cr.MAX_REVIEWS):
@@ -353,8 +357,8 @@ async def test_after_the_cap_the_final_version_is_said_not_to_have_been_read_aga
     assert len(engine._client.prompts) == cr.MAX_REVIEWS == 3
     record = cr.load(engine.quest_root)
     assert "allowed in a quest" in record["skipped"] and record["final_read"] is False
-    note = cr.write_note(engine.quest_root, engine.quest_root / "code")
-    assert "final version was not read again by another model" in note
+    assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
+    assert "not read by another model" in cr.findings_block(engine.quest_root, engine.quest_root / "code")
     assert "final version of the code was not read again" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     again = Engine(engine.config, resume_quest_id=engine.quest_id)
     assert cr.load(again.quest_root)["reviews_total"] == 3, "a resume keeps the count"
@@ -413,8 +417,9 @@ async def test_what_is_still_unanswered_is_recorded_per_requirement_and_an_unrev
                                                 for r in reqs if "quality_factor" not in r["text"]]})
     engine2._client = _SkipHeadline()
     await engine2._code_review_gate(STATE)
-    note = cr.write_note(engine2.quest_root, engine2.quest_root / "code")
-    assert "did not check these requirements" in note and "quality_factor" in note and "main quantity among them" in note
+    assert cr.write_note(engine2.quest_root, engine2.quest_root / "code") == ""
+    block = cr.findings_block(engine2.quest_root, engine2.quest_root / "code")
+    assert "did not check these requirements" in block and "quality_factor" in block and "main quantity among them" in block
 
 
 @pytest.mark.asyncio
@@ -470,7 +475,8 @@ def test_the_note_names_every_kind_of_open_finding_not_only_the_missing_quantiti
     assert "The generator ignores the seed" in note and "unconfirmed" in note, "a finding no test could show"
     assert "Two definitions of one thing disagree" in note and "contradicts itself" in note
     assert "declared constant" not in note, "a finding the results contradict is not said"
-    assert "stopped because a round did not reduce" in note
+    assert "stopped because a round did not reduce" not in note, "an internal state the writer is not told"
+    assert "ended because a round did not reduce" in cr.findings_block(root, code), "the quality report says it"
     # The same facts without the requirement findings still all appear.
     root2, code2 = _record(tmp_path / "b", missing=0)
     assert "A statistic is set to None" in cr.write_note(root2, code2)

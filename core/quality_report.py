@@ -172,6 +172,7 @@ class _Quest:
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
+        self.trial_checks = _dict(_json(fi / "trial_checks.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.pause = _dict(_json(fi / "pause.json"))
@@ -406,18 +407,20 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
                             "not fixed" if i == len(retries) and not ended_ok else "fixed",
                             f".fi/audit.jsonl seq {d.get('seq')}"))
     manifest = q.checks("run_manifest")
-    if any(e.get("status") in ("repairing", "stopped") for e in manifest):
-        first = next(e for e in manifest if e.get("status") in ("repairing", "stopped"))
+    # ``warned`` (engine.run_manifest_check: warn, the default) is recorded and not acted on: it is listed as not fixed.
+    if any(e.get("status") in ("repairing", "stopped", "warned") for e in manifest):
+        first = next(e for e in manifest if e.get("status") in ("repairing", "stopped", "warned"))
         last = manifest[-1].get("status")
+        found_by = "FI's run-record check" + (" (recorded only)" if last == "warned" else "")
         out.append(_problem("run", _one((_list(first.get("problems")) or ["the run did not report what the protocol fixed"])[0], 200),
-                            "FI's run-record check", "fixed" if last in ("ok", "pass", "not_applicable") else "not fixed",
+                            found_by, "fixed" if last in ("ok", "pass", "not_applicable") else "not fixed",
                             f".fi/audit.jsonl seq {first.get('seq')}"))
     pilot = q.pilot
     if _list(pilot.get("problems")):
         out.append(_problem("run", _one(str(_list(pilot["problems"])[0]), 200), "FI's pilot check",
                             "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
-    if stop and not any(p["found_by"] == "FI's run-record check" for p in out):
+    if stop and not any(p["found_by"].startswith("FI's run-record check") for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",
                             "FI's run-record check", "not fixed", ".fi/run_manifest_stop.json"))
     return out
@@ -439,6 +442,52 @@ def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
         said = f"{read}; they showed the simulation does not measure what the protocol names, and it was sent back to be repaired"
     return {"outcome": p["outcome"], "trials": trials, "settings": settings, "repairs": repairs,
             "problems": [str(x) for x in _list(p.get("problems"))], "says": said}
+
+
+def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
+    """FI's own checks of what the trials gave (core/trial_checks.py): the settings with failed trials, those left out, each
+    reported interval or standard error judged against the true values, and what could not be checked. ``None`` when the
+    checks did not run (no trials of FI's own)."""
+    rec = q.trial_checks
+    if not rec:
+        return None
+    if rec.get("not_run"):
+        from . import trial_checks as _tc
+
+        why = _tc.NOT_RUN.get(str(rec["not_run"]), str(rec["not_run"]))
+        return {"action": "", "left_out": [], "checked": False, "faults": 0, "not_run": True,
+                "lines": [f"FI's checks of the trials did not run: {why}"]}
+    fails =[f for f in _list(rec.get("failures")) if isinstance(f, dict)]
+    left = [str(k) for k in _list(rec.get("left_out_settings"))]
+    cal = _dict(rec.get("calibration"))
+    quantities = [x for x in _list(cal.get("quantities")) if isinstance(x, dict)]
+    lines = []
+    if fails:
+        lines.append(f"{len(fails)} of {_int(rec.get('settings'))} setting(s) had failed trials"
+                     + (f"; {len(left)} left out of the results because most of their trials failed ({', '.join(left[:6])})"
+                        if left else ""))
+        lines += [f"{f.get('key') or 'the one setting'}: {f.get('failed')} of {f.get('planned')} failed"
+                  + (f" ({_one(_list(f.get('reasons'))[0][0], 160)})" if _list(f.get("reasons"))
+                     and isinstance(_list(f.get("reasons"))[0], list) else "") for f in fails[:8]]
+    else:
+        lines.append(f"no trial failed in the {_int(rec.get('settings'))} setting(s)")
+    for x in quantities:
+        state = ("grossly wrong (a fault)" if x.get("fault") else
+                 f"below the level in {_int(x.get('below'))} setting(s): reported, not a fault" if _int(x.get("below"))
+                 else f"above the level in {_int(x.get('above'))} setting(s) (wider than need be): reported, not a fault"
+                 if _int(x.get("above")) else "as it should be")
+        lines.append(f"{_one(x.get('says'), 300)} - {state}")
+    from . import trial_checks as _tc
+
+    for u in [u for u in _list(rec.get("undefined")) if isinstance(u, dict)][:8]:
+        lines.append(_one(_tc.said_undefined(u), 300) + ("" if u.get("all") else " (not a failed trial; the paper says so)"))
+    not_checked = [str(n) for n in _list(cal.get("not_checked"))]
+    if not cal.get("checked"):
+        lines.append("calibration not checked: " + _one("; ".join(not_checked), 400))
+    elif not_checked:
+        lines += [f"not checked: {_one(n, 200)}" for n in not_checked[:4]]
+    return {"action": str(rec.get("action") or ""), "left_out": left, "checked": bool(cal.get("checked")),
+            "faults": sum(1 for x in quantities if x.get("fault")), "lines": lines}
 
 
 def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
@@ -468,7 +517,28 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
+    pdf = _paper_pdf(q)
+    if pdf and not pdf["typeset"] and _paper_exists(q.root):
+        out.append(_problem("paper", "paper.pdf is not typeset (a browser drew it): " + _one(pdf["reason"], 200),
+                            "FI's PDF render", "not fixed", ".fi/paper_render.json"))
     return out
+
+
+def _paper_pdf(q: _Quest) -> dict[str, Any] | None:
+    """How ``paper.pdf`` was made (``.fi/paper_render.json``, written by the paper generator): typeset by LaTeX or
+    drawn by the browser, every character set in another form or font than the text's, and any no font here could
+    set. ``None`` when there is no record."""
+    try:
+        from generation.paper import read_render_record
+        rec = _dict(read_render_record(q.root))
+    except Exception:  # noqa: BLE001 — the report never fails over one record
+        return None
+    if not rec:
+        return None
+    return {"typeset": bool(rec.get("typeset")), "engine": str(rec.get("engine") or ""),
+            "reason": str(rec.get("reason") or ""), "pages": rec.get("pages"), "format": rec.get("format"),
+            "glyphs_replaced": [_dict(g) for g in _list(rec.get("glyphs_replaced"))],
+            "glyphs_not_set": [_dict(g) for g in _list(rec.get("glyphs_not_set"))]}
 
 
 def _citations(q: _Quest) -> dict[str, Any] | None:
@@ -914,6 +984,42 @@ def _left_out_of_paper(q: _Quest) -> list[dict[str, Any]]:
     return out
 
 
+def _paper_records(q: _Quest) -> dict[str, Any]:
+    """What FI recorded about the run that the paper itself does not carry (``core/paper_facts.py``): how the result was
+    reached (design revisions, runs), the run record (seed, measured run time, trial counts, a reduced size, the topic's
+    requirements not done, reviewer objections), the open points in the code, and what FI's check of the paper against these
+    records found the last time it ran. Each part is empty when its record says nothing."""
+    from . import code_review as _cr
+    from . import disclosure as _d
+    from . import paper_facts as _pf
+
+    root = q.root
+    engine = _dict(q.config.get("engine"))
+    topic = str(q.config.get("topic") or "")
+    out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "paper_check": {}}
+    # The study as the quest resolved it (clarify can decide a quest needs no simulation, or is a survey, when the YAML did
+    # not say so): the last design route records both. A quest with no such record falls back to the YAML.
+    resolved = next((_dict(e.get("facts")) for e in reversed(q.decisions("design")) if _dict(e.get("facts"))), {})
+    no_sim = bool(resolved.get("no_simulation", engine.get("no_simulation")))
+    survey = bool(resolved.get("survey_mode", engine.get("survey_mode")))
+    try:
+        out["how_reached"] = _d.paragraph(root, no_simulation=no_sim, survey=survey).replace(_d.LEAD + " ", "")
+        wall, least = _pf.measured_run_time(root, None)
+        out["run_record"] = _d.run_record(root, topic=topic, duration_s=wall).replace(_d._RECORD_LEAD + " ", "")
+        if wall is None and least is not None:
+            out["run_record"] += (f" FI did not record how long the whole experiment took; the trials alone took at least "
+                                  f"{_d._plain_seconds(least)}.")
+        out["code_findings"] = _cr.findings_block(root, root / "code").replace(
+            "**Open points in the code that produced these results.** ", "")
+        kept = _pf.kept_check(root)
+        out["paper_check"] = {"hits": [str(h) for h in _list(kept.get("hits"))],
+                              "unmet_items": [_dict(i) for i in _list(kept.get("unmet_items"))],
+                              "unfilled": [str(u) for u in _list(kept.get("unfilled"))]}
+    except Exception:  # noqa: BLE001 -- a record that cannot be read leaves its part out
+        pass
+    return out
+
+
 def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, Any]:
     """The report of one quest, from its records. Never raises for a missing or old-format record.
 
@@ -965,8 +1071,11 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
+        "trial_checks": _trial_checks_summary(q),
         "citations": _citations(q),
+        "paper_pdf": _paper_pdf(q),
         "left_out_of_paper": _left_out_of_paper(q),
+        "paper_records": _paper_records(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
                      "left_out": totals["left_out"],
@@ -1035,6 +1144,15 @@ def _cell(text: str) -> str:
     return text.replace("|", "/").replace("\n", " ")
 
 
+def _paper_pdf_line(pdf: dict[str, Any]) -> str:
+    pages = f", {pdf['pages']} pages" if pdf.get("pages") else ""
+    if not pdf["typeset"]:
+        return f"paper.pdf is **not typeset**: a browser drew it{pages}. Why: {_one(pdf['reason'], 300)}"
+    changed = len(pdf["glyphs_replaced"])
+    return (f"paper.pdf is typeset by {pdf['engine'] or 'LaTeX'}{pages}."
+            + (f" {changed} character(s) are printed in another form or font than the text's:" if changed else ""))
+
+
 def _citations_line(c: dict[str, Any]) -> str:
     n = c.get("counts") or {}
     who = (f" Read by {c.get('reader')}" + (", the model that wrote the paper." if c.get("reader_is_writer") else ".")
@@ -1044,6 +1162,40 @@ def _citations_line(c: dict[str, Any]) -> str:
             f"source, {n.get('reworded', 0)} reworded, {n.get('citation_dropped', 0)} citation dropped, "
             f"{n.get('sentence_dropped', 0)} sentence dropped)"
             + (f", {n.get('unchecked')} could not be checked" if n.get("unchecked") else "") + "." + who)
+
+
+def _paper_record_lines(records: dict[str, Any]) -> list[str]:
+    """The section of what FI recorded about the run that the paper does not carry, and what its check of the paper found."""
+    labels = (("how_reached", "How this result was reached"), ("run_record", "What FI recorded about the run"),
+              ("code_findings", "Open points in the code that produced the results"))
+    parts = [(title, records.get(key)) for key, title in labels if records.get(key)]
+    check = records.get("paper_check") or {}
+    unmet = [i for i in check.get("unmet_items") or [] if isinstance(i, dict)]
+    hits = [h for h in check.get("hits") or [] if h]
+    unfilled = [u for u in check.get("unfilled") or [] if u]
+    if not parts and not unmet and not hits and not unfilled:
+        return []
+    lines = ["", "## What FI recorded that the paper does not carry", "",
+             "These are FI's records of the run. The paper's seed, measured run time, time limit, trial counts and the "
+             "parts the study did not do are filled in by FI from these records; the full records are kept here, not "
+             "pasted into the paper.", ""]
+    for title, text in parts:
+        lines += [f"### {title}", "", str(text).strip(), ""]
+    if unmet or hits:
+        lines += ["### Where the paper still disagrees with these records", "",
+                  "FI sent the paper back to be rewritten for these and the review rounds ended before they were settled:", ""]
+        lines += [f"- Not in the paper's Limitations: {_cell(str(i.get('text') or i.get('name') or ''))} "
+                  f"(record `{_cell(str(i.get('id') or i.get('kind') or ''))}`)" for i in unmet]
+        ids = {str(i.get("id")) for i in unmet}
+        lines += [f"- {_cell(_one(h, 300))}" for h in hits if not any(i and i in h for i in ids)]
+        lines.append("")
+    if unfilled:
+        lines += ["### Values FI could not fill in", "",
+                  "The paper asks for these values, but FI has no record of them, so the paper reads \"not recorded\" there:",
+                  ""]
+        lines += [f"- `{_cell(u)}`" for u in unfilled]
+        lines.append("")
+    return lines
 
 
 def render(report: dict[str, Any]) -> str:
@@ -1094,6 +1246,15 @@ def render(report: dict[str, Any]) -> str:
     pilot = report.get("pilot")
     if pilot:
         lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
+    trials = report.get("trial_checks")
+    if trials:
+        lines += ["", "## FI's checks of the trials", ""]
+        if trials.get("not_run"):
+            lines += [f"{line}." for line in trials["lines"]]
+        else:
+            lines += ["FI counted the failed trials of each setting and measured the intervals and standard errors the "
+                      "simulation reports against the true values it was given:"]
+            lines += [f"- {line}" for line in trials["lines"]]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")
     if f:
@@ -1112,10 +1273,18 @@ def render(report: dict[str, Any]) -> str:
             what = (f"backed by: \"{_one(r.get('passage'), 200)}\"" if r["status"] == "supported"
                     else f"{str(r['status']).replace('_', ' ')} ({_one(r.get('problem'), 160)})")
             lines.append(f"- [{r['label']}] {_one(r.get('sentence'), 90)} -- {what}")
+    pdf = report.get("paper_pdf")
+    if pdf:
+        lines += ["", "## The PDF", "", _paper_pdf_line(pdf)]
+        lines += [f"- `{_cell(str(g.get('glyph', '')))}` ({g.get('code_point', '')}) printed as "
+                  f"{_cell(str(g.get('became', '')))}, {g.get('count', 1)} time(s)" for g in pdf["glyphs_replaced"]]
+        lines += [f"- `{_cell(str(g.get('glyph', '')))}` ({g.get('code_point', '')}): no font here has it"
+                  for g in pdf["glyphs_not_set"]]
     if report.get("left_out_of_paper"):
         lines += ["", "## Left out of the paper", "",
-                  "These quantities are not in the paper's results, and the paper says so:", ""]
+                  "These quantities are not in the paper's results; FI checks that the paper says so:", ""]
         lines += [f"- `{_cell(x['quantity'])}`: {_cell(x['why'])}" for x in report["left_out_of_paper"]]
+    lines += _paper_record_lines(report.get("paper_records") or {})
     lines += ["", "## What to try", ""]
     if report["suggestions"]:
         lines += [f"- {s['text']} (from {s['source']})" for s in report["suggestions"]]

@@ -56,13 +56,18 @@
     {
       "id": "paper_format",
       "label": "Paper format / venue",
-      "prompt": "Picks the LaTeX template + writing persona. 'generic' is safe for scientific topics; 'essay' for non-computational humanities/social-science.",
+      "prompt": "Picks the LaTeX template + writing persona. 'article' is safe for scientific topics; 'essay' for non-computational humanities/social-science.",
       "kind": "single",
       "choices": [
         {
           "value": "generic",
           "label": "generic — scientific paper, IMRAD",
-          "description": "Default for scientific topics. Surveys, comparative reviews, theoretical derivations, brief preprints."
+          "description": "LaTeX's default article layout; the same IMRAD paper as article."
+        },
+        {
+          "value": "article",
+          "label": "article — plain one-column paper, no venue style",
+          "description": "Default for scientific topics: a neutral one-column layout with no conference name or logo. Surveys, comparative reviews, theoretical derivations, brief preprints."
         },
         {
           "value": "neurips",
@@ -106,7 +111,7 @@
         }
       ],
       "placeholder": "",
-      "default": "generic",
+      "default": "article",
       "mid_quest_editable": true,
       "frontends": [
         "cli",
@@ -1134,7 +1139,12 @@
     {
       "value": "generic",
       "label": "generic — scientific paper, IMRAD",
-      "description": "Default for scientific topics. Surveys, comparative reviews, theoretical derivations, brief preprints."
+      "description": "LaTeX's default article layout; the same IMRAD paper as article."
+    },
+    {
+      "value": "article",
+      "label": "article — plain one-column paper, no venue style",
+      "description": "Default for scientific topics: a neutral one-column layout with no conference name or logo. Surveys, comparative reviews, theoretical derivations, brief preprints."
     },
     {
       "value": "neurips",

@@ -2701,7 +2701,40 @@ async def _finish_outputs(
     summary_path = art.quest_root / "frontier_insight_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"[FI] summary -> {summary_path}")
+    _log_paper_render(cfg, art)
+    # The engine wrote QUALITY.md as its run ended, before paper.pdf and its render
+    # record existed: written again now, its PDF section is there and current.
+    from core import quality_report
+
+    await asyncio.to_thread(quality_report.write_quietly, art.quest_root)
     return summary
+
+
+def _log_paper_render(cfg: Config, art: QuestArtifacts) -> None:
+    """One plain line in the quest's run.log on how paper.pdf was made (typeset, or made
+    by the browser and why, and its pages), from ``.fi/paper_render.json``. The paper
+    generator's own log lines do not reach run.log, and a machine whose files cannot be
+    copied out has only run.log to say it."""
+    if "paper_pdf" not in cfg.output.kinds:
+        return
+    try:
+        from core.engine import _close_quest_logger, _quest_logger
+        from generation.paper import read_render_record, render_line
+
+        quest_root = Path(art.quest_root)
+        if not (quest_root / "paper.pdf").is_file() and read_render_record(quest_root) is None:
+            line = "paper.pdf: not made (no PDF and no record of a render)"
+        else:
+            line = render_line(read_render_record(quest_root))
+        was_open = bool(logging.getLogger(f"frontier_insight.{art.quest_id}").handlers)
+        logger = _quest_logger(art.quest_id, quest_root / ".fi")
+        try:
+            logger.info(line)
+        finally:
+            if not was_open:
+                _close_quest_logger(art.quest_id)
+    except Exception as exc:  # noqa: BLE001 — a log line never changes the quest
+        print(f"[FI] could not write the paper line to run.log: {exc!r}", file=sys.stderr)
 
 
 # `_VALID_PAPER_FORMATS` is derived from `core.config.PaperFormat` in `_import_runtime` (so adding a new template
@@ -2711,8 +2744,8 @@ async def _finish_outputs(
 
 def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
     """Honor the `paper_venue` clarify slot: if the user's YAML left
-    `output.paper_format` at the default `"generic"` AND clarify picked
-    a specific venue, apply the venue choice. We DON'T override an
+    `output.paper_format` at its default (`"article"`, read off the config
+    model) AND clarify picked a different template, apply the venue choice. We DON'T override an
     explicit YAML setting (the user's hand-written value wins) and
     we silently ignore unknown venue strings to avoid pydantic
     rejecting them on a Config validator."""
@@ -2721,14 +2754,15 @@ def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
     )
     if not isinstance(venue, str) or venue not in _VALID_PAPER_FORMATS:
         return
-    if cfg.output.paper_format != "generic":
+    default = type(cfg.output).model_fields["paper_format"].default
+    if cfg.output.paper_format != default:
         # User set an explicit format in YAML; honor that.
         return
-    if venue == "generic":
+    if venue == default:
         return  # nothing to do
     print(
         f"[FI] paper_venue from clarify -> overriding paper_format: "
-        f"generic -> {venue}",
+        f"{default} -> {venue}",
     )
     cfg.output.paper_format = venue  # type: ignore[assignment]
 
@@ -4431,7 +4465,7 @@ async def _run_new(
     try:
         preflight_cache = await preflight_clarify(
             topic=str(partial.get("topic", "")),
-            paper_format=str(derived.get("paper_format") or "generic"),
+            paper_format=str(derived.get("paper_format") or "article"),
             provider_name=str(partial.get("provider") or "openai"),
             provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
         )
@@ -4568,7 +4602,7 @@ async def _run_new(
                     try:
                         preflight_cache = await preflight_clarify(
                             topic=str(partial.get("topic", "")),
-                            paper_format=str(derived.get("paper_format") or "generic"),
+                            paper_format=str(derived.get("paper_format") or "article"),
                             provider_name=str(partial.get("provider") or "openai"),
                             provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
                         )

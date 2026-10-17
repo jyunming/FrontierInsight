@@ -188,7 +188,7 @@ async def test_the_analysis_is_told_when_the_target_precision_was_not_reached(
     analysis = next(p for p in seen if p != "ProtocolRepair")
     assert '"ci_method": "wilson_pooled_counts"' in analysis and '"ci_half_width": 0.03' in analysis
     assert '"target_half_width": 0.01' in analysis and '"precision_reached": false' in analysis
-    assert "was not reached for 1 of the probabilities: p (±0.03" in analysis
+    assert "was not reached for 1 of the quantities it is on: p (±0.03" in analysis
     text = plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
     assert "needs about 9604 trials" in text, "the plan said so before any compute was spent"
 

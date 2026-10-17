@@ -42,6 +42,7 @@ TEMPLATE_DIR = REPO_ROOT / "templates" / "paper"
 # enumeration — if a new format lands, it gets added here AND has to
 # pass all three invariants below.
 EXPECTED_FORMATS = [
+    "article",
     "essay",
     "generic",
     "iclr",

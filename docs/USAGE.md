@@ -39,7 +39,7 @@ In plain words a quest goes through these steps (the quest map in the Web page a
 5. **Write the code** — writes the simulation and its analysis as two scripts (one script with `execution.split_analysis: false`), and marks in the simulation where each equation of the plan's model is computed (`# E1`). By default the code is laid out as a small research tool: the model's equations in a package of their own (`code/<package>/`), unit tests from the plan's checks (`code/tests/test_oracles.py`) and `code/METHODS.md` saying which function computes each equation. The plan says what that costs (*How the code will be laid out*); over the limit the quest keeps two scripts and says so.
 6. **Run** — first runs the checks with a known answer: FI runs the simulation on each check's small case itself and compares the result with the plan's expected value (a failing check is sent back for repair, and the quest stops before the main run if it still fails; see [rigor.md](rigor.md)); then runs them; a crash goes back to a fix-and-run loop first. When one of the plan's checks of correctness is not met, FI then changes the simulation one small step at a time (at most `engine.improve_rounds`, 3 by default) and keeps a change only when it makes a check better and none worse; a kept version is run once more in full, and that run is the one analysed. Every round is in `code/CHANGELOG.md`. A topic that needs real data collects and loads it here instead. For a search for the best design, FI itself runs the search: it tries one design after another (the baseline, the design to beat, first, then the coarse scan when the plan has one), calls the simulation once per design, stays within the plan's evaluation budget and the run's time limit, and never picks a design that breaks a limit. It writes every evaluation to `raw/optimisation_ledger.jsonl` and the result to `results/best_design.json`: the best design, the baseline scored the same way, how much better it is, the method, and how many evaluations were used. The methods are FI's own (`bounded_local`, `global_then_local`, `exhaustive`); a `scipy:` or `optuna:` method named in the plan is used when the quest's environment already has that package, and otherwise FI says so and uses its own. The best design is found at the search's own numerical settings; then FI checks it: it evaluates the best designs and the baseline (the design to beat) again at the finer settings the plan names (half, then a quarter, of the search's value when it names none), nudges the best design, and compares the designs the separate searches from different starting points ended at. `run.log` gives one plain verdict (for example "the improvement over the baseline holds at finer numerical settings", or "the improvement over the baseline disappears at finer settings") and a line per check; the full record is `needs/OPTIMUM_CHECK.json`. A design counts as better when it beats the baseline by more than the plan's threshold, or, when the plan gives none, by more than the numerical error of the two designs. A check that fails does not stop the quest: it is reported as the result and keeps the evidence level lower (see [rigor.md](rigor.md)). The check's evaluations come on top of the search's budget; `plan.md` shows how many at most.
 7. **Analyse and check** — computes the findings and compares them with the literature, then checks whether the evidence is enough to write.
-8. **Write the paper** — the paper, then a check that each claim is backed. FI itself (not the model) adds one paragraph to the methods (before the results when the paper has no methods section), *How this result was reached*: how many times the design was revised after the experiment had first been run and why, how many times the whole experiment was run and how many of those runs were discarded; when the design was revised, numbers from before the last revision are called exploratory.
+8. **Write the paper** — the paper, then a check that each claim is backed. The writer does not type the facts of the run: it writes the sentence and leaves a slot such as `{{seed}}` or `{{run_time}}`, and FI fills it from its own records (the seed the code actually used, how long the experiment took, against the topic's limit if it has one, how many trials ran per setting and how many failed). Each thing the study did not do (a part of the topic, a quantity left out, an equation not tested, an open problem in the code that can change a result, a second version of a function that still disagrees) is a slot FI fills with one plain sentence, and it has to be in the Limitations section. A paper that leaves out a slot, puts one in the wrong place, or types a run time or a seed that disagrees with the records is sent back to be written again. A value FI has no record of reads "not recorded" and is listed in `QUALITY.md`. How the design was revised and how many runs were made, FI's record of the run and the open points in the code are in `QUALITY.md`, not in the paper.
 9. **Review** — a reviewer reads it; the quest is done, or goes back.
 
 It can go back at several points, each bounded: a crashed script is fixed and run again; a finding that needs a new experiment returns to the design, and one that needs more reading goes back to the literature first; the evidence check can send it back to the literature once, or to the design once when the run produced no results (with `engine.phased: true`, on by default for research, it also sends an accepted result back to the run once, to confirm the frozen design on held-back data or new seeds); a review that asks for changes returns to writing (the text was the problem), to running (a number was the problem) or to the design. Optional steps are left out above: the setup questions about your topic before the ideas (asked when someone can answer while the quest runs, otherwise answered by the agent; `pauses.clarify: off` skips them), and for a topic with no experiment, data collection instead of running code. When you refine a finished quest, a note about layout only redraws the figures, a missing number extends the existing script, and only a design problem redoes the experiment. The model that writes the paper decides which it is, so read the log line that says which one it picked.
@@ -436,6 +436,7 @@ engine:
   improve_rounds: 3                 # after a run, when a check of correctness in the plan is not met: how many times (in the whole quest; a rerun --from the run or earlier starts again) FI may change the simulation, one small change at a time, keeping a change only when no check got worse by more than its own tolerance; a kept version runs once more in full. 0 = off. Under rigor_profile: research a change that made a check worse stops the quest for you
   pilot_run: false                  # OPT-IN. Run the experiment SMALL first (FI_PILOT=1, which the implement prompt tells the script to honour), then full scale. execute_reflect already repairs a script that CRASHES; the pilot catches one that runs fine and answers the wrong question — a sweep over the wrong parameter range, a resolution too coarse to show the effect — which otherwise costs the full timeout to discover. The pilot's numbers are DISCARDED: it is a smoke test of the design, not a measurement, and it never fails a quest (a bad pilot warns and the full run proceeds). Off by default: honouring FI_PILOT is a prompt instruction the engine cannot enforce, and a script that ignores it runs full-scale under a fifth of the timeout — timing out and warning on every quest. Enable it once your scripts comply.
   pilot_timeout_frac: 0.2           # Pilot timeout as a fraction of execution.timeout_s, floored at 30s. A pilot that takes as long as the real run buys nothing.
+  run_manifest_check: warn          # after the run, FI compares its own record of the trials with the plan: warn records what differs (run.log, QUALITY.md) and goes on; block sends the code back and stops the quest if it still differs (set by rigor_profile: research); off does not look
   cross_check_per_finding_k: 3      # per-finding lit-check hits, 0 to disable
   enable_analyze_reroute: true      # analyze can request re_experiment / broaden_lit
   review_panel:                     # empty = single reviewer
@@ -452,7 +453,7 @@ engine:
 
 execution:
   sandbox: venv                     # venv (default) | docker
-  timeout_s: 3600
+  timeout_s: 3600                   # the hard stop of one run. Before the full run FI times a few trials and sizes the run to the topic's own time limit when the topic states one ("must finish within 60 s"), else to this; a run that would not fit gets fewer runs per setting (never fewer settings), said in the paper with the precision it gives
   clean_check_timeout_s: 900        # the try of code/ in a clean environment before the paper is written may take at most this long (never more than timeout_s); a run still going is stopped and reported as not finished, not as a failure
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest
@@ -520,7 +521,7 @@ knowledge:
 
 output:
   kinds: [paper_md, paper_pdf]
-  paper_format: generic             # scientific: generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
+  paper_format: article             # scientific: article (default) | generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
   output_dir: ./outputs
   save_model_calls: false           # keep every prompt and answer, whole, in .fi/io/ (one file per call); see docs/trace.md
   save_thinking: true               # keep the reasoning summary the provider returns, when its connection gives one, in .fi/thinking.jsonl (for reading; it is not the model's hidden or complete chain of thought, and never evidence); false keeps none (set it for a quest that handles sensitive data), and on the VS Code connection stops asking Copilot for the model's reasoning (asked by default: Copilot's undocumented `_enableThinking` option for Claude, whose Opus returns a summary, and `includeEncryptedThinking` for a GPT model's reasoning summary). `--why <quest> <step>` says whether the file holds that step's reasoning and how long it is. It can quote your data and prompts: only credentials and your home folder are removed, so check it before sharing the quest folder
@@ -594,13 +595,28 @@ style. Set `html_pdf_fallback: false` to force the strict LaTeX-only
 path — then a missing engine skips the PDF (or, with `require_pdf:
 true`, aborts) exactly as before.
 
+### Symbols, accents and other scripts
+
+When XeLaTeX is installed (MiKTeX and TeX Live ship it), FI compiles
+every paper with it, so each character in `paper.md` prints as itself:
+a character the text font lacks (Cyrillic, ⊤, ⩽, ★, a box-drawing line)
+is set in another installed font that has it, and code is set in a
+monospace font that has all of its characters. Without XeLaTeX,
+pdflatex sets the characters LaTeX has an exact form for (⅓ as a
+fraction). FI never prints a `?` or drops a character: a character
+no installed font has, or a right-to-left or Indic script, makes the
+paper through the browser fallback below, and its first page says
+"Not typeset". `.fi/paper_render.json` and `QUALITY.md` say whether
+the paper is typeset and list every character set in another form or
+font.
+
 ### Chinese, Japanese and Korean text
 
 pdflatex stops at the first Chinese, Japanese or Korean character,
-whether it is in the title, the body or the author line. When
-`paper.md` or the author line has such text, FI compiles the paper
-with **XeLaTeX** and the `xeCJK` package in an installed CJK font. The
-template and its layout stay the same.
+whether it is in the title, the body or the author line. Such text
+also needs an installed CJK font: FI compiles the paper with
+**XeLaTeX** and the `xeCJK` package in that font. The template and its
+layout stay the same.
 
 - **Font:** the first one installed of Noto Sans CJK / Source Han Sans,
   then the system font for the language. That is Microsoft JhengHei
@@ -791,7 +807,8 @@ Requires the `docker` Python package (`pip install docker`) and a running Docker
 
 | Format | Status |
 |---|---|
-| `generic` | ✅ Fully styled — IMRAD with default LaTeX article geometry. The default; pick this when you don't have a target venue. |
+| `article` | ✅ Fully styled — FI's plain one-column article: Latin Modern, no venue name, no logo. The default; pick this when you don't have a target venue. |
+| `generic` | ✅ Fully styled — IMRAD with default LaTeX article geometry. |
 | `neurips` | ✅ Fully styled — uses the NeurIPS 2024 style sheet. |
 | `iclr`, `ieee_access`, `nature_mi` | ⚠️ Minimal stubs — they compile, but the style sheets are placeholders. Treat as starting points; copy the real venue's `.sty` file into `templates/paper/<format>/` to customize. |
 
@@ -807,7 +824,7 @@ Requires the `docker` Python package (`pip install docker`) and a running Docker
 The `clarify` node's `paper_venue` slot accepts both buckets. For
 non-simulatable topics (set via the new `simulatability` clarify
 slot or legacy `empirical_vs_theoretical: empirical`), the agent
-will default to `essay` instead of `generic`. The write-persona
+will default to `essay` instead of `article`. The write-persona
 swap is automatic — set `paper_format: policy_brief` in YAML and
 the `write` node loads the policy-analyst voice.
 

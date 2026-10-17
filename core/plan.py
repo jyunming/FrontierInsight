@@ -394,6 +394,15 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         # Last, so a cut of the protocol (the claim check shows its first few thousand characters) keeps the grid and
         # the checks, which a long list of equations would push out.
         out["model"] = model
+    if isinstance(out.get("metrics"), list) and any(isinstance(m, dict) and m.get("reference") is not None
+                                                    for m in out["metrics"]):
+        # A metric's reference value is computed from the grid, the fixed settings and the thresholds, and must agree
+        # with the plan's own known-answer checks: all in reach only now (core/reference_values.py).
+        from . import reference_values
+
+        found = reference_values.problems(out)
+        if found:
+            return None, found[0]
     return out, None
 
 
@@ -567,16 +576,22 @@ _PROTOCOL_KEY = re.compile(r"`protocol\.([A-Za-z_]+)")
 
 #: The parts of the protocol that change what is measured: when one cannot be read, FI asks the plan's model to write it
 #: (``Engine._ask_plan_for_the_parts``), and the note says so in these words.
-ASKED_PARTS = ("grid", "metrics", "runs_per_setting", "precision")
+ASKED_PARTS = ("grid", "in_each_run", "metrics", "runs_per_setting", "precision")
 ASK_MARK = "FI asks the plan's model to write"
 PART_RULES = {
     "grid": "`protocol.grid`: the settings the experiment varies, as a mapping from each setting's name to the list of "
             "values it takes. Each list is non-empty and holds only numbers, or only names (text), never a mix: numbers "
             "such as [0.1, 0.2, 0.4], or names such as [euler, rk4]. Take the settings to vary from `variables.independent`, "
             "the method and the topic.",
+    "in_each_run": "`protocol.in_each_run`: what every run goes through together, all its values in one run on the same "
+                   "random numbers (one fit across all of them, every method applied to the same simulated data), as a "
+                   "mapping from each such factor's name to the list of ALL its values: at least two, each listed once, "
+                   "only numbers or only names. A factor listed here is not also a setting of `protocol.grid` (FI takes it "
+                   "out of the grid: a grid setting is run on its own, once per value).",
     "metrics": "`protocol.metrics`: a list; each entry has an `id` (the name the script gives the number), a `kind` "
-               "(`proportion` or `mean`), an `estimand` (text: what the number estimates) and a `unit` (text: what one "
-               "independent observation is).",
+               "(`proportion` or `mean`), an `estimand` (text: what the number estimates), a `unit` (text: what one "
+               "independent observation is) and, optionally, a `label` (the reader's name for the number: words, its "
+               "symbol in $...$ and its unit, e.g. `Activation energy $E_a$ (kJ/mol)`).",
     "runs_per_setting": "`protocol.runs_per_setting`: a whole number of at least 1.",
     "precision": "`protocol.precision`: a mapping with `target_half_width`, a number between 0 and 1, and optionally "
                  "`metric` and `reason` (text).",
@@ -588,10 +603,62 @@ PART_RULES = {
                    "line), `source` (the [n] of a source listed in the plan), `quote` (the passage of that source that states "
                    "the definition, word for word) and `differs` (empty, or the id of a `simplifications` entry when you "
                    "define it differently; then leave `quote` empty if you have no source for your own definition).",
+    # A known-answer check on a number the plan declares as an average over trials (core/mc_error.py): asked once.
+    "per_trial": "`protocol.oracles`, for each check named below and nothing else about it: does it hold in every "
+                 "single trial, or only on average over trials? Write each as `{\"name\": \"<the check's name>\", "
+                 "\"per_trial\": true}` when it must hold in every single trial, or `\"per_trial\": false` when it holds "
+                 "only on average over trials (a false discovery rate at most q, an error rate at most alpha). FI takes "
+                 "only `per_trial` from your answer.",
     "steps": "`protocol.model.steps`: a list of step cards; each has an `id` (S1, S2, ...), `name`, `does`, `inputs` (a "
              "mapping of each input's name to its unit), `output`, and optionally `uses` (equation ids of the model), "
              "`source`, `example` and `relations`. Write the model's other keys again unchanged.",
 }
+
+
+def plan_labels(protocol: Any) -> dict[str, str]:
+    """The reader's name for each quantity the plan names, by the name the code uses for it: the ``label`` of a
+    ``protocol.metrics`` entry (an output) and ``protocol.labels`` (``{name: label}``, a setting of the grid or any other
+    input). A label is words, the symbol in ``$...$`` and the unit (``Activation energy $E_a$ (kJ/mol)``). Both are
+    optional, nothing gates on them, and an old plan without them gives ``{}``; an entry that is not text is skipped."""
+    out: dict[str, str] = {}
+    if not isinstance(protocol, dict):
+        return out
+    labels = protocol.get("labels")
+    if isinstance(labels, dict):
+        for name, label in labels.items():
+            if isinstance(label, str) and label.strip() and str(name).strip():
+                out[str(name).strip()] = " ".join(label.split())
+    metrics = protocol.get("metrics")
+    for metric in metrics if isinstance(metrics, list) else [metrics] if isinstance(metrics, dict) else []:
+        if not isinstance(metric, dict):
+            continue
+        name, label = str(metric.get("id") or "").strip(), metric.get("label")
+        if name and isinstance(label, str) and label.strip():
+            out.setdefault(name, " ".join(label.split()))
+    return out
+
+
+def plan_names(protocol: Any) -> set[str]:
+    """Every name the plan gives a quantity the code handles: the grid's and ``in_each_run``'s settings, the metrics'
+    ids, the names ``protocol.labels`` labels and the inputs of the model's step cards. A figure axis labelled with one
+    of these shows the code's name, not the reader's."""
+    names: set[str] = set(plan_labels(protocol))
+    if not isinstance(protocol, dict):
+        return names
+    for key in ("grid", "in_each_run"):
+        if isinstance(protocol.get(key), dict):
+            names |= {str(k).strip() for k in protocol[key] if str(k).strip()}
+    metrics = protocol.get("metrics")
+    for metric in metrics if isinstance(metrics, list) else []:
+        if isinstance(metric, dict) and str(metric.get("id") or "").strip():
+            names.add(str(metric["id"]).strip())
+    model = protocol.get("model")
+    steps = model.get("steps") if isinstance(model, dict) else None
+    for step in steps if isinstance(steps, list) else []:
+        inputs = step.get("inputs") if isinstance(step, dict) else None
+        if isinstance(inputs, dict):
+            names |= {str(k).strip() for k in inputs if str(k).strip()}
+    return names
 
 
 def part_request(topic: str, unread: dict[str, str]) -> str:
@@ -601,8 +668,13 @@ def part_request(topic: str, unread: dict[str, str]) -> str:
              for part, why in unread.items() if part in PART_RULES]
     lead = ("Parts of this plan's protocol could not be read, so the experiment would not run what the study needs."
             if any(part in ASKED_PARTS for part in unread) else
+            "Some known-answer checks of this plan do not say whether they hold in every single trial or only on average "
+            "over trials." if set(unread) == {"per_trial"} else
             "Parts of this plan's protocol are missing or incomplete, so the plan does not say what it leaves out or how its "
             "metrics are defined.")
+    if "per_trial" in unread and set(unread) != {"per_trial"}:
+        lead += (" Some known-answer checks also do not say whether they hold in every single trial or only on average "
+                 "over trials.")
     return (
         f"{lead} Write "
         f"each of them again in the design block, from the plan and the topic: “{' '.join(str(topic or '').split())[:600]}”.\n"
@@ -632,6 +704,14 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
         if key not in out:
             return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
         if key == "metrics":
+            # A reference value that cannot be used is left out, not the metric it belongs to.
+            from . import reference_values
+
+            without, note = reference_values.without_bad_reference(out, why)
+            if without is not None:
+                out = without
+                notes.append(note)
+                continue
             # One metric the check refuses is left out, not the list it is in.
             from . import metric_spec
 

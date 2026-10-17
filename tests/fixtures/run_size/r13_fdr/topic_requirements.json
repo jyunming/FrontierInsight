@@ -1,0 +1,14 @@
+{
+ "constraints": [
+  "Use one-sided z-tests in which each real effect shifts the test statistic by 2.5.",
+  "Nominal level is 5 percent.",
+  "When pi1 = 0 there are no real effects, so power is undefined; report only the chance of any false discovery.",
+  "One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).",
+  "Two or three figures that answer the question directly, each with the reference or theory value drawn.",
+  "A short paper of at most 4 pages.",
+  "Cite only sources actually found and read; if a reference cannot be confirmed, say so rather than citing it.",
+  "CPU only; under 60 seconds of runtime.",
+  "Fixed random seeds where the run is random, stated in the paper.",
+  "Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code."
+ ]
+}

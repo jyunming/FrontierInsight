@@ -19,9 +19,23 @@ FIXTURES = Path(__file__).parent / "fixtures" / "shown_fault_names"
 
 
 def _load(name: str, tmp_path: Path) -> tuple[Path, dict, object]:
+    """The fixture's record, with each issue its test showed recorded as shown by an assertion about values (what FI
+    records now; the fixtures predate ``failure_kind``, and an issue without it counts as not shown)."""
     shutil.copytree(FIXTURES / name, tmp_path, dirs_exist_ok=True)
+    record = code_review.load(tmp_path)
+    for issue in (record.get("issues") or {}).values():
+        if issue.get("demonstrated") is True:
+            issue["failure_kind"] = code_findings.ASSERTION
+    code_review.save(tmp_path, record)
     return (tmp_path, code_review.load(tmp_path),
             json.loads((tmp_path / "result_json.json").read_text(encoding="utf-8")))
+
+
+def test_an_issue_recorded_before_fi_kept_how_its_test_failed_is_not_shown(tmp_path: Path) -> None:
+    shutil.copytree(FIXTURES / "euv_r7", tmp_path, dirs_exist_ok=True)
+    record = code_review.load(tmp_path)
+    assert record["issues"]["F-bed59bff"]["demonstrated"] is True
+    assert not code_findings.shown_open(record)
 
 
 def test_r8_s_names_are_found_in_the_results(tmp_path: Path) -> None:

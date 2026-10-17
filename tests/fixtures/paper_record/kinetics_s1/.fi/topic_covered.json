@@ -1,0 +1,48 @@
+{
+  "ledger_left": [],
+  "unsourced_definitions": [
+    "Ea_mean",
+    "Ea_sd",
+    "corr_Ea_lnA",
+    "coverage_Ea",
+    "coverage_lnA",
+    "lnA_mean"
+  ],
+  "judge_calls": 2,
+  "judged": {
+    "e7b0496b6a793bd7c0ef": {
+      "F1": "missing",
+      "F2": "covered",
+      "F3": "covered",
+      "F4": "missing",
+      "Q2": "covered",
+      "Q3": "covered",
+      "Q4": "covered",
+      "Q5": "covered",
+      "Q7": "covered"
+    },
+    "29ae7661149833afa16d": {
+      "F2": "covered",
+      "F3": "covered",
+      "F4": "covered",
+      "Q2": "covered",
+      "Q3": "covered",
+      "Q4": "covered",
+      "Q5": "covered",
+      "Q7": "covered"
+    }
+  },
+  "ever_missing": [
+    "temperature",
+    "sampling times"
+  ],
+  "mapped": {
+    "bias": "Ea_mean"
+  },
+  "overruled": [],
+  "plan_done": true,
+  "left": [],
+  "unjudged": [],
+  "asked": 1,
+  "checked_at_design": true
+}

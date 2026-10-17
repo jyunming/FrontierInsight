@@ -107,7 +107,35 @@ class ResultChecksMixin:
             found.extend(self._degenerate_findings(state, result_json, cells))
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
             self._log.warning("[execute] could not check the run's results for empty figures and constants (%r)", exc)  # type: ignore[attr-defined]
+        try:
+            found.extend(self._coverage_recount_findings(state, result_json))
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[execute] could not recount the coverages the analysis reports (%r)", exc)  # type: ignore[attr-defined]
         return found
+
+    def _coverage_recount_findings(self, state: Any, result_json: Any) -> list[Found]:
+        """A coverage of a declared known value that the analysis reports and FI, counting the same trials against the
+        plan's true value, does not get (:func:`core.trial_checks.reported_coverage_mismatches`): sent back to the analysis."""
+        from . import trial_checks as _trial_checks
+
+        protocol = self._protocol_block(state)  # type: ignore[attr-defined]
+        cells = _trial_checks.read_cells(self.quest_root)  # type: ignore[attr-defined]
+        wrong = _trial_checks.reported_coverage_mismatches(
+            cells, protocol, result_json, _trial_checks.read_thresholds(self.quest_root) or None)  # type: ignore[attr-defined]
+        if not wrong:
+            return []
+        shown = "; ".join(f"`{w['id']}` at {w['where']}: reported {w['reported']:.4g}, FI counts {w['fi']:.4g} of "
+                          f"{w['n']} trials" for w in wrong[:4])
+        directive = ("FI counted, from the trials themselves, how often each trial's interval covers the true value the plan "
+                     f"declares, and the analysis reports other coverages: {shown}. Compute each coverage as the share of "
+                     "the trials whose interval (the two ends run_trial returns, or the estimate plus and minus the critical "
+                     "value of the declared level times its standard error) contains the plan's true value, and change "
+                     "nothing else.")
+        note = f"the coverage the analysis reports is not FI's count of the same trials ({shown})"
+        say = (f"The analysis reported coverages FI's own count of the trials does not give ({shown}); those numbers are "
+               "left out: do not report them.")
+        ids = sorted({w["id"] for w in wrong})
+        return [Found("coverage_recount", ANALYSIS, directive, note, say, keys=ids, quantity=ids[0])]
 
     def _saved_figures(self) -> list[str]:
         from . import engine as _e
@@ -232,6 +260,10 @@ class ResultChecksMixin:
             if not others:
                 targets += [folder / f"{stem}.json", self.fi_dir / "figure_records" / f"{stem}.json",  # type: ignore[attr-defined]
                             self.fi_dir / "figure_records" / f"{stem}.seed0.json"]  # type: ignore[attr-defined]
+                # Its paper copy goes too: paper.pdf would otherwise show the figure through it.
+                from .plot_style import remove_paper_copies
+
+                remove_paper_copies(folder, name)
             for target in targets:
                 try:
                     target.unlink(missing_ok=True)

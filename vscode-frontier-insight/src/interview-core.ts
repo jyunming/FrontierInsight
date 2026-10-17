@@ -15,6 +15,7 @@ import * as path from "path";
  * agents/clarify.md — both pin the same Literal. */
 export type PaperFormat =
     | "generic"
+    | "article"
     | "neurips"
     | "iclr"
     | "ieee_access"

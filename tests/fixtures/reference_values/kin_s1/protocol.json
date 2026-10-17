@@ -1,0 +1,529 @@
+{
+ "grid": {
+  "sigma": [
+   0.005,
+   0.01,
+   0.02,
+   0.05,
+   0.1
+  ],
+  "n_points": [
+   5,
+   8,
+   12,
+   20,
+   40
+  ],
+  "temperature_K": [
+   320.0,
+   310.49,
+   301.53,
+   293.07,
+   285.08
+  ],
+  "t_max_over_k": [
+   3
+  ]
+ },
+ "runs_per_setting": 400,
+ "min_runs_per_setting": 200,
+ "thresholds": {
+  "confidence_level": 0.95,
+  "reference_coverage": 0.95,
+  "Ea_true_J_per_mol": 50000,
+  "lnA_true": 16,
+  "sampling_t_max_in_units_of_1_over_k": 3
+ },
+ "seed_policy": "One independent stream per setting and run, from numpy SeedSequence([20240601, setting_index, run_index]); the base seed is stated in the paper. Settings are not paired.",
+ "failure_policy": "A trial where curve_fit raises, does not converge, or returns k_hat<=0 or non-finite k or variance at any temperature is excluded from the statistics, counted per setting, and listed in the output; the failure fraction is reported, coverage is stated as conditional on success, and a bound counting failures as misses is also reported.",
+ "ci_method": "Wilson binomial interval for coverage; bootstrap (1000 resamples) or analytic standard error for bias, SD and correlation (Fisher z).",
+ "acceptance": [
+  "Coverage of the t interval for Ea and ln A lies within the 95% Wilson interval of 0.95 in at least 90% of the cell-parameter checks with sigma<=0.02 and n_points>=12, with no trend in pass rate across sigma or n_points; any single failure is reported.",
+  "Observed SD/theoretical SE is within 1\u00b10.1 in those cells.",
+  "Bias of Ea_hat is below 2 SE_MC (or below 10% of the SD) in those cells.",
+  "Noise-free oracles recover Ea and lnA to the stated tolerance.",
+  "Low-noise SD/SE limiting-case oracle is within 0.1 of 1."
+ ],
+ "precision": {
+  "target_half_width": 0.03,
+  "metric": "coverage_Ea",
+  "reason": "Distinguishing coverage 0.95 from the 0.90 typical of the failing regime needs a half-width of about 0.03 or less; 400 runs give about 0.021."
+ },
+ "metrics": [
+  {
+   "id": "coverage_Ea",
+   "estimand": "P(true Ea in 95% interval | sigma, n_points, fit succeeded)",
+   "kind": "proportion",
+   "unit": "a run",
+   "cluster": null,
+   "paired": false,
+   "family": "coverage across the sigma x n_points grid"
+  },
+  {
+   "id": "coverage_lnA",
+   "estimand": "P(true lnA in 95% interval | sigma, n_points, fit succeeded)",
+   "kind": "proportion",
+   "unit": "a run",
+   "cluster": null,
+   "paired": false,
+   "family": "coverage across the sigma x n_points grid"
+  },
+  {
+   "id": "Ea_mean",
+   "estimand": "E[Ea_hat], with bias = Ea_mean - Ea_true (median bias reported as a robust companion)",
+   "kind": "mean",
+   "unit": "a run",
+   "cluster": null,
+   "paired": false,
+   "family": "bias across the grid"
+  },
+  {
+   "id": "lnA_mean",
+   "estimand": "E[lnA_hat], with bias = lnA_mean - lnA_true",
+   "kind": "mean",
+   "unit": "a run",
+   "cluster": null,
+   "paired": false,
+   "family": "bias across the grid"
+  },
+  {
+   "id": "Ea_sd",
+   "estimand": "SD of Ea_hat over runs, reported with its bootstrap uncertainty (IQR-based spread as a robust companion)",
+   "kind": "mean",
+   "unit": "a run",
+   "cluster": null,
+   "paired": false,
+   "family": "spread across the grid"
+  },
+  {
+   "id": "corr_Ea_lnA",
+   "estimand": "Pearson correlation of Ea_hat and lnA_hat over runs",
+   "kind": "mean",
+   "unit": "a run",
+   "cluster": null,
+   "paired": false,
+   "family": "correlation across the grid"
+  }
+ ],
+ "oracles": [
+  {
+   "name": "noise_free_Ea",
+   "kind": "special_case",
+   "check": "With sigma=0 the pipeline must recover Ea exactly (unit weights are used because the NLS variance is zero); this checks the code only, not the statistics.",
+   "expected": 50000.0,
+   "expected_formula": "50000",
+   "tolerance": 0.05,
+   "tolerance_mode": "absolute",
+   "reference": "derivation: with sigma=0, c=exp(-k t) exactly, NLS (curve_fit ftol=xtol=1e-10) returns k to solver tolerance, ln k = lnA - Ea/(R T) is exactly linear in 1/T, so the slope is -Ea/R and Ea_hat=50000 J/mol.",
+   "case": {
+    "sigma": 0.0,
+    "n_points": 12
+   },
+   "measure": "Ea_hat"
+  },
+  {
+   "name": "noise_free_lnA",
+   "kind": "special_case",
+   "check": "With sigma=0 the pipeline must recover ln A exactly, which checks the centring back-transformation; the 1e-6 tolerance is at least 100 times the curve_fit solver error (ftol=xtol=1e-10).",
+   "expected": 16.0,
+   "expected_formula": "16",
+   "tolerance": 1e-06,
+   "tolerance_mode": "absolute",
+   "reference": "derivation: the intercept at the centred 1/T is lnA-(Ea/R)*xbar, and adding back the slope times xbar returns lnA=16.",
+   "case": {
+    "sigma": 0.0,
+    "n_points": 12
+   },
+   "measure": "lnA_hat"
+  },
+  {
+   "name": "sampling_window_kt_max",
+   "kind": "invariant",
+   "check": "At every one of the five temperatures the sampling grid ends at max(t)=3/k, so the worst violation of max(t)*k=3 is 0; this catches a wrong sampling window that noise-free recovery cannot see.",
+   "expected": 0.0,
+   "expected_formula": "0",
+   "tolerance": 1e-09,
+   "tolerance_mode": "absolute",
+   "reference": "derivation: t=linspace(0,3/k,n) has max(t)=3/k, so max(t)*k - 3 = 0 at each temperature and the worst violation = 0.",
+   "case": {
+    "sigma": 0.0,
+    "n_points": 12
+   },
+   "measure": "max over the five temperatures of |max(t)*k - 3|"
+  },
+  {
+   "name": "low_noise_SD_over_theory_SE",
+   "kind": "limiting_case",
+   "check": "At very low noise (sigma in units of c0) and 40 points the linearisation is accurate, so the observed SD of Ea_hat over 500 runs equals the closed-form linearised SE computed with the pipeline's own weights 1/var(ln k) (ratio 1); this exercises the real weighted pipeline and the theory code.",
+   "expected": 1.0,
+   "expected_formula": "1",
+   "tolerance": 0.1,
+   "tolerance_mode": "absolute",
+   "reference": "derivation: for small sigma the NLS estimator is asymptotically normal with Var(k_hat) = sigma^2/sum(t_i^2 exp(-2 k t_i)), and the weighted regression is linear in ln k, so Var(Ea_hat) = R^2 [(X'WX)^-1]_11 with W=diag(1/var(ln k)) and SD/SE = 1; with 500 runs the relative error of the SD is 1/sqrt(2*500) = 0.032, so 0.1 is about 3 sigma.",
+   "case": {
+    "sigma": 0.005,
+    "n_points": 40,
+    "n_runs": 500
+   },
+   "measure": "Ea_sd / Ea_se_theory"
+  },
+  {
+   "name": "low_noise_coverage_95",
+   "kind": "limiting_case",
+   "check": "At low noise and 40 points the nominal 95% interval for Ea (S3) should contain the true Ea in about 95% of repeated runs.",
+   "expected": 0.95,
+   "expected_formula": "0.95",
+   "tolerance": 0.04,
+   "tolerance_mode": "absolute",
+   "reference": "derivation: for small sigma the weighted regression estimator is approximately normal with the reported SE, so coverage of the nominal 95% interval = 0.95; the binomial SE with 500 runs is sqrt(0.95*0.05/500) = 0.0097, so 0.04 is about 4 sigma.",
+   "case": {
+    "sigma": 0.005,
+    "n_points": 40,
+    "n_runs": 500
+   },
+   "measure": "coverage_Ea"
+  },
+  {
+   "name": "low_noise_reportedSE_over_SD",
+   "kind": "limiting_case",
+   "check": "The mean reported SE of Ea_hat from the regression should equal the observed SD of Ea_hat over runs, which tests the weights and covariance that feed the interval.",
+   "expected": 1.0,
+   "expected_formula": "1",
+   "tolerance": 0.1,
+   "tolerance_mode": "absolute",
+   "reference": "derivation: with correct weights 1/var(ln k) the regression covariance (X'WX)^-1 = the true variance of the estimator, so mean reported SE / observed SD = 1; with 500 runs the SD has relative error 1/sqrt(2*500) = 0.032, so 0.1 is about 3 sigma.",
+   "case": {
+    "sigma": 0.005,
+    "n_points": 40,
+    "n_runs": 500
+   },
+   "measure": "Ea_se_reported_mean / Ea_sd"
+  }
+ ],
+ "criteria": [
+  {
+   "name": "noiseless_Ea_error",
+   "what": "The noise-free pipeline recovers Ea.",
+   "oracle": "noise_free_Ea",
+   "use": "error",
+   "direction": "lower",
+   "target": 0.05,
+   "tolerance": 0.05
+  },
+  {
+   "name": "noiseless_lnA_error",
+   "what": "The noise-free pipeline recovers ln A.",
+   "oracle": "noise_free_lnA",
+   "use": "error",
+   "direction": "lower",
+   "target": 1e-06,
+   "tolerance": 1e-06
+  }
+ ],
+ "simplifications": [
+  {
+   "id": "X1",
+   "replaces": "fit k with c0 unspecified (c0 may be free)",
+   "because": "c0 is known and fixed to 1 so each temperature fit has one parameter",
+   "effect": "Uncertainty in k is smaller than with a free c0, and the small-sample nonlinear bias of the NLS fit is reduced.",
+   "probe": "Rerun one cell with c0 free and compare the SD of Ea_hat."
+  },
+  {
+   "id": "X2",
+   "replaces": "a standard definition of bias, spread and coverage cited from a source",
+   "because": "none of the retrieved sources states these definitions word for word",
+   "effect": "None on numbers; definitions are the usual ones (bias=mean(hat)-true, spread=SD of hat, coverage=fraction of intervals containing truth).",
+   "probe": "The definitions are stated explicitly in the paper."
+  },
+  {
+   "id": "X3",
+   "replaces": "exact (non-linearised) error propagation as the theory for the spread of the estimates",
+   "because": "the linearised theory ignores that stage-two weights are estimated from stage-one data, which is the source of any small-sample coverage failure",
+   "effect": "The theory SE may understate the observed SD at high noise.",
+   "probe": "Compare SD/SE_theory across the grid."
+  },
+  {
+   "id": "X4",
+   "replaces": "temperature: the exact temperatures are not given by the topic, only a 10-fold range of k",
+   "because": "the topic fixes only a 10-fold range of k, so five temperatures are chosen equally spaced in 1/T starting at 320 K (about 285 K at the other end)",
+   "effect": "A wider or narrower 1/T range would scale the Ea SE inversely with the range.",
+   "probe": "State the temperatures and the 1/T range in the paper."
+  },
+  {
+   "id": "X5",
+   "replaces": "all simulated runs entering the statistics, including coverage of the 95% interval",
+   "because": "runs with a failed fit or k_hat<=0 at any temperature cannot be log-transformed and are excluded",
+   "effect": "Coverage, bias and spread at high noise and few points are conditional on success and may look better than the unconditional estimator.",
+   "probe": "Report the failure fraction per cell and the coverage bound counting failures as misses."
+  },
+  {
+   "id": "X6",
+   "replaces": "a continuous range of noise levels and of numbers of time points",
+   "because": "noise level and number of time points are varied on a finite grid (5 sigma values x 5 n_points values), with sigma in units of c0",
+   "effect": "Behaviour between grid values and outside 0.005 to 0.1 or 5 to 40 points is interpolated or unknown.",
+   "probe": "Check that SD varies smoothly with sigma and n_points across the grid."
+  },
+  {
+   "id": "X7",
+   "replaces": "general sampling times, with the sampling window set by the topic as 0 to 3/k at each temperature",
+   "because": "times are equally spaced, t=linspace(0,3/k,n_points), using the true k at each temperature",
+   "effect": "An analyst without the true k would choose a different window; the SD of k_hat and of Ea_hat depends on the window.",
+   "probe": "State the window and its dependence on true k in the paper; the deterministic check max(t)*k=3 verifies it."
+  },
+  {
+   "id": "X8",
+   "replaces": "the full distribution of the estimates by summary statistics of spread (SD, IQR-based spread, RMSE)",
+   "because": "heavy tails at high noise make the SD alone unrepresentative",
+   "effect": "SD may be dominated by a few runs, while the IQR-based spread understates tail risk.",
+   "probe": "Report median bias and IQR beside mean and SD and the number of runs beyond 5 SE."
+  },
+  {
+   "id": "X9",
+   "replaces": "the per-temperature k fits being summarised individually",
+   "because": "the k_hat estimates are reported as a per-temperature bias table, not as a figure",
+   "effect": "Stage-one bias of k_hat is visible only in a table and could be overlooked.",
+   "probe": "Inspect the per-temperature k_hat bias table for bias in ln k_hat that grows with sigma."
+  },
+  {
+   "id": "X10",
+   "replaces": "the activation energy being estimated from independent data",
+   "because": "Ea and ln A come from one weighted regression, so their estimates are strongly correlated, with the 1/T centre about 3.3e-3 K^-1 from zero",
+   "effect": "Marginal intervals for Ea and ln A do not describe the joint uncertainty; coverage of the pair is not 0.95 for rectangular regions.",
+   "probe": "Report corr(Ea_hat, ln A_hat) and the theoretical covariance ellipse in the scatter figure."
+  },
+  {
+   "id": "X11",
+   "replaces": "coverage of the true value by the 95 percent interval over all runs, for each parameter",
+   "because": "coverage is computed only over runs with a successful fit and from a single interval construction (t quantile with 3 dof, residual-scaled covariance), with a normal-quantile interval as a secondary",
+   "effect": "Reported coverage may be higher than the unconditional coverage at high noise and few points, and depends on the interval construction.",
+   "probe": "Report the failure fraction per cell and the coverage bound counting failures as misses, and compare the t and normal intervals."
+  },
+  {
+   "id": "X12",
+   "replaces": "the rate constant k at each temperature being reported as a headline result with its own bias, spread and coverage",
+   "because": "k_hat per temperature is an intermediate stage; its bias is only tabulated per temperature and its uncertainty is used as the stage-two weight",
+   "effect": "Stage-one bias or non-normality of k_hat is not shown in a figure and could be overlooked.",
+   "probe": "Inspect the per-temperature k_hat bias table with its Monte Carlo standard error across sigma and n_points."
+  },
+  {
+   "id": "X13",
+   "replaces": "the activation energy Ea being recovered with both A and the temperature scale unknown, or with a free c0",
+   "because": "A and Ea are the truth values of the simulation (ln A=16, Ea=50 kJ/mol), c0 and T are known exactly, and only one true Ea is studied",
+   "effect": "Bias, spread and coverage of Ea_hat are shown for one parameter set and one 1/T range and may not carry over to other Ea or temperature ranges.",
+   "probe": "State the single parameter set in the paper; optionally rerun one cell with a different Ea and compare SD/SE_theory."
+  },
+  {
+   "id": "X14",
+   "replaces": "the correlation between the Ea and ln A estimates being described by a full joint analysis",
+   "because": "it is summarised by the Pearson correlation over runs and a theoretical 95% covariance ellipse in one scatter figure at a single setting",
+   "effect": "The correlation is shown for the chosen setting only, and a Pearson coefficient does not describe heavy tails at high noise.",
+   "probe": "Compare the observed correlation with the theoretical correlation from the weighted regression covariance across the grid."
+  }
+ ],
+ "definitions": [
+  {
+   "metric": "coverage_Ea",
+   "defined_as": "fraction of successful runs whose 95% interval for Ea contains the true Ea",
+   "source": "",
+   "quote": "",
+   "differs": "X2"
+  },
+  {
+   "metric": "coverage_lnA",
+   "defined_as": "fraction of successful runs whose 95% interval for lnA contains the true lnA",
+   "source": "",
+   "quote": "",
+   "differs": "X2"
+  },
+  {
+   "metric": "Ea_mean",
+   "defined_as": "mean of Ea_hat over successful runs; bias = Ea_mean - Ea_true",
+   "source": "",
+   "quote": "",
+   "differs": "X2"
+  },
+  {
+   "metric": "lnA_mean",
+   "defined_as": "mean of lnA_hat over successful runs; bias = lnA_mean - lnA_true",
+   "source": "",
+   "quote": "",
+   "differs": "X2"
+  },
+  {
+   "metric": "Ea_sd",
+   "defined_as": "sample standard deviation of Ea_hat over successful runs (ddof=1)",
+   "source": "",
+   "quote": "",
+   "differs": "X2"
+  },
+  {
+   "metric": "corr_Ea_lnA",
+   "defined_as": "Pearson correlation of Ea_hat and lnA_hat over successful runs",
+   "source": "",
+   "quote": "",
+   "differs": "X2"
+  }
+ ],
+ "topic_map": [
+  {
+   "item": "noise level",
+   "by": "setting:sigma"
+  },
+  {
+   "item": "number of time points",
+   "by": "setting:n_points"
+  },
+  {
+   "item": "five temperatures spanning a 10-fold range of k",
+   "by": "setting:temperature_K"
+  },
+  {
+   "item": "sampling times from 0 to 3/k at each temperature",
+   "by": "setting:t_max_over_k"
+  },
+  {
+   "item": "bias",
+   "by": "metric:Ea_mean"
+  },
+  {
+   "item": "bias of ln A",
+   "by": "metric:lnA_mean"
+  },
+  {
+   "item": "spread of the estimates",
+   "by": "metric:Ea_sd"
+  },
+  {
+   "item": "how often the true value falls inside the reported 95 percent interval",
+   "by": "metric:coverage_Ea"
+  },
+  {
+   "item": "how often the true ln A falls inside the reported 95 percent interval",
+   "by": "metric:coverage_lnA"
+  },
+  {
+   "item": "Ea and ln A estimates are strongly correlated",
+   "by": "metric:corr_Ea_lnA"
+  },
+  {
+   "item": "c(t) = c0 * exp(-k * t)",
+   "by": "equation:E1"
+  },
+  {
+   "item": "k = A * exp(-Ea / (R * T))",
+   "by": "equation:E2"
+  },
+  {
+   "item": "fit ln k against 1/T",
+   "by": "equation:E3"
+  }
+ ],
+ "model": {
+  "summary": "First-order decay c=c0 exp(-kt) with Arrhenius k(T), additive Gaussian noise, NLS fit of k per temperature, then weighted linear regression of ln k on centred 1/T.",
+  "assumptions": [
+   "c0 known",
+   "iid Gaussian noise with constant SD",
+   "exact Arrhenius law",
+   "T known exactly"
+  ],
+  "holds_for": "sigma from 0.005 to 0.1 of c0, 5 to 40 points per temperature, k t_max=3.",
+  "equations": [
+   {
+    "id": "E1",
+    "formula": "c(t) = c0 * exp(-k * t)",
+    "role": "generates",
+    "source": "derivation",
+    "derivation": "Integrating dc/dt = -k c with c(0)=c0 gives c = c0 exp(-kt).",
+    "example": {
+     "inputs": {
+      "c0": 2.0,
+      "k": 0.3,
+      "t": 4.0
+     },
+     "expected_formula": "2.0*exp(-0.3*4.0)"
+    }
+   },
+   {
+    "id": "E2",
+    "formula": "k = A * exp(-Ea / (R * T))",
+    "role": "generates",
+    "source": "derivation",
+    "derivation": "Arrhenius law as given in the topic statement.",
+    "example": {
+     "inputs": {
+      "A": 10000000.0,
+      "Ea": 50000.0,
+      "R": 8.314462618,
+      "T": 300.0
+     },
+     "expected_formula": "10000000.0*exp(-50000.0/(8.314462618*300.0))"
+    }
+   },
+   {
+    "id": "E3",
+    "formula": "ln k = ln A - Ea / (R * T)",
+    "role": "analyses",
+    "source": "derivation",
+    "derivation": "Take the natural log of E2; regressing ln k on 1/T has slope -Ea/R and intercept ln A.",
+    "example": {
+     "inputs": {
+      "lnA": 16.0,
+      "Ea": 50000.0,
+      "R": 8.314462618,
+      "T": 300.0
+     },
+     "expected_formula": "16.0-50000.0/(8.314462618*300.0)"
+    }
+   }
+  ],
+  "steps": [
+   {
+    "id": "S1",
+    "name": "NLS fit of k",
+    "does": "Fits k to one temperature's noisy c(t) with c0 fixed, returning k_hat and var(k_hat).",
+    "inputs": {
+     "t": "s",
+     "c": "dimensionless"
+    },
+    "output": "k_hat (1/s), var_k (1/s^2)",
+    "uses": [
+     "E1"
+    ],
+    "source": "[11] scipy.optimize.curve_fit; Levenberg-Marquardt [6][7]",
+    "relations": [
+     "noise-free data returns k_hat equal to k to solver tolerance"
+    ]
+   },
+   {
+    "id": "S2",
+    "name": "Weighted Arrhenius regression",
+    "does": "Weighted least squares of ln k_hat on 1/T minus its mean, weights 1/var(ln k), then back-transforms to Ea and lnA with covariance.",
+    "inputs": {
+     "k_hat": "1/s",
+     "var_ln_k": "dimensionless",
+     "T": "K"
+    },
+    "output": "Ea_hat (J/mol), lnA_hat, 2x2 covariance",
+    "uses": [
+     "E3"
+    ],
+    "source": "derivation (standard weighted least squares)",
+    "relations": [
+     "the Ea-lnA covariance is positive because the centre of 1/T is positive"
+    ]
+   },
+   {
+    "id": "S3",
+    "name": "95% interval",
+    "does": "Forms Ea_hat \u00b1 q SE with q the t(3 dof) quantile (SE scaled by residual reduced chi-square) or the normal quantile (nominal weights), and checks whether the truth is inside.",
+    "inputs": {
+     "Ea_hat": "J/mol",
+     "SE": "J/mol"
+    },
+    "output": "inside (bool)",
+    "uses": [],
+    "source": "derivation"
+   }
+  ]
+ }
+}

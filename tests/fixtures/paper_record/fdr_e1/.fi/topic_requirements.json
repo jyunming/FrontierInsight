@@ -1,0 +1,94 @@
+{
+  "factors": [
+    {
+      "name": "number of tests m",
+      "levels": [
+        20.0,
+        200.0,
+        2000.0
+      ],
+      "range": [],
+      "stated": "m in {20, 200, 2000}",
+      "main": true
+    },
+    {
+      "name": "fraction of real effects pi1",
+      "levels": [
+        0.0,
+        0.05,
+        0.2
+      ],
+      "range": [],
+      "stated": "a fraction pi1 in {0.0, 0.05, 0.2} of the effects are real",
+      "main": true
+    },
+    {
+      "name": "correction procedure",
+      "levels": [
+        "uncorrected",
+        "Bonferroni",
+        "Benjamini-Hochberg"
+      ],
+      "range": [],
+      "stated": "Compare uncorrected, Bonferroni and Benjamini-Hochberg at a nominal 5 percent",
+      "main": true
+    }
+  ],
+  "quantities": [
+    {
+      "name": "realised false discovery rate",
+      "stated": "report the realised false discovery rate",
+      "main": true
+    },
+    {
+      "name": "power",
+      "stated": "the power",
+      "main": true
+    },
+    {
+      "name": "uncertainty over repeats",
+      "stated": "with uncertainty over repeats",
+      "main": false
+    },
+    {
+      "name": "chance of any false discovery (when pi1 = 0)",
+      "stated": "report only the chance of any false discovery",
+      "main": true
+    },
+    {
+      "name": "reference pi0 * 0.05 for Benjamini-Hochberg",
+      "stated": "draw the reference pi0 * 0.05 for Benjamini-Hochberg",
+      "main": false
+    }
+  ],
+  "formulas": [],
+  "comparisons": [
+    {
+      "what": "Compare Bonferroni correction and the Benjamini-Hochberg procedure (against no correction) in false discoveries and in power across m and pi1.",
+      "between": [
+        "uncorrected",
+        "Bonferroni",
+        "Benjamini-Hochberg",
+        "m",
+        "pi1"
+      ]
+    }
+  ],
+  "constraints": [
+    "Use one-sided z-tests in which each real effect shifts the test statistic by 2.5.",
+    "Nominal level is 5 percent.",
+    "When pi1 = 0 there are no real effects, so power is undefined; report only the chance of any false discovery.",
+    "One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).",
+    "Two or three figures that answer the question directly, each with the reference or theory value drawn.",
+    "A short paper of at most 4 pages.",
+    "Cite only sources actually found and read; if a reference cannot be confirmed, say so rather than citing it.",
+    "CPU only; under 60 seconds of runtime.",
+    "Fixed random seeds where the run is random, stated in the paper.",
+    "Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code."
+  ],
+  "stated_results": [],
+  "reviewer": "claude-sonnet-5-5",
+  "planner": "gpt-5.6-terra",
+  "same_model": false,
+  "at": "2026-10-15T05:28:04+00:00"
+}

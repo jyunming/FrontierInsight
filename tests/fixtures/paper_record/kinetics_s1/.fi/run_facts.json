@@ -1,0 +1,10 @@
+{
+ "trials_run": {
+  "key": "from-run-log",
+  "wall_s": 223.2,
+  "trials": 50000,
+  "cells": 125,
+  "trial_sum_s": 32.58
+ },
+ "note": "synthesised for the replay: the quest predates .fi/run_facts.json; wall_s is rc=0 duration=223.2s at 17:54:29 (the run of the trials; the run at 17:55:34, rc=0 duration=2.3s, only analysed the stored trials); trial_sum_s is the sum of duration_s over the quest's whole ledger"
+}

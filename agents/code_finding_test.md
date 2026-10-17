@@ -26,7 +26,7 @@ The test runs with the `code/` directory on `sys.path`. Import with: $modules.
 
 # Rules for the test
 
-- A Python file with one or more functions named `test_...` that take no argument. Each shows the problem by an `assert` with a message that says what is wrong. The test fails ONLY by an `AssertionError`: an exception from the code you call, or from the test itself, shows nothing. If the problem is that something raises, call it inside `try` / `except` and `assert False, "<what happened>"` there.
+- A Python file with one or more functions named `test_...` that take no argument. Each shows the problem by an `assert` about the VALUES the code computes, with a message that says what is wrong: the finding's own claim, written as a relation those values must satisfy. Only an `AssertionError` from such an `assert` shows the problem. An exception from the code you call, or from the test itself, shows nothing, and FI reports a crash in the code as a crash, with its file and line: do not catch it (FI does not run a test that calls the code inside `try`/`except`), and never turn an exception into `assert False`.
 - Small and fast: a few calls with small inputs, a fixed seed, no files read or written, no network, finished in a few seconds.
 - Assert a relation that follows from the plan or from the definition of the quantity: an identity, an invariant, a symmetry, a limit, the same quantity computed a second, direct way, what happens to the result when one setting changes. Never copy a number from the plan, never use a value you were not given, and never write a tolerance looser than the quantity needs.
 - Test the function or the output the finding names; do not test the whole study.

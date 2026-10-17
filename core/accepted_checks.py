@@ -277,6 +277,21 @@ def short_version(version: Any) -> str:
     return str(version or "")[:12]
 
 
+def _mc_said(judged: dict[str, Any], limit: Any) -> dict[str, Any]:
+    """What a check's entry keeps about the trials it was judged on (core/mc_error.py): how its number was had
+    (``mc_words``) and, for a check those trials could not decide, ``undecided`` with why (``undecided_words``)."""
+    from . import mc_error as _mc
+    from . import oracle_check as _oracle
+
+    mc = _oracle.mc_of(judged)
+    words = _mc.words(mc)
+    out: dict[str, Any] = {"mc_words": words} if words else {}
+    if judged.get("undecided"):
+        out.update(undecided=True,
+                   undecided_words=_mc.undecided_words(mc, limit if isinstance(limit, (int, float)) else None))
+    return out
+
+
 def offer(found: list[str], oracles: list[dict[str, Any]],
           judged: list[dict[str, Any]] | None) -> tuple[list[dict[str, Any]], str]:
     """Whether the stop may offer "mark it unconfirmed and go on": ``(checks, "")`` when every problem in ``found`` is a
@@ -300,12 +315,13 @@ def offer(found: list[str], oracles: list[dict[str, Any]],
         value = _oracle._num(j.get("value"))  # noqa: SLF001 -- the one finite-number test the checks use
         if value is None:
             unmeasured.append(name)
-        elif j.get("passed_by_engine") is False:
+        elif j.get("passed_by_engine") is False or j.get("undecided"):
             expected, limit, mode = _oracle.limit_of(oracle)
             failing.append({
                 "name": name, "fingerprint": fingerprint(oracle), "expected": expected, "limit": limit,
                 "tolerance": oracle.get("tolerance"), "tolerance_mode": mode, "case": oracle.get("case"),
                 "measure": oracle.get("measure"), "measured": value, "measured_by": j.get("measured_by") or "",
+                **_mc_said(j, limit),
             })
     if unmeasured:
         return [], (f"nothing was measured for {', '.join(repr(n) for n in unmeasured)} (the run stopped before it "
@@ -345,7 +361,7 @@ def went_on_entries(found: list[str], oracles: list[dict[str, Any]],
         out.append({"name": name, "fingerprint": fingerprint(oracle), "expected": expected, "limit": limit,
                     "tolerance": oracle.get("tolerance"), "tolerance_mode": mode, "case": oracle.get("case"),
                     "measure": oracle.get("measure"), "measured": value, "measured_by": j.get("measured_by") or "",
-                    **({"unmeasured": said[:300]} if value is None else {})})
+                    **({"unmeasured": said[:300]} if value is None else _mc_said(j, limit))})
     if not out and found:
         out.append({"name": "", "measured": None, "unmeasured": str(found[0])[:300]})
     return out
@@ -457,7 +473,13 @@ def gap(entry: dict[str, Any]) -> str:
             return f"FI went on by itself although no known-answer check could be judged ({entry.get('unmeasured')})"
         return (f"FI went on by itself although the known-answer check '{name}' could not be judged "
                 f"({entry.get('unmeasured')}); it is marked {UNCONFIRMED}")
-    how = conditions_text(entry)
+    how = conditions_text(entry) + (f"; {entry['mc_words']}" if entry.get("mc_words") else "")
+    if entry.get("undecided"):
+        # The trials FI could run could not decide it (core/mc_error.py): it is neither confirmed nor refuted.
+        who = "FI went on by itself" if entry.get("by") == AUTOMATIC else f"{entry.get('by')} chose to go on"
+        why = f": {entry['undecided_words']}" if entry.get("undecided_words") else ""
+        return (f"{who} although the known-answer check '{name}' was not decided ({how}){why}; the result is not "
+                f"validated against it, and it is marked {UNCONFIRMED}")
     if entry.get("by") == AUTOMATIC:
         return (f"FI went on by itself although the known-answer check '{name}' failed ({how}); "
                 f"it is marked {UNCONFIRMED}")
@@ -465,13 +487,22 @@ def gap(entry: dict[str, Any]) -> str:
 
 
 def failing_disclosure(record: Any) -> str:
-    """What the paper must say about the failed checks the quest went on with (``needs/ORACLE_CHECK.json``), or ``""``."""
+    """What the paper must say about the failed checks the quest went on with (``needs/ORACLE_CHECK.json``), or ``""``.
+    A check its trials could not decide is said as not decided and not validated against, in neutral words."""
     if not isinstance(record, dict) or record.get("status") != WENT_ON:
         return ""
     entries = [e for e in record.get("went_on") or [] if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
     if not entries:
         return ""
-    lines = "; ".join(gap(e) for e in entries)
-    return (f"These known-answer checks FAILED and the run went on anyway: {lines}. Say so plainly where the checks are "
-            "described and in the limitations: the result is not validated against these known answers, and nothing "
-            "here may be described as checked against them.")
+    failed = [e for e in entries if not e.get("undecided")]
+    undecided = [e for e in entries if e.get("undecided")]
+    out: list[str] = []
+    if failed:
+        out.append(f"These known-answer checks FAILED and the run went on anyway: {'; '.join(gap(e) for e in failed)}. "
+                   "Say so plainly where the checks are described and in the limitations: the result is not validated "
+                   "against these known answers, and nothing here may be described as checked against them.")
+    if undecided:
+        out.append(f"These known-answer checks could not be decided at the precision their tolerance needs, and the run "
+                   f"went on: {'; '.join(gap(e) for e in undecided)}. Say plainly where the checks are described and in "
+                   "the limitations that each check was not decided, so the result is not validated against it.")
+    return " ".join(out)

@@ -835,8 +835,13 @@ async function pickPaperFormat(): Promise<PaperFormat | undefined> {
             // / experimental. The clarify agent maps these to
             // simulatability == "yes". Order: most generic first.
             {
+                label: "$(file) article — plain one-column paper, no venue style",
+                description: "Default. A neutral one-column layout with no conference name or logo. Surveys, comparative reviews, theoretical derivations, brief preprints.",
+                value: "article" as const,
+            },
+            {
                 label: "$(file) generic — scientific paper, IMRAD",
-                description: "Default. Surveys, comparative reviews, theoretical derivations, brief preprints.",
+                description: "LaTeX's default article layout; the same IMRAD paper as article.",
                 value: "generic" as const,
             },
             {
@@ -886,7 +891,7 @@ async function pickPaperFormat(): Promise<PaperFormat | undefined> {
         {
             title: "Frontier Insight — paper format / venue?",
             placeHolder:
-                "Picks the LaTeX template + writing persona. 'generic' is the safe default for scientific topics; 'essay' for non-computational humanities/social-science.",
+                "Picks the LaTeX template + writing persona. 'article' is the safe default for scientific topics; 'essay' for non-computational humanities/social-science.",
             ignoreFocusOut: true,
         },
     );
@@ -912,7 +917,7 @@ const FORMAT_TOPIC_MARKERS: [string, PaperFormat][] = [
 function paperFormatFor(topic: string): PaperFormat {
     const t = topic.toLowerCase();
     const hit = FORMAT_TOPIC_MARKERS.find(([m]) => t.includes(m));
-    return hit ? hit[1] : "generic";
+    return hit ? hit[1] : "article";
 }
 
 /** The fields the person really changed in one edit (a picker opened and cancelled changes nothing). */

@@ -269,8 +269,9 @@ async def test_a_reader_that_fails_twice_is_recorded_and_the_final_version_is_sa
     assert calls["n"] == 2, "a failed request is made once more, and no more"
     record = cr.load(engine.quest_root)
     assert "twice" in record["error"] and record["final_read"] is False
-    note = cr.write_note(engine.quest_root, engine.quest_root / "code")
-    assert "not compared with the plan by another model" in note and "twice" in note
+    assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
+    block = cr.findings_block(engine.quest_root, engine.quest_root / "code")
+    assert "not compared with the plan by another model" in block and "twice" in block
 
 
 # --- after the run --------------------------------------------------------------------------------------------------------

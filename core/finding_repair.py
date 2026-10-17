@@ -31,7 +31,7 @@ import re
 import string
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterable
 
 from . import code_findings as _issues
 from . import function_steps as _steps
@@ -55,35 +55,69 @@ MARK = "FINDING_TESTS:"
 _FENCE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 #: Run in the quest's environment: imports each test file with ``code/`` on the path and calls its ``test_*`` functions.
-#: An ``AssertionError`` is a failure; anything else (including a file that does not import) is an error.
+#: Only an ``AssertionError`` raised by the test's own check of values is a failure (``kind: assertion``, with the line of
+#: the check). Anything else is an error that shows nothing, with the place it was raised (``place``: ``program`` when the
+#: deepest frame in the quest's files is under ``code/``, ``test`` when it is the test file) and its ``file:line``: an
+#: exception (``kind: exception``), an exception the test caught and turned into an assertion (``wrapped``; it is judged by
+#: the exception it caught), and an assertion the program's own code raised (``program_assert``).
 HARNESS = '''
 import importlib.util, json, os, sys, traceback
-sys.path.insert(0, os.path.abspath({code!r}))
+code_dir = os.path.abspath({code!r})
+sys.path.insert(0, code_dir)
+
+def where(e, path):
+    place, at, line = "library", "", ""
+    for f in traceback.extract_tb(e.__traceback__):
+        fn = os.path.abspath(f.filename)
+        if fn == path:
+            place, at, line = "test", os.path.basename(fn) + ":" + str(f.lineno), f.line or ""
+        elif fn.startswith(code_dir + os.sep):
+            place, at, line = "program", "code/" + os.path.relpath(fn, code_dir).replace(os.sep, "/") + ":" + str(f.lineno), f.line or ""
+    return place, at, line[:200]
+
+def said(e):
+    return (type(e).__name__ + ": " + str(e))[:300]
+
+def judged(name, e, path):
+    if isinstance(e, AssertionError):
+        caught = e.__cause__ or e.__context__
+        if caught is not None and not isinstance(caught, AssertionError):
+            place, at, line = where(caught, path)
+            return {{"test": name, "status": "error", "kind": "wrapped", "place": place, "at": at, "line": line,
+                     "detail": said(caught) + " (the test turned it into an assertion)"}}
+        place, at, line = where(e, path)
+        if place != "program":
+            return {{"test": name, "status": "fail", "kind": "assertion", "place": place, "at": at, "line": line,
+                     "detail": str(e)[:300]}}
+        return {{"test": name, "status": "error", "kind": "program_assert", "place": place, "at": at, "line": line,
+                 "detail": said(e)}}
+    place, at, line = where(e, path)
+    return {{"test": name, "status": "error", "kind": "exception", "place": place, "at": at, "line": line,
+             "detail": said(e)}}
+
 out = {{}}
-for path in {paths!r}:
+for given in {paths!r}:
+    path = os.path.abspath(given)
     results = []
     try:
         spec = importlib.util.spec_from_file_location("finding_test_" + str(len(out)), path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     except BaseException as e:
-        results.append({{"test": "(import)", "status": "error", "detail": (type(e).__name__ + ": " + str(e))[:300]}})
+        results.append(judged("(import)", e, path))
     else:
         names = sorted(n for n in dir(mod) if n.startswith("test_") and callable(getattr(mod, n)))
         if not names:
-            results.append({{"test": "(none)", "status": "error", "detail": "the file defines no test_* function"}})
+            results.append({{"test": "(none)", "status": "error", "kind": "exception", "place": "test",
+                             "detail": "the file defines no test_* function"}})
         for n in names:
             try:
                 getattr(mod, n)()
-            except AssertionError as e:
-                results.append({{"test": n, "status": "fail", "detail": str(e)[:300]}})
             except BaseException as e:
-                tb = traceback.extract_tb(e.__traceback__)
-                where = (" at line " + str(tb[-1].lineno)) if tb else ""
-                results.append({{"test": n, "status": "error", "detail": (type(e).__name__ + ": " + str(e))[:300] + where}})
+                results.append(judged(n, e, path))
             else:
                 results.append({{"test": n, "status": "pass", "detail": ""}})
-    out[path] = results
+    out[given] = results
 print({mark!r} + json.dumps(out))
 '''
 
@@ -158,11 +192,23 @@ def harness_source(code_dir: str, paths: list[str]) -> str:
 
 @dataclass
 class TestRun:
-    """What running one test file gave: ``pass`` (every test passed), ``fail`` (an assertion failed, nothing else went
-    wrong) or ``error`` (it could not be run: it did not import, raised something else, or printed nothing)."""
+    """What running one test file gave: ``pass`` (every test passed), ``fail`` (a test's own check of values failed by an
+    assertion, nothing else went wrong) or ``error`` (it could not be run: it did not import, raised something else, turned
+    an exception into an assertion, or printed nothing). ``kind`` is the harness's (``assertion``, ``exception``,
+    ``wrapped``, ``program_assert``), ``place`` where it was raised (``program``: the quest's code; ``test``: the test file),
+    ``at`` its ``file:line`` and ``line`` that line's text (for a failure: the assertion that failed)."""
 
     status: str
     detail: str = ""
+    kind: str = ""
+    place: str = ""
+    at: str = ""
+    line: str = ""
+
+    @property
+    def crash_in_program(self) -> bool:
+        """An error raised inside the quest's own code (not the test's): a crash, for the crash repair."""
+        return self.status == "error" and self.place == "program"
 
 
 def parse_runs(stdout: str, paths: list[str]) -> dict[str, TestRun]:
@@ -184,12 +230,17 @@ def parse_runs(stdout: str, paths: list[str]) -> dict[str, TestRun]:
             continue
         errors = [r for r in rows if isinstance(r, dict) and r.get("status") == "error"]
         fails = [r for r in rows if isinstance(r, dict) and r.get("status") == "fail"]
-        if errors:
-            out[path] = TestRun("error", f"{errors[0].get('test')}: {errors[0].get('detail')}")
-        elif fails:
-            out[path] = TestRun("fail", f"{fails[0].get('test')}: {fails[0].get('detail') or 'the assertion failed'}")
-        else:
+        # Each test function is judged on its own: one that fails by its own assertion shows the fault, whatever another
+        # test function of the file did (an error in one shows nothing, and hides nothing).
+        first = fails[0] if fails else errors[0] if errors else None
+        if first is None:
             out[path] = TestRun("pass")
+            continue
+        at = str(first.get("at") or "")
+        detail = (f"{first.get('test')}: {first.get('detail') or 'the assertion failed'}"
+                  + (f" (at {at})" if at and not fails else ""))
+        out[path] = TestRun("fail" if fails else "error", detail, str(first.get("kind") or ""),
+                            str(first.get("place") or ""), at, str(first.get("line") or ""))
     return out
 
 
@@ -220,8 +271,200 @@ def reply_test(reply: str) -> str:
     return ""
 
 
+def swallowed_call(text: str) -> str:
+    """Why a test is no proof, read from its text before it runs (``""`` when it may be): it calls code inside a ``try``
+    whose ``except`` swallows the error (the handler ends without raising). A crash caught there leaves a value behind that
+    a later assertion then fails on, and the assertion's own traceback no longer holds the crash: it would pass for a shown
+    fault. A handler that raises or asserts again is kept (the harness reads the exception it caught), and so is a guarded
+    import."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return ""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try) or not node.handlers:
+            continue
+        if all(isinstance(b, (ast.Import, ast.ImportFrom)) for b in node.body):
+            continue
+        if not any(isinstance(n, ast.Call) for b in node.body for n in ast.walk(b)):
+            continue
+        if any(not h.body or not isinstance(h.body[-1], (ast.Raise, ast.Assert)) for h in node.handlers):
+            return (f"the test calls the code inside try/except and goes on after an error (line {node.lineno}): a crash "
+                    "caught there turns into a failed assertion and shows nothing about the values; call the code "
+                    "directly (or raise again in the except) and assert on the values it returns")
+    return ""
+
+
 def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
     return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+
+def params_kept(old: ast.FunctionDef | ast.AsyncFunctionDef, new: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Why a repaired function's parameters are not allowed (``""`` when they are): every parameter it had stays, by the
+    same name, kind and place, so every call that worked still works; a parameter may be added only after them and only
+    with a default value (a positional one at the end, or a keyword-only one), and ``*args`` / ``**kwargs`` may be added."""
+    a, b = old.args, new.args
+    want = _steps._param_names(old)
+
+    def says() -> str:
+        return (f"must keep its parameters ({', '.join(want)}), adding only parameters with a default value after them; "
+                f"the reply has ({', '.join(_steps._param_names(new))})")
+
+    old_pos, new_pos = [x.arg for x in [*a.posonlyargs, *a.args]], [x.arg for x in [*b.posonlyargs, *b.args]]
+    if new_pos[:len(old_pos)] != old_pos or len(b.posonlyargs) != len(a.posonlyargs):
+        return says()
+    added = len(new_pos) - len(old_pos)
+    # defaults belong to the last positional parameters: each added one needs one, and the old ones keep theirs
+    if added and len(b.defaults) < added + len(a.defaults):
+        return says()
+    if (a.vararg and (not b.vararg or b.vararg.arg != a.vararg.arg)) or (a.kwarg and (not b.kwarg or b.kwarg.arg != a.kwarg.arg)):
+        return says()
+    old_kw = {x.arg for x in a.kwonlyargs}
+    for x, default in zip(b.kwonlyargs, b.kw_defaults):
+        if x.arg not in old_kw and default is None:
+            return says()
+    if not old_kw <= {x.arg for x in b.kwonlyargs}:
+        return says()
+    return ""
+
+
+def direct_callers(code: Path, rel: str, name: str) -> dict[str, set[str]]:
+    """``{file under code/: the top-level functions in it that call `name` directly}`` (``name(...)`` or ``module.name(...)``),
+    in every Python file of ``code/`` but its tests; ``name`` itself is not its own caller."""
+    out: dict[str, set[str]] = {}
+    for path in sorted(code.rglob("*.py")):
+        other = path.relative_to(code).as_posix()
+        if any(part in ("tests", "__pycache__") for part in path.relative_to(code).parts[:-1]):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for fname, fn in _top_functions(tree).items():
+            if other == rel and fname == name:
+                continue
+            for node in ast.walk(fn):
+                func = node.func if isinstance(node, ast.Call) else None
+                if (isinstance(func, ast.Name) and func.id == name) or (isinstance(func, ast.Attribute) and func.attr == name):
+                    out.setdefault(other, set()).add(fname)
+                    break
+    return out
+
+
+def unpassed_params(old_fn: str, new_fn: str, name: str, callers: dict[str, str], caller_names: dict[str, set[str]]) -> str:
+    """Why a repair that added parameters to ``name`` leaves the study on their defaults (``""`` when it does not): every
+    call of ``name`` in a function that calls it directly (``callers``: ``{file: its text after the repair}``;
+    ``caller_names``: the calling functions of each file) must pass each added parameter, by name or by place (or forward
+    ``**kwargs``). A parameter added with the old value as its default and passed only by the finding's own test changes
+    nothing the study runs."""
+    try:
+        old = _top_functions(ast.parse(old_fn)).get(name)
+        new = _top_functions(ast.parse(new_fn)).get(name)
+    except SyntaxError:
+        return ""
+    if old is None or new is None:
+        return ""
+    before = set(_steps._param_names(old))
+    positional = [x.arg for x in [*new.args.posonlyargs, *new.args.args]]
+    added = [p for p in _steps._param_names(new) if p not in before and p not in (
+        new.args.vararg.arg if new.args.vararg else None, new.args.kwarg.arg if new.args.kwarg else None)]
+    if not added:
+        return ""
+    for other, text in sorted(callers.items()):
+        try:
+            funcs = _top_functions(ast.parse(text))
+        except SyntaxError:
+            continue
+        for fname in sorted(caller_names.get(other) or ()):
+            fn = funcs.get(fname)
+            for node in ast.walk(fn) if fn is not None else ():
+                if not isinstance(node, ast.Call):
+                    continue
+                f = node.func
+                if not ((isinstance(f, ast.Name) and f.id == name) or (isinstance(f, ast.Attribute) and f.attr == name)):
+                    continue
+                if any(k.arg is None for k in node.keywords):
+                    continue  # **kwargs passed on
+                given = {k.arg for k in node.keywords}
+                places = len(node.args) if not any(isinstance(a, ast.Starred) for a in node.args) else len(positional)
+                missing = [p for p in added if p not in given and not (p in positional and positional.index(p) < places)]
+                if missing:
+                    return (f"the study's call still uses the default: `{fname}` in {other} calls `{name}` without "
+                            + ", ".join(f"`{p}`" for p in missing)
+                            + ", so the repair changes nothing the study runs; pass it on from the caller")
+    return ""
+
+
+def _calls_to(node: ast.AST, name: str) -> list[ast.Call]:
+    return [c for c in ast.walk(node) if isinstance(c, ast.Call) and (
+        (isinstance(c.func, ast.Name) and c.func.id == name) or (isinstance(c.func, ast.Attribute) and c.func.attr == name))]
+
+
+def _typed_number(node: ast.AST) -> bool:
+    """Whether an argument is only a number written into the code (``0.01``, ``-1e-3``, ``(2)``)."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        return _typed_number(node.operand)
+    return isinstance(node, ast.Constant) and isinstance(node.value, (int, float, complex)) and not isinstance(
+        node.value, bool)
+
+
+def caller_edit_problem(before: str, after: str, caller_names: set[str] | Iterable[str], callee: str) -> str:
+    """Why a repair's change to a function that calls the repaired one directly is not allowed (``""`` when it is). Only the
+    arguments of its calls of ``callee`` may change: everything else in the caller stays as it was (compared as code, with
+    those calls' arguments set aside), so a repair cannot change another reported number on its way. And an argument the
+    repair adds or changes may not be a number typed into the call: the old typed-in value passed by name is the same
+    typed-in value, and the study would run unchanged."""
+    try:
+        old_funcs, new_funcs = _top_functions(ast.parse(before)), _top_functions(ast.parse(after))
+    except SyntaxError:
+        return ""
+
+    def masked(fn: ast.FunctionDef) -> str:
+        fn = copy.deepcopy(fn)
+        for call in _calls_to(fn, callee):
+            call.args, call.keywords = [], []
+        return ast.dump(fn)
+
+    for name in sorted(caller_names):
+        old, new = old_funcs.get(name), new_funcs.get(name)
+        if old is None or new is None or ast.dump(old) == ast.dump(new):
+            continue
+        if masked(old) != masked(new):
+            return (f"it changed `{name}` beyond its call of `{callee}`: only the arguments of its call of `{callee}` may "
+                    "change in a function that calls it")
+        old_calls, new_calls = _calls_to(old, callee), _calls_to(new, callee)
+        for i, call in enumerate(new_calls):
+            was = old_calls[i] if i < len(old_calls) else None
+            was_args = [ast.dump(a) for a in was.args] if was is not None else []
+            was_kw = {k.arg: ast.dump(k.value) for k in was.keywords} if was is not None else {}
+            given = [(f"argument {j + 1}", a) for j, a in enumerate(call.args)
+                     if j >= len(was_args) or ast.dump(a) != was_args[j]]
+            given += [(f"`{k.arg}`", k.value) for k in call.keywords if was_kw.get(k.arg) != ast.dump(k.value)]
+            for what, value in given:
+                if _typed_number(value):
+                    return (f"`{name}` passes the number `{ast.unparse(value)}` for {what} of `{callee}`: a number typed "
+                            "into the call is the same typed-in value, and the study runs unchanged; pass it from what "
+                            f"`{name}` is given (its parameters, the setting or the thresholds)")
+    return ""
+
+
+def file_blocks(reply: str) -> tuple[str, dict[str, str]]:
+    """The reply's first fenced block that holds a ``def`` and is not marked for another file (``""`` when none), and
+    ``{file named by its first line # file: <path>: the rest of that block}`` for the blocks so marked."""
+    from .code_review import _FILE_LINE
+
+    main, marked = "", {}
+    for m in _FENCE.finditer(reply or ""):
+        lines = m.group(1).strip("\n").splitlines()
+        first = next((i for i, line in enumerate(lines) if line.strip()), None)
+        marker = _FILE_LINE.match(lines[first]) if first is not None else None
+        if marker:
+            name = marker.group(1).replace("\\", "/").strip("/")
+            name = name[len("code/"):] if name.startswith("code/") else name
+            marked[name] = (marked[name] + "\n\n" if name in marked else "") + "\n".join(lines[first + 1:])
+        elif not main and "def " in m.group(1):
+            main = m.group(1)
+    return main, marked
 
 
 def splice(source: str, reply: str, scope: set[str] | None = None,
@@ -258,9 +501,9 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
     if len(replaced) > MAX_FUNCTIONS:
         return None, [], f"the reply replaces {len(replaced)} functions; change only the ones the finding is about"
     for name in replaced:
-        want, got = _steps._param_names(old_funcs[name]), _steps._param_names(new_funcs[name])
-        if want != got:
-            return None, [], (f"`{name}` must keep its parameters ({', '.join(want)}); the reply has ({', '.join(got)})")
+        why = params_kept(old_funcs[name], new_funcs[name])
+        if why:
+            return None, [], f"`{name}` {why}"
     lines = source.splitlines(keepends=True)
     block_lines = block.splitlines(keepends=True)
     if block_lines and not block_lines[-1].endswith("\n"):
@@ -359,6 +602,35 @@ def _frame(tree: ast.Module) -> list[tuple[str, str]]:
 
     walk(tree.body, "")
     return out
+
+
+def without_main_guard(old: str, new: str) -> tuple[str, str]:
+    """When ``new`` moves module-level statements of ``old`` under an ``if __name__ == "__main__":`` block ``old`` did not
+    have (so importing the file no longer runs them; a module that ran its study when a test imported it), the two texts
+    to compare without that move: ``old`` without the moved statements, ``new`` without the block. A statement counts as
+    moved when it is in the block, or in a function ``new`` adds, as it was. Otherwise both are given back as they are."""
+    from .code_layout import _is_main_guard
+
+    try:
+        before, after = ast.parse(old), ast.parse(new)
+    except SyntaxError:
+        return old, new
+    guards = [n for n in after.body if _is_main_guard(n)]
+    if any(_is_main_guard(n) for n in before.body) or len(guards) != 1:
+        return old, new
+    had = set(_top_functions(before))
+    inside = {ast.dump(s) for s in ast.walk(guards[0]) if isinstance(s, ast.stmt)}
+    for fn in after.body:
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name not in had:
+            inside |= {ast.dump(s) for s in ast.walk(fn) if isinstance(s, ast.stmt) and s is not fn}
+    stays = {ast.dump(n) for n in after.body if n is not guards[0]}
+    moved = [n for n in before.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+             and ast.dump(n) not in stays and ast.dump(n) in inside]
+    if not moved:
+        return old, new
+    before.body = [n for n in before.body if n not in moved]
+    after.body = [n for n in after.body if n is not guards[0]]
+    return ast.unparse(before), ast.unparse(after)
 
 
 def frame_changes(old: str, new: str) -> list[str]:
@@ -726,6 +998,9 @@ class Env:
     other: str = ""  # the name of the other model; empty when there is none
     code_model: str = ""
     on_accept: Callable[[str, str, str, dict[str, Any]], None] | None = None
+    #: FI's small run of the simulation on the code as it is: ``""`` when it ran, else why not (a repair that breaks it is
+    #: not kept); ``None`` when there is none to make.
+    small_run: Callable[[], Awaitable[str]] | None = None
     changed: list[str] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)
     baseline_static: dict[str, int] = field(default_factory=dict)
@@ -774,25 +1049,90 @@ def _read(path: Path) -> str:
         return ""
 
 
+def _test_prompt(env: Env, issue: dict[str, Any], rel: str, problem: str) -> str:
+    source = _read(env.code / rel)
+    scope = scope_function(issue, source)
+    return env.prompts["code_finding_test"].substitute(
+        topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
+        file=rel, code=(f"### {rel} (the function `{scope}`)\n```python\n{function_source(source, scope)}\n```\n\n"
+                        f"The rest of {rel} offers:\n{signatures(source, scope)}" if scope else
+                        f"### {rel}\n```python\n{source.rstrip()}\n```"),
+        modules=module_names(env.code, env.package), problem=problem or "(none: this is the first try)")
+
+
+def _error_problem(detail: str) -> str:
+    return (f"the test could not show anything: {detail}. It must FAIL BY AN ASSERTION about the values the code "
+            "computes, on the current code; an exception in the test itself shows nothing.")
+
+
+async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -> TestRun | None:
+    """A shown issue's test now errors in its own code (not inside the program): the code model is asked ONCE more, shown
+    the error, for a test written as an assertion about the values the code computes, and it is run twice. Its
+    ``TestRun``: ``fail`` (a failing assertion in both runs; the new test becomes the issue's test), ``pass``, or ``error``;
+    ``None`` when it was asked before for this issue, or no test came back. What happened is kept in ``issue["asked_again"]``.
+    Counted in the record's requests like every other; an error never stops anything."""
+    if issue.get("asked_again"):
+        return None
+    issue["asked_again"] = {"error": error.detail[:300], "at": error.at, "outcome": "no test came back"}
+    env.record["finding_calls"] = int(env.record.get("finding_calls") or 0) + 1
+    env.record["test_calls"] = int(env.record.get("test_calls") or 0) + 1
+    env.save()
+    reply = await _ask(env, _test_prompt(env, issue, rel, _error_problem(error.detail)), "code", "test")
+    text = reply_test(reply)
+    if not text:
+        env.save()
+        return None
+    swallowed = swallowed_call(text)
+    if swallowed:
+        issue["asked_again"]["outcome"] = f"refused: {swallowed}"[:300]
+        env.save()
+        return None
+    issue["tests"] = int(issue.get("tests") or 0) + 1
+    while (env.root / test_path(issue)).exists():  # the test that errored is kept as it is
+        issue["tests"] += 1
+    path = test_path(issue)
+    try:
+        (env.root / path).parent.mkdir(parents=True, exist_ok=True)
+        (env.root / path).write_text(text, encoding="utf-8")
+    except OSError as e:
+        issue["asked_again"]["outcome"] = f"the test could not be written: {e!r}"[:200]
+        env.save()
+        return None
+    first = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
+    run = first
+    if first.status == "fail":
+        second = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
+        if second.status != "fail":
+            run = second
+    issue["asked_again"].update(test=path, outcome=run.status, detail=run.detail[:300], at=run.at or error.at)
+    if run.status == "fail":
+        issue.update(test=path, failure=run.detail[:300], failure_kind=_issues.ASSERTION, assertion=run.line[:200],
+                     assertion_at=run.at)
+    env.save()
+    return run
+
+
 async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
     """Ask for a test that fails on the current code because of the finding, and run it. ``True`` when it fails by an
     assertion on two runs (the issue is demonstrated and the test kept); otherwise the issue is ``not demonstrated``."""
-    source = _read(env.code / rel)
-    scope = scope_function(issue, source)
     detail = ""
     last = "no usable test could be made"
     while spend(env, issue, "test"):
-        prompt = env.prompts["code_finding_test"].substitute(
-            topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
-            file=rel, code=(f"### {rel} (the function `{scope}`)\n```python\n{function_source(source, scope)}\n```\n\n"
-                            f"The rest of {rel} offers:\n{signatures(source, scope)}" if scope else
-                            f"### {rel}\n```python\n{source.rstrip()}\n```"),
-            modules=module_names(env.code, env.package), problem=detail or "(none: this is the first try)")
+        prompt = _test_prompt(env, issue, rel, detail)
         reply = await _ask(env, prompt, "code", "test")
         text = reply_test(reply)
         if not text:
             detail = "the reply held no Python test: answer with one fenced block that defines a function `test_...`"
             last = "the reply held no test"
+            continue
+        swallowed = swallowed_call(text)
+        if swallowed:
+            # not run: asked for once more with the reason, and a second such test ends the tries
+            last = swallowed
+            if issue.get("swallowed"):
+                break
+            issue["swallowed"] = True
+            detail = swallowed
             continue
         issue["tests"] = int(issue.get("tests") or 0) + 1
         path = test_path(issue)
@@ -812,13 +1152,27 @@ async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
         if first.status == "fail":
             second = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
             if second.status == "fail":
-                issue.update(demonstrated=True, test=path, failure=first.detail[:300])
+                # Only a test's own assertion about values shows a fault; what failed is kept, for the gate after the run.
+                issue.update(demonstrated=True, test=path, failure=first.detail[:300], failure_kind=_issues.ASSERTION,
+                             assertion=first.line[:200], assertion_at=first.at)
                 env.save()
                 return True
             detail = "the test did not fail on a second run, so it is not deterministic: fix the seeds and make it assert one thing"
             last = detail
             continue
-        detail = f"the test could not show anything: {first.detail}. It must FAIL BY AN ASSERTION on the current code."
+        # An error shows nothing. Where it was raised is kept; a crash inside the code itself goes to the crash repair,
+        # and a test that errors in its own code is not kept (another is asked for, within the bound).
+        issue["errors"] = [*(issue.get("errors") or [])[-2:],
+                           {"test": path, "kind": first.kind, "place": first.place, "at": first.at,
+                            "detail": first.detail[:300]}]
+        if first.crash_in_program:
+            issue.update(demonstrated=False, outcome=_issues.NOT_DEMONSTRATED,
+                         crash={"at": first.at, "detail": first.detail[:300], "test": path},
+                         reason=f"its test crashed inside the code at {first.at or 'an unknown line'}: a crash, not a "
+                                "shown fault; it goes to the crash repair")
+            env.save()
+            return False
+        detail = _error_problem(first.detail)
         last = first.detail
     issue.update(demonstrated=False, outcome=_issues.NOT_DEMONSTRATED, reason=f"no test showed it ({last[:160]})")
     env.save()
@@ -833,39 +1187,84 @@ def module_names(code: Path, package: str) -> str:
     return ", ".join(names) or "(none)"
 
 
+def _callers_block(env: Env, callers: dict[str, set[str]]) -> str:
+    """The functions that call the one being repaired, shown so a repair that adds a parameter can pass it on."""
+    parts = []
+    for other, names in sorted(callers.items()):
+        source = _read(env.code / other)
+        for name in sorted(names):
+            parts.append(f"### {other} (the function `{name}`, which calls it)\n```python\n{function_source(source, name)}\n```")
+    return "\n\n".join(parts[:4])
+
+
 async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: str) -> tuple[bool, str]:
-    """One repair request and its checks. ``(accepted, why not)``; a rejected change is undone."""
+    """One repair request and its checks. ``(accepted, why not)``; a rejected change is undone, in every file it touched.
+
+    A repair of one function may add parameters after its own (each with a default value) and change the functions that
+    call it directly, in any file of the code, to pass them on (:func:`params_kept`, :func:`direct_callers`); a repair of a
+    whole file may move statements that run when the file is imported under an ``if __name__ == "__main__":`` block
+    (:func:`without_main_guard`). It is accepted only when the finding's own test passes, every check that passed before
+    still passes, no static check finds more faults, and FI's small run of the simulation still runs (``env.small_run``)."""
     path = env.code / rel
     old = _read(path)
     scope = scope_function(issue, old)
     test = issue.get("test") or ""
     failure = issue.get("failure") or ""
+    callers = direct_callers(env.code, rel, scope) if scope else {}
+    shown = _callers_block(env, callers)
     code_block = (f"### {rel} (the function `{scope}`)\n```python\n{function_source(old, scope)}\n```\n\nThe rest of {rel} "
                   f"offers (do not change these unless the finding is about them):\n{signatures(old, scope)}"
+                  + (f"\n\nIt is called by:\n\n{shown}" if shown else "")
                   if scope else f"### {rel}\n```python\n{old.rstrip()}\n```")
     how = ("Reply with ONE fenced Python block holding the corrected function(s), each whole, with the same names and "
-           "parameters (you may add small helper functions and import lines)." if scope else
-           f"Reply with ONE fenced Python block whose first line is `# file: {rel}` and that holds the whole corrected file.")
+           "parameters (you may add small helper functions and import lines). If the fix needs a value the function is not "
+           "given, add it as a parameter AFTER the existing ones, with a default value, and change each function that "
+           "calls it (shown above) to pass it: that function whole, in its own fenced block whose first line is "
+           "`# file: <its path>`." if scope else
+           f"Reply with ONE fenced Python block whose first line is `# file: {rel}` and that holds the whole corrected file. "
+           "If importing the file runs the study, you may put what runs it under `if __name__ == \"__main__\":`.")
     prompt = env.prompts["code_review_repair"].substitute(
         topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
         test=_read(env.root / test) if test else "(none)", failure=failure or "(none)", code=code_block,
         package=env.package or "(none)", how=how, problem=detail or "(none: this is the first try)")
     reply = await _ask(env, prompt, who, "repair")
     dotted = str(issue.get("function") or "")
+    edits: dict[str, tuple[str, str]] = {}  # file -> (old text, new text)
     if scope:
+        main, marked = file_blocks(reply)
+        mine_too = callers.get(rel, set())
         skipped: list[str] = []
-        new, names, why = splice(old, reply, {scope}, skipped)
+        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *mine_too}, skipped)
         if skipped:
             env.log.warning("[code_review] %s: the reply also defined %s, which the finding is not about; not used",
                             issue.get("id"), ", ".join(f"`{n}`" for n in skipped))
+        if new is not None and scope not in names:
+            new, why = None, f"the reply does not define the function the finding is about ({scope})"
+        for other, text in marked.items():
+            if new is None or other == rel:
+                continue
+            target = next((c for c in callers if c == other or Path(c).name == Path(other).name), None)
+            if target is None:
+                env.log.warning("[code_review] %s: the reply also changed %s, which does not call `%s`; not used",
+                                issue.get("id"), other, scope)
+                continue
+            before = _read(env.code / target)
+            changed, done, why_not = splice(before, f"```python\n{text}\n```", set(callers[target]), [])
+            if changed is None:
+                new, why = None, f"its change to {target}: {why_not}"
+            elif changed != before:
+                edits[target] = (before, changed)
+                names = [*names, *(f"{target}:{n}" for n in done)]
     else:
         from . import code_review as _review
 
         new = _review.parse_files(reply, [rel]).get(rel)
         names, why = [rel], "" if new else "the reply held no whole file"
+        # moving what runs on import under a main guard is not a change of the module the finding must speak of
+        was, now = without_main_guard(old, new) if new else (old, new)
         if new and dotted and not dotted.startswith("<"):
             changed = other_functions_changed(old, new, dotted)
-            outside = frame_changes(old, new)
+            outside = frame_changes(was, now)
             if changed:
                 new, why = None, ("it changed " + ", ".join(f"`{n}`" for n in changed[:4])
                                   + f", which the finding is not about (only `{dotted}` may change)")
@@ -878,7 +1277,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             # statement only when a name it binds is one the finding speaks of, or when it is an entry of the finding's
             # own quantity (a result dict built in one module-level statement). Anything wider is not this finding's.
             changed = other_functions_changed(old, new, "")
-            altered = unspoken_frame_changes(old, new, issue)
+            altered = unspoken_frame_changes(was, now, issue)
             if len(changed) > 1:
                 new, why = None, ("it changed " + ", ".join(f"`{n}`" for n in changed[:4])
                                   + "; a repair of a finding that names no function may change one existing function")
@@ -887,12 +1286,33 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                                   + ", which the finding does not speak of")
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"
-    if new == old:
+    if new != old:
+        edits[rel] = (old, new)
+    if not edits:
         return False, "the reply changed nothing"
-    problem = env.keeps(old, new, rel)
-    if problem:
-        return False, problem
-    path.write_text(new, encoding="utf-8")
+    if scope:
+        # a function that calls the repaired one may change only the arguments of that call
+        for target, (before, after_text) in edits.items():
+            problem = caller_edit_problem(before, after_text, set(callers.get(target) or ()) - {scope}, scope)
+            if problem:
+                return False, problem if target == rel else f"its change to {target}: {problem}"
+    if scope and rel in edits:
+        final = {c: (edits[c][1] if c in edits else _read(env.code / c)) for c in callers}
+        unpassed = unpassed_params(function_source(old, scope), function_source(edits[rel][1], scope), scope, final,
+                                   callers)
+        if unpassed:
+            return False, unpassed
+    for target, (before, after_text) in edits.items():
+        problem = env.keeps(before, after_text, target)
+        if problem:
+            return False, problem if target == rel else f"its change to {target}: {problem}"
+
+    def put_back() -> None:
+        for target, (before, _a) in edits.items():
+            (env.code / target).write_text(before, encoding="utf-8")
+
+    for target, (_b, after_text) in edits.items():
+        (env.code / target).write_text(after_text, encoding="utf-8")
     try:
         mine = (await env.run_tests([test])).get(test) or TestRun("error", "not run")
         if mine.status != "pass":
@@ -904,20 +1324,26 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         more = worse_static(env.baseline_static, env.static())
         if more:
             raise _Rejected("it added faults to the static checks: " + ", ".join(more))
+        if env.small_run is not None:
+            stopped = await env.small_run()
+            if stopped:
+                raise _Rejected("FI's small run of the simulation no longer runs: " + stopped)
     except _Rejected as e:
-        path.write_text(old, encoding="utf-8")
+        put_back()
         return False, str(e)
     except BaseException:
-        path.write_text(old, encoding="utf-8")
+        put_back()
         raise
     if env.on_accept is not None:
-        env.on_accept(rel, old, new, issue)
+        for target, (before, after_text) in edits.items():
+            env.on_accept(target, before, after_text, issue)
     env.baseline = {**after, f"finding:{test}": "pass"}
     env.baseline_static = env.static()
     if test not in _accepted(env.record):
         _accepted(env.record).append(test)
-    if rel not in env.changed:
-        env.changed.append(rel)
+    for target in edits:
+        if target not in env.changed:
+            env.changed.append(target)
     issue["touched"] = names
     return True, ""
 
@@ -975,7 +1401,7 @@ async def repair_issues(env: Env) -> list[str]:
         if not rel or not (env.code / rel).is_file():
             issue.update(demonstrated=False, outcome=_issues.NOT_DEMONSTRATED, reason="the file it concerns is not in the code")
             continue
-        if issue.get("demonstrated") is not True:
+        if not _issues.shown_by_assertion(issue):
             if not await demonstrate(env, issue, rel):
                 continue
         await repair_issue(env, issue, rel)

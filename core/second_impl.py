@@ -16,7 +16,8 @@ and compares the answers:
   the call limit). Never a repair, never a stop.
 
 ``unresolved`` and ``unconfirmed`` come with one plain sentence for QUALITY.md and the paper's limitations
-(:func:`limitations`). Nothing here stops a quest and nothing asks a person.
+(:func:`limitations`); an ``unresolved`` one is an item FI fills into the paper's Limitations itself and checks is there
+(:mod:`core.paper_facts`). Nothing here stops a quest and nothing asks a person.
 
 The model is reached through injected callbacks, so the engine's per-step providers decide who writes and who judges:
 ``chat(node, messages)`` with the nodes ``second_impl`` and ``second_impl.adjudicate``; ``run(argv)`` runs

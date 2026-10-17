@@ -60,7 +60,11 @@ def scrub_secrets(env: "Mapping[str, str] | None" = None) -> dict[str, str]:
     ``PIP_*``, ``CUDA_*``, ``FI_*``) stays. ``VenvExecutor`` and ``DockerExecutor`` apply this to whatever environment
     they are given, and to ``os.environ`` when given none, so code a model wrote never sees FI's keys."""
     base = os.environ if env is None else env
-    return {k: v for k, v in base.items() if not _SECRET_NAME.search(str(k))}
+    return {k: v for k, v in base.items() if not _SECRET_NAME.search(str(k)) and str(k).upper() not in _NEVER_PASSED}
+
+
+#: Never handed to code a model or an agent wrote: an older FI's pointer to the folder of its check values.
+_NEVER_PASSED = frozenset({"FI_CHECKS_DIR"})
 
 
 # How long ``VenvExecutor.execute`` still reads a timed-out command's output after stopping it.

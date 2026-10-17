@@ -293,7 +293,7 @@ def test_output_config_defaults_roundtrip() -> None:
     dumped = oc.model_dump()
     reconstructed = OutputConfig.model_validate(dumped)
     assert reconstructed.kinds == oc.kinds == ["paper_md", "paper_pdf"]
-    assert reconstructed.paper_format == oc.paper_format == "generic"
+    assert reconstructed.paper_format == oc.paper_format == "article"
     assert reconstructed.output_dir == oc.output_dir == Path("./outputs")
 
 

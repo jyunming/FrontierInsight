@@ -24,6 +24,7 @@ from generation._html_pdf import (
 )
 from generation._pandoc import HTML_MARKDOWN_READER
 from generation.paper import PaperGenerator
+from tests.paper_fakes import fake_html_run
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +192,7 @@ def test_html_render_puts_the_author_line_in_the_byline(
         seen.append(list(cmd))
         raise OSError("stop after pandoc")
 
-    monkeypatch.setattr(_html_pdf.subprocess, "run", fake_run)
+    fake_html_run(monkeypatch, fake_run)
     pmd = tmp_path / "paper.md"
     pmd.write_text("# T\n\nbody\n", encoding="utf-8")
 
@@ -213,7 +214,7 @@ def test_the_html_render_takes_the_writers_figure_number_off_the_caption(
     def fake_run(cmd, **_kw):  # noqa: ANN001
         raise OSError("stop after writing the body")
 
-    monkeypatch.setattr(_html_pdf.subprocess, "run", fake_run)
+    fake_html_run(monkeypatch, fake_run)
     pmd = tmp_path / "paper.md"
     pmd.write_text("# T\n\n![**Figure 1.** Energy decay.](figures/energy.png)\n", encoding="utf-8")
     render_paper_html_pdf(pmd, tmp_path / "paper.pdf", pandoc_path="pandoc", browser=("msedge", "edge"))
@@ -290,7 +291,7 @@ def _pandoc_cmd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, md: str) -> lis
         seen.append(list(cmd))
         raise OSError("stop after pandoc")
 
-    monkeypatch.setattr(_html_pdf.subprocess, "run", fake_run)
+    fake_html_run(monkeypatch, fake_run)
     pmd = tmp_path / "paper.md"
     pmd.write_text(md, encoding="utf-8")
     render_paper_html_pdf(

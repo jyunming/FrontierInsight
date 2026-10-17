@@ -1,0 +1,68 @@
+[
+ {
+  "name": "noise_free_Ea",
+  "value": 50000.00000000002,
+  "expected": 50000.0,
+  "tolerance": 0.05,
+  "mode": "absolute",
+  "limit": 0.05,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "noise_free_lnA",
+  "value": 16.000000000000007,
+  "expected": 16.0,
+  "tolerance": 1e-06,
+  "mode": "absolute",
+  "limit": 1e-06,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "sampling_window_kt_max",
+  "value": 0.0,
+  "expected": 0.0,
+  "tolerance": 1e-09,
+  "mode": "absolute",
+  "limit": 1e-09,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "low_noise_SD_over_theory_SE",
+  "value": 1.02909156481052,
+  "expected": 1.0,
+  "tolerance": 0.1,
+  "mode": "absolute",
+  "limit": 0.1,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "low_noise_coverage_95",
+  "value": 0.942,
+  "expected": 0.95,
+  "tolerance": 0.04,
+  "mode": "absolute",
+  "limit": 0.04,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ },
+ {
+  "name": "low_noise_reportedSE_over_SD",
+  "value": 0.9612518604131115,
+  "expected": 1.0,
+  "tolerance": 0.1,
+  "mode": "absolute",
+  "limit": 0.1,
+  "passed_by_engine": true,
+  "script_said": null,
+  "measured_by": "engine"
+ }
+]

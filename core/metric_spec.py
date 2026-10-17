@@ -93,6 +93,14 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
         paired = item.get("paired")
         if paired is not None and not isinstance(paired, bool):
             return None, f"`protocol.metrics` entry `{ident}`: `paired` must be true or false"
+        # The value the number should take at each setting, as a formula FI computes itself (core/reference_values.py).
+        # Its shape here; what it computes, with the grid and the checks in reach, in core/plan.py.
+        if item.get("reference") is not None:
+            from . import reference_values
+
+            shape = reference_values.shape_problem(item["reference"])
+            if shape:
+                return None, f"`protocol.metrics` entry `{ident}`: its `reference` {shape}"
         # No `given` (left out, null or empty) is a mean over every trial. A live plan wrote `"given": null` on every
         # metric, the key survived into the spec, and every entry then read as declaring a subset: the list was dropped.
         given = item.get("given")
@@ -103,6 +111,18 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
         entry = {k: v for k, v in item.items() if k != "given"} | {"id": ident, "kind": kind}
         if given is not None:
             entry["given"] = given
+        if item.get("known_value") is not None:
+            known, why = _known_value(ident, item["known_value"])
+            if known is None:
+                return None, why
+            entry["known_value"] = known
+        if item.get("undefined_when") is not None:
+            when = item["undefined_when"]
+            if not isinstance(when, dict) or not when or not all(isinstance(k, str) and k for k in when):
+                return None, (f"`protocol.metrics` entry `{ident}`: `undefined_when` must map a grid parameter to the "
+                              "value (or the list of values) where this number has no value, for example "
+                              "{\"effect_size\": 0}")
+            entry["undefined_when"] = {k: (list(v) if isinstance(v, (list, tuple)) else [v]) for k, v in when.items()}
         out.append(entry)
     # A mean over a subset of the trials names the proportion whose successes are that subset (see ``given_counts``).
     kinds = {m["id"]: m["kind"] for m in out}
@@ -117,6 +137,65 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
                 f"not `{m['given']}`"
             )
     return out, None
+
+
+#: The parts of a metric's ``known_value``: what FI needs to measure the reported uncertainty against the truth itself.
+KNOWN_VALUE_HELP = (
+    "`known_value` holds `true_value` (a number, or the name of a threshold or of a grid parameter that holds it, on the "
+    "estimate's own scale), `estimate` (the name run_trial returns for the estimate), `standard_error` (the name it returns "
+    "for its standard error) and/or `interval` ([the name of the lower end, the name of the upper end]), and `level` (the "
+    "interval's level, for example 0.95)")
+
+
+def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
+    """A metric's declared known value, checked for its shape: ``(clean mapping, "")`` or ``(None, why)``. Which names
+    resolve (a threshold, a grid parameter) is the protocol's to say (:func:`known_value_problems`)."""
+    where = f"`protocol.metrics` entry `{ident}`: "
+    if not isinstance(raw, dict):
+        return None, where + KNOWN_VALUE_HELP
+    out: dict[str, Any] = {}
+    truth = raw.get("true_value")
+    if isinstance(truth, bool) or not (isinstance(truth, (int, float)) and math.isfinite(truth)
+                                       or isinstance(truth, str) and truth.strip()):
+        return None, where + "`known_value.true_value` is missing; " + KNOWN_VALUE_HELP
+    out["true_value"] = truth.strip() if isinstance(truth, str) else float(truth)
+    est = raw.get("estimate")
+    if not isinstance(est, str) or not est.strip():
+        return None, where + "`known_value.estimate` is missing; " + KNOWN_VALUE_HELP
+    out["estimate"] = est.strip()
+    for key in ("standard_error", "variance"):
+        if raw.get(key) is not None:
+            if not isinstance(raw[key], str) or not raw[key].strip():
+                return None, where + f"`known_value.{key}` must be the name run_trial returns for it"
+            out[key] = raw[key].strip()
+    if raw.get("interval") is not None:
+        ends = raw["interval"]
+        if not (isinstance(ends, (list, tuple)) and len(ends) == 2 and all(isinstance(e, str) and e.strip() for e in ends)):
+            return None, where + "`known_value.interval` must be [the name of the lower end, the name of the upper end]"
+        out["interval"] = [ends[0].strip(), ends[1].strip()]
+    if not any(k in out for k in ("standard_error", "variance", "interval")):
+        return None, where + "`known_value` needs `standard_error` or `interval`; " + KNOWN_VALUE_HELP
+    level = raw.get("level")
+    if isinstance(level, bool) or not isinstance(level, (int, float)) or not 0.5 < float(level) < 1.0:
+        return None, where + "`known_value.level` must be the interval's level, a number between 0.5 and 1 (for example 0.95)"
+    out["level"] = float(level)
+    return out, ""
+
+
+def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
+    """A declared true value that names neither a threshold nor a grid parameter of the protocol, one sentence each."""
+    if not isinstance(protocol, dict):
+        return []
+    thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
+    axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
+    out = []
+    for spec in declared(protocol):
+        truth = (spec.get("known_value") or {}).get("true_value")
+        if isinstance(truth, str) and truth not in thresholds and truth not in axes:
+            out.append(f"The metric `{spec['id']}` declares its true value as `{truth}`, which is neither a threshold nor a "
+                       "grid parameter of the protocol, so FI cannot measure its uncertainty against it; give the number, "
+                       "or the name of the threshold or grid parameter that holds it.")
+    return out
 
 
 def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
@@ -135,6 +214,14 @@ def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
     ]
     for item in ordered:
         clean, why = normalize(kept + [item])
+        if clean is None and isinstance(item, dict) and any(k in item for k in ("known_value", "undefined_when")):
+            # the metric stands without the part that could not be read; that part is said
+            bare = {k: v for k, v in item.items() if k not in ("known_value", "undefined_when")}
+            again, _ = normalize(kept + [bare])
+            if again is not None:
+                notes.append(f"{why}; the metric is kept without it")
+                clean = again
+                why = None
         if clean is None:
             notes.append(why or "a `protocol.metrics` entry could not be checked")
         else:

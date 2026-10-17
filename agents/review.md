@@ -40,7 +40,7 @@ Respond with a single JSON object, no prose, no markdown fence:
   "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'figure_caption' when the Figures block lists captions that describe what their figure does not show, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"]
 }
 
-The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and has the paper written again. An objection to the design itself (such as the methodology identifiers above) does not change the design: FI states it in the paper's limitations as your objection, so name only what you can point to in the inputs. Personas without their own MUST-FLAG rules return ``[]``, except for the shared one above (`figure_caption`) and `user_feedback_unaddressed` when the person's refine notes are shown below and the paper does not answer one.
+The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and has the paper written again. An objection to the design itself (such as the methodology identifiers above) does not change the design: the paper is written again with your objection in hand and FI keeps it in its quality report, so name only what you can point to in the inputs. Personas without their own MUST-FLAG rules return ``[]``, except for the shared one above (`figure_caption`) and `user_feedback_unaddressed` when the person's refine notes are shown below and the paper does not answer one.
 
 ---
 
@@ -64,6 +64,6 @@ $claim_grounding_block
 $figure_check_block$foundational_check_block$user_feedback_block$code_findings_block
 
 ## Paper draft
-(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's own records: how often the design was revised and how many runs were made. It is not the writer's text and no revision can change it, so never ask for it to be edited or removed; you may weigh what it says. The same holds for a block between `<!-- fi:run-record:... -->` and `<!-- /fi:run-record -->` (FI's record of the run's seeds, run time, trial counts, reduced size and what was not done or not tested), and for a block between `<!-- fi:code-findings:... -->` and `<!-- /fi:code-findings -->`: FI's record of what a second reading of the code left open, listed under "Open points in the code" in the Inputs above when there is one.)
+(The seed the code used, the measured run time, the topic's time limit and whether it was kept, the trial counts and the sentences saying what the study did not do are filled in by FI from its own records, between `<!-- fi:fact-... -->` markers; FI checks them after you, so do not judge them from memory and never ask for them to be changed. How the design was revised, how many runs were made, FI's record of the run and what a second reading of the code left open are in FI's quality report, not in the paper; the open points in the code are listed under "Open points in the code" in the Inputs above when there are any. A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI and no revision can change it, so never ask for it to be edited or removed.)
 
 $paper_md

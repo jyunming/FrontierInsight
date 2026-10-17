@@ -75,6 +75,7 @@ def _write_tool(code: Path, *, model_py: str = MODEL_PY, simulate: str = SIM_PKG
     for name, text in cl.project_files(code, PROTOCOL, PKG).items():
         (code / name).parent.mkdir(parents=True, exist_ok=True)
         (code / name).write_text(text, encoding="utf-8")
+    cl.write_check_values(code, PROTOCOL)
 
 
 # --- the estimate and the cap ----------------------------------------------------------------------------------------
@@ -795,7 +796,7 @@ def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> 
     code = quest / "code"
     _write_tool(code)
     record = {name: hashlib.sha256((code / name).read_bytes()).hexdigest() for name in (cl.METHODS_NAME, cl.TEST_PATH)}
-    (quest / ".fi").mkdir(parents=True)
+    (quest / ".fi").mkdir(parents=True, exist_ok=True)  # FI's check values are already there
     (quest / ".fi" / "code_project.json").write_text(json.dumps(record), encoding="utf-8")
     hashes = attempt_records.script_hashes(quest)
     assert cl.METHODS_NAME not in hashes and cl.TEST_PATH not in hashes and f"{PKG}/model.py" in hashes
@@ -856,6 +857,7 @@ def test_the_generated_tests_hold_a_run_cell_that_only_mentions_run_trial_to_run
         (root / "tests").mkdir(parents=True)
         (root / "simulate.py").write_text(sim, encoding="utf-8")
         (root / "tests" / "test_oracles.py").write_text(cl.oracle_tests({"oracles": [check]}), encoding="utf-8")
+        cl.write_check_values(root, {"oracles": [check]})
         return subprocess.run([sys.executable, "tests/test_oracles.py"], cwd=root, capture_output=True).returncode
 
     builds = ("def run_trial(c, t, s):\n    return {'rate': 0.05}\n\n"

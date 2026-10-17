@@ -28,6 +28,8 @@ from typing import Any
 OPEN, REOPENED = "open", "reopened"
 FIXED = "fixed"
 NOT_DEMONSTRATED = "not demonstrated"
+#: How a test showed an issue: by its own assertion about values (the only way that counts; ``failure_kind``).
+ASSERTION = "assertion"
 PLAN_PROBLEM = "plan problem"
 GAVE_UP = "not repaired"
 GONE = "no longer flagged"
@@ -315,17 +317,24 @@ def flagged_now(issue: dict[str, Any]) -> bool:
     return _open_now(issue) and issue.get("outcome") not in (FIXED, GONE)
 
 
-def shown_open(record: dict[str, Any]) -> list[dict[str, Any]]:
-    """Open issues that change a reported result and were shown by a failing test, most urgent first: the candidates for
-    the evidence gate's stop. An issue the reading no longer flags, one repaired, one whose test passed on the code, one
-    never tested and a contradiction inside the plan are left out. The reader's word is not enough to stop a quest: the
-    gate runs each one's test again on the code that produced the results.
+def shown_by_assertion(issue: dict[str, Any]) -> bool:
+    """Whether a test showed the issue by its own assertion about values when it was first shown (``failure_kind``). An
+    issue recorded before FI kept how its test failed has no ``failure_kind``: it counts as not shown (its test may have
+    turned an exception into ``assert False``)."""
+    return issue.get("demonstrated") is True and issue.get("failure_kind") == ASSERTION
 
-    Repaired and no-longer-flagged issues are left out on purpose: a finding test usually turns any exception into a
-    failed assertion (``except Exception: assert False``), so after a repair changes a function's interface its old test
-    "fails" on correct code. Re-running them stopped both trustworthy papers of the suite (a fixed fault whose test now
-    indexes a shorter return value)."""
-    return sorted((i for i in open_issues(record) if i.get("changes_result") is True and i.get("demonstrated") is True
+
+def shown_open(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Open issues that change a reported result and were shown by a test's own assertion about values, most urgent first:
+    the candidates for the evidence gate's stop. An issue the reading no longer flags, one repaired, one whose test passed
+    on the code, one whose test only errored (an exception, in the code or in the test, shows nothing), one never tested
+    and a contradiction inside the plan are left out. The reader's word is not enough to stop a quest: the gate runs each
+    one's test again on the code that produced the results, and only a failing assertion there counts.
+
+    Repaired and no-longer-flagged issues are left out on purpose: after a repair changes a function's interface, its old
+    test can fail on correct code. Re-running them stopped both trustworthy papers of the suite (a fixed fault whose test
+    now indexes a shorter return value)."""
+    return sorted((i for i in open_issues(record) if i.get("changes_result") is True and shown_by_assertion(i)
                    and not i.get("plan_conflict") and i.get("outcome") not in (FIXED, GONE)), key=rank_key)
 
 

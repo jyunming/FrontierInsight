@@ -184,7 +184,8 @@ async def test_an_agree_only_code_review_is_asked_again_and_then_recorded_as_not
     assert len(reader.prompts) == 2 and "Your previous reply was no review" in reader.prompts[1]
     record = cr.load(engine.quest_root)
     assert record["error"] == pairs.NOT_A_REVIEW and not record.get("read_version")
-    assert "not compared with the plan by another model" in cr.write_note(engine.quest_root, engine.quest_root / "code")
+    assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
+    assert "not compared with the plan by another model" in cr.findings_block(engine.quest_root, engine.quest_root / "code")
     # Asked again, it says what it checked: a review with nothing found.
     class _Then(_Logic):
         async def chat(self, messages, **kw):  # noqa: ANN001

@@ -47,7 +47,7 @@ $literature_block
 $passages_block
 
 ## The draft
-(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's records. Never edit it or its markers: any change to it is undone. The same holds for blocks between `<!-- fi:run-record:... -->` and `<!-- /fi:run-record -->`, and between `<!-- fi:code-findings:... -->` and `<!-- /fi:code-findings -->`.)
+(A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI from its records. Never edit it or its markers: any change to it is undone. A placeholder in double braces, such as `{{seed}}`, `{{run_time}}`, `{{time_limit_met}}` or `{{not_done:topic-temperature}}`, stands for a value FI fills in from its records: keep each one exactly as it is written, in its sentence; never replace one with a number or a sentence of your own, and never type the seed or the run time yourself.)
 
 <draft>
 $paper_block

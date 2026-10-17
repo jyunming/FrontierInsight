@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from core import equation_tests as eqt
+from tests.equation_judge_helpers import fi_verdict
 
 # A damped spring: the quality factor Q = sqrt(m k) / c. The wrong version divides by a different quantity.
 SPRING = {"summary": "a mass on a damped spring", "equations": [
@@ -90,7 +91,9 @@ def _run(code: Path) -> tuple[list[dict[str, Any]], str]:
 def _cases(code: Path) -> list[dict[str, Any]]:
     sources = {"spring/model.py": (code / "spring" / "model.py").read_text(encoding="utf-8")}
     located = eqt.locate(PROTOCOL, sources)
-    assert located["E1"] == {"module": "spring.model", "function": "quality", "file": "spring/model.py"}
+    assert {k: located["E1"][k] for k in ("module", "function", "file")} == {
+        "module": "spring.model", "function": "quality", "file": "spring/model.py"}
+    assert [p["name"] for p in located["E1"]["static"]["params"]] == ["m", "k", "c"], "FI's own reading of it"
     assert located["E2"] is None and located["E3"] is None
     return eqt.cases(eqt.example_rows(PROTOCOL), located)
 
@@ -99,6 +102,7 @@ def test_an_equation_implemented_wrongly_is_caught_and_a_correct_one_passes(tmp_
     code = tmp_path / "code"
     _write_package(code, CORRECT)
     eqt.write(code, _cases(code))
+    eqt.write_values(code, _cases(code))   # a person's copy, delivered at the end of a quest
     results, _out = _run(code)
     assert [(r["id"], r["status"]) for r in results] == [("E1", "ok")]
     (code / "spring" / "model.py").write_text(WRONG, encoding="utf-8")
@@ -117,6 +121,7 @@ def test_the_generated_file_is_also_a_pytest_file_and_is_fi_s_not_the_model_s(tm
     code = tmp_path / "code"
     _write_package(code, WRONG)
     path = eqt.write(code, _cases(code))
+    eqt.write_values(code, _cases(code))
     text = path.read_text(encoding="utf-8")
     assert "Written by Frontier Insight (never by the model" in text and "def test_e1():" in text
     done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(path)], cwd=code,
@@ -169,9 +174,8 @@ def test_a_tiny_output_is_held_to_its_size_and_only_an_exact_zero_gets_the_round
     assert tiny["abs"] == 0.0 and zero["abs"] == eqt.ABSOLUTE_FLOOR
     (tmp_path / "m.py").write_text("def f(x):" + chr(10) + "    return 0.0" + chr(10), encoding="utf-8")
     for name, c, want in (("tiny", tiny, "mismatch"), ("zero", zero, "ok")):
-        (tmp_path / "t.py").write_text(eqt.test_source([{**c, "module": "m", "function": "f"}]), encoding="utf-8")
-        done = subprocess.run([sys.executable, "-B", "t.py", "--json"], cwd=tmp_path, capture_output=True, text=True)
-        assert eqt.parse_results(done.stdout)[0]["status"] == want, name
+        one = [{**c, "module": "m", "function": "f"}]
+        assert fi_verdict(one, tmp_path)[0]["status"] == want, name
 
 
 # --- `untestable` is accepted only when something else checks the equation -----------------------------------------------

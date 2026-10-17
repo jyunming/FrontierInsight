@@ -125,3 +125,57 @@ def test_only_seed_names_are_seeds_in_the_code(tmp_path: Path) -> None:
     (root / "code" / "simulate.py").write_text("use_seed = 1\nn_seed_batches = 4\nrandom_seed = 77\n", encoding="utf-8")
     values = {v for _loc, v in seed_records(root).code_seeds}
     assert 77 in values and 1 not in values and 4 not in values
+
+
+# ---- the second review (P1-0): FI cannot tell, or a fixed seed drives the trials too ---------------------------------------
+
+_KEPT_ON_OBJECT = ("import numpy as np\nclass Sim:\n    def __init__(self, seed):\n        self.seed = seed\n"
+                   "    def go(self):\n        return np.random.default_rng(self.seed).normal()\n"
+                   "def run_trial(cell, trial_id, seed):\n    return {'x': Sim(seed).go()}\n")
+_PARTLY = ("from model import sim\nimport numpy as np\ndef run_trial(cell, trial_id, seed):\n"
+           "    rng = np.random.default_rng(seed)\n    return sim(cell, rng)\n")
+_BASE_SEED_CLAIMS = ["Each trial's seed is derived from FI's base seed and the trial number.",
+                     "Trials were seeded with 0 plus the trial index.",
+                     "Each trial used base seed 0 plus its index."]
+
+
+def _seeded_quest(tmp_path: Path, simulate: str, extra: dict[str, str] | None = None) -> Path:
+    (tmp_path / "code").mkdir(parents=True)
+    (tmp_path / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
+    for name, text in (extra or {}).items():
+        (tmp_path / "code" / name).write_text(text, encoding="utf-8")
+    (tmp_path / "code" / "study.json").write_text(json.dumps({"base_seed": 0}), encoding="utf-8")
+    return tmp_path
+
+
+def test_when_fi_cannot_tell_a_claim_that_its_base_seed_drives_the_trials_is_flagged(tmp_path: Path) -> None:
+    from core import run_facts
+
+    root = _seeded_quest(tmp_path, _KEPT_ON_OBJECT)
+    assert run_facts.seed_verdict(root)["verdict"] == "unknown"
+    seeds = seed_records(root)
+    for sentence in _BASE_SEED_CLAIMS:
+        assert _seed_findings(f"# P\n\n{sentence}\n", seeds), sentence
+    assert not _seed_findings("# P\n\nThe study ran 9 settings.\n", seeds)
+
+
+def test_when_a_fixed_seed_drives_the_trials_too_a_base_seed_claim_is_flagged(tmp_path: Path) -> None:
+    from core import run_facts
+
+    root = _seeded_quest(tmp_path, _PARTLY, {"model.py": "import numpy as np\ndef sim(cell, rng):\n"
+                                                         "    return np.random.default_rng(7).normal()\n"})
+    assert run_facts.seed_verdict(root)["verdict"] == "partly"
+    seeds = seed_records(root)
+    for sentence in _BASE_SEED_CLAIMS:
+        assert _seed_findings(f"# P\n\n{sentence}\n", seeds), sentence
+
+
+def test_a_seed_in_a_table_is_read_as_its_column_s_words(tmp_path: Path) -> None:
+    """Second review (P1-3): a seed in a table row was never checked; the same number in a sentence was."""
+    seeds = seed_records(_quest(tmp_path))
+    two_cols = "## Methods\n\n| Quantity | Value |\n|---|---|\n| Random seed | 5 |\n| Trials | 400 |\n"
+    assert _seed_findings(two_cols, seeds), "a two-column row reads 'Random seed: 5'"
+    by_header = "## Methods\n\n| Setting | Seed | Trials |\n|---|---|---|\n| A | 5 | 400 |\n"
+    assert _seed_findings(by_header, seeds), "a cell reads with its column's header: 'Seed: 5'"
+    true_row = "## Methods\n\n| Quantity | Value |\n|---|---|\n| Trials | 400 |\n| Settings | 27 |\n"
+    assert not _seed_findings(true_row, seeds)

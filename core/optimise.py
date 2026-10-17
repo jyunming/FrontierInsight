@@ -757,6 +757,38 @@ def attach_check(quest_root: Path, run: SearchRun, check: dict[str, Any], text: 
 # --- the runner the engine uses --------------------------------------------------------------------------------------
 
 
+#: The one setting the search's own evaluations are judged as by FI's check of the failed trials.
+EVALUATIONS_KEY = "the search's evaluations"
+NO_CALIBRATION = ("a search for the best design: its intervals and standard errors are not checked against true values "
+                  "(only its failed trials are)")
+
+
+def trial_cells(run: SearchRun, quest_root: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """What FI's check of the failed trials (core/trial_checks.py) reads for a search: each setting of the coarse scan
+    with its own trials (``raw/trials.json``), then the search's evaluations together as one setting, a failed evaluation
+    counted as failed. ``(cells, reasons by key)``."""
+    from collections import Counter
+
+    from . import trial_checks as _checks
+
+    cells: list[dict[str, Any]] = []
+    reasons: dict[str, Any] = {}
+    if run.scan:
+        try:
+            data = json.loads((Path(quest_root) / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        cells = [c for c in data.get("cells") or [] if isinstance(c, dict)]
+        reasons = dict(_checks.ledger_reasons(quest_root))
+    rows = [r for r in run.rows if r.get("event", "evaluation") == "evaluation" and r.get("stage") != "scan"]
+    if rows:
+        failed = [r for r in rows if r.get("status") != "ok"]
+        cells.append({"key": EVALUATIONS_KEY, "planned": len(rows), "ok": len(rows) - len(failed), "failed": len(failed),
+                      "metrics": {}})
+        reasons[EVALUATIONS_KEY] = Counter(str(r.get("reason") or "the evaluation failed") for r in failed)
+    return cells, reasons
+
+
 class OptimisationRunner:
     """Stands in for the executor when the plan is a search for the best design, as ``trial_runner.TrialsRunner`` does
     for a measurement: running ``experiment.py`` first runs the search (:func:`run_search`), then the analysis, with
@@ -765,8 +797,13 @@ class OptimisationRunner:
     search for the checks after it."""
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, simulate: Path, analysis: Path,
-                 log: Any = None, frozen: Any = False) -> None:
+                 log: Any = None, frozen: Any = False, repairs_left: Any = None) -> None:
         self.executor = executor
+        #: Whether a repair of the simulation is left (a bool, or a callable asked at each run): FI's check of the failed
+        #: trials (core/trial_checks.py) sends a fault back only while one is.
+        self._repairs_left = repairs_left
+        #: The fault FI's check of the failed trials found on the last run (the engine's stop once the repairs are spent).
+        self.trial_fault: dict[str, Any] | None = None
         #: Whether the study is frozen for its confirm run (a bool, or a callable asked at each run): the search is
         #: then not run again (:func:`run_search`).
         self._frozen = frozen
@@ -831,6 +868,7 @@ class OptimisationRunner:
             return result
         started = time.monotonic()
         self.flat = None
+        self.trial_fault = None
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         if block_of(protocol) is None:
             self.failed_script = None
@@ -878,6 +916,10 @@ class OptimisationRunner:
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr}\nFI's search for the best design got no result from the "
                                           f"simulation: {reason}".strip())
+        # More than half of the search's evaluations (or of a scan setting's trials) failed: the best design would rest on
+        # the few that survived. Sent back to be repaired while a repair is left, then a stop (core/trial_checks.py).
+        if (sent := self._check_trials(run, started)) is not None:
+            return sent
         # A search in which every design gave the very same numbers, and whose simulation's code never lets the design reach
         # what it returns, is not a result: the simulation does not use the design it is given. It is sent back to be repaired
         # like one that does not run (core/flat_output.py). The same numbers from a simulation that does read the design are
@@ -936,6 +978,41 @@ class OptimisationRunner:
             returncode=result.returncode, stdout=stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
         )
+
+    def _check_trials(self, run: SearchRun, started: float) -> Any:
+        """FI's check of the failed trials on a search (:func:`trial_cells`): a fault is a failed run of the simulation
+        while a repair is left, then the engine's stop; a failed design is never chosen, so nothing is left out. The
+        intervals are not checked here (the record says so). ``None`` to go on."""
+        from core.execution import ExecutionResult
+
+        from . import trial_checks as _checks
+
+        cells, reasons = trial_cells(run, self.quest_root)
+        if not cells:
+            return None
+        left = self._repairs_left() if callable(self._repairs_left) else bool(self._repairs_left)
+        verdict = _checks.judge(cells, reasons=reasons, repairs_left=bool(left), no_calibration=NO_CALIBRATION)
+        if verdict.action == _checks.LEAVE_OUT:
+            # the search never chooses a design whose evaluation failed: nothing to leave out, the failures are stated
+            verdict.action, verdict.left_out = _checks.OK, []
+        _checks.write_record(self.quest_root, verdict.record())
+        if self.log is not None:
+            for f in verdict.fails:
+                if f.stated and not f.fault:
+                    self.log.info("[optimise] %s (recorded; the paper states it)", f.says())
+            self.log.info("[optimise] calibration not checked: %s", NO_CALIBRATION)
+        if verdict.action == _checks.OK:
+            return None
+        self.failed_script = self.simulate.name
+        self.trial_fault = {"action": verdict.action, "say": verdict.say, "tried": list(verdict.tried),
+                            "partial": verdict.partial}
+        if self.log is not None:
+            self.log.warning("[optimise] FI's check of the failed trials found a fault; %s:\n%s",
+                             "sending the simulation back to be repaired" if verdict.action == _checks.REPAIR
+                             else "the repairs are spent, the quest stops", verdict.directive[:1500])
+        directive = verdict.directive if len(verdict.directive) <= 1800 else verdict.directive[:1797] + "..."
+        return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
+                               stderr=f"{run.stderr[-4000:]}\n{directive}".strip())
 
     def _flat_result(self, why: str, run: SearchRun, started: float) -> Any:
         """The run, sent back: the simulation gives the same numbers whatever design it is given."""

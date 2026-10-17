@@ -108,7 +108,7 @@ def test_default_clarify_questions_has_all_eight_slots() -> None:
     # paper_venue default must be one of the templates the engine knows
     # about — `_apply_paper_venue_override` silently drops unknown values.
     assert q["paper_venue"]["default"] in (
-        "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+        "generic", "article", "neurips", "iclr", "ieee_access", "nature_mi",
     )
     # topic_shape default is one of the four documented shapes — design
     # and write prompts pattern-match on the value.

@@ -18,8 +18,10 @@ the provenance check as numbers the run computed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+from array import array
 from pathlib import Path
 from typing import Any
 
@@ -52,35 +54,89 @@ def _is_index(values: list[float]) -> bool:
     return len(values) > 1 and sorted(values) == [float(i) for i in range(len(values))]
 
 
+def summary(values: list[float]) -> dict[str, Any]:
+    """What the table needs of one value's trials in one setting, without the trials themselves: ``n``, ``mean``,
+    ``sd``, whether every trial gave 0 or 1 (``binary``, with their ``successes``), whether the values are a trial index
+    (``index``), whether they are all one number (``constant``), and a ``digest`` of the values (two settings with the
+    same digest gave the very same trials: copies, not independent runs)."""
+    mean, sd, n = _stats.mean_std(values)
+    binary = bool(values) and all(v in (0.0, 1.0) for v in values)
+    return {"n": n, "mean": mean, "sd": sd, "binary": binary, "successes": sum(values) if binary else None,
+            "index": _is_index(values), "constant": len(set(values)) <= 1,
+            "digest": hashlib.sha256(array("d", values).tobytes()).hexdigest()[:16]}
+
+
+def summaries(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each record of ``raw/trials.json`` as ``{"cell", "key", "level", "metrics": {name: summary}}`` (see
+    :func:`summary`), in the record's order, with the record's counts of runs (``planned``, ``ok``, ``failed``) when it
+    has them. A record with no metrics (the per-value records a study that compares values inside each run writes with
+    nothing in them) is kept, with an empty ``metrics``."""
+    out: list[dict[str, Any]] = []
+    for c in cells:
+        cell, level = c.get("cell"), c.get("level")
+        setting: dict[str, Any] = dict(cell) if isinstance(cell, dict) else {}
+        label = str(c.get("key") or ", ".join(f"{k}={v}" for k, v in setting.items()) or "the one setting")
+        entry: dict[str, Any] = {
+            "cell": setting, "key": label, "level": dict(level) if isinstance(level, dict) and level else None,
+            "metrics": {str(name): summary(_values(metric)) for name, metric in c["metrics"].items()}}
+        entry.update({k: c[k] for k in ("planned", "ok", "failed")
+                      if isinstance(c.get(k), int) and not isinstance(c.get(k), bool)})
+        out.append(entry)
+    return out
+
+
+def interval(s: dict[str, Any]) -> tuple[float | None, float | None, str]:
+    """``(lower, upper, method)`` of the 95% interval of the mean from a :func:`summary`: Wilson when every trial gave
+    0 or 1, otherwise a t interval (the same numbers :func:`core.stats.wilson_interval` and
+    :func:`core.stats.confidence_interval` give from the values)."""
+    n = int(s.get("n") or 0)
+    if n <= 0:
+        return None, None, ""
+    if s.get("binary"):
+        ci = _stats.wilson_interval(s["successes"], n)
+        return (ci[0], ci[1], "Wilson") if ci else (None, None, "")
+    if n < 2:
+        return None, None, ""
+    half = _stats._t95(n - 1) * (s["sd"] / math.sqrt(n))
+    return s["mean"] - half, s["mean"] + half, "t interval of the mean"
+
+
+def kept_values(summarised: list[dict[str, Any]]) -> list[str]:
+    """The value names the table reports, in the order they first appear: not a trial index, not one number in every
+    trial of every setting (a setting echoed back, a constant)."""
+    by_metric: dict[str, list[dict[str, Any]]] = {}
+    for c in summarised:
+        for name, s in c["metrics"].items():
+            by_metric.setdefault(name, []).append(s)
+    return [name for name, per_cell in by_metric.items()
+            if not all(s["index"] for s in per_cell if s["n"]) and not all(s["constant"] for s in per_cell)]
+
+
+def rows_of(summarised: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """:func:`rows` from :func:`summaries`."""
+    out: list[dict[str, Any]] = []
+    for name in kept_values(summarised):
+        for c in summarised:
+            s = c["metrics"].get(name)
+            if not s or not s["n"]:
+                continue
+            lower, upper, method = interval(s)
+            out.append({"setting": c["key"], "metric": name, "n": s["n"], "mean": s["mean"], "sd": s["sd"],
+                        "ci_lower": lower, "ci_upper": upper, "method": method if lower is not None else "",
+                        "cell": c["cell"]})
+    return out
+
+
 def rows(quest_root: Path) -> list[dict[str, Any]]:
     """One row per setting and per value the trials returned: ``{"setting", "metric", "n", "mean", "sd",
-    "ci_lower", "ci_upper", "method"}``; ``[]`` without a trial record."""
-    cells = _record(quest_root)
-    by_metric: dict[str, list[tuple[str, list[float]]]] = {}
-    for c in cells:
-        setting = c.get("cell") if isinstance(c.get("cell"), dict) else {}
-        label = str(c.get("key") or ", ".join(f"{k}={v}" for k, v in setting.items()) or "the one setting")
-        for name, metric in c["metrics"].items():
-            by_metric.setdefault(str(name), []).append((label, _values(metric)))
-    out: list[dict[str, Any]] = []
-    for name, per_cell in by_metric.items():
-        if all(_is_index(v) for _label, v in per_cell if v):
-            continue
-        if all(len(set(v)) <= 1 for _label, v in per_cell):
-            continue
-        for label, values in per_cell:
-            if not values:
-                continue
-            mean, sd, n = _stats.mean_std(values)
-            if all(v in (0.0, 1.0) for v in values):
-                ci = _stats.wilson_interval(sum(values), n)
-                lower, upper, method = (ci[0], ci[1], "Wilson") if ci else (None, None, "")
-            else:
-                ci = _stats.confidence_interval(values)
-                lower, upper, method = ci["ci_lower"], ci["ci_upper"], "t interval of the mean"
-            out.append({"setting": label, "metric": name, "n": n, "mean": mean, "sd": sd,
-                        "ci_lower": lower, "ci_upper": upper, "method": method if lower is not None else ""})
-    return out
+    "ci_lower", "ci_upper", "method", "cell"}``; ``[]`` without a trial record."""
+    return rows_of(summaries(_record(quest_root)))
+
+
+def settings(table: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Each row's setting label with its settings (``{"m=20,pi1=0.2": {"m": 20, "pi1": 0.2}}``), for the provenance
+    check's reading of which setting a sentence or a table row names."""
+    return {r["setting"]: dict(r.get("cell") or {}) for r in table}
 
 
 def _num(x: Any) -> str:

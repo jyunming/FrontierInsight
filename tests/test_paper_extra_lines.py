@@ -15,6 +15,7 @@ import pytest
 from core.config import Config
 from generation import paper as paper_mod
 from generation.paper import PaperGenerator
+from tests.paper_fakes import fake_pandoc
 
 REPO = Path(__file__).resolve().parent.parent
 FORMATS = sorted(p.parent.name for p in (REPO / "templates" / "paper").glob("*/template.tex"))
@@ -51,7 +52,7 @@ def test_extra_lines_reach_the_template_only_when_asked(tmp_path: Path, monkeypa
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    fake_pandoc(monkeypatch, fake_run)
     md, out = _paper(tmp_path, "# Title\n\n## Introduction\n\nBody.\n")
     generator = PaperGenerator(_config(tmp_path))
     generator._compile_pdf(md, out)

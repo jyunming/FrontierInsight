@@ -11,6 +11,15 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# On Windows the first platform.uname() runs ``ver`` through subprocess.run, and the
+# PDF reader (pypdfium2) calls it on its first import. A test that replaces
+# subprocess.run with a fake pandoc would record that call as a pandoc command when the
+# paper's page count is the first import of the reader in the process. Asked once here,
+# the answer is cached and no later call runs a command.
+import platform  # noqa: E402
+
+platform.uname()
+
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _NETWORK_LEAKS: dict[str, list[str]] = {}
 
@@ -119,7 +128,7 @@ _SCRIPTED_AT_THE_PLAN_STEP = (
 #: made before the plan would be taken for it.
 _FIRST_REPLY_IS_THE_PLAN = (
     "test_drafted_search_block", "test_plan_optimisation", "test_plan_model_sources", "test_design_self_critique",
-    "test_design_critique_record", "test_latex_in_model_replies_nodes", "test_run_checks",
+    "test_design_critique_record", "test_latex_in_model_replies_nodes", "test_run_checks", "test_run_size_replay",
 )
 
 

@@ -239,7 +239,7 @@ async def test_a_resume_reuses_the_finished_functions_and_asks_nothing(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_unresolved_is_a_finding_in_the_writer_note_the_quality_report_and_the_papers_limitations(tmp_path: Path) -> None:
+async def test_unresolved_is_a_finding_in_the_quality_report_and_the_claim_check_not_the_writer_note(tmp_path: Path) -> None:
     engine, client = await _written(tmp_path)
     wrong = "def mean_quality(q1, q2):\n    return q1 - q2\n"
     client.second = {"frequency": [REFERENCE["frequency"]], "quality": [REFERENCE["quality"]],
@@ -252,7 +252,7 @@ async def test_unresolved_is_a_finding_in_the_writer_note_the_quality_report_and
     found = code_review.open_findings(engine.quest_root, engine.quest_root / "code")
     assert len(found["second_version"]) == 1
     note = code_review.write_note(engine.quest_root, engine.quest_root / "code")
-    assert "independently written" in note and "mean quality" in note
+    assert note == "", "the writer is not told that a second version of a function could not be settled"
     block = code_review.findings_block(engine.quest_root, engine.quest_root / "code")
     assert "second, independent version of a key function was not settled" in block and "mean quality" in block
     # No second model read this code: the paper must not say one did
@@ -369,14 +369,14 @@ async def test_the_equation_tests_run_on_the_package_a_repair_left_and_name_what
     model = engine.quest_root / "code" / "spring" / "model.py"
     model.write_text(model.read_text(encoding="utf-8").replace("return m * w / c", "return w / c"), encoding="utf-8")
     assert await engine._equation_test_failures(PROTOCOL, None) == "E2"
-    # a model that raises on import is reported per equation; one that ends the test run itself (no results printed) is
-    # a failure too, never a pass (a syntax error is caught earlier, by the function's own tests)
+    # a model that raises on import is reported per equation; one that ends the test run itself (no results printed)
+    # fails every test too, never a pass (a syntax error is caught earlier, by the function's own tests)
     good = model.read_text(encoding="utf-8")
     model.write_text(good + "\nraise RuntimeError('crashes on import')\n", encoding="utf-8")
     assert await engine._equation_test_failures(PROTOCOL, None)
     model.write_text(good + "\nimport os\nos._exit(3)\n", encoding="utf-8")
     crashed = await engine._equation_test_failures(PROTOCOL, None)
-    assert crashed and "no results" in crashed
+    assert crashed == "E1, E2"
 
 
 @pytest.mark.asyncio

@@ -1,38 +1,29 @@
-"""What the paper says about how its result was reached: how often the design was revised, and how many runs were made.
+"""FI's text about how a result was reached: how often the design was revised, how many runs were made, the run record and
+the checks' strip helpers.
 
 The records are kept as the quest runs: ``needs/DESIGN_HISTORY.json`` (each version of the design; a later one is
 ``post_hoc``, and ``after_results`` says whether the experiment had run, or the data had been analysed, by then) and
 ``.fi/attempts.jsonl`` (one ``run`` line per complete run of the experiment, all its seeds together, with its outcome).
-A reader of the finished paper cannot see either, and a study whose design was revised after its first results looks
-the same as one whose design was fixed in advance, so the engine writes one paragraph into the paper's methods from
-those records (:func:`paragraph`, :func:`mark_paper`). When the study was confirmed more than once (a version changed
-after its confirmation is a new one, confirmed on its own: ``.fi/confirmations.jsonl``, ``core/confirmations.py``),
-the paragraph also says how many versions were confirmed and how many of those confirmations did not hold (failed ones
-included). The model never writes it: whatever the writer put between the
-markers, or under the paragraph's lead words, is removed, and the engine's paragraph is put in after the writer has
-finished.
+:func:`paragraph`, :func:`run_record` and ``core/code_review.py:findings_block`` build plain-words text from those records.
 
-The paragraph is built from a closed set of phrases and whole-number counts only (never a raw reason from the record),
-so the number checks (``core/numeric_oracle.py``, ``core/stat_claims.py``, ``core/number_provenance.py``), which hold
-every number in the paper to the run's results, can leave it out: these counts are about the quest, not results.
-:func:`strip_for_checks` removes it only when every word of it is the engine's grammar (:data:`_CONTENT`); a block
-between the markers that says anything else (a result-like number, a sentence the engine never writes) is left in and
-checked like the rest of the paper.
+**None of the three blocks is written into the paper any more.** They used to be (between ``<!-- fi:attempts -->``,
+``<!-- fi:run-record:<checksum> -->`` and ``<!-- fi:code-findings:<checksum> -->`` markers), and in graded papers they carried
+false facts (a run time that was the analysis' rather than the experiment's, a base seed the code never used, reviewer quotes
+about text no longer in the paper) and states a reader cannot use. The text is printed in the quality report
+(``core/quality_report.py``), and the paper states what it did not do in the writer's own words, which FI checks against its
+records (``core/paper_facts.py``). :func:`mark_paper`, :func:`mark_run_record` and :func:`mark_findings` are kept to build an
+old-style paper (tests) and are not called by the engine.
+
+What stays: :func:`without_block` takes every such block, marker and lead-word paragraph out of a draft (the write node calls
+it on what the writer returns), so an old paper from a resume or a refine is cleaned and the blocks do not come back;
+:func:`strip_for_checks` leaves an old block out of the number checks (``core/numeric_oracle.py``,
+``core/stat_claims.py``, ``core/number_provenance.py``) only while every word of it is the engine's grammar
+(:data:`_CONTENT`) or, for the other two, while a checksum of its text in the opening marker still matches.
 
 :func:`unconfirmed_gap` is what the evidence ladder (``core/evidence.py``) reads: a design revised after the experiment
 had run, with no confirm run on data or seeds exploration never saw after the last revision (``core/phased.py``),
 keeps the result below ``publication_ready``. It reads whether the confirm run happened (``.fi/phased.json``), not
 whether ``engine.phased`` is set.
-
-The same module holds the second engine-written block, the paper's open code findings (:func:`mark_findings`, its text
-built by ``core/code_review.py``: what a second model's reading of the code left unresolved, put into the limitations
-after the writer has finished, so the paper states it whatever the writer did with the prompt's note). It is between
-``<!-- fi:code-findings:<checksum> -->`` markers. Its words are the findings' own texts, which carry numbers (a
-tolerance, a size, a count), so the grammar check above cannot recognise it. Instead the opening marker carries a
-checksum of the block's text, and :func:`strip_for_checks` leaves the block out of the number checks only while the text
-still matches it: a block that was edited, or one a writer typed with a guessed checksum, is checked like the rest of
-the paper. (The engine removes every block between these markers from a draft before it puts its own in, so a writer's
-block never survives to the checks in the first place.)
 """
 
 from __future__ import annotations
@@ -342,6 +333,21 @@ def _inside_sentence(study: Any) -> str:
 
 
 def _seed_sentence(quest_root: Path, rows: Any) -> str:
+    from . import run_facts as _run_facts
+
+    verdict = _run_facts.seed_verdict(quest_root)
+    if verdict.get("verdict") == _run_facts.PARTLY:
+        return (f"The seed FI gives each trial seeds a generator, but not the only one: {verdict['why']}. The trials depend "
+                "on both.")
+    if verdict["fi_seed_reaches"] is False:
+        used: dict[int, list[str]] = {}
+        for lit in verdict.get("driving_seeds") or []:
+            used.setdefault(lit["value"], []).append(lit["where"])
+        written = "; ".join(f"{v} ({', '.join(w[:3])})" for v, w in list(used.items())[:4])
+        return (f"The seed FI gives each trial does not reach the simulation: {verdict['why']}. The trials' generators are "
+                f"seeded from numbers written in the code: {written or 'FI found none'}.")
+    if verdict.get("verdict") == _run_facts.UNKNOWN:
+        return f"FI could not tell from the code whether the seed it gives each trial reaches the simulation ({verdict['why']})."
     study = _read_json(Path(quest_root) / "code" / "study.json")
     base = _whole(study.get("base_seed")) if isinstance(study, dict) else None
     if base is None:
@@ -370,13 +376,19 @@ def _settings_seed_sentence(study: dict[str, Any], base: int, rows: Any) -> str:
     return f"Each trial's random seed is derived from base seed {base}."
 
 
-def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> str:
-    if isinstance(duration_s, bool) or not isinstance(duration_s, (int, float)) or not 0 <= duration_s < float("inf"):
-        return ""
+def topic_limit(quest_root: Path, topic: str) -> float | None:
+    """The one run-time limit (in seconds) the topic states, from the topic's constraints (``.fi/topic_requirements.json``)
+    or its text; ``None`` when it states none or several different ones."""
     required = _read_json(Path(quest_root) / ".fi" / "topic_requirements.json")
     constraints = [c if isinstance(c, str) else c.get("stated", "") if isinstance(c, dict) else ""
                    for c in (required.get("constraints") if isinstance(required, dict) else None) or []]
-    limit = _topic_limit([c for c in constraints if isinstance(c, str)], topic or "")
+    return _topic_limit([c for c in constraints if isinstance(c, str)], topic or "")
+
+
+def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> str:
+    if isinstance(duration_s, bool) or not isinstance(duration_s, (int, float)) or not 0 <= duration_s < float("inf"):
+        return ""
+    limit = topic_limit(quest_root, topic)
     ran = f"The experiment ran for {_plain_seconds(float(duration_s))}"
     if limit is None:
         return f"{ran}; FI did not check it against a limit in the topic."
@@ -449,7 +461,8 @@ PRECISION_RECORD = Path(".fi") / "precision_missed.json"
 
 
 def write_precision_record(quest_root: Path, missed: list[dict[str, Any]]) -> None:
-    """Keep ``missed`` for the paper's limitations and the claim check (both read it); no record when none was missed."""
+    """Keep ``missed`` for FI's record: the item FI fills into the paper's Limitations (:mod:`core.paper_facts`), the
+    quality report and the claim check read it; no record when none was missed."""
     path = Path(quest_root) / PRECISION_RECORD
     if missed:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -549,7 +562,8 @@ def _untested_sentence(notes: list[str]) -> str:
 
 
 def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = None) -> str:
-    """One paragraph (no heading) of what FI recorded about the run, for the paper's limitations: the seeds, the run
+    """One paragraph (no heading) of what FI recorded about the run, for the quality report and the claim check (the
+    paper does not carry it: its facts go into the paper through placeholders FI fills, :mod:`core.paper_facts`): the seeds, the run
     time against any limit the topic states, the trial counts, a reduced size, the topic's requirements that were not
     done and the equations not tested before the run. Each sentence is written only from a record that exists and can
     be read; a missing record leaves its sentence out. ``duration_s`` is the measured wall time of the experiment
@@ -562,10 +576,16 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
     if isinstance(reduced, dict) and isinstance(reduced.get("note"), str) and reduced["note"].strip():
         parts.append(reduced["note"].strip())
+    over = estimate.get("over_topic_limit") if isinstance(estimate, dict) else None
+    if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip():
+        parts.append(over["note"].strip())
     covered = _read_json(quest_root / ".fi" / "topic_covered.json")
     left = _items(covered.get("left")) if isinstance(covered, dict) else []
     if left:
         parts.append(_listed("FI did not do all of the topic's requirements.", left))
+    not_done = _items(covered.get("not_done")) if isinstance(covered, dict) else []
+    if not_done:
+        parts.append(_listed("The study did not do all it was asked to, as written.", not_done))
     parts.append(_code_faults_sentence(quest_root))
     tests = _read_json(quest_root / ".fi" / "equation_tests.json")
     untested = _items(tests.get("not_tested")) if isinstance(tests, dict) else []
@@ -620,6 +640,10 @@ _RECORD_ANY = re.compile(r"\n*[ \t]*" + _RECORD_OPEN + r".*?" + re.escape(RUN_RE
 _RECORD_STRAY = re.compile(r"(?:" + _RECORD_OPEN + "|" + re.escape(RUN_RECORD_END) + r")")
 _RECORD_BLOCK = re.compile(
     r"<!-- fi:run-record:([0-9a-f]{12}) -->[ \t]*\r?\n(.*?)\r?\n[ \t]*" + re.escape(RUN_RECORD_END), re.S)
+
+
+#: The markers around a value FI filled in for a placeholder (core/paper_facts.py).
+_FACT_TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->")
 
 
 def findings_checksum(text: str) -> str:
@@ -870,7 +894,11 @@ def strip_for_checks(text: str) -> str:
     """``text`` with the engine's paragraph taken out, for the checks that hold the paper's numbers to the results and
     for the claim check. Only a block whose every word is the engine's grammar is taken out; anything else between
     the markers stays and is checked. The open code findings block is left out while its text matches the checksum in
-    its opening marker (:func:`findings_checksum`); so is the run record block (:func:`run_record`)."""
+    its opening marker (:func:`findings_checksum`); so is the run record block (:func:`run_record`). The markers around a
+    value FI filled into the paper from its records (``core/paper_facts.py``) are taken out and the value is kept: the
+    checks read the values, never a placeholder or a marker."""
+    if "fi:fact-" in text:
+        text = _FACT_TAG.sub("", text)
     if "fi:code-findings:" in text:
         text = _FINDINGS_BLOCK.sub(
             lambda m: " " if findings_checksum(m.group(2)) == m.group(1) else m.group(0), text)

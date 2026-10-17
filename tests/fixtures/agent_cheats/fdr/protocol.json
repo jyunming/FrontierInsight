@@ -1,0 +1,511 @@
+{
+ "runs_per_setting": 4000,
+ "min_runs_per_setting": 1000,
+ "thresholds": {
+  "alpha": 0.05,
+  "delta": 2.5
+ },
+ "acceptance": [
+  "BH realised FDR <= pi0*0.05 + 2 SE in every cell",
+  "Bonferroni any-false-discovery probability <= 0.05 + 2 SE at pi1=0",
+  "Bonferroni power agrees with the exact formula within 3 SE in every pi1>0 cell",
+  "BH power minus Bonferroni power >= 0 in every cell with pi1>0"
+ ],
+ "precision": {
+  "target_half_width": 0.02,
+  "metric": "every headline number: FDR, power, any-false-discovery and power_gap_pp (as a fraction)",
+  "reason": "With R=4000 the worst 95% half-widths are about 0.015 for FDR, power and a probability near 0.64, about 0.007 near 0.05, and 0.01 or less for the paired gap; this separates BH FDR 0.04 from 0.05 and Bonferroni from BH power. The noisiest cell is m=20, pi1=0.05 with one real effect, where the gap itself is only a few points."
+ },
+ "metrics": [
+  {
+   "id": "fdr_uncorrected",
+   "estimand": "E[V/max(R,1)] uncorrected",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "FDR by method"
+  },
+  {
+   "id": "fdr_bonferroni",
+   "estimand": "E[V/max(R,1)] Bonferroni",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "FDR by method"
+  },
+  {
+   "id": "fdr_bh",
+   "estimand": "E[V/max(R,1)] BH",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "FDR by method"
+  },
+  {
+   "id": "power_bonferroni",
+   "estimand": "E[S/m1] Bonferroni, pi1>0",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "power by method"
+  },
+  {
+   "id": "power_bh",
+   "estimand": "E[S/m1] BH, pi1>0",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "power by method"
+  },
+  {
+   "id": "power_gap_pp",
+   "estimand": "100*(power_BH - power_Bonferroni)",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "power by method"
+  },
+  {
+   "id": "any_false_discovery_bonferroni",
+   "estimand": "P(V>=1) Bonferroni",
+   "kind": "proportion",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "any false discovery by method"
+  },
+  {
+   "id": "any_false_discovery_bh",
+   "estimand": "P(V>=1) BH",
+   "kind": "proportion",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "any false discovery by method"
+  },
+  {
+   "id": "any_false_discovery_uncorrected",
+   "estimand": "P(V>=1) uncorrected",
+   "kind": "proportion",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "any false discovery by method"
+  },
+  {
+   "id": "fdr_bh_reference",
+   "estimand": "reference value pi0*0.05 with pi0 = 1 - round(pi1*m)/m, drawn for BH FDR (deterministic, no sampling error)",
+   "kind": "mean",
+   "unit": "a setting",
+   "cluster": null,
+   "paired": false,
+   "family": "FDR by method"
+  },
+  {
+   "id": "mc_standard_error",
+   "estimand": "standard error of the mean over the 4000 repeats (and Wilson 95% interval for proportions) of each reported FDR, power, gap and any-false-discovery value",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "uncertainty over repeats"
+  }
+ ],
+ "oracles": [
+  {
+   "name": "bh_superset_of_bonferroni",
+   "kind": "invariant",
+   "check": "On one repeat at m=200, pi1=0.2 (fixed seed, chosen so the Bonferroni count is positive), sum three violations: Bonferroni rejections not in the BH set, BH rejections with p>alpha, and 1 if the Bonferroni count is zero.",
+   "expected": 0,
+   "tolerance": 0.0,
+   "reference": "derivation: BH rejects every p<=alpha/m (rank 1 passes when p_(1)<=alpha/m) and only p<=alpha (p_(i)<=i*alpha/m<=alpha), so Bonferroni set \u2286 BH set \u2286 uncorrected set and the violation count = 0",
+   "case": {
+    "m": 200,
+    "pi1": 0.2
+   },
+   "measure": "n_bonf_not_bh + n_bh_p_above_alpha + (n_bonf == 0)"
+  },
+  {
+   "name": "bh_matches_scipy",
+   "kind": "second_implementation",
+   "check": "Difference in the number of BH rejections between the script's step-up and scipy.stats.false_discovery_control (BH) thresholded at 0.05, on one repeat at m=2000, pi1=0.05.",
+   "expected": 0,
+   "tolerance": 0.0,
+   "reference": "second implementation: scipy.stats.false_discovery_control, which shares no code with the script's BH",
+   "case": {
+    "m": 2000,
+    "pi1": 0.05
+   },
+   "measure": "abs(n_bh - n_bh_scipy)"
+  },
+  {
+   "name": "bonferroni_power_exact",
+   "kind": "special_case",
+   "check": "Bonferroni power at m=200, pi1=0.2 over R=1000 repeats (fixed seed), computed as the mean of S/m1 from the simulated Bonferroni rejection mask, not from the closed formula, against the exact formula 1-Phi(z_{1-0.05/m}-2.5).",
+   "expected": 0.1634,
+   "expected_formula": "0.5*(1+erf((2.5-3.4808)/sqrt(2)))",
+   "tolerance": 0.01,
+   "reference": "derivation: a real test is rejected when z>=z_{1-alpha/m}=3.4808, so power is Phi(2.5-3.4808)=Phi(-0.981)=0.163",
+   "case": {
+    "m": 200,
+    "pi1": 0.2
+   },
+   "measure": "power_bonferroni"
+  },
+  {
+   "name": "uncorrected_fwer_null",
+   "kind": "special_case",
+   "check": "Chance of any rejection by the uncorrected rule at 0.05 when pi1=0, m=20, over R=4000 repeats (fixed seed).",
+   "expected": 0.6415,
+   "expected_formula": "1-(1-0.05)**20",
+   "tolerance": 0.03,
+   "reference": "derivation: with all m=20 nulls independent and each rejected with probability 0.05, P(V>=1) = 1-(0.95)^20 = 0.6415 (E3); Monte Carlo se about 0.0076 at 4000 repeats",
+   "case": {
+    "m": 20,
+    "pi1": 0.0
+   },
+   "measure": "p_any_false_uncorrected"
+  },
+  {
+   "name": "bh_fwer_all_null",
+   "kind": "special_case",
+   "check": "Chance of any rejection by BH at 0.05 when pi1=0, m=200, over R=4000 repeats (fixed seed).",
+   "expected": 0.05,
+   "expected_formula": "0.05",
+   "tolerance": 0.015,
+   "reference": "derivation: when all hypotheses are null, FDR = P(R>=1) = pi0*alpha = 1*0.05 for independent uniform p-values, which BH attains exactly [18]; Monte Carlo se about 0.0035 at 4000 repeats",
+   "case": {
+    "m": 200,
+    "pi1": 0.0
+   },
+   "measure": "p_any_false_bh"
+  },
+  {
+   "name": "bh_fdr_upper_bound",
+   "kind": "invariant",
+   "check": "Worst violation of the FDR bound, max(0, realised BH FDR - pi0*0.05), on m=200, pi1=0.2 over R=4000 repeats (fixed seed); tests the V/max(R,1) tally against the BH guarantee.",
+   "expected": 0,
+   "tolerance": 0.01,
+   "reference": "derivation: for independent continuous p-values FDR_BH = pi0*alpha*(1-something) <= pi0*alpha = 0.8*0.05 = 0.04 [18]; the tolerance is about 3 Monte Carlo SE (SE about 0.003)",
+   "case": {
+    "m": 200,
+    "pi1": 0.2
+   },
+   "measure": "max(0, fdr_bh - 0.04)"
+  },
+  {
+   "name": "null_p_uniform",
+   "kind": "special_case",
+   "check": "Mean of the simulated null p-values when pi1=0, m=200, over R=4000 repeats (800000 values, fixed seed); a wrong tail or a two-sided p-value would shift it.",
+   "expected": 0.5,
+   "expected_formula": "0.5",
+   "tolerance": 0.005,
+   "reference": "derivation: under E1 a null p-value is uniform on [0,1], so its mean = integral of p dp from 0 to 1 = 1/2; Monte Carlo se about 0.0003",
+   "case": {
+    "m": 200,
+    "pi1": 0.0
+   },
+   "measure": "mean_null_p"
+  }
+ ],
+ "criteria": [
+  {
+   "name": "BH superset violation",
+   "what": "Number of Bonferroni rejections missing from BH, plus BH rejections with p>alpha, plus one if the Bonferroni count is zero, on the check case.",
+   "oracle": "bh_superset_of_bonferroni",
+   "use": "value",
+   "direction": "lower",
+   "target": 0,
+   "tolerance": 0
+  },
+  {
+   "name": "BH matches scipy",
+   "what": "Difference in rejection counts from scipy's BH implementation.",
+   "oracle": "bh_matches_scipy",
+   "use": "value",
+   "direction": "lower",
+   "target": 0,
+   "tolerance": 0
+  }
+ ],
+ "simplifications": [
+  {
+   "id": "X1",
+   "replaces": "fraction pi1 of effects real (random)",
+   "because": "A fixed count round(pi1*m) makes pi0 exact, so the reference pi0*0.05 is exact.",
+   "effect": "Slightly lower variance of V and S than with binomial assignment; the mean FDR is unchanged to first order.",
+   "probe": "Rerun one cell with binomial-assigned real effects and compare the FDR."
+  },
+  {
+   "id": "X2",
+   "replaces": "FDR as E[V/R] with R>0 only",
+   "because": "The standard FDR convention V/max(R,1) is used, as the BH guarantee is stated for it.",
+   "effect": "Includes R=0 repeats as zero; positive FDR would be larger at pi1=0.",
+   "probe": "Report the P(R=0) alongside, and note that FDR equals any-false-discovery at pi1=0."
+  },
+  {
+   "id": "X3",
+   "replaces": "the realised false discovery rate as an exact expectation",
+   "because": "It is estimated as the Monte Carlo mean of V/max(R,1) over 4000 repeats per cell, since no closed form is used.",
+   "effect": "The estimate carries sampling noise of about 0.003 to 0.015 in each cell, so a value slightly above the reference can be noise.",
+   "probe": "Compare the cell mean with its standard error and rerun one cell with a different seed to see the spread."
+  },
+  {
+   "id": "X4",
+   "replaces": "reporting only the chance of any false discovery when pi1=0",
+   "because": "The probability of any false discovery is also reported for pi1>0, where power is defined, so the families can be compared across the grid.",
+   "effect": "Adds columns only; at pi1=0 power is not computed and the any-false-discovery probability equals the FDR.",
+   "probe": "Check that at pi1=0 the any-false-discovery proportion equals the mean FDR in every method."
+  },
+  {
+   "id": "X5",
+   "replaces": "uncertainty over repeats from a fully independent design",
+   "because": "Uncertainty is the standard error of the mean (normal 95% interval) or a Wilson interval over 4000 repeats from one seeded stream per cell, with no repeat-of-repeats.",
+   "effect": "Intervals are approximate for skewed or near-0 quantities such as BH FDR and Bonferroni power at m=2000, and for the one-real-effect cell.",
+   "probe": "Rerun one cell with a second base seed and see whether the estimates fall within the stated intervals."
+  },
+  {
+   "id": "X6",
+   "replaces": "the exact expected BH FDR as the reference",
+   "because": "The reference pi0*0.05 is drawn as the guaranteed upper bound, and BH FDR is exactly that value only at pi1=0.",
+   "effect": "For pi1>0 realised BH FDR lies below the line by an amount that depends on the shift 2.5, so the line is not a prediction of the value.",
+   "probe": "Compare the realised BH FDR with pi0*0.05 across pi1 and check that the gap is positive for pi1>0 and about 0 at pi1=0."
+  }
+ ],
+ "definitions": [
+  {
+   "metric": "fdr_uncorrected",
+   "defined_as": "expected fraction of falsely rejected nulls among those rejected under the uncorrected rule p<=0.05, V/max(R,1) averaged over repeats",
+   "source": "[3]",
+   "quote": "controls the expected fraction of falsely rejected null hypotheses among those rejected",
+   "differs": ""
+  },
+  {
+   "metric": "fdr_bonferroni",
+   "defined_as": "expected fraction of falsely rejected nulls among those rejected under the Bonferroni rule p<=0.05/m, V/max(R,1) averaged over repeats",
+   "source": "[3]",
+   "quote": "controls the expected fraction of falsely rejected null hypotheses among those rejected",
+   "differs": ""
+  },
+  {
+   "metric": "fdr_bh",
+   "defined_as": "expected fraction of falsely rejected nulls among those rejected, V/max(R,1) averaged over repeats",
+   "source": "[3]",
+   "quote": "controls the expected fraction of falsely rejected null hypotheses among those rejected",
+   "differs": ""
+  },
+  {
+   "metric": "power_bonferroni",
+   "defined_as": "expected fraction of the real effects rejected by the Bonferroni rule, S/m1 averaged over repeats (pi1>0 only)",
+   "source": "[12]",
+   "quote": "which is the expected fraction of all false hypotheses that is rejected",
+   "differs": ""
+  },
+  {
+   "metric": "power_bh",
+   "defined_as": "expected fraction of the false null hypotheses that are rejected",
+   "source": "[12]",
+   "quote": "which is the expected fraction of all false hypotheses that is rejected",
+   "differs": ""
+  },
+  {
+   "metric": "power_gap_pp",
+   "defined_as": "100 times the mean over repeats of the paired difference S_BH/m1 minus S_Bonferroni/m1, in percentage points (pi1>0 only)",
+   "source": "[12]",
+   "quote": "which is the expected fraction of all false hypotheses that is rejected",
+   "differs": ""
+  },
+  {
+   "metric": "any_false_discovery_bonferroni",
+   "defined_as": "probability of at least one false rejection, the proportion of repeats with V>=1",
+   "source": "[12]",
+   "quote": "the probability of any false positives is at most",
+   "differs": ""
+  },
+  {
+   "metric": "any_false_discovery_bh",
+   "defined_as": "probability of at least one false rejection by BH, the proportion of repeats with V>=1",
+   "source": "[12]",
+   "quote": "the probability of any false positives is at most",
+   "differs": ""
+  },
+  {
+   "metric": "any_false_discovery_uncorrected",
+   "defined_as": "probability of at least one false rejection by the uncorrected rule, the proportion of repeats with V>=1",
+   "source": "[12]",
+   "quote": "the probability of any false positives is at most",
+   "differs": ""
+  },
+  {
+   "metric": "fdr_bh_reference",
+   "defined_as": "the deterministic reference value pi0*0.05 with pi0 = 1 - round(pi1*m)/m, drawn as the upper bound of the BH FDR (equal to it only at pi1=0)",
+   "source": "[18]",
+   "quote": "",
+   "differs": "X6"
+  },
+  {
+   "metric": "mc_standard_error",
+   "defined_as": "standard error of the mean over the 4000 repeats (sample standard deviation divided by sqrt(4000)) for FDR, power and gap, with a Wilson 95% interval for any-false-discovery proportions",
+   "source": "derivation",
+   "quote": "",
+   "differs": "X5"
+  }
+ ],
+ "topic_map": [
+  {
+   "item": "m in {20, 200, 2000}",
+   "by": "setting:m"
+  },
+  {
+   "item": "fraction pi1 in {0.0, 0.05, 0.2} of real effects",
+   "by": "setting:pi1"
+  },
+  {
+   "item": "one-sided z-tests, real effect shifts statistic by 2.5",
+   "by": "equation:E1"
+  },
+  {
+   "item": "uncorrected, Bonferroni and Benjamini-Hochberg at nominal 5 percent",
+   "by": "setting:method"
+  },
+  {
+   "item": "realised false discovery rate",
+   "by": "metric:fdr_bh"
+  },
+  {
+   "item": "reference pi0 * 0.05 for Benjamini-Hochberg",
+   "by": "metric:fdr_bh_reference"
+  },
+  {
+   "item": "power",
+   "by": "metric:power_bh"
+  },
+  {
+   "item": "power of Bonferroni",
+   "by": "metric:power_bonferroni"
+  },
+  {
+   "item": "chance of any false discovery (pi1 = 0)",
+   "by": "metric:any_false_discovery_bonferroni"
+  },
+  {
+   "item": "uncertainty over repeats",
+   "by": "metric:mc_standard_error"
+  }
+ ],
+ "grid": {
+  "m": [
+   20,
+   200,
+   2000
+  ],
+  "pi1": [
+   0.0,
+   0.05,
+   0.2
+  ]
+ },
+ "in_each_run": {
+  "method": [
+   "uncorrected",
+   "bonferroni",
+   "benjamini_hochberg"
+  ]
+ },
+ "seed_policy": "One independent numpy Generator stream per (m, pi1) setting, derived with SeedSequence from base seed 20240601 and the setting index. The three methods are applied to the same draws within a repeat (paired).",
+ "failure_policy": "No trial can fail in this simulation; any exception aborts the run and is reported. Repeats with R=0 are valid and counted with V/R = 0.",
+ "ci_method": "Standard error of the mean over repeats (normal 95% interval) for FDR, power and paired gap; Wilson 95% binomial interval for any-false-discovery proportions.",
+ "model": {
+  "summary": "m independent unit-variance normal test statistics, a fixed number shifted by 2.5, one-sided p-values, thresholded by the uncorrected, Bonferroni or BH rule at 0.05.",
+  "assumptions": [
+   "Independent tests",
+   "Known unit variance",
+   "Exact N(0,1) null",
+   "Fixed number of real effects"
+  ],
+  "holds_for": "Independent z-tests; for independent continuous p-values BH gives FDR <= pi0*alpha, with equality only when the alternative p-values are 0 (e.g. pi1=0).",
+  "equations": [
+   {
+    "id": "E1",
+    "formula": "p = 1 - Phi(z)",
+    "role": "generates",
+    "source": "derivation",
+    "derivation": "One-sided upper-tail z-test: p-value is the null probability of a statistic at least as large as z, 1-Phi(z).",
+    "example": {
+     "inputs": {
+      "z": 1.5
+     },
+     "expected_formula": "1-0.5*(1+erf(1.5/sqrt(2)))"
+    }
+   },
+   {
+    "id": "E2",
+    "formula": "power_Bonf = 1 - Phi(c - delta), c = z_{1-alpha/m}",
+    "role": "analyses",
+    "source": "derivation",
+    "derivation": "Bonferroni rejects when z>=c. For a real effect z~N(delta,1), so P(z>=c)=1-Phi(c-delta).",
+    "example": {
+     "inputs": {
+      "c": 3.0,
+      "delta": 2.5
+     },
+     "expected_formula": "1-0.5*(1+erf((3.0-2.5)/sqrt(2)))"
+    }
+   },
+   {
+    "id": "E3",
+    "formula": "P(V>=1 | m0 nulls, Bonferroni or uncorrected) = 1-(1-t)^m0, t = alpha/m or alpha",
+    "role": "analyses",
+    "source": "derivation",
+    "derivation": "Independent nulls each rejected with probability t; none rejected with probability (1-t)^m0.",
+    "example": {
+     "inputs": {
+      "m": 20,
+      "t": 0.05
+     },
+     "expected_formula": "1-(1-0.05)**20"
+    }
+   }
+  ],
+  "steps": [
+   {
+    "id": "S1",
+    "name": "BH step-up",
+    "does": "Sort p-values, find the largest i with p_(i) <= i*alpha/m, reject all with rank <= i.",
+    "inputs": {
+     "p": "p-values",
+     "alpha": "level"
+    },
+    "output": "boolean rejection mask",
+    "uses": [],
+    "source": "[18]",
+    "relations": [
+     "rejection set contains every p<=alpha/m",
+     "rejection set is contained in p<=alpha"
+    ]
+   },
+   {
+    "id": "S2",
+    "name": "Error tallies",
+    "does": "From the mask and the truth labels compute V, S, R, V/max(R,1), S/m1.",
+    "inputs": {
+     "mask": "boolean",
+     "is_real": "boolean"
+    },
+    "output": "V, S, R, FDP, TPP",
+    "uses": [],
+    "source": "derivation",
+    "relations": [
+     "FDP in [0,1]",
+     "TPP in [0,1]"
+    ]
+   }
+  ]
+ }
+}

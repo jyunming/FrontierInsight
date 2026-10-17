@@ -53,6 +53,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import equation_measure as _measure
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 
@@ -62,19 +63,29 @@ ROLES = ("generates", "analyses")
 RELATIVE = 1e-6
 ABSOLUTE_FLOOR = 1e-12
 #: A random equation: how many fixed-seed draws, the fewest that still count, the most time they may take, and how many
-#: standard errors the draws' mean (and variance) may be from the stated one.
-DRAWS = 1000
-MIN_DRAWS = 100
-TIME_LIMIT_S = 60.0
-SIGMAS = 5.0
+#: standard errors the draws' mean (and variance) may be from the stated one (core/equation_measure.py).
+DRAWS = _measure.DRAWS
+MIN_DRAWS = _measure.MIN_DRAWS
+TIME_LIMIT_S = _measure.TIME_LIMIT_S
+SIGMAS = _measure.SIGMAS
 #: The parameters of the function that FI supplies to a random equation (never taken from the example's inputs).
-RNG_PARAMS = ("rng", "random_state", "generator")
+RNG_PARAMS = _measure.RNG_PARAMS
 SEED_PARAM = "seed"
 TEST_NAME = "test_equations.py"
 TESTS_DIR = "tests"
 TEST_PATH = f"{TESTS_DIR}/{TEST_NAME}"
-#: Beside the test file: what the last ``--json`` run measured (value got, expected value, tolerance) per equation.
-NUMBERS_NAME = "equation_numbers.json"
+#: What the tests FI writes into ``code/tests/`` compare with (expected values, tolerances, the worked examples' inputs)
+#: is never written into ``code/``: a coding agent that works in ``code/`` could read it there and special-case it. It
+#: lives in the quest's ``.fi/checks/`` (beside ``code/``, outside it), where a person's run of the test file reads it.
+#: FI's own verdict never comes from that file (:func:`run_and_judge`): the process that calls the functions is given
+#: the inputs only, and FI compares what they return with these values in its own process.
+CHECKS_DIR = ".fi/checks"
+#: In ``.fi/checks/``: each equation's worked example (inputs, expected output, tolerance, variance), by equation id.
+VALUES_NAME = "equation_values.json"
+#: Files an older FI left in ``code/tests/`` that hold expected values (:func:`remove_stale`): removed on load.
+STALE_NAMES = ("equation_numbers.json", "equation_values.json", "oracle_values.json")
+#: The fields of a case that hold values a test compares with: kept out of the test file.
+_HIDDEN = ("inputs", "expected", "rel", "abs", "variance")
 #: The line the test file prints (with ``--json``), one JSON list of ``{"id", "function", "status", "detail"}``.
 MARK = "EQUATION_TESTS:"
 
@@ -543,9 +554,10 @@ def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str]
 # --- finding the function that implements an equation -----------------------------------------------------------------
 
 
-def locate(protocol: dict[str, Any] | None, sources: dict[str, str]) -> dict[str, dict[str, str] | None]:
+def locate(protocol: dict[str, Any] | None, sources: dict[str, str]) -> dict[str, dict[str, Any] | None]:
     """For each equation that gets an example: the importable top-level function labelled ``# E<n>`` (a comment on or
-    above it, or in its docstring), as ``{"module", "function", "file"}``; ``None`` when there is none. ``sources``:
+    above it, or in its docstring), as ``{"module", "function", "file", "static"}`` (``static``: FI's own reading of
+    it, :func:`static_facts`); ``None`` when there is none. ``sources``:
     ``{"<package>/model.py": text, "simulate.py": text}`` (a script that runs when imported, ``experiment.py``, is
     never one of them). A package is preferred to ``simulate.py``."""
     from . import code_layout as _layout
@@ -558,7 +570,8 @@ def locate(protocol: dict[str, Any] | None, sources: dict[str, str]) -> dict[str
         for rel, items in labelled.items():
             for _line, text, fn in items:
                 if fn and "." not in fn and _oracle._labelled_in(eid, text):
-                    found = {"module": module_of(rel), "function": fn, "file": rel}
+                    found = {"module": module_of(rel), "function": fn, "file": rel,
+                             "static": static_facts(sources[rel], fn)}
                     break
             if found:
                 break
@@ -574,7 +587,7 @@ def module_of(rel: str) -> str:
     return path.replace("/", ".")
 
 
-def cases(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None]) -> list[dict[str, Any]]:
+def cases(rows: list[dict[str, Any]], located: dict[str, dict[str, Any] | None]) -> list[dict[str, Any]]:
     """The tests to write: one per equation whose example is ``ok`` and whose function is found."""
     out = []
     for r in rows:
@@ -583,7 +596,7 @@ def cases(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None])
             out.append({"id": r["id"], "formula": r["formula"], "module": where["module"], "function": where["function"],
                         "inputs": r["inputs"], "expected": r["expected"], "rel": r["rel"], "abs": r["abs"],
                         "method": r["method"], "random": bool(r.get("random")), "variance": r.get("variance"),
-                        "outputs": list(r.get("outputs") or [])})
+                        "outputs": list(r.get("outputs") or []), "static": where.get("static")})
     return out
 
 
@@ -595,184 +608,54 @@ from the plan's own worked example: the inputs are the plan's, and the output is
     python -m pytest tests/test_equations.py        (or: python tests/test_equations.py)
 
 Each test imports the function labelled with the equation (`# E1`) and calls it with the example's inputs, by name.
+The inputs and the output are not in this folder: Frontier Insight writes them into the quest's
+`.fi/checks/{values_name}` (next to `code/`) once the quest's code has run for the last time. Run the tests inside the quest folder, or name the folder
+that holds that file: python tests/test_equations.py --checks <folder>.
+
+This file is a copy for a person. Frontier Insight does not take its verdict from it: it calls each function in a
+process of its own that is given only the function and its inputs, and compares the number it returns with the
+expected value in its own process.
 """
-import importlib
-import inspect
 import json
-import math
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-CASES = json.loads({cases!r})
-DRAWS, MIN_DRAWS, TIME_LIMIT_S, SIGMAS = {draws!r}, {min_draws!r}, {limit!r}, {sigmas!r}
-RNG_PARAMS = {rng_params!r}
-NUMBERS_NAME = {numbers!r}
+
+def _checks_dir():
+    if "--checks" in sys.argv[:-1]:
+        return Path(sys.argv[sys.argv.index("--checks") + 1])
+    return Path(__file__).resolve().parent.parent.parent / ".fi" / "checks"
 
 
-def _run_random(case, fn, params):
-    """A random equation: DRAWS calls with fixed seeds; the mean of the draws is held to SIGMAS standard errors of the
-    stated mean (and the variance, when it is stated, to SIGMAS standard errors of a variance). Draws that do not vary at
-    all are a deterministic output: the strict rule applies to it, as for any other equation."""
-    import random
-    import time
+VALUES_NAME = {values_name!r}
 
-    random.seed(0)
+
+def _values():
     try:
-        import numpy
-        numpy.random.seed(0)
-        rng = numpy.random.default_rng(12345)
-    except Exception:  # noqa: BLE001
-        rng = random.Random(12345)
-    rng_name = next((n for n in RNG_PARAMS if n in params), None)
-    values = []
-    started = time.monotonic()
-    for i in range(DRAWS):
-        kwargs = dict(case["inputs"])
-        if rng_name:
-            kwargs[rng_name] = rng
-        if "seed" in params and "seed" not in kwargs:
-            kwargs["seed"] = i
-        try:
-            result = fn(**kwargs)
-        except Exception as e:  # noqa: BLE001
-            return "error", (type(e).__name__ + ": " + str(e))[:300], None, None
-        try:
-            draw = float(result)
-        except (TypeError, ValueError):
-            return "mismatch", "it returned something that is not one number", None, None
-        if not math.isfinite(draw):
-            return "mismatch", "a draw was not a finite number", None, None
-        values.append(draw)
-        if len(values) >= MIN_DRAWS and time.monotonic() - started > TIME_LIMIT_S:
-            break
-    n = len(values)
-    if n < MIN_DRAWS:
-        return "error", "the function is too slow to be drawn from " + str(MIN_DRAWS) + " times in the time allowed", None, None
-    mean = sum(values) / n
-    m2 = sum((v - mean) ** 2 for v in values) / n
-    want = case["expected"]
-    if max(values) == min(values):
-        tol = max(case["rel"] * abs(want), case["abs"])
-        if abs(mean - want) > tol:
-            return "mismatch", "", mean, tol
-        return "ok", "", mean, tol
-    variance = case.get("variance")
-    sigma = math.sqrt(variance) if variance else math.sqrt(m2 * n / (n - 1))
-    tol = max(SIGMAS * sigma / math.sqrt(n), case["rel"] * abs(want), case["abs"])
-    if abs(mean - want) > tol:
-        return "mismatch", "the mean of " + str(n) + " draws with fixed seeds is further than " + str(int(SIGMAS)) + " standard errors from the distribution's mean the plan states", mean, tol
-    if variance:
-        m4 = sum((v - mean) ** 4 for v in values) / n
-        spread = math.sqrt(max(m4 - m2 * m2, 0.0) / n)
-        if abs(m2 * n / (n - 1) - variance) > SIGMAS * spread:
-            return "mismatch", "the variance of " + str(n) + " draws with fixed seeds is further than " + str(int(SIGMAS)) + " standard errors from the variance the plan states", m2 * n / (n - 1), SIGMAS * spread, variance
-    return "ok", "", mean, tol
+        data = json.loads((_checks_dir() / VALUES_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {{}}
+    return data if isinstance(data, dict) else {{}}
 
 
-def _unsupplied(params, inputs, random):
-    """The parameters without a default that the example gives no value (the rule of core.equation_tests.unsupplied)."""
-    if any(p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL) for p in params.values()):
-        return []
-    given = set(inputs) | (set(RNG_PARAMS) | {{"seed"}} if random else set())
-    return [n for n, p in params.items() if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
-            and n not in given]
+_VALUES = _values()
+CASES = [{{**c, **_VALUES[c["id"]]}} if isinstance(_VALUES.get(c["id"]), dict) else c for c in json.loads({cases!r})]
 
-
-def _by_name(result):
-    """Whether the function returned its outputs by name: a mapping, a namedtuple or a dataclass. A number, an array, a
-    plain tuple or list has no named outputs (an attribute such as an array's ``T`` or a number's ``real`` is not one)."""
-    return (hasattr(result, "keys") and hasattr(result, "__getitem__")) or (
-        isinstance(result, tuple) and hasattr(result, "_fields")) or (
-        hasattr(type(result), "__dataclass_fields__") and not isinstance(result, type))
-
-
-def _output(result, name):
-    """The output called ``name`` of what the function returned by name (:func:`_by_name`). Raises LookupError when it has
-    no such output, or reading it fails."""
-    if not _by_name(result):
-        raise LookupError(name)
-    try:
-        if hasattr(result, "keys"):
-            return result[name]
-        fields = result._fields if isinstance(result, tuple) else type(result).__dataclass_fields__
-        if name not in fields:
-            raise LookupError(name)
-        return getattr(result, name)
-    except Exception:  # noqa: BLE001
-        raise LookupError(name)
-
-
-def _run_multi(case, fn):
-    """A formula that defines several named outputs: the function returns them by name and each is held to its own tolerance."""
-    want = case["expected"]
-    names = list(want)
-    try:
-        result = fn(**case["inputs"])
-    except Exception as e:  # noqa: BLE001
-        return "error", (type(e).__name__ + ": " + str(e))[:300], None, None, want
-    got, absent = {{}}, []
-    for n in names:
-        try:
-            got[n] = _output(result, n)
-        except LookupError:
-            absent.append(n)
-    if absent:
-        return "mismatch", "return the outputs by name: " + ", ".join(names) + " (a dict with these keys); no output called " + ", ".join(absent), None, None, want
-    values, tols, bad = {{}}, {{}}, []
-    for n in names:
-        absolute = case["abs"][n] if isinstance(case["abs"], dict) else case["abs"]
-        tols[n] = max(case["rel"] * abs(want[n]), absolute)
-        try:
-            values[n] = float(got[n])
-        except Exception:  # noqa: BLE001 -- an array of several numbers, a method, a tensor: not one number
-            values[n] = None
-            bad.append(n)
-            continue
-        if not math.isfinite(values[n]) or abs(values[n] - want[n]) > tols[n]:
-            bad.append(n)
-    if bad:
-        return "mismatch", "the output " + ", ".join(bad) + (" does" if len(bad) == 1 else " do") + " not agree", values, tols, want
-    return "ok", "", values, tols, want
+# --- the same measure and judge Frontier Insight runs (core/equation_measure.py), here in one process ---
+@@MEASURE@@
 
 
 def _run(case):
-    """(status, detail, value, tolerance, expected): status ok | mismatch | contract | error. The detail never holds the
-    expected value (it goes to the model that repairs the function); the last three are for the record and the log."""
-    want = case["expected"]
-    try:
-        fn = getattr(importlib.import_module(case["module"]), case["function"])
-    except Exception as e:  # noqa: BLE001
-        return "error", (type(e).__name__ + ": " + str(e))[:300], None, None, want
-    params = inspect.signature(fn).parameters
-    if not any(p.kind is p.VAR_KEYWORD for p in params.values()):
-        missing = [n for n in case["inputs"] if n not in params]
-        if missing:
-            return "contract", "the function must take " + ", ".join(missing) + " as arguments, named so", None, None, want
-    required = _unsupplied(params, case["inputs"], case.get("random"))
-    if required:
-        return "contract", ("the parameter " + ", ".join(required) + (" has" if len(required) == 1 else " have")
-                            + " no default and is not one of the example's inputs; give it a default or take it out of this function"), None, None, want
-    if isinstance(want, dict):
-        return _run_multi(case, fn)
-    if case.get("random"):
-        out = _run_random(case, fn, params)
-        return (*out, want) if len(out) == 4 else out
-    try:
-        value = fn(**case["inputs"])
-    except Exception as e:  # noqa: BLE001
-        return "error", (type(e).__name__ + ": " + str(e))[:300], None, None, want
-    try:
-        value = float(value)
-    except Exception:  # noqa: BLE001
-        if len(case.get("outputs") or []) >= 2 and _by_name(value):
-            return "outputs", "the function returns its outputs by name and the worked example gives one value", None, None, want
-        return "mismatch", "it returned something that is not one number", None, None, want
-    tol = max(case["rel"] * abs(want), case["abs"])
-    if not math.isfinite(value) or abs(value - want) > tol:
-        return "mismatch", "", value, tol, want
-    return "ok", "", value, tol, want
+    """(status, detail, value, tolerance, expected): status ok | mismatch | contract | outputs | error."""
+    if any(k not in case for k in ("inputs", "expected", "rel", "abs")):
+        # Never a pass: without FI's values the test has nothing to compare with.
+        return ("error", "the worked example this test compares with is not here (Frontier Insight keeps it in the "
+                "quest's .fi/checks/" + VALUES_NAME + ", outside code/); run the tests inside the quest folder",
+                None, None, None)
+    case = dict(case, names=list(case["expected"]) if isinstance(case["expected"], dict) else None)
+    return judge(case, measure(case))
 
 
 def _check(index):
@@ -786,10 +669,12 @@ def _check(index):
 
 
 def test_source(case_list: list[dict[str, Any]]) -> str:
-    """``tests/test_equations.py`` for ``case_list`` (:func:`cases`): a test per equation, and a runner."""
-    text = _TEMPLATE.format(cases=json.dumps(case_list, default=str), draws=DRAWS, min_draws=MIN_DRAWS,
-                            limit=TIME_LIMIT_S, sigmas=SIGMAS, rng_params=RNG_PARAMS,
-                            numbers=NUMBERS_NAME)
+    """``tests/test_equations.py`` for ``case_list`` (:func:`cases`): a test per equation, and a runner. The file holds
+    each equation's id, formula and function; the example's inputs, output and tolerance (:func:`values_of`) are read
+    when it runs from the quest's ``.fi/checks/`` (:func:`write_values`), never written into it."""
+    public = [{k: v for k, v in c.items() if k not in _HIDDEN and k != "static"} for c in case_list]
+    text = _TEMPLATE.format(cases=json.dumps(public, default=str), values_name=VALUES_NAME)
+    text = text.replace("@@MEASURE@@", _measure_body())
     names = []
     for i, c in enumerate(case_list):
         name = "test_" + re.sub(r"[^a-z0-9]+", "_", str(c["id"]).lower()).strip("_")
@@ -800,21 +685,19 @@ def test_source(case_list: list[dict[str, Any]]) -> str:
     text += '''
 
 if __name__ == "__main__":
-    only = sys.argv[sys.argv.index("--only") + 1:] if "--only" in sys.argv else []
-    results, numbers = [], {}
+    only = []
+    if "--only" in sys.argv:
+        for arg in sys.argv[sys.argv.index("--only") + 1:]:
+            if arg.startswith("--"):
+                break
+            only.append(arg)
+    results = []
     for case in CASES:
         if only and case["id"] not in only:
             continue
         status, detail, value, tol, want = _run(case)
         results.append({"id": case["id"], "function": case["function"], "status": status, "detail": detail})
-        numbers[case["id"]] = {"got": value, "expected": want, "tolerance": tol}
     if "--json" in sys.argv:
-        # The numbers (value got, expected value, tolerance) are for the run log, in a file of their own: this line is
-        # read by code that may report to the model that writes the function, and it never carries the expected value.
-        try:
-            Path(__file__).with_name(NUMBERS_NAME).write_text(json.dumps(numbers), encoding="utf-8")
-        except OSError:
-            pass
         print("''' + MARK + ''' " + json.dumps(results))
         sys.exit(0)
     for r in results:
@@ -822,6 +705,182 @@ if __name__ == "__main__":
     sys.exit(1 if any(r["status"] != "ok" for r in results) else 0)
 '''
     return text
+
+
+def _measure_body() -> str:
+    """The text of :mod:`core.equation_measure` without its module docstring (what the test file and the command embed)."""
+    source = Path(_measure.__file__).read_text(encoding="utf-8")
+    end = source.index('"""', 3) + 3
+    return source[end:].strip("\n") + "\n"
+
+
+def measure_spec(case_list: list[dict[str, Any]], *, nonce: str, only: list[str] | None = None,
+                 code: str = "code") -> dict[str, Any]:
+    """What the process that calls the functions is given: per case the module, the function, the example's inputs and
+    how the output is reported (one number, named outputs, or draws). Never the expected value, the tolerance or the
+    variance, and no path to them."""
+    picked = [c for c in case_list if not only or str(c["id"]) in only]
+    return {"nonce": nonce, "code": code,
+            "cases": [{"id": str(c["id"]), "module": c["module"], "function": c["function"],
+                       "inputs": dict(c.get("inputs") or {}), "random": bool(c.get("random")),
+                       "names": list(c["expected"]) if isinstance(c.get("expected"), dict) else None,
+                       "outputs": list(c.get("outputs") or [])} for c in picked]}
+
+
+def measure_argv(case_list: list[dict[str, Any]], *, nonce: str, only: list[str] | None = None,
+                 code: str = "code") -> list[str]:
+    """The arguments after ``python`` that measure ``case_list`` (:func:`measure_spec`): the measuring code itself
+    (``-c``, FI's own text, nothing written into the quest) and the spec. Run from the folder that holds ``code``."""
+    return ["-c", _measure_body() + "\nmain()\n", json.dumps(measure_spec(case_list, nonce=nonce, only=only, code=code),
+                                                             default=str)]
+
+
+def new_nonce() -> str:
+    import secrets
+
+    return secrets.token_hex(12)
+
+
+#: What a failed test says when the measuring process printed no result (it stopped early, was ended, ran past its time
+#: or printed more than one result line): a failure of the test, never "not tested".
+NO_RESULT = ("the run that calls the function gave no result FI can take (it stopped early, was ended, ran past its "
+             "time, or printed more than one result)")
+
+
+def _returns_by_name(fn: Any) -> bool:
+    """Whether FI's reading of ``fn`` (an ``ast`` function) finds it returning its outputs by name: a dict, or an object
+    of a class (a namedtuple, a dataclass), directly or through a name assigned one."""
+    import ast
+
+    def named(node: Any) -> bool:
+        if isinstance(node, (ast.Dict, ast.DictComp)):
+            return True
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            return name in ("dict", "OrderedDict", "namedtuple") or name[:1].isupper()
+        return False
+
+    nodes, stack = [], list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        nodes.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    held = {t.id for n in nodes if isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None and named(n.value)
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]) if isinstance(t, ast.Name)}
+    return any(isinstance(n, ast.Return) and n.value is not None
+               and (named(n.value) or (isinstance(n.value, ast.Name) and n.value.id in held)) for n in nodes)
+
+
+def static_facts(source: str, function: str) -> dict[str, Any] | None:
+    """FI's own reading of the top-level function ``function`` in ``source``, made in FI's process before anything
+    runs: its parameters (``{"name", "default", "kind"}``), whether it takes ``*args`` / ``**kwargs``, and whether it
+    returns its outputs by name. ``None`` when it cannot be read (no such function, a decorator that may change the
+    signature, text that does not parse)."""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    fn = next((n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == function),
+              None)
+    if fn is None or fn.decorator_list:
+        return None
+    a = fn.args
+    positional = [*a.posonlyargs, *a.args]
+    firsts = len(positional) - len(a.defaults)
+    params = [{"name": p.arg, "default": i >= firsts, "kind": "positional_only" if p in a.posonlyargs else "positional"}
+              for i, p in enumerate(positional)]
+    params += [{"name": p.arg, "default": d is not None, "kind": "keyword_only"} for p, d in zip(a.kwonlyargs, a.kw_defaults)]
+    return {"params": params, "varargs": a.vararg is not None, "varkw": a.kwarg is not None,
+            "by_name": _returns_by_name(fn)}
+
+
+def _contract_here(case: dict[str, Any]) -> str:
+    """Why the function cannot be called with the example's inputs, by FI's own reading (:func:`static_facts`): the
+    same rule the measuring process applies, decided here so nothing it prints can claim it. ``""`` when it can, or when
+    FI could not read the function."""
+    static = case.get("static")
+    if not isinstance(static, dict):
+        return ""
+    names = {p["name"] for p in static["params"]}
+    inputs = list(case.get("inputs") or {})
+    if not static["varkw"]:
+        missing = [n for n in inputs if n not in names]
+        if missing:
+            return "the function must take " + ", ".join(missing) + " as arguments, named so"
+    if static["varargs"] or static["varkw"]:
+        return ""
+    given = set(inputs) | ((set(RNG_PARAMS) | {SEED_PARAM}) if case.get("random") else set())
+    required = [p["name"] for p in static["params"] if not p["default"] and p["name"] not in given]
+    if required:
+        return ("the parameter " + ", ".join(required) + (" has" if len(required) == 1 else " have")
+                + " no default and is not one of the example's inputs; give it a default or take it out of this function")
+    return ""
+
+
+def _judge_here(case: dict[str, Any], measured: Any) -> tuple[str, str, Any, Any, Any]:
+    """:func:`equation_measure.judge`, with the statuses that mean "FI could not judge this" decided by FI alone: a
+    contract from FI's own reading of the function, and outputs returned by name only when the formula defines several
+    and FI's reading finds the function returning them by name. The measuring process saying either is otherwise a
+    failure (``error``)."""
+    want = case["expected"]
+    contract = _contract_here(case)
+    if contract:
+        return CONTRACT, contract, None, None, want
+    status = measured.get("status") if isinstance(measured, dict) else None
+    if status == CONTRACT:
+        return (ERROR, "the run that calls the function said it could not be called with the example's inputs, which "
+                "FI's own reading of the function does not confirm", None, None, want)
+    if status == OUTPUTS:
+        static = case.get("static")
+        if len(case.get("outputs") or []) >= 2 and isinstance(static, dict) and static.get("by_name"):
+            return OUTPUTS, str(measured.get("detail") or ""), None, None, want
+        return (ERROR, "the run that calls the function said it returns its outputs by name, which FI's own reading "
+                "of the function does not confirm", None, None, want)
+    return _measure.judge(case, measured)
+
+
+def judged(case_list: list[dict[str, Any]], stdout: str, *, nonce: str,
+           only: list[str] | None = None) -> list[dict[str, Any]]:
+    """FI's verdict on each case, from what the measuring process printed (its one line with ``nonce``): ``{"id",
+    "function", "status", "detail", "got", "expected", "tolerance"}`` per case, judged here, in FI's own process, with
+    the expected value and the tolerance that process never had. No such line, or more than one, is a failure of every
+    case (:data:`NO_RESULT`), never "not tested"."""
+    found: list[Any] = []
+    head = _measure.MEASURED_MARK + " " + nonce + " "
+    for line in (stdout or "").splitlines():
+        if line.startswith(head):
+            try:
+                found.append(json.loads(line[len(head):]))
+            except ValueError:
+                found.append(None)
+    taken = found[0] if len(found) == 1 and isinstance(found[0], dict) else None
+    out = []
+    for c in case_list:
+        if only and str(c["id"]) not in only:
+            continue
+        case = {**c, "names": list(c["expected"]) if isinstance(c.get("expected"), dict) else None}
+        if taken is None:
+            contract = _contract_here(case)
+            status, detail, got, tol, want = (CONTRACT if contract else ERROR), (contract or NO_RESULT), None, None, c["expected"]
+        else:
+            status, detail, got, tol, want = _judge_here(case, taken.get(str(c["id"])))
+        out.append({"id": str(c["id"]), "function": c["function"], "status": status, "detail": detail,
+                    "got": got, "expected": want, "tolerance": tol})
+    return out
+
+
+async def run_and_judge(run: Any, case_list: list[dict[str, Any]], *, only: list[str] | None = None,
+                        **run_kwargs: Any) -> tuple[list[dict[str, Any]], int, str]:
+    """Measure ``case_list`` with ``run(argv, **run_kwargs) -> (returncode, stdout, stderr)`` (python's arguments, run
+    from the quest folder or a copy of it) and judge it here: ``(results, returncode, stderr)``."""
+    nonce = new_nonce()
+    rc, out, err = await run(measure_argv(case_list, nonce=nonce, only=only), **run_kwargs)
+    return judged(case_list, out, nonce=nonce, only=only), rc, err
 
 
 def parse_results(stdout: str) -> list[dict[str, Any]] | None:
@@ -853,19 +912,62 @@ def failure_message(result: dict[str, Any], formula: str) -> str:
     return head + f" Calling it with the equation's inputs raised: {result.get('detail')}"
 
 
-def load_numbers(code_dir: Path) -> dict[str, dict[str, Any]]:
-    """What the last ``--json`` run of the test file measured, by equation id (``{}`` when there is none)."""
-    try:
-        value = json.loads((Path(code_dir) / TESTS_DIR / NUMBERS_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return {str(k): v for k, v in value.items() if isinstance(v, dict)} if isinstance(value, dict) else {}
+def checks_dir(code_dir: Path) -> Path:
+    """Where FI keeps what its tests in ``code_dir/tests/`` compare with: ``<quest>/.fi/checks/``, beside ``code/`` and
+    outside it (where the test files look unless a person names another folder with ``--checks``)."""
+    return Path(code_dir).resolve().parent / CHECKS_DIR
+
+
+def values_of(case_list: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """What each equation's test compares with, by equation id: the example's inputs, output, tolerance and variance."""
+    return {str(c["id"]): {k: c[k] for k in _HIDDEN if k in c} for c in case_list}
+
+
+def write_values(code_dir: Path, case_list: list[dict[str, Any]]) -> Path | None:
+    """Write :func:`values_of` into :func:`checks_dir` (removing it when there is no case); the file written."""
+    path = checks_dir(code_dir) / VALUES_NAME
+    if not case_list:
+        path.unlink(missing_ok=True)
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(values_of(case_list), default=str, indent=1) + "\n", encoding="utf-8")
+    return path
+
+
+#: A test file of FI's that reads its values from outside ``code/`` holds this line; one without it is from an older FI
+#: that wrote the expected values into the file itself.
+_READS_OUTSIDE = "VALUES_NAME = "
+
+
+def remove_stale(code_dir: Path) -> list[str]:
+    """Remove what an older FI left in ``code/tests/`` with expected values in it: the value files
+    (:data:`STALE_NAMES`) and FI's test files written before their values moved out of ``code/`` (FI writes them again
+    in the current form). The paths removed, relative to ``code_dir``. Nothing else is touched."""
+    tests = Path(code_dir) / TESTS_DIR
+    removed: list[str] = []
+    if not tests.is_dir():
+        return removed
+    for name in STALE_NAMES:
+        path = tests / name
+        if path.is_file():
+            path.unlink(missing_ok=True)
+            removed.append(f"{TESTS_DIR}/{name}")
+    for name in (TEST_NAME, "test_oracles.py"):
+        path = tests / name
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
+        except OSError:
+            continue
+        if text is not None and "Frontier Insight" in text and _READS_OUTSIDE not in text:
+            path.unlink(missing_ok=True)
+            removed.append(f"{TESTS_DIR}/{name}")
+    return removed
 
 
 def failure_reason(result: dict[str, Any]) -> str:
     """Why one equation test failed, for the run log and the record (never for a request to the model: it holds the
     expected value): the expected value, the value got and the tolerance, or the error the call raised. ``result`` is a
-    parsed result merged with its entry of :func:`load_numbers`."""
+    result of :func:`judged`."""
     status = result.get("status")
     got, want, tol = result.get("got"), result.get("expected"), result.get("tolerance")
     detail = _text(result.get("detail"))
@@ -886,8 +988,12 @@ def failure_reason(result: dict[str, Any]) -> str:
 
 
 def write(code_dir: Path, case_list: list[dict[str, Any]]) -> Path | None:
-    """Write ``tests/test_equations.py`` into ``code_dir`` (removing it when there is no case); the file written."""
+    """Write ``tests/test_equations.py`` into ``code_dir`` (removing it when there is no case); the test file written.
+    What it compares with is not on disk while the quest's code can still run: this removes the quest's
+    ``.fi/checks/`` copy, FI judges with the values it holds (:func:`run_and_judge`), and the person's copy is written
+    once the last run is over (:func:`write_values`, from ``code_layout.write_check_values``)."""
     path = Path(code_dir) / TEST_PATH
+    (checks_dir(code_dir) / VALUES_NAME).unlink(missing_ok=True)
     if not case_list:
         try:
             path.unlink()

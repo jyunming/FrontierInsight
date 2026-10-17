@@ -4,9 +4,11 @@
   is a number typed into the code is sent back to be computed (or removed), at most twice; one that is still typed in
   afterwards is left out of the results the paper may use, and the paper says so.
 * **The run fits the time it is allowed** (``core/run_estimate.py``): a few real trials are timed before the freeze and
-  added up; a study that would not finish gets fewer runs per setting from FI itself (no model is asked; every setting
-  is kept, and the runs never go below the fewest the plan allows); one that still would not fit stops the quest
-  plainly with no paper.
+  added up against the topic's own time limit when it states one (``execution.timeout_s`` stays FI's hard stop) or else
+  ``execution.timeout_s``; a study that would not finish gets fewer runs per setting from FI itself (no model is asked;
+  every setting is kept; the runs go down to the fewest the plan allows, and below it only for the topic's own limit,
+  said in the paper with the precision those runs give); one that would not fit FI's own limit even so stops the quest
+  plainly with no paper, and one that cannot meet the topic's limit runs at the plan's fewest and says it was over.
 * **The simulation measures what the protocol names** (the same trials, ``RunChecksMixin._pilot_gate``): what the timed trials
   returned is read before the full run; a metric that is not a number in any pilot trial at any pilot setting (after the
   settings with few values were tried in every combination), one that never moves while others do, or an output that is the
@@ -38,9 +40,11 @@ from . import typed_results as _typed
 #: How many times, in all, a simulation that returns typed-in numbers is sent back.
 TYPED_RESULT_REPAIRS = 2
 TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
+#: In ``.fi/``: the settings FI took out of the grid because the simulation never reads them.
 NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
-
+#: How many crashes inside the code, shown by a finding's test during the code review, go to the crash repair in a quest.
+REVIEW_CRASHES = 2
 
 
 def _one(text: str, limit: int = 400) -> str:
@@ -386,9 +390,137 @@ class RunChecksMixin:
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
-            parts.append(f"{reduced['note']} FI states this, with the numbers, in its own record of the run at the end "
-                         "of the limitations; do not repeat it, and write no result for what was left out.")
+            parts.append(f"{reduced['note']} Say this in the paper with the numbers (it is among FI's facts about this run, "
+                         "given below), and write no result for what was left out.")
+        over = sized.get("over_topic_limit")
+        if isinstance(over, dict) and over.get("note"):
+            parts.append(f"{over['note']} Say this in the paper (it is among FI's facts about this run, given below).")
         return "\n\n".join(parts)
+
+    # ---- a setting of the grid the code never reads ----------------------------------------------------------------------
+
+    def _check_unread_settings(self, state: Any, simulate: Path) -> dict[str, Any] | None:
+        """After the checks of the code before the run (the static gate is clean) and before the run is timed and the
+        protocol frozen: a setting of ``protocol.grid`` (two values or more) that FI's reading of the code
+        (:func:`core.unread_settings.unread_axes`) finds no use of. FI never takes a setting out of the grid on its own
+        reading: a reading of code can be wrong, and a setting taken out is a study that was not run.
+
+        * The study compares the setting (a factor the topic compares, as the plan's own topic map or a name match places
+          it; a key of a check's case, of ``in_each_run``, or named by a metric or a comparison) and the simulation never
+          reads it: a fault of the code. The simulation goes back to be repaired (a failed run, at most
+          ``engine.exec_reflect_max_iterations`` times), naming the setting; after that the grid is kept as written.
+        * Otherwise: one plain line in plan.md and run.log says FI's reading finds no use of it, and every setting is kept
+          and run.
+
+        Nothing is said when the reading is not certain or the code reads a name the plan does not give (a misspelt read
+        is a fault of the code: core/grid_keys.py sends it back), after the freeze, or for a redesign. No model is asked.
+        Returns the failed run for the repair, or ``None`` to go on."""
+        from . import engine as _e
+        from . import grid_keys as _grid_keys
+        from . import unread_settings as _unread
+
+        if _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
+            return None
+        protocol = self._draft_protocol(state) or {}  # type: ignore[attr-defined]
+        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        if len(grid) < 1:
+            return None
+        files = {rel: text for rel, text in _grid_keys.code_files(simulate.parent).items()
+                 if rel not in ("run.py", _trial_runner.SUBMIT_NAME)}
+        misread = _grid_keys.problems(files, protocol, state.get("design"))
+        if misread:
+            self._log.info("[execute] the code reads a name the plan does not give (%s); left to the check of the code",  # type: ignore[attr-defined]
+                           ", ".join(f"`{k}`" for r in misread for k in r.keys) or "a fixed number of runs")
+            return None
+        # A setting the study compares and the simulation itself never reads is the simulation's fault, even when the
+        # analysis reads it (then it groups results that differ in nothing but their seeds).
+        swept = [str(a) for a, v in grid.items() if isinstance(v, list) and len(v) >= 2]
+        simulated, _why = _unread.setting_reads(files, analysis=False)
+        if simulated is not None and any(a in simulated for a in swept):
+            compared = self._settings_the_study_compares(state, protocol, [a for a in swept if a not in simulated])
+            if compared:
+                return self._unread_compared_setting(state, grid, compared, simulate)
+        unread, why = _unread.unread_axes(files, protocol)
+        if not unread:
+            if why:
+                self._log.info("[execute] FI could not tell whether the code reads every setting of the grid (%s); "  # type: ignore[attr-defined]
+                               "every setting is kept and run", why)
+            return None
+        compared = self._settings_the_study_compares(state, protocol, unread)
+        if compared:
+            return self._unread_compared_setting(state, grid, compared, simulate)
+        line = (f"FI's reading of the code finds no use of {', '.join(f'`{k}`' for k in unread)}; every setting is kept "
+                "and run.")
+        self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
+        path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
+        try:
+            text = path.read_text(encoding="utf-8")
+            if line not in text:
+                edited = _plan.add_to_section(text, _e._PART_HEADING, ["", f"- {line}"])
+                _plan.note_edit(self.quest_root, text)  # type: ignore[attr-defined]
+                path.write_text(edited, encoding="utf-8")
+                _plan.record_version(self.quest_root, edited, by="engine",  # type: ignore[attr-defined]
+                                     note="FI's reading of the code finds no use of a setting; every setting is kept")
+        except OSError as e:
+            self._log.warning("[execute] FI could not add that line to plan.md: %r", e)  # type: ignore[attr-defined]
+        return None
+
+    def _settings_the_study_compares(self, state: Any, protocol: dict[str, Any], axes: list[str]) -> dict[str, str]:
+        """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records: a
+        factor the topic compares (:func:`core.topic_requirements.compared_axes`), a key of a check's case, of
+        ``in_each_run``, or a name a metric or the plan's comparisons use."""
+        from . import in_run as _in_run
+        from . import oracle_check as _oracle
+        from . import topic_requirements as _tr
+
+        out: dict[str, str] = {}
+        req = _read_json(self.fi_dir / _tr.FILE)  # type: ignore[attr-defined]
+        if isinstance(req, dict) and isinstance(req.get("factors"), list):
+            for axis, factor in _tr.compared_axes(req, state.get("design") or {}, protocol).items():
+                out.setdefault(axis, f"the topic compares {factor}")
+        for oracle in _oracle.declared(protocol):
+            own = _oracle.case_of(oracle)
+            for axis in (own[0] or {}) if own else {}:
+                out.setdefault(str(axis), f"the check `{oracle.get('name')}` runs at a value of it")
+        for axis in _in_run.of(protocol) or {}:
+            out.setdefault(str(axis), "each run compares its values")
+
+        def names(value: Any) -> set[str]:
+            if isinstance(value, str):
+                return {value}
+            if isinstance(value, dict):
+                return {n for v in value.values() for n in names(v)}
+            if isinstance(value, list):
+                return {n for v in value for n in names(v)}
+            return set()
+
+        for metric in protocol.get("metrics") or []:
+            for axis in names({k: v for k, v in metric.items() if k not in ("id", "description", "kind")}
+                              if isinstance(metric, dict) else {}):
+                out.setdefault(axis, f"the metric `{metric.get('id')}` is given per value of it")
+        design = state.get("design") if isinstance(state.get("design"), dict) else {}
+        for axis in names(protocol.get("comparisons")) | names(design.get("comparisons")):
+            out.setdefault(axis, "the plan compares its values")
+        return {axis: why for axis, why in out.items() if axis in axes}
+
+    def _unread_compared_setting(self, state: Any, grid: dict[str, Any], compared: dict[str, str],
+                                 simulate: Path) -> dict[str, Any] | None:
+        """A setting the study compares and the code never reads: a fault of the code. Sent back to be repaired a bounded
+        number of times; after that the grid is kept as written (the run then shows the setting changed nothing)."""
+        said = "; ".join(f"`{axis}` ({why})" for axis, why in compared.items())
+        if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+            self._log.warning("[execute] the code still never reads %s; the repairs are used up, so FI keeps the grid as the "  # type: ignore[attr-defined]
+                              "plan wrote it", said)
+            return None
+        self._log.warning("[execute] nothing in the code reads %s, a setting the study compares: sending the simulation back "  # type: ignore[attr-defined]
+                          "to be repaired, not taking the setting out of the plan", said)
+        print("[FI] the code never reads a setting the study compares; sending the simulation back to be repaired")
+        values = "; ".join(f"`{axis}` takes {', '.join(str(v) for v in grid[axis][:6])}" for axis in compared)
+        return self._code_review_failed_run(  # type: ignore[attr-defined]
+            f"FI read the code before the run: nothing in it reads {said}. The plan's grid gives each run its own value "
+            f"({values}), and the study compares the results across those values, so the simulation must use the value it is "
+            "given (`cell[\"<name>\"]`, the name exactly as the grid spells it) where the plan's model uses it. Do not fix "
+            "the value inside the code.", script=simulate.name)
 
     # ---- the run fits the time it is allowed ---------------------------------------------------------------------------
 
@@ -435,8 +567,13 @@ class RunChecksMixin:
         if (not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs  # type: ignore[attr-defined]
                 or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0):  # type: ignore[attr-defined]
             return None
-        limit_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
-        budget_s = max(limit_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
+        # The time the run is sized to: the topic's own limit when it states one (never more than FI's), else FI's
+        # ``execution.timeout_s``, which stays the hard stop of a run in either case.
+        hard_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
+        topic_s = self._topic_limit_s(state)
+        by_topic = topic_s is not None and topic_s < hard_s
+        limit_s = float(topic_s) if by_topic else hard_s  # type: ignore[arg-type]
+        budget_s = max(hard_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
         cached: dict[str, _estimate.Probe] = {}
         prior = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
         # The note of a cut made before a resume is kept, whether the sizing finished or not.
@@ -466,35 +603,113 @@ class RunChecksMixin:
                 return self._sizing_failed(why)
             for p in probes:
                 cached[_estimate.probe_key(p.cell, runs)] = p
-            if (broken := await self._pilot_gate(state, runner, python, env, grid, probes, thresholds, limit_s, budget_s)) is not None:
+            # The checks of the pilot's trials get the time they always had (FI's own limit, not the topic's).
+            if (broken := await self._pilot_gate(state, runner, python, env, grid, probes, thresholds, hard_s, budget_s)) is not None:
                 return broken
             est = _estimate.estimate(grid, runs, runner.deterministic, probes)
             if est is None:
                 return None
-            line = _estimate.says(est, limit_s)
+            line = _estimate.says(est, limit_s, topic=by_topic)
             base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
-                    "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials}
-            if not _estimate.known_too_long(est, limit_s):
+                    "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
+                    "limit": "topic" if by_topic else "execution.timeout_s", "topic_limit_s": topic_s, "hard_limit_s": hard_s}
+            # The smaller run FI chose is timed again: it goes on unless it is over the limit even without the margin
+            # (the margin was spent choosing it; a second timing of the same run differs by about as much).
+            if not _estimate.known_too_long(est, limit_s, timed_again=cut_done):
+                if _estimate.known_too_long(est, limit_s):
+                    line += (" (timed again with the fewer runs; without FI's margin of one half it is "
+                             f"{_estimate.plain_duration(est.seconds)}, within the limit)")
+                    base["says"] = line
                 self._log.info("[execute] %s", line)  # type: ignore[attr-defined]
                 print(f"[FI] {line}")
+                self._say_headroom(est, hard_s)
                 _estimate.write_record(self.quest_root, {**base, "fits": True})  # type: ignore[attr-defined]
                 return None
-            self._log.warning("[execute] %s, so it would not finish", line)  # type: ignore[attr-defined]
-            # Fewer runs per setting is the only cut FI makes: every setting the study compares is kept, and the runs never go
-            # below the fewest the plan states. The shorter run is timed again before it is used. No model is asked.
-            fewer = None if cut_done else _estimate.runs_that_fit(
-                est, limit_s, runs, runner.deterministic, self._protocol_block(state) or {}, est.spreads)  # type: ignore[attr-defined]
-            note = self._lower_the_runs(state, runs, fewer, est, limit_s, grid) if fewer is not None else None
+            self._log.warning("[execute] %s, so it would not finish within it", line)  # type: ignore[attr-defined]
+            protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+            if cut_done:
+                # The shorter run, timed again, is still over: over the topic's limit but within FI's own, it runs and the
+                # paper says it was over; over FI's own, the quest stops (below).
+                if by_topic and not _estimate.known_too_long(est, hard_s):
+                    over = (f"Timed again with the fewer runs, the experiment is expected to take {self._padded(est)}, over the "
+                            f"topic's limit of {_estimate.plain_duration(limit_s)}; FI runs it, and the paper reports the "
+                            "measured run time against that limit.")
+                    self._log.warning("[execute] %s", over)  # type: ignore[attr-defined]
+                    if isinstance(reduced, dict):
+                        reduced = {**reduced, "note": f"{reduced.get('note', '')} {over}".strip(),
+                                   "over_topic_limit": "cut_still_over"}
+                    self._say_headroom(est, hard_s)
+                    _estimate.write_record(self.quest_root, {**base, "reduced": reduced, "fits": False})  # type: ignore[attr-defined]
+                    return None
+                fit = None
+            else:
+                # Fewer runs per setting is the only cut FI makes: every setting the study compares is kept. The runs go down
+                # to the fewest the plan states, or, for the topic's own limit, below it (said in the paper). The shorter run
+                # is timed again before it is used. No model is asked.
+                fit = _estimate.fit_runs(grid, runs, runner.deterministic, probes, protocol, limit_s=limit_s,
+                                         topic_limit=by_topic, spreads=est.spreads)
+            over_topic = ""
+            if fit is None and by_topic and not cut_done:
+                # Not even the fewest runs meet the topic's limit: going below the plan's minimum would not meet it either,
+                # so the plan's minimum stands and the run is nearest the limit there, over it (said in the paper). Only a
+                # run over FI's own limit stops.
+                floor = _estimate.runs_floor(protocol, runs, est.spreads) if _estimate.floor_is_stated(protocol) else runs
+                floor = min(runs, max(floor, _estimate.runs_checks_need(protocol, grid)))  # what the plan's checks need
+                least = _estimate.fewest_for_topic(protocol, grid, runs)
+                fewest = _estimate.seconds_at(grid, least, runs, runner.deterministic, probes) or 0.0
+                at_floor = _estimate.seconds_at(grid, floor, runs, runner.deterministic, probes) or est.seconds
+                if at_floor * _estimate.SAFETY <= hard_s:
+                    over_topic = (f"The topic's limit of {_estimate.plain_duration(limit_s)} cannot be met by fewer runs per "
+                                  f"setting: even with {least} runs per setting the {est.cells:,} settings would take about "
+                                  f"{_estimate.plain_duration(fewest * _estimate.SAFETY)} with FI's margin (each setting runs "
+                                  "in a process of its own).")
+                    if floor < runs:
+                        fit = _estimate.Fit(runs=floor, seconds=at_floor, plan_floor=floor, below_plan=False)
+                    else:
+                        note = (f"{over_topic} FI ran the plan's {runs} runs per setting and all {est.cells:,} settings; the "
+                                f"experiment is expected to take {self._padded(est)}, over the topic's limit.")
+                        self._log.warning("[execute] %s", note)  # type: ignore[attr-defined]
+                        print(f"[FI] {note}")
+                        self._say_headroom(est, hard_s)
+                        _estimate.write_record(self.quest_root, {**base, "fits": False, "over_topic_limit": {"note": note}})  # type: ignore[attr-defined]
+                        return None
+            if fit is None:
+                text = self._too_long_text(est, hard_s)
+                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text})  # type: ignore[attr-defined]
+                return self._stop_too_long(text)
+            note = self._lower_the_runs(state, runs, fit, est, limit_s, grid, protocol, topic=by_topic, over_topic=over_topic)
             if note is None:
-                text = self._too_long_text(est, limit_s)
+                text = self._too_long_text(est, hard_s)
                 _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text})  # type: ignore[attr-defined]
                 return self._stop_too_long(text)
             cut_done = True
             reduced = note
-            self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fewer}
+            self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fit.runs}
             _estimate.write_record(self.quest_root, {**base, "fits": False, "reduced": reduced})  # type: ignore[attr-defined]
             await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
+            if over_topic:
+                return None  # sized to the plan's minimum, knowingly over the topic's limit: nothing to gain by timing again
         return None
+
+    def _topic_limit_s(self, state: Any) -> float | None:
+        """The one run-time limit the topic states (in seconds), read as the paper's run record reads it, or ``None``."""
+        from . import disclosure as _disclosure
+
+        limit = _disclosure.topic_limit(self.quest_root, str(state.get("topic") or ""))  # type: ignore[attr-defined]
+        return float(limit) if isinstance(limit, (int, float)) and limit > 0 else None
+
+    @staticmethod
+    def _padded(est: _estimate.Estimate) -> str:
+        return ("at least " if est.at_least else "about ") + _estimate.plain_duration(est.seconds * _estimate.SAFETY)
+
+    def _say_headroom(self, est: _estimate.Estimate, hard_s: float) -> None:
+        """One line when FI's hard stop (``execution.timeout_s``) is close to what the run is expected to take: a run slower
+        than estimated would be stopped before it ends."""
+        if est.seconds * _estimate.SAFETY * 2 > hard_s:
+            self._log.warning(  # type: ignore[attr-defined]
+                "[execute] FI stops a run that takes longer than execution.timeout_s (%s); this one is expected to take %s, "
+                "so a run much slower than the estimate would be stopped before it ends",
+                _estimate.plain_duration(hard_s), self._padded(est))
 
     async def _size_the_scan(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
         """The coarse scan of a search for the best design runs every setting of the plan's grid, so its size is counted
@@ -639,10 +854,15 @@ class RunChecksMixin:
         design["protocol"] = {**(design.get("protocol") if isinstance(design.get("protocol"), dict) else {}), **sized}
         return design
 
-    def _lower_the_runs(self, state: Any, runs: int, fewer: int, est: _estimate.Estimate, limit_s: float,
-                        grid: dict[str, list[Any]]) -> dict[str, Any] | None:
-        """FI's own smaller run: the same settings with ``fewer`` runs each, written into plan.md as a version of the engine
-        (no request to the plan's model). The record of it, or ``None`` when plan.md could not be changed."""
+    def _lower_the_runs(self, state: Any, runs: int, fit: _estimate.Fit, est: _estimate.Estimate, limit_s: float,
+                        grid: dict[str, list[Any]], protocol: dict[str, Any], *, topic: bool = False,
+                        over_topic: str = "") -> dict[str, Any] | None:
+        """FI's own smaller run: the same settings with ``fit.runs`` runs each, written into plan.md as a version of the engine
+        (no request to the plan's model). The record of it (the plain note the paper states, the precision those runs give,
+        and whether they are fewer than the plan's minimum), or ``None`` when plan.md could not be changed. ``topic``: the
+        limit is the one the topic states; ``over_topic``: why that limit cannot be met even so (the run then has the plan's
+        minimum and is over it)."""
+        fewer = int(fit.runs)
         path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
         try:
             text = path.read_text(encoding="utf-8")
@@ -658,15 +878,43 @@ class RunChecksMixin:
         except OSError as e:
             self._log.warning("[execute] FI could not lower the runs per setting in plan.md: %r", e)  # type: ignore[attr-defined]
             return None
-        words = "at least " if est.at_least else "about "
-        note = (f"FI made the experiment smaller so that it fits the time allowed ({_estimate.plain_duration(limit_s)}): it "
-                f"would have taken {words}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}. FI lowered the runs per "
-                f"setting from {runs} to {fewer} and kept all {_estimate.cell_count(grid)} setting(s); the checks, thresholds "
-                "and tolerances are unchanged.")
+        whose = "the topic's limit" if topic else "the time allowed"
+        cells = _estimate.cell_count(grid)
+        if over_topic:
+            note = (f"{over_topic} FI lowered the runs per setting from {runs} to the plan's minimum of {fewer} and kept all "
+                    f"{cells} setting(s); the experiment is expected to take about "
+                    f"{_estimate.plain_duration(fit.seconds * _estimate.SAFETY)}, over the topic's limit; the checks, "
+                    "thresholds and tolerances are unchanged.")
+        else:
+            note = (f"FI made the experiment smaller so that it fits {whose} ({_estimate.plain_duration(limit_s)}): it would "
+                    f"have taken {self._padded(est)}. FI lowered the runs per setting from {runs} to {fewer} and kept all "
+                    f"{cells} setting(s); the checks, thresholds and tolerances are unchanged.")
+        if fit.below_plan:
+            note += (f" That is fewer than the {fit.plan_floor} runs per setting the plan allows at the least ("
+                     + ("its minimum and its precision target" if fit.precision_known else "its stated minimum")
+                     + "): the topic's time limit asked for it, so the plan's minimum number of runs is a part of the study "
+                     "not fully done.")
+        elif not _estimate.floor_is_stated(protocol) and topic and not over_topic:
+            note += (" The plan states no fewest number of runs per setting; for the topic's own limit FI goes down to "
+                     f"{_estimate.fewest_for_topic(protocol, grid, runs)} at the least.")
+        precision = _estimate.expected_precision(protocol, fewer, est.spreads) if fit.precision_known else None
+        if precision is not None:
+            note += (f" With {fewer} runs per setting, the 95% interval of `{precision['metric']}` is about "
+                     f"±{precision['half_width']:g} ({precision['how']})"
+                     + (f"; the plan's target is ±{precision['target']:g}" if precision.get("target") else "") + ".")
+        elif not fit.precision_known:
+            metric, _kind = _estimate.precision_metric(protocol)
+            note += (f" The precision {fewer} runs per setting give for `{metric}` was not known before the run: the timed "
+                     "trials did not show its spread, so the 95% interval is the one the run itself gives.")
         self._log.warning("[execute] %s", note)  # type: ignore[attr-defined]
         print(f"[FI] {note}")
         return {"note": note, "from": {"grid": grid, "runs_per_setting": runs},
-                "to": {"grid": grid, "runs_per_setting": fewer}}
+                "to": {"grid": grid, "runs_per_setting": fewer}, "limit": "topic" if topic else "execution.timeout_s",
+                "below_plan_minimum": bool(fit.below_plan), "plan_minimum": fit.plan_floor, "precision": precision,
+                "precision_known": bool(fit.precision_known),
+                # why the run is over the topic's limit: sized to the plan's minimum (no fewer runs meet it), or, set when the
+                # cut is timed again, still over it after the cut (_size_the_run)
+                "over_topic_limit": "at_plan_minimum" if over_topic else False}
 
     @staticmethod
     def _too_long_text(est: _estimate.Estimate, limit_s: float, cut: bool = True) -> str:
@@ -689,6 +937,226 @@ class RunChecksMixin:
             "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
             "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
         }
+
+    async def _small_run(self, state: Any, py: Any, exec_env: Any) -> Any:
+        """FI's small run of the simulation on the code as it is (core/small_run.py), or ``None`` when the simulation does
+        not follow the trial contract (``run_trial`` / ``run_cell`` in simulate.py). A run of the same code and settings is
+        not made again: its record (``.fi/small_run.json``) is read back."""
+        from . import small_run as _small
+
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
+        if not getattr(self, "_trial_mode", False) or not simulate.is_file():
+            return None
+        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        from . import optimisation_plan as _optim
+        from . import optimise as _optimise
+
+        # A search for the best design has no grid: FI's search runner evaluates the baseline first, at its own settings.
+        if _optim.has_block(state.get("design")) or _optimise.block_of(protocol) is not None:
+            return None
+        self._small_run_ctx = (state, py, exec_env)
+        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+        deterministic = "run_trial" not in set(getattr(self, "_trial_entries", set()) or ())
+        key = _small.key_of(simulate, grid, deterministic, thresholds)
+        record = _small.read_record(self.quest_root)  # type: ignore[attr-defined]
+        if record.get("key") == key:
+            self._small_run_note = str(record.get("for_reader") or "")
+            return record
+        paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
+        inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
+        got = await _small.run(
+            self.executor, py, self.quest_root, simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
+            deterministic=deterministic, timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
+            env=dict(exec_env or {}), thresholds=thresholds, paired=paired, in_each_run=inside)
+        _small.write_record(self.quest_root, key, got)  # type: ignore[attr-defined]
+        self._small_run_note = got.for_reader()
+        self._log.info("[execute] FI's small run before the code is read: %s", got.says())  # type: ignore[attr-defined]
+        return _small.read_record(self.quest_root)  # type: ignore[attr-defined]
+
+    async def _small_run_gate(self, state: Any, py: Any, exec_env: Any) -> dict[str, Any] | None:
+        """Before the code is read: FI runs the simulation on a small case (core/small_run.py). A crash (it cannot be loaded,
+        or most trials of a setting fail) goes to the repair of a failed run with the place and the traceback, while a
+        repair is left; then the code is read with what the run gave. ``None`` to go on."""
+        from . import small_run as _small
+
+        record = await self._small_run(state, py, exec_env)
+        if not record or not record.get("crashed"):
+            return None
+        if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+            self._log.warning("[execute] FI's small run still fails (%s) and no repair is left; the study's own run "  # type: ignore[attr-defined]
+                              "and its checks decide", record.get("says"))
+            return None
+        settings = [_small.Setting(str(s.get("key") or ""), int(s.get("planned") or 0), int(s.get("ok") or 0),
+                                   int(s.get("failed") or 0), bool(s.get("timed_out")),
+                                   [(str(r), int(n)) for r, n in s.get("reasons") or []])
+                    for s in record.get("settings") or [] if isinstance(s, dict)]
+        tb = ""
+        try:
+            for path in sorted((self.quest_root / _small.DIR).glob("s*/cell*.out.jsonl")):  # type: ignore[attr-defined]
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    row = json.loads(line) if line.strip().startswith("{") else {}
+                    if isinstance(row, dict) and row.get("traceback"):
+                        tb = str(row["traceback"])
+                        break
+                if tb:
+                    break
+        except (OSError, ValueError):
+            tb = ""
+        for s in settings:
+            if s.fault and not s.traceback:
+                s.traceback = tb
+                break
+        message = _small.SmallRun(settings, str(record.get("load_error") or "")).directive()
+        self._log.warning("[execute] FI's small run of the simulation failed before the code is read (%s); sending it "  # type: ignore[attr-defined]
+                          "to be repaired", record.get("says"))
+        return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
+
+    async def _small_run_again(self) -> str:
+        """For a repair of a reader's finding: ``""`` when FI's small run still runs on the code as it is now, else why not.
+        ``""`` when there is no small run to make."""
+        ctx = getattr(self, "_small_run_ctx", None)
+        if not ctx:
+            return ""
+        record = await self._small_run(*ctx)
+        return str(record.get("says") or "it failed") if record and record.get("crashed") else ""
+
+    async def _review_crash_run(self, state: Any) -> dict[str, Any] | None:
+        """A test written for a reader's finding that crashed inside the code (not in the test) showed a crash, not the
+        finding: it goes to the crash repair like a failed run, with the place and the call that crashed, while a repair is
+        left and at most :data:`REVIEW_CRASHES` times a quest. The test is run again first: a crash a later repair removed
+        is not sent. ``None`` when there is nothing to send."""
+        from . import code_findings as _code_findings
+        from . import code_review as _code_review
+        from . import finding_repair as _finding_repair
+
+        record = _code_review.load(self.quest_root)  # type: ignore[attr-defined]
+        if not record or int(record.get("crashes_sent") or 0) >= REVIEW_CRASHES:
+            return None
+        if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+            return None
+        for issue in _code_findings.issues_of(record).values():
+            crash = issue.get("crash") if isinstance(issue, dict) else None
+            if not isinstance(crash, dict) or crash.get("sent"):
+                continue
+            crash["sent"] = True
+            rel = str(crash.get("test") or "")
+            _rc, text, _err = await self._run_in_env(  # type: ignore[attr-defined]
+                ["-c", _finding_repair.harness_source("code", [rel])], timeout_s=180, env=self._finding_test_env())  # type: ignore[attr-defined]
+            now = _finding_repair.parse_runs(text, [rel]).get(rel)
+            if now is None or not now.crash_in_program:
+                crash["gone"] = True
+                _code_review.save(self.quest_root, record)  # type: ignore[attr-defined]
+                continue
+            record["crashes_sent"] = int(record.get("crashes_sent") or 0) + 1
+            _code_review.save(self.quest_root, record)  # type: ignore[attr-defined]
+            try:
+                test_text = (self.quest_root / rel).read_text(encoding="utf-8")  # type: ignore[attr-defined]
+            except OSError:
+                test_text = ""
+            at = now.at or str(crash.get("at") or "")
+            self._log.warning("[code_review] a test of finding %s crashed inside the code at %s (%s); sending the code to "  # type: ignore[attr-defined]
+                              "the crash repair", issue.get("id"), at, _one(now.detail))
+            message = (f"FI called the code the way the test below does, and it crashed inside the code at {at}: "
+                       f"{now.detail}\n\nThe call (a test written to check a reader's finding about the code):\n```python\n"
+                       f"{test_text[:1500]}\n```\n\nRepair the code so that this call runs to the end and returns its values. "
+                       "Keep everything else as it is.")
+            script = ("experiment.py" if at.startswith("code/experiment.py") or not self._split_on(state)  # type: ignore[attr-defined]
+                      else _split_run.SIMULATE_NAME)
+            return self._code_review_failed_run(message, script=script)  # type: ignore[attr-defined]
+        return None
+
+    def _gate_crash_repair(self, issue: dict[str, Any], run: Any, rel: str, record: dict[str, Any],
+                           state: Any = None) -> dict[str, Any] | None:
+        """At the evidence gate, a shown fault's test crashed inside the program: the crash is recorded on the issue (unsent)
+        and, while the budget of the crash repair before the run is left (:data:`REVIEW_CRASHES` a quest, and the run's own
+        repairs), the gate's verdict sends the quest back to the run step (``repair_crash``), where
+        :meth:`_review_crash_run` gives it to the repair of a failed run. ``None`` when the budget is spent: it is only
+        recorded, and nothing stops."""
+        issue["crash"] = {"at": run.at, "detail": str(run.detail or "")[:300], "test": rel, "at_gate": True}
+        left = int(record.get("crashes_sent") or 0) < REVIEW_CRASHES and (
+            int((state or {}).get("exec_reflect_iter") or 0) < self.config.engine.exec_reflect_max_iterations)  # type: ignore[attr-defined]
+        if not left:
+            issue["crash"]["sent"] = True
+            issue["crash"]["not_sent"] = "the repairs of a crash are spent"
+            return None
+        why = (f"the test of {issue.get('id')} crashed inside the code at {run.at or 'an unknown line'} on the code that "
+               f"ran ({_one(str(run.detail or ''), 160)}): a crash, not a shown fault; the code goes back to the crash repair")
+        self._log.warning("[evidence_gate] %s", why)  # type: ignore[attr-defined]
+        return {"verdict": "insufficient", "rationale": why, "gaps": [why], "repair_crash": True}
+
+    async def _ask_finding_test_again(self, issue: dict[str, Any], error: Any, record: dict[str, Any],
+                                      state: Any = None) -> Any:
+        """At the evidence gate, a shown issue's test errors in its own code: the code model is asked once more for it,
+        shown the error, as an assertion about values (:func:`core.finding_repair.ask_again`). Its ``TestRun``, or ``None``
+        (asked before, no test came back, or the model could not be asked: an error here never stops anything)."""
+        from . import code_review as _code_review
+        from . import finding_repair as _finding_repair
+        from . import review_pairs as _pairs
+
+        if not isinstance(issue, dict) or issue.get("asked_again"):
+            return None
+        protocol = self._protocol_block(state) if state is not None else None  # type: ignore[attr-defined]
+        protocol = protocol if isinstance(protocol, dict) else None
+        values = _pairs.plan_values(protocol)
+
+        async def ask(prompt: str, who: str, kind: str) -> str:
+            try:
+                return await self._chat(prompt, node="implement.finding_test")  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001 - a request that cannot be made shows nothing and stops nothing
+                self._log.warning("[evidence_gate] the code model could not be asked again for the test of %s: %s",  # type: ignore[attr-defined]
+                                  issue.get("id"), _one(str(exc)))
+                return ""
+
+        async def run_tests(paths: list[str]) -> dict[str, Any]:
+            out: dict[str, Any] = {}
+            for path in paths:
+                if (run := await self._rerun_finding_test(path)) is not None:  # type: ignore[attr-defined]
+                    out[path] = run
+            return out
+
+        async def snapshot() -> dict[str, str]:
+            return {}
+
+        code = self.quest_root / "code"  # type: ignore[attr-defined]
+        env = _finding_repair.Env(
+            root=self.quest_root, code=code, record=record,  # type: ignore[attr-defined]
+            save=lambda: _code_review.save(self.quest_root, record),  # type: ignore[attr-defined]
+            ask=ask, run_tests=run_tests, snapshot=snapshot, static=dict, keeps=lambda *a: "",
+            prompts=self._prompts,  # type: ignore[attr-defined]
+            topic=_pairs.scrub(self._topic_block(), values) or "(not stated)",  # type: ignore[attr-defined]
+            equations=_code_review.equations_view(protocol, values), scrub=lambda text: _pairs.scrub(text, values),
+            log=self._log, package=(self._package_in_use(state) or "") if state is not None else "")  # type: ignore[attr-defined]
+        again = await _finding_repair.ask_again(env, issue, _finding_repair.target_file(issue, code), error)
+        if again is not None:
+            self._log.warning("[evidence_gate] the test of %s errored in its own code; FI asked once more for a test that "  # type: ignore[attr-defined]
+                              "asserts on the values, and it %s", issue.get("id"),
+                              {"fail": "fails on the code that ran", "pass": "passes on the code that ran"}.get(
+                                  again.status, "errors too: it shows nothing"))
+        return again
+
+    def _trial_checks_stop(self, state: Any) -> dict[str, Any] | None:
+        """When no repair of a fault FI's checks of the trials found is coming (they are spent, or the repair gave up): failed
+        trials in some settings only run the study once more with the repairs counted as spent, so those settings are left
+        out (FI's trials are reused, the simulation being unchanged); any other fault stops the quest with its plain record
+        (``cannot_repair``, no paper). ``None`` when the run was not sent back by those checks (core/trial_checks.py)."""
+        result = state.get("exec_result") or {}
+        fault = result.get("trial_checks") if isinstance(result, dict) else None
+        if not isinstance(fault, dict) or not fault.get("say") or result.get("returncode", 0) == 0:
+            return None
+        if fault.get("partial"):
+            self._log.warning(  # type: ignore[attr-defined]
+                "[execute_reflect] no repair of the settings where most trials failed is coming: the study is read once "
+                "more and those settings are left out")
+            return {"exec_patch_pending": True, "exec_give_up_reason": "",
+                    "exec_reflect_iter": max(int(state.get("exec_reflect_iter") or 0),
+                                             int(self.config.engine.exec_reflect_max_iterations))}  # type: ignore[attr-defined]
+        repairs = int(state.get("exec_reflect_iter") or 0)
+        return self._stop_before_run(
+            str(fault["say"]), "cannot_repair",
+            tried=[*[str(t) for t in fault.get("tried") or []],
+                   f"sent the simulation back to be repaired with these numbers ({repairs} repair"
+                   f"{'s' if repairs != 1 else ''}); the fault stood"])
 
     def _stop_too_long(self, text: str) -> dict[str, Any]:
         """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""

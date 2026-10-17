@@ -8,11 +8,12 @@ $topic
 
 # What to list
 
-- **factors**: each thing the topic says to vary, sweep, compare, or change between runs. Give its short `name` in the topic's own words, the `levels` the topic states for it (numbers, or names such as the named kinds it lists; an empty list when it states none), the `range` as `[low, high]` when the topic states one (else `[]`), and `stated`: the phrase of the topic that says it, copied exactly.
+- **factors**: each thing the topic says to vary, sweep, compare, or change between runs. Give its short `name` in the topic's own words, the `levels` the topic states for it (numbers, or names such as the named kinds it lists; an empty list when it states none), the `range` as `[low, high]` when the topic states one (else `[]`), `stated`: the phrase of the topic that says it, copied exactly, and `compared`: `true` when the topic compares results across its values (a result for each value, or how a result changes with it), `false` when the topic only uses its values (all of them together in each run, such as several values fitted together, or a range every run covers) and compares no result across them.
 - **quantities**: each result the topic says to report, measure or compute (`name`, and `stated`: the phrase, copied exactly).
 - **formulas**: each formula or definition the topic writes out in full (`name`: what it gives, `text`: the formula exactly as the topic writes it, with the topic's own symbols).
 - **comparisons**: each comparison the topic asks for, as one sentence (`what`) and the factors or levels compared (`between`).
 - **constraints**: each limit or condition the topic puts on the study (what to hold fixed, what to say plainly, how long it may run), one sentence each.
+- **code_files**: how many files of code the topic asks the study's code to be in, as a whole number (`1` when it asks for one script, one file of code or one module), else `null`. Only a request about the code itself: a file of results, of data or of input, or a script the topic compares with another, is not one. `null` when the topic does not say.
 - **stated_results**: every number or value the topic gives as what the study will find, or as the answer a check should reproduce (an expected value, a known value, a target to be reached). Not a given input, a constant, a definition or a design requirement. Copy each exactly as written. An empty list when the topic gives none.
 
 For every factor, quantity and formula, set `main` to `true` when the question the topic asks cannot be answered without it, and to `false` when it is something the topic also asks for but the question can be answered without.
@@ -21,11 +22,12 @@ For every factor, quantity and formula, set `main` to `true` when the question t
 
 Return ONE JSON object and nothing else:
 
-{"factors": [{"name": "", "levels": [], "range": [], "stated": "", "main": true}],
+{"factors": [{"name": "", "levels": [], "range": [], "stated": "", "compared": true, "main": true}],
  "quantities": [{"name": "", "stated": "", "main": true}],
  "formulas": [{"name": "", "text": "", "main": false}],
  "comparisons": [{"what": "", "between": []}],
  "constraints": [""],
+ "code_files": null,
  "stated_results": [""]}
 
 # Rules

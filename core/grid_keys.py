@@ -120,28 +120,117 @@ def _read_of(node: ast.AST, names: set[str]) -> tuple[str, ast.AST | None] | Non
     return None
 
 
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _params(fn: ast.AST) -> list[str]:
+    args = fn.args  # type: ignore[attr-defined]
+    return [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs,
+                            *(x for x in (args.vararg, args.kwarg) if x is not None))]
+
+
+def _locals(fn: ast.AST) -> set[str]:
+    """The names a function binds itself (its parameters, and names it assigns that it does not declare ``nonlocal``
+    or ``global``): inside it, they are not the enclosing function's."""
+    own = set(_params(fn))
+    declared: set[str] = set()
+    nodes = _own_nodes(fn)
+    # a comprehension's variable is the comprehension's own, not the function's
+    looped = {id(n) for c in nodes if isinstance(c, ast.comprehension) for n in ast.walk(c.target)}
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and id(node) not in looped:
+            own.add(node.id)
+        elif isinstance(node, (ast.Nonlocal, ast.Global)):
+            declared.update(node.names)
+        elif isinstance(node, _FUNCTIONS[:2]) or isinstance(node, ast.ClassDef):
+            own.add(node.name)
+    return own - declared
+
+
+def _grown(scope: ast.AST, names: set[str]) -> set[str]:
+    """``names`` with every name ``scope`` assigns from a setting (``c = cell``, ``c = entry["cell"]``) and every loop
+    variable called ``cell`` over anything but the script's own summaries: the names that hold a setting in it."""
+    names = set(names)
+    nodes = sorted(_own_nodes(scope), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)))
+    for node in nodes:
+        if isinstance(node, ast.Assign) and _setting_like(node.value, names):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id in SETTING_NAMES:
+            if not _fresh_summaries(node.iter, nodes):
+                names.add(node.target.id)
+    return names
+
+
+def _given_settings(fn: ast.Lambda, outer: ast.AST, holders: set[str], parent: dict[int, ast.AST]) -> set[str]:
+    """The parameters of the lambda ``fn`` (in ``outer``, whose names ``holders`` hold a setting) that are handed a
+    setting: by a call of it with one (``(lambda c: ...)(cell)``, or ``f(cell)`` after ``f = lambda c: ...`` in
+    ``outer``), or by a default (``lambda t, c=cell: ...``). A lambda's parameter is not a setting by its name: the
+    ``cell`` of ``max(rows, key=lambda cell: cell["score"])`` is one of the rows."""
+    positional = [a.arg for a in (*fn.args.posonlyargs, *fn.args.args)]
+    given = {a.arg for a, d in zip(fn.args.args[::-1], fn.args.defaults[::-1]) if _setting_like(d, holders)}
+    given |= {a.arg for a, d in zip(fn.args.kwonlyargs, fn.args.kw_defaults) if d is not None and _setting_like(d, holders)}
+    up = parent.get(id(fn))
+    calls = [up] if isinstance(up, ast.Call) and up.func is fn else []
+    if isinstance(up, ast.Assign) and up.value is fn and len(up.targets) == 1 and isinstance(up.targets[0], ast.Name):
+        name = up.targets[0].id
+        calls += [n for n in _own_nodes(outer) if isinstance(n, ast.Call) and _is_name(n.func, name)]
+    for call in calls:
+        given |= {p for p, arg in zip(positional, call.args) if _setting_like(arg, holders)}  # type: ignore[union-attr]
+        given |= {k.arg for k in call.keywords if k.arg and _setting_like(k.value, holders)}  # type: ignore[union-attr]
+    return given
+
+
 def _scopes(tree: ast.Module) -> list[tuple[ast.AST, set[str]]]:
-    """Each function with the names in it that hold a setting, and the module body with its own."""
-    out: list[tuple[ast.AST, set[str]]] = []
+    """Each function and lambda with the names in it that hold a setting, and the module body with its own.
+
+    A function or lambda defined inside another function sees the names of the enclosing one that it does not bind
+    itself, so a setting read in a closure or a callback (``lambda: cell["sigma"]``, ``solve_ivp(lambda t, y:
+    -cell["k"] * y, ...)``, ``def model(x): return x * c["a"]``) is a read of the function it is in; so is one in a
+    lambda of the module body. A function defined at the top of the module does not see the module's names (as
+    before). A lambda's own parameter holds a setting only when the lambda is handed one (:func:`_given_settings`)."""
+    parent: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            args = [a.arg for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)]
+        for child in ast.iter_child_nodes(node):
+            parent[id(child)] = node
+
+    def enclosing(node: ast.AST) -> ast.AST | None:
+        up = parent.get(id(node))
+        while up is not None and not isinstance(up, _FUNCTIONS):
+            up = parent.get(id(up))
+        if up is None and isinstance(node, ast.Lambda):
+            return tree
+        return up
+
+    held: dict[int, set[str]] = {id(tree): _grown(tree, set(SETTING_NAMES))}
+    out: list[tuple[ast.AST, set[str]]] = []
+    for node in ast.walk(tree):  # breadth first: an enclosing function before the ones inside it
+        if not isinstance(node, _FUNCTIONS):
+            continue
+        args = _params(node)
+        outer = enclosing(node)
+        if isinstance(node, ast.Lambda):
+            names = _given_settings(node, outer, held.get(id(outer), set()), parent) if outer is not None else set()
+        else:
             names = {a for a in args if a in SETTING_NAMES}
             if node.name in ENTRIES and args:
                 names.add(args[0])
-            out.append((node, names))
+        if outer is not None:
+            mine = _locals(node)
+            names |= {n for n in held.get(id(outer), set()) if n not in mine}
+        held[id(node)] = _grown(node, names)
+        out.append((node, names))
     out.append((tree, set(SETTING_NAMES)))
     return out
 
 
 def _own_nodes(scope: ast.AST) -> list[ast.AST]:
-    """The nodes of ``scope`` that are not inside a nested function (those have their own scope)."""
+    """The nodes of ``scope`` that are not inside a nested function or lambda (those have their own scope)."""
     found: list[ast.AST] = []
     stack = list(ast.iter_child_nodes(scope))
     while stack:
         node = stack.pop()
         found.append(node)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(node, _FUNCTIONS):
             continue
         stack.extend(ast.iter_child_nodes(node))
     return found

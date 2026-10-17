@@ -56,7 +56,7 @@ SandboxKind = Literal["venv", "docker"]
 # via ``$persona_block``. Scientific venues yield an empty persona
 # block, so ``write.md`` falls through to its built-in IMRAD voice.
 PaperFormat = Literal[
-    "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+    "generic", "article", "neurips", "iclr", "ieee_access", "nature_mi",
     "essay", "report", "policy_brief", "whitepaper",
 ]
 # Subsets of PaperFormat used by Engine._resolve_write_persona and
@@ -65,11 +65,15 @@ PaperFormat = Literal[
 # PaperFormat invariants are pinned by
 # test_paper_format_subsets_partition_the_literal.
 SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
-    "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+    "generic", "article", "neurips", "iclr", "ieee_access", "nature_mi",
 })
 NON_SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
     "essay", "report", "policy_brief", "whitepaper",
 })
+# The paper template a quest gets when nobody chose one: FI's plain one-column
+# article. A config left at this value also means "no template chosen yet", so
+# the clarify step's ``paper_venue`` pick may replace it.
+DEFAULT_PAPER_FORMAT: PaperFormat = "article"
 OutputKind = Literal["paper_md", "paper_pdf", "slides", "poster", "speech"]
 # How paper.pdf is rendered. ``latex`` (default) = the venue LaTeX template
 # (Computer Modern article). ``briefing`` = the Frontier Insight
@@ -887,12 +891,16 @@ class EngineConfig(BaseModel):
     # What the finished simulation says it did (``run_manifest.json`` in its raw-data folder: the grid it swept, the trials
     # it attempted and completed per setting, the failures, the thresholds) is compared with the frozen protocol
     # (``core/run_manifest.py``); it needs the two-script layout (``execution.split_analysis``), because that is where the
-    # simulation is a script of its own. ``block`` (default) sends the simulation back for up to
+    # simulation is a script of its own. ``warn`` (default) records a difference in what was counted (run.log, QUALITY.md,
+    # the evidence level, which names it as a gap, and the paper's limitations) and goes on: a count that does not add up
+    # is not by itself a wrong number. Numbers FI's trials never produced (a value not in FI's record, more values than a
+    # setting's record holds, a record changed on disk) are sent back and stop the quest in every mode but ``off``.
+    # ``block`` sends the simulation back for up to
     # ``run_manifest_repair_attempts`` repairs (each is a full run again, so the default is one; a difference only in the
     # analysis is sent back up to three times, since its repair reruns no experiment) and, if it still differs, stops
-    # the quest with what differs; ``warn`` only records it; ``off`` does not look. Every check is in
+    # the quest with what differs (``rigor_profile: research`` sets it); ``off`` does not look. Every check is in
     # ``needs/RUN_MANIFEST_CHECK.json``.
-    run_manifest_check: Literal["block", "warn", "off"] = "block"
+    run_manifest_check: Literal["block", "warn", "off"] = "warn"
     run_manifest_repair_attempts: int = Field(default=1, ge=0, le=3)
     # How far apart consecutive replicates' seeds sit. Replicate i is handed
     # ``FI_REPLICATE_SEED = i * replicate_seed_stride``, so the seeds it can
@@ -1607,7 +1615,7 @@ class KnowledgeConfig(BaseModel):
 
 class OutputConfig(BaseModel):
     kinds: list[OutputKind] = Field(default_factory=lambda: ["paper_md", "paper_pdf"])
-    paper_format: PaperFormat = "generic"
+    paper_format: PaperFormat = DEFAULT_PAPER_FORMAT
     # Visual style of paper.pdf. ``latex`` (default) keeps the venue LaTeX
     # template (Computer Modern article). ``briefing`` renders the Frontier
     # Insight "Research Briefing" look (warm paper, deep-teal accents, serif

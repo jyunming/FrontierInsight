@@ -19,6 +19,11 @@ $endif$
 \else
   \usepackage[utf8]{inputenc}
 \fi
+% Glyphs (generation/paper.py, _prepare_unicode): under XeLaTeX the fallback fonts that set
+% what the text font lacks and the code font; under pdflatex the code's glyphs.
+$if(fi-unicode)$
+\input{fi_unicode.tex}
+$endif$
 % A paper with a page limit (fi-tight, set by generation/paper.py) gets 2 cm margins.
 $if(fi-tight)$
 \usepackage[margin=2cm]{geometry}
@@ -26,6 +31,9 @@ $else$
 \usepackage[margin=1in]{geometry}
 $endif$
 \usepackage{graphicx}
+% A figure given both a width and a height (``{width=80% height=33%}``) keeps its
+% shape and fits inside both, so a tall figure is capped at the height.
+\setkeys{Gin}{keepaspectratio}
 % Required for pandoc-rendered markdown tables (pandoc emits \begin{longtable}).
 \usepackage{longtable}
 % Required for pandoc-rendered table column widths. Pandoc emits column

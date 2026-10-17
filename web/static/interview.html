@@ -845,7 +845,7 @@
   function paperFormatFor(topic) {
     const t = String(topic || '').toLowerCase();
     const hit = FORMAT_TOPIC_MARKERS.find(([m]) => t.includes(m));
-    return hit ? hit[1] : 'generic';
+    return hit ? hit[1] : 'article';
   }
 
   async function probeAxonReachable() {

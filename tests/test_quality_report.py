@@ -358,3 +358,35 @@ def test_the_report_says_how_many_functions_were_written_and_tested(tmp_path: Pa
     assert "Functions written and tested: 2 of 3." in qr.render(r)
     none = qr.build(tmp_path / "q-none")
     assert none["code"]["functions_total"] == 0 and "Functions written and tested" not in qr.render(none)
+
+
+def test_the_report_says_whether_the_pdf_is_typeset_and_which_characters_changed(tmp_path: Path) -> None:
+    root = _finished(tmp_path / "q")
+    _w(root / "paper.pdf", "%PDF-1.5\n")
+    _w(root / ".fi" / "paper_render.json", {
+        "engine": "xelatex", "typeset": True, "rc": 0, "reason": "", "pages": 6, "format": "generic",
+        "glyphs_replaced": [{"glyph": "⅓", "code_point": "U+2153", "became": "\tfrac{1}{3}", "where": "text", "count": 2}],
+        "glyphs_not_set": [],
+    })
+    report = qr.build(root, running=False)
+    assert report["paper_pdf"]["typeset"] is True and report["paper_pdf"]["pages"] == 6
+    assert not [p for p in _stage(report, "paper")["problems"]["items"] if "typeset" in p["text"]]
+    md = qr.render(report)
+    assert "paper.pdf is typeset by xelatex, 6 pages." in md and "(U+2153) printed as \tfrac{1}{3}, 2 time(s)" in md
+
+    _w(root / ".fi" / "paper_render.json", {
+        "engine": "edge", "typeset": False, "rc": 0, "pages": 7, "format": "generic",
+        "reason": "xelatex: no font here has Ɐ (U+2C6F)", "glyphs_replaced": [],
+        "glyphs_not_set": [{"glyph": "Ɐ", "code_point": "U+2C6F"}],
+    })
+    report = qr.build(root, running=False)
+    items = _stage(report, "paper")["problems"]["items"]
+    assert [p["status"] for p in items if "not typeset" in p["text"]] == ["not fixed"]
+    assert report["failure"] and report["failure"]["stage"] == "paper"
+    md = qr.render(report)
+    assert "paper.pdf is **not typeset**" in md and "`Ɐ` (U+2C6F): no font here has it" in md
+
+
+def test_a_quest_without_a_render_record_has_no_pdf_section(tmp_path: Path) -> None:
+    report = qr.build(_finished(tmp_path / "q"), running=False)
+    assert report["paper_pdf"] is None and "## The PDF" not in qr.render(report)

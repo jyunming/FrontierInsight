@@ -2,19 +2,26 @@
 
 A study is every setting of the plan's grid times its runs per setting, each setting in its own process
 (``core/trial_runner.py``). Before the full run FI times a handful of real trials, adds them up and compares the total
-with the time the study is allowed (``execution.timeout_s``):
+with the time the study is allowed (the topic's own limit when it states one, else ``execution.timeout_s``):
 
 * **What is timed.** One *base* setting (the middle value of every setting that varies) and, for each varying setting, the
   base with that one setting at its first and at its last value: at most ``1 + 2 * MAX_AXES`` settings. A numerical
   resolution that dominates the cost (a finer mesh, a smaller step) is a setting like any other, so it shows up as a
   large factor between the base and one end. Each timed setting runs its first trial (the process start, the loading of
-  the simulation and the first call, as the real run pays them) and, for a stochastic simulation, a second one, which
-  is what the remaining trials of the setting cost.
+  the simulation and the first call, as the real run pays them) and, for a stochastic simulation, more trials until the
+  later ones have taken :data:`TIMING_LATER_S` (at most :data:`TIMING_TRIALS`), timed on a fine clock: their mean is what
+  each further run costs (``Probe.per_trial_s``), and the rest is what the setting costs once whatever its runs
+  (``Probe.fixed_s``), so a smaller run is costed with its process start paid once (:meth:`Probe.at`).
 * **What is added up.** The cost of the setting a value belongs to is the base's cost times, for each varying setting,
   the ratio measured for that value (values in between are read between their timed neighbours, in proportion), so the
   total is the number of settings times the base's cost times the mean ratio of each varying setting. A trial that does
   not finish within its allowance is a lower bound, and the estimate says it is "at least".
 * **What it is compared with.** The estimate with a margin of :data:`SAFETY` (one half more) against the time allowed.
+  A run that would not fit is given fewer runs per setting (:func:`fit_runs`), never fewer settings, and the 95% interval
+  those runs give is stated (:func:`expected_precision`), or said to be unknown before the run. For FI's own limit the
+  runs go down only to the fewest the plan states; for the topic's own limit they may go down to
+  :data:`MIN_RUNS_FOR_LIMIT` whether or not the plan states a fewest. Every cut is an item the paper must name
+  (:data:`core.paper_facts.FEWER_RUNS`).
 
 None of the timed trials is a result: they are run apart from the study, write nothing into FI's ledger and are not
 kept. Everything here is arithmetic on the measurements; nothing is a judgement about the science.
@@ -50,6 +57,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import statistics
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +70,13 @@ from . import trial_runner as _tr
 SAFETY = 1.5
 #: The most varying settings that are timed one by one (the first ones, largest range first); the rest are taken as 1.
 MAX_AXES = 6
+#: A timed stochastic setting runs its first trial and then more, until the later ones have taken this many seconds, at
+#: most :data:`TIMING_TRIALS` in all: one short trial on a coarse clock measured nothing (r12: 0 or 16 ms for a 4 ms trial).
+TIMING_LATER_S = 1.0
+TIMING_TRIALS = 2000
+#: The fewest runs per setting FI goes down to for the topic's own time limit, whatever the plan states (and never below what
+#: the plan's checks need, :func:`runs_checks_need`). The paper names every such cut (``core.paper_facts.FEWER_RUNS``).
+MIN_RUNS_FOR_LIMIT = 10
 RECORD = Path(".fi") / "run_estimate.json"
 
 
@@ -111,11 +126,28 @@ class Probe:
     cell: dict[str, Any]
     seconds: float
     at_least: bool = False
-    #: ``{metric: sample standard deviation}`` of the two timed trials of a stochastic simulation (empty otherwise): the spread
+    #: ``{metric: sample standard deviation}`` of the timed trials of a stochastic simulation (empty otherwise): the spread
     #: a precision target on a mean is judged by.
     spread: dict[str, float] = field(default_factory=dict)
-    #: What each timed trial returned (``{metric: number}``, not-a-number kept): the pilot's evidence of correctness.
+    #: What the first two timed trials returned (``{metric: number}``, not-a-number kept): the pilot's evidence of correctness.
     trials: list[dict[str, float]] = field(default_factory=list)
+    #: What the setting costs that does not depend on its runs (the process, the loading, the first call's extra), and what
+    #: each run costs (the mean of the timed trials after the first): ``seconds`` is ``fixed_s + runs * per_trial_s``.
+    #: ``None`` when they were not measured apart (a probe made by hand, or a setting run once): the cost is then taken to
+    #: follow the runs in proportion.
+    fixed_s: float | None = None
+    per_trial_s: float | None = None
+    #: How many trials of the setting were timed.
+    timed_trials: int = 0
+
+    def at(self, runs: int, runs_now: int) -> "Probe":
+        """This setting's cost with ``runs`` runs instead of ``runs_now``."""
+        if self.fixed_s is not None and self.per_trial_s is not None:
+            seconds = max(0.0, self.fixed_s) + max(1, int(runs)) * self.per_trial_s
+        else:
+            seconds = self.seconds * max(1, int(runs)) / max(1, int(runs_now))
+        return Probe(self.axis, self.index, dict(self.cell), max(seconds, 1e-6), self.at_least, dict(self.spread),
+                     [dict(t) for t in self.trials], self.fixed_s, self.per_trial_s, self.timed_trials)
 
 
 @dataclass
@@ -133,7 +165,7 @@ class Estimate:
     #: When two or more settings are each costly, the settings at their costly ends together and how many times the base's
     #: cost that was measured: ``{"cell": {...}, "ratio": 3.2}``.
     together: dict[str, Any] | None = None
-    #: ``{metric: the largest standard deviation any timed setting's two trials showed}``.
+    #: ``{metric: the largest standard deviation any timed setting's trials showed}``.
     spreads: dict[str, float] = field(default_factory=dict)
 
 
@@ -269,10 +301,12 @@ def fits(est: Estimate, limit_s: float) -> bool:
     return est.seconds * SAFETY <= limit_s
 
 
-def known_too_long(est: Estimate, limit_s: float) -> bool:
+def known_too_long(est: Estimate, limit_s: float, *, timed_again: bool = False) -> bool:
     """Whether the study cannot fit: the padded total is over the limit, and when it is only a lower bound it is over
-    already. A lower bound that is under the limit says nothing."""
-    return est.seconds * SAFETY > limit_s
+    already. A lower bound that is under the limit says nothing. ``timed_again``: the smaller run FI chose (with the
+    margin) timed a second time; it is over only when it is over the limit without the margin, since the margin was spent
+    choosing it and a second timing of the same run differs by about as much."""
+    return est.seconds * (1.0 if timed_again else SAFETY) > limit_s
 
 
 async def measure(
@@ -296,8 +330,9 @@ async def measure(
         """Time one setting into ``probes``; ``(False, why)`` when the simulation could not be timed."""
         key = probe_key(cell, runs)
         if cached and key in cached:
-            probes.append(Probe(axis, index, cell, cached[key].seconds, cached[key].at_least, dict(cached[key].spread),
-                                [dict(t) for t in cached[key].trials]))
+            hit = cached[key]
+            probes.append(Probe(axis, index, cell, hit.seconds, hit.at_least, dict(hit.spread), [dict(t) for t in hit.trials],
+                                hit.fixed_s, hit.per_trial_s, hit.timed_trials))
             return True, ""
         left = budget_s - (time.monotonic() - started)
         if probes and left < 5:
@@ -339,13 +374,16 @@ async def _time_one(
     spec, out = work / "pilot.json", work / "pilot.out.jsonl"
     out.unlink(missing_ok=True)
     key = _tr.cell_key(cell)
-    n = 1 if deterministic else (2 if int(runs) >= 2 else 1)
+    # A stochastic setting: its first trial, then more until the later ones have taken TIMING_LATER_S (at most
+    # TIMING_TRIALS, never more than the setting's runs), so what one run costs is measured, not read off one short trial.
+    n = 1 if deterministic else min(max(1, int(runs)), TIMING_TRIALS)
     trials = [{"trial": t, "seed": None if deterministic else _tr.trial_seed(0, key, t)} for t in range(n)]
     nonce = f"pilot{time.time_ns()}"
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     spec.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
                                 "cell": {**cell, **inside}, "levels": _in_run.level_cells(inside), "trials": trials,
-                                "nonce": nonce, "thresholds": dict(thresholds or {})},
+                                "nonce": nonce, "thresholds": dict(thresholds or {}),
+                                **({"stop_after_s": TIMING_LATER_S} if n > 1 else {})},
                                default=str), encoding="utf-8")
     t0 = time.monotonic()
     result = await executor.execute(
@@ -367,31 +405,45 @@ async def _time_one(
     if failed is not None:
         where = _tr.last_frame(str(failed.get("traceback") or ""), quest_root)
         return None, f"a trial failed: {failed.get('reason') or 'no reason given'}" + (f" (at {where})" if where else "")
-    if getattr(result, "timed_out", False) and len(done) < n:
+    # One trial, or for a stochastic setting at least two (the harness stops once the later ones took TIMING_LATER_S).
+    wanted = min(n, 2)
+    if getattr(result, "timed_out", False) and len(done) < wanted:
         # Past its allowance with `len(done)` trials in: the next one costs at least what is left of the allowance.
         per_trial = timeout_s / (len(done) + 1)
         seconds = per_trial * (1 if deterministic else max(1, int(runs)))
-        return Probe(None, None, cell, seconds, at_least=True), ""
-    if len(done) < n:
+        return Probe(None, None, cell, seconds, at_least=True, timed_trials=len(done)), ""
+    if len(done) < wanted:
         return None, f"the trial did not report (exit code {getattr(result, 'returncode', '?')})"
     durations = [float(r.get("duration_s") or 0.0) for r in done]
-    if n == 1:
-        seconds = wall
+    overhead = max(0.0, wall - sum(durations))  # the process, the loading and the harness
+    if len(done) == 1:
+        seconds, fixed, per_trial = wall, (wall if deterministic else None), (0.0 if deterministic else None)
     else:
-        # The process, the loading and the first call once; the later trials cost what the second one did.
-        seconds = max(0.0, wall - sum(durations)) + durations[0] + (int(runs) - 1) * durations[1]
+        # The process, the loading and the first call once; every later run costs what the later timed ones did on average,
+        # from one trial's start to the next (the call and the harness writing its result), when the harness says when.
+        starts = [r.get("at_s") for r in done]
+        if len(done) >= 3 and all(isinstance(s, (int, float)) and not isinstance(s, bool) for s in starts):
+            per_trial = max(0.0, (float(starts[-1]) - float(starts[1])) / (len(done) - 2))
+        else:
+            per_trial = sum(durations[1:]) / (len(durations) - 1)
+        # never negative: later trials slower than the start and the first call would under-cost a small run
+        fixed = max(0.0, overhead + durations[0] - per_trial)
+        seconds = fixed + int(runs) * per_trial
     spread: dict[str, float] = {}
-    if n == 2:
+    if len(done) >= 2:
         # a number per value spreads as the widest of its values does: the precision is wanted at every one of them
-        first, second = (_in_run.flat("", dict(done[i].get("values") or {})) for i in (0, 1))
-        later = {(k, name): v for k, name, v in second}
-        for k, name, a in first:
-            b = later.get((k, name))
-            if b is not None and all(isinstance(v, (int, float)) and math.isfinite(v) for v in (a, b)):
-                sd = abs(float(a) - float(b)) / math.sqrt(2.0)  # the sample standard deviation of two numbers
-                spread[str(name)] = max(spread.get(str(name), 0.0), sd)
+        values: dict[str, dict[Any, list[float]]] = {}
+        for r in done:
+            for k, name, v in _in_run.flat("", dict(r.get("values") or {})):
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                    values.setdefault(str(name), {}).setdefault(k, []).append(float(v))
+        for name, by_value in values.items():
+            for xs in by_value.values():
+                if len(xs) >= 2:
+                    spread[name] = max(spread.get(name, 0.0), statistics.stdev(xs))  # the sample standard deviation
     return Probe(None, None, cell, max(seconds, 1e-6), spread=spread,
-                 trials=[dict(r.get("values") or {}) for r in done]), ""
+                 trials=[dict(r.get("values") or {}) for r in done[:2]], fixed_s=fixed, per_trial_s=per_trial,
+                 timed_trials=len(done)), ""
 
 
 # ---- the correctness pilot -----------------------------------------------------------------------------------------------
@@ -711,10 +763,11 @@ def write_record(quest_root: Path, record: dict[str, Any]) -> bool:
 # ---- words ---------------------------------------------------------------------------------------------------------------
 
 
-def says(est: Estimate, limit_s: float) -> str:
-    """The one plain line for run.log and the console."""
+def says(est: Estimate, limit_s: float, *, topic: bool = False) -> str:
+    """The one plain line for run.log and the console. ``topic``: the limit is the one the topic states."""
+    whose = "the topic's" if topic else "the"
     return (f"FI estimates the experiment takes {'at least ' if est.at_least else 'about '}"
-            f"{plain_duration(est.seconds * SAFETY)}; the limit is {plain_duration(limit_s)}")
+            f"{plain_duration(est.seconds * SAFETY)}; {whose} limit is {plain_duration(limit_s)}")
 
 
 def progress_line(done_cells: int, cells: int, done_trials: int, trials: int, elapsed_s: float) -> str:
@@ -726,6 +779,28 @@ def progress_line(done_cells: int, cells: int, done_trials: int, trials: int, el
     if done_trials <= 0 or trials <= done_trials or elapsed_s <= 0:
         return head
     return f"{head}, about {plain_duration(elapsed_s / done_trials * (trials - done_trials))} left"
+
+
+def _stated_min(protocol: dict[str, Any] | None) -> int | None:
+    """The plan's own `protocol.min_runs_per_setting`, or ``None``."""
+    least = protocol.get("min_runs_per_setting") if isinstance(protocol, dict) else None
+    return int(least) if isinstance(least, (int, float)) and not isinstance(least, bool) and least >= 1 else None
+
+
+def precision_known(protocol: dict[str, Any] | None, spreads: dict[str, float] | None = None) -> bool:
+    """Whether the runs a precision target needs can be worked out before the run: always, but for a target on a mean
+    whose spread the timed trials did not show (fewer than two trials, or all equal)."""
+    if not isinstance(protocol, dict):
+        return True
+    precision = protocol.get("precision")
+    target = precision.get("target_half_width") if isinstance(precision, dict) else None
+    if not (isinstance(target, (int, float)) and not isinstance(target, bool) and float(target) > 0):
+        return True
+    metric, kind = precision_metric(protocol)
+    if kind != "mean":
+        return True
+    sd = (spreads or {}).get(metric or "")
+    return isinstance(sd, (int, float)) and sd > 0
 
 
 def precision_metric(protocol: dict[str, Any] | None) -> tuple[str | None, str | None]:
@@ -774,9 +849,25 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
     return min(int(before_runs), floor)
 
 
+def runs_checks_need(protocol: dict[str, Any] | None, grid: dict[str, list[Any]]) -> int:
+    """The most runs per setting any check of the plan needs to be judged (``core.criteria.runs_per_setting_needed``: a
+    standard-error criterion needs 32 per setting); 0 when none needs any."""
+    from .criteria import runs_per_setting_needed
+
+    return runs_per_setting_needed(protocol, cell_count(grid) if grid else 1)
+
+
+def fewest_for_topic(protocol: dict[str, Any] | None, grid: dict[str, list[Any]], runs: int) -> int:
+    """The fewest runs per setting the topic's own limit may take a run down to: :data:`MIN_RUNS_FOR_LIMIT`, or what the
+    plan's checks need when that is more (:func:`runs_checks_need`), never more than the run already has."""
+    return min(int(runs), max(MIN_RUNS_FOR_LIMIT, runs_checks_need(protocol, grid)))
+
+
 def floor_is_stated(protocol: dict[str, Any] | None) -> bool:
     """Whether the plan itself states how few runs per setting it may have (`protocol.min_runs_per_setting`, or a precision
-    target): only then may FI lower the runs on its own. FI never makes up a number of runs."""
+    target): only then may FI lower the runs to fit its own limit (``execution.timeout_s``). The topic's own time limit is
+    the one exception: it may take the runs down to :data:`MIN_RUNS_FOR_LIMIT` whatever the plan states, and the paper then
+    names the cut with the numbers (:func:`fit_runs`)."""
     if not isinstance(protocol, dict):
         return False
     least = protocol.get("min_runs_per_setting")
@@ -787,20 +878,105 @@ def floor_is_stated(protocol: dict[str, Any] | None) -> bool:
     return isinstance(target, (int, float)) and not isinstance(target, bool) and float(target) > 0
 
 
-def runs_that_fit(est: Estimate, limit_s: float, runs: int, deterministic: bool, protocol: dict[str, Any] | None,
-                  spreads: dict[str, float] | None = None) -> int | None:
-    """The runs per setting that make the experiment fit the time allowed with every setting kept, or ``None`` when the
-    runs alone cannot do it (the plan states no fewest number of runs, or its fewest still takes too long). Aims at half the
-    limit; never below :func:`runs_floor`. The result is timed again before it is used."""
-    if deterministic or int(runs) <= 1 or not floor_is_stated(protocol) or not est.seconds > 0:
+def seconds_at(grid: dict[str, list[Any]], runs: int, runs_now: int, deterministic: bool, probes: list[Probe]) -> float | None:
+    """The estimate (without the margin) of the same study with ``runs`` runs per setting, from the settings timed for
+    ``runs_now``: each setting's process and first call are paid once whatever the runs, the rest scales with them."""
+    est = estimate(grid, runs, deterministic, [p.at(runs, runs_now) for p in probes])
+    return None if est is None else est.seconds
+
+
+@dataclass
+class Fit:
+    """FI's smaller run: ``runs`` per setting, every setting kept. ``below_plan`` when that is fewer than the plan's own
+    minimum (``plan_floor``: its `min_runs_per_setting` and what its precision target needs, ``None`` when the plan states
+    neither or the target's needs are not known), which only the topic's own time limit may ask for. ``precision_known``:
+    False for a precision target on a mean whose spread the timed trials did not show, so the precision those runs give is
+    not known before the run."""
+
+    runs: int
+    seconds: float
+    plan_floor: int | None
+    below_plan: bool
+    precision_known: bool = True
+
+
+def fit_runs(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes: list[Probe], protocol: dict[str, Any] | None,
+             *, limit_s: float, topic_limit: bool, spreads: dict[str, float] | None = None) -> Fit | None:
+    """The most runs per setting (fewer than ``runs``) whose estimate, with its margin, fits ``limit_s``, every setting kept;
+    ``None`` when none does. For FI's own limit the fewest allowed is the plan's own (:func:`runs_floor`, when the plan
+    states one: FI invents no number of runs for its own limit, and with a target on a mean whose spread is not known it
+    does not cut at all). For the limit the topic itself states (``topic_limit``) the runs may go down to
+    :data:`MIN_RUNS_FOR_LIMIT`, below the plan's minimum or with none stated: the topic's limit comes before the plan's
+    runs, and the paper names the cut with its numbers. Neither goes below the runs the plan's checks need to be judged
+    (:func:`runs_checks_need`). The result is timed again before it is used."""
+    if deterministic or int(runs) <= 1 or not probes:
         return None
-    full = est.seconds * SAFETY
-    floor = runs_floor(protocol, runs, spreads)
-    want = int(runs * (limit_s / 2.0) / full)
-    if want >= floor:
-        n = want
-    elif full * floor / runs <= limit_s * 0.9:
-        n = floor
+    known = precision_known(protocol, spreads)
+    if not floor_is_stated(protocol):
+        floor = None
+    elif known:
+        floor = runs_floor(protocol, runs, spreads)
     else:
+        # The precision target's needs are not known, so the plan's fewest is only its stated minimum, if any: never the
+        # plan's own runs read as a "minimum".
+        stated = _stated_min(protocol)
+        floor = min(int(runs), stated) if stated is not None else None
+        if not topic_limit:
+            return None  # FI's own limit never cuts below a precision it cannot work out
+    need = runs_checks_need(protocol, grid)
+    if topic_limit:
+        lowest: int | None = max(MIN_RUNS_FOR_LIMIT, need)
+    else:
+        lowest = None if floor is None else max(floor, need)
+    if lowest is None or lowest >= int(runs):
         return None
-    return n if floor <= n < int(runs) else None
+
+    def fits_at(n: int) -> float | None:
+        s = seconds_at(grid, n, runs, deterministic, probes)
+        return s if s is not None and s * SAFETY <= limit_s else None
+
+    if fits_at(lowest) is None:
+        return None
+    lo, hi = lowest, int(runs) - 1  # lo fits; find the largest that does (the cost grows with the runs)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits_at(mid) is not None:
+            lo = mid
+        else:
+            hi = mid - 1
+    return Fit(runs=lo, seconds=float(fits_at(lo) or 0.0), plan_floor=floor, below_plan=floor is not None and lo < floor,
+               precision_known=known)
+
+
+def expected_precision(protocol: dict[str, Any] | None, runs: int, spreads: dict[str, float] | None = None) -> dict[str, Any] | None:
+    """The 95% interval half-width ``runs`` runs per setting give, for the metric the plan's precision target is on (or, with
+    no target, its first proportion, else its first mean whose spread the timed trials showed): a proportion at its worst
+    case (near 0.5), a mean from the spread the timed trials showed. ``None`` when there is nothing to say it of (no such
+    metric, or a mean whose spread is not known)."""
+    from .stats import _Z95
+
+    if not isinstance(protocol, dict) or runs < 1:
+        return None
+    metric, kind = precision_metric(protocol)
+    precision = protocol.get("precision") if isinstance(protocol.get("precision"), dict) else {}
+    target = precision.get("target_half_width")
+    target = float(target) if isinstance(target, (int, float)) and not isinstance(target, bool) and target > 0 else None
+    if metric is None:
+        metrics = [m for m in protocol.get("metrics") or [] if isinstance(m, dict) and m.get("id")]
+        first = next((m for m in metrics if m.get("kind") == "proportion"), None)
+        if first is not None:
+            metric, kind = str(first.get("id")), "proportion"
+        else:
+            spread_known = [m for m in metrics if m.get("kind") == "mean" and isinstance((spreads or {}).get(str(m["id"])), (int, float))
+                            and (spreads or {})[str(m["id"])] > 0]
+            if not spread_known:
+                return None
+            metric, kind = str(spread_known[0]["id"]), "mean"
+    if kind == "mean":
+        sd = (spreads or {}).get(metric)
+        if not isinstance(sd, (int, float)) or not sd > 0:
+            return None
+        half, how = _Z95 * float(sd) / math.sqrt(runs), "from the spread the timed trials showed"
+    else:
+        half, how = _Z95 * math.sqrt(0.25 / runs), "at most: a proportion's interval is widest near 0.5"
+    return {"metric": metric, "runs": int(runs), "half_width": round(half, 4), "how": how, "target": target}
