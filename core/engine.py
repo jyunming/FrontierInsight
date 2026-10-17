@@ -11906,12 +11906,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if not _code_review.may_read(record, final=final, after_run_repair=after_run_repair):
                 if final:
                     cap = _code_review.read_cap(final=True, after_run_repair=after_run_repair)
-                    # A flag sticks: what the last reading left open stays open for this version, which no one read
-                    # (core/code_review.py:still_open), so the paper's limitations and the gate still see it.
-                    kept = ({"problems": _code_review.still_open(record), "final": True}
-                            if record.get("read_version") else {})
+                    # What the last reading left open stays open for this version, which no one read (carried).
                     record = {**_code_review.carried(record), "version": version, "requirements": len(reqs),
-                              "skipped": f"the {cap} readings of the code allowed in a quest are spent", **kept}
+                              "skipped": f"the {cap} readings of the code allowed in a quest are spent"}
                     _code_review.save(self.quest_root, record)
                     self._log.warning("[code_review] %s%s", _code_review.plain_lines(record),
                                       "; the final version of the code was not read again by another model, so what the "
@@ -12018,6 +12015,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         record["checked"] = listed[:40]
         record["problems"] = [*_code_review.problems(verdicts), *logic]
         record["read_problems"] = list(record["problems"])  # carried: a later reading that fails does not lose the flags
+        record.pop("final", None)  # this reading's findings replace the carried ones, and may be repaired
         _code_review.note_reading(record, version, record["problems"], code)
         self._log.info("[code_review] %s; %s", _code_review.plain_lines(record), _code_review.metrics_line(record))
         if not record["problems"]:

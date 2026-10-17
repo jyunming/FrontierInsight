@@ -389,6 +389,30 @@ async def test_what_the_last_reading_left_open_stays_open_for_a_version_no_one_r
     assert "stays open" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
 
 
+@pytest.mark.asyncio
+async def test_a_reading_that_fails_keeps_what_the_last_one_left_open(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    reader = _Reader()
+    reader.missing = ("planned figure",)
+    engine._client = reader
+    sim = engine.quest_root / "code" / "simulate.py"
+    sim.write_text(SIM_FULL + "# v0" + chr(10), encoding="utf-8")
+    await engine._code_review_gate(STATE, final=True)
+    read = [v["text"] for v in cr.not_computed(engine.quest_root, sim.parent)]
+    assert read
+
+    async def broken(messages, **kw):  # noqa: ANN001
+        raise RuntimeError("the provider is down")
+
+    reader.chat = broken  # type: ignore[method-assign]
+    sim.write_text(SIM_FULL + "# v1" + chr(10), encoding="utf-8")
+    await engine._code_review_gate(STATE, final=True)
+    record = cr.load(engine.quest_root)
+    assert "failed" in record.get("error", "") and record["final_read"] is False
+    assert [v["text"] for v in cr.not_computed(engine.quest_root, sim.parent)] == read
+    assert read[0] in cr.write_note(engine.quest_root, sim.parent)
+
+
 class _Partial(_Reader):
     """Answers only the first requirement of a request, unless told to answer the rest when asked again."""
 

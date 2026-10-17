@@ -460,7 +460,15 @@ CARRIED = ("reviews_total", "send_backs", "repair_calls", "finding_calls", "test
 
 
 def carried(record: dict[str, Any]) -> dict[str, Any]:
-    return {k: record[k] for k in CARRIED if k in record}
+    """What a record for a new version of the code starts from: the quest-wide counters and the history of the readings,
+    and, once a version was read, what the last reading left open (:func:`still_open`, as ``problems`` of a finished
+    record). A flag sticks: a version no one reads (the readings are spent, a reading fails, the reader is the model that
+    wrote the code) keeps those findings, so the paper's limitations and the gate still see them; a reading of the new
+    version replaces them."""
+    out = {k: record[k] for k in CARRIED if k in record}
+    if record.get("read_version"):
+        out.update(problems=still_open(record), final=True)
+    return out
 
 
 def earlier_block(previous: list[dict[str, Any]]) -> str:
