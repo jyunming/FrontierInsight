@@ -230,7 +230,8 @@ def example_signature(sig: str, row: dict[str, Any]) -> str:
     a row whose example is not usable. Otherwise the inputs come first, in the outline's order for the names it had
     (annotations kept) and the example's order for the rest, without defaults; then what the outline gave a default
     (a setting of the function, not an input) as it was; for a random equation ``rng`` when the outline gave none. An
-    outline parameter with no default that is not an input of the example is dropped: the test cannot give it a value."""
+    outline parameter with no default that is not an input of the example is dropped: the test cannot give it a value.
+    A signature FI rewrote takes its parameters by keyword only (``def f(*, ...)``)."""
     if row.get("state") != "ok":
         return sig
     try:
@@ -267,7 +268,9 @@ def example_signature(sig: str, row: dict[str, Any]) -> str:
     if row.get("random") and not any(n in fi_supplied for n in had):
         out.append("rng")
     returns = f" -> {ast.unparse(node.returns)}" if node.returns is not None else ""
-    return f"def {node.name}({', '.join(out)}){returns}:"
+    # Keyword-only: code written against the outline's order (a resumed quest, a function repaired alone) then fails at
+    # the call, loudly, instead of passing its values to the wrong parameters.
+    return f"def {node.name}(*, {', '.join(out)}){returns}:"
 
 
 def align_outline(outline: dict[str, Any] | None, protocol: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
