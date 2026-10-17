@@ -110,6 +110,17 @@ A model can also *describe* running a command it never ran — in one check
 Haiku wrote out an `echo hello` result while claude's event stream held no tool
 call — so a CLI answer is text, not evidence that anything was executed.
 
+**`claude_cli` runs without the prompt cache.** By default Claude Code stores every
+prompt in a one-hour cache, which is billed at twice the normal input price, and
+FI's calls almost never send the same prompt again: over 49 Sonnet quests, 45.5M
+tokens were written to the cache and 10.2M read back, and the same calls without
+the cache would have cost about 29% less. FI therefore sets
+`DISABLE_PROMPT_CACHING=1` for each claude call. The answers are the same;
+only the price changes. If you set any of Claude Code's own caching variables
+yourself (`DISABLE_PROMPT_CACHING`, `FORCE_PROMPT_CACHING_5M`,
+`ENABLE_PROMPT_CACHING_1H`, or a per-model `DISABLE_PROMPT_CACHING_*`), FI leaves
+your choice as it is.
+
 Measured through FI's own client with a prompt asking the model to list the
 directory, run `echo hello` and search the web. `codex_cli`
 (`gpt-5.6-luna`, `reasoning_effort: low`): without these flags codex ran one

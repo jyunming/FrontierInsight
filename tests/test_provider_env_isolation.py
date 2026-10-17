@@ -60,3 +60,43 @@ def test_other_clis_are_untouched() -> None:
             assert spec.env_unset, "copilot_cli must opt in"
         else:
             assert not spec.env_unset, f"{name} unexpectedly clears env vars"
+        if name != "claude_cli":
+            assert not spec.env_default, f"{name} unexpectedly sets env vars"
+
+
+_CACHE_VARS = ("DISABLE_PROMPT_CACHING", "DISABLE_PROMPT_CACHING_SONNET", "DISABLE_PROMPT_CACHING_OPUS",
+               "DISABLE_PROMPT_CACHING_HAIKU", "DISABLE_PROMPT_CACHING_FABLE", "DISABLE_PROMPT_CACHING_MYTHOS",
+               "FORCE_PROMPT_CACHING_5M", "ENABLE_PROMPT_CACHING_1H", "ENABLE_PROMPT_CACHING_1H_BEDROCK")
+
+
+def test_claude_cli_runs_without_the_prompt_cache(monkeypatch) -> None:
+    """Claude Code writes every prompt to a one-hour cache at twice the input price, and FI's calls almost never send
+    the same prompt again, so the claude subprocess gets DISABLE_PROMPT_CACHING and keeps the rest of the env."""
+    from core.provider import _CLI_SPECS
+
+    for var in _CACHE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    env = _child_env(_CLI_SPECS["claude_cli"])
+    assert env is not None and env.get("DISABLE_PROMPT_CACHING") == "1"
+    assert env.get("PATH") == os.environ.get("PATH"), "the rest of the env must survive"
+    assert "DISABLE_PROMPT_CACHING" not in os.environ, "FI's own environment must not change"
+
+
+@pytest.mark.parametrize("var", _CACHE_VARS)
+def test_a_caching_choice_of_the_users_own_is_kept(monkeypatch, var) -> None:
+    from core.provider import _CLI_SPECS
+
+    for other in _CACHE_VARS:
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv(var, "0" if var == "DISABLE_PROMPT_CACHING" else "1")
+    env = _child_env(_CLI_SPECS["claude_cli"])
+    assert env is None, f"FI overrode the user's own {var}"
+
+
+def test_defaults_and_cleared_variables_together(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_x")
+    monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("FI_TEST_DEFAULT", raising=False)
+    env = _child_env(_spec(env_unset=("GITHUB_TOKEN",), env_unset_override="COPILOT_GITHUB_TOKEN",
+                           env_default=(("FI_TEST_DEFAULT", "1"),)))
+    assert env is not None and "GITHUB_TOKEN" not in env and env.get("FI_TEST_DEFAULT") == "1"

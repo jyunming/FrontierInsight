@@ -316,6 +316,15 @@ class _CliSpec:
     # Only a shim recording the child's environment showed the token.
     env_unset: tuple[str, ...] = ()
     env_unset_override: str | None = None
+    # Environment variables to set for this CLI's subprocess, and the variables
+    # whose presence means the user chose that setting themselves; then none of
+    # ``env_default`` is set. claude_cli uses it to turn off prompt caching:
+    # Claude Code writes every prompt into a one-hour cache at twice the input
+    # price, and FI's calls almost never send the same prompt again (49 Sonnet
+    # quests: 45.5M tokens written, 10.2M read back; the same calls without the
+    # cache cost about 29% less).
+    env_default: tuple[tuple[str, str], ...] = ()
+    env_default_override: tuple[str, ...] = ()
     # How this CLI takes ``provider.reasoning_effort``: ``effort_args`` turns
     # a level into the argv to add, and ``effort_levels`` lists the levels the
     # CLI accepts (``None`` = every level FI accepts). ``effort_args=None``
@@ -336,15 +345,20 @@ def _child_env(spec: _CliSpec) -> dict[str, str] | None:
     Only ``spec.env_unset`` is removed, and only when the spec's override
     variable is absent -- setting that variable is how a user says "I mean
     to authenticate through the environment", and then nothing is touched.
+    ``spec.env_default`` is set the same way: not when any of
+    ``spec.env_default_override`` is already in the environment.
     """
+    env: dict[str, str] | None = None
+    if spec.env_default and not any(k in os.environ for k in spec.env_default_override):
+        env = {**os.environ, **dict(spec.env_default)}
     if not spec.env_unset:
-        return None
+        return env
     if spec.env_unset_override and os.environ.get(spec.env_unset_override):
-        return None
+        return env
     present = [k for k in spec.env_unset if k in os.environ]
     if not present:
-        return None
-    env = dict(os.environ)
+        return env
+    env = dict(os.environ) if env is None else env
     for key in present:
         env.pop(key, None)
     _log.info(
@@ -799,6 +813,14 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # signature; checked on Claude Code 2.1.287 with Haiku). The user setting `showThinkingSummaries`, given
         # for this call only, brings the text back (an older CLI ignores an unknown settings key).
         thinking_args=("--settings", '{"showThinkingSummaries":true}'),
+        # No prompt cache (see _CliSpec.env_default). Checked on Claude Code 2.1.302 with Sonnet 5.5, a 19k-token
+        # prompt: by default 17,818 tokens written to the one-hour cache, $0.071; with this, nothing written, $0.039.
+        # A user who sets any of these caching variables themselves keeps their own choice.
+        env_default=(("DISABLE_PROMPT_CACHING", "1"),),
+        env_default_override=("DISABLE_PROMPT_CACHING", "DISABLE_PROMPT_CACHING_SONNET", "DISABLE_PROMPT_CACHING_OPUS",
+                              "DISABLE_PROMPT_CACHING_HAIKU", "DISABLE_PROMPT_CACHING_FABLE",
+                              "DISABLE_PROMPT_CACHING_MYTHOS", "FORCE_PROMPT_CACHING_5M", "ENABLE_PROMPT_CACHING_1H",
+                              "ENABLE_PROMPT_CACHING_1H_BEDROCK"),
         model_flag="--model",   # provider.model = "opus" / "sonnet" / "claude-opus-4-7"
         image_input="stream_json",
         # `claude --effort <level>` (Claude Code 2.1.x). Checked against the
