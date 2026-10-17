@@ -1084,9 +1084,12 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
                 if line:
                     pooled.append(line)
         if varied:
-            # A pooled line over the grid's axes: an axis compared inside each run is never pooled, so it is pinned to each of
-            # its values in turn (a metric that is one number per run has no such axis in its cells and is pooled whole).
-            inside = [a for a in varied if a in rec.in_run_axes()]
+            # A pooled line over the grid's axes: an axis compared inside each run is never pooled, so where this metric's
+            # cells hold more than one of its values it is pinned to each in turn (the refusal in _matching); a metric that
+            # is one number per run has no such axis in its cells and is pooled whole.
+            carrying = [c for c in rec.cells if metric in c["metrics"]]
+            inside = [a for a in varied if a in rec.in_run_axes()
+                      and len({json.dumps(c["cell"][a], default=str) for c in carrying if a in c["cell"]}) > 1]
             combos: list[dict[str, Any]] = [{}]
             for a in inside:
                 combos = [dict(base, **{a: v}) for base in combos for v in usable[a]]
@@ -1096,6 +1099,7 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
                     pooled.append(line)
     head = ("Results you can place (FI fills each key in from its records; never type a result). "
             "A line shows the key and what it will read as.")
+    pooled = list(dict.fromkeys(pooled))  # a line pinned to one value can also be the line of that value's own axis
     body = full + ["Pooled (the trials of the other axes together; sd is the within-setting pooled SD):"] + pooled
     if sum(1 for line in body if line.startswith("- ")) > max_lines:
         body = ["Too many settings to list; the pooled lines and each value's extremes:"] + pooled + extremes

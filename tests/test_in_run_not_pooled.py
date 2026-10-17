@@ -57,3 +57,10 @@ def test_sheet_offers_no_all_line_over_the_axis_but_pools_the_grid_per_level():
     assert not any("estimator=all" in x.split(" -> ")[0] for x in lines)
     assert any("sigma=all, estimator=weighted" in x for x in lines)
     assert any("sigma=all, estimator=plain" in x for x in lines)
+
+
+def test_sheet_still_offers_the_whole_pool_of_a_one_number_per_run_metric_and_no_line_twice():
+    sheet = pv.sheet(pv.from_cells(_cells(), PROTOCOL))
+    lines = [x for x in sheet.splitlines() if x.startswith("- ")]
+    assert any(x.startswith("- {{v:ea:mean_ci @ sigma=all, estimator=all}}") for x in lines)
+    assert len(lines) == len(set(lines))
