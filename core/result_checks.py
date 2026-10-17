@@ -20,6 +20,7 @@ They live here and not in ``engine.py`` so the node only calls :meth:`ResultChec
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -286,7 +287,9 @@ class ResultChecksMixin:
             return result, failed_script
         result_json = _e._extract_result_json(result.stdout or "")
         self._result_kept = []
-        found = self._result_findings(state, result_json) if getattr(self, "_trial_mode", False) else []
+        # Off the event loop: the comparison reads every trial value, and with --fleet a blocked loop stalls the other quests.
+        found = (await asyncio.to_thread(self._result_findings, state, result_json)
+                 if getattr(self, "_trial_mode", False) else [])
         # What a second model found the code computes otherwise cannot be repaired here (its repairs were spent before the run).
         # A run that drew none of the planned figures still has its results: they stand, and the writer is told there is
         # no figure. Sent back like a failed run, a repair that gave up would have thrown the results away and stopped the
