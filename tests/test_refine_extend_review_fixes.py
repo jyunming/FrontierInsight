@@ -75,7 +75,8 @@ def test_the_paper_is_told_once_what_could_not_be_done(tmp_path: Path) -> None:
     prompts: list[str] = []
 
     async def chat(prompt: str, **kw: Any) -> str:
-        prompts.append(prompt)
+        if not prompt.startswith("The paper below has no Abstract"):  # the abstract FI writes after the draft
+            prompts.append(prompt)
         return "# P\n\nBody.\n"
 
     eng._chat = chat  # type: ignore[method-assign]
@@ -95,7 +96,8 @@ def test_the_write_after_an_extended_run_still_shows_the_person_the_notes(tmp_pa
     prompts: list[str] = []
 
     async def chat(prompt: str, **kw: Any) -> str:
-        prompts.append(prompt)
+        if not prompt.startswith("The paper below has no Abstract"):  # the abstract FI writes after the draft
+            prompts.append(prompt)
         return "# P\n\nBody.\n"
 
     eng._chat = chat  # type: ignore[method-assign]
