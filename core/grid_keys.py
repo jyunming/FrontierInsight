@@ -20,6 +20,12 @@ satisfied by any one of them, so a code that accepts several spellings is flagge
 the study has. The fields of FI's per-cell record itself (``cell``, ``key``, ``metrics`` ...) are not settings. The check
 is conservative: a read with a fallback value of a name that is like none of the study's settings is an optional setting
 the study never sets, and is left alone; a computed key, ``in`` tests, ``**`` spreads and a setting passed on to a function are not followed.
+
+A constant the plan itself defines is not a setting the study lacks. ``cell.get("baseline_rate", 80.0)`` reads a name the grid does
+not have, and its only likeness to the swept ``rate`` is a shared word; when the plan states that very number as the value of that name (a structured field, or one short clause such as
+the name's words "of 80") (``a declared baseline rate of 80``), the fallback IS the plan's constant (:func:`plan_defined`)
+and is left alone. A name spelt almost like a swept setting (``rat``) is still a collapsed axis, whatever the plan says. And a repair
+never turns the plan's constant into the swept setting: :func:`substituted` finds that, and a repair that does it is not kept.
 """
 
 from __future__ import annotations
@@ -49,8 +55,12 @@ class Read:
     keys: tuple[str, ...]
     default: str
     fallback: bool = False
+    planned: int | None = None  # set for a fixed count of runs per setting (:func:`counts`): what the protocol says
 
     def says(self, supplied: list[str]) -> str:
+        if self.planned is not None:
+            return (f"{self.script} line {self.line}: fixes the number of runs per setting at {self.default} "
+                    f"(`{self.keys[0]}`); the protocol runs {self.planned}")
         named = " or ".join(f"`{k}`" for k in self.keys)
         fallback = f" (and gives {self.default} when it is not there)" if self.default else ""
         have = ", ".join(f"`{n}`" for n in supplied[:8]) or "none"
@@ -217,6 +227,15 @@ def _tokens(name: str) -> set[str]:
     return {t for t in re.split(r"[^a-z0-9]+", re.sub(r"(?<=[a-z])(?=[A-Z])", "_", name).lower()) if len(t) >= 3}
 
 
+def _alike(key: str, supplied: list[str] | set[str]) -> bool:
+    """Whether ``key`` is spelt like a supplied name: one contains the other, or they differ by a letter or two. Sharing a
+    word is not enough (``baseline_rate`` and ``rate`` are two quantities)."""
+    low = key.lower()
+    pool = sorted(supplied)
+    return (any((len(s) >= 3 and s.lower() in low) or (len(low) >= 3 and low in s.lower()) for s in pool)
+            or bool(difflib.get_close_matches(key, pool, n=1, cutoff=0.75)))
+
+
 def _near(key: str, supplied: list[str] | set[str]) -> list[str]:
     """The supplied names that look like ``key``: one contains the other, they share a word of three letters or more
     (``rate`` and ``rate_hz``), or they are spelt alike."""
@@ -228,17 +247,416 @@ def _near(key: str, supplied: list[str] | set[str]) -> list[str]:
     return list(dict.fromkeys([*contained, *shared, *close]))
 
 
-def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> list[Read]:
-    """The reads, in ``files`` (``{script name: text}``), of a setting the study does not have. Nothing when the plan has
-    no grid (there is nothing to compare with)."""
+#: A name that says it counts trials or runs (``N_TRIALS``, ``num_runs``, ``TRIALS_PER_SETTING``). Replicates, repeats and
+#: repetitions are what an analysis counts for its own resampling or seeds, so they are not read as the protocol's count.
+_COUNT_NAME = re.compile(r"^(?:(?:n|num|number)_?(?:of_)?)?(?:trials|runs)(?:_per_(?:setting|cell|condition))?$", re.IGNORECASE)
+
+
+_RUNNER_WORDS = ("run_trial", "run_cell", "simulate")
+_RUNNER_KEYWORDS = frozenset({"runs_per_setting", "n_trials", "num_trials", "trials", "n_runs", "num_runs", "runs"})
+
+
+def _mentions(node: ast.AST, name: str) -> bool:
+    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
+
+
+def _is_length(node: ast.AST) -> bool:
+    """``len(x)``, ``x.shape[0]``, ``x.size``: the number of items something holds."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "len":
+        return True
+    if isinstance(node, ast.Attribute) and node.attr in ("size", "shape"):
+        return True
+    return isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "shape"
+
+
+def _mentions_trial_source(node: ast.AST) -> bool:
+    """Whether a node's text mentions FI_TRIALS, trials.json, ledger, or calls load_trials/read_trials."""
+    # Check via unparsed text for all keywords (handles string constants like environ["FI_TRIALS"])
+    text = ast.unparse(node)
+    if any(kw in text for kw in ["FI_TRIALS", "trials.json", "ledger"]):
+        return True
+
+    # Check for function calls with load_trials or read_trials in the name
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            func_name = ""
+            if isinstance(n.func, ast.Name):
+                func_name = n.func.id
+            elif isinstance(n.func, ast.Attribute):
+                func_name = n.func.attr
+            if any(kw in func_name.lower() for kw in ["load_trials", "read_trials"]):
+                return True
+
+    return False
+
+
+def _is_trial_records_length(node: ast.AST, tree: ast.Module) -> bool:
+    """Whether a length expression measures the trial records (not a resample or seed count).
+
+    Returns True for len(X), X.shape[0], X.size, X.shape when X satisfies:
+    (a) X is a name containing one of: trials, trial, records, record, rows, results, runs (whole word, case-insensitive)
+    (b) X is a name assigned from an expression mentioning FI_TRIALS, trials.json, ledger, load_trials, or read_trials,
+        OR assigned inside a function whose name or parameters contain trial-related keywords
+    (c) The expression itself mentions FI_TRIALS
+    """
+    if not _is_length(node):
+        return False
+
+    # Extract the variable being measured
+    var_node = None
+    var_name = None
+
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "len" and node.args:
+        var_node = node.args[0]
+    elif isinstance(node, ast.Attribute) and node.attr in ("size", "shape"):
+        var_node = node.value
+    elif isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "shape":
+        var_node = node.value.value
+
+    if var_node is None:
+        return False
+
+    # Extract variable name if it's a simple Name node
+    if isinstance(var_node, ast.Name):
+        var_name = var_node.id
+
+    # Check rule (a): name contains trial-related keywords
+    if var_name:
+        keywords = {"trials", "trial", "records", "record", "rows", "results", "runs"}
+        # Convert to lowercase and split on non-alphanumeric characters
+        tokens = set(re.split(r"[^a-z0-9]+", var_name.lower()))
+        if tokens & keywords:
+            return True
+
+    # Check rule (c): the expression itself mentions FI_TRIALS
+    if _mentions_trial_source(var_node):
+        return True
+
+    # Build set of functions related to trial records (for rule b extension)
+    trial_related_funcs = set()
+    func_keywords = {"trial", "trials"}
+    for node_in_tree in ast.walk(tree):
+        if isinstance(node_in_tree, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Check function name
+            func_tokens = set(re.split(r"[^a-z0-9]+", node_in_tree.name.lower()))
+            if func_tokens & func_keywords:
+                trial_related_funcs.add(node_in_tree.name)
+            # Check parameter names
+            for arg in node_in_tree.args.args + node_in_tree.args.posonlyargs + node_in_tree.args.kwonlyargs:
+                arg_tokens = set(re.split(r"[^a-z0-9]+", arg.arg.lower()))
+                if arg_tokens & func_keywords:
+                    trial_related_funcs.add(node_in_tree.name)
+
+    # Check rule (b): variable assigned from expression mentioning trial-source keywords,
+    # or assigned inside a trial-related function
+    if var_name:
+        for stmt in ast.walk(tree):
+            value = None
+            target_names = []
+
+            if isinstance(stmt, ast.Assign):
+                value = stmt.value
+                target_names = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                value = stmt.value
+                if isinstance(stmt.target, ast.Name):
+                    target_names = [stmt.target.id]
+            else:
+                continue
+
+            if var_name not in target_names or value is None:
+                continue
+
+            # Check if directly mentions trial source
+            if _mentions_trial_source(value):
+                return True
+
+            # Check if inside a trial-related function
+            for func_node in ast.walk(tree):
+                if isinstance(func_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if func_node.name in trial_related_funcs:
+                        # Check if stmt is inside this function
+                        for sub_stmt in ast.walk(func_node):
+                            if sub_stmt is stmt:
+                                return True
+
+    return False
+
+
+def _calls_runner(node: ast.AST) -> bool:
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            f = n.func.id if isinstance(n.func, ast.Name) else n.func.attr if isinstance(n.func, ast.Attribute) else ""
+            if any(w in f.lower() for w in _RUNNER_WORDS):
+                return True
+    return False
+
+
+def _controls_trial_records(tree: ast.Module, name: str) -> bool:
+    """Whether the constant ``name`` decides how many trial records are produced or expected: the bound of a loop whose body
+    calls the simulation, a length of the trial records compared with it (an assertion or a check of the records received), or the count passed
+    to a runner by keyword. Used only as the size of a resample, a count of seeds or an inner iteration count, it is not."""
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.For, ast.AsyncFor)) and _mentions(n.iter, name) and any(_calls_runner(b) for b in n.body):
+            return True
+        if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)) and any(
+                _mentions(g.iter, name) for g in n.generators) and _calls_runner(
+                    n.elt if not isinstance(n, ast.DictComp) else ast.Tuple(elts=[n.key, n.value], ctx=ast.Load())):
+            return True  # the same loop written as a comprehension
+        if isinstance(n, ast.Compare):
+            parts = [n.left, *n.comparators]
+            if any(isinstance(p, ast.Name) and p.id == name for p in parts) and any(_is_trial_records_length(p, tree) for p in parts):
+                return True
+        if isinstance(n, ast.Call):
+            for kw in n.keywords:
+                if kw.arg and kw.arg.lower() in _RUNNER_KEYWORDS and _mentions(kw.value, name):
+                    return True
+    return False
+
+
+def counts(source: str, script: str, planned: int) -> list[Read]:
+    """The module-level whole-number literals in ``source`` that a name saying it counts trials or runs holds, other than
+    ``planned``, and that the script uses to decide how many trial records are produced or expected (see
+    :func:`_controls_trial_records`). Never raises: a script that does not parse has none to report."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []
+    out: list[Read] = []
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, int) and not isinstance(value.value, bool)):
+            continue
+        for target in targets:
+            if (isinstance(target, ast.Name) and _COUNT_NAME.match(target.id) and value.value != planned
+                    and _controls_trial_records(tree, target.id)):
+                out.append(Read(script=script, line=int(node.lineno), keys=(target.id,), default=str(value.value),
+                                planned=planned))
+    return out
+
+
+def _planned_runs(protocol: dict[str, Any] | None) -> int | None:
+    runs = protocol.get("runs_per_setting") if isinstance(protocol, dict) else None
+    if isinstance(runs, bool) or not isinstance(runs, (int, float)) or runs != int(runs) or runs < 1:
+        return None
+    return int(runs)
+
+
+_NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+_WINDOW = 60
+
+
+def _number(text: str) -> float | None:
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _distinct_words(key: str, supplied: list[str] | set[str]) -> list[str]:
+    """The words of ``key`` that no supplied name has: what makes it another quantity (``baseline`` of
+    ``baseline_rate``, beside ``rate``)."""
+    have: set[str] = set()
+    for name in supplied:
+        have |= _tokens(name)
+    return sorted(_tokens(key) - have)
+
+
+_BREAK = re.compile(r"[;,\n()\[\]{}]|\.(?:\s|$)|\b(?:but|while|whereas|and|with|which|when|where)\b")
+_BINDER = re.compile(r"(?:\b(?:of|is|are|at|to|equals|equal to|set to|fixed at)\b|=|:)\s*(?:about\s+|approximately\s+)?$")
+_UNIT = re.compile(r"^\s*([A-Za-z%/][\w/%.^*-]*)\s+")
+#: Words allowed between the last word of a name and the ``of`` / ``is`` / ``=`` that gives its value.
+_BOUND_WORDS = 2
+
+
+def _structured_value(node: Any, key: str, value: float, allowed: set[str]) -> bool:
+    """Whether the plan's structured fields (the protocol, the design) hold ``key: value``: a mapping whose key is the name
+    (case and punctuation ignored) and whose value is that number, or an entry that names it (``name`` / ``id``) and gives
+    it as its ``value``."""
+    want = re.sub(r"[^a-z0-9]", "", key.lower())
+
+    def same(x: Any) -> bool:
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and abs(float(x) - value) <= 1e-9 * max(1.0, abs(value))
+
+    def walk(n: Any) -> bool:
+        if isinstance(n, dict):
+            for k, v in n.items():
+                if re.sub(r"[^a-z0-9]", "", str(k).lower()) == want and (same(v) or (
+                        isinstance(v, dict) and same(v.get("value")))):
+                    return True
+            label = re.sub(r"[^a-z0-9]", "", str(n.get("name") or n.get("id") or "").lower())
+            if label == want and same(n.get("value")):
+                return True
+            return any(walk(v) for v in n.values())
+        if isinstance(n, (list, tuple)):
+            return any(walk(v) for v in n)
+        return False
+
+    return walk(node)
+
+
+def _word_end(text: str, word: str) -> int:
+    """Where the last whole-word occurrence of ``word`` in ``text`` ends (``-1`` when it is not there as a word: ``rate`` is
+    not in ``accelerate``)."""
+    ends = [m.end() for m in re.finditer(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])", text)]
+    return ends[-1] if ends else -1
+
+
+def _stated_as_value(low: str, words: list[str], value: float) -> bool:
+    """Whether the prose states ``value`` AS the value of the thing the ``words`` name, in one short clause: ``<words> of 80``,
+    ``<words> = 80``, ``<words> is 80``, or ``80 <unit> <words>``; no other number between them and no clause break
+    (a comma, a semicolon, a bracket, ``with`` / ``and`` / ``but`` ...)."""
+    for m in _NUMBER.finditer(low):
+        n = _number(m.group(0))
+        if n is None or abs(n - value) > 1e-9 * max(1.0, abs(value)):
+            continue
+        before = low[max(0, m.start() - _WINDOW): m.start()]
+        cuts = list(_BREAK.finditer(before))
+        clause = before[cuts[-1].end():] if cuts else before
+        binder = _BINDER.search(clause.rstrip() + " ")
+        if all(_word_end(clause, w) >= 0 for w in words) and binder and not _NUMBER.search(clause):
+            # The binder must follow the name itself: at most a few words (``reference line dose of 80``) between the
+            # last of its words and ``of`` / ``is`` / ``=``. "the rate is estimated from a sample of 80" binds 80 to the
+            # sample, not to the rate.
+            last = max(_word_end(clause, w) for w in words)
+            between = clause[last:binder.start()].split()
+            if len(between) <= _BOUND_WORDS:
+                return True
+        after = low[m.end(): m.end() + _WINDOW]
+        cut = _BREAK.search(after)
+        tail = after[:cut.start()] if cut else after
+        unit = _UNIT.match(tail + " ")
+        if unit and all(_word_end(tail[unit.end():], w) >= 0 for w in words) and not _NUMBER.search(tail) and len(tail.split()) <= 6:
+            return True
+    return False
+
+
+def plan_defined(r: Read, allowed: set[str], plan_text: str, structured: Any = None) -> bool:
+    """Whether a read with a fixed fallback is the plan's own constant: the fallback is a plain number, no name read is spelt
+    like a setting of the study, and the plan states that number AS the value of that name, either (a) in a structured field
+    whose key is the name (the protocol's fixed settings, constants or thresholds, an optimisation ``fixed`` block, an
+    assumption given as ``key: value``) or (b) in prose, the name's distinguishing words (words the study's settings do
+    not have) and the number bound in one short clause (:func:`_stated_as_value`). A number that merely stands near
+    those words is not enough. Only then is the fallback the plan's constant and not a swept setting under another name."""
+    if not r.fallback:
+        return False
+    value = _number(r.default)
+    if value is None:
+        return False
+    low = (plan_text or "").lower()
+    for key in r.keys:
+        if _alike(key, allowed):
+            continue
+        if structured is not None and _structured_value(structured, key, value, allowed):
+            return True
+        words = _distinct_words(key, allowed)
+        if words and low and _stated_as_value(low, words, value):
+            return True
+    return False
+
+
+def _unwrap(node: ast.AST) -> ast.AST:
+    """``float(x)`` / ``int(x)`` / ``np.float64(x)`` -> ``x`` (one level)."""
+    if isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords:
+        f = node.func
+        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+        if name in ("float", "int", "float64", "float32", "int64", "abs"):
+            return node.args[0]
+    return node
+
+
+def _setting_assigns(source: str) -> dict[tuple[str, str], tuple[tuple[str, ...], str, int]]:
+    """``{(function, name): (the setting names it reads, the fallback, line)}`` for each ``name = setting.get(...)`` /
+    ``setting["k"]`` assignment (a chain of fallbacks is one read; the fallback is its last default)."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    out: dict[tuple[str, str], tuple[tuple[str, ...], str, int]] = {}
+    for scope, names in _scopes(tree):
+        names = set(names)
+        label = getattr(scope, "name", "<module>")
+        for node in sorted(_own_nodes(scope), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))):
+            if isinstance(node, ast.Assign) and _setting_like(node.value, names):
+                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+                continue
+            if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+                continue
+            keys: list[str] = []
+            cur: ast.AST | None = _unwrap(node.value)
+            default = ""
+            while cur is not None:
+                hit = _read_of(cur, names)
+                if hit is None:
+                    default = _text(cur) if keys else ""
+                    break
+                keys.append(hit[0])
+                cur = _unwrap(hit[1]) if hit[1] is not None else None
+            if keys:
+                out[(label, node.targets[0].id)] = (tuple(dict.fromkeys(keys)), default, int(node.lineno))
+    return out
+
+
+def substituted(old_files: dict[str, str], new_files: dict[str, str], protocol: dict[str, Any] | None,
+                design: dict[str, Any] | None = None) -> list[str]:
+    """What a repair did that it must not: where ``old_files`` read a constant the plan itself defines (a fixed reference
+    value with a fallback, :func:`plan_defined`) into a name, ``new_files`` read a setting the study sweeps into the same
+    name of the same function. The plan's constant is not the swept setting; the fault is the fallback, and it is mended by
+    keeping the constant (read from the plan, or defined once under its own name). One sentence each; empty when none."""
+    from . import typed_constants as _constants
+
     axes, allowed = supplied_names(protocol, design)
     if not axes:
         return []
+    plan_text = _constants.plan_text_of(protocol, design)
+    found: list[str] = []
+    for script, text in old_files.items():
+        if script not in new_files:
+            continue
+        after = _setting_assigns(new_files[script])
+        for (fn, name), (keys, default, line) in _setting_assigns(text).items():
+            if set(keys) & allowed or not plan_defined(Read(script, line, keys, default, fallback=bool(default)), allowed, plan_text, (protocol, design)):
+                continue
+            new = after.get((fn, name))
+            if new is not None and set(new[0]) & set(axes) and not (set(new[0]) - allowed):
+                found.append(f"{script} line {line}: `{name}` was the plan's constant ({default}) and now reads the swept setting "
+                             + " or ".join(f"`{k}`" for k in new[0]))
+    return found
+
+
+def rejects(old_files: dict[str, str], new_files: dict[str, str], protocol: dict[str, Any] | None,
+            design: dict[str, Any] | None = None) -> str:
+    """Why a repair of these files is not kept (:func:`substituted`), else ``""``."""
+    got = substituted(old_files, new_files, protocol, design)
+    return ("it replaced a constant the plan defines with a setting the study sweeps (" + "; ".join(got[:2]) + ")") if got else ""
+
+
+def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> list[Read]:
+    """The reads, in ``files`` (``{script name: text}``), of a setting the study does not have, and each number of runs per
+    setting a script fixes that the protocol sets otherwise. Nothing about the first when the plan has no grid (there is
+    nothing to compare with)."""
     out: list[Read] = []
+    planned = _planned_runs(protocol)
+    if planned is not None and any(re.search(r"^\s*def\s+run_trial\s*\(", text, re.MULTILINE) for text in files.values()):
+        for script, text in files.items():
+            out.extend(counts(text, script, planned))
+    axes, allowed = supplied_names(protocol, design)
+    if not axes:
+        return out
+    from . import typed_constants as _constants
+
+    plan_text = _constants.plan_text_of(protocol, design)
     for script, text in files.items():
         for r in reads(text, script):
             if set(r.keys) & allowed:
                 continue
+            if plan_defined(r, allowed, plan_text, (protocol, design)):
+                continue  # the plan's own constant, with its fallback: not a setting the study lacks
             # A name with a fallback value that is like none of the study's is an optional setting the study never
             # sets, not a misspelt one: only a read that cannot be answered, or one that looks like a study setting
             # spelt another way, is a fault.
@@ -254,13 +672,31 @@ def directive(found: list[Read], protocol: dict[str, Any] | None) -> str:
     axes, _allowed = supplied_names(protocol)
     lines = []
     for r in found[:8]:
+        if r.planned is not None:
+            lines.append(f"- {r.says(axes)}")
+            continue
         hint = [h for h in _near(r.keys[0], axes)][:2]
         lines.append(f"- {r.says(axes)}" + (f" (did you mean {' or '.join(f'`{h}`' for h in hint)}?)" if hint else ""))
+    tail = []
+    if any(r.planned is None for r in found):
+        tail.append(
+            "A read of a setting that is not there silently gives its default, so every row would carry the same value "
+            "and no error would show. Read each setting by the name the study gives it, with no fallback value. If the "
+            "name is a fixed value the PLAN itself defines (a reference value, not a setting the study varies), it is not "
+            "a setting: define it once under its own name in the code with the value the plan gives, and never replace it "
+            "with a setting the study sweeps")
+    if any(r.planned is not None for r in found):
+        tail.append(
+            "FI runs the trials the protocol states and hands the analysis every one of them; a number fixed in the code "
+            "makes the analysis reject the record. Take the number of runs from the trials FI supplies (count them), "
+            "not from a constant")
     return (
-        "FI read the code before running it, and it reads a setting the study does not have:\n" + "\n".join(lines)
-        + "\n\nA read of a setting that is not there silently gives its default, so every row would carry the same value "
-        "and no error would show. Read each setting by the name the study gives it, with no fallback value, and change "
-        "nothing else."
+        "FI read the code before running it, and "
+        + ("it fixes a number of runs that the protocol sets otherwise" if all(r.planned is not None for r in found)
+           else "it reads a setting the study does not have" if all(r.planned is None for r in found)
+           else "it does not match the study")
+        + ":" + chr(10) + chr(10).join(lines)
+        + chr(10) * 2 + ". ".join(tail) + ", and change nothing else."
     )
 
 
@@ -268,13 +704,17 @@ def plain_note(found: list[Read], protocol: dict[str, Any] | None) -> str:
     """One sentence for the stop and for run.log."""
     axes, _allowed = supplied_names(protocol)
     names = "; ".join(r.says(axes) for r in found[:3])
+    if all(r.planned is not None for r in found):
+        return f"the code fixes a number of runs that the protocol sets otherwise, so its analysis would not accept the trials ({names})"
     return f"the code reads a setting the study does not have, so a whole axis would not vary ({names})"
 
 
 def record(found: list[Read], protocol: dict[str, Any] | None) -> dict[str, Any]:
     axes, _allowed = supplied_names(protocol)
     return {"settings_of_the_study": axes, "reads": [{"script": r.script, "line": r.line, "names": list(r.keys),
-                                                      "default": r.default} for r in found]}
+                                                      "default": r.default,
+                                                      **({"protocol_runs": r.planned} if r.planned is not None else {})}
+                                                     for r in found]}
 
 
 def code_files(code_dir: Path) -> dict[str, str]:

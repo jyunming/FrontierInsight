@@ -61,9 +61,9 @@ $analysis_block
 $claim_grounding_block
 
 ## Figures (what each figure draws, recorded when the experiment saved it)
-$figure_check_block$foundational_check_block$user_feedback_block
+$figure_check_block$foundational_check_block$user_feedback_block$code_findings_block
 
 ## Paper draft
-(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's own records: how often the design was revised and how many runs were made. It is not the writer's text and no revision can change it, so never ask for it to be edited or removed; you may weigh what it says.)
+(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's own records: how often the design was revised and how many runs were made. It is not the writer's text and no revision can change it, so never ask for it to be edited or removed; you may weigh what it says. The same holds for a block between `<!-- fi:code-findings:... -->` and `<!-- /fi:code-findings -->`: FI's record of what a second reading of the code left open, listed under "Open points in the code" in the Inputs above when there is one.)
 
 $paper_md

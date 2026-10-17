@@ -7,6 +7,11 @@
   added up; a study that would not finish is shrunk by the plan's model (fewer runs per setting, fewer or coarser
   settings, with the measured numbers in the request; nothing that decides whether a result is right may change), at most
   twice; one that still would not fit stops the quest plainly with no paper.
+* **The simulation measures what the protocol names** (the same trials, ``RunChecksMixin._pilot_gate``): what the timed trials
+  returned is read before the full run; a metric that is not a number in any pilot trial at any pilot setting (after the
+  settings with few values were tried in every combination), one that never moves while others do, or an output that is the
+  same everywhere goes to the existing repair of the simulation with the exact finding, and what the repairs leave ends in
+  the honest stop in minutes instead of after the study.
 
 They live here and not in ``engine.py`` so the node only calls them. Every method uses the engine's own attributes
 (``quest_root``, ``fi_dir``, ``config``, ``_log``, ``_chat`` ...).
@@ -16,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -31,7 +37,13 @@ from . import typed_results as _typed
 #: How many times, in all, a simulation that returns typed-in numbers is sent back.
 TYPED_RESULT_REPAIRS = 2
 TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
+NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
+
+
+def _one(text: str, limit: int = 400) -> str:
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[:limit - 3] + "..."
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -208,14 +220,149 @@ class RunChecksMixin:
 
     def _left_out_quantities(self) -> set[str]:
         """The quantities this pass's analysis and results must not use (still typed into the code after the repairs)."""
-        return set(getattr(self, "_typed_result_keys", None) or ()) | self._result_check_keys()  # type: ignore[attr-defined]
+        typed = getattr(self, "_typed_result_keys", None)
+        if typed is None:
+            # A fresh process (a resume at a later node): the pass that left them out wrote its record, which is what stands.
+            typed = {str(k) for k in _read_json(self.quest_root / "needs" / TYPED_RECORD).get("removed_quantities") or []}  # type: ignore[attr-defined]
+        return set(typed) | self._result_check_keys()  # type: ignore[attr-defined]
 
     def _without_typed_results(self, result_json: Any) -> Any:
         """``result_json`` without the left-out quantities."""
         keys = self._left_out_quantities()
         return _typed.strip_keys(result_json, keys) if keys and result_json else result_json
 
+    def _lines_without_left_out(self, lines: list[str]) -> tuple[list[str], int, list[str]]:
+        """``lines`` without those that name a left-out quantity: the kept lines, how many were taken out, and the names."""
+        keys = sorted(self._left_out_quantities())
+        patterns = [re.compile(r"(?<![A-Za-z0-9_])" + re.escape(k) + r"(?![A-Za-z0-9_])") for k in keys]
+        kept = [line for line in lines if not any(p.search(line) for p in patterns)]
+        return kept, len(lines) - len(kept), keys
+
+    def _taken_out_note(self, dropped: int, keys: list[str], where: str) -> str:
+        """The plain note that says how many lines of ``where`` were taken out, and why."""
+        names = ", ".join(f"`{k}`" for k in keys)
+        return (f"[FI NOTE] {dropped} line(s) of the run's {where} that name {names} were taken out: "
+                f"{'that quantity was' if len(keys) == 1 else 'those quantities were'} left out of the results "
+                "(typed into the code, or failed a check of what ran) and must not be used, derived from or renamed.")
+
+    def _stdout_for_models(self, stdout: str) -> str:
+        """What a model may read of a run's output: the output without its ``RESULT_JSON`` line (the verified results reach a
+        model once, as FI's accepted projection of them, with the left-out quantities taken out) and without any line that
+        names a left-out quantity, with a plain note saying what was taken out and why. A bare left-out value is replaced
+        too. The raw output stays in the records (``.fi/last_run_stdout.txt``)."""
+        text = stdout or ""
+        lines = text.splitlines()
+        body = [line for line in lines if not line.lstrip().startswith("RESULT_JSON:")]
+        kept, dropped, keys = self._lines_without_left_out(body)
+        notes: list[str] = []
+        if len(body) != len(lines):
+            notes.append("[FI NOTE] The run's RESULT_JSON line is not repeated here: the results block is FI's accepted "
+                         "projection of the results, and the only place to read them.")
+        if dropped:
+            notes.append(self._taken_out_note(dropped, keys, "output"))
+        out = "\n".join([*kept, *notes]) if notes else text
+        return self._withhold_left_out_values(out)
+
+    def _stderr_for_models(self, stderr: str) -> str:
+        """What a model may read of a run's error output: every line except those that name a left-out quantity (the
+        traceback and the rest stay readable), with a plain note saying how many were taken out. A bare left-out value is
+        replaced too."""
+        text = stderr or ""
+        lines = text.splitlines()
+        # FI's own messages in the error output (why a run was refused: "FI ran no trial successfully: ...", "FI's run gave
+        # a result that is not usable: ...") name a quantity to say what to repair; they are FI's diagnosis, not a value the
+        # script printed, so they stay. Only what the script itself printed is filtered (and any bare value, below).
+        kept: list[str] = []
+        dropped, keys = 0, []
+        for line in lines:
+            if line.lstrip().startswith(("FI ", "FI's ", "[FI")):
+                kept.append(line)
+                continue
+            ok, gone, keys = self._lines_without_left_out([line])
+            kept.extend(ok)
+            dropped += gone
+        if not dropped:
+            return self._withhold_left_out_values(text)
+        out = "\n".join([*kept, self._taken_out_note(dropped, keys, "error output")])
+        return self._withhold_left_out_values(out)
+
+    def _keep_raw_stdout(self, stdout: str) -> None:
+        """The run's output exactly as it was, for the records (no model reads it)."""
+        try:
+            path = self.fi_dir / "last_run_stdout.txt"  # type: ignore[attr-defined]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text((stdout or "")[-200000:], encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute] could not keep the run's raw output (%r)", exc)  # type: ignore[attr-defined]
+
+    def _note_typed_values(self, raw_result_json: Any) -> None:
+        """The values of the quantities left out for being typed into the code, kept in this pass's record so the writer's
+        text can be checked for quoting one (core/record_claims.py). Nothing is added when none was left out."""
+        from . import result_checks as _checks
+
+        keys = self._typed_result_keys if getattr(self, "_typed_result_keys", None) is not None else set()
+        if not keys or not raw_result_json:
+            return
+        path = self.quest_root / "needs" / TYPED_RECORD  # type: ignore[attr-defined]
+        record = _read_json(path)
+        if not record:
+            return
+        record["removed_values"] = _checks._values_left_out(raw_result_json, set(keys))
+        try:
+            path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute] could not write needs/%s (%r)", TYPED_RECORD, exc)  # type: ignore[attr-defined]
+
+    # ---- a result that did not change is recorded as observed ----------------------------------------------------------
+
+    def _record_no_difference(self, note: str | None) -> None:
+        """Every setting gave the same numbers and the code does read the settings (core/flat_output.py): the observation is
+        kept in ``needs/NO_DIFFERENCE_OBSERVED.json`` (this run's alone) for the analysis and the writer. A run without one
+        removes an earlier run's record."""
+        path = self.quest_root / "needs" / NO_DIFFERENCE_RECORD  # type: ignore[attr-defined]
+        if not note:
+            path.unlink(missing_ok=True)
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"note": note}, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute] could not write needs/%s (%r)", NO_DIFFERENCE_RECORD, exc)  # type: ignore[attr-defined]
+
+    def _no_difference_note(self) -> str:
+        """For the analysis and the writer: a study whose numbers did not change with its settings, said as an observation
+        (never as proof of no effect, and never as a broken simulation). Empty when there is none."""
+        record = _read_json(self.quest_root / "needs" / NO_DIFFERENCE_RECORD)  # type: ignore[attr-defined]
+        note = record.get("note") if isinstance(record, dict) else None
+        if not isinstance(note, str) or not note.strip():
+            return ""
+        return (f"Observed: {note} Report it as a result that did not change in the settings tried; do not call the "
+                "simulation broken, and do not claim that the setting can have no effect in general.")
+
     # ---- the note for the writer ---------------------------------------------------------------------------------------
+
+    def _withhold_left_out_values(self, text: str) -> str:
+        """``text`` (a note a model reads) with any number written precisely enough to be recognised that equals a value of a
+        quantity left out of the results replaced by plain words: a note that says why a quantity is out never repeats it."""
+        from .number_provenance import _carries_enough_precision
+
+        values: list[float] = []
+        for name in (TYPED_RECORD, "RESULT_CHECK.json"):
+            removed = _read_json(self.quest_root / "needs" / name).get("removed_values")  # type: ignore[attr-defined]
+            if isinstance(removed, dict):
+                values += [float(v) for vs in removed.values() if isinstance(vs, list) for v in vs
+                           if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if not values:
+            return text
+
+        def swap(m: re.Match[str]) -> str:
+            token = m.group(0)
+            if not _carries_enough_precision(token):
+                return token
+            number = float(token)
+            return "(a value that is not given)" if any(abs(number - v) <= 1e-9 * max(1.0, abs(v)) for v in values) else token
+
+        return re.sub(r"(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w])", swap, text)
 
     def _run_checks_note(self) -> str:
         """For the writer: quantities left out because they were typed into the code, and a run FI made smaller to fit the
@@ -225,12 +372,14 @@ class RunChecksMixin:
         note = record.get("note")
         if isinstance(note, str) and note.strip():
             names = ", ".join(f"`{k}`" for k in record.get("removed_quantities") or [])
-            parts.append(f"{note} Do not report, describe or quote any value for {names or 'them'}: say plainly, in the "
+            parts.append(f"{self._withhold_left_out_values(note)} Do not report, describe or quote any value for {names or 'them'}: say plainly, in the "
                          "limitations, that this quantity was not computed by the simulation and is left out.")
         if checked := self._result_checks_note():  # type: ignore[attr-defined]  # core/result_checks.py
-            parts.append(checked)
+            parts.append(self._withhold_left_out_values(checked))
         if static := self._static_checks_note():  # type: ignore[attr-defined]  # core/static_checks.py
             parts.append(static)
+        if observed := self._no_difference_note():
+            parts.append(observed)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
@@ -258,6 +407,7 @@ class RunChecksMixin:
         Only the trial contract is timed, and only before the first freeze: a frozen protocol cannot be changed, a search for
         the best design or a cluster job has its own limits, and a resume of a run that already fits is not timed again."""
         self._sized_protocol: dict[str, Any] | None = None
+        self._pilot_spent = 0.0  # seconds the pilot's extra trials took in this sizing: they count against the same budget
         if (not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs  # type: ignore[attr-defined]
                 or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0):  # type: ignore[attr-defined]
             return None
@@ -281,7 +431,8 @@ class RunChecksMixin:
                 return self._stop_too_long(str(record["stopped"]))
             probes, why = await _estimate.measure(
                 self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
-                runs=runs, deterministic=runner.deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
+                runs=runs, deterministic=runner.deterministic, limit_s=limit_s,
+                budget_s=max(0.0, budget_s - self._pilot_spent), env=env,
                 thresholds=thresholds, cached=cached)
             if probes is None:
                 # A setting that fails when timed is a setting the simulation fails at: the same repair as a failed run, naming
@@ -290,6 +441,8 @@ class RunChecksMixin:
                 return self._sizing_failed(why)
             for p in probes:
                 cached[_estimate.probe_key(p.cell, runs)] = p
+            if (broken := await self._pilot_gate(state, runner, python, env, grid, probes, thresholds, limit_s, budget_s)) is not None:
+                return broken
             est = _estimate.estimate(grid, runs, runner.deterministic, probes)
             if est is None:
                 return None
@@ -321,6 +474,85 @@ class RunChecksMixin:
                     self.quest_root, {**base, "fits": False, "asks": asks, "reduced": reduced})
                 await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
         return None
+
+    async def _pilot_gate(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]],
+                          probes: list[_estimate.Probe], thresholds: dict[str, Any], limit_s: float,
+                          budget_s: float) -> dict[str, Any] | None:
+        """Read what the timed trials returned (:func:`core.run_estimate.pilot`). Nothing wrong: one line in run.log and the
+        record in ``.fi/pilot_check.json`` (which QUALITY.md shows). Something wrong: a failed run for the existing repair of the
+        simulation, with the exact finding (at most ``engine.exec_reflect_max_iterations`` repairs, counted in the record
+        BEFORE the run goes back); what the repairs leave ends in the honest stop. Nobody is asked to debug."""
+        from . import degenerate_results as _degenerate
+        from . import hidden_check as _hidden
+
+        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        kinds = {str(m.get("id")): str(m.get("kind") or "") for m in protocol.get("metrics") or []
+                 if isinstance(m, dict) and str(m.get("id") or "").strip()}
+        total = sum(len(p.trials) for p in probes)
+        if not total:
+            return None  # nothing came back to read (a timed trial ran past its allowance)
+        _grid, runs, _t = self._grid_and_runs(state)
+        total_trials = _estimate.trial_count(grid, runs, runner.deterministic)
+        allowance = max(60.0, 3.0 * limit_s / max(1, total_trials))
+        record = _estimate.read_pilot_record(self.quest_root)  # type: ignore[attr-defined]
+        repairs = int(record.get("repairs") or 0)
+        # Once per version of the code: resizing the run does not change what the simulation does, so a reading already made
+        # of this code (and these metrics) is reused, and its extra trials are not run again.
+        code_key = _hidden.code_sha(self.quest_root) + "|" + ",".join(f"{k}:{v}" for k, v in sorted(kinds.items()))  # type: ignore[attr-defined]
+        if code_key[0] != "|" and record.get("code_key") == code_key and record.get("outcome") == "passed":
+            self._log.info("[execute] the pilot has read this version of the simulation already: nothing was wrong")  # type: ignore[attr-defined]
+            return None
+        if code_key[0] != "|" and record.get("code_key") == code_key and record.get("problem_items"):
+            result = _estimate.Pilot(
+                trials=int(record.get("trials") or 0), settings=int(record.get("settings") or 0),
+                checked=[str(x) for x in record.get("metrics_read") or []],
+                problems=[_estimate.PilotProblem(str(d.get("metric")), str(d.get("kind")), str(d.get("says")))
+                          for d in record["problem_items"] if isinstance(d, dict)],
+                unsure=[str(x) for x in record.get("not_ruled_out") or []])
+        else:
+            # The extra trials come out of the sizing's own budget (at most half of it in all, across the rounds).
+            left = max(0.0, budget_s / 2.0 - self._pilot_spent)
+            began = time.monotonic()
+            result = await _estimate.pilot(
+                self.executor, python, self.quest_root,  # type: ignore[attr-defined]
+                runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                grid, probes, kinds, deterministic=runner.deterministic, budget_s=left,
+                allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol))
+            self._pilot_spent += time.monotonic() - began
+        base = {"trials": result.trials, "settings": result.settings, "metrics_read": result.checked,
+                "not_ruled_out": result.unsure, "at": time.time(), "trial_count_read": total, "code_key": code_key,
+                "problem_items": [{"metric": p.metric, "kind": p.kind, "says": p.says} for p in result.problems]}
+        if result.unsure:
+            self._log.info("[execute] the pilot could not try every combination of the small settings, so it says nothing of "  # type: ignore[attr-defined]
+                           "%s", ", ".join(f"`{n}`" for n in result.unsure))
+        if not result.problems:
+            self._log.info("[execute] the pilot read %d trial(s) at %d setting(s): %d metric(s) of the protocol checked, nothing "  # type: ignore[attr-defined]
+                           "wrong%s", result.trials, result.settings, len(result.checked),
+                           f" (after {repairs} repair(s))" if repairs else "")
+            _estimate.write_pilot_record(self.quest_root, {**base, "outcome": "passed", "repairs": repairs, "problems": []})  # type: ignore[attr-defined]
+            return None
+        says = [p.says for p in result.problems]
+        iters = int(state.get("exec_reflect_iter") or 0)
+        for line in says:
+            self._log.warning("[execute] the pilot found: %s", line)  # type: ignore[attr-defined]
+        if iters < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+            # Counted BEFORE the run goes back: a quest killed here never repairs more often than it may.
+            _estimate.write_pilot_record(  # type: ignore[attr-defined]
+                self.quest_root, {**base, "outcome": "repairing", "repairs": repairs + 1, "problems": says})
+            print("[FI] a small trial run before the study shows the simulation does not measure what the protocol names; "
+                  "sending it back to be repaired")
+            return self._code_review_failed_run(  # type: ignore[attr-defined]
+                _estimate.directive(result), script=_split_run.SIMULATE_NAME)
+        _estimate.write_pilot_record(  # type: ignore[attr-defined]
+            self.quest_root, {**base, "outcome": "stopped", "repairs": repairs, "problems": says})
+        return self._stop_before_run(  # type: ignore[attr-defined]
+            "a small trial run before the study (" + f"{result.trials} trial(s) at {result.settings} setting(s)) showed: "
+            + "; ".join(says),
+            "cannot_repair",
+            tried=[f"ran {result.trials} trial(s) of the simulation at {result.settings} setting(s) before the full study "
+                   "and read what they returned",
+                   *[_one(s) for s in says[:3]],
+                   f"sent the simulation back to be repaired {iters} time(s) with this named; it still showed it"])
 
     def _design_after_sizing(self, state: Any) -> dict[str, Any] | None:
         """The state's design with the protocol parts the plan's model made smaller, or ``None`` when none were."""

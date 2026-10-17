@@ -1,0 +1,1 @@
+{"id": "E1", "formula": "Z_j = mu_j + epsilon_j, where epsilon_j~N(0,1), mu_j=0 for a null and mu_j=effect_shift for an alternative.", "module": "fdr_bonferroni_vs_bh.model", "function": "z_statistic", "inputs": {"mu": 2.5}, "expected": 2.5, "rel": 1e-06, "abs": 0.0, "method": "", "random": false, "variance": null}

@@ -1,0 +1,205 @@
+{
+  "judge_calls": 2,
+  "judged": {
+    "b07ab4a288ddb47670ec": {
+      "F1": "missing",
+      "F2": "missing",
+      "F3": "missing",
+      "F4": "missing",
+      "F5": "missing",
+      "F6": "missing",
+      "F7": "missing",
+      "F8": "missing",
+      "F9": "missing",
+      "F10": "missing",
+      "Q1": "covered",
+      "Q4": "covered",
+      "Q10": "missing",
+      "Q11": "missing",
+      "Q12": "missing",
+      "Q14": "missing",
+      "M1": "missing",
+      "M2": "covered",
+      "M3": "covered",
+      "M4": "missing",
+      "M5": "missing",
+      "M6": "missing"
+    },
+    "880daa09a32852316963": {
+      "F1": "missing",
+      "F2": "missing",
+      "F3": "missing",
+      "F4": "missing",
+      "F5": "missing",
+      "F6": "missing",
+      "F7": "missing",
+      "F8": "missing",
+      "F9": "missing",
+      "F10": "missing",
+      "Q1": "covered",
+      "Q4": "covered",
+      "Q10": "missing",
+      "Q11": "missing",
+      "Q12": "missing",
+      "Q14": "missing",
+      "M1": "missing",
+      "M2": "covered",
+      "M3": "covered",
+      "M4": "missing",
+      "M5": "missing",
+      "M6": "missing"
+    }
+  },
+  "ever_missing": [
+    "illumination sources",
+    "pitches",
+    "conventional sigma",
+    "annular inner/outer sigma pairs",
+    "x-dipole pole centre",
+    "x-dipole pole radius",
+    "conventional sources with sigma",
+    "neighbour",
+    "defocus z",
+    "mask line width",
+    "optical ambit",
+    "extent of CD oscillation",
+    "Abbe and Hopkins aerial images",
+    "runtime",
+    "attenuated-mask transmission amplitude",
+    "first zero of mutual coherence",
+    "symmetric dense-pitch dipole poles",
+    "frequency limit reaching the wafer"
+  ],
+  "plan_done": true,
+  "left": [
+    {
+      "kind": "factor",
+      "name": "illumination sources",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare illumination sources (conventional, annular, x-dipole, quasar, free-form pixelated source), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "pitches",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare pitches (isolated), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "conventional sigma",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare conventional sigma (0.3 to 0.9), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "annular inner/outer sigma pairs",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare annular inner/outer sigma pairs, but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "x-dipole pole centre",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare x-dipole pole centre (0.5 to 0.95), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "x-dipole pole radius",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare x-dipole pole radius (0.1 to 0.2), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "conventional sources with sigma",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare conventional sources with sigma (0.1 to 0.95), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "neighbour",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare neighbour (80 to 2000), but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "defocus z",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare defocus z, but the plan's settings do not include it."
+    },
+    {
+      "kind": "factor",
+      "name": "mask line width",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic says to vary or compare mask line width, but the plan's settings do not include it."
+    },
+    {
+      "kind": "quantity",
+      "name": "optical ambit",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic asks to report optical ambit, but the plan does not measure it."
+    },
+    {
+      "kind": "quantity",
+      "name": "extent of CD oscillation",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic asks to report extent of CD oscillation, but the plan does not measure it."
+    },
+    {
+      "kind": "quantity",
+      "name": "Abbe and Hopkins aerial images",
+      "main": false,
+      "axis": "",
+      "sentence": "The topic asks to report Abbe and Hopkins aerial images, but the plan does not measure it."
+    },
+    {
+      "kind": "quantity",
+      "name": "runtime",
+      "main": false,
+      "axis": "",
+      "sentence": "The topic asks to report runtime, but the plan does not measure it."
+    },
+    {
+      "kind": "formula",
+      "name": "attenuated-mask transmission amplitude",
+      "main": false,
+      "axis": "",
+      "sentence": "The topic states the formula `sqrt(0.06)`, but the plan's model does not use it and does not say why it uses another."
+    },
+    {
+      "kind": "formula",
+      "name": "first zero of mutual coherence",
+      "main": true,
+      "axis": "",
+      "sentence": "The topic states the formula `d = 0.61*lambda/(sigma*NA)`, but the plan's model does not use it and does not say why it uses another."
+    },
+    {
+      "kind": "formula",
+      "name": "symmetric dense-pitch dipole poles",
+      "main": false,
+      "axis": "",
+      "sentence": "The topic states the formula `sigma = lambda/(2*p*NA)`, but the plan's model does not use it and does not say why it uses another."
+    },
+    {
+      "kind": "formula",
+      "name": "frequency limit reaching the wafer",
+      "main": false,
+      "axis": "",
+      "sentence": "The topic states the formula `NA*(1+sigma_max)/lambda`, but the plan's model does not use it and does not say why it uses another."
+    }
+  ],
+  "unjudged": [],
+  "asked": 2,
+  "checked_at_design": true
+}

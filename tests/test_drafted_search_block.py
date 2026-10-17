@@ -97,9 +97,11 @@ async def test_two_unusable_answers_end_in_the_stop_and_a_resume_asks_no_more(tm
     assert len(model.asked) == 2, "never asked beyond the bound"
     seen: list[dict[str, Any]] = []
     eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
-    with pytest.raises(Paused):
-        eng._stop_if_the_search_cannot_start({"topic": TOPIC}, again)
-    steps = " ".join(seen[0]["steps"])
+    eng._stop_if_the_search_cannot_start({"topic": TOPIC}, again)  # no pause: nobody is asked to pick another model
+    assert seen == []
+    stop = eng._search_cannot_start_stop({"topic": TOPIC}, again)
+    assert stop is not None
+    steps = " ".join(stop["exec_result"]["no_search_tried"])
     assert "asked the design step's model 2 time(s)" in steps and "never ran as a sweep" not in steps
 
 

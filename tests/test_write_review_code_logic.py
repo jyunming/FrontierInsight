@@ -12,7 +12,9 @@ import pytest
 
 from core import code_review as cr
 from core import review_pairs as pairs
-from tests.test_code_review import DESIGN, PROTOCOL, REPAIR_HEAD, STATE, _engine
+from tests.test_code_review import DESIGN, PROTOCOL, STATE, _engine, code_model_answer
+
+pytestmark = pytest.mark.usefixtures("this_python")
 
 WITH_PLAN = {**STATE, "design": {**DESIGN, "protocol": PROTOCOL}}
 WRONG = "# E1\ndef run_cell(cell):\n    return {'quality': cell['m'] * cell['w'] / cell['length']}\n"
@@ -26,13 +28,14 @@ class _Logic:
     def __init__(self, finding: dict[str, Any] | None = None, *, always: bool = False, checked: bool = True) -> None:
         self.finding, self.always, self.checked, self.prompts = finding, always, checked, []
         self.repair_prompts: list[str] = []
-        self.repaired = ""
+        self.test_prompts: list[str] = []
+        self.repaired: dict[str, str] = {}
 
     async def chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
-        if prompt.lstrip().startswith(REPAIR_HEAD):
-            self.repair_prompts.append(prompt)
-            return f"```python\n# file: simulate.py\n{self.repaired}```" if self.repaired else ""
+        answered = code_model_answer(self, prompt)
+        if answered is not None:
+            return answered
         assert prompt.lstrip().startswith("# Code Against the Plan"), prompt[:80]
         self.prompts.append(prompt)
         reqs = json.loads(prompt.split("```json", 1)[1].split("```", 1)[0])
@@ -89,7 +92,7 @@ async def test_a_wrong_normalisation_is_sent_to_a_repair_request_without_a_value
     engine = _engine(tmp_path)
     (engine.quest_root / "code" / "simulate.py").write_text(WRONG, encoding="utf-8")
     reader = _Logic(NORMALISATION)
-    reader.repaired = RIGHT
+    reader.repaired = {"simulate.py": RIGHT}
     engine._client = reader
     assert await engine._code_review_gate(WITH_PLAN) is None
     assert "0.123456789" not in reader.prompts[0], "the plan's expected value is never shown to the reviewer"

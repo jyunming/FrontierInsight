@@ -18,6 +18,31 @@ with the time the study is allowed (``execution.timeout_s``):
 
 None of the timed trials is a result: they are run apart from the study, write nothing into FI's ledger and are not
 kept. Everything here is arithmetic on the measurements; nothing is a judgement about the science.
+
+The same trials are also a **correctness pilot** (:func:`pilot_problems`): what they returned is read before the full run,
+so a simulation that measures nothing is found in minutes, not after the study:
+
+* a metric of the protocol that the trials return (``protocol.metrics``) and that is not a number in ANY pilot trial at ANY
+  pilot setting is undefined everywhere. Before it counts, every value of every setting is tried (the others at the base) and
+  the settings with few values (at most three) in every combination (:func:`confirm_cells`), so a metric that applies only to
+  some of the settings is not mistaken for a broken one; if those cannot all be tried, nothing is claimed;
+* a ``mean`` metric that is exactly one value in every pilot trial although the settings change and other results move, and a
+  simulation whose every returned number is the same at every setting (:func:`core.flat_output.flat_sweep`). Values that did
+  not change are only an observation (a conserved quantity or a true absence of effect look the same), so each of these, and
+  the stuck proportions below, is a finding only with evidence from the simulation's own code that the returned value is
+  built from no setting (:func:`core.flat_output.unused_outputs`, :func:`core.flat_output.unread_settings`); without the
+  code's text, or when the code cannot be followed with certainty, nothing is claimed;
+* proportions stuck at a bound: **at least two different** ``proportion`` metrics that are each exactly 0 (or each exactly 1)
+  in every pilot trial that returned them, over at least :data:`MIN_STUCK_TRIALS` trials at :data:`MIN_STUCK_SETTINGS`
+  settings. The protocol has no structured field that tells a rare-event probability (where 0 is the expected outcome of a
+  small pilot) from any other, so one metric at a bound is never a finding; two or more at once are the sign of a simulated
+  object that is itself degenerate. Names the plan expects to stay put (``expected_constants``) are exempt. Several proportions
+  at opposite bounds that flip only between settings are deliberately **not** a finding: a sharp but honest transition sampled
+  by a few settings looks the same, and a pilot of a few trials cannot tell the two apart.
+
+A metric that is undefined at some settings and has a value at others is the plan's own business and is never a finding. The
+findings go to the existing repair of the simulation (``RunChecksMixin._pilot_gate``); a metric the trials do not return at all
+(a quantity the analysis derives) is left to the checks that follow the run.
 """
 
 from __future__ import annotations
@@ -90,6 +115,8 @@ class Probe:
     #: ``{metric: sample standard deviation}`` of the two timed trials of a stochastic simulation (empty otherwise): the spread
     #: a precision target on a mean is judged by.
     spread: dict[str, float] = field(default_factory=dict)
+    #: What each timed trial returned (``{metric: number}``, not-a-number kept): the pilot's evidence of correctness.
+    trials: list[dict[str, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -268,7 +295,8 @@ async def measure(
         """Time one setting into ``probes``; ``(False, why)`` when the simulation could not be timed."""
         key = probe_key(cell, runs)
         if cached and key in cached:
-            probes.append(Probe(axis, index, cell, cached[key].seconds, cached[key].at_least, dict(cached[key].spread)))
+            probes.append(Probe(axis, index, cell, cached[key].seconds, cached[key].at_least, dict(cached[key].spread),
+                                [dict(t) for t in cached[key].trials]))
             return True, ""
         left = budget_s - (time.monotonic() - started)
         if probes and left < 5:
@@ -354,7 +382,280 @@ async def _time_one(
             a, b = done[0]["values"][name], done[1]["values"][name]
             if all(isinstance(v, (int, float)) and math.isfinite(v) for v in (a, b)):
                 spread[str(name)] = abs(float(a) - float(b)) / math.sqrt(2.0)  # the sample standard deviation of two numbers
-    return Probe(None, None, cell, max(seconds, 1e-6), spread=spread), ""
+    return Probe(None, None, cell, max(seconds, 1e-6), spread=spread,
+                 trials=[dict(r.get("values") or {}) for r in done]), ""
+
+
+# ---- the correctness pilot -----------------------------------------------------------------------------------------------
+
+#: Settings that take at most this many values are tried in every combination before a metric is called undefined.
+SMALL_AXIS = 3
+#: The most settings tried for that (one trial each); beyond it nothing is claimed about a metric that looks undefined.
+CONFIRM_MAX = 40
+#: A metric is called constant only when it was returned in at least this many pilot trials, at this many different settings.
+MIN_CONSTANT_TRIALS = 6
+MIN_CONSTANT_SETTINGS = 3
+#: A proportion is called stuck at a bound only when it was returned in at least this many pilot trials at this many settings.
+MIN_STUCK_TRIALS = 4
+MIN_STUCK_SETTINGS = 2
+PILOT_RECORD = Path(".fi") / "pilot_check.json"
+
+
+@dataclass
+class PilotProblem:
+    """What the pilot found wrong with one metric (or with the whole output), in plain words."""
+
+    metric: str
+    kind: str  # "undefined" | "constant" | "flat"
+    says: str
+
+
+@dataclass
+class Pilot:
+    """What the pilot trials showed: how many trials at how many settings, the metrics read, and what was wrong."""
+
+    trials: int = 0
+    settings: int = 0
+    checked: list[str] = field(default_factory=list)
+    problems: list[PilotProblem] = field(default_factory=list)
+    #: Metrics that looked undefined but whose subsets could not all be tried: nothing is claimed about them.
+    unsure: list[str] = field(default_factory=list)
+
+
+def _finite(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def observations(probes: list[Probe]) -> list[tuple[dict[str, Any], dict[str, float]]]:
+    """Every pilot trial as ``(its setting, what it returned)``."""
+    return [(dict(p.cell), dict(t)) for p in probes for t in p.trials]
+
+
+def _settings_text(obs: list[tuple[dict[str, Any], dict[str, float]]], limit: int = 6) -> str:
+    seen: list[str] = []
+    for cell, _v in obs:
+        key = ", ".join(f"{k} = {v}" for k, v in cell.items())
+        if key not in seen:
+            seen.append(key)
+    shown = "; ".join(seen[:limit])
+    return shown + (f"; and {len(seen) - limit} more" if len(seen) > limit else "")
+
+
+def _setting_count(obs: list[tuple[dict[str, Any], dict[str, float]]]) -> int:
+    return len({_tr.cell_key(c) for c, _v in obs})
+
+
+def undefined_metrics(obs: list[tuple[dict[str, Any], dict[str, float]]], ids: list[str]) -> list[str]:
+    """The metrics (of ``ids``) that the pilot trials returned and that were not a number in any of them."""
+    out = []
+    for name in ids:
+        values = [v[name] for _c, v in obs if name in v]
+        if values and not any(_finite(x) for x in values):
+            out.append(name)
+    return out
+
+
+def confirm_cells(grid: dict[str, list[Any]], ran: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    """``(settings still to try, whether that covers everything)``: every combination of the settings that take at most
+    :data:`SMALL_AXIS` values and every value of every setting on its own (the others at the base value), without those
+    already run. ``False`` when there are more than :data:`CONFIRM_MAX` of them: only the first are returned and the set is
+    not whole."""
+    axes = axes_of(grid)
+    base = dict(probe_cells(grid)[0][2])
+    small = [(n, v) for n, v in axes if 2 <= len(v) <= SMALL_AXIS]
+    wanted: list[dict[str, Any]] = [
+        {**base, **dict(zip((n for n, _v in small), values))} for values in itertools.product(*(v for _n, v in small))]
+    for name, values in axes:
+        wanted += [{**base, name: value} for value in values]
+    done = {_tr.cell_key(c) for c in ran}
+    todo: list[dict[str, Any]] = []
+    for cell in wanted:
+        key = _tr.cell_key(cell)
+        if key not in done:
+            done.add(key)
+            todo.append(cell)
+    return todo[:CONFIRM_MAX], len(todo) <= CONFIRM_MAX
+
+
+def _say_undefined(name: str, obs: list[tuple[dict[str, Any], dict[str, float]]], tried_all: str) -> str:
+    own = [(c, v) for c, v in obs if name in v]
+    sample = sorted({repr(v[name]) for _c, v in own})[:3]
+    return (f"the metric `{name}` was not a number in any of the {len(own)} pilot trials, at any of the {_setting_count(own)} "
+            f"settings tried ({_settings_text(own)}){tried_all}. The values that came back: {', '.join(sample)}. A metric may be "
+            "undefined at the settings it does not apply to, but it must have a value at the settings it does apply to")
+
+
+def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: dict[str, str], *,
+                   exempt: set[str] | frozenset[str] = frozenset(), tried_all: str = "",
+                   unsure: set[str] | frozenset[str] = frozenset(), axes: set[str] | frozenset[str] = frozenset(),
+                   source: str | None = None) -> Pilot:
+    """What the pilot trials show. ``kinds``: the protocol's metrics (``{id: kind}``); only those the trials returned are read.
+    ``tried_all``: a clause saying that every combination of the small settings was tried (when it was); ``unsure``: metrics
+    that looked undefined but whose subsets were not all tried (nothing is claimed about them). ``exempt``: names the plan
+    expects to stay put. ``source``: the text of the simulation, for the evidence a value that never changed needs (see the
+    module's notes); without it only an undefined metric is a finding. Nothing here is a judgement about the science: a metric
+    undefined everywhere, and, when the code shows it is built from no setting, one that never moves while others do and an
+    output that is the same everywhere."""
+    from . import flat_output as _flat
+
+    pilot = Pilot(trials=len(obs), settings=_setting_count(obs))
+    returned = sorted({n for _c, v in obs for n in v})
+    pilot.checked = [n for n in kinds if n in returned]
+    if not obs:
+        return pilot
+    for name in undefined_metrics(obs, pilot.checked):
+        if name in unsure:
+            pilot.unsure.append(name)
+            continue
+        pilot.problems.append(PilotProblem(name, "undefined", _say_undefined(name, obs, tried_all)))
+    ignoring = set(_flat.unused_outputs(source, pilot.checked) or []) if source is not None else set()
+    moved = {n for n in returned
+             if len({v[n] for _c, v in obs if n in v and _finite(v[n])}) > 1}
+    varied_cells = {_tr.cell_key(c) for c, _v in obs}
+    if len(obs) >= MIN_CONSTANT_TRIALS and len(varied_cells) >= MIN_CONSTANT_SETTINGS and moved:
+        for name in pilot.checked:
+            if kinds.get(name) != "mean" or name in exempt or name in axes or name in moved or name not in ignoring:
+                continue
+            own = [v[name] for _c, v in obs if name in v]
+            if len(own) >= MIN_CONSTANT_TRIALS and all(_finite(x) for x in own) and _flat._all_same([float(x) for x in own]):
+                pilot.problems.append(PilotProblem(
+                    name, "constant",
+                    f"the metric `{name}` was exactly {float(own[0]):g} in all {len(own)} pilot trials, at "
+                    f"{_setting_count([(c, v) for c, v in obs if name in v])} settings ({_settings_text(obs)}), although "
+                    f"other results changed with the settings: a result that never responds to them is not computed from them"))
+    stuck: list[tuple[str, float, list[tuple[dict[str, Any], dict[str, float]]]]] = []
+    if len(varied_cells) >= 2:
+        for name in pilot.checked:
+            if kinds.get(name) != "proportion" or name in exempt or name in axes or name not in ignoring:
+                continue
+            own_obs = [(c, v) for c, v in obs if name in v]
+            own = [v[name] for _c, v in own_obs]
+            if (len(own) >= MIN_STUCK_TRIALS and _setting_count(own_obs) >= MIN_STUCK_SETTINGS
+                    and all(_finite(x) for x in own) and (all(float(x) == 0.0 for x in own) or all(float(x) == 1.0 for x in own))):
+                stuck.append((name, float(own[0]), own_obs))
+    # Only proportions stuck at the SAME bound count together: one at 1 beside its complement at 0 (a success and a
+    # failure fraction) is what a deterministic study gives, not a sign that the simulated object is degenerate.
+    by_bound = {b: [t for t in stuck if t[1] == b] for b in (0.0, 1.0)}
+    stuck = max(by_bound.values(), key=len)
+    if len(stuck) >= 2:
+        names = ", ".join(f"`{n}`" for n, _b, _o in stuck)
+        for name, bound, own_obs in stuck:
+            pilot.problems.append(PilotProblem(
+                name, "stuck",
+                f"the proportion `{name}` was exactly {bound:g} in all {len(own_obs)} pilot trials, at {_setting_count(own_obs)} "
+                f"settings ({_settings_text(own_obs)}), and so were {', '.join(f'`{n}`' for n, _b, _o in stuck if n != name)}: "
+                f"{len(stuck)} proportions ({names}) each gave the same outcome in every trial, which a simulated object that "
+                "is sampled does not do"))
+    by_cell: dict[str, Any] = {}
+    for cell, values in obs:
+        run = by_cell.setdefault(_tr.cell_key(cell), type("PilotCell", (), {"cell": dict(cell), "rows": []})())
+        run.rows.append({"status": "ok", "values": values})
+    flat = _flat.flat_sweep(list(by_cell.values()), source=source, expected=set(exempt))
+    if flat:
+        pilot.problems.append(PilotProblem("", "flat", f"in the {len(obs)} pilot trials, {flat}"))
+    return pilot
+
+
+def directive(pilot: Pilot) -> str:
+    """The plain message the simulation's repair is given: what the pilot trials showed, exactly, and what to make true.
+    No expected value is in it."""
+    return (
+        f"FI ran {pilot.trials} trials of the simulation at {pilot.settings} settings before the full study, to check that "
+        "it measures what the protocol names, and found:\n"
+        + "\n".join(f"- {p.says}" for p in pilot.problems)
+        + "\n\nRepair the simulation so that each of these results is computed from the trial's inputs and has a value "
+        "wherever it applies. Keep everything else as it is."
+    )
+
+
+async def run_values(
+    executor: Any, python: Path | str, quest_root: Path, module: Path | str, cell: dict[str, Any], *, deterministic: bool,
+    timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+) -> dict[str, float] | None:
+    """What one trial of ``cell`` returns (nothing is written to FI's ledger), or ``None`` when it failed or did not finish."""
+    quest_root = Path(quest_root)
+    work = quest_root / ".fi" / "trials"
+    work.mkdir(parents=True, exist_ok=True)
+    (quest_root / _tr.HARNESS_PATH).write_text(_tr.HARNESS_SOURCE, encoding="utf-8")
+    spec, out = work / "pilot.json", work / "pilot.out.jsonl"
+    out.unlink(missing_ok=True)
+    key = _tr.cell_key(cell)
+    nonce = f"pilot{time.time_ns()}"
+    spec.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
+                                "cell": cell, "trials": [{"trial": 0, "seed": None if deterministic else _tr.trial_seed(0, key, 0)}],
+                                "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
+    await executor.execute(
+        [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
+         out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
+    try:
+        rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError):
+        rows = []
+    for name in (spec, out):
+        name.unlink(missing_ok=True)
+    row = next((r for r in rows if isinstance(r, dict) and r.get("nonce") == nonce and r.get("status") == "ok"), None)
+    return dict(row.get("values") or {}) if row else None
+
+
+async def pilot(
+    executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]],
+    probes: list[Probe], kinds: dict[str, str], *, deterministic: bool, budget_s: float, allowance_s: float,
+    env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
+    exempt: set[str] | frozenset[str] = frozenset(),
+) -> Pilot:
+    """Read what the timed trials returned (:func:`pilot_problems`). When a metric looks undefined everywhere, the settings with
+    few values are first tried in every combination, one trial each, within ``budget_s``: a metric that applies to only some
+    of the settings has a value there. If they cannot all be tried, the metric is left alone (nothing is claimed)."""
+    obs = observations(probes)
+    axes = {name for name, _v in axes_of(grid)}
+    try:
+        source = (Path(quest_root) / str(module)).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        source = None
+    suspects = undefined_metrics(obs, [n for n in kinds if any(n in v for _c, v in obs)])
+    tried_all, unsure = "", set()
+    if suspects:
+        todo, whole = confirm_cells(grid, [c for c, _v in obs])
+        started = time.monotonic()
+        reached = True
+        for cell in todo:
+            left = budget_s - (time.monotonic() - started)
+            if left < 5:
+                reached = False
+                break
+            values = await run_values(executor, python, quest_root, module, cell, deterministic=deterministic,
+                                      timeout_s=int(max(5, min(allowance_s, left))), env=env, thresholds=thresholds)
+            if values is None:
+                reached = False
+                continue
+            obs.append((dict(cell), values))
+        if whole and reached:
+            tried_all = (f"; FI also tried every value of every setting and every combination of the settings that take few "
+                         f"values ({_setting_count(obs)} settings in all)")
+        else:
+            unsure = set(suspects)
+    return pilot_problems(obs, kinds, exempt=exempt, tried_all=tried_all, unsure=unsure, axes=axes, source=source)
+
+
+# ---- the record: so a resume neither times nor asks again -------------------------------------------------------------
+
+
+def read_pilot_record(quest_root: Path) -> dict[str, Any]:
+    try:
+        record = json.loads((Path(quest_root) / PILOT_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def write_pilot_record(quest_root: Path, record: dict[str, Any]) -> bool:
+    try:
+        path = Path(quest_root) / PILOT_RECORD
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
 
 
 # ---- the record: so a resume neither times nor asks again -------------------------------------------------------------

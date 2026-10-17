@@ -1,0 +1,26 @@
+# The plan's model block as it stood in the quest (E1 and E2; the other equations are left out).
+model:
+  summary: Each family consists of independent standard-normal null z-statistics and independent normal alternative z-statistics shifted by 2.5.
+  equations:
+    - id: E1
+      formula: Z_j = mu_j + epsilon_j, where epsilon_j~N(0,1), mu_j=0 for a null and mu_j=effect_shift
+        for an alternative.
+      role: generates
+      source: derivation
+      derivation: The specified one-sided z-test simulation fixes the null distribution at N(0,1); adding
+        effect_shift to an independent N(0,1) draw gives N(effect_shift,1).
+      example:
+        inputs:
+          mu: 2.5
+        expected_formula: mu
+        variance_formula: '1'
+      random: true
+    - id: E2
+      formula: p_j = 1-Phi(Z_j).
+      role: generates
+      source: derivation
+      derivation: For a one-sided upper-tail z-test, the p-value is the probability under the N(0,1) null
+        of observing a statistic at least as large as Z_j.
+      example:
+        untestable: The required numerical normal survival function is not expressible in the plan formula
+          language; the SciPy implementation is cross-checked by the Bonferroni z/p equivalence oracle.

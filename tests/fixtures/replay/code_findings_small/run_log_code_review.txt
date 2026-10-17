@@ -1,0 +1,71 @@
+2026-10-08 17:17:37,165 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=10s, idle=10s
+2026-10-08 17:18:07,177 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=40s, idle=40s
+2026-10-08 17:18:20,052 [INFO] [code_review] the code was read by gpt-6-sol: 5 problem(s) in how it computes what the plan says; open findings per reading: 5 (2 high)
+2026-10-08 17:18:20,079 [WARNING] [code_review] sending 4 finding(s) to be repaired in simulate.py: The all-null FWER interval uses a Wilson interval.; The printed result includes a paired interval for the BH versus Bonferroni power difference but omits paired intervals for the other method differences and for realized FDR differences.; The generated paper contains only a heading and a methods par
+2026-10-08 17:19:48,541 [WARNING] [code_review] sending 1 finding(s) to be repaired in experiment.py: The FDR figure imposes an upper axis limit that can clip the uncorrected estimates and their intervals.
+2026-10-08 17:20:58,679 [INFO] [code_review] repaired experiment.py, simulate.py; the changed version is read again
+2026-10-08 17:21:08,785 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=10s, idle=10s
+2026-10-08 17:21:38,825 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=40s, idle=40s
+2026-10-08 17:22:08,836 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=70s, idle=70s
+2026-10-08 17:22:09,545 [INFO] [code_review] the code was read by gpt-6-sol: 3 problem(s) in how it computes what the plan says; open findings per reading: 5 (2 high), 3 (1 high); the repairs converged
+2026-10-08 17:22:09,567 [WARNING] [code_review] sending 3 finding(s) to be repaired in experiment.py: The alternative analysis script gives all-null FWER a Wilson interval.; The alternative analysis script reports paired differences only between Benjamini-Hochberg and Bonferroni.; The returned oracle records contain fixed placeholders instead of check results.
+2026-10-08 17:23:59,763 [INFO] [code_review] repaired experiment.py; the changed version is read again
+2026-10-08 17:26:17,177 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 17:27:41,736 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 17:29:03,482 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 17:43:12,160 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 17:44:58,716 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=10s, idle=10s
+2026-10-08 17:45:28,725 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=40s, idle=40s
+2026-10-08 17:45:47,075 [INFO] [code_review] the code was read by gpt-6-sol: 3 requirement(s) of the plan are missing or implemented differently and 4 problem(s) in how it computes what the plan says; open findings per reading: 5 (2 high), 3 (1 high), 7 (1 high); the repairs did not converge
+2026-10-08 17:45:47,081 [WARNING] [code_review] 7 finding(s) are open and are not repaired: this is the version that will run
+2026-10-08 17:45:47,081 [WARNING] [code_review] still implemented differently after the repairs: the script draws the planned figure power_comparison.png: power with 95% intervals by m, pi1, and method for pi1>0; include the one-sided uncorrected theoretical power reference with its numerical rounding error
+2026-10-08 17:45:47,088 [WARNING] [code_review] still missing after the repairs: the parameter m is varied over all 3 values of the plan's grid
+2026-10-08 17:45:47,088 [WARNING] [code_review] still missing after the repairs: the parameter pi1 is varied over all 3 values of the plan's grid
+2026-10-08 17:45:47,088 [WARNING] [code_review] still flagged after the repairs: The analysis requires an external trial file, and the supplied code never constructs the planned cells or calls run_trial.
+2026-10-08 17:45:47,088 [WARNING] [code_review] still flagged after the repairs: Each trial starts a generator from a supplied seed instead of drawing successively from a SeedSequence child stream for its cell.
+2026-10-08 17:45:47,088 [WARNING] [code_review] still flagged after the repairs: The one-sided p-value subtracts the normal CDF from one instead of using the normal survival function.
+2026-10-08 17:45:47,088 [WARNING] [code_review] still flagged after the repairs: The power figure draws the theoretical reference without its numerical rounding error.
+2026-10-08 17:47:31,211 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 17:47:41,315 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=10s, idle=10s
+2026-10-08 17:48:11,349 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=40s, idle=40s
+2026-10-08 17:48:20,905 [INFO] [code_review] the code was read by gpt-6-sol: 3 requirement(s) of the plan are missing or implemented differently and 7 problem(s) in how it computes what the plan says; open findings per reading: 5 (2 high), 3 (1 high), 7 (1 high), 10 (2 high); the repairs did not converge
+2026-10-08 17:48:20,917 [WARNING] [code_review] 10 finding(s) are open and are not repaired: this is the version that will run
+2026-10-08 17:48:20,917 [WARNING] [code_review] still implemented differently after the repairs: the script draws the planned figure power_comparison.png: power with 95% intervals by m, pi1, and method for pi1>0; include the one-sided uncorrected theoretical power reference with its numerical rounding error
+2026-10-08 17:48:20,917 [WARNING] [code_review] still missing after the repairs: the parameter m is varied over all 3 values of the plan's grid
+2026-10-08 17:48:20,917 [WARNING] [code_review] still missing after the repairs: the parameter pi1 is varied over all 3 values of the plan's grid
+2026-10-08 17:48:20,917 [WARNING] [code_review] still flagged after the repairs: The experiment reads precomputed trials without creating or validating the planned cells and trial counts.
+2026-10-08 17:48:20,917 [WARNING] [code_review] still flagged after the repairs: Each trial starts a generator from a supplied seed instead of drawing successively from a cell-specific SeedSequence child stream.
+2026-10-08 17:48:20,917 [WARNING] [code_review] still flagged after the repairs: The p-value calculation subtracts the normal CDF from one, which can round small positive tail probabilities to zero.
+2026-10-08 17:48:20,917 [WARNING] [code_review] still flagged after the repairs: The power figure omits the numerical rounding error for its theoretical reference.
+2026-10-08 17:48:20,917 [WARNING] [code_review] still flagged after the repairs: The check labeled Bonferroni FWER uses the Benjamini-Hochberg all-null result.
+2026-10-08 17:48:20,917 [WARNING] [code_review] still flagged after the repairs: The power accuracy check compares a theoretical calculation with a literal reference and never examines simulated power.
+2026-10-08 17:48:20,917 [WARNING] [code_review] still flagged after the repairs: The summary does not report the observed interval widths.
+2026-10-08 17:50:23,388 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 17:50:33,517 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=10s, idle=10s
+2026-10-08 17:51:02,976 [INFO] [code_review] the code was read by gpt-6-sol: 3 requirement(s) of the plan are missing or implemented differently and 6 problem(s) in how it computes what the plan says; open findings per reading: 5 (2 high), 3 (1 high), 7 (1 high), 10 (2 high), 9 (2 high); the repairs did not converge
+2026-10-08 17:51:02,990 [WARNING] [code_review] 9 finding(s) are open and are not repaired: this is the version that will run
+2026-10-08 17:51:02,990 [WARNING] [code_review] still implemented differently after the repairs: the script draws the planned figure power_comparison.png: power with 95% intervals by m, pi1, and method for pi1>0; include the one-sided uncorrected theoretical power reference with its numerical rounding error
+2026-10-08 17:51:02,990 [WARNING] [code_review] still missing after the repairs: the parameter m is varied over all 3 values of the plan's grid
+2026-10-08 17:51:02,990 [WARNING] [code_review] still missing after the repairs: the parameter pi1 is varied over all 3 values of the plan's grid
+2026-10-08 17:51:02,990 [WARNING] [code_review] still flagged after the repairs: The experiment reads trial data from an external file but never runs the simulation or constructs the planned design cells.
+2026-10-08 17:51:02,990 [WARNING] [code_review] still flagged after the repairs: Each trial creates a generator from a supplied seed, with no cell-specific SeedSequence stream in the code.
+2026-10-08 17:51:02,990 [WARNING] [code_review] still flagged after the repairs: Trial-record validation checks the number of cells but does not check their settings, uniqueness, metric names, or aligned trial identifiers.
+2026-10-08 17:51:02,990 [WARNING] [code_review] still flagged after the repairs: The p-value function subtracts a normal CDF from one instead of evaluating the normal survival function.
+2026-10-08 17:51:02,990 [WARNING] [code_review] still flagged after the repairs: The power figure omits the numerical rounding error of its theoretical reference.
+2026-10-08 17:51:02,990 [WARNING] [code_review] still flagged after the repairs: The summary reports interval endpoints but does not report observed interval widths.
+2026-10-08 17:51:56,863 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 17:52:06,958 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=10s, idle=10s
+2026-10-08 17:52:36,994 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=40s, idle=40s
+2026-10-08 17:53:07,046 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=70s, idle=70s
+2026-10-08 17:53:23,987 [INFO] [code_review] the code was read by gpt-6-sol: 3 requirement(s) of the plan are missing or implemented differently and 7 problem(s) in how it computes what the plan says; open findings per reading: 5 (2 high), 3 (1 high), 7 (1 high), 10 (2 high), 9 (2 high), 10 (2 high); the repairs did not converge
+2026-10-08 17:53:24,001 [WARNING] [code_review] 10 finding(s) are open and are not repaired: this is the version that will run
+2026-10-08 17:53:24,001 [WARNING] [code_review] still implemented differently after the repairs: the script draws the planned figure power_comparison.png: power with 95% intervals by m, pi1, and method for pi1>0; include the one-sided uncorrected theoretical power reference with its numerical rounding error
+2026-10-08 17:53:24,001 [WARNING] [code_review] still implemented differently after the repairs: the parameter m is varied over all 3 values of the plan's grid
+2026-10-08 17:53:24,001 [WARNING] [code_review] still implemented differently after the repairs: the parameter pi1 is varied over all 3 values of the plan's grid
+2026-10-08 17:53:24,001 [WARNING] [code_review] still flagged after the repairs: The experiment requires an external trial file and never calls the simulation function or generates the design cells.
+2026-10-08 17:53:24,001 [WARNING] [code_review] still flagged after the repairs: Each trial uses a supplied seed directly, with no master SeedSequence or child stream for its cell.
+2026-10-08 17:53:24,001 [WARNING] [code_review] still flagged after the repairs: Per-procedure arrays are grouped by cell without matching trial identifiers before the paired power difference is calculated.
+2026-10-08 17:53:24,001 [WARNING] [code_review] still flagged after the repairs: The p-value calculation subtracts a normal CDF from one instead of evaluating the normal survival function.
+2026-10-08 17:53:24,001 [WARNING] [code_review] still flagged after the repairs: The normalized record replaces source run counts with fixed success and failure counts.
+2026-10-08 17:53:24,001 [WARNING] [code_review] still flagged after the repairs: The summaries report interval endpoints without reporting observed interval widths.
+2026-10-08 17:53:24,001 [WARNING] [code_review] still flagged after the repairs: The power figure draws the theoretical curve without its numerical rounding error.

@@ -1,0 +1,5 @@
+from fdr_bonferroni_vs_bh import model
+
+
+def test_the_threshold_is_slightly_below_the_split():
+    assert abs(model.bonferroni_threshold(0.05, 10) - 0.0049) < 1e-12

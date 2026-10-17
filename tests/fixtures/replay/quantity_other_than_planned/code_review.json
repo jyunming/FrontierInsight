@@ -1,0 +1,197 @@
+{
+ "version": "e89b03ddfc1a1f1d",
+ "final": true,
+ "read_version": "e89b03ddfc1a1f1d",
+ "reviewer": "gpt-6-sol",
+ "planner": "gpt-5.6-terra",
+ "readings": [
+  {
+   "n": 1,
+   "version": "ca84b9b7bddce838",
+   "open": 14,
+   "high": 4
+  },
+  {
+   "n": 2,
+   "version": "e5cc7d9ee1dd122b",
+   "open": 20,
+   "high": 5,
+   "improved": false
+  },
+  {
+   "n": 3,
+   "version": "e89b03ddfc1a1f1d",
+   "open": 13,
+   "high": 2
+  }
+ ],
+ "converged": false,
+ "repaired": false,
+ "repairs_stopped": "this is the version that will run",
+ "problems": [
+  {
+   "id": "R3",
+   "kind": "dependent variable",
+   "text": "the dependent variable ea_spread is computed and reported in the result",
+   "headline": false,
+   "name": "ea_spread",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 77,
+   "note": "The reported spread is a standard deviation rather than the planned mean absolute error."
+  },
+  {
+   "id": "R5",
+   "kind": "dependent variable",
+   "text": "the dependent variable k_relative_spread_by_temperature is computed and reported in the result",
+   "headline": false,
+   "name": "k_relative_spread_by_temperature",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 125,
+   "note": "The reported relative spread is a standard deviation rather than the planned mean absolute relative error."
+  },
+  {
+   "id": "R8",
+   "kind": "dependent variable",
+   "text": "the dependent variable lnA_spread is computed and reported in the result",
+   "headline": false,
+   "name": "lnA_spread",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 78,
+   "note": "The reported spread is a standard deviation rather than the planned mean absolute error."
+  },
+  {
+   "id": "R20",
+   "kind": "metric",
+   "text": "the result reports ea_spread (Mean absolute error of Ea fit conditional on a valid fit.)",
+   "headline": false,
+   "name": "ea_spread",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 77,
+   "note": "The code computes standard deviation instead of mean absolute error."
+  },
+  {
+   "id": "R21",
+   "kind": "metric",
+   "text": "the result reports k_relative_spread_by_temperature (Mean absolute relative error of k fit at each temperature conditional on a valid fit.)",
+   "headline": false,
+   "name": "k_relative_spread_by_temperature",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 125,
+   "note": "The code computes standard deviation instead of mean absolute relative error."
+  },
+  {
+   "id": "R22",
+   "kind": "metric",
+   "text": "the result reports lnA_spread (Mean absolute error of ln A fit conditional on a valid fit.)",
+   "headline": false,
+   "name": "lnA_spread",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 78,
+   "note": "The code computes standard deviation instead of mean absolute error."
+  },
+  {
+   "id": "R27",
+   "kind": "sweep",
+   "text": "the parameter noise_ratio is varied over all 4 values of the plan's grid",
+   "headline": false,
+   "name": "",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 167,
+   "note": "The experiment accepts noise values inferred from the supplied records instead of requiring every value in the planned grid."
+  },
+  {
+   "id": "R28",
+   "kind": "sweep",
+   "text": "the parameter num_time_points is varied over all 3 values of the plan's grid",
+   "headline": false,
+   "name": "",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 168,
+   "note": "The experiment accepts time-point counts inferred from the supplied records instead of requiring every value in the planned grid."
+  },
+  {
+   "id": "L1",
+   "kind": "logic",
+   "text": "Ea and ln A spread, and relative k spread at line 125, are calculated as standard deviations.",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 77,
+   "note": "The plan defines each reported spread as a mean absolute error conditional on a valid fit.",
+   "fix": "Compute the mean absolute value of each trial's error and bootstrap that same statistic for its uncertainty.",
+   "severity": "high",
+   "name": "ea_spread, lnA_spread, k_relative_spread_by_temperature",
+   "constant": false,
+   "where": "experiment.py:77",
+   "headline": false
+  },
+  {
+   "id": "L2",
+   "kind": "logic",
+   "text": "Grid validation derives allowed settings from the supplied records when sweep metadata is absent.",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 167,
+   "note": "A subset of the planned settings can therefore pass validation and produce an incomplete study.",
+   "fix": "Validate the supplied cells against the explicit planned noise-ratio and time-point grids.",
+   "severity": "high",
+   "name": "noise_ratio, num_time_points",
+   "constant": false,
+   "where": "experiment.py:167",
+   "headline": false
+  },
+  {
+   "id": "L3",
+   "kind": "logic",
+   "text": "The random generator uses the supplied seed directly, while trial_id is unused.",
+   "status": "different",
+   "file": "simulate.py",
+   "line": 199,
+   "note": "The shown code does not construct the per-setting, per-trial SeedSequence specified by the plan.",
+   "fix": "Construct the generator seed from the base seed and the noise, time-point and trial indices.",
+   "severity": "medium",
+   "name": "",
+   "constant": false,
+   "where": "simulate.py:199",
+   "headline": false
+  },
+  {
+   "id": "L4",
+   "kind": "logic",
+   "text": "The reported concentration checks compare locally calculated expressions with themselves, and the nonunit check examines only the initial time.",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 363,
+   "note": "These checks do not test the model function on the stated special-case inputs.",
+   "fix": "Call the model function with each check's case inputs and compare its output with an independently calculated reference.",
+   "severity": "medium",
+   "name": "checks",
+   "constant": false,
+   "where": "experiment.py:363",
+   "headline": false
+  },
+  {
+   "id": "L5",
+   "kind": "logic",
+   "text": "The reported noise-free recovery check uses a different sampling count and fitting path from its stated case.",
+   "status": "different",
+   "file": "experiment.py",
+   "line": 384,
+   "note": "Its result does not check the planned case or the rate-fitting procedure used in trials.",
+   "fix": "Run the stated noise-free case through the trial fitting path and report its numerical error.",
+   "severity": "medium",
+   "name": "noise_free_Ea_fit_J_per_mol",
+   "constant": false,
+   "where": "experiment.py:384",
+   "headline": false
+  }
+ ],
+ "final_read": true
+}

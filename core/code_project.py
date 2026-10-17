@@ -407,6 +407,37 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
     }
 
 
+def study_differences(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = True) -> list[str]:
+    """One plain sentence per setting of ``code/study.json`` (what ``run.py`` runs) that is not what the protocol says: the
+    runs per setting and each setting to vary. The protocol is the source of truth. Nothing when there is no
+    ``study.json``, the study is a search for the best design, or the protocol says nothing about the setting (a protocol
+    without a run count leaves ``study.json`` its own)."""
+    path = Path(code_dir) / STUDY
+    wanted = study_of(Path(code_dir), protocol, split=split)
+    try:
+        have = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(have, dict) or not isinstance(wanted, dict) or "optimisation" in wanted:
+        return []
+    protocol = protocol if isinstance(protocol, dict) else {}
+    found: list[str] = []
+    runs = protocol.get("runs_per_setting")
+    if isinstance(runs, (int, float)) and not isinstance(runs, bool) and have.get("runs_per_setting") != wanted.get("runs_per_setting"):
+        found.append(f"it runs {have.get('runs_per_setting')} per setting, the protocol says {wanted.get('runs_per_setting')}")
+    grid = wanted.get("grid") if isinstance(wanted.get("grid"), dict) else {}
+    have_grid = have.get("grid") if isinstance(have.get("grid"), dict) else {}
+    if not grid:
+        return found  # the protocol names no setting to vary: nothing to compare the file's with
+    for name, values in grid.items():
+        if have_grid.get(name) != values:
+            found.append(f"it varies `{name}` over {have_grid.get(name)}, the protocol says {values}")
+    for name in have_grid:
+        if name not in grid:
+            found.append(f"it varies `{name}`, which the protocol does not")
+    return found
+
+
 def _readme(code_dir: Path, *, title: str, question: str, study: dict[str, Any] | None, split: bool = True,
             layout: list[str] | None = None) -> str:
     two = (code_dir / _split_run.SIMULATE_NAME).is_file() and split

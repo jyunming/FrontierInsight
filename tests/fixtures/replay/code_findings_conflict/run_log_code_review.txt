@@ -1,0 +1,54 @@
+2026-10-08 16:25:30,243 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=10s, idle=10s
+2026-10-08 16:26:00,263 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=40s, idle=40s
+2026-10-08 16:26:30,293 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=70s, idle=70s
+2026-10-08 16:26:39,119 [INFO] [code_review] the code was read by gpt-6-sol: 6 requirement(s) of the plan are missing or implemented differently and 8 problem(s) in how it computes what the plan says; open findings per reading: 14 (4 high)
+2026-10-08 16:26:39,165 [WARNING] [code_review] sending 6 finding(s) to be repaired in simulate.py: The first-stage fit uses bounded scalar minimization without analytic derivatives or a safeguarded fallback.; Fit acceptance compares an unnormalized gradient with an objective-dependent threshold.; the parameter noise_ratio is varied over all 4 values of the plan's grid; the parameter num_time_poin
+2026-10-08 16:29:08,855 [WARNING] [code_review] sending 6 finding(s) to be repaired in experiment.py: The reported check errors, flags, and solver-tolerance comparison are literals.; The experiment processes whatever cells are present without defining or verifying the planned sweep.; the script draws the planned figure coverage_heatmap.png: Ea and ln A operational 95% coverage across noise ratio a
+2026-10-08 16:31:36,602 [WARNING] [code_review] sending 2 finding(s) to be repaired in experiment.py: The accuracy figure omits ln A bias and standard deviation, uses activation-energy mean absolute error in place of standard deviation, and has no trial-level uncertainty.; The temperature figure uses mean absolute error in place of standard deviation and writes a separate image for each sampling d
+2026-10-08 16:31:50,390 [WARNING] [code_review] the repair of experiment.py gave back no changed file; kept as it is
+2026-10-08 16:31:50,399 [INFO] [code_review] repaired experiment.py, simulate.py; the changed version is read again
+2026-10-08 16:32:00,432 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=10s, idle=10s
+2026-10-08 16:32:30,480 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=40s, idle=40s
+2026-10-08 16:33:00,510 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=70s, idle=70s
+2026-10-08 16:33:12,399 [INFO] [code_review] the code was read by gpt-6-sol: 9 requirement(s) of the plan are missing or implemented differently and 11 problem(s) in how it computes what the plan says; open findings per reading: 14 (4 high), 20 (5 high); the repairs did not converge
+2026-10-08 16:33:12,421 [WARNING] [code_review] 20 finding(s) are open and are not repaired: the last repair did not reduce the open high-severity findings
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the dependent variable ea_spread is computed and reported in the result
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the dependent variable k_relative_spread_by_temperature is computed and reported in the result
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the dependent variable lnA_spread is computed and reported in the result
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the result reports ea_spread (Mean absolute error of Ea fit conditional on a valid fit.)
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the result reports k_relative_spread_by_temperature (Mean absolute relative error of k fit at each temperature conditional on a valid fit.)
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the result reports lnA_spread (Mean absolute error of ln A fit conditional on a valid fit.)
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the script draws the planned figure coverage_heatmap.png: Ea and ln A operational 95% coverage across noise ratio and time-point count, with 0.95 reference and pooled-count uncertainty annotations.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the parameter noise_ratio is varied over all 4 values of the plan's grid
+2026-10-08 16:33:12,421 [WARNING] [code_review] still missing after the repairs: the parameter num_time_points is varied over all 3 values of the plan's grid
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: Ea spread is reported as the sample standard deviation of its errors.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: ln A spread is reported as the sample standard deviation of its errors.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: Relative k spread is reported as the sample standard deviation of relative errors.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: The permitted noise-ratio settings differ from the plan's grid.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: Grid validation constructs its expected settings from the supplied record when no sweep is supplied.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: The fallback uses unconstrained BFGS in log k.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: The heatmap states the reference coverage only in its title.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: The returned concentration closed-form error compares an expression with itself.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: The returned nonunit-concentration error checks only the initial sample of a different case.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: The solver-tolerance comparison refits only noiseless generated curves with a separate fitting routine.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: Trial randomness depends on an arbitrary supplied seed, with no shown construction of the plan's per-cell, per-trial seed sequence.
+2026-10-08 16:36:17,360 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 16:43:13,771 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 17:17:36,049 [INFO] [code_review] the code was repaired; the last reading is kept for the version that will run, so it is read just before the run
+2026-10-08 17:20:56,938 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=10s, idle=10s
+2026-10-08 17:21:26,979 [INFO] [code_review] still waiting on LLM — no events yet, elapsed=40s, idle=40s
+2026-10-08 17:21:42,534 [INFO] [code_review] the code was read by gpt-6-sol: 8 requirement(s) of the plan are missing or implemented differently and 5 problem(s) in how it computes what the plan says; open findings per reading: 14 (4 high), 20 (5 high), 13 (2 high); the repairs did not converge
+2026-10-08 17:21:42,545 [WARNING] [code_review] 13 finding(s) are open and are not repaired: this is the version that will run
+2026-10-08 17:21:42,545 [WARNING] [code_review] still implemented differently after the repairs: the dependent variable ea_spread is computed and reported in the result
+2026-10-08 17:21:42,545 [WARNING] [code_review] still implemented differently after the repairs: the dependent variable k_relative_spread_by_temperature is computed and reported in the result
+2026-10-08 17:21:42,545 [WARNING] [code_review] still implemented differently after the repairs: the dependent variable lnA_spread is computed and reported in the result
+2026-10-08 17:21:42,545 [WARNING] [code_review] still implemented differently after the repairs: the result reports ea_spread (Mean absolute error of Ea fit conditional on a valid fit.)
+2026-10-08 17:21:42,545 [WARNING] [code_review] still implemented differently after the repairs: the result reports k_relative_spread_by_temperature (Mean absolute relative error of k fit at each temperature conditional on a valid fit.)
+2026-10-08 17:21:42,545 [WARNING] [code_review] still implemented differently after the repairs: the result reports lnA_spread (Mean absolute error of ln A fit conditional on a valid fit.)
+2026-10-08 17:21:42,545 [WARNING] [code_review] still implemented differently after the repairs: the parameter noise_ratio is varied over all 4 values of the plan's grid
+2026-10-08 17:21:42,545 [WARNING] [code_review] still implemented differently after the repairs: the parameter num_time_points is varied over all 3 values of the plan's grid
+2026-10-08 17:21:42,545 [WARNING] [code_review] still flagged after the repairs: Ea and ln A spread, and relative k spread at line 125, are calculated as standard deviations.
+2026-10-08 17:21:42,545 [WARNING] [code_review] still flagged after the repairs: Grid validation derives allowed settings from the supplied records when sweep metadata is absent.
+2026-10-08 17:21:42,545 [WARNING] [code_review] still flagged after the repairs: The random generator uses the supplied seed directly, while trial_id is unused.
+2026-10-08 17:21:42,545 [WARNING] [code_review] still flagged after the repairs: The reported concentration checks compare locally calculated expressions with themselves, and the nonunit check examines only the initial time.
+2026-10-08 17:21:42,545 [WARNING] [code_review] still flagged after the repairs: The reported noise-free recovery check uses a different sampling count and fitting path from its stated case.

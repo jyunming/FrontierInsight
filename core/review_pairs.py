@@ -5,7 +5,8 @@ that can be another model. Each reviewer has its own step, so a person can route
 
 * the plan's checks: ``oracle_review`` (core/oracle_review.py),
 * the design: ``design_review`` (the methodology audit, ``Engine._audit_design``),
-* the code: ``code_review`` (core/code_review.py), which follows ``oracle_review`` while it is not set.
+* the code: ``code_review`` (core/code_review.py), which follows ``oracle_review`` while it is not set,
+* the citations: ``citation_check`` (core/citation_support.py), which follows ``oracle_review`` while it is not set.
 
 A step that is not set keeps today's behaviour: the design is audited by the main model (recorded as a self-review, never
 as an independent one), the code is read by whatever reads the checks.
@@ -22,11 +23,12 @@ import re
 from typing import Any, Callable
 
 #: The step a person routes (``provider.node_providers.<step>`` / ``provider.node_models.<step>``) to have each stage read.
-READER_STEP = {"checks": "oracle_review", "design": "design_review", "code": "code_review"}
+READER_STEP = {"checks": "oracle_review", "design": "design_review", "code": "code_review", "paper": "citation_check"}
 #: The steps a call is made under when its own step is not set: the design audit keeps its old name (so does every
 #: record of it); the code reading goes to the step that reads the checks (``oracle_review.code`` is routed by the key
 #: ``oracle_review``, and its calls are recorded apart from the reading of the plan's checks).
-FALLBACK_NODE = {"design_review": "design_self_critique", "code_review": "oracle_review.code"}
+FALLBACK_NODE = {"design_review": "design_self_critique", "code_review": "oracle_review.code",
+                 "citation_check": "oracle_review.citations"}
 
 
 def node_for(step: str, configured: Callable[[str], Any]) -> str:
@@ -66,6 +68,18 @@ def severity_of(value: Any) -> str:
     return _SEVERITY_WORDS.get(" ".join(str(value or "").lower().split()).rstrip("."), "medium")
 
 
+def _flag(value: Any) -> bool | None:
+    """``True`` / ``False`` for a reply that says so (a boolean or yes / no text), ``None`` for one that does not."""
+    if isinstance(value, bool):
+        return value
+    text = str(value if value is not None else "").strip().lower()
+    if text in ("true", "yes", "y", "1"):
+        return True
+    if text in ("false", "no", "n", "0"):
+        return False
+    return None
+
+
 def finding(item: Any) -> dict[str, Any] | None:
     """One finding as ``{where, what, why, fix, severity, quantity, constant}``, or ``None`` when it does not say what is wrong.
     The keys a reviewer is likely to use for the same thing are read as one (``problem`` / ``issue`` for ``what``)."""
@@ -83,7 +97,11 @@ def finding(item: Any) -> dict[str, Any] | None:
         "fix": _first(item, "fix", "how_to_fix", "suggestion", "how"),
         "severity": severity_of(item.get("severity")),
         "quantity": _first(item, "quantity", "name", limit=80),
-        "constant": str(item.get("constant") if item.get("constant") is not None else "").strip().lower() in ("true", "yes", "y", "1"),
+        "constant": _flag(item.get("constant")) is True,
+        # Whether it can change a number or a figure the study reports (``None``: the reply did not say), and whether it is
+        # a contradiction inside the plan itself and not a fault of the code.
+        "changes_result": _flag(item.get("changes_result", item.get("changes_a_result"))),
+        "plan_conflict": _flag(item.get("plan_conflict", item.get("plan_contradicts_itself"))) is True,
     }
 
 

@@ -332,7 +332,7 @@ def test_criteria_are_decided_only_when_the_data_decide_them() -> None:
 
 
 def test_paper_status_and_stop_status() -> None:
-    ok = {"g1": "pass", "g2": "pass", "g3": "pass"}
+    ok = {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0}
     assert collect.paper_status("paper", ok, "") == "trustworthy"
     assert collect.paper_status("paper", ok, "the experiment was not executed") == "fake"
     assert collect.paper_status("paper", {"g1": "fail (narrow)", "g2": "pass", "g3": "pass"}, "") == "fake"
@@ -352,7 +352,8 @@ def test_trend_and_pareto_from_collected_rounds(tmp_path: Path) -> None:
     grade_report = tmp_path / "ga.md"
     _w(grade_report, "| run | date | build | model | D1 | D2 | D3 | D4 | D5 | D6 | Mean | G1 | G2 | G3 | pages | tok | note |\n"
                      "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
-                     "| a | d | b | m | 100 | 100 | N/A | 100 | 90 | 100 | 98.0 | pass | pass | pass | 4 | 1 | fine |\n")
+                     "| a | d | b | m | 100 | 100 | N/A | 100 | 90 | 100 | 98.0 | pass | pass | pass | 4 | 1 | fine |\n"
+                         "PARTS NOT DONE: 0 | STATED: n/a\n")
     grade.import_grade(rdir, "a", grade_report)
     grade.import_grade(rdir, "b", _w_and(tmp_path / "gb.md", "STOP: wrong\nthe cause was untrue\n"))
     data = collect.collect_round(rdir)
@@ -409,6 +410,14 @@ def test_grader_prompt_carries_the_topics_own_goals_and_no_topic_words(tmp_path:
     text = paths[0].read_text(encoding="utf-8")
     assert "alpha question" in text and "SCOPE. one thing." in text and "rubric.md" in text
     assert "G1" in text and "STOP:" in text and "{" not in text.replace("{}", "")
+
+
+def test_grade_template_says_to_collect_first_when_round_json_missing(tmp_path: Path) -> None:
+    """When round.json does not exist, write_templates raises SuiteError with a helpful message."""
+    rdir = tmp_path / "empty_round"
+    rdir.mkdir()
+    with pytest.raises(SuiteError, match="has not been collected yet"):
+        grade.write_templates(rdir, {})
 
 
 # --------------------------------------------------------------------------------------------- the CLI
@@ -626,3 +635,78 @@ def test_the_manifest_is_read_again_so_another_writers_change_is_kept(tmp_path: 
     out = runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: pid == 77, sleep=lambda s: [setattr(p, "code", 0) for p in procs],
                        interval=0, pid=77)
     assert len(procs) == 2 and out["topics"][names[1]]["state"] == "adopted"
+
+
+# ------------------------------------------------------------------- a paper that does part of the topic
+
+def test_grader_prompt_states_the_partial_scope_rule(tmp_path: Path) -> None:
+    rdir, suite = _round(tmp_path, {"alpha": "paper"})
+    collect.collect_round(rdir)
+    text = grade.write_templates(rdir, {t: suite.topic_text(t) for t in suite.topic_files})[0].read_text(encoding="utf-8")
+    assert "does PART of the topic correctly AND states plainly" in text
+    assert "on what the paper DOES" in text
+    assert "without saying so" in text and "fails D5" in text
+    assert "PARTS NOT DONE:" in text
+
+
+def test_parts_not_done_are_read_from_the_report(tmp_path: Path) -> None:
+    row = "| r | d | b | m | 100 | 100 | n/a | 100 | 50 | 100 | 90 | pass | pass | pass | 4 | 1 | n |\n"
+    stated = grade.import_grade(tmp_path / "r", "a", _w_and(tmp_path / "a.md", row + "PARTS NOT DONE: 2 | STATED: yes\n"))
+    silent = grade.import_grade(tmp_path / "r", "b", _w_and(tmp_path / "b.md", row + "PARTS NOT DONE: 2 | STATED: no\n"))
+    assert stated["parts_not_done"] == 2 and stated["parts_stated"] is True
+    assert silent["parts_stated"] is False
+
+
+def test_a_partial_paper_is_trustworthy_only_when_it_says_what_it_leaves_out() -> None:
+    gates = {"g1": "pass", "g2": "pass", "g3": "pass"}
+    assert collect.paper_status("paper", {**gates, "parts_not_done": 2, "parts_stated": True}, "") == "trustworthy"
+    assert collect.paper_status("paper", {**gates, "parts_not_done": 2, "parts_stated": False}, "") == "flawed"
+    assert collect.paper_status("paper", {**gates, "parts_not_done": 0, "parts_stated": None}, "") == "trustworthy"
+    # a report without the PARTS line has not decided it: never trustworthy, still open for the upper bound
+    assert collect.paper_status("paper", gates, "") == "ungraded"
+    assert collect.paper_status("paper", {**gates, "parts_not_done": None}, "") == "ungraded"
+
+
+def test_grade_import_warns_plainly_when_the_parts_line_is_missing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    row = "| r | d | b | m | 100 | 100 | n/a | 100 | 50 | 100 | 90 | pass | pass | pass | 4 | 1 | n |" + chr(10)
+    entry = grade.import_grade(tmp_path / "r", "a", _w_and(tmp_path / "a.md", row))
+    err = capsys.readouterr().err
+    assert "PARTS NOT DONE" in err and "undecided" in err
+    assert collect.paper_status("paper", entry, "") == "ungraded"
+    grade.import_grade(tmp_path / "r", "b", _w_and(tmp_path / "b.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10)))
+    assert capsys.readouterr().err == ""
+
+
+def test_unfixed_problem_is_fake_only_when_it_changes_a_reported_number() -> None:
+    # When unfixed_changes_numbers is False, the paper is not fake despite the unfixed problem
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0,
+                                          "parts_stated": None, "unfixed_changes_numbers": False},
+                                "a code problem was not fixed: x") == "trustworthy"
+    # When unfixed_changes_numbers is True, it is fake
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0,
+                                          "parts_stated": None, "unfixed_changes_numbers": True},
+                                "a code problem was not fixed: x") == "fake"
+    # When unfixed_changes_numbers is missing (None), it is fake (old behavior)
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0,
+                                          "parts_stated": None},
+                                "a code problem was not fixed: x") == "fake"
+
+
+def test_not_executed_is_always_fake_regardless_of_unfixed_changes_numbers() -> None:
+    # Even with unfixed_changes_numbers False, a not-executed contradiction is always fake
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0,
+                                          "parts_stated": None, "unfixed_changes_numbers": False},
+                                "EVIDENCE.json says the experiment was not executed") == "fake"
+
+
+def test_import_grade_parses_unfixed_changes_numbers_line(tmp_path: Path) -> None:
+    row = "| r | d | b | m | 100 | 100 | n/a | 100 | 50 | 100 | 90 | pass | pass | pass | 4 | 1 | n |" + chr(10)
+    entry_no = grade.import_grade(tmp_path / "r", "a", _w_and(tmp_path / "a.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10) +
+                                                               "UNFIXED CHANGES NUMBERS: no" + chr(10)))
+    assert entry_no["unfixed_changes_numbers"] is False
+    entry_yes = grade.import_grade(tmp_path / "r", "b", _w_and(tmp_path / "b.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10) +
+                                                                "UNFIXED CHANGES NUMBERS: yes" + chr(10)))
+    assert entry_yes["unfixed_changes_numbers"] is True
+    entry_na = grade.import_grade(tmp_path / "r", "c", _w_and(tmp_path / "c.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10) +
+                                                               "UNFIXED CHANGES NUMBERS: n/a" + chr(10)))
+    assert entry_na.get("unfixed_changes_numbers") is None

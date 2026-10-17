@@ -68,7 +68,7 @@ async def test_a_reviewers_calls_go_to_its_providers_and_are_recorded_under_its_
     assert [(c["node"], c["served_model"]) for c in calls] == [
         ("design_review", "kimi-k3"), ("oracle_review.code", "kimi-k3"), ("oracle_review.code", "kimi-k3"),
         ("design", "main-model")]
-    assert pairs.READER_STEP == {"checks": "oracle_review", "design": "design_review", "code": "code_review"}
+    assert pairs.READER_STEP == {"checks": "oracle_review", "design": "design_review", "code": "code_review", "paper": "citation_check"}
 
 
 def test_the_quality_report_names_the_new_steps(tmp_path: Path) -> None:

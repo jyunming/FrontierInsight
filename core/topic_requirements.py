@@ -123,7 +123,7 @@ def parse(obj: Any) -> dict[str, Any] | None:
     if not (factors or quantities or formulas or comparisons):
         return None
     return {"factors": factors[:20], "quantities": quantities[:30], "formulas": formulas[:12],
-            "comparisons": comparisons[:12], "constraints": constraints[:12], "stated_results": results[:20]}
+            "comparisons": comparisons[:12], "constraints": constraints[:30], "stated_results": results[:20]}
 
 
 def is_empty(req: Any) -> bool:
@@ -148,7 +148,8 @@ def _tokens(text: Any) -> set[str]:
 
 
 def view(design: Any, protocol: Any = None) -> dict[str, Any]:
-    """What the plan can be searched for: ``axes`` ({name: values}, from ``protocol.grid`` and a search's design variables),
+    """What the plan can be searched for: ``axes`` ({name: values}, from ``protocol.grid``, a search's design variables and
+    the settings its own scan compares: ``protocol.optimisation.grid``),
     ``metrics`` ([(id, text)]), ``equations`` ([{id, formula, source}]) and ``assumptions`` (text). ``protocol`` is the one
     that runs when it differs from the design's own (the frozen one)."""
     design = design if isinstance(design, dict) else {}
@@ -165,6 +166,10 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
         values = variable.get("values") if isinstance(variable.get("values"), list) else [
             v for v in (variable.get("low"), variable.get("high")) if v is not None]
         axes[str(variable["name"]).strip()] = list(values)
+    # The block's own scan compares the study across settings (of a design variable, or of a condition held fixed): those
+    # are the settings the plan varies, whatever the plan's kind of study.
+    for axis, values in (block.get("grid") if isinstance(block.get("grid"), dict) else {}).items():
+        axes[str(axis)] = list(values) if isinstance(values, list) else [values]
     metrics: list[tuple[str, str]] = []
     for metric in protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []:
         if isinstance(metric, dict) and metric.get("id"):
@@ -181,7 +186,8 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
     assumptions = " ".join(str(a) for a in (model.get("assumptions") if isinstance(model.get("assumptions"), list) else []))
     topic_map = [m for m in (protocol.get("topic_map") if isinstance(protocol.get("topic_map"), list) else [])
                  if isinstance(m, dict) and str(m.get("item") or "").strip() and str(m.get("by") or "").strip()]
-    return {"axes": axes, "metrics": metrics, "equations": equations, "assumptions": assumptions, "topic_map": topic_map}
+    return {"axes": axes, "metrics": metrics, "equations": equations, "assumptions": assumptions, "topic_map": topic_map,
+            "search": bool(block)}
 
 
 def _norm_formula(text: Any) -> str:
@@ -239,6 +245,10 @@ def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[
     for entry in entries:
         head, _sep, name = str(entry["by"]).partition(":")
         head, name = head.strip().lower(), name.strip()
+        if kind == "factors" and head in ("optimisation", "optimization", "search") and plan.get("search"):
+            # What the search for the best design itself finds (a free-form design, the best member of a family) is not a
+            # setting with values to cover: the plan says its block covers it, and a reader confirms that it does.
+            return "judge", "optimisation"
         if kind == "factors" and head in ("setting", "grid", "design_variable", "variable"):
             axis = next((a for a in plan["axes"] if _name_key(a) == _name_key(name)), None)
             if axis is None:
@@ -415,20 +425,30 @@ def mapped_items(req: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def request(topic: str, gaps: list[dict[str, Any]]) -> str:
-    """The request to the plan's model for what the topic asks and the plan lacks. Nothing else may change."""
+def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False) -> str:
+    """The request to the plan's model for what the topic asks and the plan lacks. Nothing else may change. ``search``:
+    the plan is a search for the best design, which has no ``protocol.grid`` beside its block (the settings to compare
+    belong to the block's own scan, ``protocol.optimisation.grid``)."""
     lines = [f"- {g['sentence']}" for g in gaps]
+    where = (
+        "A setting to vary or compare is a key of `protocol.optimisation.grid` with every value the topic states (this "
+        "plan is a search for the best design, so do NOT write a `protocol.grid`): either one of the design variables, or "
+        "a condition held fixed during the search, which you also list under `protocol.optimisation.fixed` with the value "
+        "the search holds it at. What the search itself finds (the best design) needs no setting: say in "
+        "`protocol.topic_map` that `optimisation` covers it. "
+        if search else
+        "A setting to vary or compare is a key of `protocol.grid` with every value the topic states (or, for a search for "
+        "the best design, a design variable of `protocol.optimisation` with its range). ")
     return (
         "The topic asks for things this plan does not yet include:\n" + "\n".join(lines)
         + f"\n\nThe topic: “{' '.join(str(topic or '').split())[:1500]}”\n\n"
-        "Write them into the design block. A setting to vary or compare is a key of `protocol.grid` with every value the topic "
-        "states (or, for a search for the best design, a design variable of `protocol.optimisation` with its range). A quantity "
+        "Write them into the design block. " + where + "A quantity "
         "to report is an entry of `protocol.metrics` (an `id`, a `kind`, an `estimand` and a `unit`). A formula the topic "
         "states is an equation of `protocol.model.equations`, written as the topic writes it; if the plan needs another "
         "formula in its place, keep that one and say in its `source` that it replaces the topic's, and why. Also say, in "
         "`protocol.topic_map`, which element of the plan covers each thing the topic asks for (the ones above and the ones the "
         "plan already has): a list of entries `item` (the name of the factor or quantity, or the formula, as the topic "
-        "words it) and `by` (`setting:<the key in protocol.grid or the design variable>`, `metric:<the metric id>` or "
+        "words it) and `by` (`setting:<the key in protocol.grid or protocol.optimisation.grid, or the design variable>`,`metric:<the metric id>` or "
         "`equation:<the equation id>`). FI checks that each named element exists and covers what the topic states. Change "
         "nothing else: not a check, a threshold, a tolerance, a criterion, or a setting the plan already has right.")
 
@@ -445,6 +465,27 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
     taken = False
     named = {g.get("axis") for g in gaps if g.get("axis")}
     new_grid = n.get("grid") if isinstance(n.get("grid"), dict) else {}
+    search = isinstance(o.get("optimisation"), dict)
+    if search:
+        # A plan that is a search for the best design has no `protocol.grid` beside its block: the settings to compare
+        # belong to the block's own scan (`optimisation.grid`), so the model's answer is read that way, whichever of the
+        # two places it wrote them in.
+        nb = n.get("optimisation") if isinstance(n.get("optimisation"), dict) else {}
+        new_grid = {**(nb.get("grid") if isinstance(nb.get("grid"), dict) else {}), **new_grid}
+        scan = dict(o["optimisation"].get("grid") if isinstance(o["optimisation"].get("grid"), dict) else {})
+        for axis, values in new_grid.items():
+            if axis not in scan or axis in named:
+                if scan.get(axis) != values:
+                    scan[axis] = values
+                    taken = True
+        held = dict(o["optimisation"].get("fixed") if isinstance(o["optimisation"].get("fixed"), dict) else {})
+        for key, value in (nb.get("fixed") if isinstance(nb.get("fixed"), dict) else {}).items():
+            if key not in held and key in scan:  # a condition the answer holds fixed so that the scan can compare it
+                held[key] = value
+                taken = True
+        if scan:
+            protocol["optimisation"] = {**o["optimisation"], "grid": scan, **({"fixed": held} if held else {})}
+        new_grid = {}
     if new_grid:
         grid = dict(o.get("grid") if isinstance(o.get("grid"), dict) else {})
         for axis, values in new_grid.items():
@@ -481,7 +522,8 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
         have_vars = {str(v.get("name")) for v in block_old.get("design_variables") or [] if isinstance(v, dict)}
         extra = [v for v in block_new.get("design_variables") or [] if isinstance(v, dict) and str(v.get("name")) not in have_vars]
         if extra:
-            protocol["optimisation"] = {**block_old, "design_variables": [*(block_old.get("design_variables") or []), *extra]}
+            protocol["optimisation"] = {**protocol.get("optimisation", block_old),
+                                        "design_variables": [*(block_old.get("design_variables") or []), *extra]}
             taken = True
     new_map = [m for m in (n.get("topic_map") if isinstance(n.get("topic_map"), list) else []) if isinstance(m, dict)]
     if new_map:
@@ -542,7 +584,11 @@ def write_note(quest_root: Any) -> str:
     try:
         record = json.loads((Path(quest_root) / ".fi" / COVERED_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
+        record = {}
+    try:
+        requirements = json.loads((Path(quest_root) / ".fi" / FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        requirements = {}
     left = record.get("left") if isinstance(record, dict) else None
     left = left if isinstance(left, list) else []
     unjudged = [str(n) for n in (record.get("unjudged") if isinstance(record, dict) else None) or [] if str(n).strip()]
@@ -557,20 +603,26 @@ def write_note(quest_root: Any) -> str:
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
+    raw = requirements.get("constraints") if isinstance(requirements, dict) else None
+    constraints = [str(c).strip().rstrip(".").strip() for c in (raw if isinstance(raw, list) else [])]
+    constraints = [c for c in constraints if c]
+    if constraints:
+        parts.append(f"The topic set these requirements on the study and the paper: {'; '.join(constraints)}. For each one the "
+                     "study did not meet (check it against the run record: run time, the code files, the seed, the uncertainty "
+                     "of every number), say plainly in the limitations that it was not met and why; never leave one out "
+                     "silently, and never claim one was met unless the record shows it.")
     return " ".join(parts)
 
 
-def stop_steps(quest_id: str, gaps: list[dict[str, Any]], asked: int) -> list[str]:
-    """The card of the stop, in plain words: what the topic asks for that the plan could not include."""
+def stop_tried(gaps: list[dict[str, Any]], asked: int, problem: str = "") -> list[str]:
+    """What FI did before the plain stop (the card's "tried" lines): it asked the plan's model, and the plan still lacks
+    what the topic asks for. ``problem``: why the plan's model's last answer was not used."""
     return [
-        "Nothing was run. The topic asks for something the plan could not include, so an experiment run from it would not "
-        "answer the topic's question: " + " ".join(g["sentence"] for g in gaps),
-        (f"FI asked the plan's model {asked} time(s) to add it, and the plan still lacks it." if asked else
-         "FI did not ask the plan's model to add it (no model was available to ask)."),
-        "You do not need to write it yourself. What to do:",
-        "1. Try another model for the plan step: give `provider.node_models.plan_revise` (or `provider.model`) another model in "
-        f"the quest's config.yaml, then `python launch.py --update {quest_id}`.",
-        f"2. Or say it in words: `--resume {quest_id} --revise-plan \"<what to add, with its values>\"`.",
+        (f"asked the plan's model {asked} time(s) to add it, each time quoting why the last answer was not used"
+         if asked else "had no model to ask for it (or the plan was already settled)"),
+        *([f"the last answer was not used: {' '.join(str(problem).split())[:400]}"] if problem else []),
+        *[g["sentence"] for g in gaps[:4]],
+        "did not run a study that leaves it out: it would not answer the topic's question",
     ]
 
 

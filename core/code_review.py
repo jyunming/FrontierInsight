@@ -20,12 +20,15 @@ ends in the honest stop after the run; every other open finding is said in the p
 * A reader that is the model that wrote the code is not a second reader: nothing is asked, and ``.fi/code_review.json``
   and ``run.log`` say that the code was not read by another model.
 * What is missing or different goes to its OWN repair, not the repair of a crashed script: the code has not crashed, it
-  does not do what the plan requires. A request of its own (``agents/code_review_repair.md``) holds the topic, the plan's
-  equations (never an expected value), the findings IN FULL (each with where, what, why, fix and severity; never a
-  value) and the file the findings name (:func:`files_for`: the model's package, ``simulate.py`` or ``experiment.py``),
-  in batches of at most :data:`BATCH` findings, at most :data:`MAX_SEND_BACKS` rounds and :data:`MAX_REPAIR_CALLS`
-  requests in a quest. After a round the changed version is read again (against the findings still open, and anything
-  new); when the open high-severity findings did not drop, repairing stops (no oscillation).
+  does not do what the plan requires. Every finding is kept by a stable id (:mod:`core.code_findings`), the reader is asked
+  for every finding (no cap) ranked by effect on the reported results, and :mod:`core.finding_repair` takes the issues one
+  at a time, the ones that can change a reported result first: a test that must fail on the current code is asked for (a
+  finding it does not show is "not demonstrated" and left alone), then a repair of the function(s) involved, kept only
+  when the new test passes and nothing that passed before fails. A request of its own (``agents/code_review_repair.md``)
+  holds the topic, the plan's equations (never an expected value) and the finding IN FULL. At most
+  :data:`MAX_SEND_BACKS` passes and :data:`MAX_FINDING_CALLS` requests in a quest. After a pass the changed version is read
+  again (against the findings still open, and anything new); when the open issues that change a result did not drop,
+  repairing stops (no oscillation). A finding that says the PLAN contradicts itself is not sent to the code at all.
 * One reading per code version (:func:`version`), at most :data:`MAX_REVIEWS` in a quest, and the last of them is
   reserved for the version that will run the full study: an intermediate version never spends it. The final version is
   read, and the record says whether it was (``final_read``), the open findings per reading and whether the repairs
@@ -61,8 +64,13 @@ RESERVED_FOR_FINAL = 1
 #: read too (at most one per repair, and ``engine.exec_reflect_max_iterations`` bounds the repairs; 3 by default).
 RUN_REPAIR_READS = 3
 MAX_SEND_BACKS = 2
-BATCH = 6
-MAX_REPAIR_CALLS = 8
+#: Every model request the finding-by-finding repair may make in a quest (a failing test asked for, a repair, the other
+#: model's one rewrite), each counted on disk before it is made. Each finding has its own smaller bounds
+#: (:mod:`core.finding_repair`).
+MAX_FINDING_CALLS = 60
+#: The most findings read from one reply. The reader is asked for every finding, ranked by effect on the reported
+#: results, so this is a guard against a runaway reply and not a cap on what is reported.
+FINDING_LIMIT = 200
 #: How much code the reader is shown (whole files; the rest is said not to be shown).
 _MAX_CODE_CHARS = 60000
 IMPLEMENTED, MISSING, DIFFERENT = "implemented", "missing", "different"
@@ -189,7 +197,8 @@ def parse(reply: Any, reqs: list[dict[str, Any]], values: list[float] | None = N
         out.append({"id": req["id"], "kind": req["kind"], "text": req["text"], "headline": req["headline"],
                     "name": req.get("name", ""), "status": status, "file": _text(item.get("file"), 80),
                     "line": line if isinstance(line, int) and not isinstance(line, bool) else None,
-                    "note": _pairs.scrub(_text(item.get("note")), values)})
+                    "note": _pairs.scrub(_text(item.get("note")), values),
+                    "changes_result": _pairs._flag(item.get("changes_result"))})
     return out or None
 
 
@@ -250,7 +259,7 @@ def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | No
         return []
     headline = {_norm(r["name"]) for r in reqs if r.get("headline") and r.get("name")}
     out: list[dict[str, Any]] = []
-    for f in _pairs.findings(reply.get("findings"), limit=12):
+    for f in _pairs.findings(reply.get("findings"), limit=FINDING_LIMIT):
         f = _pairs.without_values(f, values)
         match = _WHERE_RE.search(f["where"])
         quantity = f["quantity"]
@@ -259,6 +268,7 @@ def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | No
                     "line": int(match.group(2)) if match and match.group(2) else None,
                     "note": f["why"], "fix": f["fix"], "severity": f["severity"], "name": quantity,
                     "constant": bool(f.get("constant")), "where": f["where"],
+                    "changes_result": f.get("changes_result"), "plan_conflict": bool(f.get("plan_conflict")),
                     "headline": bool(quantity) and _norm(quantity) in headline})
     return out
 
@@ -323,10 +333,6 @@ def files_for(problems: list[dict[str, Any]], code_dir: Path) -> dict[str, list[
         if rel:
             out.setdefault(rel, []).append(v)
     return out
-
-
-def batches(items: list[dict[str, Any]], size: int = BATCH) -> list[list[dict[str, Any]]]:
-    return [items[i:i + size] for i in range(0, len(items), max(1, size))]
 
 
 def findings_text(items: list[dict[str, Any]]) -> str:
@@ -455,7 +461,8 @@ def repair_problem(old: str, new: str, rel: str, *, equations: list[str], packag
 
 
 #: What a record keeps from one code version to the next (the quest-wide counters and the history of the readings).
-CARRIED = ("reviews_total", "send_backs", "repair_calls", "readings", "converged", "repaired", "read_version")
+CARRIED = ("reviews_total", "send_backs", "repair_calls", "finding_calls", "test_calls", "readings", "converged", "repaired",
+           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts", "read_problems")
 
 
 def carried(record: dict[str, Any]) -> dict[str, Any]:
@@ -484,12 +491,12 @@ def may_repair(record: dict[str, Any]) -> str:
     findings."""
     if int(record.get("send_backs") or 0) >= MAX_SEND_BACKS:
         return f"the {MAX_SEND_BACKS} rounds of repair allowed in a quest are spent"
-    if int(record.get("repair_calls") or 0) >= MAX_REPAIR_CALLS:
-        return f"the {MAX_REPAIR_CALLS} repair requests allowed in a quest are spent"
+    if int(record.get("finding_calls") or 0) >= MAX_FINDING_CALLS:
+        return f"the {MAX_FINDING_CALLS} model requests allowed for repairing findings in a quest are spent"
     if int(record.get("reviews_total") or 0) >= MAX_REVIEWS:
         return "no reading is left to read a repaired version"
     if record.get("converged") is False:
-        return "the last repair did not reduce the open high-severity findings"
+        return "the last repair did not reduce the open findings that change a result"
     return ""
 
 
@@ -507,17 +514,33 @@ def may_read(record: dict[str, Any], *, final: bool, after_run_repair: bool = Fa
     return int(record.get("reviews_total") or 0) < read_cap(final=final, after_run_repair=after_run_repair)
 
 
-def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[str, Any]]) -> None:
-    """Record a reading: the open findings and the high-severity ones in it. When it is the reading of a version a repair
-    made, it is compared with the reading before: the repairs have converged while each round reduced the open
-    high-severity findings (or, with none open, the open findings), and not when one did not."""
-    total, high = open_counts(problems)
+def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[str, Any]],
+                 code_dir: Path | None = None) -> None:
+    """Record a reading: the open findings in it (distinct issues, when ``code_dir`` is given: the id of each finding is
+    stable, :mod:`core.code_findings`) and the ones that can change a reported result. When it is the reading of a version
+    a repair made, it is compared with the reading before: the repairs have converged while each round reduced the open
+    issues that change a result (or, with none open, the open issues), and not when one did not."""
+    from . import code_findings as _issues
+
     readings = [r for r in record.get("readings") or [] if isinstance(r, dict)]
-    entry: dict[str, Any] = {"n": len(readings) + 1, "version": version_now, "open": total, "high": high}
+    n = len(readings) + 1
+    if code_dir is not None:
+        _issues.index_problems(problems, Path(code_dir))
+        _issues.update_issues(record, problems, n, version_now)
+        total = len(_issues.open_issues(record))
+        changing = len(_issues.changing_open(record))
+        high = sum(1 for i in _issues.open_issues(record) if i.get("severity") == "high")
+    else:
+        total, high = open_counts(problems)
+        changing = high
+    entry: dict[str, Any] = {"n": n, "version": version_now, "open": total, "high": high, "changing": changing}
+    if code_dir is not None:
+        entry["ids"] = [i["id"] for i in _issues.open_issues(record)]
     if record.get("repaired") and readings:
         before = readings[-1]
-        improved = high < int(before.get("high") or 0) or (
-            high == int(before.get("high") or 0) == 0 and total < int(before.get("open") or 0))
+        before_changing = int(before.get("changing", before.get("high")) or 0)
+        improved = changing < before_changing or (
+            changing == before_changing == 0 and total < int(before.get("open") or 0))
         entry["improved"] = improved
         record["converged"] = bool(improved) and record.get("converged") is not False
     record["repaired"] = False
@@ -536,9 +559,13 @@ def metrics_line(record: dict[str, Any]) -> str:
     readings = [r for r in record.get("readings") or [] if isinstance(r, dict)]
     if not readings:
         return ""
-    return ("open findings per reading: " + ", ".join(f"{r.get('open')} ({r.get('high')} high)" for r in readings)
-            + ("; the repairs converged" if record.get("converged") else
-               "; the repairs did not converge" if record.get("converged") is False else ""))
+    from . import code_findings as _issues
+
+    return ("open issues per reading: " + ", ".join(
+        f"{r.get('open')} ({r.get('changing', r.get('high'))} can change a result)" for r in readings)
+        + ("; the repairs converged" if record.get("converged") else
+           "; the repairs did not converge" if record.get("converged") is False else "")
+        + (f"; {line}" if (line := _issues.convergence_line(record)) else ""))
 
 
 def directive(items: list[dict[str, Any]]) -> str:
@@ -628,6 +655,164 @@ def in_results(name: str, result: Any) -> bool:
     return walk(result)
 
 
+def _holds_numbers(value: Any) -> bool:
+    """Whether ``value`` is a number, or a list or mapping with a number somewhere in it (a flag, null and text are not)."""
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, dict):
+        return any(_holds_numbers(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_numbers(v) for v in value)
+    return False
+
+
+def _keys_with_numbers(result: Any) -> list[str]:
+    """Every key, at any depth, whose value holds a number."""
+    out: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if _holds_numbers(v):
+                    out.append(str(k))
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return out
+
+
+#: Words that make a key the interval or uncertainty of the quantity before them (``_ci95``, ``_lo``, ``_bootstrap_95``,
+#: ``_se``); any other word after a quantity's name makes another quantity of its own (``_bias``, ``_coverage``).
+_INTERVAL_WORDS = frozenset({"ci", "lo", "hi", "low", "high", "lower", "upper", "se", "stderr", "interval", "intervals",
+                             "bound", "bounds", "bootstrap", "wilson", "student", "t", "percentile", "band"})
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.split(r"[^a-z0-9]+", re.sub(r"(?<=[a-z])(?=[A-Z])", "_", str(text)).lower()) if t]
+
+
+def _interval_remainder(key: str, stem_tokens: list[str]) -> bool:
+    """Whether ``key`` is ``stem_tokens`` followed only by interval or uncertainty words (and numbers: ``_95``)."""
+    toks = _tokens(key)
+    if toks[:len(stem_tokens)] != stem_tokens or len(toks) == len(stem_tokens):
+        return False
+    rest = toks[len(stem_tokens):]
+    return all(t in _INTERVAL_WORDS or re.fullmatch(r"ci?\d*|\d+", t) for t in rest)
+
+
+def named_in_results(name: str, result: Any) -> set[str]:
+    """The keys of the run's results (at any depth, holding a number) that are the quantity the plan calls ``name``, and its
+    intervals. Case, punctuation and underscores are ignored.
+
+    * When a key is the quantity itself (the same name, or a shorter key the plan's name is a longer form of, at least six
+      characters), those keys are it, and a key that only begins with the name goes with it only when what follows is an
+      interval or uncertainty form (``_ci95``, ``_lo``, ``_bootstrap_95``, ``_se``). Another quantity's word after the name
+      (``accuracy_bias`` beside ``accuracy``) stays.
+    * When no key is the quantity itself, a key that begins with the name stands for it when it is the one such key whose
+      remainder is not an interval form (a unit-suffixed name); with several, the one with the shortest remainder if that is
+      unique, else none. Keys that are intervals of the name go too."""
+    want = _norm(name)
+    if len(want) < 2:
+        return set()
+    keys = _keys_with_numbers(result)
+    normed = {k: _norm(k) for k in keys}
+    own = {k for k, n in normed.items() if n and (n == want or (len(n) >= 6 and want.startswith(n)))}
+    stems: list[list[str]] = []
+    if own:
+        found = set(own)
+        stems = [_tokens(k) for k in own]
+    else:
+        prefixed = [k for k, n in normed.items() if n.startswith(want) and n != want]
+        wt = _tokens(name)
+        plain = [k for k in prefixed if not _interval_remainder(k, wt)]
+        found = {k for k in prefixed if _interval_remainder(k, wt)}
+        pick = None
+        if len(plain) == 1:
+            pick = plain[0]
+        elif plain:
+            shortest = min(len(normed[k]) for k in plain)
+            ties = [k for k in plain if len(normed[k]) == shortest]
+            pick = ties[0] if len(ties) == 1 else None
+        if pick is not None:
+            found.add(pick)
+            stems = [_tokens(pick)]
+        stems.append(wt)
+    for k in keys:
+        if any(_interval_remainder(k, st) for st in stems if st):
+            found.add(k)
+    return found
+
+
+def absent_from_results(names: list[str], result: Any) -> list[str]:
+    """Of the plan's quantities ``names``, those the run's results hold no number for under any key that contains the name
+    (case, punctuation and underscores ignored). Containment, not equality: an analysis that writes ``variant_metric_c``
+    for ``metric_c`` has the quantity, and a stop must never rest on a name written another way."""
+    keys = [_norm(k) for k in _keys_with_numbers(result)]
+    out = []
+    for name in names:
+        want = _norm(name)
+        if want and not any(want in k or (len(k) >= 6 and k in want) for k in keys):
+            out.append(name)
+    return out
+
+
+_FAILURE_KEYS = frozenset({"error", "errors", "failure", "failures", "failed", "exception"})
+_FAILURE_WORDS = re.compile(r"invalid|fail|error|incomplete|abort|not[_ ]?run|no[_ ]?data", re.IGNORECASE)
+
+
+def reports_failure(result: Any) -> str:
+    """What the run's own result says about itself when it reports it did not produce its results (a key such as ``errors``
+    holding something, or a ``status`` that says invalid, failed or incomplete), else ``""``. The script's word about its
+    own failure; the engine does not guess one."""
+    found = ""
+
+    def walk(node: Any) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                n = _norm(k)
+                if n in _FAILURE_KEYS and v not in (None, False, "", [], {}, 0) and not _holds_numbers(v):  # text, not error statistics
+                    found = f"{k}: {str(v)[:120]}"
+                    return
+                if n == "status" and isinstance(v, str) and _FAILURE_WORDS.search(v):
+                    found = f"{k}: {v[:120]}"
+                    return
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return found
+
+
+#: The kinds of requirement that name one quantity of the plan (a dependent variable, a metric).
+QUANTITY_KINDS = ("dependent variable", "metric")
+
+
+def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any]]:
+    """The quantities the plan names that a second model found the final version of the code computes differently (or not
+    at all) and that the repairs did not change: ``{"name", "kind", "status", "text", "note"}``, one per name. Only a finding
+    of the version that ran (:func:`not_computed`), only one the run's results did not contradict, and only a requirement
+    that names a quantity. A problem of logic is not one (its ``name`` lists several things)."""
+    seen: dict[str, dict[str, Any]] = {}
+    for v in not_computed(quest_root, code_dir):
+        name = str(v.get("name") or "").strip()
+        if (v.get("kind") not in QUANTITY_KINDS or v.get("status") not in (DIFFERENT, MISSING) or not name
+                or v.get("contradicted") or name in seen):
+            continue
+        seen[name] = {"name": name, "kind": v.get("kind"), "status": v.get("status"), "text": str(v.get("text") or ""),
+                      "note": str(v.get("note") or "")}
+    return list(seen.values())
+
+
 def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     """After a run: of the headline requirements a reader still called missing, those the run's results do not hold
     either (the quest then stops, honestly). The ones the results do hold are recorded as a disagreement between the
@@ -641,6 +826,8 @@ def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]
         if not isinstance(v, dict) or not v.get("headline") or v.get("contradicted") or v.get("kind") == "logic":
             continue
         if in_results(str(v.get("name") or ""), result):
+            if v.get("status") == DIFFERENT:
+                continue  # computed under another definition: the results holding a value does not say the reader was wrong
             v["contradicted"] = True
             changed = True
         else:
@@ -722,45 +909,250 @@ def resolve_logic(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     return confirmed
 
 
-def write_note(quest_root: Path, code_dir: Path) -> str:
-    """For the write prompt: what the code does not compute, to be said plainly in the limitations. ``""`` when nothing."""
+#: How many findings of one kind the writer's note and the paper's block name; the rest are counted and left to the record.
+NOTE_CAP = 8
+BLOCK_CAP = 20
+
+
+def _listed(items: list[str], cap: int) -> str:
+    """``a; b; c`` for the first ``cap`` items, then how many more there are and where they are listed (never a silent cut)."""
+    out = "; ".join(items[:cap])
+    more = len(items) - cap
+    return out + (f"; and {more} more (all are listed in {RECORD.as_posix()})" if more > 0 else "")
+
+
+def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
+    """What a second model's reading of the code left unresolved on the version that ran, by kind: ``unread`` (why the
+    code was not read by another model, else ``""``), ``reread`` (the final version was changed after the reading and
+    not read again), ``not_reviewed`` (requirements the reader did not check) and ``not_reviewed_headline``, ``missing`` /
+    ``different`` (requirements not computed / computed differently from the plan), ``conflicts`` (the plan's parts
+    disagree), ``unshown`` (flagged, and no test could show the fault), ``flagged`` (flagged logic problems, still open),
+    ``stopped`` (repairs ended because a round did not reduce what is open). A finding the run's own results contradict is
+    not in it. Everything is empty for a quest with no record."""
     record = load(quest_root)
-    notes: list[str] = []
-    if record and not record.get("read_version"):
+    out: dict[str, Any] = {"unread": "", "reread": False, "not_reviewed": [], "not_reviewed_headline": False,
+                           "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False}
+    if not record:
+        return out
+    now = version(code_dir)
+    if not record.get("read_version"):
         # The code that runs was never read by another model (the reading failed, the same model was the reader, or the
-        # readings allowed are spent): the writer says so.
-        why = record.get("error") or record.get("skipped") or "no reading was made"
+        # readings allowed are spent).
+        out["unread"] = str(record.get("error") or record.get("skipped") or "no reading was made")
+    elif record["read_version"] != now:
+        out["reread"] = True
+    elif record.get("version") == now and record.get("not_reviewed"):
+        out["not_reviewed"] = [str(x) for x in record["not_reviewed"]]
+        out["not_reviewed_headline"] = bool(record.get("not_reviewed_headline"))
+    still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")]
+    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    logic = [v for v in still if v.get("kind") == "logic"]
+    left = [v for v in still if v.get("kind") != "logic"]
+    out["missing"] = [v for v in left if v.get("status") == MISSING]
+    out["different"] = [v for v in left if v.get("status") != MISSING]
+    out["conflicts"] = [v for v in logic if v.get("plan_conflict")]
+    rest = [v for v in logic if not v.get("plan_conflict")]
+    out["unshown"] = [v for v in rest if (issues.get(v.get("fid")) or {}).get("outcome") == "not demonstrated"]
+    out["flagged"] = [v for v in rest if v not in out["unshown"]]
+    out["stopped"] = record.get("converged") is False and bool(out["flagged"] or out["unshown"] or left)
+    return out
+
+
+def _words(text: Any) -> list[str]:
+    """The lower-case alphanumeric words of ``text``; case, punctuation and underscores do not matter."""
+    return re.findall(r"[a-z0-9]+", str(text).lower())
+
+
+def _names_check(finding: str, name: str) -> bool:
+    """Whether ``finding`` names the check ``name``: the check's words appear in it one after the other (``Grid_Convergence_Check``
+    is named by "the grid convergence check", not by "grid" and "check" far apart). A check with a one-word name is
+    named only when that word, as a whole word (case does not matter), is in the finding."""
+    want = _words(name)
+    if not want:
+        return False
+    if len(want) == 1 and want[0] not in (w.lower() for w in re.findall(r"\w+", str(finding))):
+        return False
+    have = _words(finding)
+    return any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
+
+
+def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[str, str]:
+    """The checks of correctness (``names``) that an OPEN finding of the second model's reading of the code concerns, as
+    ``{name: the finding in its own words}`` (no line number). A check is evidence only if the code that computes its measure
+    is not itself flagged: a check whose measure the code fakes (a closed form put where the simulation should run) passes
+    whatever the simulation does.
+
+    A flag sticks: the findings of the latest reading stay open for every later version of the code (a repair, a round of
+    the improve loop) until a newer reading, one of that later version, no longer flags the check; a version nobody has
+    read yet is not trusted more than the one that was. A finding the run's results contradict is not open, and a
+    contradiction in the plan is not a fault of the code. A finding concerns a check only when it names it
+    (:func:`_names_check`); a likeness of words is not a match. Reads the record only."""
+    if not names:
+        return {}
+    record = load(quest_root)
+    if not record:
+        return {}
+    if "problems" in record:
+        if record.get("version") == version(code_dir) and not record.get("final"):
+            return {}  # a reading in progress: the gate has not finished with this version
+        found = record["problems"]
+    else:
+        found = record.get("read_problems")  # the latest reading's findings survive a reading that failed
+    from . import code_findings as _issues
+
+    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    out: dict[str, str] = {}
+    for v in found if isinstance(found, list) else []:
+        if not isinstance(v, dict) or v.get("contradicted") or v.get("plan_conflict"):
+            continue
+        if (issues.get(v.get("fid")) or {}).get("outcome") in (_issues.FIXED, _issues.GONE):
+            continue  # a repair a test showed, or a later reading that no longer names it, settled it
+        text = _plain_text(v.get("text"))
+        for name in names:
+            if name not in out and _names_check(f"{v.get('text') or ''}", str(name)):
+                out[name] = text
+    return out
+
+
+def _where(v: dict[str, Any], *, line: bool) -> str:
+    if not v.get("file"):
+        return ""
+    return f" (in {v['file']}" + (f", line {v['line']}" if line and v.get("line") else "") + ")"
+
+
+def write_note(quest_root: Path, code_dir: Path) -> str:
+    """For the write prompt: what the code does not compute and what is still flagged, to be said plainly in the
+    limitations. ``""`` when nothing. Every kind of finding is named (none is dropped because another is present); a long
+    list is cut for the prompt's size and says how many more there are. The paper itself carries the same facts in a block
+    the engine writes (:func:`findings_block`), whatever the writer does with this note."""
+    f = open_findings(quest_root, code_dir)
+    notes: list[str] = []
+    missing, different = f["missing"], f["different"]
+    if missing or different:
+        names = _listed([f"{v['text']} ({'not computed' if v['status'] == MISSING else 'computed differently from the plan'})"
+                         for v in [*missing, *different]], NOTE_CAP)
+        notes.append("A second model compared the code with what the plan requires, and the code was sent back to be "
+                     f"repaired; these requirements are still not met: {names}. Say so plainly (in the limitations): a "
+                     "quantity listed as not computed was not computed, and do not write a value, a figure or a claim for it.")
+    if f["unread"]:
         notes.append("The code that produced these results was not compared with the plan by another model "
-                     f"({why}): say so plainly in the limitations.")
-    elif record.get("read_version") and record["read_version"] != version(code_dir):
+                     f"({f['unread']}): say so plainly in the limitations.")
+    elif f["reread"]:
         notes.append("The code was read against the plan by a second model, but it was changed afterwards and the final "
                      "version was not read again by another model: say so in the limitations.")
-    elif record.get("version") == version(code_dir) and record.get("not_reviewed"):
-        names = "; ".join(str(x) for x in record["not_reviewed"][:8])
+    elif f["not_reviewed"]:
+        names = _listed(f["not_reviewed"], NOTE_CAP)
         notes.append("A second model was asked to compare the code with the plan, and did not check these requirements: "
                      f"{names}. Say plainly (in the limitations) that they were not checked against the code by another model"
-                     + (", the study's main quantity among them." if record.get("not_reviewed_headline") else "."))
-    still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")]
-    flagged = [v for v in still if v.get("kind") == "logic"]
-    left = [v for v in still if v.get("kind") != "logic"]
-    if flagged:
-        listed = "; ".join(f"{v['text']}" + (f" (in {v['file']}" + (f", line {v['line']}" if v.get("line") else "") + ")"
-                                             if v.get("file") else "") + f" [{v.get('severity', 'medium')}]"
-                           for v in flagged[:8])
+                     + (", the study's main quantity among them." if f["not_reviewed_headline"] else "."))
+    if f["conflicts"]:
+        listed = _listed([f"{v['text']}" + (f" ({v['note']})" if v.get("note") else "") for v in f["conflicts"]], NOTE_CAP)
+        notes.append("A second model found that the PLAN contradicts itself: two of its parts define one thing differently "
+                     f"({listed}). This is not a fault of the code. The plan's model was asked to make the plan consistent "
+                     "and the code follows the plan as it stands now: say plainly in the limitations that the plan's own "
+                     "definitions disagreed, and which one the study used.")
+    if f["unshown"]:
+        listed = _listed([f"{v['text']}" for v in f["unshown"]], NOTE_CAP)
+        notes.append("A second model flagged these, and FI could not show any of them by a test that fails on the code, so "
+                     f"the code was left as it is: {listed}. Say plainly in the limitations that they are unconfirmed.")
+    if f["flagged"]:
+        listed = _listed([f"{v['text']}{_where(v, line=True)} [{v.get('severity', 'medium')}]" for v in f["flagged"]], NOTE_CAP)
         notes.append("A second model read how the code computes what the plan says, and the code was sent back to be "
                      f"repaired; it still flags: {listed}. The run's results cannot settle this, and the reader can be wrong: "
                      "say plainly in the limitations that a second model flagged these and they were not resolved, and do "
                      "not present the quantities they concern as established.")
-    if record.get("converged") is False and (flagged or [v for v in still if v.get("kind") != "logic"]):
+    if f["stopped"]:
         notes.append("The repairs of the second model's findings were stopped because a round did not reduce the open "
-                     "high-severity findings; what is open is listed here as it stands.")
-    if not left:
-        return " ".join(notes)
-    names = "; ".join(f"{v['text']} ({'not computed' if v['status'] == MISSING else 'computed differently from the plan'})"
-                      for v in left[:8])
-    return ("A second model compared the code with what the plan requires, and the code was sent back to be repaired; "
-            f"these requirements are still not met: {names}. Say so plainly (in the limitations): a quantity listed as "
-            "not computed was not computed, and do not write a value, a figure or a claim for it.")
+                     "findings that change a result; what is open is listed here as it stands.")
+    return " ".join(notes)
+
+
+# ---- the paper's block ---------------------------------------------------------------------------------------------
+
+
+def _plain_text(text: Any) -> str:
+    """One finding's words for the paper: one line, and nothing that could open or close an HTML comment (the engine's
+    own block is found by its markers)."""
+    out = re.sub(r"\s+", " ", str(text or "")).strip()
+    out = out.replace("<!--", "").replace("-->", "")
+    out = out[len("the result reports "):] if out.startswith("the result reports ") else out
+    return out.rstrip(" .;")
+
+
+def findings_block(quest_root: Path, code_dir: Path) -> str:
+    """The paragraph the ENGINE puts into the paper's limitations: what the second model's reading of the code left
+    unresolved on the version that ran, in plain words, from the same record the writer's note (:func:`write_note`) is built
+    from. ``""`` when nothing is open (no record, or every requirement met and no problem flagged). The writer never writes
+    it: whatever it put between the block's markers is removed and this goes in after it has finished
+    (``core/disclosure.py:mark_findings``), so the paper states the open findings even when the writer left them out of its
+    own limitations.
+
+    Its findings are the reader's own sentences, which carry numbers (a tolerance, a size). The number checks
+    (``core/numeric_oracle.py``, ``core/number_provenance.py``, ``core/stat_claims.py``) hold every number in the paper to the
+    run's results, so those numbers must not count as claims of the paper's. They are left out the way every other
+    engine-written block is, but by a checksum of this text in the block's opening marker (``disclosure.strip_for_checks``)
+    and not by a grammar: the block is left out only while it is exactly what this function returned, so it cannot carry a
+    claim of anyone's. No line number is printed (a place in the code is the record's, not the paper's)."""
+    f = open_findings(quest_root, code_dir)
+
+    def names(items: list[dict[str, Any]], *, severity: bool = False) -> list[str]:
+        return [_plain_text(v.get("text")) + _where(v, line=False) + (f" [{v.get('severity') or 'medium'}]" if severity else "")
+                for v in items]
+
+    points: list[str] = []
+    if f["missing"]:
+        points.append("**Not computed.** The plan asks for these quantities and the second model found that the code does "
+                      "not compute them, so no value for them is established by this study: "
+                      f"{_listed(names(f['missing']), BLOCK_CAP)}.")
+    if f["different"]:
+        points.append("**Not as the plan defines them.** These are in the code, but done differently from the plan, so what "
+                      f"they show may not be what the plan meant: {_listed(names(f['different']), BLOCK_CAP)}.")
+    if f["flagged"]:
+        points.append("**Problems still flagged in how the results are computed** (how serious, as the second model rated "
+                      "it). The repairs did not settle them, the run's results cannot show whether they are real, and the "
+                      "quantities they concern should not be taken as established: "
+                      f"{_listed(names(f['flagged'], severity=True), BLOCK_CAP)}.")
+    if f["unshown"]:
+        points.append("**Flagged, not confirmed.** No test that fails on the code could be written for these, so the code "
+                      f"was left as it is and the points remain open: {_listed(names(f['unshown']), BLOCK_CAP)}.")
+    if f["conflicts"]:
+        points.append("**The plan disagrees with itself.** Two of its parts define one thing differently; the study followed "
+                      f"the plan as it stood at the end: {_listed(names(f['conflicts']), BLOCK_CAP)}.")
+    if f["unread"]:
+        points.append("**The code was not compared with the plan by another model** "
+                      f"({_plain_text(f['unread'])}).")
+    elif f["reread"]:
+        points.append("**The final code was not read again.** A second model read the code against the plan, but the code "
+                      "was changed afterwards and the version that produced these results was not read by another model.")
+    elif f["not_reviewed"]:
+        points.append("**Not checked against the code.** The second model did not check these requirements"
+                      + (" (the study's main quantity among them)" if f["not_reviewed_headline"] else "")
+                      + f": {_listed([_plain_text(x) for x in f['not_reviewed']], BLOCK_CAP)}.")
+    if f["stopped"]:
+        points.append("**Repairs stopped.** They ended because a round did not reduce the open findings that change a "
+                      "result, so what is listed above is open as it stands.")
+    if not points:
+        return ""
+    return ("**Open points in the code that produced these results.** A second model read the code against the plan. "
+            "These points were still open on the version that ran. The second model can be wrong, and none of them was "
+            f"settled by the run; the full record is in `{RECORD.as_posix()}`.\n\n"
+            + "\n\n".join(f"- {p}" for p in points))
+
+
+def review_block(quest_root: Path, code_dir: Path) -> str:
+    """For the paper's reviewer: the same open points as :func:`findings_block`, with how to weigh them (``""`` when none
+    are open). The reviewer reads the paper, in which the engine's block states them, and this tells it what they mean for
+    its judgement."""
+    text = findings_block(quest_root, code_dir)
+    if not text:
+        return ""
+    return ("\n\n## Open points in the code (a second model's reading, not resolved)\n"
+            f"{text}\n\n"
+            "A claim, a figure or a number in the paper that rests on a quantity named here must not be presented as "
+            "established: treat it as a problem to report (a weakness, and a required fix when the paper states it as fact). "
+            "A quantity listed as not computed must not have a value anywhere in the paper. The block above is the engine's "
+            "own text from its records, also printed in the paper's limitations; it is not the writer's and cannot be "
+            "edited, so do not ask for it to be changed.")
 
 
 def plain_lines(record: dict[str, Any]) -> str:

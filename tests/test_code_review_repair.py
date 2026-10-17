@@ -13,9 +13,12 @@ from typing import Any, Callable
 import pytest
 
 from core import code_review as cr
+from core import finding_repair as fr
 from tests.test_code_review import (
-    ANALYSIS, DESIGN, REPAIR_HEAD, SIM_FULL, STATE, WITH_PLAN, _engine,
+    ANALYSIS, DESIGN, REPAIR_HEAD, SIM_FULL, STATE, WITH_PLAN, _engine, code_model_answer,
 )
+
+pytestmark = pytest.mark.usefixtures("this_python")
 
 MODEL = "# E1\ndef quality(m, w, c):\n    return m * w / c\n"
 DESIGN_WITH_HEADLINE = DESIGN
@@ -23,8 +26,19 @@ HEADLINE_FINDING = {"where": "simulate.py:2", "what": "quality_factor ignores th
                     "fix": "divide by cell['c']", "severity": "high", "quantity": "quality_factor"}
 
 
-def _fence(rel: str, text: str) -> str:
-    return f"```python\n# file: {rel}\n{text}```"
+def attempt(n: int) -> str:
+    """``simulate.py`` changed inside its function: the n-th attempt (a repair of one function keeps only its body)."""
+    return f"# E1\ndef run_cell(cell):\n    # attempt {n}\n    return {{'quality': 1.0}}\n"
+
+
+class _Repairs:
+    """``owner.repaired`` for a fake that repairs by ``repair(file, request number)``."""
+
+    def __init__(self, repair: Callable[[str, int], str | None] | None) -> None:
+        self.repair = repair
+
+    def get(self, rel: str) -> Any:
+        return None if self.repair is None else (lambda n: self.repair(rel, n))  # type: ignore[misc]
 
 
 class _Script:
@@ -36,14 +50,15 @@ class _Script:
         self.decide, self.repair = decide, repair
         self.prompts: list[str] = []
         self.repair_prompts: list[str] = []
+        self.test_prompts: list[str] = []
+        self.repaired = _Repairs(repair)
+        self.undemonstrated: set[str] = set()
 
     async def chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
-        if prompt.lstrip().startswith(REPAIR_HEAD):
-            self.repair_prompts.append(prompt)
-            rel = re.search(r"^### (\S+)", prompt, re.M).group(1)  # type: ignore[union-attr]
-            text = self.repair(rel, len(self.repair_prompts)) if self.repair else None
-            return "" if text is None else _fence(rel, text)
+        answered = code_model_answer(self, prompt)
+        if answered is not None:
+            return answered
         assert prompt.lstrip().startswith("# Code Against the Plan"), prompt[:80]
         self.prompts.append(prompt)
         reqs = json.loads(prompt.split("```json", 1)[1].split("```", 1)[0])
@@ -120,28 +135,35 @@ async def test_a_finding_that_names_the_model_s_package_rewrites_that_file_and_n
 
 
 @pytest.mark.asyncio
-async def test_findings_are_sent_in_full_in_batches_and_every_request_opens_with_what_is_wrong(tmp_path: Path) -> None:
+async def test_findings_are_taken_one_at_a_time_each_in_full_with_its_own_test_and_the_ones_that_change_a_result_first(
+        tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    many = [{"where": f"simulate.py:{i + 2}", "what": f"finding number {i} " + "w" * 120,
-             "why": f"reason {i} " + "y" * 200, "fix": f"remedy {i} " + "z" * 200, "severity": "medium"} for i in range(12)]
-    script = _Script(lambda n, code: many if n == 1 else [], lambda rel, n: SIM_FULL + f"# repaired {n}\n")
+    kinds = [("minor", False, "medium"), ("changes", True, "medium"), ("high", True, "high")]
+    many = [{"where": "simulate.py:2", "what": f"finding {name} " + "w" * 120, "why": f"reason {name} " + "y" * 200,
+             "fix": f"remedy {name} " + "z" * 200, "severity": sev, "quantity": f"q_{name}", "changes_result": changes}
+            for name, changes, sev in kinds]
+    script = _Script(lambda n, code: many if n == 1 else [], lambda rel, n: attempt(n))
     engine._client = script
     assert await engine._code_review_gate(WITH_PLAN) is None
-    assert len(script.repair_prompts) == 2, "12 findings in batches of six: two requests, each its own bounded repair"
+    assert len(script.test_prompts) == 3 and len(script.repair_prompts) == 3, "each finding: one test, one repair"
     for prompt in script.repair_prompts:
         assert prompt.lstrip().startswith(REPAIR_HEAD) and "has NOT crashed" in prompt.split("# Topic")[0]
-        assert len(prompt) > 2500
-    together = "\n".join(script.repair_prompts)
-    for i in range(12):
-        for part in (f"finding number {i} " + "w" * 120, f"reason {i} " + "y" * 200, f"remedy {i} " + "z" * 200):
-            assert part in together, f"finding {i} is sent whole"
-    first = script.repair_prompts[0]
-    assert first.count("What is wrong:") == 6 and "How to fix it:" in first and "Why it is wrong against the plan:" in first
-    assert "has NOT crashed" in first and "[medium]" in first
-    # The second batch sees the first batch's change: the file is read again from disk for each request.
-    assert "# repaired 1" in script.repair_prompts[1]
+        assert prompt.count("What is wrong:") == 1, "one finding at a time"
+        assert "How to fix it:" in prompt and "Why it is wrong against the plan:" in prompt
+    for prompt in script.test_prompts:
+        assert prompt.lstrip().startswith(fr.TEST_HEAD) and prompt.count("What is wrong:") == 1
+    # The ones that can change a result come first (the high one, then the other), the one that changes nothing last.
+    order = [next(n for n, *_ in kinds if f"finding {n} " in p) for p in script.repair_prompts]
+    assert order == ["high", "changes", "minor"]
+    for name, *_ in kinds:
+        assert f"finding {name} " + "w" * 120 in "\n".join(script.repair_prompts), "the finding is sent whole"
+        assert f"remedy {name} " + "z" * 200 in "\n".join(script.repair_prompts)
+    # The second sees the first's change: the file is read again from disk for each request.
+    assert "# attempt 1" in script.repair_prompts[1]
     record = cr.load(engine.quest_root)
-    assert record["repair_calls"] == 2 and record["send_backs"] == 1
+    assert record["repair_calls"] == 3 and record["test_calls"] == 3 and record["finding_calls"] == 6
+    assert sorted(i["outcome"] for i in record["issues"].values()) == ["fixed"] * 3
+    assert {i["fixed_by"] for i in record["issues"].values()}, "the record says which model fixed each"
 
 
 @pytest.mark.asyncio
@@ -164,11 +186,12 @@ async def test_the_repair_request_names_the_topic_and_the_equations_but_never_an
 async def test_a_repair_that_does_not_reduce_the_open_high_findings_stops_the_repairs_and_leaves_the_budget_unspent(
         tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    script = _Script(lambda n, code: [HEADLINE_FINDING], lambda rel, n: SIM_FULL + f"# attempt {n}\n")
+    script = _Script(lambda n, code: [HEADLINE_FINDING], lambda rel, n: attempt(n))
     engine._client = script
     assert await engine._code_review_gate(WITH_PLAN) is None
     record = cr.load(engine.quest_root)
     assert len(script.prompts) == 2 and len(script.repair_prompts) == 1, "read, repaired once, read again, and no second repair"
+    assert len(script.test_prompts) == 1, "the finding was shown by a test before it was repaired"
     assert [(r["open"], r["high"]) for r in record["readings"]] == [(1, 1), (1, 1)]
     assert record["converged"] is False and record["final"] is True
     assert record["send_backs"] == 1 < cr.MAX_SEND_BACKS and record["reviews_total"] == 2 < cr.MAX_REVIEWS
@@ -184,18 +207,19 @@ async def test_a_repair_that_does_not_reduce_the_open_high_findings_stops_the_re
 @pytest.mark.asyncio
 async def test_repairs_that_keep_reducing_the_findings_go_on_up_to_their_bound(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    three = [{**HEADLINE_FINDING, "what": f"fault {i}", "severity": "high", "quantity": "quality_factor"} for i in range(3)]
+    three = [{**HEADLINE_FINDING, "what": f"fault {i}", "severity": "high", "quantity": f"quantity_{i}"} for i in range(3)]
 
     def decide(n: int, code: str) -> list[dict[str, Any]]:
         return three[: max(0, 3 - code.count("# attempt"))]
 
-    script = _Script(decide, lambda rel, n: SIM_FULL + "".join(f"# attempt {i}\n" for i in range(n)))
+    script = _Script(decide, lambda rel, n: attempt(n))
     engine._client = script
     await engine._code_review_gate(WITH_PLAN)
     record = cr.load(engine.quest_root)
     assert [r["high"] for r in record["readings"]] == [3, 2], "the third reading is the reserved one: not made by this call"
     assert record["converged"] is True and record["send_backs"] == 2 == cr.MAX_SEND_BACKS, "bounded at two rounds"
-    assert len(script.repair_prompts) == 2 and record["reviews_total"] == cr.MAX_REVIEWS - cr.RESERVED_FOR_FINAL
+    assert len(script.repair_prompts) == 3 + 2, "three findings in the first pass, the two still flagged in the second"
+    assert record["reviews_total"] == cr.MAX_REVIEWS - cr.RESERVED_FOR_FINAL
 
 
 # --- the last reading is for the version that will run --------------------------------------------------------------------
@@ -204,22 +228,22 @@ async def test_repairs_that_keep_reducing_the_findings_go_on_up_to_their_bound(t
 @pytest.mark.asyncio
 async def test_the_final_version_is_always_read_even_after_repairs_used_the_other_readings(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    three = [{**HEADLINE_FINDING, "what": f"fault {i}", "quantity": "quality_factor"} for i in range(3)]
+    three = [{**HEADLINE_FINDING, "what": f"fault {i}", "quantity": f"quantity_{i}"} for i in range(3)]
 
     def decide(n: int, code: str) -> list[dict[str, Any]]:
         return three[: max(0, 3 - code.count("# attempt"))]
 
-    script = _Script(decide, lambda rel, n: SIM_FULL + "".join(f"# attempt {i}\n" for i in range(n)))
+    script = _Script(decide, lambda rel, n: attempt(n))
     engine._client = script
     await engine._code_review_gate(WITH_PLAN)
     # Two intermediate readings were made; the repaired version after the second is not read by this early call.
     assert len(script.prompts) == cr.MAX_REVIEWS - 1
     assert cr.load(engine.quest_root)["final_read"] is False
     # An oracle or equation repair may change it again; whatever version will run is read with the reserved reading.
-    (engine.quest_root / "code" / "simulate.py").write_text(SIM_FULL + "# attempt 0\n# attempt 1\n# gate\n", encoding="utf-8")
+    (engine.quest_root / "code" / "simulate.py").write_text(attempt(1) + "# gate\n", encoding="utf-8")
     assert await engine._code_review_gate(WITH_PLAN, final=True) is None
     record = cr.load(engine.quest_root)
-    assert len(script.prompts) == cr.MAX_REVIEWS and len(script.repair_prompts) == 2, "no repair of a version nobody reads"
+    assert len(script.prompts) == cr.MAX_REVIEWS and len(script.repair_prompts) == 5, "no repair of a version nobody reads"
     assert record["final_read"] is True and record["read_version"] == cr.version(engine.quest_root / "code")
 
 

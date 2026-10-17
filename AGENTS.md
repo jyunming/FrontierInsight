@@ -121,6 +121,30 @@ merge requirements for you).
 - **Re-review after applying that review's fixes, before opening.** A fix for one finding can silently introduce or miss a new bug — a construction site the first fix didn't cover, a fix that only half-applies. Once every finding from the first pass is addressed, run a second, targeted pass that checks each changed file specifically against the finding it was meant to fix (a full fresh review is not required, but skipping this step is not an option). Applying a suggested fix is not the same claim as verifying the fix is correct.
 - **Keep `dev/registry.md` current** in the same PR that adds, splits, or renames a module-level responsibility.
 
+## Splitting work for small, fast models
+
+Many fixes are small and mechanical. A coding agent that delegates work can hand those to a small, fast model (a
+Haiku-class model) and run several at once, keeping a larger model for judgment calls, the engine's core flow in
+`core/engine.py`, and changes that span modules. This works only when each task is small and fully specified.
+
+- **One task, one place.** One file and one function where possible, at most the file plus its test file (and one
+  named line elsewhere). Give each task its own git worktree and branch, created from the current branch head, so no
+  two agents edit the same file.
+- **Say everything the model needs.** The exact location (file, function, approximate line), the real failure it
+  fixes (a concrete input and what goes wrong), the rule to implement in plain words, what must NOT change, the tests
+  to add (including one that fails on the old code), the exact test command, and the commit message.
+- **Name the tests of the callers too.** List not only the changed module's test file but the test files of every
+  module that calls the changed function (find them with grep). A change that passes its own tests can break a
+  consumer: a filter that hid a quantity's name from model input also hid the engine's own repair instruction, and
+  only another module's tests caught it.
+- **Pass means the whole file passes.** The task must say: run every listed test file in full, paste the final
+  summary line, and treat any failure as "not done". Report anything done beyond the spec instead of doing it quietly.
+- **Do not use `git stash`** in a task (the stash stack is shared across worktrees and sessions); to run a test on
+  the old code, copy the file aside and restore it.
+- **Verify before merging.** Read each diff, rerun the listed test files yourself, and cherry-pick only what passes.
+  Reject a change whose rule is riskier than the problem it fixes (for example a rule that removes a loophole but
+  stops honest runs). Run the full suite before any evaluation round or PR, whatever the small tasks reported.
+
 ## Tests
 
 `tests/test_config.py` covers the YAML schema and tilde expansion. `tests/test_execution.py` covers `VenvExecutor` (creates a real venv — slow). `tests/test_engine_smoke.py` runs the full DAG with a fake LLM, real venv, real matplotlib install, real subprocess — a regression detector for the engine plumbing. `tests/test_engine_helpers.py` is the unit-test workhorse for the engine resolver / routing helpers (128+ cases). `tests/test_fleet.py` runs two engines concurrently. `tests/test_knowledge.py` covers source adapters, dedup, router-LLM happy/failure paths, local-paper load + pin, PDF magic-bytes check + login-wall rejection, structured-ingest helpers (spine / header / topic event), external-ref spine writes. `tests/test_knowledge_writeback.py` verifies the cross-quest memory write-back call shape and the accept-gate. `tests/test_docker_executor.py` mocks docker-py for unit tests and gates real-daemon integration tests on `info["OSType"] == "linux"` so Windows-mode daemons skip cleanly. Dataset adapters: `tests/test_dataset_adapters.py` (WorldBank registry, country/indicator extraction, table rendering) and `tests/test_wikipedia_adapter.py` (opensearch + summary fetch). VSCode extension: `tests/test_vscode_extension_typescript.py` (tsc + vsce package round-trip) and `tests/test_vscode_extension_icon.py` (the 128×128 RGBA contract + README references). Per-PM-command modules have their own files (`tests/test_{digest,portfolio,critique,proposal}.py`). **Tests do not call real LLM APIs**; introduce new tests with `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` (or `Knowledge.asearch`) to keep that property.

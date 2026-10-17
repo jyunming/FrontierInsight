@@ -38,11 +38,12 @@ _NODE_STAGE = {
     "design": "design", "design_self_critique": "design", "design_review": "design",
     "implement_outline": "code", "implement": "code", "implement_body": "code", "implement_function": "code",
     "implement_function_repair": "code", "implement_module_repair": "code", "code_review_repair": "code",
-    "code_review": "code", "oracle_review.code": "code",
+    "code_review": "code", "oracle_review.code": "code", "code_review.repair": "code", "oracle_review.code.repair": "code",
     "oracle_review.topic": "plan",
     "execute_reflect": "run", "improve": "run",
     "analyze": "analysis", "cross_check": "analysis",
-    "write": "paper", "figures": "paper", "claim_check": "paper",
+    "write": "paper", "figures": "paper", "claim_check": "paper", "citation_check": "paper",
+    "oracle_review.citations": "paper",
     "review": "review",
 }
 #: The steps that write a stage's work, and the steps that read it (the step a person routes with
@@ -54,7 +55,7 @@ _WRITERS = {"plan": ("plan", "plan_revise"), "checks": ("implement_oracle",), "d
             "review": ("review",)}
 _READERS = {"plan": ("oracle_review.topic",), "checks": ("oracle_review", "oracle_recompute"),
             "design": ("design_review", "design_self_critique"), "code": ("code_review", "oracle_review.code"),
-            "analysis": ("cross_check",), "paper": ("claim_check",)}
+            "analysis": ("cross_check",), "paper": ("claim_check", "citation_check", "oracle_review.citations")}
 #: A stage's step to name when a person asks for another model to write (or read) it.
 _KEY = {"plan": "plan", "checks": "oracle_review", "design": "design", "code": "implement", "run": "execute_reflect",
         "analysis": "analyze", "paper": "write", "review": "review"}
@@ -169,6 +170,7 @@ class _Quest:
         self.function_steps = _dict(_json(fi / "function_steps.json"))
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
+        self.pilot = _dict(_json(fi / "pilot_check.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.pause = _dict(_json(fi / "pause.json"))
@@ -176,6 +178,7 @@ class _Quest:
         self.stuck = _dict(_json(root / "needs" / "STUCK.json"))
         self.critique = [x for x in _list(_json(root / "needs" / "DESIGN_CRITIQUE.json")) if isinstance(x, dict)]
         self.oracle_check = _dict(_json(root / "needs" / "ORACLE_CHECK.json"))
+        self.result_check = _dict(_json(root / "needs" / "RESULT_CHECK.json"))
         self.evidence = _dict(_json(root / "needs" / "EVIDENCE.json"))
         self.summary = _dict(_json(root / "frontier_insight_summary.json"))
         self.numeric_audit = _dict(_json(root / "paper" / "numeric_audit.json"))
@@ -287,8 +290,14 @@ def _code_problems(q: _Quest) -> list[dict[str, str]]:
     cr = q.code_review
     reviewer = str(cr.get("reviewer") or "a second model")
     final = bool(cr.get("final"))
+    taken_out = {str(c.get("quantity")) for c in map(_dict, _list(q.result_check.get("checks"))) if c.get("quantity")}
     for p in _list(cr.get("problems")):
         p = _dict(p)
+        if p.get("kind") in ("dependent variable", "metric") and str(p.get("name") or "") in taken_out:
+            out.append(_problem("code", f"the plan's {p.get('kind')} '{_one(p.get('text'), 100)}' is "
+                                f"{p.get('status') or 'missing'} in the code; the paper leaves it out",
+                                f"{reviewer} (reads the code)", "left out", "needs/RESULT_CHECK.json"))
+            continue
         if p.get("kind") == "logic":
             where = f" ({p['where']})" if p.get("where") else ""
             out.append(_problem("code", f"{_one(p.get('text'), 140)}{where} [{p.get('severity') or 'medium'}]",
@@ -364,8 +373,20 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
     return out
 
 
+def _flagged_check_problems(q: _Quest) -> list[dict[str, str]]:
+    """The known-answer checks that passed but that a second model's reading of the code flags as computed by flagged code:
+    not shown, so they do not count as evidence (``core/code_review.py:flagged_checks``)."""
+    from . import code_review as _cr
+    from . import oracle_check as _oc
+
+    names = [str(j["name"]) for j in _oc.last_judged(q.oracle_check)]
+    return [_problem("run", f"the check {n!r} is {_oc.not_shown_words(text)}", "a second model reading the code", "not fixed",
+                     ".fi/code_review.json")
+            for n, text in _cr.flagged_checks(q.root, q.root / "code", names).items()]
+
+
 def _run_problems(q: _Quest) -> list[dict[str, str]]:
-    out = _oracle_problems(q)
+    out = [*_oracle_problems(q), *_flagged_check_problems(q)]
     crashes = q.decisions("execute_reflect")
     retries = [d for d in crashes if str(d.get("chosen")) == "retry"]
     ended_ok = bool(crashes) and str(crashes[-1].get("chosen")) == "proceed"
@@ -380,11 +401,33 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("run", _one((_list(first.get("problems")) or ["the run did not report what the protocol fixed"])[0], 200),
                             "FI's run-record check", "fixed" if last in ("ok", "pass", "not_applicable") else "not fixed",
                             f".fi/audit.jsonl seq {first.get('seq')}"))
+    pilot = q.pilot
+    if _list(pilot.get("problems")):
+        out.append(_problem("run", _one(str(_list(pilot["problems"])[0]), 200), "FI's pilot check",
+                            "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
     if stop and not any(p["found_by"] == "FI's run-record check" for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",
                             "FI's run-record check", "not fixed", ".fi/run_manifest_stop.json"))
     return out
+
+
+def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
+    """What the pilot before the full run showed and how many repairs it caused, or ``None`` when no pilot ran."""
+    p = q.pilot
+    if not p or not p.get("outcome"):
+        return None
+    repairs = _int(p.get("repairs"))
+    trials, settings = _int(p.get("trials")), _int(p.get("settings"))
+    read = f"{trials} trial(s) at {settings} setting(s) were read before the full run"
+    if p["outcome"] == "passed":
+        said = f"{read}; nothing was wrong" + (f" once the simulation was repaired" if repairs else "")
+    elif p["outcome"] == "stopped":
+        said = f"{read}; they showed the simulation does not measure what the protocol names, and its repairs did not remove it"
+    else:
+        said = f"{read}; they showed the simulation does not measure what the protocol names, and it was sent back to be repaired"
+    return {"outcome": p["outcome"], "trials": trials, "settings": settings, "repairs": repairs,
+            "problems": [str(x) for x in _list(p.get("problems"))], "says": said}
 
 
 def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
@@ -414,6 +457,29 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
+    return out
+
+
+def _citations(q: _Quest) -> dict[str, Any] | None:
+    """The citation check's ledger of the delivered paper (``paper/citations.json``): every citation with the passage that
+    backs it or what was done instead, and the counts. ``None`` when the check did not run."""
+    data = _json(q.root / "paper" / "citations.json")
+    return data if isinstance(data, dict) and isinstance(data.get("citations"), list) else None
+
+
+def _citation_problems(q: _Quest) -> list[dict[str, str]]:
+    """Each citation the retrieved text did not support: found by the citation reader, fixed by FI."""
+    data = _citations(q)
+    if not data:
+        return []
+    reader = str(data.get("reader") or "") or "the citation reader"
+    out: list[dict[str, str]] = []
+    for r in map(_dict, _list(data.get("citations"))):
+        if r.get("status") == "supported" or str(r.get("action") or "").startswith("added"):
+            continue
+        fixed = r.get("status") != "unchecked"
+        out.append(_problem("paper", f"[{r.get('label')}] {_one(r.get('sentence'), 90)}: {_one(r.get('problem'), 140)}",
+                            f"{reader} (citation check)", "fixed" if fixed else "not fixed", "paper/CITATIONS.md"))
     return out
 
 
@@ -782,7 +848,54 @@ def _code_metrics(q: _Quest) -> dict[str, Any]:
             "open_high_per_reading": [_int(r.get("high")) for r in readings],
             "repairs_converged": cr.get("converged") if isinstance(cr.get("converged"), bool) else None,
             "repair_requests": _int(cr.get("repair_calls")), "repair_rounds": _int(cr.get("send_backs")),
-            "repairs_stopped": str(cr.get("repairs_stopped") or "")}
+            "repairs_stopped": str(cr.get("repairs_stopped") or ""),
+            "issues": _issue_rows(cr), "issue_summary": _issue_summary(cr),
+            "open_changing_per_reading": [_int(r.get("changing", r.get("high"))) for r in readings]}
+
+
+def _issue_rows(cr: dict[str, Any]) -> list[dict[str, Any]]:
+    """One row per issue of the code reader (a stable id; :mod:`core.code_findings`): what it concerns, whether it can change
+    a reported result, whether a failing test showed it, whether and by which model it was repaired, and whether it is
+    still open after the last reading."""
+    from . import code_findings as _issues
+
+    rows = []
+    for issue in _issues.ranked(cr, only_open=False):
+        outcome = str(issue.get("outcome") or "")
+        readings = [r for r in _list(issue.get("readings")) if isinstance(r, dict)]
+        still = bool(readings) and readings[-1].get("status") == "open" and outcome != _issues.FIXED
+        rows.append({
+            "id": str(issue.get("id") or ""), "what": _one(issue.get("text"), 110),
+            "where": " ".join(x for x in (str(issue.get("file") or ""), str(issue.get("function") or "")) if x),
+            "changes_result": bool(issue.get("changes_result")),
+            "demonstrated": issue.get("demonstrated") if isinstance(issue.get("demonstrated"), bool) else None,
+            "repaired": outcome == _issues.FIXED, "repaired_by": str(issue.get("fixed_by") or ""),
+            "open": still, "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
+            "reason": _one(issue.get("reason"), 140), "seen_in": len(readings)})
+    return rows
+
+
+def _issue_summary(cr: dict[str, Any]) -> dict[str, Any]:
+    from . import code_findings as _issues
+
+    summary = _issues.summary(cr)
+    return {**summary, "line": _issues.convergence_line(cr)}
+
+
+def _left_out_of_paper(q: _Quest) -> list[dict[str, Any]]:
+    """The quantities FI took out of the results the paper may use, and why (``needs/RESULT_CHECK.json``): one entry per
+    quantity, with the names it was found under in the results."""
+    out: list[dict[str, Any]] = []
+    record = q.result_check
+    named = {str(k) for c in map(_dict, _list(record.get("checks"))) for k in _list(c.get("keys"))}
+    for c in map(_dict, _list(record.get("checks"))):
+        if c.get("quantity"):
+            out.append({"quantity": str(c["quantity"]), "why": _one(c.get("note"), 300),
+                        "names_in_results": [str(k) for k in _list(c.get("keys"))]})
+    rest = [str(k) for k in _list(record.get("removed_quantities")) if str(k) not in named]
+    if rest:
+        out.append({"quantity": ", ".join(rest[:6]), "why": _one(record.get("note"), 300), "names_in_results": rest})
+    return out
 
 
 def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, Any]:
@@ -800,7 +913,8 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
             running = False
     started = _run_started(q)
     problems: list[dict[str, str]] = [*_plan_problems(q), *_checks_problems(q), *_design_problems(q), *_code_problems(q),
-                                      *_run_problems(q), *_analysis_problems(q), *_paper_problems(q), *_review_problems(q),
+                                      *_run_problems(q), *_analysis_problems(q), *_paper_problems(q), *_citation_problems(q),
+                                      *_review_problems(q),
                                       *_call_problems(q)]
     seconds = _durations(q.audit)
     stages: dict[str, dict[str, Any]] = {}
@@ -834,6 +948,9 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "schema": SCHEMA, "written_at": _stamp(time.time()), "run_started_at": _stamp(started), "running": bool(running),
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
+        "pilot": _pilot_summary(q),
+        "citations": _citations(q),
+        "left_out_of_paper": _left_out_of_paper(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
                      "left_out": totals["left_out"],
@@ -856,8 +973,52 @@ def _span(seconds: int | None) -> str:
     return f"{h}h {m:02d}m" if h else (f"{m}m {s:02d}s" if m else f"{s}s")
 
 
+def _issue_lines(code: dict[str, Any]) -> list[str]:
+    """The code reader's findings by stable id: shown by a test or not, repaired and by which model, still open and whether
+    it changes a result. The convergence statement counts the issues a test showed to change a result, not findings per
+    reading (the same issue comes back reworded)."""
+    summary = code.get("issue_summary") or {}
+    lines = ["", "### Findings of the code reader, by id", ""]
+    if summary.get("line"):
+        lines += [summary["line"] + ".", ""]
+    models = summary.get("fixed_by") or {}
+    if models:
+        lines += ["Repaired by: " + ", ".join(f"{m} ({n})" for m, n in sorted(models.items())) + ".", ""]
+    lines += ["| id | where | what | changes a result | shown by a failing test | repaired | still open |",
+              "| --- | --- | --- | --- | --- | --- | --- |"]
+    for row in code["issues"][:40]:
+        if row["demonstrated"] is False:
+            shown = ("no: the test passed on the code, so it was not repaired" if "passes on the current code" in row["reason"]
+                     else "no usable test could be written, so it was not repaired")
+        else:
+            shown = "yes" if row["demonstrated"] else "not tested"
+        repaired = f"yes, by {row['repaired_by']}" if row["repaired"] else ("no" + (f" ({row['reason']})" if row["reason"] else ""))
+        if row["plan_problem"]:
+            still = "plan problem: the plan contradicts itself, asked of the plan's model"
+        elif row["open"]:
+            still = "yes, and it changes a result" if row["changes_result"] else "yes, but it changes nothing reported"
+        else:
+            still = "no"
+        lines.append(f"| {_cell(row['id'])} | {_cell(row['where'] or '-')} | {_cell(row['what'])} | "
+                     f"{'yes' if row['changes_result'] else 'no'} | {_cell(shown)} | {_cell(repaired)} | {_cell(still)} |")
+    if len(code["issues"]) > 40:
+        lines.append(f"(+{len(code['issues']) - 40} more in .fi/code_review.json)")
+    return lines
+
+
 def _cell(text: str) -> str:
     return text.replace("|", "/").replace("\n", " ")
+
+
+def _citations_line(c: dict[str, Any]) -> str:
+    n = c.get("counts") or {}
+    who = (f" Read by {c.get('reader')}" + (", the model that wrote the paper." if c.get("reader_is_writer") else ".")
+           if c.get("reader") else "")
+    return (f"{n.get('citations', 0)} citation(s): {n.get('supported', 0)} backed by a passage of the retrieved text as "
+            f"written, {n.get('found_unsupported', 0)} found unsupported and fixed ({n.get('replaced', 0)} cited to another "
+            f"source, {n.get('reworded', 0)} reworded, {n.get('citation_dropped', 0)} citation dropped, "
+            f"{n.get('sentence_dropped', 0)} sentence dropped)"
+            + (f", {n.get('unchecked')} could not be checked" if n.get("unchecked") else "") + "." + who)
 
 
 def render(report: dict[str, Any]) -> str:
@@ -899,10 +1060,15 @@ def render(report: dict[str, Any]) -> str:
                      + "." if code.get("open_per_reading") else "")
                   + ("" if code.get("repairs_converged") is None else
                      " The repairs " + ("converged." if code["repairs_converged"] else
-                                        "did not converge (they were stopped when a round did not reduce the high-severity "
-                                        "findings)."))
+                                        "did not converge (they were stopped when a round did not reduce the open "
+                                        "findings that change a result)."))
                   + (f" Repairs ended because {code['repairs_stopped']}; {code['repair_rounds']} round(s) and "
                      f"{code['repair_requests']} request(s) were used." if code.get("repairs_stopped") else "")]
+    if code.get("issues"):
+        lines += _issue_lines(code)
+    pilot = report.get("pilot")
+    if pilot:
+        lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")
     if f:
@@ -911,6 +1077,20 @@ def render(report: dict[str, Any]) -> str:
     else:
         lines.append("Nothing was left unfixed that stopped the quest." if o["kind"] == "finished"
                      else "The records name no stage where the quest could not go on.")
+    cites = report.get("citations")
+    if cites:
+        lines += ["", "## Citations", "", _citations_line(cites), ""]
+        for r in cites["citations"]:
+            if str(r.get("action") or "").startswith("added"):
+                lines.append(f"- [{r['label']}] cited in the fixed sentence: \"{_one(r.get('passage'), 200)}\"")
+                continue
+            what = (f"backed by: \"{_one(r.get('passage'), 200)}\"" if r["status"] == "supported"
+                    else f"{str(r['status']).replace('_', ' ')} ({_one(r.get('problem'), 160)})")
+            lines.append(f"- [{r['label']}] {_one(r.get('sentence'), 90)} -- {what}")
+    if report.get("left_out_of_paper"):
+        lines += ["", "## Left out of the paper", "",
+                  "These quantities are not in the paper's results, and the paper says so:", ""]
+        lines += [f"- `{_cell(x['quantity'])}`: {_cell(x['why'])}" for x in report["left_out_of_paper"]]
     lines += ["", "## What to try", ""]
     if report["suggestions"]:
         lines += [f"- {s['text']} (from {s['source']})" for s in report["suggestions"]]

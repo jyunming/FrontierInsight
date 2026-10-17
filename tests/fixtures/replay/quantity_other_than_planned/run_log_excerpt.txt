@@ -1,0 +1,12 @@
+2026-10-08 16:26:39,119 [INFO] [code_review] the code was read by gpt-6-sol: 6 requirement(s) of the plan are missing or implemented differently and 8 problem(s) in how it computes what the plan says; open findings per reading: 14 (4 high)
+2026-10-08 16:33:12,399 [INFO] [code_review] the code was read by gpt-6-sol: 9 requirement(s) of the plan are missing or implemented differently and 11 problem(s) in how it computes what the plan says; open findings per reading: 14 (4 high), 20 (5 high); the repairs did not converge
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the dependent variable ea_spread is computed and reported in the result
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the dependent variable k_relative_spread_by_temperature is computed and reported in the result
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the dependent variable lnA_spread is computed and reported in the result
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the result reports ea_spread (Mean absolute error of Ea fit conditional on a valid fit.)
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the result reports k_relative_spread_by_temperature (Mean absolute relative error of k fit at each temperature conditional on a valid fit.)
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the result reports lnA_spread (Mean absolute error of ln A fit conditional on a valid fit.)
+2026-10-08 16:33:12,421 [WARNING] [code_review] still implemented differently after the repairs: the parameter noise_ratio is varied over all 4 values of the plan's grid
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: Ea spread is reported as the sample standard deviation of its errors.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: ln A spread is reported as the sample standard deviation of its errors.
+2026-10-08 16:33:12,421 [WARNING] [code_review] still flagged after the repairs: Relative k spread is reported as the sample standard deviation of relative errors.

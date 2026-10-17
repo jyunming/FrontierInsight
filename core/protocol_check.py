@@ -152,6 +152,7 @@ class _Found:
     values: list[float]
     line: int
     script: str
+    positional: bool = False  # a loop variable the body never hands on as an argument: it picks positions or output names
 
 
 def _numeric_sequence(node: ast.AST) -> list[float] | None:
@@ -249,7 +250,13 @@ class _Reader(ast.NodeVisitor):
         if isinstance(node.target, ast.Name):
             seq = _numeric_sequence(node.iter)
             if seq is not None:
-                self.lists.append(_Found(node.target.id, seq, node.lineno, self.script))
+                var = node.target.id
+                handed_on = any(
+                    isinstance(call, ast.Call)
+                    and any(isinstance(a, ast.Name) and a.id == var for a in [*call.args, *[k.value for k in call.keywords]])
+                    for stmt in node.body for call in ast.walk(stmt)
+                )
+                self.lists.append(_Found(var, seq, node.lineno, self.script, positional=not handed_on))
         self.generic_visit(node)
 
 
@@ -377,6 +384,48 @@ def protocol_numbers(protocol: dict[str, Any] | None) -> list[tuple[float, str]]
     return out
 
 
+def _is_named_for(f: _Found, axis: str) -> bool:
+    axis_tokens = _tokens(str(axis))
+    return bool(axis_tokens) and set(axis_tokens) <= set(_tokens(f.name)) and set(_tokens(f.name)) - set(axis_tokens) <= _LIST_WORDS
+
+
+def _named_loosely(f: _Found, axis: str, want: list[float]) -> bool:
+    """A list whose name carries the axis's name and a list word (PRIMARY_R0_VALUES for R0) and that shares at least half
+    of the axis's values: named after the axis, with a qualifier the strict rule does not know."""
+    axis_tokens = _tokens(str(axis))
+    tokens = set(_tokens(f.name))
+    return (
+        bool(axis_tokens) and set(axis_tokens) <= tokens and bool(tokens & _LIST_WORDS) and not tokens & _INDEX_WORDS
+        and len(f.values) >= 2 and sum(_has(f.values, v) for v in want) >= max(1, len(want) // 2)
+    )
+
+
+def _unnamed_matches(axis: str, want: list[float], grid: dict[str, Any], lists: list[_Found]) -> list[_Found]:
+    """Lists that hold the axis's values under a name that does not say so, for a script outside the trial contract.
+
+    Only a strong match counts, so a list that merely shares a number with the axis is not read as the axis: the axis
+    has at least two values, the list shares at least two of them and all but at most one, it is not a set of positions
+    (by name, or a loop variable the body never hands on), and it is not already the list of another axis of the grid
+    (named after it, or the same set of values)."""
+    if len(want) < 2:
+        return []
+    others = [
+        (o, [float(v) for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)])
+        for o, vals in grid.items() if o != axis and isinstance(vals, list)
+    ]
+    out = []
+    for f in lists:
+        shared = sum(_has(f.values, v) for v in want)
+        if shared < 2 or shared < len(want) - 1 or len(f.values) < 2:
+            continue
+        if set(_tokens(f.name)) & _INDEX_WORDS or f.positional:
+            continue
+        if any(_is_named_for(f, o) or (ov and _same_set(f.values, ov)) for o, ov in others):
+            continue
+        out.append(f)
+    return out
+
+
 _FI_RUNS_TRIALS = re.compile(r"^def\s+(run_trial|run_cell)\s*\(", re.MULTILINE)
 
 
@@ -398,17 +447,12 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
         want = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)] if isinstance(values, list) else []
         if not want:
             continue
-        axis_tokens = _tokens(str(axis))
-        named = [
-            f for f in lists
-            if axis_tokens and set(axis_tokens) <= set(_tokens(f.name))
-            and set(_tokens(f.name)) - set(axis_tokens) <= _LIST_WORDS
-        ]
-        candidates = named or [
-            f for f in lists
-            if len(f.values) >= 2 and sum(_has(f.values, v) for v in want) >= max(1, len(want) // 2)
-            and not set(_tokens(f.name)) & _INDEX_WORDS
-        ]
+        named = [f for f in lists if _is_named_for(f, str(axis))]
+        candidates = (
+            named
+            or [f for f in lists if _named_loosely(f, str(axis), want)]
+            or ([] if fi_runs_trials else _unnamed_matches(axis, want, grid, lists))
+        )
         if candidates:
             if not any(_same_set(f.values, want) for f in candidates):
                 best = max(candidates, key=lambda f: sum(_has(want, v) for v in f.values))

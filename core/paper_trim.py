@@ -51,8 +51,9 @@ _TRIMMABLE_SECTION_RE = re.compile(
 )
 _HEADING_LINE_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$", re.MULTILINE)
 _MIN_WORDS = 6  # a shorter sentence is not worth a place in the list
-# A note the engine writes into the paper (core/disclosure.py, core/phased.py), markers included: never offered.
-_ENGINE_NOTE_RE = re.compile(r"<!-- fi:([\w-]+) -->.*?<!-- /fi:\1 -->", re.S)
+# A note the engine writes into the paper (core/disclosure.py, core/phased.py), markers included: never offered. The open
+# code findings block carries a checksum in its opening marker; a trimmed one would no longer match it.
+_ENGINE_NOTE_RE = re.compile(r"<!-- fi:([\w-]+)(?::[0-9a-f]+)? -->.*?<!-- /fi:\1 -->", re.S)
 _CITE_BRACKET_RE = re.compile(r"\[((?:W?\d+(?:\s*[–-]\s*\d+)?)(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*)\]")
 _FIGURE_OR_TABLE_RE = re.compile(r"\b(?:figures?|figs?\.?|tables?)\b", re.IGNORECASE)
 # A sentence that introduces a term, a symbol or an abbreviation the text may use

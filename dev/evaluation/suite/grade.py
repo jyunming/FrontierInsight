@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 from .collect import GRADES, load_grades
+from .suite import SuiteError
 
 RUBRIC = Path(__file__).resolve().parents[1] / "benchmark" / "rubric.md"
 SCORES = Path(__file__).resolve().parents[1] / "benchmark" / "scores.md"
@@ -35,6 +37,8 @@ Adapt the three topic-specific items of the rubric:
 - D5 Topic goals met: the goals are the topic's own SCOPE, GOALS and CONSTRAINTS above. Number them yourself first (one goal per stated deliverable, figure, comparison, limit and reporting duty), write the numbered list in your report, then count how many the paper meets.
 - G1 Numbers correct: compute the reference values yourself from the formulas and reference values the topic states in its CONTEXT, SCOPE and GOALS (write down what you computed and with what), then check the paper's numbers against those AND against the run's own results (`raw/`, `data/`, `run_output/`, `.fi/run.log`, RESULT_JSON in `.fi/state.sqlite` if needed). A textbook value printed as the paper's own result, a value the run never computed, or results missing because the experiment crashed or never ran fail G1. Where the topic states no reference value, say so and judge G1 on the run's results alone.
 
+Partial scope (a rule of this suite, in addition to the rubric): a paper that does PART of the topic correctly AND states plainly, in the paper itself, which parts of the topic it does not do counts as trustworthy when G1-G3 pass on what it does. So: (a) from your numbered goal list, mark each goal the paper does not do; (b) judge G1, G2 and G3 on what the paper DOES (a goal it declares it did not do is not a missing result for G1, and its absence is not a citation or figure fault); (c) a goal left out is "stated" only if the paper says so in plain words (the abstract, a limitations or scope section); a paper that leaves parts out without saying so, or presents itself as complete, does not get this credit: it fails D5 and is not trustworthy, so write G1 `fail` if it reports a result for a part it never computed, otherwise record the omission under D5 and in the PARTS line below. D5 still counts only the goals met.
+
 Sources for D1: the retrieved sources are wherever this quest stored them (look under the quest folder: `literature/`, `data/`, `needs/*.json` with source records, `paper/` claim files such as `claims.json` / `CLAIMS.md`, `.fi/`). Judge each in-text citation against the retrieved text, never against memory. If a source's text was not retrieved, it does not support the sentence.
 
 Read `paper.pdf` (render pages to images if you need to see layout and figures; `pdftoppm` or Python `fitz` may be available; if not, read `paper.md` and the figure PNGs in `figures/`), `slides.pdf`/`slides.pptx`, and `poster.pdf` (if missing, P0 = 0 for every P item).
@@ -45,6 +49,8 @@ Write your report to `{report}` with:
 3. Item-level record: every item that decided each score, and every place where a reasonable grader could decide otherwise ("alternative: ...").
 4. FI faults (a check that passed something wrong, or flagged something right) listed separately from the model's own mistakes.
 5. If, and only if, the quest was an honest stop, a line `STOP: correct` or `STOP: wrong` saying whether the cause FI gave for stopping was true of the run, with the evidence.
+6. One line `PARTS NOT DONE: <number of goals the paper does not do> | STATED: yes|no|n/a` (`n/a` when it does every goal; `yes` only when every goal left out is declared plainly in the paper), then the list of those goals, each marked stated or silent.
+7. One line `UNFIXED CHANGES NUMBERS: yes|no|n/a` saying whether any unfixed problem in FI's records (QUALITY.md "Where it failed", .fi/code_review.json open issues) changes a number or figure the paper reports; `n/a` if the record has no unfixed problem, `no` if they change none, `yes` if any unfixed problem changes a reported number or figure.
 Be concise and factual; do not inflate. Finish by replying with just the table row and the 3 most important faults.
 """
 
@@ -57,7 +63,10 @@ def prompt_for(*, quest: str, round_name: str, topic: str, topic_text: str, repo
 def write_templates(round_dir: Path, topic_texts: dict[str, str]) -> list[Path]:
     """One ``GRADER_PROMPT.md`` per delivered paper of a collected round (``<round>/<topic>/GRADER_PROMPT.md``)."""
     rdir = Path(round_dir)
-    data = json.loads((rdir / "round.json").read_text(encoding="utf-8"))
+    round_json = rdir / "round.json"
+    if not round_json.exists():
+        raise SuiteError(f"round {rdir.name} has not been collected yet: run `python -m dev.evaluation.suite collect --suite <suite.yaml> --round {rdir.name}` first")
+    data = json.loads(round_json.read_text(encoding="utf-8"))
     written = []
     for t in data["topics"]:
         if t["outcome"] != "paper" or not t.get("folder"):
@@ -112,6 +121,16 @@ def import_grade(round_dir: Path, topic: str, report_file: Path, *, stop_correct
         stop_correct = m.group(1).lower() == "correct"
     if stop_correct is not None:
         entry["stop_correct"] = stop_correct
+    pm = re.search(r"^\s*PARTS NOT DONE:\s*(\d+)\s*\|\s*STATED:\s*(yes|no|n/a)", text, re.I | re.M)
+    if pm:
+        entry["parts_not_done"] = int(pm.group(1))
+        entry["parts_stated"] = {"yes": True, "no": False}.get(pm.group(2).lower())
+    if entry.get("g1") and not pm:
+        print(f"WARNING: {report_file} has no `PARTS NOT DONE: n | STATED: yes|no|n/a` line, so the paper for '{topic}' stays "
+              "undecided (never trustworthy) until the grader adds it.", file=sys.stderr)
+    um = re.search(r"^\s*UNFIXED CHANGES NUMBERS:\s*(yes|no|n/a)", text, re.I | re.M)
+    if um:
+        entry["unfixed_changes_numbers"] = {"yes": True, "no": False}.get(um.group(1).lower())
     if cause_class:
         entry["class"] = cause_class
         entry["stage"] = stage or ""

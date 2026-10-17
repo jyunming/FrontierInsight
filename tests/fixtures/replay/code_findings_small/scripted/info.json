@@ -1,0 +1,9 @@
+{
+  "note": "What the scripted models say in tests/test_replay_code_findings.py. The names are the real quest's; the test file itself names none of them.",
+  "package": "fdr_bonferroni_vs_bh",
+  "module": "model.py",
+  "first": {"finding": "L4", "function": "one_sided_p_value", "fixed_marker": "ndtr(-", "broken_marker": "1.0 - ndtr"},
+  "second": {"function": "bonferroni_threshold", "line_marker": "return alpha / m", "fixed_marker": "alpha * 0.98",
+             "what": "the per-test threshold is not the plan's", "quantity": "threshold"},
+  "reworded_what": "a tail probability is computed as a difference near one"
+}

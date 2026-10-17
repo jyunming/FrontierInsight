@@ -1,0 +1,5 @@
+import simulate
+
+
+def test_all_four_noise_levels_are_in_the_grid():
+    assert len(simulate.NOISE_RATIOS) == 4, 'the grid lacks a value'

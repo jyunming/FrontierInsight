@@ -233,10 +233,15 @@ def cell_of(block, design):
 
 def scan_grid(block):
     """The coarse scan as a grid of cells: every fixed condition and search setting at its one value, each design
-    variable over the scan's values (or at the baseline's value when the scan leaves it out)."""
+    variable over the scan's values (or at the baseline's value when the scan leaves it out). A condition held fixed that
+    the scan names is compared over the scan's values: those cells are measured and kept, and none but the cells at the
+    value the plan holds can start the search (:func:`scan_rows`)."""
     grid = block.get("grid") if isinstance(block.get("grid"), dict) else {}
     baseline = block["baseline"]["values"]
     out = {name: [value] for name, value in cell_of(block, {}).items()}
+    for name, values in grid.items():
+        if str(name) in out and isinstance(values, list) and values:
+            out[str(name)] = list(values)
     for v in block["design_variables"]:
         name = str(v["name"])
         values = grid.get(name)
@@ -244,11 +249,24 @@ def scan_grid(block):
     return out
 
 
+def _same(a, b):
+    if _number(a) and _number(b):
+        return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12)
+    return a == b
+
+
 def scan_rows(summary, block):
     """The coarse scan's results (a ``fi.trials/v1`` summary: one entry per setting) as evaluated designs."""
     names = [str(v["name"]) for v in block["design_variables"]]
+    held = cell_of(block, {})
+    compared = [str(k) for k in (block.get("grid") if isinstance(block.get("grid"), dict) else {})
+                if str(k) in held]
     out = []
     for cell in (summary or {}).get("cells") or []:
+        # A cell at another value of a condition the plan holds fixed is a comparison: it is kept in the trial record,
+        # but it is not a design evaluated under the search's conditions, so it never seeds the search.
+        if any(not _same(cell.get("cell", {}).get(k), held[k]) for k in compared):
+            continue
         design = {name: cell["cell"][name] for name in names if name in cell.get("cell", {})}
         if len(design) != len(names):
             continue

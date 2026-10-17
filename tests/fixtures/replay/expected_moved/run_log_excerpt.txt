@@ -1,0 +1,14 @@
+2026-10-08 15:58:34,743 [INFO] [plan] revised by the engine for its oracle check: version 3
+2026-10-08 16:15:23,582 [INFO] [plan] revised by the engine for its oracle check: version 6
+2026-10-08 16:17:26,045 [INFO] [plan] revised by the engine for its oracle check: version 7
+2026-10-08 16:34:05,043 [INFO] [plan] revised by the engine for its oracle check: version 10
+2026-10-08 16:35:03,852 [INFO] [plan] revised by the engine for its oracle check: version 11
+2026-10-08 16:38:41,623 [INFO] [plan] revised by the engine for its oracle check: version 12
+2026-10-08 16:41:17,452 [INFO] [plan] revised by the engine for its oracle check: version 13
+2026-10-08 17:14:23,068 [INFO] [plan] revised by the engine for its oracle check: version 14
+2026-10-08 17:15:33,525 [INFO] [plan] revised by the engine for its oracle check: version 15
+2026-10-08 17:18:30,406 [INFO] [plan] revised by the engine for its oracle check: version 16
+2026-10-08 17:19:05,773 [INFO] [plan] revised by the engine for its oracle check: version 17
+2026-10-08 17:19:29,277 [WARNING] [oracle] the expected value of 'arrhenius_log_relation' is disputed: worked out again without the measured value it is 2.97934 (the plan says 2.98033, measured 2.97934); the script is not rewritten for it (the recheck is not independent, so the check is not corrected either: it goes on unconfirmed)
+2026-10-08 17:20:40,542 [WARNING] [oracle] the script is kept as it is: the check 'arrhenius_log_relation' is disputed (FI worked its expected value out again); FI corrects the check only where two independent workings agree, or goes on with it marked unconfirmed
+2026-10-08 17:20:40,597 [WARNING] [oracle] going on: FI went on by itself although the known-answer check 'arrhenius_log_relation' failed (expected 2.98033 within ±2.98033e-06 (relative); case A=10000000000.0, Ea=50000, R=8.314, T=300; measure `ln_k_val`; measured 2.97934); it is marked unconfirmed (the check stays marked unconfirmed; the result does not count as checked against known answers)

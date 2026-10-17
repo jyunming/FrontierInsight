@@ -53,14 +53,18 @@ A finding says WHERE (file:line, such as `simulate.py:42`), WHAT is wrong, WHY i
 
 Return ONE JSON object and nothing else:
 
-{"requirements": [{"id": "<the requirement's id, exactly>", "status": "<implemented | missing | different>", "file": "<file name, or empty when missing>", "line": <line number, or null>, "note": "<for missing or different: what is missing or different, one sentence, naming no expected number; else empty>"}],
- "findings": [{"where": "<file:line>", "what": "<what is wrong, one sentence>", "why": "<why it is wrong against the plan, one sentence>", "fix": "<how to fix it, one sentence, no value>", "severity": "<high | medium | low>", "quantity": "<the returned quantity it concerns, or empty>", "constant": <true when the quantity is a constant, else false>}],
+{"requirements": [{"id": "<the requirement's id, exactly>", "status": "<implemented | missing | different>", "file": "<file name, or empty when missing>", "line": <line number, or null>, "note": "<for missing or different: what is missing or different, one sentence, naming no expected number; else empty>", "changes_result": <true when a missing or different requirement changes a number or figure the study reports, else false>}],
+ "findings": [{"where": "<file:line>", "what": "<what is wrong, one sentence>", "why": "<why it is wrong against the plan, one sentence>", "fix": "<how to fix it, one sentence, no value>", "severity": "<high | medium | low>", "quantity": "<the returned quantity, figure, setting or requirement it concerns, as the plan names it, or empty>", "constant": <true when the quantity is a constant, else false>, "changes_result": <true when the fault can change a number or a figure the study reports, false when it changes nothing reported>, "plan_conflict": <true only when the fault is that the PLAN contradicts itself, else false>}],
  "checked": ["<a requirement or a point of the logic you checked and found no problem with, and what you looked at, one line>"],
  "summary": "<one sentence>"}
 
 Rules:
 
 - Judge every requirement, once.
+- List EVERY finding you have, with no limit on how many, and put the ones that change a reported number or figure first, then the others by severity. Do not leave a finding out because the list is long.
+- One finding per fault. Do not list the same fault twice in other words, and do not list a fault under `findings` and again as a different requirement: put it once, with the quantity it concerns in `quantity`.
+- `changes_result` is true only when, if the fault were left as it is, a number or figure the study reports would be wrong or missing. A dead constant, a missing optional output, a weak internal check or a style point is false.
 - `high` means the quantity the study reports would be wrong because of it; `low` is a matter of care that does not change a number.
+- `plan_conflict`: when two parts of the plan define one thing differently (for example a metric's definition and the method's text say different things), the code cannot satisfy both. Report that as ONE finding with `plan_conflict` true, say in `why` which two parts disagree and what each says, and give no fix for the code: it is not a fault of the code.
 - Do not answer "looks fine". A reply with no `findings`, no `checked`, and no requirement that says where it was found is no review and is asked again.
 - Never write an expected value, a number the result should have, or a tolerance.

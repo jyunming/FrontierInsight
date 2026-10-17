@@ -1112,12 +1112,14 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
         # A must-flag about something the run computed: the experiment is
         # written and run again instead.
         "re_execute": "implement",
-        "done": END,
+        # Both exits of the review go through the citation check first: the paper that is delivered, or shown to a
+        # person, has every citation read against the retrieved text of its source, last.
+        "done": "citation_check",
         # The human-feedback gate adds a third terminal: when
         # ``engine.human_feedback_gate: "after_review"`` the router
         # picks ``human_feedback`` instead of revise/done so the user
         # can accept / reject / refine.
-        "human_feedback": "human_feedback",
+        "human_feedback": "citation_check",
         # The paper still claims what FI's own records contradict after its rewrites: no paper.
         "stuck": "stuck_no_findings",
     }

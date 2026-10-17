@@ -870,6 +870,32 @@ def _matches(assertion_path: str, leaf_path: str) -> bool:
     return bool(m and m.group(0) == a)
 
 
+class _PathIndex:
+    """The leaves ``_matches`` would pick for an assertion path, found by lookup instead of by trying every leaf.
+
+    A result that prints every trial's value has millions of leaves (r5 euv: 9.6 million), and trying each one against
+    each assertion kept a quest on this check for more than half an hour. The same leaves come back, in result order.
+    """
+
+    def __init__(self, paths: Any) -> None:
+        self._full: dict[str, list[int]] = {}
+        self._last: dict[str, list[int]] = {}
+        for i, path in enumerate(paths):
+            self._full.setdefault(path, []).append(i)
+            m = _LEAF.search(path)
+            if m:
+                self._last.setdefault(m.group(0), []).append(i)
+
+    def matching(self, assertion_path: str) -> list[int]:
+        a = assertion_path.rstrip(".*")
+        found = set(self._full.get(assertion_path, ())) | set(self._full.get(a, ())) | set(self._last.get(a, ()))
+        return sorted(found)
+
+    def any_match(self, assertion_path: str) -> bool:
+        a = assertion_path.rstrip(".*")
+        return assertion_path in self._full or a in self._full or a in self._last
+
+
 # How many settings of one quantity must sit exactly on the same bound before
 # the run is sent back (see "Why several values on a bound fail" above). One is
 # ordinary: a probability of 0 at one working point is often the answer.
@@ -1075,6 +1101,7 @@ def violations(
 
     clamps = clamp_constants(code) if code else set()
     literals = numeric_literals(code) if code else set()
+    index = _PathIndex(path for _tokens, path, _value in leaves)
     out: list[Violation] = []
     for a in assertions:
         # For a value on a bound every cap in the script counts but one proven to be another value's. A value exactly on
@@ -1082,9 +1109,8 @@ def violations(
         # reported as 10).
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
-        for tokens, path, value in leaves:
-            if not _matches(a.path, path):
-                continue
+        for i in index.matching(a.path):
+            tokens, path, value = leaves[i]
             matched.append((tokens, path, value))
             bound = _on_bound(value, a)
             if bound is None:
@@ -1188,8 +1214,8 @@ def _at_bound(
 
 def bounded_paths(result_json: Any, design: Any) -> list[str]:
     """The assertion paths this result reports at least one number for."""
-    leaves = [path for _tokens, path, _value in _walk_leaves(result_json)]
-    return [a.path for a in parse_assertions(design) if any(_matches(a.path, p) for p in leaves)]
+    index = _PathIndex(path for _tokens, path, _value in _walk_leaves(result_json))
+    return [a.path for a in parse_assertions(design) if index.any_match(a.path)]
 
 
 def check_design(
@@ -1206,10 +1232,10 @@ def check_design(
     out = violations(result_json, assertions, code=code, zero_expected={str(p) for p in zero_expected or ()})
     earlier = {str(p) for p in seen or ()}
     if earlier:
-        present = list(_present_paths(result_json))
+        present = _PathIndex(_present_paths(result_json))
         out += [
             Violation(a.path, math.nan, a, kind="missing")
             for a in assertions
-            if a.path in earlier and not any(_matches(a.path, p) for p in present)
+            if a.path in earlier and not present.any_match(a.path)
         ]
     return out

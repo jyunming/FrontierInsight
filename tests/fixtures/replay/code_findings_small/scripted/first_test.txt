@@ -1,0 +1,6 @@
+from fdr_bonferroni_vs_bh import model
+
+
+def test_a_far_tail_is_not_a_zero_probability():
+    p = float(model.one_sided_p_value(12.0))
+    assert p > 0.0, f'the p-value of a far tail is {p}'

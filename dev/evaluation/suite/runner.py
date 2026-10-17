@@ -90,7 +90,11 @@ def default_spawn(cmd: list[str], *, cwd: Path, env: dict[str, str], stdout: Pat
     """Start ``cmd`` detached from this process (it keeps running when this process or its console goes away)."""
     kwargs: dict[str, Any] = {}
     if os.name == "nt":
-        base = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # CREATE_NO_WINDOW, not DETACHED_PROCESS: a detached process has no console, so Windows opens a new window
+        # for every console program it starts (python, the model CLIs, pip, tasklist). With a console of its own
+        # that is never shown, the child and everything it starts stay invisible; a new process group keeps it
+        # out of the parent's Ctrl-C, and it keeps running when this process or its console goes away.
+        base = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         kwargs["creationflags"] = base | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
     else:
         kwargs["start_new_session"] = True
@@ -100,7 +104,7 @@ def default_spawn(cmd: list[str], *, cwd: Path, env: dict[str, str], stdout: Pat
             return subprocess.Popen(cmd, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err, **kwargs)
         except OSError:
             if os.name == "nt":  # a job that does not allow breakaway
-                kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
                 return subprocess.Popen(cmd, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err, **kwargs)
             raise
     finally:

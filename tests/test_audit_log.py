@@ -203,7 +203,7 @@ async def test_a_quest_leaves_a_trace_of_its_nodes_checks_routes_and_the_reasons
     assert started == done and started[:3] == ["clarify", "ideate", "literature"] and started.count("design") == 2
     assert all(e["duration_s"] >= 0 for e in events if e["kind"] == "node_completed")
     routes = [(e["node"], e["chosen"]) for e in events if e["kind"] == "route_decision"]
-    assert ("review", "revise") in routes and routes[-1] == ("review", "done")
+    assert ("review", "revise") in routes and routes[-2:] == [("review", "done"), ("citation_check", "done")]
     first_review = next(e for e in events if e["kind"] == "route_decision" and e["node"] == "review")
     assert first_review["facts"]["verdict"] == "revise"
 

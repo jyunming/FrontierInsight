@@ -145,8 +145,10 @@ def test_the_node_reads_the_simulation_again_after_each_gate() -> None:
     src = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
     node = src[src.index("async def _node_execute("):]
     node = node[:node.index("pilot_run and not self.config.execution.background_jobs")]
-    assert node.count("self._results_from_computation(state)") == 2, "before the gates, and after the equation gate"
-    assert "self._typed_results_stable(" in node, "and until the text the oracle gate leaves has been read"
+    assert "self._gate_pass(state, py, exec_env, seed_path)" in node, "the node makes the checks through one function"
+    gates = src[src.index("async def _gate_pass("):src.index("async def _verify_gated_code(")]
+    assert gates.count("self._results_from_computation(state)") == 2, "before the gates, and after the equation gate"
+    assert "self._typed_results_stable(" in gates, "and until the text the oracle gate leaves has been read"
 
 
 def _fake_gate(eng: Engine, texts: list[str | None]) -> list[int]:

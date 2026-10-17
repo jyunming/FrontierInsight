@@ -155,6 +155,13 @@ class Reader:
         return _NO_OBJECTIONS
 
 
+def _honest_stop(eng: Any) -> dict[str, Any]:
+    """The plain stop a plan that leaves out what the topic needs ends in (no paper, nobody asked to pick another model)."""
+    stop = eng._topic_unmet_stop()
+    assert stop is not None, "the quest records the stop for the code step"
+    return stop["exec_result"]
+
+
 def _stop(eng: Any) -> list[dict[str, Any]]:
     seen: list[dict[str, Any]] = []
     eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
@@ -311,17 +318,18 @@ async def test_a_main_factor_still_missing_after_the_bound_stops_before_anything
     model = Reader(eng, _draft(), adds=set())  # the plan's model never adds anything
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == [], "nobody is asked to pick another model: the plan's rules, not the model, left it out"
     assert 1 <= len(model.asked) <= 2
-    shown = " ".join(seen[0]["steps"])
-    assert "Nothing was run" in shown and "lid material" in shown and "You do not need to write it yourself" in shown
+    result = _honest_stop(eng)
+    shown = " ".join([result["topic_unmet"], *result["topic_unmet_tried"]])
+    assert "lid material" in shown and "asked the plan's model" in shown
     assert "heat lost per minute" not in shown, "a secondary item does not stop the quest"
     assert not (eng.quest_root / "paper.md").exists()
     asked_before = len(model.asked)
-    with pytest.raises(Paused):  # a resume stops again and asks no more
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert len(model.asked) == asked_before
+    await eng._node_design({"topic": TOPIC, "iteration": 0})  # a resume stops again and asks no more
+    assert len(model.asked) == asked_before and seen == []
+    assert "the quest stops before anything runs" in _plan_text(eng)
     assert "the quest stops before anything runs" in _plan_text(eng)
 
 
@@ -375,10 +383,10 @@ async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_i
     seen = _stop(eng)
     state = {"topic": TOPIC, "iteration": 1, "design": redesign}
     for _ in range(2):
-        with pytest.raises(Paused):
-            await eng._hold_the_design_to_the_topic(state, redesign, "")
+        await eng._hold_the_design_to_the_topic(state, redesign, "")
+    assert seen == []
     assert len([p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]) == 1
-    assert "lid material" in " ".join(seen[0]["steps"])
+    assert "lid material" in _honest_stop(eng)["topic_unmet"]
 
 
 @pytest.mark.asyncio
@@ -402,9 +410,8 @@ async def test_a_mapping_to_something_the_plan_does_not_have_does_not_save_a_mis
     Reader(eng, _draft(), adds={"map_bad"})
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
-    with pytest.raises(Paused):
-        await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert "lid material" in " ".join(seen[0]["steps"])
+    await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == [] and "lid material" in _honest_stop(eng)["topic_unmet"]
 
 
 def test_a_mapping_is_checked_for_the_levels_it_must_cover() -> None:
@@ -451,3 +458,40 @@ async def test_a_formula_mapped_to_an_unrelated_equation_that_the_reader_rejects
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [] and "design" in patch
     assert "states the formula `dT/dt = -k*(T - Tr)`" in tr.write_note(eng.quest_root)
+
+
+# --- constraints: the cap and the writer's note -----------------------------------------------------------------------
+
+
+def test_parse_keeps_thirty_constraints_when_given_thirty_five() -> None:
+    obj = {"factors": [{"name": "alpha"}], "constraints": [f"limit {n}." for n in range(35)]}
+    parsed = tr.parse(obj)
+    assert parsed is not None and len(parsed["constraints"]) == 30
+    assert parsed["constraints"][-1] == "limit 29."
+
+
+def test_write_note_names_each_constraint_when_no_covered_record_exists(tmp_path: Path) -> None:
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    (fi / tr.FILE).write_text(json.dumps({"constraints": ["Alpha bound one.", "Beta bound two.", "Gamma bound three."]}),
+                              encoding="utf-8")
+    note = tr.write_note(tmp_path)
+    assert "Alpha bound one; Beta bound two; Gamma bound three." in note
+    assert "say plainly in the limitations" in note
+
+
+def test_write_note_is_empty_when_requirements_have_no_constraints(tmp_path: Path) -> None:
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    (fi / tr.FILE).write_text(json.dumps({"factors": [{"name": "alpha"}]}), encoding="utf-8")
+    assert tr.write_note(tmp_path) == ""
+
+
+def test_the_cover_reader_counts_a_metric_of_an_estimate_for_a_recovery_topic() -> None:
+    """r5 kinetics: "how accurately can k and Ea be recovered" with k/Ea error, bias, spread and coverage metrics was read
+    as "no metric reports k itself" and the quest stopped. A metric of the estimate reports the quantity it estimates."""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parent.parent / "agents" / "topic_cover.md").read_text(encoding="utf-8")
+    assert "how well that quantity is estimated, fitted or recovered" in text
+    assert "a metric of its estimate" in text

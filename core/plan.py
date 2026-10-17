@@ -80,6 +80,69 @@ def _as_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+#: The parts of the protocol. A model sometimes writes one of them beside ``protocol:`` (at the top level of the design
+#: block) instead of under it; the plan's readers look only under ``protocol``, so the part read as absent.
+PROTOCOL_PARTS = (
+    "optimisation", "grid", "runs_per_setting", "min_runs_per_setting", "numerical_axes", "thresholds", "metrics",
+    "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
+)
+
+
+def hoist_protocol_parts(design: Any) -> tuple[Any, list[str]]:
+    """``(design, moved)``: ``design`` with each protocol part written at its top level moved under ``protocol``, and the
+    names moved. A part the protocol already has stays as the protocol has it (the top-level one is then left where it
+    is, and not moved). ``design`` itself is not changed."""
+    if not isinstance(design, dict):
+        return design, []
+    protocol = design.get("protocol")
+    if protocol is not None and not isinstance(protocol, dict):
+        return design, []
+    stray = [k for k in PROTOCOL_PARTS if k in design and design[k] not in (None, "", [], {})
+             and not (isinstance(protocol, dict) and protocol.get(k) is not None)]
+    if not stray:
+        return design, []
+    out = {k: v for k, v in design.items() if k not in stray}
+    out["protocol"] = {**(protocol or {}), **{k: design[k] for k in stray}}
+    return out, stray
+
+
+_ENTRY_NAME = re.compile(r"entry `([^`]+)`|`protocol\.\w+(?:\.\w+)?` `([^`]+)`")
+_ENTRY_INDEX = re.compile(r"entry (\d+)")
+_PART_KEY = re.compile(r"`protocol\.(\w+)(?:\.(\w+))?`")
+
+
+def offending_entry(protocol: Any, why: str | None, limit: int = 500) -> str:
+    """The entry of ``protocol`` that a reader's reason ``why`` names (``entry 2``, ``entry `id```, ``design_variables`
+    `name```), as written, in one short line; ``""`` when the reason names none or it cannot be found."""
+    if not isinstance(protocol, dict) or not why:
+        return ""
+    part = _PART_KEY.search(why)
+    if part is None:
+        return ""
+    value: Any = protocol.get(part.group(1))
+    if part.group(1) == "optimisation" and part.group(2) and isinstance(value, dict):
+        value = value.get(part.group(2))
+    named = _ENTRY_NAME.search(why)
+    index = _ENTRY_INDEX.search(why)
+    found: Any = None
+    if isinstance(value, list):
+        if index and 0 < int(index.group(1)) <= len(value):
+            found = value[int(index.group(1)) - 1]
+        elif named:
+            key = named.group(1) or named.group(2)
+            found = next((v for v in value if isinstance(v, dict) and key in {str(x) for x in v.values()}), None)
+    elif isinstance(value, dict) and named:
+        key = named.group(1) or named.group(2)
+        found = value.get(key)
+    if found is None:
+        return ""
+    try:
+        text = json.dumps(found, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(found)
+    return text if len(text) <= limit else text[:limit] + " ..."
+
+
 def normalize_design(design: Any) -> tuple[dict[str, Any] | None, str | None]:
     """``(design, None)`` when ``design`` can drive the experiment, else ``(None, why)``.
 
@@ -87,6 +150,7 @@ def normalize_design(design: Any) -> tuple[dict[str, Any] | None, str | None]:
     what would send the experiment somewhere else: no hypothesis, or a result bound that is not a bound."""
     if not isinstance(design, dict):
         return None, "the design block is not a mapping of names to values"
+    design, _moved = hoist_protocol_parts(design)  # a part written beside `protocol` belongs under it
     out: dict[str, Any] = dict(design)
     hypothesis = out.get("hypothesis")
     if not isinstance(hypothesis, str) or not hypothesis.strip():
@@ -252,7 +316,9 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
 
         if out.get("grid") is not None:
             return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
-                          "best design puts a coarse scan run before it in `optimisation.grid`")
+                          "best design puts the settings it compares, and a coarse scan run before it, in "
+                          "`optimisation.grid` (a design variable, or a condition also listed under `optimisation.fixed` "
+                          "with the value the search holds it at)")
         block, why = optimisation_plan.normalize(out["optimisation"])
         if block is None:
             return None, why
@@ -1037,8 +1103,10 @@ def load_design(quest_root: Path) -> tuple[dict[str, Any] | None, str | None]:
     return parsed.design, parsed.error
 
 
-def raw_design_block(text: str) -> dict[str, Any] | None:
-    """The design block of ``text`` as written (not normalised), or ``None`` when it cannot be read."""
+def raw_design_block(text: str, *, as_written: bool = False) -> dict[str, Any] | None:
+    """The design block of ``text`` (not normalised), or ``None`` when it cannot be read. A protocol part written beside
+    ``protocol`` is shown under it (:func:`hoist_protocol_parts`), so every reader finds it where it looks; with
+    ``as_written`` the block is exactly as the file has it."""
     heading = _HEADING_RE.search(text or "")
     fenced = _FENCE_RE.search(text, heading.end()) if heading else None
     if fenced is None:
@@ -1047,7 +1115,9 @@ def raw_design_block(text: str) -> dict[str, Any] | None:
         loaded = yaml.safe_load(fenced.group(1))
     except yaml.YAMLError:
         return None
-    return loaded if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict):
+        return None
+    return loaded if as_written else hoist_protocol_parts(loaded)[0]
 
 
 def edit_design_block(text: str, change: Any) -> str | None:

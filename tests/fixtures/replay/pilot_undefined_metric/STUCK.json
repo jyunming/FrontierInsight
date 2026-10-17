@@ -1,0 +1,14 @@
+{
+ "at": 1791476414.20383,
+ "kind": "no_findings",
+ "problem": "the code does not compute the study's main quantity (the dependent variable dose_to_size for lines and contacts, mJ/cm2 is computed and reported in the result), even after FI repaired the script 3 times, so there is nothing measured to write up",
+ "tried": [
+  "asked a second model to read the code against what the plan requires it to compute",
+  "the dependent variable dose_to_size for lines and contacts, mJ/cm2 is computed and reported in the result",
+  "sent the findings to be repaired (1 round); open findings per reading: 46 (13 high), 39 (11 high), 34 (13 high), 38 (13 high), 37 (13 high), 35 (13 high); the repairs converged",
+  "asked the model to repair the script (3 repairs)"
+ ],
+ "say": "FI stopped: the code does not compute the study's main quantity (the dependent variable dose_to_size for lines and contacts, mJ/cm2 is computed and reported in the result), even after FI repaired the script 3 times, so there is nothing measured to write up. No paper was written; the results are kept.",
+ "why_repairs_ended": "the code still did not compute the study's main quantity",
+ "set_aside": ".fi/set_aside_by_stuck/20261008-182014"
+}
