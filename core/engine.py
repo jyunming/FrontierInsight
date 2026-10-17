@@ -705,7 +705,6 @@ _FI_PROVIDER_NAMES = frozenset(get_args(_ProviderName)) - {"vscode_extension"}
 #: Why FI asks the plan to work an equation's example out again (core/engine.py ``_rederive_examples``), by source.
 _REDERIVE_BECAUSE = {
     "tests": "could not be met by code that follows its formula",
-    "parameters": "names other inputs than the parameters the outline gave its function",
 }
 
 class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
@@ -10005,6 +10004,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 (text or "")[:300],
             )
             return {"implement_outline": {}}
+        outline = self._outline_with_example_names(state, outline)
         n_funcs = len(outline.get("functions") or [])
         n_const = len(outline.get("constants") or [])
         self._log.info(
@@ -10012,6 +10012,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             n_funcs, n_const,
         )
         return {"implement_outline": outline}
+
+    def _outline_with_example_names(self, state: QuestState, outline: dict[str, Any]) -> dict[str, Any]:
+        """The outline with the parameters of each equation's function set to the inputs of the plan's worked example for it
+        (:func:`core.function_steps.align_outline`): the plan's example is its own record, frozen before any code, and the
+        outline is only the code-writing model's reading of the same equation. FI sets the names itself, so the outline, the
+        equation tests and the repair guard (:meth:`_outline_signatures`) name the same parameters, and no one is asked to
+        rename anything. Nothing is changed when the names already agree."""
+        try:
+            protocol = self._protocol_block(state)
+            aligned, changed = _function_steps.align_outline(outline, protocol if isinstance(protocol, dict) else None)
+        except Exception as e:  # noqa: BLE001 -- the outline as written is still usable
+            self._log.warning("[implement_outline] could not set the functions' parameters from the plan's examples (%r)", e)
+            return outline
+        for line in changed:
+            self._log.info("[implement_outline] the parameters of %s are the inputs of the plan's worked example", line)
+        return aligned
 
     async def _node_implement(self, state: QuestState) -> QuestState:
         self._forget_cannot_repair()  # the code is written again: an earlier problem does not stop the new code
@@ -10025,7 +10041,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return {**_FRESH_SCRIPT, **kept, "refine_extend": []}
         extend = [str(p).strip() for p in state.get("refine_extend") or [] if str(p).strip()]
         # A number the person asked to have added extends the script that exists; the scaffold is for a first script.
-        outline = {} if extend else state.get("implement_outline") or {}
+        outline = {} if extend else self._outline_with_example_names(state, state.get("implement_outline") or {})
         body_prompt = self._prompts.get("implement_body")
         if outline and outline.get("scaffold") and body_prompt is not None:
             self._log.info(
@@ -12476,23 +12492,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 return False
             protocol = self._protocol_block(state)
             specs, notes = _function_steps.model_functions(outline, protocol if isinstance(protocol, dict) else None)
-            if specs and isinstance(protocol, dict):
-                # The function's parameters are the example's inputs (core/equation_tests.py): both are known before any
-                # code is written, so a disagreement of names is put to the plan now (once), not found by a failing test.
-                problems = _equation_tests.parameter_problems(
-                    _equation_tests.example_rows(protocol),
-                    {s.equation: (s.params(), s.required_params()) for s in specs
-                     if s.kind == _function_steps.EQUATION})
-                if problems:
-                    by_id = {str(eq["id"]).strip(): eq for eq in _equation_tests.eligible(protocol)}
-                    changed = await self._rederive_examples(state, protocol, [
-                        {"id": eid, "formula": " ".join(str(by_id[eid].get("formula") or "").split()),
-                         "example": by_id[eid].get("example"), "why": why, "source": "parameters"}
-                        for eid, why in problems.items() if eid in by_id])
-                    if changed:
-                        protocol = self._protocol_block(state)
-                        specs, notes = _function_steps.model_functions(
-                            outline, protocol if isinstance(protocol, dict) else None)
             if not specs:
                 self._log.info("[implement] the model's functions are written with the rest of the code (%s)",
                                "; ".join(notes) or "the outline names no function per equation")
@@ -12687,8 +12686,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if str(f.get("id")) in agrees:
                 self._log.info("[equations] the worked example of %s is what its equation as written gives for the same "
                                "inputs, so the code, not the example, is wrong; the plan is not asked about it", f.get("id"))
-        # The function's parameters were fixed by the outline before any code was written: the plan is told them, so a
-        # reworked example cannot name other inputs (the one place a function's inputs come from is the outline).
+        # The function's parameters are the first example's inputs (FI set them when it read the outline) and the code is
+        # written against them: the plan is told them, so a reworked example keeps the same input names.
         try:
             outline_specs, _notes = _function_steps.model_functions(state.get("implement_outline") or {}, protocol)
         except Exception:  # noqa: BLE001 -- without a readable outline there are no fixed parameters to tell
@@ -12703,9 +12702,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     async def _rederive_examples(self, state: QuestState, protocol: dict[str, Any] | None,
                                  asks: list[dict[str, Any]]) -> list[str]:
-        """Ask the plan, once per equation and per reason (``tests``: code could not meet the example; ``parameters``: the
-        outline's function takes other names than the example's inputs), to work the worked example of each equation in
-        ``asks`` out again from the equation as written: ``id``, ``formula``, ``example`` (as written), ``why``.
+        """Ask the plan, once per equation and per reason (``tests``: code could not meet the example), to work the worked
+        example of each equation in ``asks`` out again from the equation as written: ``id``, ``formula``, ``example`` (as
+        written), ``why``.
 
         The request holds the equation, the example as written and the kind of failure, never the number the code gave and
         never the code. Only the asked equations' ``example`` is kept from the rewrite (:meth:`_revise_checks_only` keeps
