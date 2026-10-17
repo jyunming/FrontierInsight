@@ -158,6 +158,9 @@ async def test_a_note_FI_adds_to_plan_md_does_not_make_it_ask_a_second_time(tmp_
     path.write_text(path.read_text(encoding="utf-8") + "\n- a note FI added after the plan was asked about\n", encoding="utf-8")
     await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert len(model.asked) == 1
+    # ... and the stop still says the plan's model was asked (read by the model asked, not by plan.md's hash).
+    stop = eng._grid_too_large_stop({"topic": TOPIC, "design": {"protocol": {"grid": BIG}}})
+    assert stop is not None and "asked the plan's model" in " ".join(stop["exec_result"]["too_long_tried"])
 
 
 @pytest.mark.asyncio
@@ -180,5 +183,7 @@ async def test_a_redesign_drafted_at_design_is_asked_once_per_round_and_a_grid_t
     assert protocol["constants"] == {"k": 1} and protocol["runs_per_setting"] == 3
     again = await eng._ask_design_for_the_grid(state, design, iteration=1)
     assert len(sent) == 1 and again is design  # the same round asks nothing more
+    stop = eng._grid_too_large_stop({**state, "design": design})
+    assert stop is not None and "asked the plan's model" in " ".join(stop["exec_result"]["too_long_tried"])
     await eng._ask_design_for_the_grid(state, {"protocol": {"grid": SMALL}}, iteration=2)
     assert len(sent) == 1  # a grid that fits is never asked about

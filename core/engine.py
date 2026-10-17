@@ -7607,8 +7607,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         said = _optimise_search.grid_too_large(protocol.get("grid"))
         if not said:
             return None
-        path = _plan.plan_path(self.quest_root)
-        asked = self._search_record(_plan.sha256(path.read_text(encoding="utf-8")), _GRID_ASKED)[0] if path.is_file() else 0
+        # Read the way the asks count themselves (by the model asked, not plan.md's hash, which FI's own notes change).
+        asked = self._grid_asked_of(_GRID_ASKED) + self._grid_asked_of(_DRAFTED_GRID_ASKED)
         tried = [said,
                  ("asked the plan's model to rewrite the settings so they are crossed only where they should be, with the "
                   "count above; the grid was still too large") if asked else
