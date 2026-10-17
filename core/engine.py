@@ -5833,23 +5833,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             what="search for the best design", short="the search",
             note="the search for the best design, written by the plan's model", ask_limit=1 if scan_only else None)
 
-    async def _ask_plan_for_the_grid(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+    async def _ask_plan_for_the_grid(self, state: QuestState, design: Any, plan_sha: str, *,
+                                     again: bool = False) -> tuple[Any, str]:
         """Before any code is written, a ``protocol.grid`` of more settings than FI lists (:func:`core.optimise_search.grid_too_large`,
         the same count the run stops on) is asked of the plan's model once to rewrite, with the plan's own arithmetic (at most
         once per plan, counted in ``.fi/grid_asked.json``, so a resume does not ask again). Only the grid and the parts a
-        smaller grid changes with it (``in_each_run``, ``constants``) are kept from the answer. A plan that fits is not asked,
+        smaller grid changes with it (``sub_studies``, ``in_each_run``, ``constants``) are kept from the answer. A plan that fits is not asked,
         and nothing is logged for it. The stop that follows when it still does not fit is :meth:`_grid_too_large_stop`.
+        ``again``: the count is made once more after what the topic asks for was added to the plan (an added setting can make
+        the study larger), with one request of its own, so the plan is counted after every edit FI makes to it.
         Returns the design to use and the hash of its plan."""
         if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
                 or not plan_sha or _optim.has_block(design)):
             return design, plan_sha
+        asked_file = _GRID_ASKED_AGAIN if again else _GRID_ASKED
 
         def problem(now: Any) -> str:
             protocol = now.get("protocol") if isinstance(now, dict) else None
-            grid = protocol.get("grid") if isinstance(protocol, dict) else None
-            return "" if _optim.has_block(now) else _optimise_search.grid_too_large(grid)
+            return "" if _optim.has_block(now) else _optimise_search.grid_too_large(_optimise_search.study_grid(protocol))
 
-        if not problem(design) or self._grid_asked_of(_GRID_ASKED) > 0:
+        if not problem(design) or self._grid_asked_of(asked_file) > 0:
             return design, plan_sha  # a fit grid is not asked; a grid asked once is not asked again (FI's own notes change the hash)
 
         def lacks(now: Any) -> list[str]:
@@ -5859,13 +5862,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return _plan.grid_request(state.get("topic") or self.config.topic, problem(now))
 
         def keep(before: str, answer: dict[str, Any]) -> str:
-            kept = self._keep_only_the_parts(before, answer, ["grid", "in_each_run", "constants"])
+            kept = self._keep_only_the_parts(before, answer, ["grid", "sub_studies", "in_each_run", "constants"])
             if kept is None:
                 raise ValueError("your answer has none of the asked parts in a form that can be read; plan.md is unchanged")
             return kept
 
         return await self._ask_plan_to_complete(
-            design, plan_sha, lacks=lacks, request=request, keep=keep, file=_GRID_ASKED,
+            design, plan_sha, lacks=lacks, request=request, keep=keep, file=asked_file,
             what="what fits the settings limit", short="the settings",
             note="the grid of settings made small enough to run, written by the plan's model", ask_limit=1,
             extra={"parts": ["grid"]})
@@ -5895,7 +5898,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if (not isinstance(protocol, dict) or protocol.get("optimisation") or not self._runs_code(state)
                 or self._client is None or _frozen.load(self.quest_root) is not None):
             return design
-        problem = _optimise_search.grid_too_large(protocol.get("grid"))
+        problem = _optimise_search.grid_too_large(_optimise_search.study_grid(protocol))
         if not problem or self._grid_asked_of(_DRAFTED_GRID_ASKED, iteration) > 0:
             return design
         try:
@@ -5927,20 +5930,30 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not isinstance(obj, dict) or not isinstance(obj.get("grid"), dict):
             self._log.warning("[design] the plan's model's answer about the redesign's grid had no grid")
             return design
-        candidate = {k: v for k, v in protocol.items() if k not in ("grid", "in_each_run", "constants")}
-        for part in ("grid", "in_each_run", "constants"):
-            value = obj.get(part) if obj.get(part) is not None else (protocol.get(part) if part != "grid" else None)
+        candidate = {k: v for k, v in protocol.items() if k not in ("grid", "sub_studies", "in_each_run", "constants")}
+        for part in ("grid", "sub_studies", "in_each_run", "constants"):
+            # a rewritten grid replaces the old division into sub-studies: only the answer's own is taken
+            value = obj.get(part) if obj.get(part) is not None else (
+                protocol.get(part) if part not in ("grid", "sub_studies") else None)
             if value is not None:
                 candidate[part] = value
         if isinstance(candidate.get("in_each_run"), dict) and isinstance(candidate.get("grid"), dict):
-            candidate["grid"] = {k: v for k, v in candidate["grid"].items() if k not in candidate["in_each_run"]}
+            moved = [k for k in candidate["grid"] if k in candidate["in_each_run"]]
+            candidate["grid"] = {k: v for k, v in candidate["grid"].items() if k not in moved}
+            if isinstance(candidate.get("sub_studies"), list) and moved:
+                candidate["sub_studies"] = _plan.sub_studies_without(candidate["sub_studies"], moved) or None
+                if candidate["sub_studies"] is None:
+                    del candidate["sub_studies"]
         fixed, why = _plan.normalize_protocol(candidate)
         if fixed is None or not fixed.get("grid"):
             self._log.warning("[design] the redesign's grid, as the plan's model wrote it, cannot be read: %s", why)
             return design
         self._log.info("[design] the redesign's grid was rewritten by the plan's model: %s",
-                       _optimise_search.grid_too_large(fixed["grid"]) or "it fits now")
-        return {**design, "protocol": {**protocol, **{k: fixed[k] for k in ("grid", "in_each_run", "constants") if k in fixed}}}
+                       _optimise_search.grid_too_large(_optimise_search.study_grid(fixed)) or "it fits now")
+        kept = {**protocol, **{k: fixed[k] for k in ("grid", "sub_studies", "in_each_run", "constants") if k in fixed}}
+        if "sub_studies" not in fixed:
+            kept.pop("sub_studies", None)
+        return {**design, "protocol": kept}
 
     def _move_misplaced_parts(self) -> list[str]:
         """A protocol part the plan's model wrote beside ``protocol`` (at the top level of the design block, as the search
@@ -6200,7 +6213,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design, sha = await self._ask_plan_for_the_search(state, design, sha)
             design, sha = await self._ask_plan_for_the_parts(state, design, sha)
             design, sha = await self._ask_plan_for_the_grid(state, design, sha)
+            before = _study_size(design)
             await self._cover_the_topic_in_the_plan(state)
+            again, again_sha = self._design_from_plan()  # what the topic added may have made the study larger
+            if again is not None and again_sha and _study_size(again) > before:
+                await self._ask_plan_for_the_grid(state, again, again_sha, again=True)
             self._write_the_ledger(state)
 
     def _write_the_ledger(self, state: QuestState, design: Any = None) -> None:
@@ -6837,8 +6854,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 moved = [str(k) for k in new_protocol[part] if str(k) in merged["grid"]]
             if moved:
                 kept_grid = {k: v for k, v in merged["grid"].items() if k not in moved}
-                candidate = {**{k: v for k, v in merged.items() if k != "grid"}, **({"grid": kept_grid} if kept_grid else {}),
+                left = _plan.sub_studies_without(merged.get("sub_studies"), moved) if merged.get("sub_studies") else []
+                candidate = {**{k: v for k, v in merged.items() if k not in ("grid", "sub_studies")},
+                             **({"grid": kept_grid} if kept_grid else {}), **({"sub_studies": left} if left else {}),
                              part: new_protocol[part]}
+            elif part == "grid":
+                # a rewritten grid replaces the old division into sub-studies (the answer's own comes next, as its own part)
+                candidate = {**{k: v for k, v in merged.items() if k != "sub_studies"}, part: new_protocol[part]}
             else:
                 candidate = {**merged, part: new_protocol[part]}
             fixed, why = _plan.normalize_protocol(candidate)
@@ -6855,11 +6877,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     reasons.append(f"`protocol.{part}` as you wrote it is not complete: {problems}")
                     continue
             merged[part] = fixed[part]
+            if part == "grid":
+                merged.pop("sub_studies", None)
             if moved:
                 if fixed.get("grid"):
                     merged["grid"] = fixed["grid"]
                 else:
                     merged.pop("grid", None)
+                if fixed.get("sub_studies"):
+                    merged["sub_studies"] = fixed["sub_studies"]
+                else:
+                    merged.pop("sub_studies", None)
                 self._log.warning("[plan] %s now go%s through every run together (`protocol.in_each_run`), so FI took "
                                   "%s out of the settings run one by one (`protocol.grid`)", ", ".join(moved),
                                   "es" if len(moved) == 1 else "", "it" if len(moved) == 1 else "them")
@@ -7604,11 +7632,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         protocol = self._protocol_block(state)
         if not isinstance(protocol, dict) or protocol.get("optimisation"):
             return None
-        said = _optimise_search.grid_too_large(protocol.get("grid"))
+        said = _optimise_search.grid_too_large(_optimise_search.study_grid(protocol))
         if not said:
             return None
         # Read the way the asks count themselves (by the model asked, not plan.md's hash, which FI's own notes change).
-        asked = self._grid_asked_of(_GRID_ASKED) + self._grid_asked_of(_DRAFTED_GRID_ASKED)
+        asked = (self._grid_asked_of(_GRID_ASKED) + self._grid_asked_of(_GRID_ASKED_AGAIN)
+                 + self._grid_asked_of(_DRAFTED_GRID_ASKED))
         tried = [said,
                  ("asked the plan's model to rewrite the settings so they are crossed only where they should be, with the "
                   "count above; the grid was still too large") if asked else
@@ -8397,7 +8426,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._stop_if_the_search_cannot_start(state, design)
         # The design that will run is held to what the topic asks for (a redesign or an amendment that dropped a setting
         # is caught here); what is still missing and is the question's own stops the quest before anything runs.
+        size_before = _study_size(design)
         design, plan_sha = await self._hold_the_design_to_the_topic(state, design, plan_sha)
+        if plan_sha and _study_size(design) > size_before:  # what the topic added here made the study larger: counted again
+            design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha, again=True)
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
         # `cross_check` route back here, so a design CAN be rewritten after
@@ -14568,7 +14600,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 problems.append(f"the known-answer cases could not be run: {e!r}"[:300])
                 why_missing["oracle"] = "the known-answer cases could not be run"
         if trial_names:
-            grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+            grid = _optimise_search.study_grid(protocol)
             entries = _trial_runner.entries(root / simulate)
             try:
                 run = await _trial_runner.run_trials(
@@ -26251,7 +26283,7 @@ _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 #: The parts of a protocol that a redesign writes itself: it is never given the plan's in their place by
 #: :meth:`Engine._inherit_plan_parts` (a search for the best design is a different kind of study, not a missing part).
-_REDESIGN_OWNED_PARTS = frozenset({"grid", "in_each_run", "metrics", "model", "topic_map", "optimisation"})
+_REDESIGN_OWNED_PARTS = frozenset({"grid", "sub_studies", "in_each_run", "metrics", "model", "topic_map", "optimisation"})
 _DRAFTED_PARTS_ASKED = "drafted_parts_asked.json"  # the same bound, for protocol parts a redesign drafted that could not be read
 _LEDGER_ASKED = "ledger_asked.json"  # which ledger parts were asked about, in which design round
 _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger parts: each asked once per quest
@@ -26259,6 +26291,7 @@ _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger
 _ONCE_PARTS = (*_LEDGER_PARTS, "per_trial")
 _DRAFTED_GRID_ASKED = "drafted_grid_asked.json"  # one request per redesign round, for a drafted grid of more settings than FI lists
 _GRID_ASKED = "grid_asked.json"  # the same bounds, for a grid of more settings than FI lists (one request per plan)
+_GRID_ASKED_AGAIN = "grid_asked_again.json"  # one more request, after what the topic asked for was added to the plan
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"
 _TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks
@@ -26428,6 +26461,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 
 "protocol": {
   "grid": {"<parameter, named as the code will name it>": [<every value it takes>]},
+  "sub_studies": [{"name": "<a separate part of the study, in a few words>", "vary": ["<the settings of `grid` this part crosses with one another>"], "hold": {"<another setting of `grid`>": <the value this part keeps it at; leave `hold` out to keep it at its first value>}}],
   "in_each_run": {"<what ONE run goes through all of together: the conditions one fit spans, the methods applied to the same simulated data>": [<all its values>]},
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
   "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it and keeps every setting; only the topic's own time limit may take them below it (down to 10), and the paper then says so; leave out for a deterministic study>,
@@ -26449,6 +26483,8 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   },
   "criteria": [{"name": "<short name>", "what": "<one sentence>", "oracle": "<the name of one of the oracles above>", "use": "<error (how far it lands from its expected value, the default) | value (the measured value itself)>", "direction": "<lower | higher | target>", "target": <a number: for lower the most it may be, for higher the least, for target the value aimed at>, "tolerance": <a number: how close to the target counts as met, and how much a later version may change before it counts as worse>}]
 }
+
+`grid` is crossed: the study runs every combination of the values of ALL its settings, so each setting multiplies every other. When the topic is several separate studies (for example one comparison of methods, and a different sweep of a condition that only matters for one method), do not put all their settings into one `grid`: list every setting with its values in `grid`, and divide them in `sub_studies`, one entry for each part, naming in `vary` the settings that part crosses (a setting can be in several parts). The study then runs the settings of each part in turn, so its size is the sum of the parts, not the product of every setting; a setting a part does not vary stays at one value (its first, or the one in `hold`). Every setting of `grid` that takes more than one value must be varied by some part, or its values would never be run. Leave `sub_studies` out when every setting is meant to be crossed with every other.
 
 `constants` lists every other number the method uses that is neither a grid value nor a threshold nor a setting of the model: a quantile of a distribution (1.96 for a 95% interval), a physical constant (the gas constant R), a conversion factor. Give each a name and its value. The paper may state these numbers and only these (and the plan's own settings and thresholds): any other number in the paper's text must come from FI's records, and FI refuses a number the plan does not state. Leave `constants` out when the method uses none.
 
@@ -30289,6 +30325,16 @@ def _figure_overlap_directive(findings: list[str]) -> str:
 
 _PANEL_ROWS = {2: ("top", "bottom"), 3: ("top", "middle", "bottom")}
 _PANEL_COLS = {2: ("left", "right"), 3: ("left", "centre", "right")}
+
+
+def _study_size(design: Any) -> int:
+    """How many settings the design's protocol names (0 when it names none): what is compared before and after FI adds to a plan."""
+    protocol = design.get("protocol") if isinstance(design, dict) else None
+    grid = _optimise_search.study_grid(protocol)
+    try:
+        return _optimise_search.grid_size(grid) if grid else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _panel_place(grid: Any) -> str:

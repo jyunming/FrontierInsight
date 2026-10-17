@@ -39,7 +39,6 @@ from __future__ import annotations
 import json
 import math
 import re
-from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -162,7 +161,7 @@ def manifest_from_ledger(
     protocol (:func:`problems` does that part): a row naming no cell the protocol's grid has, one missing ``trial`` or
     ``status``, or two rows claiming the same (cell, trial) — the exact "duplicate id" / "replayed trial" and
     "out-of-protocol cell" shapes a script's self-report could otherwise hide."""
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid = _search.study_grid(protocol)
     row_problems: list[str] = []
     attempted: dict[str, int] = {}
     successful: dict[str, int] = {}
@@ -390,9 +389,7 @@ def _canonicalize_cell(key: Any, grid: dict[str, list[Any]]) -> tuple[frozenset[
 def _all_cells(grid: dict[str, list[Any]]) -> set[frozenset[tuple[str, Any]]]:
     """Every setting the protocol's grid names — its full Cartesian product, canonically keyed the same way
     :func:`_canonicalize_cell` keys a manifest's cells, so the two sets can be compared for exact equality."""
-    _search.check_listable(grid)
-    axes = list(grid.items())
-    return {frozenset(zip((a for a, _ in axes), (_freeze(c) for c in combo))) for combo in product(*(v for _, v in axes))}
+    return {frozenset((a, _freeze(v)) for a, v in cell.items()) for cell in _search.grid_cells(grid)}
 
 
 def _total_values_reported(result_json: Any, metric_id: str) -> int:
@@ -1418,7 +1415,7 @@ def strata_coverage(protocol: dict[str, Any] | None, result_json: Any) -> list[s
     settings its strata cover when that is fewer than all: a result for some strata only is allowed, and said."""
     if not isinstance(protocol, dict) or result_json is None:
         return []
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid = _search.study_grid(protocol)
     if not grid:
         return []
     everything = _all_cells(grid)
@@ -1447,14 +1444,14 @@ def metric_grid(protocol: dict[str, Any] | None, metric: str,
     compares inside it (``protocol.in_each_run``; FI keeps it under the value's own key, core/in_run.py), those values too.
     A number per run is counted once per run, a number per value once per value: never one as the other."""
     protocol = protocol if isinstance(protocol, dict) else {}
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid = _search.study_grid(protocol)
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     if not inside:
         return grid
     for key, by_name in (recorded_by_cell or {}).items():
         parsed = _parse_cell(key)
         if parsed and set(parsed) & set(inside) and recorded_counts(by_name, metric) is not None:
-            return {**grid, **inside}
+            return _search.with_everywhere(grid, inside)
     return grid
 
 
@@ -1478,7 +1475,7 @@ def _value_count_findings(
     derived by the analysis (a quantity per setting, a fit, a time): the trials hold no per-trial list of it, so no trial
     count is claimed for it (:func:`derived_metrics` says which). ``recorded_by_cell`` is the same record per setting: each
     per-setting list the analysis prints is then held to its own setting's trials as well (:func:`_listed_counts`)."""
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid = _search.study_grid(protocol)
     runs = _num(protocol.get("runs_per_setting"))
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     # A study whose only factor is what each run compares inside it (one fit over five temperatures) has no grid: one setting.
@@ -1671,7 +1668,7 @@ def differences(
     undefined), "recorded": (values, undefined)}`` for a setting the analysis lists more under than the trials of that
     setting returned, and each of ``short`` the same for a setting it lists fewer under (:func:`_account`). Computed from the counts :func:`problems` compares,
     never from its sentences. Empty when FI holds no record or the analysis lists no more than was measured."""
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid = _search.study_grid(protocol)
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     if not recorded or result_json is None or not (grid or inside) or not isinstance(manifest, dict):
         return []
@@ -1816,7 +1813,7 @@ def problems(
 
     realized = manifest.get("realized_grid")
     realized = realized if isinstance(realized, dict) else {}
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid = _search.study_grid(protocol)
     for axis, values in grid.items():
         want = values if isinstance(values, list) else []
         if not want:

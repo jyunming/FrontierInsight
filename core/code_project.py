@@ -24,6 +24,7 @@ from typing import Any
 from . import experiment_deps as _experiment_deps
 from .execution import scrub_secrets
 from .proc_tree import ProcessTree as _ProcessTree
+from . import optimise_search as _search
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
 
@@ -66,11 +67,24 @@ WORK = (QUEST / "run_output") if QUEST else (HERE / "output")
 MAX_SETTINGS = 500000  # the most settings listed from one grid (core.optimise_search.MAX_LISTED_SETTINGS)
 
 
-def cells(grid):
+def cells(grid, sub_studies=None):
+    axes = list(grid.items())
+    if sub_studies:  # the settings of each sub-study in turn, none twice (core.optimise_search.grid_cells)
+        out, seen = [], set()
+        for sub in sub_studies:
+            held = sub.get("hold") or {}
+            choices = [range(len(v)) if a in sub["vary"] else [next((i for i, x in enumerate(v) if a in held and x == held[a]), 0)]
+                       for a, v in axes]
+            for picked in itertools.product(*choices):
+                if picked not in seen:
+                    seen.add(picked)
+                    out.append({a: v[i] for (a, v), i in zip(axes, picked)})
+                    if len(out) > MAX_SETTINGS:
+                        raise SystemExit("the study asks for more than {:,} settings; this script does not list or run more".format(MAX_SETTINGS))
+        return out
     size = math.prod(len(v) for v in grid.values())
     if size > MAX_SETTINGS:
         raise SystemExit("the study asks for {:,} settings; this script does not list or run more than {:,}".format(size, MAX_SETTINGS))
-    axes = list(grid.items())
     if not axes:
         return [{}]
     return [dict(zip((a for a, _ in axes), combo)) for combo in itertools.product(*(v for _, v in axes))]
@@ -105,7 +119,7 @@ def run_cell_child(study, index, out_path):
     module = load_simulation()
     entry = study["entry"]
     fn = getattr(module, entry)
-    cell = cells(study.get("grid") or {})[index]
+    cell = cells(study.get("grid") or {}, study.get("sub_studies"))[index]
     key = cell_key(cell)
     inside = study.get("in_each_run") or {}
     levels = level_cells(inside)
@@ -132,7 +146,7 @@ def run_trials(study):
     out = []
     planned = 1 if study["entry"] == "run_cell" else int(study.get("runs_per_setting") or 1)
     levels = level_cells(study.get("in_each_run") or {})
-    for index, cell in enumerate(cells(study.get("grid") or {})):
+    for index, cell in enumerate(cells(study.get("grid") or {}, study.get("sub_studies"))):
         key = cell_key(cell)
         with tempfile.TemporaryDirectory() as tmp:
             result = Path(tmp) / "rows.json"
@@ -392,11 +406,13 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
             study["rounds"] = [{k: r[k] for k in ("added", "target", "search_target") if k in r} for r in rounds]
         return study
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    sub_studies = getattr(_search.study_grid(protocol), "sub_studies", None)
     metrics = protocol.get("metrics") or []
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     return {
         "entry": entry,
         "grid": grid,
+        **({"sub_studies": sub_studies} if sub_studies else {}),
         **({"in_each_run": inside} if inside else {}),
         "runs_per_setting": int(protocol.get("runs_per_setting") or 1),
         "base_seed": 0,
@@ -433,6 +449,8 @@ def study_differences(code_dir: Path, protocol: dict[str, Any] | None, *, split:
     for name in have_grid:
         if name not in grid:
             found.append(f"it varies `{name}`, which the protocol does not")
+    if (wanted.get("sub_studies") or None) != (have.get("sub_studies") or None):
+        found.append("it divides the settings into sub-studies differently from the protocol")
     inside, have_inside = wanted.get("in_each_run") or {}, have.get("in_each_run") or {}
     for name, values in inside.items():
         if have_inside.get(name) != values:
@@ -469,9 +487,7 @@ def _readme(code_dir: Path, *, title: str, question: str, study: dict[str, Any] 
     elif two:
         lines += ["It runs the simulation, then the analysis.", ""]
         if study:
-            settings = 1
-            for values in study["grid"].values():
-                settings *= max(1, len(values))
+            settings = _search.grid_size(_search.study_grid({"grid": study["grid"], "sub_studies": study.get("sub_studies")}))
             runs = 1 if study["entry"] == "run_cell" else study["runs_per_setting"]
             lines += [
                 f"It runs {settings} setting(s) x {runs} run(s) each, once (seed 0). "

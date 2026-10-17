@@ -30,6 +30,7 @@ from typing import Any
 
 from . import frozen_protocol as _frozen
 from . import in_run as _in_run
+from . import optimise_search as _optimise_search
 from . import oracle_forms as _forms
 from . import plan as _plan
 from . import run_estimate as _estimate
@@ -545,14 +546,15 @@ class RunChecksMixin:
 
     def _grid_and_runs(self, state: Any) -> tuple[dict[str, list[Any]], int, dict[str, Any]]:
         protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
-        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-        grid = {str(k): list(v) for k, v in grid.items() if isinstance(v, list) and v}
+        whole = _optimise_search.study_grid(protocol)
+        grid = _optimise_search.with_axes(whole, {str(k): list(v) for k, v in whole.items() if isinstance(v, list) and v})
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
         return grid, max(1, int(protocol.get("runs_per_setting") or 1)), thresholds
 
     def _sizing_key(self, runner: Any, grid: dict[str, list[Any]], runs: int, limit_s: float,
                     inside: dict[str, list[Any]] | None = None) -> str:
-        what = {"grid": grid, **({"in_each_run": inside} if inside else {})}
+        what = {"grid": grid, **({"sub_studies": grid.sub_studies} if getattr(grid, "sub_studies", None) else {}),
+                **({"in_each_run": inside} if inside else {})}
         return _trial_runner._run_key(runner.simulate, what, runs, 0, runner.deterministic) + f"|{int(limit_s)}"
 
     async def _size_the_run(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
