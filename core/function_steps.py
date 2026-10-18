@@ -424,7 +424,7 @@ def _name_key(name: str) -> str:
 def pair_parameter_names(have: list[str], want: list[str]) -> dict[str, str] | None:
     """``{name the function has: name it must have}`` when the two lists of unmatched names pair up with no choice to
     make, else ``None``. ``have`` are the function's parameters that are not wanted, ``want`` the wanted names the function
-    lacks. A pair is made when the two names are the same word apart from capitals and underscores (``na`` and ``NA``), and
+    lacks. A pair is made when the two names are the same word apart from capitals and underscores (``rate`` and ``Rate``), and
     when exactly one name is left on each side. Two or more names left on a side, or lists of different lengths, are never
     paired: that would be a guess. The caller's test of the function's value is what judges the renamed function."""
     if not have or len(have) != len(want):
@@ -606,7 +606,7 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
         return None, f"the reply holds no function named `{name}`"
     want = _param_names(ast.parse(signature.rstrip().rstrip(":") + ":\n    pass").body[0])  # type: ignore[arg-type]
     if _param_names(node) != want:
-        # A reply that only names a parameter otherwise (``sigma_max`` for ``sigma``) is the function with its names put
+        # A reply that only names a parameter otherwise (``width_max`` for ``width``) is the function with its names put
         # right by FI, when there is no choice in the pairing; any other difference is refused.
         renamed = match_parameter_names(reply, name, want, callers=[source])
         if renamed is not None:
