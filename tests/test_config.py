@@ -462,3 +462,12 @@ def test_code_writer_rejects_any_other_value() -> None:
     msg = str(ei.value)
     assert "code_writer" in msg
     assert "'chat'" in msg and "'agent'" in msg
+
+
+def test_settings_at_once_is_auto_or_a_whole_number_of_at_least_one() -> None:
+    from pydantic import ValidationError
+    assert ExecutionConfig().settings_at_once == "auto"
+    assert ExecutionConfig(settings_at_once=4).settings_at_once == 4
+    for bad in (0, -2, True, "many"):
+        with pytest.raises(ValidationError):
+            ExecutionConfig(settings_at_once=bad)

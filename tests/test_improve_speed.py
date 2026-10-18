@@ -228,18 +228,20 @@ def test_the_sample_takes_only_settings_the_timing_saw_finish_and_fits_the_time_
     probes = [_probe({"s": 2}, 1000.0, at_least=True, axis=None), _probe({"s": 1}, 2.0), _probe({"s": 3}, 500.0)]
     kept, timeouts, why = sp.bounded_sample(cells, probes, runs=50, deterministic=False, budget_s=600.0, samples=4)
     # the base did not finish when timed (left out); s=3 costs 12/50 * 500 = 120 s, over 600 / 4 samples / 2 repeats
-    assert kept == [{"s": 1}] and why == ""
+    assert kept == [{"s": 1}]
+    assert why == ("2 of the sample's 3 settings are left out (FI's timing did not see 1 finish; 1 would not fit in "
+                   "the time left for timing)")
     assert timeouts == {tr.cell_key({"s": 1}): 60}  # three times its 0.48 s, at least a minute
     # a setting the timing never ran is costed as the base; a known-answer case's setting is one of these
-    more, more_t, _ = sp.bounded_sample([{"s": 1}, {"s": 9}], [_probe({"s": 1}, 50.0, axis=None)], runs=50,
+    more, more_t, more_why = sp.bounded_sample([{"s": 1}, {"s": 9}], [_probe({"s": 1}, 50.0, axis=None)], runs=50,
                                         deterministic=False, budget_s=10_000.0, samples=1)
-    assert more == [{"s": 1}, {"s": 9}] and more_t[tr.cell_key({"s": 9})] == 60
+    assert more == [{"s": 1}, {"s": 9}] and more_t[tr.cell_key({"s": 9})] == 60 and more_why == ""
     # nothing fits, or nothing finished: the step is skipped and says why
     none, _, why = sp.bounded_sample(cells, probes, runs=50, deterministic=False, budget_s=1.0, samples=4)
     assert none == [] and "more than the" in why
     unseen, _, why = sp.bounded_sample(cells, [_probe({"s": 2}, 9.0, at_least=True, axis=None)], runs=50,
                                        deterministic=False, budget_s=600.0, samples=4)
-    assert unseen == [] and "none of the sample's settings finish" in why
+    assert unseen == [] and "did not see any of the sample's settings finish" in why
 
 
 @pytest.mark.asyncio

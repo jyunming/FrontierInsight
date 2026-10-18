@@ -65,7 +65,8 @@ def bounded_sample(cells: list[dict[str, Any]], probes: list[Any] | None, *, run
     the timing did not see finish (``at_least``) is left out (its cost is not known, only that it is large), a setting
     the timing never ran is costed as the base, and each is given :data:`SAMPLE_ALLOWANCE` times its measured cost. The
     ``samples`` samples the step runs (before, and after each edit) together fit in ``budget_s``: the costliest settings
-    are left out first. ``([], {}, why)`` when none can be sampled in that time."""
+    are left out first. ``([], {}, why)`` when none can be sampled in that time; otherwise ``why`` says how many settings
+    were left out, or is empty."""
     by_key = {_tr.cell_key(p.cell): p for p in probes or [] if getattr(p, "cell", None) is not None}
     base = next((p for p in probes or [] if getattr(p, "axis", 0) is None), None)
     n = 1 if deterministic else SAMPLE_TRIALS
@@ -81,8 +82,9 @@ def bounded_sample(cells: list[dict[str, Any]], probes: list[Any] | None, *, run
         if p is None or getattr(p, "at_least", False):
             continue
         costed.append((cost(p), cell))
+    unfinished = len(cells) - len(costed)
     if not costed:
-        return [], {}, "the timing saw none of the sample's settings finish, so their cost is not known"
+        return [], {}, "FI's timing did not see any of the sample's settings finish, so how long they take is not known"
     share = budget_s / max(1, samples) / REPEATS
     kept = list(costed)
     while kept and sum(c for c, _cell in kept) > share:
@@ -93,8 +95,13 @@ def bounded_sample(cells: list[dict[str, Any]], probes: list[Any] | None, *, run
                         f"{_estimate.plain_duration(share)} the time for timing leaves each sample")
     order = {id(cell): i for i, cell in enumerate(cells)}
     kept.sort(key=lambda item: order[id(item[1])])
+    over = len(costed) - len(kept)
+    reasons = ([f"FI's timing did not see {unfinished} finish"] if unfinished else []) + (
+        [f"{over} would not fit in the time left for timing"] if over else [])
+    note = (f"{unfinished + over} of the sample's {len(cells)} settings are left out ({'; '.join(reasons)})"
+            if reasons else "")
     return ([cell for _c, cell in kept],
-            {_tr.cell_key(cell): max(60, math.ceil(SAMPLE_ALLOWANCE * c)) for c, cell in kept}, "")
+            {_tr.cell_key(cell): max(60, math.ceil(SAMPLE_ALLOWANCE * c)) for c, cell in kept}, note)
 
 
 async def run_sample(executor: Any, python: Path | str, quest_root: Path, module: str, cells: list[dict[str, Any]], *,

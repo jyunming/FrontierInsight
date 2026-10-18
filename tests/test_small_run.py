@@ -125,4 +125,5 @@ def test_a_study_of_parts_runs_a_setting_of_every_part_each_with_its_share_of_th
     assert small_run.settings(plain) == [{"n": 3}, {"n": 1}, {"n": 5}]
     ex2 = _Hangs()
     asyncio.run(small_run.run(ex2, sys.executable, root, "code/simulate.py", plain, deterministic=True, timeout_s=60))
-    assert ex2.given[0] == 60
+    # the whole time less what setting up took (a second on a busy machine), not a share of it
+    assert ex2.given[0] >= 55, ex2.given

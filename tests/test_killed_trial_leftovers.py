@@ -122,6 +122,29 @@ def test_a_killed_trials_leftovers_are_found_by_what_was_not_there_before(tmp_pa
     assert (root / "data" / "table.csv").exists()
 
 
+def test_a_leftover_fi_cannot_remove_is_said(tmp_path: Path, monkeypatch, caplog) -> None:  # noqa: ANN001
+    """On Windows a handle of the stopped process can outlive it: the removal is tried again, and a file still held is
+    named in the log rather than left behind without a trace."""
+    import logging
+
+    root = _quest(tmp_path)
+    before = outside_run.working_files(root)
+    (root / "data" / "held.lock").write_text("x")
+    real_unlink = Path.unlink
+
+    def held(self: Path, missing_ok: bool = False) -> None:
+        if self.name == "held.lock":
+            raise PermissionError("in use")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", held)
+    left: list[str] = []
+    assert outside_run.remove_created_since(root, before, left) == [] and left == ["data/held.lock"]
+    with caplog.at_level(logging.WARNING):
+        outside_run.say_removed(logging.getLogger("t"), [], left)
+    assert "could not remove (data/held.lock)" in caplog.text
+
+
 class _Writes:
     """An executor whose run writes a file in its working folder and is (or is not) stopped for its time."""
 

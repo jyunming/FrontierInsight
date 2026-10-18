@@ -14,6 +14,10 @@ Never choose:
 - the only sentence that gives a limitation or a conclusion the Abstract states;
 - the sentence that gives the reason the study was done.
 
+# Formulas and headings
+
+The paper follows this rule. Write every formula and symbol in LaTeX math between dollar signs, e.g. `$$\sigma = 0.6$$`, `$$k_1 \approx 0.28$$`; do not use Unicode math symbols (σ, ≈, ×). Do not number the section headings; FI numbers them. You write nothing here, so choose sentences whatever formulas they hold, and keep the marker numbers exactly as given.
+
 # Output format
 
 Respond with one JSON object and nothing else: no prose, no markdown fence.
