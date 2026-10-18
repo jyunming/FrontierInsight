@@ -649,11 +649,20 @@ same PR that adds, splits or renames one.
   FI's process only; `main()` measures a spec and prints one `EQUATION_MEASURED: <nonce> {...}` line. Tests:
   `tests/test_fi_judges_numbers.py` (the review's in-process theft probe: a wrong law that reads the test's memory is a
   mismatch), `tests/equation_judge_helpers.py`.
-- `core/agent_coder.py` — the coding agent's runner and guard (not wired into the engine yet): `ClaudeCliRunner` (`claude -p` on a
+- `core/agent_coder.py` — the coding agent's runner and guard (used by `core/agent_build.py`): `ClaudeCliRunner` (`claude -p` on a
   scratch copy of `code/`, in Docker when the daemon answers, else on the host with a tripwire), `make_runner`, `AgentCoder`
   (`write` / `continue_` rounds, FI-owned files kept, writes outside the copy put back and recorded in `.fi/agent_coder.json`),
   `guarded_round`, `hide_path` (the prompt never names the quest folder). Image: `docker/agent_coder/Dockerfile` (CLI version
   pinned to `CLAUDE_VERSION`). Tests: `tests/test_agent_coder.py`.
+- `core/agent_build.py` — agent mode (`engine.code_writer: agent`), `AgentBuildMixin` of `Engine`: `_implement_by_agent`
+  (the agent writes `code/` from `agents/implement_agent.md`; no chat repair in the implement step), `_agent_build` (in place of
+  `_gate_pass` in `_node_execute`: the checks run in report mode, what they found goes back to the agent, at most `FIX_ROUNDS`
+  fixes / `TOTAL_S`, ends when a round makes no check newly pass; claimed vs found per round in `.fi/agent_coder.json`),
+  `_reflect_by_agent` (a failed run: one agent round, `AFTER_FREEZE_ROUNDS` after the freeze). Report mode is one switch:
+  `Engine._repairs_go_to` makes `Engine._chat` raise `RepairForAgent` for a code-writing node (`writes_code`), caught by the
+  loop or by `Engine._node_execute` (a failed run for the repair step); log lines shown to the agent lose their numbers
+  (`without_numbers`). Evidence: `agent_coder.evidence_settings` -> `code_writer` in `needs/EVIDENCE.json`. Tests:
+  `tests/test_agent_build.py`.
 - `core/outside_run.py` — FI runs the quest's code from a copy outside the quest folder: `OutsideCopy` (`<temp>/fi_run/
   <random id>/` with `code/` minus `.git`/`.venv`/caches/stale value files, the folders the run reads and the paths FI
   names for the run: `CELL_INPUTS` (`inputs/`, `data/` without `data/results/`) for a cell, a check case or an equation

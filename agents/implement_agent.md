@@ -22,7 +22,7 @@ $topic_block
 - Do not hard-code expected values, results or any number a check will compare against: compute every result from the plan's formulas and settings. A result pinned to a number, a clipped result, or a value copied from the literature is rejected by FI and counted against you.
 - FI keeps the expected values of its checks hidden. Do not try to find them: do not search for them, guess them, or read any file that might hold them.
 - Do not open `.fi/`, `needs/`, `plan.md` or any folder outside the copy of `code/` you are given. Work from the plan and the inputs in this prompt only.
-- To check your work, run `python fi_check.py` (FI's own checks) from this folder. The work is accepted only when FI's own run agrees with your own quick runs; a result that only your own runs show is not accepted.
+- The work is accepted only when FI's own run of your code agrees with your own quick runs; a result that only your own runs show is not accepted.
 - Use the plan's equations exactly as written. Put each equation's id in a comment (`# E1`) on or above the code that computes it.
 - No network access. Packages the study needs are already installed in the interpreter above. If you need one that is not, do not try to install it: say so in your last message on a line `DEPS: name1, name2` and write the code so far.
 - Keep the whole study within the wall-time limit (seconds): $timeout_s.

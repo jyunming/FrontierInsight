@@ -32,4 +32,5 @@ def test_agent_prompt_states_the_three_rules() -> None:
     text = (AGENTS / "implement_agent.md").read_text(encoding="utf-8")
     assert "expected values" in text and "hidden" in text
     assert ".fi/" in text and "needs/" in text and "plan.md" in text
-    assert "python fi_check.py" in text
+    # No self-check script exists for the agent to run: the prompt must not tell it to run one.
+    assert "fi_check.py" not in text
