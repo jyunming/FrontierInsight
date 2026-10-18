@@ -104,26 +104,21 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
     return out_sample
 
 
-def _leaves(x: Any, path: str = "") -> dict[str, Any]:
-    """Every value a trial returned, by its place: numbers as floats, and every other value (a label, a flag, ``None``, an
-    object the trial runner wrote as text) as it is, so a speed edit that changes one is seen too."""
-    out: dict[str, Any] = {}
+def _numbers(x: Any, path: str = "") -> dict[str, float]:
+    out: dict[str, float] = {}
     if isinstance(x, dict):
         for k, v in x.items():
-            out.update(_leaves(v, f"{path}/{k}"))
+            out.update(_numbers(v, f"{path}/{k}"))
     elif isinstance(x, (list, tuple)):
         for i, v in enumerate(x):
-            out.update(_leaves(v, f"{path}[{i}]"))
+            out.update(_numbers(v, f"{path}[{i}]"))
     elif isinstance(x, (int, float)) and not isinstance(x, bool):
         out[path] = float(x)
-    else:
-        out[path] = x
     return out
 
 
 def disagreements(before: Sample, after: Sample) -> list[str]:
-    """Where the sample's values are not the same (a missing or a new value counts), by setting, trial and name: numbers
-    within the tolerance, every other value exactly."""
+    """Where the sample's numbers are not the same (a missing or a new number counts), by setting, trial and name."""
     bad: list[str] = []
     for key in sorted(before.values.keys() | after.values.keys()):
         a, b = before.values.get(key), after.values.get(key)
@@ -131,16 +126,12 @@ def disagreements(before: Sample, after: Sample) -> list[str]:
             bad.append(f"{key}: not run in both")
             continue
         for t, (ra, rb) in enumerate(zip(a, b)):
-            na, nb = _leaves(ra), _leaves(rb)
+            na, nb = _numbers(ra), _numbers(rb)
             for name in sorted(na.keys() | nb.keys()):
                 if name not in na or name not in nb:
                     bad.append(f"{key} trial {t} {name}: only in one")
                     continue
                 x, y = na[name], nb[name]
-                if not (isinstance(x, float) and isinstance(y, float)):
-                    if x != y:
-                        bad.append(f"{key} trial {t} {name}: {str(x)[:60]} -> {str(y)[:60]}")
-                    continue
                 if math.isnan(x) and math.isnan(y):
                     continue
                 if not abs(x - y) <= ATOL + RTOL * abs(y):

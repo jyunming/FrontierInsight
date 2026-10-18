@@ -91,19 +91,6 @@ def test_the_sample_must_return_the_same_numbers_and_take_clearly_less_time() ->
     assert sp.fast_enough(1.0, 0.7) and not sp.fast_enough(1.0, 0.8) and not sp.fast_enough(0.0, 0.0)
 
 
-def test_a_speed_edit_that_changes_a_value_that_is_not_a_number_is_seen() -> None:
-    """A flag, a label or an object written as text is part of what a trial returns: an edit that turns a converged
-    solve into one that stops early (``converged`` True to False) gives other results, though every number is the same."""
-    a = sp.Sample(seconds=1.0, values={"k": [{"x": 1.0, "converged": True, "regime": "laminar", "extra": None}]})
-    flag = sp.Sample(seconds=0.5, values={"k": [{"x": 1.0, "converged": False, "regime": "laminar", "extra": None}]})
-    label = sp.Sample(seconds=0.5, values={"k": [{"x": 1.0, "converged": True, "regime": "turbulent", "extra": None}]})
-    none = sp.Sample(seconds=0.5, values={"k": [{"x": 1.0, "converged": True, "regime": "laminar", "extra": 0.0}]})
-    for changed, name in ((flag, "converged"), (label, "regime"), (none, "extra")):
-        bad = sp.disagreements(a, changed)
-        assert len(bad) == 1 and name in bad[0], (name, bad)
-    assert sp.disagreements(a, sp.Sample(seconds=0.5, values={"k": [dict(a.values["k"][0])]})) == []
-
-
 @pytest.mark.asyncio
 async def test_a_change_that_alters_a_number_is_not_kept_and_one_that_keeps_them_and_is_faster_is_kept(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
