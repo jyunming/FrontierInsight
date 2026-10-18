@@ -12778,6 +12778,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             sources = self._equation_sources()
             located = _equation_tests.locate(protocol, sources, self._outline_equation_names(state))
             case_list = _equation_tests.cases(rows, located)
+            if self._match_example_names(case_list, located, sources):  # FI's reading of the code is of the renamed code
+                sources = self._equation_sources()
+                located = _equation_tests.locate(protocol, sources, self._outline_equation_names(state))
+                case_list = _equation_tests.cases(rows, located)
             notes = _equation_tests.untested_notes(rows, located)
             record["not_tested"] = notes
             if attempt == 0:
@@ -12827,6 +12831,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 protocol = self._protocol_block(state)
                 rows = _equation_tests.example_rows(protocol)
                 record["equations"] = {r["id"]: {"state": r["state"], "why": r["why"]} for r in rows}
+                fixed = self._outline_signatures(state)  # the reworked examples' names, which the tests now call by
                 continue
             for f in failures:
                 eid = str(f.get("id"))
@@ -13060,6 +13065,37 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if node is not None:
                 fixed[name] = f"def {name}({ast.unparse(node.args)}):"
         return fixed
+
+    def _match_example_names(self, case_list: list[dict[str, Any]], located: dict[str, dict[str, str] | None],
+                             sources: dict[str, str]) -> bool:
+        """Before the equation tests run: a function whose parameter is named otherwise than the plan's worked example names
+        that input (``na`` for ``NA``), when the pairing leaves no choice (:func:`core.function_steps.match_example_names`),
+        has the parameter renamed by FI, in the function and where it reads it. The code is often written whole with
+        the parameters it prefers, and a repair of one function is held to the example's names, which the model that wrote the
+        function has twice not used; FI already knows both names, so it sets them. The value is still judged by the test.
+        ``True`` when a file was changed."""
+        changed = False
+        for case in case_list:
+            where = located.get(str(case.get("id")))
+            if not where or not case.get("inputs"):
+                continue
+            try:
+                path = self.quest_root / "code" / where["file"]
+                text = path.read_text(encoding="utf-8")
+                new, renames = _function_steps.match_example_names(
+                    text, where["function"], list(case["inputs"]), random=bool(case.get("random")),
+                    callers=[f.read_text(encoding="utf-8", errors="replace") for f in (self.quest_root / "code").glob("*.py")]
+                    + [s for rel, s in sources.items() if rel != where["file"]])
+                if new is None:
+                    continue
+                path.write_text(new, encoding="utf-8")
+            except Exception as e:  # noqa: BLE001 -- a rename FI could not make leaves the code as it was
+                self._log.warning("[equations] could not set the parameter names of %s: %r", where.get("function"), e)
+                continue
+            changed = True
+            self._log.info("[equations] FI set the parameters of %s to the names of the plan's worked example for %s (%s)",
+                           where["function"], case.get("id"), ", ".join(f"{o} -> {n}" for o, n in renames.items()))
+        return changed
 
     async def _repair_equation_function(self, failure: dict[str, Any], sources: dict[str, str],
                                         located: dict[str, dict[str, str] | None],
