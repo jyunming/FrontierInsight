@@ -1098,6 +1098,17 @@ def sub_study_sizes(grid):
             for i, sub in enumerate(getattr(grid, "sub_studies", None) or [], start=1)]
 
 
+def part_cells(grid):
+    """``[(name, setting)]``: for each sub-study of a :class:`StudyGrid`, one real setting of it (every setting it varies at its
+    middle value, every other at the value it holds), else ``[]``. A part can cost far more than another (what a run of it
+    computes differs), so timing a setting of every part is how its cost is known."""
+    out = []
+    for i, sub in enumerate(getattr(grid, "sub_studies", None) or [], start=1):
+        picks = [c[len(c) // 2] for c in _axis_choices(grid, sub)]
+        out.append((sub.get("name") or f"sub-study {i}", {name: values[k] for (name, values), k in zip(grid.items(), picks)}))
+    return out
+
+
 def check_listable(grid):
     """Raise :class:`TooManySettings` when listing the whole grid would hold more than :data:`MAX_LISTED_SETTINGS`."""
     size = grid_size(grid)
