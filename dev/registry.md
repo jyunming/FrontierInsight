@@ -648,6 +648,11 @@ same PR that adds, splits or renames one.
   FI's process only; `main()` measures a spec and prints one `EQUATION_MEASURED: <nonce> {...}` line. Tests:
   `tests/test_fi_judges_numbers.py` (the review's in-process theft probe: a wrong law that reads the test's memory is a
   mismatch), `tests/equation_judge_helpers.py`.
+- `core/agent_coder.py` — the coding agent's runner and guard (not wired into the engine yet): `ClaudeCliRunner` (`claude -p` on a
+  scratch copy of `code/`, in Docker when the daemon answers, else on the host with a tripwire), `make_runner`, `AgentCoder`
+  (`write` / `continue_` rounds, FI-owned files kept, writes outside the copy put back and recorded in `.fi/agent_coder.json`),
+  `guarded_round`, `hide_path` (the prompt never names the quest folder). Image: `docker/agent_coder/Dockerfile` (CLI version
+  pinned to `CLAUDE_VERSION`). Tests: `tests/test_agent_coder.py`.
 - `core/outside_run.py` — FI runs the quest's code from a copy outside the quest folder: `OutsideCopy` (`<temp>/fi_run/
   <random id>/` with `code/` minus `.git`/`.venv`/caches/stale value files, the folders the run reads and the paths FI
   names for the run: `CELL_INPUTS` (`inputs/`, `data/` without `data/results/`) for a cell, a check case or an equation
