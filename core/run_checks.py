@@ -555,7 +555,10 @@ class RunChecksMixin:
                     inside: dict[str, list[Any]] | None = None) -> str:
         what = {"grid": grid, **({"sub_studies": grid.sub_studies} if getattr(grid, "sub_studies", None) else {}),
                 **({"in_each_run": inside} if inside else {})}
-        return _trial_runner._run_key(runner.simulate, what, runs, 0, runner.deterministic) + f"|{int(limit_s)}"
+        # How many settings run at once changes how long the run takes: a different number is timed again.
+        at_once = int(getattr(runner, "at_once", 1) or 1)
+        return (_trial_runner._run_key(runner.simulate, what, runs, 0, runner.deterministic) + f"|{int(limit_s)}"
+                + (f"|{at_once}" if at_once > 1 else ""))
 
     async def _size_the_run(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
         """Before the protocol is frozen and the study starts: time a few real trials, add them up, and compare the total with
@@ -602,6 +605,8 @@ class RunChecksMixin:
         # FI lowers the runs once; the lowered run is timed again, and a resume after the cut does not cut a second time.
         cut_done = bool(reduced) and prior.get("fits") is False
         speed_done = False
+        at_once = int(getattr(runner, "at_once", 1) or 1)
+        slowdown: float | None = None  # measured once, only when the settings one after another would not fit
         for _round in range(3):
             grid, runs, thresholds = self._grid_and_runs(state)
             inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
@@ -628,9 +633,17 @@ class RunChecksMixin:
             # The checks of the pilot's trials get the time they always had (FI's own limit, not the topic's).
             if (broken := await self._pilot_gate(state, runner, python, env, grid, probes, thresholds, hard_s, budget_s)) is not None:
                 return broken
+            if isinstance(runner, _trial_runner.TrialsRunner):
+                runner.cost = _estimate.setting_cost(grid, probes)  # the run starts the costliest settings first
             est = _estimate.estimate(grid, runs, runner.deterministic, probes)
             if est is None:
                 return None
+            if at_once > 1 and _estimate.known_too_long(est, limit_s):
+                if slowdown is None:
+                    slowdown = await self._slowdown_at_once(runner, python, env, probes, runs, thresholds, inside,
+                                                            at_once, budget_s)
+                if slowdown is not None:
+                    est = _estimate.estimate(grid, runs, runner.deterministic, probes, at_once=at_once, slowdown=slowdown)
             line = _estimate.says(est, limit_s, topic=by_topic)
             base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
@@ -681,7 +694,8 @@ class RunChecksMixin:
                 # to the fewest the plan states, or, for the topic's own limit, below it (said in the paper). The shorter run
                 # is timed again before it is used. No model is asked.
                 fit = _estimate.fit_runs(grid, runs, runner.deterministic, probes, protocol, limit_s=limit_s,
-                                         topic_limit=by_topic, spreads=est.spreads)
+                                         topic_limit=by_topic, spreads=est.spreads, at_once=est.at_once,
+                                         slowdown=est.slowdown)
             over_topic = ""
             if fit is None and by_topic and not cut_done:
                 # Not even the fewest runs meet the topic's limit: going below the plan's minimum would not meet it either,
@@ -690,8 +704,10 @@ class RunChecksMixin:
                 floor = _estimate.runs_floor(protocol, runs, est.spreads) if _estimate.floor_is_stated(protocol) else runs
                 floor = min(runs, max(floor, _estimate.runs_checks_need(protocol, grid)))  # what the plan's checks need
                 least = _estimate.fewest_for_topic(protocol, grid, runs)
-                fewest = _estimate.seconds_at(grid, least, runs, runner.deterministic, probes) or 0.0
-                at_floor = _estimate.seconds_at(grid, floor, runs, runner.deterministic, probes) or est.seconds
+                fewest = _estimate.seconds_at(grid, least, runs, runner.deterministic, probes, at_once=est.at_once,
+                                              slowdown=est.slowdown) or 0.0
+                at_floor = _estimate.seconds_at(grid, floor, runs, runner.deterministic, probes, at_once=est.at_once,
+                                                slowdown=est.slowdown) or est.seconds
                 if at_floor * _estimate.SAFETY <= hard_s:
                     over_topic = (f"The topic's limit of {_estimate.plain_duration(limit_s)} cannot be met by fewer runs per "
                                   f"setting: even with {least} runs per setting the {est.cells:,} settings would take about "
@@ -724,6 +740,45 @@ class RunChecksMixin:
             if over_topic:
                 return None  # sized to the plan's minimum, knowingly over the topic's limit: nothing to gain by timing again
         return None
+
+    async def _slowdown_at_once(self, runner: Any, python: Any, env: Any, probes: list[Any], runs: int,
+                                thresholds: dict[str, Any], inside: Any, at_once: int, budget_s: float) -> float | None:
+        """How many times slower a setting runs when ``at_once`` run at the same time on this machine
+        (:func:`core.run_estimate.slowdown_at_once`), or ``None`` when it could not be measured in the time left for timing;
+        then the estimate counts the settings one after another, as before. It is measured on the costliest timed setting
+        that finished and can be timed again in the time left: the costly settings are most of the run, and running beside
+        others slows them the most (a short setting is mostly its process start, which hardly slows)."""
+        left = budget_s - self._pilot_spent
+
+        def timing_of(p: Any) -> float:
+            # What timing the setting took: its timed trials, not the whole setting.
+            if p.per_trial_s is not None and p.timed_trials > 0:
+                return min(p.seconds, (p.fixed_s or 0.0) + p.timed_trials * p.per_trial_s)
+            return p.seconds
+
+        finished = [p for p in probes if not p.at_least and p.seconds > 0]
+        # Alone once, then beside the others: at worst as slow as all of them one after another.
+        fits = [p for p in finished if left >= timing_of(p) * (1 + at_once) + 10]
+        base = max(fits, key=timing_of, default=None)
+        if base is None:
+            why = "no timed setting finished" if not finished else "no time was left for it"
+            self._log.info("[execute] FI did not measure how much slower settings run at the same time (%s); the "  # type: ignore[attr-defined]
+                           "estimate counts them one after another", why)
+            return None
+        timing = timing_of(base)
+        started = time.monotonic()
+        factor, why = await _estimate.slowdown_at_once(
+            self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+            dict(base.cell), at_once=at_once, runs=runs, deterministic=runner.deterministic,
+            timeout_s=int(max(30, 3 * timing + 10)), env=env, thresholds=thresholds, in_each_run=inside)
+        self._pilot_spent += time.monotonic() - started
+        if factor is None:
+            self._log.info("[execute] FI could not measure how much slower settings run at the same time (%s); the "  # type: ignore[attr-defined]
+                           "estimate counts them one after another", why or "no reason given")
+            return None
+        self._log.info("[execute] with %d settings running at the same time, each took %.1f times as long as alone (timed "  # type: ignore[attr-defined]
+                       "on a setting that took %s alone)", at_once, factor, _estimate.plain_duration(timing))
+        return factor
 
     def _topic_limit_s(self, state: Any) -> float | None:
         """The one run-time limit the topic states (in seconds), read as the paper's run record reads it, or ``None``."""
@@ -952,8 +1007,9 @@ class RunChecksMixin:
 
     @staticmethod
     def _too_long_text(est: _estimate.Estimate, limit_s: float, cut: bool = True) -> str:
+        at_once = f" with {est.at_once} running at the same time" if est.at_once > 1 else ""
         return (f"the experiment's {est.cells:,} settings would take {'at least ' if est.at_least else 'about '}"
-                f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
+                f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}{at_once}, more than the "
                 f"{_estimate.plain_duration(limit_s)} allowed; FI does not run a smaller study than the plan's settings"
                 + (", and they cannot fit even with the fewest runs per setting the plan allows" if cut else ""))
 

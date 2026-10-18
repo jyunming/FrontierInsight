@@ -454,6 +454,7 @@ engine:
 execution:
   sandbox: venv                     # venv (default) | docker
   timeout_s: 3600                   # the hard stop of one run. Before the full run FI times a few trials and sizes the run to the topic's own time limit when the topic states one ("must finish within 60 s"), else to this; a run that would not fit gets fewer runs per setting (never fewer settings), said in the paper with the precision it gives
+  settings_at_once: auto            # how many settings of the study run at the same time: auto (half this computer's cores, at most 8) or a whole number of at least 1. The time estimate before the run counts the same number, each setting as much slower as FI measures when several run together
   clean_check_timeout_s: 900        # the try of code/ in a clean environment before the paper is written may take at most this long (never more than timeout_s); a run still going is stopped and reported as not finished, not as a failure
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest

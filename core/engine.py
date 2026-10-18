@@ -14736,6 +14736,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     timeout_s=self.config.execution.timeout_s, env=env, thresholds=thresholds,
                     paired=any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or []),
                     in_each_run=_in_run.of(protocol), log=self._log,
+                    at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
                 )
                 series = _improve.series_of(run, trial_names)
                 if run.ok_trials == 0:
@@ -16638,6 +16639,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                       and not state.get("exec_give_up_reason")),
                 submit=(self.quest_root / "code" / _trial_runner.SUBMIT_NAME
                         if self.config.execution.background_jobs else None),
+                at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
             )
         elif split:
             runner = _split_run.SplitRunner(

@@ -444,3 +444,12 @@ def test_from_yaml_accepts_valid_and_legacy_keys(tmp_path: Path) -> None:
 
 def test_the_clean_check_of_code_defaults_to_fifteen_minutes() -> None:
     assert ExecutionConfig().clean_check_timeout_s == 900
+
+
+def test_settings_at_once_is_auto_or_a_whole_number_of_at_least_one() -> None:
+    from pydantic import ValidationError
+    assert ExecutionConfig().settings_at_once == "auto"
+    assert ExecutionConfig(settings_at_once=4).settings_at_once == 4
+    for bad in (0, -2, True, "many"):
+        with pytest.raises(ValidationError):
+            ExecutionConfig(settings_at_once=bad)
