@@ -17,6 +17,13 @@ created or removed, except into FI's own folders (:data:`FI_OWNED`: ``needs/``, 
 ``code/`` and ``paper/``): those are dropped, and each dropped path is said in the run log. Paths that name the copy are written
 back as the quest's in what the run printed and in FI's own result files, so a traceback still points at ``code/...``.
 
+One folder is shared, not copied: ``data/results/cache/`` (:data:`SHARED_CACHE`), where a computation several settings
+use is kept. A cell's copy reaches the quest's own folder through a link (a directory junction on Windows), so a value one
+setting worked out is there for the next, and settings run at the same time see each other's finished files. What a cell
+writes there is the quest's at once, so it is never copied back or removed by the copy-back. The folder belongs to one
+version of the code: when ``code/`` changes (a repair, a speed-up), what an earlier version kept there is moved aside to
+``.fi/previous/`` before anything runs, so no value worked out by other code is read (:func:`prepare_shared_cache`).
+
 This is not a sandbox. Code that searches the disk by absolute path, or starts from its own interpreter (the quest's
 ``.venv/`` stays in the quest folder), can still find the quest; the copy only stops reads and writes by relative path.
 :class:`OutsideExecutor` wraps an executor so a run whose working folder is the quest folder runs from such a copy.
@@ -43,6 +50,10 @@ CODE = "code"
 #: the data the quest collected, without what the study writes under ``data/`` (:data:`CELL_SKIP`).
 CELL_INPUTS = ("inputs", "data")
 CELL_SKIP = ("data/results",)
+#: The one folder every cell of the study shares while it runs (see the module docstring): linked, not copied.
+SHARED_CACHE = "data/results/cache"
+#: FI's record of which version of ``code/`` filled :data:`SHARED_CACHE`.
+SHARED_CACHE_RECORD = ".fi/shared_cache.json"
 #: What the analysis is given: every folder of the quest but FI's own (:data:`FI_OWNED`), so it reads
 #: whatever the cells wrote (``raw/``, ``results/``, a ``cache/`` of their own); never a file at the top of the quest
 #: (``plan.md`` holds the checks' expected values).
@@ -120,6 +131,28 @@ def remove_created_since(quest_root: Path | str, before: set[str], left: list[st
     return gone
 
 
+def _remove_files(quest_root: Path | str, rels: list[str], left: list[str] | None = None) -> list[str]:
+    """Remove these files of the quest (each tried twice, as in :func:`remove_created_since`); the ones removed."""
+    import time
+
+    root = Path(quest_root)
+    gone: list[str] = []
+    for rel in rels:
+        for attempt in range(2):
+            try:
+                (root / rel).unlink()
+                gone.append(rel)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                if attempt == 0:
+                    time.sleep(0.5)
+                elif left is not None:
+                    left.append(rel)
+    return gone
+
+
 def say_removed(log: Any, gone: list[str], left: list[str] | None = None) -> None:
     if gone:
         shown = ", ".join(gone[:5]) + (f" and {len(gone) - 5} more" if len(gone) > 5 else "")
@@ -138,6 +171,7 @@ async def execute_keeping_only_finished(executor: Any, cmd: list[str], *, cwd: P
     """``executor.execute(...)`` for a trial that runs in the quest folder itself: when FI stopped it for its time, the
     files it created are removed (see :func:`remove_created_since`); a trial that finished keeps what it wrote."""
     root = Path(cwd)
+    await asyncio.to_thread(prepare_shared_cache, root, log)
     before = await asyncio.to_thread(working_files, root)
     result = await executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
     if getattr(result, "timed_out", False):
@@ -145,6 +179,90 @@ async def execute_keeping_only_finished(executor: Any, cmd: list[str], *, cwd: P
         gone = await asyncio.to_thread(remove_created_since, root, before, left)
         say_removed(log if log is not None else logging.getLogger(f"frontier_insight.{root.resolve().name}"), gone, left)
     return result
+
+
+def code_version(quest_root: Path | str) -> str:
+    """A hash of ``code/`` as it is now (names and contents; no caches, history or environment)."""
+    h = hashlib.sha256()
+    code = Path(quest_root) / CODE
+    if code.is_dir():
+        for here, names, leaves in os.walk(code):
+            names[:] = sorted(n for n in names if n not in _SKIP_DIRS)
+            for leaf in sorted(leaves):
+                if leaf.endswith(".pyc"):
+                    continue
+                path = Path(here) / leaf
+                with contextlib.suppress(OSError):
+                    h.update(path.relative_to(code).as_posix().encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def prepare_shared_cache(quest_root: Path | str, log: Any = None) -> Path:
+    """The quest's :data:`SHARED_CACHE` folder, made if missing, holding only what the current version of ``code/`` kept
+    there: when FI's record names another version, the folder is moved aside to ``.fi/previous/`` first (what is in it
+    was worked out by other code). Returns the folder."""
+    import json
+    import time
+
+    root = Path(quest_root)
+    folder = root / SHARED_CACHE
+    record = root / SHARED_CACHE_RECORD
+    version = code_version(root)
+    try:
+        kept = json.loads(record.read_text(encoding="utf-8")).get("code")
+    except (OSError, ValueError, AttributeError):
+        kept = None
+    if kept != version:
+        if folder.is_dir() and any(folder.iterdir()):
+            aside = root / ".fi" / "previous" / f"shared_cache_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+            aside.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(folder, aside)
+                if log is not None:
+                    log.info("[run] the code changed, so what the earlier code kept in %s/ was moved to %s (no value "
+                             "worked out by other code is read)", SHARED_CACHE, aside.relative_to(root).as_posix())
+            except OSError:
+                pass  # another run moved it first
+        record.parent.mkdir(parents=True, exist_ok=True)
+        tmp = record.with_name(record.name + f".{uuid.uuid4().hex[:6]}.tmp")
+        tmp.write_text(json.dumps({"code": version}), encoding="utf-8")
+        os.replace(tmp, record)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _shared_names(quest_root: Path) -> set[str]:
+    """The files in the quest's :data:`SHARED_CACHE` (relative to the quest, with ``/``)."""
+    folder = Path(quest_root) / SHARED_CACHE
+    out: set[str] = set()
+    if folder.is_dir():
+        for here, _names, leaves in os.walk(folder):
+            out.update((Path(here) / leaf).relative_to(quest_root).as_posix() for leaf in leaves)
+    return out
+
+
+def _link_folder(link: Path, target: Path) -> bool:
+    """Make ``link`` reach ``target`` (a directory junction on Windows, a symbolic link elsewhere); False when it could not."""
+    try:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            import _winapi
+
+            _winapi.CreateJunction(str(target), str(link))
+        else:
+            os.symlink(target, link, target_is_directory=True)
+        return True
+    except (OSError, ImportError, AttributeError):
+        return False
+
+
+def _unlink_folder(link: Path) -> None:
+    """Remove the link itself, never what it reaches."""
+    with contextlib.suppress(OSError):
+        if os.name == "nt":
+            os.rmdir(link)  # a junction: removes the link, not its target's files
+        else:
+            os.unlink(link)
 
 
 def _never(rel: str) -> bool:
@@ -172,12 +290,15 @@ def _sig(path: Path) -> Any:
     return (st.st_size, st.st_mtime_ns)
 
 
-def _files(folder: Path) -> dict[str, Any]:
+def _files(folder: Path, leave: tuple[str, ...] = ()) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if not folder.is_dir():
         return out
     for here, names, leaves in os.walk(folder):
-        names[:] = [n for n in names if n not in _SKIP_DIRS]
+        rel_here = Path(here).relative_to(folder).as_posix()
+        # a linked folder (``leave``) is the quest's own: never walked as part of the copy
+        names[:] = [n for n in names if n not in _SKIP_DIRS
+                    and (f"{rel_here}/{n}" if rel_here != "." else n) not in leave]
         for leaf in leaves:
             path = Path(here) / leaf
             with contextlib.suppress(OSError):
@@ -201,6 +322,10 @@ class OutsideCopy:
         self.brought_back: list[str] = []
         self.left_out: list[str] = []
         self.unfinished: list[str] = []
+        #: The folders linked to the quest's own (:data:`SHARED_CACHE`), relative to the copy.
+        self.linked: list[str] = []
+        #: :data:`SHARED_CACHE` could not be linked, so this run works out its shared values again.
+        self.not_shared = False
 
     def _named(self, rel: str) -> bool:
         return any(rel == n or rel.startswith(n + "/") for n in self.named)
@@ -228,7 +353,14 @@ class OutsideCopy:
                 shutil.copy2(src, root / rel)
             elif "/" in rel:
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
-        self._before = _files(root)
+        # The study's shared folder, when the copy would not hold it: linked to the quest's own, not copied.
+        if any(SHARED_CACHE == s or SHARED_CACHE.startswith(s + "/") for s in self.skip):
+            target = self.quest_root / SHARED_CACHE
+            if target.is_dir() and _link_folder(root / SHARED_CACHE, target):
+                self.linked.append(SHARED_CACHE)
+            else:
+                self.not_shared = True
+        self._before = _files(root, tuple(self.linked))
         return root
 
     def _comes_back(self, rel: str) -> bool:
@@ -259,7 +391,7 @@ class OutsideCopy:
         written back. ``stopped``: FI stopped the run for its time, so it did not finish; a file it created (not a path
         FI named for it) is not written back, and is listed in :attr:`unfinished`."""
         assert self.root is not None
-        now = _files(self.root)
+        now = _files(self.root, tuple(self.linked))
         back: list[str] = []
         for rel in sorted(set(now) | set(self._before)):
             if now.get(rel) == self._before.get(rel):
@@ -292,6 +424,8 @@ class OutsideCopy:
 
     def remove(self) -> None:
         if self.root is not None:
+            for rel in self.linked:  # the link first: the quest's own folder behind it is never touched
+                _unlink_folder(self.root / rel)
             shutil.rmtree(self.root, ignore_errors=True)
 
 
@@ -341,6 +475,10 @@ class OutsideExecutor:
         # Without a log of its own, the quest's run log (core/engine.py names it frontier_insight.<quest id>).
         self._log = log if log is not None else logging.getLogger(f"frontier_insight.{self.quest_root.name}")
         self.last: OutsideCopy | None = None
+        # The runs of this executor now running: each one's flag says whether another ran beside it at any time (then
+        # what it left in the shared folder cannot be told from what the other wrote).
+        self._running: dict[int, bool] = {}
+        self._said_not_shared = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
@@ -356,9 +494,21 @@ class OutsideExecutor:
         if Path(cwd).resolve() != self.quest_root:
             return await self.inner.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
         named = named_paths(self.quest_root, [*cmd[1:], *(env or {}).values()])
+        shares = any(SHARED_CACHE == s or SHARED_CACHE.startswith(s + "/") for s in self._skip)
+        if shares:
+            await asyncio.to_thread(prepare_shared_cache, self.quest_root, self._log)
         box = OutsideCopy(self.quest_root, named=named, base=self._base, inputs=self._inputs, skip=self._skip)
         root = await asyncio.to_thread(box.make)
         self.last = box
+        if box.not_shared and not self._said_not_shared:
+            self._said_not_shared = True
+            self._log.warning("[run] the settings cannot share %s/ (FI could not link it into the copy the code runs "
+                              "from), so each setting works out what is kept there again", SHARED_CACHE)
+        token = id(box)
+        for other in self._running:
+            self._running[other] = True
+        self._running[token] = bool(self._running)
+        shared_before = await asyncio.to_thread(_shared_names, self.quest_root) if box.linked else set()
         try:
             argv = [cmd[0], *(self._map(a, root) for a in cmd[1:])]
             run_env = {k: self._map(v, root) for k, v in env.items()} if env is not None else None
@@ -367,6 +517,8 @@ class OutsideExecutor:
             await asyncio.to_thread(box.bring_back, stopped=stopped)
             if box.unfinished:
                 say_removed(self._log, box.unfinished)
+            if stopped and box.linked:
+                await self._clean_shared(shared_before, beside=self._running.get(token, False))
             dropped = [r for r in box.left_out if not r.endswith(".pyc") and "/__pycache__/" not in f"/{r}"]
             if dropped:
                 self._log.warning("[run] the code ran from a copy outside the quest folder and wrote into FI's own "
@@ -377,4 +529,22 @@ class OutsideExecutor:
                                            stderr=box.to_quest(result.stderr or ""))
             return result
         finally:
+            self._running.pop(token, None)
             await asyncio.to_thread(box.remove)
+
+    async def _clean_shared(self, before: set[str], *, beside: bool) -> None:
+        """After a run FI stopped for its time: the files that appeared in the shared folder while it ran. Alone, they are
+        its own and it did not finish them (a lock, a half-written value): removed, so the next setting does not wait on
+        them. With another run beside it, FI cannot tell which run wrote which, so they are kept and said."""
+        created = sorted(await asyncio.to_thread(_shared_names, self.quest_root) - before)
+        if not created:
+            return
+        if beside:
+            shown = ", ".join(created[:5]) + (f" and {len(created) - 5} more" if len(created) > 5 else "")
+            self._log.warning("[execute] a setting stopped for its time while others ran beside it; %d file%s appeared in "
+                              "%s/ meanwhile (%s) and are kept, as FI cannot tell which setting wrote them", len(created),
+                              "" if len(created) == 1 else "s", SHARED_CACHE, shown)
+            return
+        left: list[str] = []
+        gone = await asyncio.to_thread(_remove_files, self.quest_root, created, left)
+        say_removed(self._log, gone, left)

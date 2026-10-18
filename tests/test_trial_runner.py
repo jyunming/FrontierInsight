@@ -505,7 +505,7 @@ def run_trial(cell, trial_id, seed):
     for rel in ("cache/traj_%d.txt" % trial_id, "outputs/table.csv", "needs/forged.json", ".fi/x.txt", "code/stray.py"):
         Path(rel).parent.mkdir(parents=True, exist_ok=True)
         Path(rel).write_text("x", encoding="utf-8")
-    return {"sees_raw": float(Path("raw/old.txt").is_file()), "sees_results": float(Path("data/results").is_dir()),
+    return {"sees_raw": float(Path("raw/old.txt").is_file()), "sees_results": float(Path("data/results/r.csv").is_file()),
             "sees_inputs": float(Path("inputs/table.csv").is_file())}
 '''
 
