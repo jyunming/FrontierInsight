@@ -1015,7 +1015,10 @@ def study_grid(protocol):
                 or not all(isinstance(a, str) and a in grid and isinstance(grid[a], (list, tuple))
                            and _value_index(grid[a], v) is not None for a, v in hold.items())):
             return grid
-        found.append({"name": str(sub.get("name") or ""), "vary": list(vary), "hold": dict(hold)})
+        entry = {"name": str(sub.get("name") or ""), "vary": list(vary), "hold": dict(hold)}
+        if sub.get("own") and isinstance(sub.get("values"), dict):  # a sub-study that lists only its own settings
+            entry.update(own=True, values={a: list(v) for a, v in sub["values"].items()})
+        found.append(entry)
     return StudyGrid(grid, found)
 
 
@@ -1060,6 +1063,9 @@ def grid_weight(grid, weights=None):
     without listing any: the weight of the settings in all of a set of sub-studies is the product, axis by axis, of the
     weights of the values they all have, and a setting in several sub-studies is taken out of the sum as often as it was
     added. A time estimate that gives each value a cost ratio sums them the same way."""
+    if getattr(grid, "sub_studies", None) and all(s.get("own") for s in grid.sub_studies):
+        # every sub-study lists only its own settings: its settings are the combinations of those, none shared
+        return sum(math.prod(len(s["values"][a]) for a in s["vary"]) for s in grid.sub_studies)
     names = list(grid)
     each = [list(weights.get(name) or [1] * len(grid[name])) if weights else [1] * len(grid[name]) for name in names]
     subs = getattr(grid, "sub_studies", None)

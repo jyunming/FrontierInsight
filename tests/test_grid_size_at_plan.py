@@ -99,16 +99,14 @@ def _record(eng: Any) -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_the_plan_is_asked_once_and_a_grid_that_fits_goes_on(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
-    model = Model(eng, [_set(grid=SMALL, constants={"pitch_nm": 90}, in_each_run={"method": ["abbe", "hopkins"]},
-                             tolerance_changed=True)], _draft(BIG))
+    model = Model(eng, [_set(grid=BIG, sub_studies=PARTS, tolerance_changed=True)], _draft(BIG))
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     assert len(model.asked) == 1 and _record(eng)["count"] == 1
     assert "147,604,654,080,000" in model.asked[0] and "`pitch` 135 values" in model.asked[0]
     state = {"topic": TOPIC, "iteration": 0}
     patch = await eng._node_design(state)
     protocol = patch["design"]["protocol"]
-    assert protocol["grid"] == SMALL and protocol["constants"] == {"pitch_nm": 90}
-    assert protocol["in_each_run"] == {"method": ["abbe", "hopkins"]}
+    assert protocol["grid"] == BIG and len(protocol["sub_studies"]) == len(PARTS)
     assert len(model.asked) == 1, "the design step asks nothing more"
     assert eng._grid_too_large_stop(state) is None
     text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
@@ -223,12 +221,13 @@ async def test_a_grid_written_again_replaces_the_division_into_sub_studies_it_no
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     assert "sub_studies" in text  # a plan that already divides its grid is not asked anything
-    kept = eng._keep_only_the_parts(text, {"protocol": {"grid": SMALL}}, ["grid", "sub_studies", "in_each_run", "constants"])
+    wider = {**BIG, "extra": [0, 1]}
+    kept = eng._keep_only_the_parts(text, {"protocol": {"grid": wider}}, ["grid", "sub_studies", "in_each_run", "constants"])
     protocol = plan.parse(kept).design["protocol"]
-    assert protocol["grid"] == SMALL and "sub_studies" not in protocol  # the old parts name settings that left
-    partial = eng._keep_only_the_parts(text, {"protocol": {"grid": BIG, "sub_studies": PARTS[:2]}}, ["grid", "sub_studies"])
-    assert "sub_studies" not in plan.parse(partial).design["protocol"]  # parts that leave a setting out are not taken ...
-    assert "no entry of `protocol.sub_studies` varies" in " ".join(eng._answer_refused)  # ... and the model is told why
+    assert protocol["grid"] == wider and "sub_studies" not in protocol  # the old parts do not cover the new grid
+    with pytest.raises(ValueError, match="no entry of `protocol.sub_studies` varies"):  # parts that leave a setting out
+        eng._keep_only_the_parts(text, {"protocol": {"grid": BIG, "sub_studies": PARTS[:2]}}, ["grid", "sub_studies"])
+    assert plan.parse(text).design["protocol"]["grid"] == BIG  # the grid is not taken without its division
     moved = eng._keep_only_the_parts(text, {"protocol": {"in_each_run": {"pitch": [0, 1]}}}, ["in_each_run"])
     inside = plan.parse(moved).design["protocol"]
     assert "pitch" not in inside["grid"] and all("pitch" not in p["vary"] for p in inside["sub_studies"])

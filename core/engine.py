@@ -6892,6 +6892,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                   "%s out of the settings run one by one (`protocol.grid`)", ", ".join(moved),
                                   "es" if len(moved) == 1 else "", "it" if len(moved) == 1 else "them")
             taken.append(part)
+        # A rewrite of the settings is taken whole or not at all: the grid and the division of it go together, and no setting
+        # the plan compared is dropped (core.plan.lost_settings); the reasons go back to the model with the next request.
+        settings_parts = ("grid", "sub_studies", "in_each_run", "constants")
+        lost = _plan.lost_settings(old_protocol, merged) if any(p in taken for p in settings_parts) else []
+        split = ("grid" in taken and isinstance(new_protocol.get("sub_studies"), list) and "sub_studies" not in taken)
+        if lost or split:
+            if lost:
+                reasons.append(_plan.lost_settings_reason(lost))
+            elif split:
+                reasons.append("`protocol.grid` and `protocol.sub_studies` are taken together, and `protocol.sub_studies` was not taken")
+            for part in settings_parts:
+                if part in old_protocol:
+                    merged[part] = old_protocol[part]
+                else:
+                    merged.pop(part, None)
+            taken = [p for p in taken if p not in settings_parts]
         if not taken:
             if reasons:  # the reader's exact reason goes back to the model with the next request
                 raise ValueError(" ".join(reasons))
