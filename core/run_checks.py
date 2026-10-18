@@ -651,7 +651,7 @@ class RunChecksMixin:
                 # Before the runs are cut or the quest stops: try to make the simulation itself faster, same numbers.
                 speed_done = True
                 sped = await self._speed_up(state, runner, python, env, grid, runs, thresholds, inside, est, limit_s,
-                                            budget_s=max(0.0, budget_s - self._pilot_spent))
+                                            budget_s=max(0.0, budget_s - self._pilot_spent), probes=probes)
                 if sped.get("kept"):
                     cached.clear()
                     # the slower of two timings of the faster simulation is the one the next decision is made on
@@ -1192,7 +1192,7 @@ class RunChecksMixin:
 
     async def _speed_up(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
                         thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
-                        budget_s: float = 600.0) -> dict[str, Any]:
+                        budget_s: float = 600.0, probes: list[Any] | None = None) -> dict[str, Any]:
         """The study would not fit the time allowed: up to ``engine.improve_rounds`` edits that make the simulation itself
         faster without changing a number (core/improve_speed.py). FI runs a fixed sample of trials, the checks' own cases
         included, before and after each edit; an edit is kept only when every number is the same and the sample takes
@@ -1226,11 +1226,21 @@ class RunChecksMixin:
                 if isinstance(value, (int, float, str)) and not isinstance(value, bool):
                     settings.setdefault(str(key), []).append(value)
         timeout_s = max(60, int(self.config.execution.timeout_s))  # type: ignore[attr-defined]
+        timeouts: dict[str, int] | None = None
+        if probes is not None:
+            # The sample is held to what the timing measured: a setting it did not see finish is left out, each gets a
+            # few times its measured cost, and every sample of the step fits in the time left for timing.
+            cells, timeouts, why = _speed.bounded_sample(cells, probes, runs=runs, deterministic=runner.deterministic,
+                                                         budget_s=budget_s, samples=1 + limit)
+            if not cells:
+                log.info("[improve] The simulation is not sped up: %s.", why)
+                return {"goal": "speed", "limit_s": limit_s, "rounds": [], "kept": False, "calls": 0, "probes": None,
+                        "stopped": why}
 
         async def sample() -> Any:
             return await _speed.run_sample(self.executor, python, root, module, cells,  # type: ignore[attr-defined]
                                            deterministic=runner.deterministic, thresholds=thresholds, in_each_run=inside,
-                                           env=env, timeout_s=timeout_s, log=log)
+                                           env=env, timeout_s=timeout_s, log=log, timeouts=timeouts)
 
         async def time_study() -> list[Any] | None:
             probes, _why = await _estimate.measure(
