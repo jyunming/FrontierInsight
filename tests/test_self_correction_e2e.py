@@ -258,13 +258,13 @@ async def test_full_dag_with_analyze_re_experiment_reroute(
 
 
 @pytest.mark.asyncio
-async def test_a_redesigned_script_gets_its_own_repairs(
+async def test_a_rewritten_script_gets_its_own_repairs(
     cfg: Config, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two live quests spent every repair on their first script, were sent back to design, and the new script's first
+    """Two live quests spent every repair on their first script, were given a new script, and the new script's first
     crash then logged "iterations exhausted" with no repair at all: the counter belonged to the old script. Both papers
-    were written with no results."""
-    flags = {"design_calls": 0, "reflect_after_redesign": 0, "analyze_calls": 0}
+    were written with no results. A script that crashes is written again from the same design (not a new design)."""
+    flags = {"design_calls": 0, "implement_calls": 0, "reflect_after_redesign": 0, "analyze_calls": 0}
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
@@ -278,9 +278,10 @@ async def test_a_redesigned_script_gets_its_own_repairs(
                                "method": "m", "expected_outcome": "monotonic", "figures_planned": ["result.png"],
                                "dependencies": ["matplotlib"]})
         if "Implementation" in head:
+            flags["implement_calls"] += 1
             return json.dumps({"code": _BAD_EXPERIMENT, "deps": []})
         if "Execute-Reflect" in head:
-            if flags["design_calls"] < 2:  # the first script's repairs all fail
+            if flags["implement_calls"] < 2:  # the first script's repairs all fail
                 return json.dumps({"code": _BAD_EXPERIMENT, "deps": [], "patch_summary": "tried", "give_up_reason": ""})
             flags["reflect_after_redesign"] += 1
             return json.dumps({"code": _GOOD_EXPERIMENT, "deps": ["matplotlib"], "patch_summary": "fixed",
@@ -301,8 +302,9 @@ async def test_a_redesigned_script_gets_its_own_repairs(
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
     artifacts = await Engine(cfg).run()
-    assert flags["design_calls"] == 2, "the first script's failure was sent back to design"
-    assert flags["reflect_after_redesign"] >= 1, "the redesigned script got a repair of its own"
+    assert flags["design_calls"] == 1, "a crash is the code's fault: the design is not asked for again"
+    assert flags["implement_calls"] == 2, "the first script's failure was answered with the code written again"
+    assert flags["reflect_after_redesign"] >= 1, "the rewritten script got a repair of its own"
     assert artifacts.raw_state.get("result_json") == {"score": 0.5}
 
 

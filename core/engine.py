@@ -477,8 +477,11 @@ class QuestState(TypedDict, total=False):
     # How many times the evidence_gate has sent the quest back to broaden
     # the literature. Bounds the broaden loop (``evidence_gate_max_broaden``).
     evidence_broaden_count: int
-    # How many times the evidence_gate has sent a simulation with no results back to design (at most once).
+    # How many times the evidence_gate has given a simulation with no results another try (at most once): back to design,
+    # or, when the script could not run to the end, its code written again from the same design.
     evidence_no_result_retries: int
+    # That try was the code written again from the same design (the script crashed), not a new design.
+    evidence_code_rewritten: bool
     paper_md: str
     # A fingerprint of the study the current draft was written from (design,
     # analysis, results, figures, cross-check and the user's feedback). A revise
@@ -2612,7 +2615,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # evidence_gate → write (sufficient / insufficient-but-write) OR
         # back to literature for ONE bounded broaden pass.
         after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings",
-                      "repair_crash": "execute"}
+                      "repair_crash": "execute", "rewrite_code": "implement"}
         if _phased.enabled(self.config):
             # Explore, then confirm (core/phased.py): when exploration ends, the frozen design runs once more; a quest
             # that analyses data reads the held-back rows once more with it.
@@ -2945,8 +2948,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         Fails open to ``write`` when the gate was a passthrough. Under ``engine.phased`` a write at the end of
         exploration goes to the confirm run first (``_phased_route``)."""
         route = (state.get("evidence_assessment") or {}).get("route", "write")
-        if route in ("stuck", "repair_crash"):
-            return route  # no findings to write up, or a crash to repair first: the same in every mode
+        if route in ("stuck", "repair_crash", "rewrite_code"):
+            return route  # no findings to write up, a crash to repair first, code to write again: the same in every mode
         if _phased.enabled(self.config):
             return self._phased_route(state, route)
         return route
@@ -19350,6 +19353,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # An experiment that produced no results goes back to design once while there is an iteration left (the new
         # script gets its own repairs); after that the verdict stays insufficient and the writer is told why.
         redesign = bool(parsed.get("redesign")) and status == "ok"
+        # A script that could not run to the end, even after its repairs, is the code's fault, not the design's: the same
+        # design is written into code again (core/engine.py::_no_results_verdict).
+        rewrite_code = bool(parsed.get("rewrite_code")) and status == "ok"
         no_findings = bool(parsed.get("stuck")) and status == "ok"
         # A shown fault's test crashed inside the program: back to the run step's crash repair (RunChecksMixin._gate_crash_repair).
         crash_repair = bool(parsed.get("repair_crash")) and status == "ok" and not no_findings
@@ -19357,8 +19363,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "verdict": verdict,
             "status": status,
             "failure": failure,
-            "route": ("stuck" if no_findings else "repair_crash" if crash_repair else "redesign" if redesign
-                      else "broaden_lit" if will_broaden else "write"),
+            "route": ("stuck" if no_findings else "repair_crash" if crash_repair else "rewrite_code" if rewrite_code
+                      else "redesign" if redesign else "broaden_lit" if will_broaden else "write"),
             "rationale": str(parsed.get("rationale") or ""),
             "gaps": [str(g) for g in (parsed.get("gaps") or []) if str(g).strip()],
             "n_sources": n_sources,
@@ -19395,7 +19401,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         }
         if will_broaden:
             patch["evidence_broaden_count"] = broadened + 1
-        if redesign:
+        if rewrite_code:
+            # The design stays as it is (no design iteration is spent); the new code gets its own repairs.
+            patch.update(_FRESH_SCRIPT)
+            patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
+            patch["evidence_code_rewritten"] = True
+        elif redesign:
             patch["iteration"] = int(state.get("iteration", 0) or 0) + 1
             patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
         return patch
@@ -19439,9 +19450,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         repairs = int(state.get("exec_reflect_iter") or 0)
         # Said only when it happened: a quest with no iteration left stops on the first pass, with no second design.
         redesigned = int(state.get("evidence_no_result_retries") or 0) >= 1
-        again = ", even after the design was asked for again" if redesigned else ""
+        rewritten = redesigned and bool(state.get("evidence_code_rewritten"))
+        again = (", even after the code was written again from the same design" if rewritten else
+                 ", even after the design was asked for again" if redesigned else "")
         repaired = f"repaired the script {repairs} time{'s' if repairs != 1 else ''}" if repairs else ""
-        after = " and ".join(x for x in (repaired, "asked for the design again" if redesigned else "") if x)
+        after = " and ".join(x for x in (repaired, "wrote the code again from the same design" if rewritten else
+                                         "asked for the design again" if redesigned else "") if x)
         # A result that holds numbers, but none of the study's quantities and says it failed (see _reports_no_quantity).
         bare = self._reports_no_quantity(state, state.get("result_json")) if no_numbers else ""
         problem = ((f"the experiment ran, but its result holds none of the study's quantities ({bare}){again}, so FI has "
@@ -19452,7 +19466,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                    "so FI has nothing measured to write up" if crashed else
                    "the experiment ran, but the model's reading of its results could not be read, even when asked twice, "
                    "so FI has no findings to write up")
-        redo = (["sent the quest back to the design once, so the script was written again"] if redesigned else [])
+        redo = (["wrote the code again once from the same design (the design was not changed)"] if rewritten else
+                ["sent the quest back to the design once, so the script was written again"] if redesigned else [])
         tried = ([("ran the experiment and read the result it printed: it says it failed and has no number for the study's "
                    "quantities" if bare else "ran the experiment and read the result it printed: no number in it"), *redo,
                   *([("ran it again: the result still holds none of the study's quantities" if bare else
@@ -19899,17 +19914,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if state.get("exec_give_up_reason"):
             why += f"; the repair gave up: {_one_line(state.get('exec_give_up_reason'), 160)}"
         why += ")"
+        # "Could not run to the end" only when the script really exited with an error; one that finished (exit 0) and printed
+        # nothing measured is the other wording, whether or not a repair was tried.
+        crashed = exec_result.get("returncode") not in (0, None)
+        tried_again = int(state.get("evidence_no_result_retries") or 0) >= 1
+        if crashed and not flat and not tried_again:
+            # The script could not run to the end, even after its repairs: the code's fault, not the design's. In the
+            # quest records of every no-result run sent back to design, the cause was a script that crashed; where a quest
+            # then recovered, the new design varied the same settings and measured the same quantities (only the code was
+            # new), and where the design was written anew it brought in new problems of its own. So the design stays and
+            # its code is written once more (with its own repairs); the design is never changed for a crash.
+            self._log.warning("[evidence_gate] %s; the design stays as it is and its code is written again once", why)
+            return {"verdict": "insufficient", "rationale": why + "; the code is written again from the same design",
+                    "gaps": [why], "rewrite_code": True}
         if (
-            int(state.get("evidence_no_result_retries") or 0) < 1
+            not tried_again
             and int(state.get("iteration", 0) or 0) < self.config.engine.max_iterations
         ):
             self._log.warning("[evidence_gate] %s; sending the quest back to design once", why)
             return {"verdict": "insufficient", "rationale": why + "; tried once more from the design", "gaps": [why],
                     "redesign": True}
-        # Asked from the design once and still nothing measured: there is nothing to write up, so no paper is written.
-        # "Could not run to the end" only when the script really exited with an error; one that finished (exit 0) and printed
-        # nothing measured is the other wording, whether or not a repair was tried.
-        crashed = exec_result.get("returncode") not in (0, None)
+        # Tried once more and still nothing measured: there is nothing to write up, so no paper is written.
         return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
                 "stuck_reason": "flat" if flat else "crashed" if crashed else "no_numbers"}
 
