@@ -161,26 +161,44 @@ def _numbers(x: Any, path: str = "") -> dict[str, float]:
     return out
 
 
-def disagreements(before: Sample, after: Sample) -> list[str]:
-    """Where the sample's numbers are not the same (a missing or a new number counts), by setting, trial and name."""
-    bad: list[str] = []
+def _differences(before: Sample, after: Sample) -> list[tuple[str, int | None, str, str]]:
+    """Every place the numbers of two samples are not the same, as ``(setting, trial, name, text)``; a setting not run in
+    both has ``trial`` and ``name`` empty."""
+    bad: list[tuple[str, int | None, str, str]] = []
     for key in sorted(before.values.keys() | after.values.keys()):
         a, b = before.values.get(key), after.values.get(key)
         if a is None or b is None or len(a) != len(b):
-            bad.append(f"{key}: not run in both")
+            bad.append((key, None, "", f"{key}: not run in both"))
             continue
         for t, (ra, rb) in enumerate(zip(a, b)):
             na, nb = _numbers(ra), _numbers(rb)
             for name in sorted(na.keys() | nb.keys()):
                 if name not in na or name not in nb:
-                    bad.append(f"{key} trial {t} {name}: only in one")
+                    bad.append((key, t, name, f"{key} trial {t} {name}: only in one"))
                     continue
                 x, y = na[name], nb[name]
                 if math.isnan(x) and math.isnan(y):
                     continue
                 if not abs(x - y) <= ATOL + RTOL * abs(y):
-                    bad.append(f"{key} trial {t} {name}: {x:.12g} -> {y:.12g}")
+                    bad.append((key, t, name, f"{key} trial {t} {name}: {x:.12g} -> {y:.12g}"))
     return bad
+
+
+def disagreements(before: Sample, after: Sample, *, ignore: set[tuple[str, int, str]] | frozenset[Any] = frozenset()) -> list[str]:
+    """Where the sample's numbers are not the same (a missing or a new number counts), by setting, trial and name. The
+    ``(setting, trial, name)`` of ``ignore`` are left out (see :func:`varying`)."""
+    return [text for key, t, name, text in _differences(before, after) if (key, t, name) not in ignore]
+
+
+def varying(first: Sample, again: Sample) -> set[tuple[str, int, str]]:
+    """The numbers that are not the same in two runs of the same, unchanged code (same settings, same seeds): the code does
+    not fix them, so they cannot tell whether an edit changed a result. A number in only one of the runs counts."""
+    return {(key, t, name) for key, t, name, _text in _differences(first, again) if t is not None}
+
+
+def count_numbers(sample: Sample) -> int:
+    """How many numbers the sample holds (by setting, trial and name)."""
+    return sum(len(_numbers(r)) for rows in sample.values.values() for r in rows)
 
 
 def fast_enough(before_s: float, after_s: float) -> bool:
