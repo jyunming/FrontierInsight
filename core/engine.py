@@ -388,6 +388,9 @@ class QuestState(TypedDict, total=False):
     # case ``_node_implement`` falls back to the original
     # ``agents/implement.md`` one-shot prompt.
     implement_outline: dict[str, Any]
+    #: The hash of the design the outline was written for (:meth:`Engine._outline_design_sha`): a redesign gets a new outline,
+    #: a resume of the same design keeps the one it has. Absent in a checkpoint made before it existed (then reused).
+    implement_outline_for: str
     code: str
     deps: list[str]
     exec_result: dict[str, Any]
@@ -5901,22 +5904,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except (TypeError, ValueError):
             return 0
 
-    async def _ask_design_for_the_grid(self, state: QuestState, design: Any, *, iteration: int) -> Any:
+    async def _ask_design_for_the_grid(self, state: QuestState, design: Any, *, iteration: int, again: bool = False) -> Any:
         """A design drafted at this step (a redesign: it did not come from ``plan.md``) whose ``protocol.grid`` holds more
         settings than FI lists is asked of the plan's model once per design round (counted in ``.fi/drafted_grid_asked.json``
         BEFORE the call, so a resume does not ask again), the way the plan's own grid is (:meth:`_ask_plan_for_the_grid`).
         Only a grid, ``in_each_run`` and ``constants`` that pass the same reading as the plan's are taken; the rest of the
-        design is untouched. A grid still too large is the stop of :meth:`_grid_too_large_stop`. Returns the design to use."""
+        design is untouched. A grid still too large is the stop of :meth:`_grid_too_large_stop`. ``again``: the one more request,
+        after what the topic asked for was added to the redesign made its grid larger (counted in its own file, as the plan's
+        is: :meth:`_ask_plan_for_the_grid`). Returns the design to use."""
+        asked_file = _DRAFTED_GRID_ASKED_AGAIN if again else _DRAFTED_GRID_ASKED
         protocol = design.get("protocol") if isinstance(design, dict) else None
         if (not isinstance(protocol, dict) or protocol.get("optimisation") or not self._runs_code(state)
                 or self._client is None or _frozen.load(self.quest_root) is not None):
             return design
         problem = _optimise_search.grid_too_large(_optimise_search.study_grid(protocol))
-        if not problem or self._grid_asked_of(_DRAFTED_GRID_ASKED, iteration) > 0:
+        if not problem or self._grid_asked_of(asked_file, iteration) > 0:
             return design
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
-            (self.fi_dir / _DRAFTED_GRID_ASKED).write_text(json.dumps(
+            (self.fi_dir / asked_file).write_text(json.dumps(
                 {"count": 1, "model": self._plan_model_name(), "iteration": iteration, "at": _frozen.now()}) + "\n",
                 encoding="utf-8")
         except OSError as e:
@@ -5924,7 +5930,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                               "ask: %r", e)
             return design
         self._log.warning("[design] the redesign's grid is too large to run (%s); FI asked the plan's model to rewrite it "
-                          "(1 of 1)", _one_line(problem, 300))
+                          "(1 of 1%s)", _one_line(problem, 300), ", after what the topic asks for was added" if again else "")
         self._progress("Asking the model to make the settings of the redesign small enough to run")
         ask = (_plan.grid_request(state.get("topic") or self.config.topic, problem)
                + "\n\nThe protocol drafted so far (keep what is usable in it):\n"
@@ -7666,7 +7672,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return None
         # Read the way the asks count themselves (by the model asked, not plan.md's hash, which FI's own notes change).
         asked = (self._grid_asked_of(_GRID_ASKED) + self._grid_asked_of(_GRID_ASKED_AGAIN)
-                 + self._grid_asked_of(_DRAFTED_GRID_ASKED))
+                 + self._grid_asked_of(_DRAFTED_GRID_ASKED) + self._grid_asked_of(_DRAFTED_GRID_ASKED_AGAIN))
         tried = [said,
                  ("asked the plan's model to rewrite the settings so they are crossed only where they should be, with the "
                   "count above; the grid was still too large") if asked else
@@ -8393,6 +8399,37 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                        "by the engine for its oracle check" if by == "engine" else "on request", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
 
+    def _run_gave_no_results(self, state: QuestState) -> bool:
+        """True when FI's own record shows the experiment that led back to the design produced no results: a simulation
+        ran (``exec_result``) and its result holds no number, or only a number that is none of the study's quantities and a
+        word that it failed (the same reading as the gate's, :meth:`_no_results_verdict`). False when it cannot be told, for
+        a study of data or of the literature, and when an earlier round of this quest did have results."""
+        if any(isinstance(e, dict) and e.get("results_seen", e.get("after_results")) for e in state.get("design_history") or []):
+            return False
+        exec_result = state.get("exec_result")
+        if (not isinstance(exec_result, dict) or not exec_result or state.get("no_simulation_resolved")
+                or state.get("survey_mode_resolved") or self.config.engine.analyze_local_first):
+            return False
+        from . import numeric_oracle as _numeric_oracle
+
+        result = state.get("result_json")
+        no_numbers = not any(True for _ in _numeric_oracle.flatten_numbers(result, keep_zero=True))
+        return bool(no_numbers or self._reports_no_quantity(state, result))
+
+    def _keep_hypothesis_after_an_empty_run(self, state: QuestState, design: Any) -> Any:
+        """The redesign keeps the hypothesis of the design that ran when that run produced no results
+        (:meth:`_run_gave_no_results`): a hypothesis is not changed by a run that showed nothing. A reply that changes it has
+        that part not taken, and run.log says so. With results, the hypothesis is the model's, recorded as post hoc."""
+        previous = state.get("design")
+        if not (isinstance(design, dict) and isinstance(previous, dict)) or not state.get("design_history"):
+            return design
+        before = str(previous.get("hypothesis") or "").strip()
+        if not before or str(design.get("hypothesis") or "").strip() == before or not self._run_gave_no_results(state):
+            return design
+        self._log.warning("[design] the redesign's new hypothesis was not taken: the run before it produced no results, so "
+                          "nothing was learned that could change it; the hypothesis stays as it was")
+        return {**design, "hypothesis": previous.get("hypothesis")}
+
     async def _node_design(self, state: QuestState) -> QuestState:
         if self.config.engine.analyze_local_first:
             # --analyze: no experiment to design — the data already exists.
@@ -8421,9 +8458,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             await self._read_topic_before_the_prompt(state)
             prompt = self._design_prompt(state)
             design = await self._design_reply(prompt, node="design")
+            # Before the audit, so the receipt it leaves is for the design that runs (the hypothesis is part of it).
+            design = self._keep_hypothesis_after_an_empty_run(state, design)
             design, objections = await self._audit_design(state, design)
             # After the freeze a redesign keeps the frozen protocol; a different one is an amendment request.
             design = self._hold_design_to_frozen(state, design)
+            design = self._keep_hypothesis_after_an_empty_run(state, design)
 
         # A search for the best design never runs as a plain sweep: every design, from the plan or drafted here, passes
         # this point before anything is implemented or run, and one the engine cannot search stops here
@@ -8459,6 +8499,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         design, plan_sha = await self._hold_the_design_to_the_topic(state, design, plan_sha)
         if plan_sha and _study_size(design) > size_before:  # what the topic added here made the study larger: counted again
             design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha, again=True)
+        elif not plan_sha and _study_size(design) > size_before:  # a redesign: the same, with its own request
+            design = await self._ask_design_for_the_grid(state, design, iteration=iteration, again=True)
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
         # `cross_check` route back here, so a design CAN be rewritten after
@@ -8470,8 +8512,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # So record every version: what it was, when, and what sent the engine
         # back here. Nothing is blocked -- the record exists so the revision is
         # auditable rather than invisible.
+        design = out["design"] = self._keep_hypothesis_after_an_empty_run(state, design)  # a later amendment too
         out["design_history"] = _append_design_revision(
             state, design, self.quest_root, self._log, plan_sha,
+            results_seen=not self._run_gave_no_results(state),
         )
         def _design_record() -> dict[str, Any]:
             latest = (out["design_history"] or [{}])[-1]
@@ -10159,12 +10203,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         """
         if (self.fi_dir / self._TOPIC_UNMET_FILE).is_file():
             return {}  # the study will not be written: the next step stops it
-        if state.get("implement_outline"):
-            # Already populated (resume after a failed body call, or a
+        design_sha = self._outline_design_sha(state)
+        if state.get("implement_outline") and state.get("implement_outline_for", design_sha) == design_sha:
+            # Already populated for THIS design (resume after a failed body call, or a
             # checkpoint that was advanced by a future-version engine).
             # Don't re-bill an outline call.
             self._log.info("[implement_outline] cached outline present; skipping")
             return {}
+        if state.get("implement_outline"):
+            self._log.info("[implement_outline] the design changed since the outline was written; writing it again")
         self._log.info("[implement_outline] drafting scaffold + signatures")
         try:
             prompt = self._prompts["implement_outline"].substitute(
@@ -10211,7 +10258,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "[implement_outline] scaffold ready — %d functions, %d constants",
             n_funcs, n_const,
         )
-        return {"implement_outline": outline}
+        return {"implement_outline": outline, "implement_outline_for": design_sha}
+
+    def _outline_design_sha(self, state: QuestState) -> str:
+        """The hash of the design as the outline request sees it (:meth:`_code_design_block`): the outline is kept only for
+        this design."""
+        return hashlib.sha256(self._code_design_block(state, names_only=True).encode("utf-8")).hexdigest()[:16]
 
     def _outline_with_example_names(self, state: QuestState, outline: dict[str, Any]) -> dict[str, Any]:
         """The outline with the parameters of each equation's function set to the inputs of the plan's worked example for it
@@ -26440,6 +26492,7 @@ _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger
 # Asked once per design round, never a stop: the ledger parts, and whether a check on an average holds in every trial.
 _ONCE_PARTS = (*_LEDGER_PARTS, "per_trial")
 _DRAFTED_GRID_ASKED = "drafted_grid_asked.json"  # one request per redesign round, for a drafted grid of more settings than FI lists
+_DRAFTED_GRID_ASKED_AGAIN = "drafted_grid_asked_again.json"  # one more request per redesign round, after what the topic asked for was added
 _GRID_ASKED = "grid_asked.json"  # the same bounds, for a grid of more settings than FI lists (one request per plan)
 _GRID_ASKED_AGAIN = "grid_asked_again.json"  # one more request, after what the topic asked for was added to the plan
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
@@ -32284,6 +32337,7 @@ def _anything_ran(state: "QuestState", quest_root: Path) -> bool:
 
 def _append_design_revision(
     state: "QuestState", design: dict, quest_root: Path, log: logging.Logger, plan_sha: str = "",
+    results_seen: bool = True,
 ) -> list[dict[str, Any]]:
     """Record this version of the design, returning the full history.
 
@@ -32297,6 +32351,9 @@ def _append_design_revision(
     scientific claims, and a finished paper looks identical either way. The
     history is written to ``needs/DESIGN_HISTORY.json`` so it survives
     alongside the quest rather than only in state.
+
+    ``results_seen``: False when the run that led back here produced no results (FI's own record), which the reason
+    then says instead of "results were seen".
     """
     prior = list(state.get("design_history") or [])
     hypothesis = str((design or {}).get("hypothesis") or "").strip()
@@ -32309,12 +32366,13 @@ def _append_design_revision(
         analysis = state.get("analysis") or {}
         next_step = str(analysis.get("next_step") or "").strip()
         verdict = str((state.get("review") or {}).get("verdict") or "").strip()
+        seen = "results were seen" if results_seen else "the run before it produced no results"
         if next_step in ("re_experiment", "broaden_lit"):
-            reason = f"analyze.next_step={next_step} (results were seen)"
+            reason = f"analyze.next_step={next_step} ({seen})"
         elif verdict:
-            reason = f"review verdict={verdict} (results were seen)"
+            reason = f"review verdict={verdict} ({seen})"
         else:
-            reason = "re-entered design (results were seen)"
+            reason = f"re-entered design ({seen})"
 
     entry = {
         "revision": len(prior),
@@ -32325,6 +32383,7 @@ def _append_design_revision(
         # (a rerun from the plan after a stop before the first run) is not a revision after results (core/disclosure.py).
         "after_results": bool(prior) and _anything_ran(state, quest_root),
         "reason": reason,
+        "results_seen": bool(prior) and results_seen,
         "hypothesis": hypothesis[:600],
     }
     if plan_sha:
@@ -32334,11 +32393,12 @@ def _append_design_revision(
     if entry["post_hoc"]:
         changed = hypothesis != str(prior[-1].get("hypothesis") or "")
         log.warning(
-            "[design] revision %d recorded (%s)%s -- the paper's hypothesis "
-            "is being set after results were seen; DESIGN_HISTORY.json keeps "
+            "[design] revision %d recorded (%s)%s -- %s; DESIGN_HISTORY.json keeps "
             "this auditable.",
             entry["revision"], reason,
             "; hypothesis TEXT CHANGED" if changed else "; hypothesis unchanged",
+            "the paper's hypothesis is being set after results were seen" if results_seen
+            else "the run produced no results, so the design is not a response to any",
         )
 
     try:
