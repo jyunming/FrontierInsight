@@ -444,3 +444,21 @@ def test_from_yaml_accepts_valid_and_legacy_keys(tmp_path: Path) -> None:
 
 def test_the_clean_check_of_code_defaults_to_fifteen_minutes() -> None:
     assert ExecutionConfig().clean_check_timeout_s == 900
+
+
+def test_code_writer_defaults_to_chat() -> None:
+    assert EngineConfig().code_writer == "chat"
+
+
+def test_code_writer_accepts_agent() -> None:
+    assert EngineConfig(code_writer="agent").code_writer == "agent"
+
+
+def test_code_writer_rejects_any_other_value() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as ei:
+        EngineConfig(code_writer="copilot")
+    msg = str(ei.value)
+    assert "code_writer" in msg
+    assert "'chat'" in msg and "'agent'" in msg

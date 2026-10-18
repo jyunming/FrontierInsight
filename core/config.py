@@ -705,6 +705,10 @@ class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
     max_iterations: int = Field(default=2, ge=0)
     review_loop: bool = True
+    # Who writes the experiment's code. ``chat`` (the default) is today's way: a chat model writes the code function by
+    # function. ``agent`` hands the whole program to one coding agent, which writes, runs and fixes it in the quest's
+    # ``code/`` folder, and then FI checks the result. Not wired in yet: setting it changes nothing for now.
+    code_writer: Literal["chat", "agent"] = "chat"
     # Write ``<quest>/.fi/audit.jsonl``: every node, check verdict, route and the model's stated reasons, in order, with a hash
     # chain (core/audit_log.py). A record only: a failure to write it never stops a quest. Off writes nothing.
     audit_trace: bool = True
