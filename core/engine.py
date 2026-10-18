@@ -5901,22 +5901,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except (TypeError, ValueError):
             return 0
 
-    async def _ask_design_for_the_grid(self, state: QuestState, design: Any, *, iteration: int) -> Any:
+    async def _ask_design_for_the_grid(self, state: QuestState, design: Any, *, iteration: int, again: bool = False) -> Any:
         """A design drafted at this step (a redesign: it did not come from ``plan.md``) whose ``protocol.grid`` holds more
         settings than FI lists is asked of the plan's model once per design round (counted in ``.fi/drafted_grid_asked.json``
         BEFORE the call, so a resume does not ask again), the way the plan's own grid is (:meth:`_ask_plan_for_the_grid`).
         Only a grid, ``in_each_run`` and ``constants`` that pass the same reading as the plan's are taken; the rest of the
-        design is untouched. A grid still too large is the stop of :meth:`_grid_too_large_stop`. Returns the design to use."""
+        design is untouched. A grid still too large is the stop of :meth:`_grid_too_large_stop`. ``again``: the one more request,
+        after what the topic asked for was added to the redesign made its grid larger (counted in its own file, as the plan's
+        is: :meth:`_ask_plan_for_the_grid`). Returns the design to use."""
+        asked_file = _DRAFTED_GRID_ASKED_AGAIN if again else _DRAFTED_GRID_ASKED
         protocol = design.get("protocol") if isinstance(design, dict) else None
         if (not isinstance(protocol, dict) or protocol.get("optimisation") or not self._runs_code(state)
                 or self._client is None or _frozen.load(self.quest_root) is not None):
             return design
         problem = _optimise_search.grid_too_large(_optimise_search.study_grid(protocol))
-        if not problem or self._grid_asked_of(_DRAFTED_GRID_ASKED, iteration) > 0:
+        if not problem or self._grid_asked_of(asked_file, iteration) > 0:
             return design
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
-            (self.fi_dir / _DRAFTED_GRID_ASKED).write_text(json.dumps(
+            (self.fi_dir / asked_file).write_text(json.dumps(
                 {"count": 1, "model": self._plan_model_name(), "iteration": iteration, "at": _frozen.now()}) + "\n",
                 encoding="utf-8")
         except OSError as e:
@@ -5924,7 +5927,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                               "ask: %r", e)
             return design
         self._log.warning("[design] the redesign's grid is too large to run (%s); FI asked the plan's model to rewrite it "
-                          "(1 of 1)", _one_line(problem, 300))
+                          "(1 of 1%s)", _one_line(problem, 300), ", after what the topic asks for was added" if again else "")
         self._progress("Asking the model to make the settings of the redesign small enough to run")
         ask = (_plan.grid_request(state.get("topic") or self.config.topic, problem)
                + "\n\nThe protocol drafted so far (keep what is usable in it):\n"
@@ -7666,7 +7669,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return None
         # Read the way the asks count themselves (by the model asked, not plan.md's hash, which FI's own notes change).
         asked = (self._grid_asked_of(_GRID_ASKED) + self._grid_asked_of(_GRID_ASKED_AGAIN)
-                 + self._grid_asked_of(_DRAFTED_GRID_ASKED))
+                 + self._grid_asked_of(_DRAFTED_GRID_ASKED) + self._grid_asked_of(_DRAFTED_GRID_ASKED_AGAIN))
         tried = [said,
                  ("asked the plan's model to rewrite the settings so they are crossed only where they should be, with the "
                   "count above; the grid was still too large") if asked else
@@ -8459,6 +8462,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         design, plan_sha = await self._hold_the_design_to_the_topic(state, design, plan_sha)
         if plan_sha and _study_size(design) > size_before:  # what the topic added here made the study larger: counted again
             design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha, again=True)
+        elif not plan_sha and _study_size(design) > size_before:  # a redesign: the same, with its own request
+            design = await self._ask_design_for_the_grid(state, design, iteration=iteration, again=True)
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
         # `cross_check` route back here, so a design CAN be rewritten after
@@ -26444,6 +26449,7 @@ _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger
 # Asked once per design round, never a stop: the ledger parts, and whether a check on an average holds in every trial.
 _ONCE_PARTS = (*_LEDGER_PARTS, "per_trial")
 _DRAFTED_GRID_ASKED = "drafted_grid_asked.json"  # one request per redesign round, for a drafted grid of more settings than FI lists
+_DRAFTED_GRID_ASKED_AGAIN = "drafted_grid_asked_again.json"  # one more request per redesign round, after what the topic asked for was added
 _GRID_ASKED = "grid_asked.json"  # the same bounds, for a grid of more settings than FI lists (one request per plan)
 _GRID_ASKED_AGAIN = "grid_asked_again.json"  # one more request, after what the topic asked for was added to the plan
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
