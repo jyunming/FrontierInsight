@@ -6498,6 +6498,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         merged = _topic_req.merge(old, new, gaps) if isinstance(old, dict) and isinstance(new, dict) else None
         if merged is None:
             raise ValueError("your answer has none of what was asked in a form that can be read; plan.md is unchanged")
+        for moved in _topic_req.moved_holds(old.get("protocol"), merged.get("protocol")):
+            self._log.warning("[plan] what the topic asks for changed a part of the study: %s", moved)
         # Part by part and entry by entry: what can be read is taken, and what cannot goes back with its reason (the
         # topic's gaps are worked out again, so a refused part is asked for again).
         before = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
@@ -6635,6 +6637,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 save(asks)
                 continue
             merged = _topic_req.merge(design, obj, gaps) if isinstance(obj, dict) else None
+            for moved in _topic_req.moved_holds(design.get("protocol"), (merged or {}).get("protocol")):
+                self._log.warning("[design] what the topic asks for changed a part of the study: %s", moved)
             before = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
             fixed, refused = (_plan.accept_answer(before, merged.get("protocol")) if merged is not None
                               else (None, ["nothing came back"]))

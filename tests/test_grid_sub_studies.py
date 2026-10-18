@@ -261,9 +261,14 @@ def test_new_values_for_a_setting_a_part_holds_keep_the_plan_readable() -> None:
     assert protocol is not None, why
     assert protocol["grid"]["kind"] == ["p", "q"]
     assert [s["hold"]["kind"] for s in protocol["sub_studies"] if s["name"] == "r"] == ["p"]  # its first value
+    # what the part studies changed, so the person is told (FI logs each one)
+    assert topic.moved_holds(old["protocol"], merged["protocol"]) == [
+        "part `r` held `kind` at 'r', which the new values of `kind` no longer have; it now holds it at 'p'"]
     # a hold the new values still have is kept as the plan wrote it
     still = topic.merge(old, {"protocol": {"grid": {**GRID, "kind": ["q", "r"]}}}, [{"axis": "kind"}])
     assert [s["hold"]["kind"] for s in still["protocol"]["sub_studies"] if s["name"] == "r"] == ["r"]
+    assert topic.moved_holds(old["protocol"], still["protocol"]) == [  # only the part whose value is gone is named
+        "part `modes` held `kind` at 'p', which the new values of `kind` no longer have; it now holds it at 'q'"]
 
 
 def test_a_setting_added_to_a_plan_that_has_sub_studies_without_a_part_is_a_part_of_its_own() -> None:

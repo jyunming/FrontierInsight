@@ -725,6 +725,23 @@ def joined_sub_studies(old_protocol: dict[str, Any], grid: dict[str, Any], said:
     return subs
 
 
+def moved_holds(old_protocol: Any, new_protocol: Any) -> list[str]:
+    """Each part of the study whose held value of a setting :func:`joined_sub_studies` had to change (the new values of the
+    setting no longer have it), in plain words: what the part studies changed, and the person is told."""
+    old = {str(s.get("name") or ""): s.get("hold") or {} for s in (old_protocol or {}).get("sub_studies") or []
+           if isinstance(s, dict) and isinstance(s.get("hold"), dict)} if isinstance(old_protocol, dict) else {}
+    out: list[str] = []
+    for s in (new_protocol or {}).get("sub_studies") or [] if isinstance(new_protocol, dict) else []:
+        if not isinstance(s, dict) or not isinstance(s.get("hold"), dict):
+            continue
+        name = str(s.get("name") or "")
+        for axis, value in (old.get(name) or {}).items():
+            if axis in s["hold"] and s["hold"][axis] != value:
+                out.append(f"part `{name}` held `{axis}` at {value!r}, which the new values of `{axis}` no longer have; "
+                           f"it now holds it at {s['hold'][axis]!r}")
+    return out
+
+
 def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) -> dict[str, Any] | None:
     """``old`` (a design block as written) with only what was asked taken from ``new``: settings of ``protocol.grid`` that
     are new, or that a gap names; what each run compares inside it (``protocol.in_each_run``) the same way, and a factor
