@@ -744,22 +744,28 @@ class RunChecksMixin:
     async def _slowdown_at_once(self, runner: Any, python: Any, env: Any, probes: list[Any], runs: int,
                                 thresholds: dict[str, Any], inside: Any, at_once: int, budget_s: float) -> float | None:
         """How many times slower a setting runs when ``at_once`` run at the same time on this machine
-        (:func:`core.run_estimate.slowdown_at_once`, on the base setting, or the quickest timed setting that finished when
-        the base did not), or ``None`` when it could not be measured in the time left for timing; then the estimate counts
-        the settings one after another, as before."""
-        base = next((p for p in probes if p.axis is None and not p.at_least), None)
-        if base is None:
-            base = min((p for p in probes if not p.at_least), key=lambda p: p.seconds, default=None)
+        (:func:`core.run_estimate.slowdown_at_once`), or ``None`` when it could not be measured in the time left for timing;
+        then the estimate counts the settings one after another, as before. It is measured on the costliest timed setting
+        that finished and can be timed again in the time left: the costly settings are most of the run, and running beside
+        others slows them the most (a short setting is mostly its process start, which hardly slows)."""
         left = budget_s - self._pilot_spent
-        # What timing the base took: its timed trials, not the whole setting (alone once, then beside the others).
-        timing = base.seconds if base is not None else 0.0
-        if base is not None and base.per_trial_s is not None and base.timed_trials > 0:
-            timing = min(timing, (base.fixed_s or 0.0) + base.timed_trials * base.per_trial_s)
-        if base is None or left < timing * (1 + 4) + 10:
-            why = "no timed setting finished" if base is None else "no time was left for it"
+
+        def timing_of(p: Any) -> float:
+            # What timing the setting took: its timed trials, not the whole setting.
+            if p.per_trial_s is not None and p.timed_trials > 0:
+                return min(p.seconds, (p.fixed_s or 0.0) + p.timed_trials * p.per_trial_s)
+            return p.seconds
+
+        finished = [p for p in probes if not p.at_least and p.seconds > 0]
+        # Alone once, then beside the others: at worst as slow as all of them one after another.
+        fits = [p for p in finished if left >= timing_of(p) * (1 + at_once) + 10]
+        base = max(fits, key=timing_of, default=None)
+        if base is None:
+            why = "no timed setting finished" if not finished else "no time was left for it"
             self._log.info("[execute] FI did not measure how much slower settings run at the same time (%s); the "  # type: ignore[attr-defined]
                            "estimate counts them one after another", why)
             return None
+        timing = timing_of(base)
         started = time.monotonic()
         factor, why = await _estimate.slowdown_at_once(
             self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
@@ -770,8 +776,8 @@ class RunChecksMixin:
             self._log.info("[execute] FI could not measure how much slower settings run at the same time (%s); the "  # type: ignore[attr-defined]
                            "estimate counts them one after another", why or "no reason given")
             return None
-        self._log.info("[execute] with %d settings running at the same time, each took %.1f times as long as alone",  # type: ignore[attr-defined]
-                       at_once, factor)
+        self._log.info("[execute] with %d settings running at the same time, each took %.1f times as long as alone (timed "  # type: ignore[attr-defined]
+                       "on a setting that took %s alone)", at_once, factor, _estimate.plain_duration(timing))
         return factor
 
     def _topic_limit_s(self, state: Any) -> float | None:

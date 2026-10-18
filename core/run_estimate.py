@@ -568,7 +568,7 @@ async def slowdown_at_once(
     took = time.monotonic() - t0  # what the timing itself took (it times a few trials, not the whole setting)
     if alone is None or alone.at_least or alone.seconds <= 0:
         return None, why or "the setting did not finish alone in the time for timing"
-    allowance = int(max(10, math.ceil(4 * took * max(1, int(at_once))) + 10))
+    allowance = int(max(10, math.ceil(2 * took * max(1, int(at_once))) + 10))  # twice as slow as one after another
     together = await asyncio.gather(*(
         _time_one(executor, python, quest_root, module, cell, timeout_s=allowance, name=f"at_once{i}", **kw)
         for i in range(max(1, int(at_once)))))
