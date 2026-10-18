@@ -13069,7 +13069,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     def _match_example_names(self, case_list: list[dict[str, Any]], located: dict[str, dict[str, str] | None],
                              sources: dict[str, str]) -> bool:
         """Before the equation tests run: a function whose parameter is named otherwise than the plan's worked example names
-        that input (``rate`` for ``Rate``), when the pairing leaves no choice (:func:`core.function_steps.match_example_names`),
+        that input (``rate`` for ``Rate``), when only capitals or underscores differ (:func:`core.function_steps.match_example_names`),
         has the parameter renamed by FI, in the function and where it reads it. The code is often written whole with
         the parameters it prefers, and a repair of one function is held to the example's names, which the model that wrote the
         function has twice not used; FI already knows both names, so it sets them. The value is still judged by the test.

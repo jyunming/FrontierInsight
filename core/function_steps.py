@@ -422,26 +422,21 @@ def _name_key(name: str) -> str:
 
 
 def pair_parameter_names(have: list[str], want: list[str]) -> dict[str, str] | None:
-    """``{name the function has: name it must have}`` when the two lists of unmatched names pair up with no choice to
-    make, else ``None``. ``have`` are the function's parameters that are not wanted, ``want`` the wanted names the function
-    lacks. A pair is made when the two names are the same word apart from capitals and underscores (``rate`` and ``Rate``), and
-    when exactly one name is left on each side. Two or more names left on a side, or lists of different lengths, are never
-    paired: that would be a guess. The caller's test of the function's value is what judges the renamed function."""
+    """``{name the function has: name it must have}`` when every name in ``have`` (the function's parameters that are not
+    wanted) has exactly one partner in ``want`` (the wanted names the function lacks) that is the same word apart from
+    capitals and underscores (``rate`` and ``Rate``, ``rate_max`` and ``ratemax``): the one pairing with no second reading.
+    Any other difference (a different word, a different number of names) is never paired: which name means which is
+    not something FI can know, and a function with a parameter for another quantity must go to the repair, not be
+    renamed into passing."""
     if not have or len(have) != len(want):
         return None
-    left_h, left_w, pairs = list(have), list(want), {}
-    for h in list(left_h):
-        same = [w for w in left_w if _name_key(w) == _name_key(h)]
-        rivals = [x for x in left_h if _name_key(x) == _name_key(h)]
-        if len(same) == 1 and len(rivals) == 1:
-            pairs[h] = same[0]
-            left_h.remove(h)
-            left_w.remove(same[0])
-    if len(left_h) == 1 and len(left_w) == 1:
-        pairs[left_h[0]] = left_w[0]
-    elif left_h or left_w:
-        return None
-    return pairs
+    pairs: dict[str, str] = {}
+    for h in have:
+        same = [w for w in want if _name_key(w) == _name_key(h)]
+        if len(same) != 1 or len([x for x in have if _name_key(x) == _name_key(h)]) != 1:
+            return None
+        pairs[h] = same[0]
+    return pairs if len(set(pairs.values())) == len(pairs) else None
 
 
 def rename_parameters(source: str, name: str, renames: dict[str, str], *, callers: list[str] | None = None) -> str | None:
@@ -511,7 +506,7 @@ def rename_parameters(source: str, name: str, renames: dict[str, str], *, caller
 
 def match_parameter_names(source: str, name: str, wanted: list[str], *, callers: list[str] | None = None) -> str | None:
     """``source`` with the parameters of function ``name`` renamed to ``wanted`` (the parameters the function must have), when
-    the only difference is names that pair with no choice (:func:`pair_parameter_names`); ``None`` when there is nothing to
+    the only difference is names that differ only in capitals or underscores (:func:`pair_parameter_names`); ``None`` when there is nothing to
     rename or no safe rename."""
     node = _find(source, name)
     if node is None:
@@ -528,8 +523,8 @@ def match_example_names(source: str, name: str, inputs: list[str], *, random: bo
     """``(source with the parameters of function ``name`` named as the plan's worked example names its inputs, the renames
     made)``, or ``(None, {})`` when there is nothing to do or no safe rename. The test calls the function by the example's
     input names (:func:`core.equation_tests.parameter_problems`): an input the function has no parameter for is paired with a
-    parameter that has no default and is no input (a random equation's ``rng``/``seed`` are FI's), when that pairing leaves
-    no choice (:func:`pair_parameter_names`). A parameter with a default is a setting and is never renamed."""
+    parameter that has no default and is no input (a random equation's ``rng``/``seed`` are FI's), when the two names differ only
+    in capitals or underscores (:func:`pair_parameter_names`). A parameter with a default is a setting and is never renamed."""
     node = _find(source, name)
     if node is None or node.args.vararg or node.args.kwarg:
         return None, {}
@@ -607,7 +602,7 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
     want = _param_names(ast.parse(signature.rstrip().rstrip(":") + ":\n    pass").body[0])  # type: ignore[arg-type]
     if _param_names(node) != want:
         # A reply that only names a parameter otherwise (``width_max`` for ``width``) is the function with its names put
-        # right by FI, when there is no choice in the pairing; any other difference is refused.
+        # right by FI when only capitals or underscores differ; any other difference is refused.
         renamed = match_parameter_names(reply, name, want, callers=[source])
         if renamed is not None:
             reply = renamed
