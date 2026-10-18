@@ -69,3 +69,43 @@ async def _none() -> None:
 
 async def _same(design: Any) -> Any:
     return design
+
+
+def _outline_engine(tmp_path: Path, calls: list[str]) -> Any:
+    from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+    from core.engine import Engine
+    eng = Engine(Config(
+        topic="made-up study", title="outline-key", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False), execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(kinds=["paper_md"], output_dir=tmp_path / "out")))
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+
+    async def chat(prompt: str, **kw: Any) -> str:
+        calls.append(prompt)
+        return json.dumps({"scaffold": f"# outline {len(calls)}\n", "functions": [], "constants": []})
+
+    eng._chat = chat  # type: ignore[method-assign]
+    return eng
+
+
+@pytest.mark.asyncio
+async def test_the_outline_is_kept_for_the_same_design_and_written_again_for_a_new_one(tmp_path: Path) -> None:
+    calls: list[str] = []
+    eng = _outline_engine(tmp_path, calls)
+    state: dict[str, Any] = {"topic": "t", "title": "x", "design": {"hypothesis": "h", "protocol": {"grid": {"a": [1, 2]}}}}
+    first = await eng._node_implement_outline(state)
+    assert len(calls) == 1 and first["implement_outline"]["scaffold"] == "# outline 1\n"
+    state = {**state, **first}
+    assert await eng._node_implement_outline(state) == {} and len(calls) == 1  # a resume of the same design: no call
+    redesign = {**state, "design": {"hypothesis": "h", "protocol": {"grid": {"a": [1, 2, 3]}}}}
+    again = await eng._node_implement_outline(redesign)
+    assert len(calls) == 2 and again["implement_outline"]["scaffold"] == "# outline 2\n"
+    assert again["implement_outline_for"] != first["implement_outline_for"]
+
+
+@pytest.mark.asyncio
+async def test_an_outline_from_a_checkpoint_made_before_the_key_existed_is_still_reused(tmp_path: Path) -> None:
+    calls: list[str] = []
+    eng = _outline_engine(tmp_path, calls)
+    state = {"topic": "t", "design": {"hypothesis": "h"}, "implement_outline": {"scaffold": "# old\n"}}
+    assert await eng._node_implement_outline(state) == {} and calls == []

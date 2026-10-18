@@ -388,6 +388,9 @@ class QuestState(TypedDict, total=False):
     # case ``_node_implement`` falls back to the original
     # ``agents/implement.md`` one-shot prompt.
     implement_outline: dict[str, Any]
+    #: The hash of the design the outline was written for (:meth:`Engine._outline_design_sha`): a redesign gets a new outline,
+    #: a resume of the same design keeps the one it has. Absent in a checkpoint made before it existed (then reused).
+    implement_outline_for: str
     code: str
     deps: list[str]
     exec_result: dict[str, Any]
@@ -10164,12 +10167,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         """
         if (self.fi_dir / self._TOPIC_UNMET_FILE).is_file():
             return {}  # the study will not be written: the next step stops it
-        if state.get("implement_outline"):
-            # Already populated (resume after a failed body call, or a
+        design_sha = self._outline_design_sha(state)
+        if state.get("implement_outline") and state.get("implement_outline_for", design_sha) == design_sha:
+            # Already populated for THIS design (resume after a failed body call, or a
             # checkpoint that was advanced by a future-version engine).
             # Don't re-bill an outline call.
             self._log.info("[implement_outline] cached outline present; skipping")
             return {}
+        if state.get("implement_outline"):
+            self._log.info("[implement_outline] the design changed since the outline was written; writing it again")
         self._log.info("[implement_outline] drafting scaffold + signatures")
         try:
             prompt = self._prompts["implement_outline"].substitute(
@@ -10216,7 +10222,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "[implement_outline] scaffold ready — %d functions, %d constants",
             n_funcs, n_const,
         )
-        return {"implement_outline": outline}
+        return {"implement_outline": outline, "implement_outline_for": design_sha}
+
+    def _outline_design_sha(self, state: QuestState) -> str:
+        """The hash of the design as the outline request sees it (:meth:`_code_design_block`): the outline is kept only for
+        this design."""
+        return hashlib.sha256(self._code_design_block(state, names_only=True).encode("utf-8")).hexdigest()[:16]
 
     def _outline_with_example_names(self, state: QuestState, outline: dict[str, Any]) -> dict[str, Any]:
         """The outline with the parameters of each equation's function set to the inputs of the plan's worked example for it
