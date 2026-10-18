@@ -140,7 +140,7 @@ def test_without_docker_the_cli_is_kept_to_files_and_python_and_never_bypasses_p
     assert argv[argv.index("--model") + 1] == "sonnet" and argv[argv.index("--effort") + 1] == "high"
     again = runner.argv(code_dir=tmp_path, name="", session_id=SESSION, resume=True)
     assert again[again.index("--resume") + 1] == SESSION and "--session-id" not in again
-    assert runner.works_on_copy and not runner.confined
+    assert not runner.confined and runner.workdir(tmp_path).name == "code"
 
 
 def test_the_copy_lives_outside_the_quest_and_is_the_same_every_round(tmp_path: Path) -> None:

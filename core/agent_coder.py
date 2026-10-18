@@ -1,6 +1,6 @@
 """A coding agent (Claude CLI) writes and fixes the quest's code in ``code/`` (agent mode, :mod:`core.agent_build`).
 
-The agent works in the quest's ``code/`` folder the way a person would: it writes files, runs Python, reads the errors and
+The agent works on a copy of the quest's ``code/`` folder the way a person would: it writes files, runs Python, reads the errors and
 tries again. Its own report counts for nothing: FI runs its own checks on the files the agent leaves, and when one fails
 the failure text goes back to the same agent session (:meth:`AgentCoder.continue_`). This module holds the parts that do
 not depend on how the engine uses them:
@@ -83,6 +83,15 @@ def scratch_id(quest_root: Path | str) -> str:
     path.write_text(json.dumps({"id": value}) + "\n", encoding="utf-8")
     return value
 
+
+def default_workdir(quest_root: Path | str, work_root: Path | None = None) -> Path:
+    """The folder of this quest's copy of ``code/``: outside the quest (under ``work_root``, the computer's temporary
+    folder by default), the same every round and after a resume, named by :func:`scratch_id`, never by the quest's name
+    or path. Every runner works there: ``code/`` itself (with FI's ``.git`` history, whose messages name checks and
+    measured values) is never the agent's folder."""
+    root = Path(work_root) if work_root is not None else Path(tempfile.gettempdir()) / "fi_agent_work"
+    return root / scratch_id(quest_root) / "code"
+
 #: Files of ``code/`` FI writes itself (so the agent must not change them) when they are there, and folders whose whole
 #: content is FI's. Relative to ``code/``.
 FI_OWNED_FILES = ("run.py", "study.json", "fi_search.py", "README.md", "requirements.txt", "CHANGELOG.md", "METHODS.md")
@@ -142,7 +151,9 @@ class RunnerOutput:
 
 
 class AgentRunner(Protocol):
-    """The swappable piece: run the agent once, in ``cwd``, on ``prompt``; continue ``session_id`` when given."""
+    """The swappable piece: run the agent once, in ``cwd``, on ``prompt``; continue ``session_id`` when given. ``cwd`` is
+    always the scratch copy of ``code/`` (the runner's own ``workdir(quest_root)`` when it has one, else
+    :func:`default_workdir`), never ``code/`` itself."""
 
     async def run(self, prompt: str, *, cwd: Path, session_id: str | None, timeout_s: float) -> RunnerOutput: ...
 
@@ -285,7 +296,7 @@ class ClaudeCliRunner:
         self.docker, self.launcher, self.token_env = docker, launcher, token_env
         self._environ = environ          # the environment to read the token from (default: FI's own)
         self.uid_gid = uid_gid or (f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "1000:1000")
-        self.work_root = Path(work_root) if work_root is not None else Path(tempfile.gettempdir()) / "fi_agent_work"
+        self.work_root = Path(work_root) if work_root is not None else None
         self._built = False
 
     @property
@@ -293,17 +304,10 @@ class ClaudeCliRunner:
         """The agent can reach only what is mounted: :class:`AgentCoder` need not watch the rest of the quest folder."""
         return self.mode == "docker"
 
-    @property
-    def works_on_copy(self) -> bool:
-        """The agent works on a scratch copy of ``code/`` outside the quest (in a container, that copy is what is
-        mounted): :class:`AgentCoder` makes and compares it, and only its own list of files comes back."""
-        return True
-
     def workdir(self, quest_root: Path) -> Path:
-        """The copy's folder for this quest: outside the quest, the same every round and after a resume (the CLI files a
-        session under its working folder, so ``--resume`` needs the same one), named by a random id made once for the
-        quest and kept in its ``.fi/`` (:data:`SCRATCH_ID`), never by the quest's name or path."""
-        return self.work_root / scratch_id(quest_root) / "code"
+        """The copy's folder for this quest (:func:`default_workdir` under ``work_root``; in a container, that copy is
+        what is mounted). The CLI files a session under its working folder, so ``--resume`` needs the same one."""
+        return default_workdir(quest_root, self.work_root)
 
     # -- the command --
 
@@ -623,8 +627,8 @@ class AgentCoder:
     def close(self, *, final: bool = False) -> None:
         """The run is over: the runner tidies its own folder. ``final`` (the quest finished or stopped, it will not be
         resumed) also removes the session files a resume would have continued, and the scratch copy of ``code/``."""
-        if final and getattr(self.runner, "works_on_copy", False):
-            shutil.rmtree(self.runner.workdir(self.quest_root).parent, ignore_errors=True)
+        if final:
+            shutil.rmtree(self._workdir().parent, ignore_errors=True)
         closer = getattr(self.runner, "close", None)
         if closer is None:
             return
@@ -659,55 +663,16 @@ class AgentCoder:
         rounds = self.load().get("rounds") or []
         return str(rounds[-1].get("message") or "") if rounds else ""
 
+    def rounds_made(self) -> int:
+        """The number of the last round the record holds (0 before the first write)."""
+        rounds = [r for r in self.load().get("rounds") or [] if isinstance(r, dict)]
+        return int(rounds[-1].get("n") or 0) if rounds else 0
+
     def fixes_left(self) -> int:
         return max(0, self.max_fixes - int(self.load().get("fixes") or 0))
 
     def has_written(self) -> bool:
         return bool(self.load().get("write_done"))
-
-    # -- the tamper guard --
-
-    def _guarded(self) -> dict[str, bytes]:
-        """``{relative path: bytes}`` of every file FI owns that is there now."""
-        out: dict[str, bytes] = {}
-        names = list(FI_OWNED_FILES) + [str(n) for n in (self._owned() if self._owned else [])]
-        for name in names:
-            path = self.code_dir / name
-            if path.is_file():
-                out[Path(name).as_posix()] = path.read_bytes()
-        for folder in FI_OWNED_DIRS:
-            root = self.code_dir / folder
-            if root.is_dir():
-                for path in root.rglob("*"):
-                    if path.is_file() and "__pycache__" not in path.parts:
-                        out[path.relative_to(self.code_dir).as_posix()] = path.read_bytes()
-        return out
-
-    def _restore(self, before: dict[str, bytes]) -> list[str]:
-        """Put FI's copies back; return what the agent touched (``"<file> (changed|removed|added)"``)."""
-        touched: list[str] = []
-        for rel, data in before.items():
-            path = self.code_dir / rel
-            try:
-                if not path.is_file():
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(data)
-                    touched.append(f"code/{rel} (removed)")
-                elif path.read_bytes() != data:
-                    path.write_bytes(data)
-                    touched.append(f"code/{rel} (changed)")
-            except OSError as e:  # noqa: BLE001
-                touched.append(f"code/{rel} (could not be put back: {e!r})")
-        for folder in FI_OWNED_DIRS:
-            root = self.code_dir / folder
-            if root.is_dir():
-                for path in list(root.rglob("*")):
-                    rel = path.relative_to(self.code_dir).as_posix()
-                    if path.is_file() and rel not in before and "__pycache__" not in path.parts:
-                        with contextlib.suppress(OSError):
-                            path.unlink()
-                            touched.append(f"code/{rel} (added)")
-        return touched
 
     # -- the rest of the quest folder --
 
@@ -793,13 +758,10 @@ class AgentCoder:
             found.append(f"{path} (a file Python runs on start, removed outside the copy)")
         return found
 
-    def _code_changed_since(self, snap: "TreeSnapshot | None") -> bool:
-        return snap is not None and bool(snap.changed(self.code_dir))
-
-    async def _run_once(self, prompt: str, session_id: str | None, cwd: Path | None = None) -> RunnerOutput:
+    async def _run_once(self, prompt: str, session_id: str | None, *, cwd: Path) -> RunnerOutput:
         prompt = hide_path(prompt, self.quest_root)   # the agent works on a copy and is never told where the quest is
         try:
-            return await self.runner.run(prompt, cwd=cwd or self.code_dir, session_id=session_id,
+            return await self.runner.run(prompt, cwd=cwd, session_id=session_id,
                                          timeout_s=self.timeout_s)
         except Exception as e:  # noqa: BLE001 -- a runner that could not start is a failed round, said as such
             return RunnerOutput(exit_code=-1, stderr_tail=f"{type(e).__name__}: {e}"[-_TAIL:])
@@ -850,48 +812,14 @@ class AgentCoder:
         self._save(record)   # before it starts: a crash in the round still counts as a round
         self._log.info("[implement] the coding agent is %s in code/ (round %d of %d)",
                        "writing the code" if kind == "write" else "fixing what FI's checks found", n, self.total_rounds)
-        if getattr(self.runner, "works_on_copy", False):
-            return await self._copy_round(record, entry, kind, prompt, session_id=session_id,
-                                          fallback_prompt=fallback_prompt)
-        before = await asyncio.to_thread(self._guarded)
-        # A runner that can reach only what it is given (a container with code/ mounted) cannot touch the rest of the quest
-        # folder, so it is not walked; the walk of a big folder is off the event loop otherwise.
-        outside = None if getattr(self.runner, "confined", False) else await asyncio.to_thread(self._outside)
-        resumed_from = await asyncio.to_thread(TreeSnapshot.take, self.code_dir) if session_id is not None else None
-        out = await self._run_once(prompt, session_id)
-        if (session_id is not None and fallback_prompt and out.exit_code != 0 and not out.timed_out
-                and not out.session_id and not await asyncio.to_thread(self._code_changed_since, resumed_from)):
-            # The session could not be continued (its files are gone after a resume, or the CLI refused it): it reported no
-            # session and left no change, so nothing was done. The same round is made again in a new session from the
-            # whole task and what FI found. One round, not two.
-            self._log.warning("[implement] the coding agent's session could not be continued (exit code %s); this round "
-                              "starts a new session from the whole task", out.exit_code)
-            record["session_id"] = ""
-            entry["resume_failed"] = True
-            out = await self._run_once(fallback_prompt, None)
-        tampered = [*await asyncio.to_thread(self._restore, before),
-                    *(await asyncio.to_thread(self._restore_outside, outside) if outside is not None else [])]
-        if tampered:
-            self._log.warning("[implement] the coding agent changed files FI owns; FI put its own copies back: %s",
-                              "; ".join(tampered))
-        ok = out.exit_code == 0 and not out.timed_out
-        if out.session_id:
-            record["session_id"] = out.session_id
-        if kind == "write" and ok:
-            record["write_done"] = True
-        entry.update({"status": "done" if ok else ("timed_out" if out.timed_out else "failed"),
-                      "exit_code": out.exit_code, "timed_out": out.timed_out, "duration_s": round(out.duration_s, 1),
-                      "tampered": tampered, "message": out.message[-_TAIL:], "stderr_tail": out.stderr_tail[-500:]})
-        self._save(record)
-        if out.timed_out:
-            self._log.warning("[implement] the coding agent was stopped after %g s (the wall-clock cap)", self.timeout_s)
-        elif not ok:
-            self._log.warning("[implement] the coding agent ended with exit code %s: %s", out.exit_code,
-                              out.stderr_tail.strip()[-300:] or "(no message)")
-        return AgentResult(ok=ok, round=n, exit_code=out.exit_code, timed_out=out.timed_out, message=out.message,
-                           duration_s=out.duration_s, tampered=tampered, error="" if ok else out.stderr_tail[-500:])
+        return await self._copy_round(record, entry, kind, prompt, session_id=session_id, fallback_prompt=fallback_prompt)
 
-    # -- the no-Docker round: the agent works on a scratch copy of code/ --
+    # -- the round: the agent works on a scratch copy of code/ --
+
+    def _workdir(self) -> Path:
+        """The agent's folder: the runner's own copy folder, else :func:`default_workdir` (never ``code/``)."""
+        own = getattr(self.runner, "workdir", None)
+        return Path(own(self.quest_root)) if callable(own) else default_workdir(self.quest_root)
 
     def _owned_rel(self, rel: str) -> bool:
         names = {Path(n).as_posix() for n in (*FI_OWNED_FILES, *(self._owned() if self._owned else []))}
@@ -989,7 +917,7 @@ class AgentCoder:
     async def _copy_round(self, record: dict[str, Any], entry: dict[str, Any], kind: str, prompt: str, *,
                           session_id: str | None, fallback_prompt: str) -> AgentResult:
         n = int(entry["n"])
-        work = self.runner.workdir(self.quest_root)   # type: ignore[attr-defined]
+        work = self._workdir()
         confined = bool(getattr(self.runner, "confined", False))
         entry["isolation"] = "docker" if confined else "none"
         await asyncio.to_thread(self._fresh_copy, work)

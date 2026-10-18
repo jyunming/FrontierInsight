@@ -10,8 +10,13 @@ model again. In agent mode the code is the agent's (:mod:`core.agent_coder`, the
 * :meth:`AgentBuildMixin._agent_build` replaces the one call of the checks before the run (``Engine._gate_pass``): the
   checks run with every repair turned into a report (:class:`RepairForAgent`), and what they found goes back to the same
   agent session, at most :data:`FIX_ROUNDS` times, :data:`ROUND_S` seconds a round and :data:`TOTAL_S` seconds in all.
-  The loop ends early when a round makes no check newly pass. The agent's own account counts for nothing: the code is
-  accepted only when FI's checks pass it, and a stop says which check did not;
+  Each round is judged check by check against the best earlier round (:func:`compare_rounds`): a check that passes
+  now and failed there is newly passing, one that passed there and fails now is broken. A round is progress only when
+  something newly passes and nothing is broken; a round that broke a check is said so, naming it, to the agent and in
+  the run log, and gets one round to put it back. The loop ends early when a round makes nothing newly pass, or when a
+  round that broke a check is followed by another round that is not progress. FI does not undo a round: its checks
+  judge the code the last round left. The agent's own account counts for nothing: the code is accepted only when FI's
+  checks pass it, and a stop says which check did not;
 * after the freeze the run's own failure gets :data:`AFTER_FREEZE_ROUNDS` agent round
   (:meth:`AgentBuildMixin._reflect_by_agent`), then the stop the chat path has; the improve loop does not run.
 
@@ -58,6 +63,51 @@ _SITE = {
     "execute_reflect": "a check of the code before the run (a result typed into the code, or a static fault)",
     "implement.finding_repair": "a fault another model found in the code and FI's test showed",
 }
+
+
+#: The checks of :func:`core.code_checks.check_code` and the run of the code, in a scientist's words.
+_CHECK_WORDS = {
+    "run": "running the code",
+    "typed_results": "the check that the results are computed, not typed into the code",
+    "grid_keys": "the check that the code reads only settings the study has",
+    "typed_constants": "the check for numbers typed into the model's functions that the plan never gives",
+    "independent_check": "the check that a second implementation does not compare a value with itself",
+    "small_run": "FI's small run of the simulation",
+    "trial_checks": "the check of the trials that failed in FI's small run",
+    "equation_tests": "the test of each equation against the plan's worked example",
+    "known_answers": "the plan's known-answer checks",
+    "unread_settings": "the check that the code reads every setting the study compares",
+    "figure_data": "the check that each figure is drawn from computed numbers",
+}
+
+
+def check_words(check: str) -> str:
+    """One of FI's checks of the code (a :func:`core.code_checks.check_code` name, a refused repair's node, ``run``),
+    in plain words."""
+    return _CHECK_WORDS.get(check) or _SITE.get(check) or check
+
+
+def _from_gate(check: str) -> bool:
+    """A check the gate reports by stopping at it (a refused repair's node, or ``run``): it is never seen to pass, so
+    a later round that gets past it counts as having fixed it."""
+    return check == "run" or writes_code(check)
+
+
+def compare_rounds(earlier: list[tuple[int, dict[str, bool | None]]], now: dict[str, bool | None]) -> dict[str, Any]:
+    """This round's checks (``{check: True passed | False failed | None not judged}``) against the best earlier round
+    (``(round, checks)``; the one with the fewest failing checks, the later on a tie). ``{"best": its round or None,
+    "newly_passed", "newly_failed", "still_broken"}``: a check failing there that passes now (or that the gate got
+    past), one passing there that fails now, and one that passed in any earlier round and fails now."""
+    out: dict[str, Any] = {"best": None, "newly_passed": [], "newly_failed": [], "still_broken": []}
+    if not earlier:
+        return out
+    best_n, best = min(reversed(earlier), key=lambda r: sum(1 for v in r[1].values() if v is False))
+    out["best"] = best_n
+    out["newly_passed"] = sorted(c for c, v in best.items() if v is False and (
+        now.get(c) is True or (c not in now and _from_gate(c))))
+    out["newly_failed"] = sorted(c for c, v in best.items() if v is True and now.get(c) is False)
+    out["still_broken"] = sorted(c for c in now if now[c] is False and any(r[1].get(c) is True for r in earlier))
+    return out
 
 
 def writes_code(node: str | None) -> bool:
@@ -121,9 +171,12 @@ def seconds_used(quest_root: Path) -> float:
     return sum(float(r.get("duration_s") or 0.0) for r in _record(quest_root).get("rounds") or [] if isinstance(r, dict))
 
 
-def note_judgement(quest_root: Path, *, claimed: str, found: list[str], passed: bool, after_freeze: bool = False) -> None:
+def note_judgement(quest_root: Path, *, claimed: str, found: list[str], passed: bool, after_freeze: bool = False,
+                   checks: dict[str, bool | None] | None = None, compared: dict[str, Any] | None = None) -> None:
     """FI's judgement of the code the last round left, beside what the agent said of it (``.fi/agent_coder.json``):
-    ``claimed`` is the agent's last message, ``found`` what FI's checks found."""
+    ``claimed`` is the agent's last message, ``found`` what FI's checks found; ``checks`` each check's result
+    (recorded as ``checks`` and the list ``passed``), ``compared`` the comparison with the best earlier round
+    (:func:`compare_rounds`: ``compared_with``, ``newly_passed``, ``newly_failed``)."""
     data = _record(quest_root)
     rounds = [r for r in data.get("rounds") or [] if isinstance(r, dict)]
     if not rounds:
@@ -131,9 +184,27 @@ def note_judgement(quest_root: Path, *, claimed: str, found: list[str], passed: 
     rounds[-1]["claimed"] = claimed[-600:]
     rounds[-1]["found"] = [f[:600] for f in found][:20]
     rounds[-1]["fi_passed"] = passed
+    if checks is not None:
+        rounds[-1]["checks"] = dict(checks)
+        rounds[-1]["passed"] = sorted(c for c, v in checks.items() if v is True)
+    if compared is not None:
+        rounds[-1]["compared_with"] = compared.get("best")
+        rounds[-1]["newly_passed"] = list(compared.get("newly_passed") or [])
+        rounds[-1]["newly_failed"] = list(compared.get("newly_failed") or [])
     if after_freeze:
         rounds[-1]["after_freeze"] = True
     _save_record(quest_root, data)
+
+
+def judged_rounds(quest_root: Path) -> list[tuple[int, dict[str, bool | None]]]:
+    """``(round, checks)`` of every round of the record FI's checks judged before the run, in order."""
+    return [(int(r.get("n") or 0), r["checks"]) for r in _record(quest_root).get("rounds") or []
+            if isinstance(r, dict) and isinstance(r.get("checks"), dict)]
+
+
+def _record_round(quest_root: Path, n: int) -> dict[str, Any]:
+    """Round ``n`` of the record (``{}`` when there is none)."""
+    return next((r for r in _record(quest_root).get("rounds") or [] if isinstance(r, dict) and r.get("n") == n), {})
 
 
 def after_freeze_rounds(quest_root: Path) -> int:
@@ -214,29 +285,30 @@ class AgentBuildMixin:
     # -- the checks before the run ---------------------------------------------------------------------------------------
 
     async def _agent_judge(self, state: Any, py: Any, exec_env: Any, seed_path: Path) -> tuple[
-            tuple[Any, str | None, bool] | None, list[str], set[str]]:
+            tuple[Any, str | None, bool] | None, list[str], dict[str, bool | None]]:
         """FI's checks of the code the agent left, every repair turned into a report. ``(the gate's result when the code
-        passed, or a stop that is not the code's to fix; what the checks found; the names of the failing checks)``."""
+        passed, or a stop that is not the code's to fix; what the checks found; each check's result: True passed, False
+        failed, None not judged)``. The gate stops at the first check that fails, so only that one of its checks is seen."""
         from . import code_checks as _code_checks
 
         lines = _Lines()
         self._log.addHandler(lines)  # type: ignore[attr-defined]
         found: list[str] = []
-        failing: set[str] = set()
+        checks: dict[str, bool | None] = {}
         try:
             stop, oracle_code, repaired = await self._gate_pass(state, py, exec_env, seed_path)  # type: ignore[attr-defined]
         except RepairForAgent as asked:
-            failing.add(asked.node)
+            checks[asked.node] = False
             found.append(f"{asked.what} did not pass.")
             found.extend(without_numbers(line) for line in lines.lines[-6:])
             stop = None
         else:
             if stop is None:
-                return (None, oracle_code, repaired), [], set()
+                return (None, oracle_code, repaired), [], {}
             result = stop.get("exec_result") or {}
             if stop.get("exec_give_up_reason"):
-                return (stop, None, False), [], set()   # a stop that is not the code's (a plan's fault, FI's limit)
-            failing.add("run")
+                return (stop, None, False), [], {}   # a stop that is not the code's (a plan's fault, FI's limit)
+            checks["run"] = False
             found.append("Running the code failed:\n" + str(result.get("stderr_tail") or "")[-2000:])
         finally:
             self._log.removeHandler(lines)  # type: ignore[attr-defined]
@@ -249,40 +321,58 @@ class AgentBuildMixin:
             self._log.info("[implement] FI's list of the code's faults could not be made (%r)", exc)  # type: ignore[attr-defined]
             verdicts = []
         for v in verdicts:
+            if checks.get(v.check) is not False:
+                checks[v.check] = v.passed
             if v.passed is False:
-                failing.add(v.check)
                 found.append(v.says)
-        return None, found, failing
+        return None, found, checks
 
     async def _agent_build(self, state: Any, py: Any, exec_env: Any, seed_path: Path) -> tuple[Any, str | None, bool]:
         """The checks before the run in agent mode, in place of ``Engine._gate_pass`` and with its result: the agent fixes
-        what FI's checks find, round by round, until they pass, the rounds or the time run out, or a round makes no check
-        newly pass; then the honest stop names what still fails."""
+        what FI's checks find, round by round, until they pass, the rounds or the time run out, or the rounds stop making
+        progress (:func:`compare_rounds`); then the honest stop names what still fails. A round is never undone: FI's
+        checks judge the code the last round left."""
         coder = await self._code_agent()
         self._repairs_go_to = "agent"
-        failing_before: set[str] | None = None
         while True:
-            passed, found, failing = await self._agent_judge(state, py, exec_env, seed_path)
+            passed, found, checks = await self._agent_judge(state, py, exec_env, seed_path)
+            n = coder.rounds_made()
+            earlier = [r for r in judged_rounds(self.quest_root) if r[0] < n]  # type: ignore[attr-defined]
+            compared = compare_rounds(earlier, checks) if passed is None else None
             note_judgement(self.quest_root, claimed=coder.last_message, found=found, passed=passed is not None  # type: ignore[attr-defined]
-                           and passed[0] is None)
+                           and passed[0] is None, checks=checks if passed is None else None, compared=compared)
             if passed is not None:
                 if passed[0] is None:
                     self._log.info("[implement] FI's checks pass the coding agent's code")  # type: ignore[attr-defined]
                 return passed
+            broke = [check_words(c) for c in compared["newly_failed"]]
+            if broke:
+                self._log.warning("[implement] the coding agent's last round broke what passed before, so it is not "  # type: ignore[attr-defined]
+                                  "progress: %s", "; ".join(broke))
+            # The round before this one broke a check and had its one round to put it back.
+            after_break = bool(earlier) and bool(_record_round(self.quest_root, earlier[-1][0]).get("newly_failed"))  # type: ignore[attr-defined]
+            progress = bool(compared["newly_passed"]) and not broke
             why = ""
-            if failing_before is not None and not (failing_before - failing):
+            if earlier and not compared["newly_passed"]:
                 why = "its last round made no check of FI's pass that failed before"
+            elif earlier and after_break and not progress:
+                why = "its round to put back what it broke was not progress either"
             elif coder.fixes_left() <= AFTER_FREEZE_ROUNDS:
                 why = f"its {FIX_ROUNDS} round(s) of fixes before the run are used"
             elif seconds_used(self.quest_root) >= TOTAL_S:  # type: ignore[attr-defined]
                 why = f"its {TOTAL_S // 60} minutes for the code are used"
             if why:
+                still = [check_words(c) for c in compared["still_broken"]]
+                if still:
+                    why += " (passed in an earlier round and fails now: " + "; ".join(still) + ")"
                 text = ("FI's checks still find faults in the coding agent's code, and " + why + ": "
                         + "; ".join(f.splitlines()[0] for f in found if f.strip())[:1500])
                 return self._stop_before_run(text, "cannot_repair", tried=[  # type: ignore[attr-defined]
                     "the coding agent wrote the code and fixed what FI's checks found, round by round",
                     *[f.splitlines()[0][:300] for f in found[:3] if f.strip()]]), None, False
-            failing_before = failing
+            if broke:
+                found.insert(0, "Your last round broke what passed before (" + "; ".join(broke) + "). Put it back "
+                             "while you keep what you fixed: a round that breaks a check that passed is not progress.")
             self._log.info("[implement] FI's checks found %d problem(s) in the coding agent's code; sending them back to "  # type: ignore[attr-defined]
                            "it", len(found))
             await coder.continue_("\n\n".join(found))

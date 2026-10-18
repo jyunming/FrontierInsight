@@ -1,13 +1,17 @@
 """Agent mode (``engine.code_writer: agent``, core/agent_build.py): the coding agent writes the code, FI's checks judge it.
 
-A stand-in agent (no model, no command-line tool) writes files in ``code/``; FI's checks before the run are stood in for by
-a function that asks for a repair the way a real check does (``Engine._chat`` with a code-writing node), so the report mode
-itself is what is tested. No model is called.
+A stand-in agent (no model, no command-line tool) writes files in the copy of ``code/`` it is given; FI's checks before the
+run are stood in for by a function that asks for a repair the way a real check does (``Engine._chat`` with a code-writing
+node), so the report mode itself is what is tested. No model is called.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,10 +19,19 @@ import pytest
 
 from core import agent_build as ab
 from core import agent_coder as ac
+from core import code_checks
 from core import evidence
 from core.agent_build import RepairForAgent
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
+
+
+@pytest.fixture(autouse=True)
+def _copies_in_the_test_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent's copy of ``code/`` lives in the computer's temporary folder (:func:`core.agent_coder.default_workdir`):
+    here, the test's own."""
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
 
 
 def _cfg(tmp_path: Path, writer: str) -> Config:
@@ -318,3 +331,201 @@ def test_a_chat_mode_quest_has_no_code_writer_in_its_evidence(tmp_path: Path) ->
     eng = _engine(tmp_path, writer="chat")
     assert "code_writer" not in evidence.assess(eng.quest_root, {}, settings=ac.evidence_settings(eng.quest_root))
 
+
+# --- a round is judged check by check against the best earlier round ----------------------------------------------------
+
+
+def _verdicts_by_value(table: dict[int, dict[str, bool]]) -> Callable[..., Any]:
+    """A stand-in for FI's list of the code's faults: the verdicts for the ``value = <n>`` the code holds now."""
+    async def check(root: Path, *_a: Any, **_k: Any) -> list[code_checks.Verdict]:
+        text = (Path(root) / "code" / "experiment.py").read_text(encoding="utf-8")
+        value = int(text.split("value = ")[1].split()[0])
+        return [code_checks.Verdict(name, ok, f"{name} {'passed' if ok else 'found a fault'}")
+                for name, ok in table[value].items()]
+    return check
+
+
+def _gate_always_asks(eng: Engine) -> Callable[..., Any]:
+    async def gate(*_a: Any) -> tuple[Any, Any, bool]:
+        await eng._chat("repair the script so the check passes", node="implement_oracle")
+        raise AssertionError("the chat model was asked to repair the agent's code")
+    return gate
+
+
+def _run_rounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, table: dict[int, dict[str, bool]],
+                values: list[int]) -> tuple[Engine, _Agent, Any]:
+    agent = _Agent([_write(v) for v in values])
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr("core.code_checks.check_code", _verdicts_by_value(table))
+    monkeypatch.setattr(eng, "_gate_pass", _gate_always_asks(eng))
+    _first_write(eng, agent)
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    return eng, agent, out
+
+
+# The e2 replay's shape: round 1 has the equations right and every trial failing; round 2 fixes the trials and breaks
+# an equation.
+FIRST = {"equation_tests": True, "trial_checks": False, "known_answers": False}
+BROKE_AN_EQUATION = {"equation_tests": False, "trial_checks": True, "known_answers": False}
+
+
+def test_a_round_that_breaks_a_check_that_passed_is_not_progress_and_the_break_is_named(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, agent, (stop, code, _r) = _run_rounds(tmp_path, monkeypatch, {1: FIRST, 2: BROKE_AN_EQUATION, 3: BROKE_AN_EQUATION},
+                                              [1, 2, 3])
+    rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
+    first, second, third = rounds
+    assert "equation_tests" in first["passed"] and first["newly_passed"] == [] and first["newly_failed"] == []
+    assert second["compared_with"] == 1
+    assert second["newly_passed"] == ["trial_checks"] and second["newly_failed"] == ["equation_tests"]
+    assert "trial_checks" in second["passed"] and "equation_tests" not in second["passed"]
+    assert third["newly_passed"] == [] and third["newly_failed"] == []
+    broke = "the test of each equation against the plan's worked example"
+    log = (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert any("[WARNING]" in line and "broke what passed before" in line and broke in line
+               for line in log.splitlines()), "the run log names the check that broke"
+    told = agent.prompts[2]
+    assert told.index("Your last round broke what passed before (" + broke + ")") < told.index("known_answers")
+    assert "broke what passed before" not in agent.prompts[1], "round 1 broke nothing"
+    said = stop["exec_result"]["cannot_repair"]
+    assert "made no check of FI's pass that failed before" in said
+    assert "(passed in an earlier round and fails now: " + broke + ")" in said
+    assert code is None and len(agent.prompts) == 3
+
+
+def test_a_round_that_puts_back_what_it_broke_is_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    put_back = {"equation_tests": True, "trial_checks": True, "known_answers": False}
+    every = {"equation_tests": True, "trial_checks": True, "known_answers": True}
+    eng, agent, (stop, _code, _r) = _run_rounds(tmp_path, monkeypatch, {1: FIRST, 2: BROKE_AN_EQUATION, 3: put_back, 4: every},
+                                               [1, 2, 3, 4])
+    rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
+    assert rounds[2]["newly_passed"] == ["equation_tests"] and rounds[2]["newly_failed"] == []
+    assert rounds[3]["newly_passed"] == ["known_answers"]
+    assert f"its {ab.FIX_ROUNDS} round(s) of fixes before the run are used" in stop["exec_result"]["cannot_repair"]
+
+
+def test_a_break_followed_by_another_round_that_is_not_progress_stops(tmp_path: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    broke_the_trials = {"equation_tests": True, "trial_checks": False, "known_answers": True}
+    eng, agent, (stop, _code, _r) = _run_rounds(tmp_path, monkeypatch, {1: FIRST, 2: BROKE_AN_EQUATION, 3: broke_the_trials},
+                                               [1, 2, 3, 3])
+    said = stop["exec_result"]["cannot_repair"]
+    assert "its round to put back what it broke was not progress either" in said
+    assert len(agent.prompts) == 3
+
+
+def test_the_best_earlier_round_has_the_fewest_failing_checks_and_the_gate_is_passed_by_getting_past_it() -> None:
+    earlier = [(1, {"a": True, "b": False, "c": False}), (2, {"a": False, "b": True, "c": True}),
+               (3, {"implement_oracle": False, "a": False, "b": False, "c": False})]
+    got = ab.compare_rounds(earlier, {"implement_seed": False, "a": True, "b": True, "c": False})
+    assert got["best"] == 2 and got["newly_passed"] == ["a"] and got["newly_failed"] == ["c"]
+    assert got["still_broken"] == ["c"]
+    gate = ab.compare_rounds([(1, {"implement_oracle": False, "a": None})], {"implement_seed": False, "a": None})
+    assert gate["newly_passed"] == ["implement_oracle"] and gate["newly_failed"] == []
+    assert ab.compare_rounds([], {"a": False}) == {"best": None, "newly_passed": [], "newly_failed": [], "still_broken": []}
+
+
+# --- what the agent can see -------------------------------------------------------------------------------------------------
+
+
+PLANTED = "aligns the noiseless-rate recovery check | noiseless_rate_accuracy: 3.747e-15 (not met, not compared)"
+
+
+def _git(code: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(code), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                          capture_output=True, text=True, check=True).stdout
+
+
+def test_the_agents_folder_holds_no_history_of_fis_commits_and_fi_keeps_its_own(tmp_path: Path,
+                                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def looks_then_writes(value: int) -> Callable[[Path], None]:
+        def step(folder: Path) -> None:
+            text = " ".join(p.read_text(encoding="utf-8", errors="replace") for p in folder.rglob("*") if p.is_file())
+            seen.append({"folder": folder, "git": [p for p in folder.rglob("*") if p.name == ".git"],
+                         "named": [w for w in ("noiseless_rate_accuracy", "3.747e-15")
+                                   if w in text]})
+            _write(value)(folder)
+        return step
+
+    agent = _Agent([looks_then_writes(1), looks_then_writes(2)])
+    eng = _engine(tmp_path, agent=agent)
+    code = eng.quest_root / "code"
+    (code / "notes.txt").write_text("FI's earlier version\n", encoding="utf-8")
+    _git(code, "init", "-q")
+    _git(code, "add", "-A")
+    _git(code, "commit", "-q", "-m", PLANTED)
+    design = {"hypothesis": "h", "protocol": {"grid": {"n": [1, 2]}}}
+    asyncio.run(eng._implement_by_agent({"design": design}, {}, []))
+    assert "code written by the coding agent" in _git(code, "log", "--format=%s"), "FI's own commit after the write"
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    assert asyncio.run(eng._agent_build({}, "python", {}, code / "experiment.py")) == (None, None, False)
+    assert len(seen) == 2
+    for round_ in seen:
+        assert round_["git"] == [] and round_["named"] == [], round_
+        assert eng.quest_root.resolve() not in round_["folder"].resolve().parents and round_["folder"] != code
+    assert PLANTED in _git(code, "log", "--format=%B"), "FI's history of code/ is kept"
+    assert (code / "experiment.py").read_text(encoding="utf-8").startswith("value = 2")
+
+
+# A tiny quest whose plan holds values the agent must never see: the worked examples' outputs (5.0 and 12.0, which FI
+# computes from the formulas), a known-answer check's expected value (8.0) and two tolerances.
+HIDDEN = ("5.0", "12.0", "8.0", "0.000731", "0.000617")
+SPRING = {
+    "grid": {"c": [0.5, 1.0], "extra": [1, 2]},
+    "model": {"summary": "a mass on a damped spring", "equations": [
+        {"id": "E1", "formula": "w = sqrt(k / m)", "role": "generates", "source": "derivation", "derivation": "Newton's law",
+         "example": {"inputs": {"k": 50.0, "m": 2.0}, "expected_formula": "sqrt(k / m)", "tolerance": 0.000617}},
+        {"id": "E2", "formula": "Q = m * w / c", "role": "generates", "source": "derivation", "derivation": "energy ratio",
+         "example": {"inputs": {"m": 2.0, "w": 3.0, "c": 0.5}, "expected_formula": "m * w / c"}},
+    ]},
+    "oracles": [{"name": "quality at one damping", "kind": "closed_form", "check": "Q = m * w / c at c = 0.75",
+                 "expected": 8.0, "tolerance": 0.000731, "case": {"c": 0.75, "extra": 1}, "measure": "q"}],
+}
+WRONG = {
+    "spring/__init__.py": "from . import model\n",
+    "spring/model.py": "import math\n\n\n# E1\ndef frequency(k, m):\n    return math.sqrt(k * m)\n\n\n"
+                       "# E2\ndef quality(m, w, c):\n    return m * w / c\n",
+    "simulate.py": "from spring import model\n\n\ndef run_cell(cell):\n"
+                   "    return {\"q\": model.quality(2.0, 3.0, cell[\"c\"] * 2) * cell[\"extra\"]}\n",
+}
+
+
+def test_no_expected_value_or_tolerance_of_the_plan_reaches_the_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.execution import SharedInterpreterExecutor
+
+    def writes_the_wrong_code(folder: Path) -> None:
+        for rel, text in WRONG.items():
+            (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+            (folder / rel).write_text(text, encoding="utf-8")
+        _write(1)(folder)
+
+    agent = _Agent([writes_the_wrong_code, writes_the_wrong_code, writes_the_wrong_code])
+    eng = _engine(tmp_path, agent=agent)
+    eng.executor = SharedInterpreterExecutor(python_version="3.11")
+
+    async def no_project(*_a: Any, **_k: Any) -> None:
+        return None
+
+    monkeypatch.setattr(eng, "_refresh_code_project", no_project)
+    state = {"design": {"hypothesis": "h", "protocol": SPRING}}
+
+    async def gate(*_a: Any) -> tuple[Any, Any, bool]:
+        # What the real known-answer check logs before it asks for a repair, its expected value and tolerance included.
+        eng._log.warning("[oracle] the check 'quality at one damping' measured 4.0, expected 8.0 within 0.000731")
+        eng._log.warning("[equations] E1 (frequency) gave 10.0 where the example gives 5.0 within 0.000617")
+        await eng._chat("repair the script; expected 8.0 within 0.000731", node="implement_oracle")
+        raise AssertionError("the chat model was asked to repair the agent's code")
+
+    monkeypatch.setattr(eng, "_gate_pass", gate)
+    asyncio.run(eng._implement_by_agent(state, {}, []))
+    stop, _code, _r = asyncio.run(eng._agent_build(state, sys.executable, None, eng.quest_root / "code" / "experiment.py"))
+    assert stop is not None and len(agent.prompts) >= 2, "the checks found the faults and the agent was told"
+    feedback = "\n".join(agent.prompts[1:])
+    assert "equation E1" in feedback and "quality at one damping" in feedback, "the real verdicts reached the agent"
+    for k, prompt in enumerate(agent.prompts):
+        for value in HIDDEN:
+            assert not re.search(rf"(?<![\d.]){re.escape(value)}(?!\d)", prompt), (k, value, prompt[-1500:])
+        assert not re.search(r"7\.31e-0?4|6\.17e-0?4", prompt), (k, prompt[-1500:])

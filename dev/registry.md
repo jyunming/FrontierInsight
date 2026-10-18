@@ -651,13 +651,15 @@ same PR that adds, splits or renames one.
   mismatch), `tests/equation_judge_helpers.py`.
 - `core/agent_coder.py` — the coding agent's runner and guard (used by `core/agent_build.py`): `ClaudeCliRunner` (`claude -p` on a
   scratch copy of `code/`, in Docker when the daemon answers, else on the host with a tripwire), `make_runner`, `AgentCoder`
-  (`write` / `continue_` rounds, FI-owned files kept, writes outside the copy put back and recorded in `.fi/agent_coder.json`),
+  (`write` / `continue_` rounds, every runner on a copy outside the quest (`default_workdir`; never `code/` and its `.git`), FI-owned files kept, writes outside the copy put back and recorded in `.fi/agent_coder.json`),
   `guarded_round`, `hide_path` (the prompt never names the quest folder). Image: `docker/agent_coder/Dockerfile` (CLI version
   pinned to `CLAUDE_VERSION`). Tests: `tests/test_agent_coder.py`.
 - `core/agent_build.py` — agent mode (`engine.code_writer: agent`), `AgentBuildMixin` of `Engine`: `_implement_by_agent`
   (the agent writes `code/` from `agents/implement_agent.md`; no chat repair in the implement step), `_agent_build` (in place of
   `_gate_pass` in `_node_execute`: the checks run in report mode, what they found goes back to the agent, at most `FIX_ROUNDS`
-  fixes / `TOTAL_S`, ends when a round makes no check newly pass; claimed vs found per round in `.fi/agent_coder.json`),
+  fixes / `TOTAL_S`; each round judged check by check against the best earlier round (`compare_rounds`: a round that broke a
+  check that passed is not progress, named to the agent and in the log, and gets one round to put it back); ends when a round
+  makes nothing newly pass; claimed vs found and passed / newly_passed / newly_failed per round in `.fi/agent_coder.json`),
   `_reflect_by_agent` (a failed run: one agent round, `AFTER_FREEZE_ROUNDS` after the freeze). Report mode is one switch:
   `Engine._repairs_go_to` makes `Engine._chat` raise `RepairForAgent` for a code-writing node (`writes_code`), caught by the
   loop or by `Engine._node_execute` (a failed run for the repair step); log lines shown to the agent lose their numbers
