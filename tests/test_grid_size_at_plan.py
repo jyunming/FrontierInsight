@@ -193,13 +193,9 @@ def held(grid: dict[str, Any], parts: list[dict[str, Any]]) -> list[dict[str, An
             for p in parts]
 
 
-PARTS = [
-    {"name": "sources", "vary": ["source", "pitch", "conventional_sigma"]},
-    {"name": "annular", "vary": ["annular_sigma_inner_outer", "source_design_class", "pitch_nm"]},
-    {"name": "dipoles", "vary": ["xdipole_pole_centre", "xdipole_pole_radius", "dipole_pole_centre", "dipole_pole_radius"]},
-    {"name": "ambit", "vary": ["neighbour_distance_nm", "ambit_conventional_sigma", "ambit_source_type"]},
-    {"name": "parametrisation", "vary": ["source_parametrisation"]},
-]
+NAMES = list(BIG)  # the settings of the real plan this test is built from, in its order; the parts below group them
+PARTS = [{"name": f"part{n}", "vary": [NAMES[i] for i in idx]}
+         for n, idx in enumerate([(0, 1, 2), (3, 9, 10), (4, 5, 11, 12), (6, 7, 8), (13,)], start=1)]
 PARTS = held(BIG, PARTS)
 
 
@@ -235,7 +231,7 @@ async def test_a_grid_written_again_replaces_the_division_into_sub_studies_it_no
     with pytest.raises(ValueError, match="no entry of `protocol.sub_studies` varies"):  # parts that leave a setting out
         eng._keep_only_the_parts(text, {"protocol": {"grid": BIG, "sub_studies": PARTS[:2]}}, ["grid", "sub_studies"])
     assert plan.parse(text).design["protocol"]["grid"] == BIG  # the grid is not taken without its division
-    moved = eng._keep_only_the_parts(text, {"protocol": {"in_each_run": {"pitch": [0, 1]}}}, ["in_each_run"])
+    moved = eng._keep_only_the_parts(text, {"protocol": {"in_each_run": {NAMES[1]: [0, 1]}}}, ["in_each_run"])
     inside = plan.parse(moved).design["protocol"]
-    assert "pitch" not in inside["grid"] and all("pitch" not in p["vary"] for p in inside["sub_studies"])
+    assert NAMES[1] not in inside["grid"] and all(NAMES[1] not in p["vary"] for p in inside["sub_studies"])
     assert search.grid_size(search.study_grid(inside)) > 0

@@ -17,12 +17,12 @@ from core import run_manifest as rm
 from core import topic_requirements as topic
 from core import trial_runner
 
-GRID = {"family": ["conv", "annular", "dipole"], "dipole_radius": [0.1, 0.2, 0.3], "ring": [0.5, 0.7],
-        "ambit_type": ["a", "b", "c", "d"], "defocus": [-100, 0, 100]}
+GRID = {"kind": ["p", "q", "r"], "r_size": [0.1, 0.2, 0.3], "load": [0.5, 0.7],
+        "mode": ["a", "b", "c", "d"], "shift": [-100, 0, 100]}
 SUBS = [
-    {"name": "sources", "vary": ["family", "defocus", "ring"], "hold": {}},
-    {"name": "dipole", "vary": ["dipole_radius"], "hold": {"family": "dipole"}},
-    {"name": "ambit", "vary": ["ambit_type", "defocus"], "hold": {}},
+    {"name": "kinds", "vary": ["kind", "shift", "load"], "hold": {}},
+    {"name": "r", "vary": ["r_size"], "hold": {"kind": "r"}},
+    {"name": "modes", "vary": ["mode", "shift"], "hold": {}},
 ]
 
 
@@ -52,13 +52,13 @@ def test_the_settings_are_the_union_of_the_sub_studies_and_counted_exactly() -> 
     keys = [tuple(c.items()) for c in cells]
     assert len(keys) == len(set(keys)) == search.grid_size(grid)  # no setting listed twice, the count is the list's length
     assert all(set(c) == set(GRID) for c in cells)  # every setting carries every axis, a real value each
-    # sources 3*3*2=18 (radius, radius, ambit at their first), dipole 3, ambit 4*3=12; shared: family=conv/defocus cells etc.
+    # kinds 3*3*2=18 (r_size and mode at their first), r 3, modes 4*3=12; shared: kind=p/shift cells etc.
     sizes = dict(search.sub_study_sizes(grid))
-    assert sizes == {"sources": 18, "dipole": 3, "ambit": 12}
+    assert sizes == {"kinds": 18, "r": 3, "modes": 12}
     assert search.grid_size(grid) < sum(sizes.values()) and search.grid_size(grid) < math.prod(len(v) for v in GRID.values())
     # a held value is the stated one, an unstated one the first listed
-    dipole = [c for c in cells if c["dipole_radius"] != 0.1]
-    assert dipole and all(c["family"] == "dipole" and c["defocus"] == -100 and c["ambit_type"] == "a" for c in dipole)
+    rs = [c for c in cells if c["r_size"] != 0.1]
+    assert rs and all(c["kind"] == "r" and c["shift"] == -100 and c["mode"] == "a" for c in rs)
     # every value of every axis is somewhere in the study (no comparison is lost)
     for axis, values in GRID.items():
         assert {c[axis] for c in cells} == set(values)
@@ -112,7 +112,7 @@ def test_sub_studies_make_a_grid_that_was_too_large_fit_and_a_still_too_large_on
 
 
 def test_a_sub_study_that_does_not_read_is_left_out_not_guessed() -> None:
-    for subs in ([{"vary": ["nope"]}], [{"vary": []}], [{"vary": ["family"], "hold": {"defocus": 7}}], ["family"]):
+    for subs in ([{"vary": ["nope"]}], [{"vary": []}], [{"vary": ["kind"], "hold": {"shift": 7}}], ["kind"]):
         assert not isinstance(search.study_grid({"grid": GRID, "sub_studies": subs}), search.StudyGrid)
 
 
@@ -121,26 +121,26 @@ def _normalized(**protocol):
 
 
 FULL = [  # the same division, each part saying the value it holds every setting it does not vary at
-    {"name": "sources", "vary": ["family", "defocus", "ring"], "hold": {"dipole_radius": 0.1, "ambit_type": "a"}},
-    {"name": "dipole", "vary": ["dipole_radius"], "hold": {"family": "dipole", "ring": 0.5, "ambit_type": "a", "defocus": 0}},
-    {"name": "ambit", "vary": ["ambit_type", "defocus"], "hold": {"family": "conv", "dipole_radius": 0.1, "ring": 0.5}},
+    {"name": "kinds", "vary": ["kind", "shift", "load"], "hold": {"r_size": 0.1, "mode": "a"}},
+    {"name": "r", "vary": ["r_size"], "hold": {"kind": "r", "load": 0.5, "mode": "a", "shift": 0}},
+    {"name": "modes", "vary": ["mode", "shift"], "hold": {"kind": "p", "r_size": 0.1, "load": 0.5}},
 ]
 
 
 def test_the_plan_check_reads_a_good_division_and_names_each_planted_fault() -> None:
     fixed, why = _normalized(sub_studies=[dict(s) for s in FULL])
-    assert why is None and [s["name"] for s in fixed["sub_studies"]] == ["sources", "dipole", "ambit"]
-    assert fixed["sub_studies"][1]["hold"] == {"family": "dipole", "ring": 0.5, "ambit_type": "a", "defocus": 0}
+    assert why is None and [s["name"] for s in fixed["sub_studies"]] == ["kinds", "r", "modes"]
+    assert fixed["sub_studies"][1]["hold"] == {"kind": "r", "load": 0.5, "mode": "a", "shift": 0}
     assert isinstance(search.study_grid(fixed), search.StudyGrid)
     faults = {
-        "not a setting of": [{"vary": ["nope", "family"]}] + FULL,
-        "no entry of `protocol.sub_studies` varies": FULL[1:],  # family and ring are neither varied nor held at all values
-        "not one of its values": [dict(FULL[0], hold={"ambit_type": "zzz"}), FULL[2]],
-        "both varies and holds": [dict(FULL[0], hold={"family": "conv"}), FULL[2]],
+        "not a setting of": [{"vary": ["nope", "kind"]}] + FULL,
+        "no entry of `protocol.sub_studies` varies": FULL[1:],  # kind and load are neither varied nor held at all values
+        "not one of its values": [dict(FULL[0], hold={"mode": "zzz"}), FULL[2]],
+        "both varies and holds": [dict(FULL[0], hold={"kind": "p"}), FULL[2]],
         "does not say the value it holds": SUBS,  # the parts do not say what they hold the other settings at
         "needs `vary`": [{"name": "empty", "vary": []}],
-        "lists a setting twice": [{"vary": ["family", "family"]}],
-        "must be a list": "family",
+        "lists a setting twice": [{"vary": ["kind", "kind"]}],
+        "must be a list": "kind",
     }
     for expect, subs in faults.items():
         got, why = _normalized(sub_studies=subs)
@@ -185,7 +185,7 @@ def test_run_py_is_given_the_sub_studies_and_a_change_to_them_is_a_difference(tm
     (code / "simulate.py").write_text("def run_cell(cell):" + chr(10) + "    return {'x': 1}" + chr(10), encoding="utf-8")
     protocol = plan.normalize_protocol(_protocol())[0]
     study = code_project.study_of(code, protocol)
-    assert [s["name"] for s in study["sub_studies"]] == ["sources", "dipole", "ambit"]
+    assert [s["name"] for s in study["sub_studies"]] == ["kinds", "r", "modes"]
     plain = code_project.study_of(code, {"grid": GRID})
     assert "sub_studies" not in plain
     (code / "study.json").write_text(json.dumps(plain), encoding="utf-8")
@@ -232,21 +232,21 @@ def test_the_time_of_the_study_is_summed_over_its_sub_studies() -> None:
 
 
 def _design(**protocol):
-    return {"protocol": {"grid": {"source_family": ["a", "b", "c", "d", "e"]}, **protocol}}
+    return {"protocol": {"grid": {"kind_a": ["a", "b", "c", "d", "e"]}, **protocol}}
 
 
 def test_a_setting_added_for_the_topic_joins_the_part_the_answer_names() -> None:
     old = _design()
-    new = _design(grid={"source_family": ["a", "b", "c", "d", "e"], "defocus_nm": list(range(9)), "ambit_type": [1, 2, 3, 4]},
-                  sub_studies=[{"name": "sources", "vary": ["source_family", "defocus_nm"]},
-                               {"name": "ambit", "vary": ["ambit_type"]}])
+    new = _design(grid={"kind_a": ["a", "b", "c", "d", "e"], "shift_x": list(range(9)), "mode": [1, 2, 3, 4]},
+                  sub_studies=[{"name": "kinds", "vary": ["kind_a", "shift_x"]},
+                               {"name": "modes", "vary": ["mode"]}])
     merged = topic.merge(old, new, [])
     protocol = plan.normalize_protocol(merged["protocol"])[0]
     assert protocol is not None
     grid = search.study_grid(protocol)
     assert search.grid_size(grid) == 5 * 9 + 4 - 1  # 48, not 5 * 9 * 4 = 180
     # no answer for the parts: the plan has none, so the setting joins the one grid, as before
-    plain = topic.merge(old, _design(grid={"source_family": list("abcde"), "defocus_nm": [0, 1]}), [])
+    plain = topic.merge(old, _design(grid={"kind_a": list("abcde"), "shift_x": [0, 1]}), [])
     assert "sub_studies" not in plain["protocol"]
     assert search.grid_size(search.study_grid(plain["protocol"])) == 10
 
@@ -260,6 +260,6 @@ def test_a_setting_added_to_a_plan_that_has_sub_studies_without_a_part_is_a_part
     before = search.grid_size(search.study_grid(old["protocol"]))
     assert search.grid_size(search.study_grid(protocol)) == before + 2  # three values at the base: two new settings
     # a part of the plan the answer names takes the setting
-    named = {"protocol": {"grid": {**GRID, "noise": [0.0, 0.1]}, "sub_studies": [{"name": "dipole", "vary": ["noise"]}]}}
+    named = {"protocol": {"grid": {**GRID, "noise": [0.0, 0.1]}, "sub_studies": [{"name": "r", "vary": ["noise"]}]}}
     joined = topic.merge(old, named, [])["protocol"]["sub_studies"]
-    assert [s["vary"] for s in joined if s["name"] == "dipole"] == [["dipole_radius", "noise"]]
+    assert [s["vary"] for s in joined if s["name"] == "r"] == [["r_size", "noise"]]

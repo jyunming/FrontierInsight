@@ -1069,8 +1069,8 @@ def grid_weight(grid, weights=None):
     if len(subs) > MAX_EXACT_SUB_STUDIES:
         return sum(math.prod(sum(each[k][i] for i in c) for k, c in enumerate(one)) for one in choices)
     total = 0
-    for mask in range(1, 1 << len(subs)):
-        chosen = [choices[i] for i in range(len(subs)) if mask >> i & 1]
+    for bits in range(1, 1 << len(subs)):
+        chosen = [choices[i] for i in range(len(subs)) if bits >> i & 1]
         shared = 1
         for k in range(len(names)):
             shared *= sum(each[k][i] for i in set.intersection(*(set(one[k]) for one in chosen)))
