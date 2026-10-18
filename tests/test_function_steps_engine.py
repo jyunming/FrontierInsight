@@ -259,3 +259,35 @@ async def test_a_function_still_wrong_after_the_module_repair_is_kept_failing_an
     engine._client = _Writer({"quality": [WRONG_Q]})
     patch = await engine._equation_gate(STATE, None, None)
     assert patch is not None and "`quality`" in patch["exec_result"]["stderr_tail"]
+
+
+class _AlwaysBroken:
+    """A fake model whose every reply is code that does not parse; counts the requests."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        self.prompts.append(messages[-1]["content"])
+        return "```python\ndef broken(:\n```"
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_a_model_with_many_functions_is_written_one_at_a_time_and_the_call_budget_alone_bounds_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    n = 20  # more than the 16 that used to send the whole model to the one-shot path
+    engine = _engine(tmp_path)
+    _plan_md(engine)
+    specs = [fs.Spec(name=f"fn{i}", signature=f"def fn{i}(x) -> float:", purpose="a quantity", equation=f"E{i}")
+             for i in range(n)]
+    monkeypatch.setattr(fs, "model_functions", lambda outline, protocol=None: (specs, []))
+    writer = _AlwaysBroken()
+    engine._client = writer
+    await engine._fill_model_functions(STATE, OUTLINE)
+    assert writer.prompts, "a model with more than 16 functions goes through the one-at-a-time path"
+    assert "# The function" in writer.prompts[0]
+    # Every reply fails; the step still stops, within the budget that scales with the number of functions.
+    assert len(writer.prompts) <= fs.max_calls_for(n)

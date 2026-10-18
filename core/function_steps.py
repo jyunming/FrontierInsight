@@ -58,12 +58,11 @@ from . import plan_steps as _plan_steps
 from . import step_static as _step_static
 
 RECORD = Path(".fi") / "function_steps.json"
-#: Fixed limits (not settings): repairs of ONE function before the code is written whole; model functions above which the
-#: code is written whole; the most requests the step (fills, repairs, and the repairs after the equation tests) may make
-#: in a whole quest.
+#: Fixed limits (not settings): repairs of ONE function before the code is written whole; the most requests the step
+#: (fills, repairs, and the repairs after the equation tests) may make in a whole quest. There is no limit on the number
+#: of functions: the request budget (:func:`max_calls_for`) grows with it and is what bounds the step.
 REPAIRS = 2
 MODULE_REPAIRS = 2
-MAX_FUNCTIONS = 16
 MAX_CALLS = 40
 #: Requests the step may make for ``n`` functions in a whole quest (one fill and up to :data:`REPAIRS` repairs, and a
 #: little over for the module's repairs); the quest-wide count in the record (:func:`spend`) is what holds it. The caller

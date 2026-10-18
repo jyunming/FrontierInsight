@@ -12707,10 +12707,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.info("[implement] the model's functions are written with the rest of the code (%s)",
                                "; ".join(notes) or "the outline names no function per equation")
                 return False
-            if len(specs) > _function_steps.MAX_FUNCTIONS:
-                self._log.info("[implement] the model has %d functions, over the %d that are written one at a time: "
-                               "written with the rest of the code", len(specs), _function_steps.MAX_FUNCTIONS)
-                return False
             if ex.sandbox == "venv" and not self.executor.python_path(self.quest_root).is_file():
                 self._log.info("[implement] the model's functions are written with the rest of the code: the quest's "
                                "environment is not there to check them in")
