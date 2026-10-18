@@ -17,7 +17,7 @@ same PR that adds, splits or renames one.
   plan (`Engine._declare_oracles`) is recorded in `.fi/oracles_added.json`, and `Engine._hold_added_oracles` stops the
   quest again (the `plan` pause, `_pause_for_plan(added=...)`) before the freeze under `pauses.plan: ask`.
 - `core/protocol_check.py` — static check: does the experiment's source hold to the frozen protocol? Also the plan's
-  notes on the protocol (`*_notes`; `run_count_notes`: repeated runs of a design that names nothing random). Under the trial contract a `for` loop in the analysis script is not read as the grid; `analysis_suspects` returns
+  notes on the protocol (`*_notes`; `rng_notes`: what `rng_reuse` reads from free code about a stream that may restart for every setting, a note for the quality report and never a difference; `run_count_notes`: repeated runs of a design that names nothing random). Under the trial contract a `for` loop in the analysis script is not read as the grid; `analysis_suspects` returns
   the loops it skipped, which `run_manifest.confirmed` settles from FI's own count of the run (`Engine._grid_values_left_out`).
 - `core/run_manifest.py` — runtime check (`differences` / `plain_difference` / `difference_request`: where the analysis lists
   more values than FI's record holds, computed from the counts, the plain first sentence of the stop, and the request that

@@ -85,9 +85,11 @@ def test_a_thin_grid_is_said_only_when_the_design_claims_something_about_the_par
 def test_the_run_that_rebuilt_its_stream_for_every_setting_is_the_only_one_of_the_three_flagged() -> None:
     assert pc.rng_reuse(_real("fr1")) == [] and pc.rng_reuse(_real("fr2")) == []
     assert pc.rng_reuse(_real("fr3")) == [("run_stochastic_experiment", 78)]
-    found = pc.check({"seed_policy": "one independent stream per setting and run"}, {"experiment.py": _real("fr3")})
-    assert [(m.kind, m.name) for m in found] == [("rng", "run_stochastic_experiment")]
-    assert "SeedSequence" in found[0].message() and "line 78" in found[0].message()
+    policy = {"seed_policy": "one independent stream per setting and run"}
+    assert pc.check(policy, {"experiment.py": _real("fr3")}) == [], "reading free code never makes a difference"
+    (note,) = pc.rng_notes(policy, {"experiment.py": _real("fr3")})
+    assert "run_stochastic_experiment" in note and "line 78" in note and "could not tell" in note
+    assert pc.rng_notes(policy, {"experiment.py": _real("fr1")}) == []
 
 
 REUSED = """
@@ -127,11 +129,72 @@ def test_a_stream_that_varies_with_the_setting_or_is_built_once_is_not_reported(
     assert pc.rng_reuse(code) == []
 
 
-def test_common_random_numbers_declared_in_the_protocol_are_not_reported() -> None:
-    assert pc.check({"seed_policy": "independent streams"}, {"e.py": REUSED})[0].kind == "rng"
-    for policy in ("common random numbers across settings, analysed as paired", "CRN", "shared stream by design", "coupled runs"):
-        assert pc.check({"seed_policy": policy}, {"e.py": REUSED}) == [], policy
-    assert pc.check({}, {"e.py": REUSED})[0].kind == "rng", "no stated policy means independent streams"
+def test_common_random_numbers_declared_in_the_protocol_are_not_noted() -> None:
+    assert len(pc.rng_notes({"seed_policy": "independent streams"}, {"e.py": REUSED})) == 1
+    for policy in ("common random numbers across settings, analysed as paired", "CRN", "shared stream by design", "coupled runs",
+                   "Paired by trial index", "the settings use common random numbers"):
+        assert pc.rng_notes({"seed_policy": policy}, {"e.py": REUSED}) == [], policy
+    assert len(pc.rng_notes({"runs_per_setting": 3}, {"e.py": REUSED})) == 1, "no stated policy means independent streams"
+
+
+@pytest.mark.parametrize("policy", [
+    "All comparisons are unpaired", "settings are not paired", "No common random numbers across settings",
+    "Every setting has its own stream, without common random numbers", "streams aren't paired", "independent streams",
+])
+def test_a_policy_that_says_the_opposite_is_not_a_declaration_of_shared_streams(policy: str) -> None:
+    assert pc._SHARED_STREAMS_RE.search(policy) is None, policy
+    assert len(pc.rng_notes({"seed_policy": policy}, {"e.py": REUSED})) == 1
+
+
+# What a live DUV quest wrote: a list of spawned streams in one statement, indexed in the next, cached once per run. FI read
+# the bare SeedSequence as a generator built from nothing, repaired twice and stopped a quest whose code did what its plan said.
+TWO_STATEMENTS = """
+import numpy as np
+_C = {}
+def _freeform(cell):
+    if "ff" in _C:
+        return _C["ff"]
+    ss = np.random.SeedSequence(20260).spawn(10)
+    starts = []
+    for i in range(3):
+        starts.append(np.random.default_rng(ss[i]).random(4))
+    _C["ff"] = starts
+    return starts
+for c in (1, 2):
+    _freeform(c)
+"""
+
+
+def test_a_stream_spawned_in_one_statement_and_indexed_in_the_next_does_not_stop_the_quest() -> None:
+    protocol = {"seed_policy": "Each restart uses its own Generator from SeedSequence(20260).spawn(10)[restart index]"}
+    assert pc.check(protocol, {"simulate.py": TWO_STATEMENTS}) == []
+    (note,) = pc.rng_notes(protocol, {"simulate.py": TWO_STATEMENTS})
+    assert "`_freeform`" in note and "could not tell" in note
+
+
+def test_under_the_trial_contract_the_seed_record_is_the_judge_and_nothing_is_noted() -> None:
+    trial = "import numpy as np\ndef run_trial(cell, trial_id, seed):\n    return {'x': np.random.default_rng(1).random()}\n"
+    assert pc.rng_notes({"seed_policy": "independent"}, {"simulate.py": trial + "for t in range(3):\n    run_trial({}, t, t)\n"}) == []
+
+
+_TRIAL_CLEAN = "import numpy as np\ndef run_trial(cell, trial_id, seed):\n    rng = np.random.default_rng(seed)\n    return {'x': float(rng.random())}\n"
+
+
+@pytest.mark.parametrize("fault, text", [
+    ("a constant reseed", _TRIAL_CLEAN.replace("default_rng(seed)", "default_rng(12345)")),
+    ("a module-level generator", "import numpy as np\n_R = np.random.default_rng(1)\ndef run_trial(cell, trial_id, seed):\n    return {'x': float(_R.random())}\n"),
+])
+def test_a_trial_that_ignores_the_seed_fi_gave_it_is_still_caught_by_the_seed_record(tmp_path: Path, fault: str, text: str) -> None:
+    from core import run_facts
+
+    clean = tmp_path / "clean" / "code"
+    clean.mkdir(parents=True)
+    (clean / "simulate.py").write_text(_TRIAL_CLEAN, encoding="utf-8")
+    assert run_facts.seed_verdict(clean.parent)["fi_seed_reaches"] is True
+    bad = tmp_path / "bad" / "code"
+    bad.mkdir(parents=True)
+    (bad / "simulate.py").write_text(text, encoding="utf-8")
+    assert run_facts.seed_verdict(bad.parent)["fi_seed_reaches"] is False, fault
 
 
 # --- through the real graph and a real checkpoint -------------------------------------------------------------------------
@@ -219,7 +282,7 @@ _FIXED = _REUSING.replace('rng = np.random.default_rng(int(os.environ.get("FI_RE
 
 
 @pytest.mark.asyncio
-async def test_a_script_that_restarts_its_stream_for_every_setting_is_sent_back_and_the_repaired_one_runs(
+async def test_a_script_that_restarts_its_stream_for_every_setting_is_noted_and_runs_unrepaired(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[str] = []
@@ -227,11 +290,11 @@ async def test_a_script_that_restarts_its_stream_for_every_setting_is_sent_back_
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(seen, implement=_REUSING, repair=_FIXED, protocol=protocol))
     engine = Engine(_cfg(tmp_path))
     artifacts = await engine.run()
-    assert artifacts.paper_md is not None and seen.count("ProtocolRepair") == 1
-    assert "int(R0 * 100)" in (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
+    assert artifacts.paper_md is not None and seen.count("ProtocolRepair") == 0, "no model repair for a reading of free code"
+    assert "int(R0 * 100)" not in (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
     record = json.loads((engine.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
-    assert record["status"] == "ok" and "restarts the same stream" not in record["attempts"][-1]["differences"]
-    assert "share their random numbers" in record["attempts"][0]["differences"][0]
+    assert record["status"] == "ok" and record["differences"] == []
+    assert len(record["notes"]) == 1 and "could not tell" in record["notes"][0] and "`cell`" in record["notes"][0]
 
 
 def test_the_plan_directive_asks_for_a_target_a_dense_grid_and_a_stream_policy() -> None:

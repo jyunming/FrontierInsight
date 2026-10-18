@@ -180,6 +180,7 @@ class _Quest:
         self.stuck = _dict(_json(root / "needs" / "STUCK.json"))
         self.critique = [x for x in _list(_json(root / "needs" / "DESIGN_CRITIQUE.json")) if isinstance(x, dict)]
         self.oracle_check = _dict(_json(root / "needs" / "ORACLE_CHECK.json"))
+        self.protocol_check = _dict(_json(root / "needs" / "PROTOCOL_CHECK.json"))
         self.result_check = _dict(_json(root / "needs" / "RESULT_CHECK.json"))
         self.evidence = _dict(_json(root / "needs" / "EVIDENCE.json"))
         self.summary = _dict(_json(root / "frontier_insight_summary.json"))
@@ -284,6 +285,9 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for eid in _list(eq.get("not_tested")):
         out.append(_problem("checks", f"equation {eid} has no test", "FI's equation test", "left out",
                             ".fi/equation_tests.json"))
+    for note in _list(q.protocol_check.get("notes")):
+        out.append(_problem("checks", str(note), "FI's reading of the code (a note, not a stop)", "left out",
+                            "needs/PROTOCOL_CHECK.json"))
     return out
 
 

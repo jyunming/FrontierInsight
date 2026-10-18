@@ -11404,6 +11404,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             "differences": [m.message() for m in final],
             "protocol": protocol,
         }
+        notes = _protocol.rng_notes(protocol, self._scripts_on_disk())  # read from free code: a note, never a stop or a repair
+        if notes:
+            record["notes"] = notes
+            self._log.info("[protocol] %s", "; ".join(notes))
         self._protocol_record(record)
         if not final:
             self._log.info(
