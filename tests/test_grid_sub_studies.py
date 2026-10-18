@@ -251,6 +251,21 @@ def test_a_setting_added_for_the_topic_joins_the_part_the_answer_names() -> None
     assert search.grid_size(search.study_grid(plain["protocol"])) == 10
 
 
+def test_new_values_for_a_setting_a_part_holds_keep_the_plan_readable() -> None:
+    """The topic's answer gave a setting new values (a gap named it), and a part held that setting at a value the new list
+    no longer has: the merged plan was rejected, so what the topic asked for was lost."""
+    old = {"protocol": {"grid": {k: list(v) for k, v in GRID.items()}, "sub_studies": _held(SUBS)}}
+    new = {"protocol": {"grid": {**GRID, "kind": ["p", "q"]}}}
+    merged = topic.merge(old, new, [{"axis": "kind"}])
+    protocol, *why = plan.normalize_protocol(merged["protocol"])
+    assert protocol is not None, why
+    assert protocol["grid"]["kind"] == ["p", "q"]
+    assert [s["hold"]["kind"] for s in protocol["sub_studies"] if s["name"] == "r"] == ["p"]  # its first value
+    # a hold the new values still have is kept as the plan wrote it
+    still = topic.merge(old, {"protocol": {"grid": {**GRID, "kind": ["q", "r"]}}}, [{"axis": "kind"}])
+    assert [s["hold"]["kind"] for s in still["protocol"]["sub_studies"] if s["name"] == "r"] == ["r"]
+
+
 def test_a_setting_added_to_a_plan_that_has_sub_studies_without_a_part_is_a_part_of_its_own() -> None:
     old = {"protocol": {"grid": {k: list(v) for k, v in GRID.items()}, "sub_studies": [dict(s) for s in SUBS]}}
     new = {"protocol": {"grid": {**GRID, "noise": [0.0, 0.1, 0.2]}}}
