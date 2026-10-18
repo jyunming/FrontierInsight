@@ -100,6 +100,13 @@ External prerequisites are all optional and feature-gated:
 
 ## Test topics, live runs and reports to the maintainer
 
+- **Public in English, internal in Chinese.** Everything committed is public, so it is written in English: code,
+  comments, prompts, tests, docs, this file, commit messages and PR descriptions. Chinese stays outside the repository
+  (handovers, plans and reports for the maintainer, and every reply to the maintainer, in Traditional Chinese). Inside
+  the repository Chinese is allowed only as data: a quoted string or a code span (text a user may type, such as a
+  regular expression for Chinese words), test fixtures, the historical record `docs/audits/`, and a `*.zh-TW.md`
+  translation next to its English original (the English one is the authority).
+  `tests/test_public_text_english.py` fails on anything else and names the file and line.
 - **A test topic is only a test.** Real research topics used to validate FI (in live runs and replays) never shape what
   goes into the repo: code, prompts, unit tests, docs, commit messages and PR descriptions do not use that topic's words
   or carry a special case for it. Fixtures use neutral made-up topics, and every fix must be general.

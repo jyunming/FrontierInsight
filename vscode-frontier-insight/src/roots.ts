@@ -211,7 +211,7 @@ export function askPythonWhereFiIs(pythonPath: string, timeoutMs = 8000): Promis
                 {
                     // The extension's own folder: Windows looks for a bare `python` in the current
                     // folder first, and nothing but the extension goes there (unlike a temp folder).
-                    // UTF-8 out so a path like C:\Users\張三 survives.
+                    // UTF-8 out so a path with a user name that is not ASCII (for example Chinese) survives.
                     cwd: __dirname, timeout: timeoutMs, windowsHide: true, encoding: "utf-8",
                     env: { ...process.env, PYTHONIOENCODING: "utf-8" },
                 },
