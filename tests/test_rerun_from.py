@@ -35,14 +35,21 @@ def test_the_backup_takes_what_the_step_and_later_ones_made_and_leaves_its_input
     assert rerun_from.back_up(tmp_path, "review") == (None, [])
 
 
-def test_a_new_plan_is_asked_about_its_grid_again() -> None:
-    """The grid asks are counted by the plan model's name, not by the plan: a rerun from the plan that kept a record of
-    the "one more ask after the topic's additions" would never make that ask for the new plan."""
+def test_a_new_plan_and_a_new_design_are_asked_again() -> None:
+    """Every record of what FI asked the model about the plan or a drafted design goes with what it was asked about: some
+    are counted by the model's name or the design round, not by the plan, so a record kept from the old plan stopped the
+    new plan's asks (the grid's second ask, the checks' sources, a drafted design's parts). Listed from the engine's own
+    file names, so a new ask record that is not moved is caught here."""
     from core import engine as _engine
-    look = rerun_from._OWN["plan"]
-    for name in (_engine._GRID_ASKED, _engine._GRID_ASKED_AGAIN, _engine._DRAFTED_GRID_ASKED,
-                 _engine._DRAFTED_GRID_ASKED_AGAIN):
-        assert f".fi/{name}" in look, name
+    asks = {name: getattr(_engine, name) for name in dir(_engine)
+            if (name.endswith("_ASKED") or "_ASKED_" in name or name == "_FILL_MARKER")
+            and isinstance(getattr(_engine, name), str) and getattr(_engine, name).endswith(".json")}
+    asks.pop("_PAPERS_ASKED")  # the pause for papers to add, before the plan: not the plan's
+    assert len(asks) >= 12, sorted(asks)  # the sweep finds the records it is meant to
+    for name, file in asks.items():
+        assert f".fi/{file}" in rerun_from.OUTPUTS["plan"], name
+        if name.startswith("_DRAFTED_") or name == "_TOPIC_DESIGN_ASKED":
+            assert f".fi/{file}" in rerun_from.OUTPUTS["design"], name
 
 
 def _cfg(tmp_path: Path) -> Config:
