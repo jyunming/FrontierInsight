@@ -152,6 +152,28 @@ def test_a_setting_named_like_a_probe_label_is_timed_like_any_other(tmp_path: Pa
         assert e is not None and e.complete and e.parts == 0 and set(e.ratios) == {name, "other"}
 
 
+SOMETIMES_FAILS = '''
+import time
+
+def run_trial(cell, trial, seed):
+    time.sleep(0.25)
+    if trial COND:
+        raise RuntimeError("this trial did not converge")
+    return {"y": float(cell["n"]) + (seed % 3)}
+'''
+
+
+def test_a_trial_that_fails_now_and_then_is_timed_as_the_run_judges_it(tmp_path: Path) -> None:
+    """One failed trial among those timed is not a setting the simulation fails at: the full run judges the share that
+    fail (more than half at a setting is a fault), and the timing holds the simulation to that rule, not a stricter one."""
+    root = _quest(tmp_path / "a", SOMETIMES_FAILS.replace("COND", "== 1"))
+    probes, why = _measure(root, {"n": [1, 2]}, 50, False)
+    assert why == "" and probes is not None and all(p.seconds > 0 for p in probes), why
+    root = _quest(tmp_path / "b", SOMETIMES_FAILS.replace("COND", "% 4"))  # three of every four fail
+    probes, why = _measure(root, {"n": [1, 2]}, 50, False)
+    assert probes is None and "a trial failed: RuntimeError: this trial did not converge" in why, why
+
+
 def test_a_simulation_that_fails_when_timed_says_where_and_why(tmp_path: Path) -> None:
     root = _quest(tmp_path, "def run_trial(cell, trial, seed):\n    raise RuntimeError('broken')\n")
     probes, why = _measure(root, {"n": [1, 2]}, 3, False)

@@ -66,6 +66,7 @@ from typing import Any, Iterable
 from . import in_run as _in_run
 from . import optimise_search as _search
 from . import outside_run as _outside
+from . import trial_checks as _checks
 from . import trial_runner as _tr
 
 #: The margin added to the measured total before it is compared with the time allowed.
@@ -466,12 +467,16 @@ async def _time_one(
     if loaded is not None:
         return None, f"the simulation could not be loaded ({loaded['load_error']})"
     done = sorted((r for r in rows if r.get("status") == "ok"), key=lambda r: int(r.get("trial") or 0))
-    failed = next((r for r in rows if r.get("status") == "failed"), None)
-    if failed is not None:
-        where = _tr.last_frame(str(failed.get("traceback") or ""), quest_root)
-        return None, f"a trial failed: {failed.get('reason') or 'no reason given'}" + (f" (at {where})" if where else "")
+    failures = [r for r in rows if r.get("status") == "failed"]
     # One trial, or for a stochastic setting at least two (the harness stops once the later ones took TIMING_LATER_S).
     wanted = min(n, 2)
+    # A trial that fails now and then is judged as the full run judges it (core/trial_checks.py: more than half failing at
+    # a setting is a fault): the timing does not hold the simulation to a stricter rule than the run does. A setting where
+    # too few trials finish to time it, or more than that share failed, is a setting the simulation fails at.
+    if failures and (len(done) < wanted or len(failures) > _checks.FAULT_FRACTION * (len(done) + len(failures))):
+        failed = failures[0]
+        where = _tr.last_frame(str(failed.get("traceback") or ""), quest_root)
+        return None, f"a trial failed: {failed.get('reason') or 'no reason given'}" + (f" (at {where})" if where else "")
     if getattr(result, "timed_out", False) and len(done) < wanted:
         # Past its allowance with `len(done)` trials in: the next one costs at least what is left of the allowance.
         per_trial = timeout_s / (len(done) + 1)

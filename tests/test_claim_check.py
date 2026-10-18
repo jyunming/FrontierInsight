@@ -1291,3 +1291,25 @@ def test_claim_check_template_fills_every_placeholder() -> None:
     assert "do not call a claim about that part `unsupported` just because it is not shown" in out
     assert "a constant in the code is never a result" in out
     assert "cannot ground a claim that it passed" in out
+
+
+def test_a_sentence_found_unsupported_stays_so_while_the_paper_holds_it_unchanged(tmp_path: Path) -> None:
+    """A later check that leaves an unsupported sentence out has not judged it: the sentence, still in the paper word for
+    word, stays unsupported. A sentence the writer changed is judged afresh, and a check that judges it again decides."""
+    planted = "In a supplementary sweep the effect reached 7.413 (95% CI 7.208 to 7.618)."
+    eng = _engine(tmp_path)
+    earlier = {"claims": [{"claim": planted, "basis": "unsupported", "citation_index": None, "quote": "",
+                           "evidence": "no supplementary sweep was run"}]}
+    _set_chat(eng, json.dumps({"claims": [], "summary": "no substantive claims found"}))
+    state = {"topic": "t", "paper_md": _paper(tmp_path, f"# Paper\n\nWe find X.\n\n{planted}\n"),
+             "claim_grounding": earlier}
+    g = asyncio.run(eng._node_claim_check(state))["claim_grounding"]  # type: ignore[arg-type]
+    assert g["unsupported"] == [planted], g
+    # the writer changed the sentence: nothing is carried
+    state["paper_md"] = _paper(tmp_path, "# Paper\n\nWe find X.\n\nNo supplementary sweep was run.\n")
+    assert asyncio.run(eng._node_claim_check(state))["claim_grounding"]["unsupported"] == []  # type: ignore[arg-type]
+    # the check judges the unchanged sentence again: its judgement stands
+    state["paper_md"] = _paper(tmp_path, f"# Paper\n\nWe find X.\n\n{planted}\n")
+    _set_chat(eng, json.dumps({"claims": [{"claim": planted, "basis": "experiment", "citation_index": None,
+                                           "evidence": "the results hold it"}], "summary": ""}))
+    assert asyncio.run(eng._node_claim_check(state))["claim_grounding"]["unsupported"] == []  # type: ignore[arg-type]

@@ -20991,6 +20991,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         claims, withdrawn = _retractions.apply_to_claims(claims, sources, citing, _same_statement)
         if withdrawn:
             self._log.info("[claim_check] %d claim(s) rest on a retracted source; marked unsupported", withdrawn)
+        # A sentence an earlier check marked unsupported that the paper still holds word for word stays unsupported when
+        # this check does not list it: leaving a sentence out is not a judgement of it (a reply that judges it again decides).
+        kept = _unsupported_still_in(paper_text, (state.get("claim_grounding") or {}).get("claims") or [], claims)
+        if kept:
+            claims.extend(kept)
+            self._log.info("[claim_check] %d sentence(s) an earlier check found unsupported are still in the paper unchanged "
+                           "and this check did not judge them again: they stay unsupported", len(kept))
         unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
         # A paper with a real body that yields zero claims is suspicious, not
         # clean: the check almost certainly missed something rather than the
@@ -26276,6 +26283,26 @@ def _title_only_sentences(
             if len(extra) >= _TITLE_ONLY_UNEXPLAINED_STEMS:
                 found.append((sentence, labels, sorted(extra)))
     return found
+
+
+def _unsupported_still_in(paper_text: str, earlier: list[Any], claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The claims of an earlier check of this quest marked ``unsupported`` whose text the paper still holds word for word
+    (spacing aside) and that ``claims`` (this check's) does not state again (:func:`_same_statement`): carried over, so a
+    check that leaves a sentence out cannot clear it. A sentence the writer changed is not carried (it is judged afresh)."""
+    flat = " ".join(str(paper_text or "").split())
+    out: list[dict[str, Any]] = []
+    for c in earlier or []:
+        if not isinstance(c, dict) or c.get("basis") != "unsupported":
+            continue
+        text = " ".join(str(c.get("claim") or "").split())
+        if not text or text not in flat:
+            continue
+        if any(_same_statement(text, str(n.get("claim") or "")) for n in [*claims, *out] if isinstance(n, dict)):
+            continue
+        out.append({**c, "claim": text,
+                    "evidence": f"{str(c.get('evidence') or '').strip()} (an earlier check found it unsupported; the "
+                                "sentence is unchanged and this check did not judge it again)".strip()})
+    return out
 
 
 def _same_statement(a: str, b: str) -> bool:
