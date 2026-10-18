@@ -1238,6 +1238,8 @@ class RunChecksMixin:
                 log.info("[improve] The simulation is not sped up: %s.", why)
                 return {"goal": "speed", "limit_s": limit_s, "rounds": [], "kept": False, "calls": 0, "probes": None,
                         "stopped": why}
+            if why:
+                log.info("[improve] %s; a speed-up is not tried on them.", why[0].upper() + why[1:])
 
         async def sample() -> Any:
             return await _speed.run_sample(self.executor, python, root, module, cells,  # type: ignore[attr-defined]
@@ -1268,8 +1270,10 @@ class RunChecksMixin:
             names = sorted(noisy)
             shown = [f"{k or 'its only setting'} trial {t} {n}" for k, t, n in names[:3]]
             record["varying"] = shown
-            log.info("[improve] %d number(s) of the sample are not the same from one run of the unchanged code to the next "
-                     "(first: %s); edits are judged on the other numbers.", len(noisy), shown[0])
+            which = sorted({n.strip("/") for _k, _t, n in noisy})
+            log.info("[improve] %d number(s) of the sample change from one run of the unchanged code to the next (%s); a "
+                     "speed-up is judged on the other numbers.", len(noisy),
+                     ", ".join(which[:3]) + (f" and {len(which) - 3} more" if len(which) > 3 else ""))
             if len(noisy) >= _speed.count_numbers(first):
                 record["stopped"] = "every number of the sample differs from one run of the unchanged code to the next, so an edit cannot be judged"
                 log.info("[improve] The simulation is not sped up: %s.", record["stopped"])

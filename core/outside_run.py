@@ -95,27 +95,42 @@ def working_files(quest_root: Path | str) -> set[str]:
     return out
 
 
-def remove_created_since(quest_root: Path | str, before: set[str]) -> list[str]:
+def remove_created_since(quest_root: Path | str, before: set[str], left: list[str] | None = None) -> list[str]:
     """Remove the files under the quest's working folders that were not in ``before``; the paths removed. For a trial
     FI stopped for its time: it did not finish, so what it was writing (a lock, a half-written cache entry) is not
-    something the next trial may trust."""
+    something the next trial may trust. A file that cannot be removed (on Windows a handle of the stopped process can
+    outlive it for a moment) is tried once more, then added to ``left``."""
+    import time
+
     root = Path(quest_root)
     gone: list[str] = []
     for rel in sorted(working_files(root) - before):
-        try:
-            (root / rel).unlink()
-            gone.append(rel)
-        except OSError:
-            continue
+        for attempt in range(2):
+            try:
+                (root / rel).unlink()
+                gone.append(rel)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                if attempt == 0:
+                    time.sleep(0.5)
+                elif left is not None:
+                    left.append(rel)
     return gone
 
 
-def say_removed(log: Any, gone: list[str]) -> None:
+def say_removed(log: Any, gone: list[str], left: list[str] | None = None) -> None:
     if gone:
         shown = ", ".join(gone[:5]) + (f" and {len(gone) - 5} more" if len(gone) > 5 else "")
         log.warning("[execute] a trial stopped for its time left %d file%s it was writing (%s); removed, so the next "
                     "trial does not wait on %s", len(gone), "" if len(gone) == 1 else "s", shown,
                     "it" if len(gone) == 1 else "them")
+    if left:
+        shown = ", ".join(left[:5]) + (f" and {len(left) - 5} more" if len(left) > 5 else "")
+        log.warning("[execute] a trial stopped for its time left %d file%s FI could not remove (%s); a later trial that "
+                    "waits on %s may not finish", len(left), "" if len(left) == 1 else "s", shown,
+                    "it" if len(left) == 1 else "them")
 
 
 async def execute_keeping_only_finished(executor: Any, cmd: list[str], *, cwd: Path, timeout_s: int,
@@ -126,8 +141,9 @@ async def execute_keeping_only_finished(executor: Any, cmd: list[str], *, cwd: P
     before = await asyncio.to_thread(working_files, root)
     result = await executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
     if getattr(result, "timed_out", False):
-        gone = await asyncio.to_thread(remove_created_since, root, before)
-        say_removed(log if log is not None else logging.getLogger(f"frontier_insight.{root.resolve().name}"), gone)
+        left: list[str] = []
+        gone = await asyncio.to_thread(remove_created_since, root, before, left)
+        say_removed(log if log is not None else logging.getLogger(f"frontier_insight.{root.resolve().name}"), gone, left)
     return result
 
 
