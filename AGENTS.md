@@ -98,6 +98,16 @@ External prerequisites are all optional and feature-gated:
 
 **Dataset adapters** (`core/datasets/`): the no-simulation `auto_collect_data` node can additionally pull structured data via adapters listed in `engine.dataset_adapters`. The abstract base is `core/datasets/base.py::DatasetAdapter` — a single `async def search(self, query: str, *, top_k: int) -> list[DatasetRow]`. Shipped adapters: `worldbank.py` (country-indicator tables via the WorldBank Indicators API, stdlib `urllib`) and `wikipedia.py` (opensearch + page-summary lookups for qualitative topics). Adapter failures log a WARNING and return `[]`; `Engine._run_dataset_adapters` sums counts and keeps the quest moving. Adding a new adapter is a single-file change plus a registry entry; no graph edit.
 
+## Test topics, live runs and reports
+
+- **A test topic is only a test.** Real research topics used to validate FI (in live runs and replays) never shape what
+  goes into the repo: code, prompts, unit tests, docs, commit messages and PR descriptions do not use that topic's words
+  or carry a special case for it. Fixtures use neutral made-up topics, and every fix must be general.
+- **Watch a live run while it runs.** A long real run is watched throughout (stops, errors, the size of the study and
+  FI's own time estimate); a problem is reported with a proposed way forward as soon as it shows, not after the run ends.
+- **Report outcomes, not process.** Say what is done, what is left, how much better it is, what it cost and its quality;
+  say "not measured" for what was not measured, and never "verified" for what was not observed directly.
+
 ## Conventions and gotchas worth knowing
 
 - **Tilde expansion is manual.** `Config` uses `field_validator(..., mode="before")` to expand `~` in path-shaped YAML fields (`output_dir`, `axon_config` when given as a path, every entry in `knowledge.local_papers`). When adding new path fields, mirror that pattern — pydantic does not expand `~`.
