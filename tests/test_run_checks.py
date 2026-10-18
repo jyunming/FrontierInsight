@@ -807,3 +807,25 @@ def test_the_topics_cut_never_goes_below_what_the_plans_checks_need_nor_below_te
     assert _fit({"min_runs_per_setting": 5}, 47.0, topic=True) is None
     # FI's own limit keeps the plan's minimum, and what the checks need
     assert _fit({**_TRIALS_CRITERION, "min_runs_per_setting": 5}, 60.0) is None
+
+
+@pytest.mark.asyncio
+async def test_settings_run_at_once_make_a_run_fit_that_one_after_another_would_not(tmp_path: Path) -> None:
+    """The estimate uses the same number at once as the run: the settings' work spread over them, each as much slower
+    as FI measured on this machine, and never less than the costliest setting."""
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=40, grid={"n": [1, 2, 4], "m": [1, 2, 3, 4]})
+    serial_key = eng._sizing_key(runner, {"n": [1, 2, 4], "m": [1, 2, 3, 4]}, 40, 40)
+    runner.at_once = 6
+    assert eng._sizing_key(runner, {"n": [1, 2, 4], "m": [1, 2, 3, 4]}, 40, 40) == serial_key + "|6"
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    log = _log(eng)
+    assert re.search(r"with 6 settings running at the same time, each took [\d.]+ times as long as alone", log), log
+    line = re.search(r"FI estimates the experiment takes about .+; the limit is 40 seconds \(6 settings run at the same "
+                     r"time.*; one after another they would take (.+?), and the run takes at least as long as its "
+                     r"costliest setting\)", log)
+    assert line, log
+    record = run_estimate.read_record(eng.quest_root)
+    assert record["fits"] is True and model.asked == []
+    assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == 40, "the runs were not lowered"
+    assert runner.cost is not None and runner.cost({"n": 4, "m": 1}) > runner.cost({"n": 1, "m": 1}), \
+        "the run starts the costliest settings first"
