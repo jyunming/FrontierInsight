@@ -8399,6 +8399,37 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                        "by the engine for its oracle check" if by == "engine" else "on request", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
 
+    def _run_gave_no_results(self, state: QuestState) -> bool:
+        """True when FI's own record shows the experiment that led back to the design produced no results: a simulation
+        ran (``exec_result``) and its result holds no number, or only a number that is none of the study's quantities and a
+        word that it failed (the same reading as the gate's, :meth:`_no_results_verdict`). False when it cannot be told, for
+        a study of data or of the literature, and when an earlier round of this quest did have results."""
+        if any(isinstance(e, dict) and e.get("results_seen", e.get("after_results")) for e in state.get("design_history") or []):
+            return False
+        exec_result = state.get("exec_result")
+        if (not isinstance(exec_result, dict) or not exec_result or state.get("no_simulation_resolved")
+                or state.get("survey_mode_resolved") or self.config.engine.analyze_local_first):
+            return False
+        from . import numeric_oracle as _numeric_oracle
+
+        result = state.get("result_json")
+        no_numbers = not any(True for _ in _numeric_oracle.flatten_numbers(result, keep_zero=True))
+        return bool(no_numbers or self._reports_no_quantity(state, result))
+
+    def _keep_hypothesis_after_an_empty_run(self, state: QuestState, design: Any) -> Any:
+        """The redesign keeps the hypothesis of the design that ran when that run produced no results
+        (:meth:`_run_gave_no_results`): a hypothesis is not changed by a run that showed nothing. A reply that changes it has
+        that part not taken, and run.log says so. With results, the hypothesis is the model's, recorded as post hoc."""
+        previous = state.get("design")
+        if not (isinstance(design, dict) and isinstance(previous, dict)) or not state.get("design_history"):
+            return design
+        before = str(previous.get("hypothesis") or "").strip()
+        if not before or str(design.get("hypothesis") or "").strip() == before or not self._run_gave_no_results(state):
+            return design
+        self._log.warning("[design] the redesign's new hypothesis was not taken: the run before it produced no results, so "
+                          "nothing was learned that could change it; the hypothesis stays as it was")
+        return {**design, "hypothesis": previous.get("hypothesis")}
+
     async def _node_design(self, state: QuestState) -> QuestState:
         if self.config.engine.analyze_local_first:
             # --analyze: no experiment to design — the data already exists.
@@ -8430,6 +8461,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design, objections = await self._audit_design(state, design)
             # After the freeze a redesign keeps the frozen protocol; a different one is an amendment request.
             design = self._hold_design_to_frozen(state, design)
+            design = self._keep_hypothesis_after_an_empty_run(state, design)
 
         # A search for the best design never runs as a plain sweep: every design, from the plan or drafted here, passes
         # this point before anything is implemented or run, and one the engine cannot search stops here
@@ -8478,8 +8510,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # So record every version: what it was, when, and what sent the engine
         # back here. Nothing is blocked -- the record exists so the revision is
         # auditable rather than invisible.
+        design = out["design"] = self._keep_hypothesis_after_an_empty_run(state, design)  # a later amendment too
         out["design_history"] = _append_design_revision(
             state, design, self.quest_root, self._log, plan_sha,
+            results_seen=not self._run_gave_no_results(state),
         )
         def _design_record() -> dict[str, Any]:
             latest = (out["design_history"] or [{}])[-1]
@@ -32305,6 +32339,7 @@ def _anything_ran(state: "QuestState", quest_root: Path) -> bool:
 
 def _append_design_revision(
     state: "QuestState", design: dict, quest_root: Path, log: logging.Logger, plan_sha: str = "",
+    results_seen: bool = True,
 ) -> list[dict[str, Any]]:
     """Record this version of the design, returning the full history.
 
@@ -32318,6 +32353,9 @@ def _append_design_revision(
     scientific claims, and a finished paper looks identical either way. The
     history is written to ``needs/DESIGN_HISTORY.json`` so it survives
     alongside the quest rather than only in state.
+
+    ``results_seen``: False when the run that led back here produced no results (FI's own record), which the reason
+    then says instead of "results were seen".
     """
     prior = list(state.get("design_history") or [])
     hypothesis = str((design or {}).get("hypothesis") or "").strip()
@@ -32330,12 +32368,13 @@ def _append_design_revision(
         analysis = state.get("analysis") or {}
         next_step = str(analysis.get("next_step") or "").strip()
         verdict = str((state.get("review") or {}).get("verdict") or "").strip()
+        seen = "results were seen" if results_seen else "the run before it produced no results"
         if next_step in ("re_experiment", "broaden_lit"):
-            reason = f"analyze.next_step={next_step} (results were seen)"
+            reason = f"analyze.next_step={next_step} ({seen})"
         elif verdict:
-            reason = f"review verdict={verdict} (results were seen)"
+            reason = f"review verdict={verdict} ({seen})"
         else:
-            reason = "re-entered design (results were seen)"
+            reason = f"re-entered design ({seen})"
 
     entry = {
         "revision": len(prior),
@@ -32346,6 +32385,7 @@ def _append_design_revision(
         # (a rerun from the plan after a stop before the first run) is not a revision after results (core/disclosure.py).
         "after_results": bool(prior) and _anything_ran(state, quest_root),
         "reason": reason,
+        "results_seen": bool(prior) and results_seen,
         "hypothesis": hypothesis[:600],
     }
     if plan_sha:
@@ -32355,11 +32395,12 @@ def _append_design_revision(
     if entry["post_hoc"]:
         changed = hypothesis != str(prior[-1].get("hypothesis") or "")
         log.warning(
-            "[design] revision %d recorded (%s)%s -- the paper's hypothesis "
-            "is being set after results were seen; DESIGN_HISTORY.json keeps "
+            "[design] revision %d recorded (%s)%s -- %s; DESIGN_HISTORY.json keeps "
             "this auditable.",
             entry["revision"], reason,
             "; hypothesis TEXT CHANGED" if changed else "; hypothesis unchanged",
+            "the paper's hypothesis is being set after results were seen" if results_seen
+            else "the run produced no results, so the design is not a response to any",
         )
 
     try:

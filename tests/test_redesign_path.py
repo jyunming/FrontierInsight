@@ -109,3 +109,56 @@ async def test_an_outline_from_a_checkpoint_made_before_the_key_existed_is_still
     eng = _outline_engine(tmp_path, calls)
     state = {"topic": "t", "design": {"hypothesis": "h"}, "implement_outline": {"scaffold": "# old\n"}}
     assert await eng._node_implement_outline(state) == {} and calls == []
+
+
+def _after_a_run(result: Any, **extra: Any) -> dict[str, Any]:
+    return {"topic": "t", "iteration": 1, "design": {"hypothesis": "H0", "protocol": {}},
+            "design_history": [{"revision": 0, "post_hoc": False, "after_results": False, "hypothesis": "H0"}],
+            "exec_result": {"returncode": 1}, "result_json": result,
+            "analysis": {"next_step": "re_experiment"}, **extra}
+
+
+def test_a_redesign_after_a_run_with_no_results_keeps_the_hypothesis(tmp_path: Path) -> None:
+    import logging
+    eng = _outline_engine(tmp_path, [])
+    said: list[str] = []
+
+    class Catch(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            said.append(record.getMessage())
+
+    eng._log.addHandler(Catch())
+    for empty in ({}, None, {"note": "failed"}):
+        state = _after_a_run(empty)
+        kept = eng._keep_hypothesis_after_an_empty_run(state, {"hypothesis": "H1", "method": "m"})
+        assert kept["hypothesis"] == "H0" and kept["method"] == "m", empty
+    assert len(said) == 3 and "was not taken" in said[0]
+    # the reply that leaves it alone is untouched, and nothing is logged for it
+    same = {"hypothesis": "H0"}
+    assert eng._keep_hypothesis_after_an_empty_run(_after_a_run({}), same) is same and len(said) == 3
+
+
+def test_a_redesign_after_results_may_change_the_hypothesis_and_is_recorded_as_post_hoc(tmp_path: Path) -> None:
+    eng = _outline_engine(tmp_path, [])
+    state = _after_a_run({"mean_error": 0.2})
+    new = {"hypothesis": "H1"}
+    assert eng._keep_hypothesis_after_an_empty_run(state, new) is new
+    assert not eng._run_gave_no_results(state)
+    # an earlier round that did have results keeps this one as it is, even if the latest run produced none
+    earlier = _after_a_run({}, design_history=[{"revision": 0, "after_results": True, "results_seen": True}])
+    assert eng._keep_hypothesis_after_an_empty_run(earlier, new) is new
+    # a study of data has no run to be empty
+    assert not eng._run_gave_no_results(_after_a_run({}, no_simulation_resolved=True))
+
+
+def test_the_record_says_when_the_run_before_the_redesign_gave_no_results(tmp_path: Path) -> None:
+    from core.engine import _append_design_revision
+    eng = _outline_engine(tmp_path, [])
+    state = _after_a_run({})
+    empty = _append_design_revision(state, {"hypothesis": "H0"}, eng.quest_root, eng._log, "", results_seen=False)[-1]
+    assert "produced no results" in empty["reason"] and "results were seen" not in empty["reason"]
+    assert empty["results_seen"] is False and "next_step=re_experiment" in empty["reason"]
+    seen = _append_design_revision(_after_a_run({"x": 1}), {"hypothesis": "H1"}, eng.quest_root, eng._log, "")[-1]
+    assert "(results were seen)" in seen["reason"] and seen["results_seen"] is True
+    from core import disclosure
+    assert disclosure.reason_phrase(empty["reason"]) == disclosure.REASON_ANOTHER_EXPERIMENT
