@@ -13,6 +13,7 @@ import pytest
 
 from core import frozen_protocol as fp, improve, improve_speed as sp, plan
 from core import run_estimate as est
+from core import trial_runner as tr
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig
 from core.engine import Engine
 
@@ -181,3 +182,47 @@ async def test_a_quest_whose_unmet_check_is_inside_its_own_tolerance_makes_no_ch
     assert out == {"improve_rerun": False} and model.prompts == []
     assert "already within its own tolerance of its bar" in ti._log(engine)
     assert ti.EULER in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+
+
+def _probe(cell: dict, seconds: float, at_least: bool = False, axis: Any = "s") -> est.Probe:
+    return est.Probe(axis, 0, dict(cell), seconds, at_least)
+
+
+def test_the_sample_takes_only_settings_the_timing_saw_finish_and_fits_the_time_for_timing() -> None:
+    """A live quest's speed step gave every sampled setting the whole study's limit (8 h), including the base setting the
+    timing had not seen finish: one setting of the sample ran for half an hour and the step could take hours."""
+    cells = [{"s": 2}, {"s": 1}, {"s": 3}]
+    probes = [_probe({"s": 2}, 1000.0, at_least=True, axis=None), _probe({"s": 1}, 2.0), _probe({"s": 3}, 500.0)]
+    kept, timeouts, why = sp.bounded_sample(cells, probes, runs=50, deterministic=False, budget_s=600.0, samples=4)
+    # the base did not finish when timed (left out); s=3 costs 12/50 * 500 = 120 s, over 600 / 4 samples / 2 repeats
+    assert kept == [{"s": 1}] and why == ""
+    assert timeouts == {tr.cell_key({"s": 1}): 60}  # three times its 0.48 s, at least a minute
+    # a setting the timing never ran is costed as the base; a known-answer case's setting is one of these
+    more, more_t, _ = sp.bounded_sample([{"s": 1}, {"s": 9}], [_probe({"s": 1}, 50.0, axis=None)], runs=50,
+                                        deterministic=False, budget_s=10_000.0, samples=1)
+    assert more == [{"s": 1}, {"s": 9}] and more_t[tr.cell_key({"s": 9})] == 60
+    # nothing fits, or nothing finished: the step is skipped and says why
+    none, _, why = sp.bounded_sample(cells, probes, runs=50, deterministic=False, budget_s=1.0, samples=4)
+    assert none == [] and "more than the" in why
+    unseen, _, why = sp.bounded_sample(cells, [_probe({"s": 2}, 9.0, at_least=True, axis=None)], runs=50,
+                                       deterministic=False, budget_s=600.0, samples=4)
+    assert unseen == [] and "none of the sample's settings finish" in why
+
+
+@pytest.mark.asyncio
+async def test_a_setting_the_timing_could_not_finish_is_not_sampled(tmp_path: Path) -> None:
+    import time
+
+    engine = _engine(tmp_path, rounds=1)
+    slow = SLOW.replace("    rng = np.random.default_rng(seed)\n",
+                        "    rng = np.random.default_rng(seed)\n    if cell['s'] == 2:\n        import time; time.sleep(60)\n")
+    (engine.quest_root / "code" / "simulate.py").write_bytes(slow.encode("utf-8"))
+    engine._client = _Model(["{}"])  # no edit: only the sample before any change runs (a kept edit times the study again)
+    root = engine.quest_root
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=False)
+    probes = [_probe({"s": 2}, 300.0, at_least=True, axis=None), _probe({"s": 1}, 1.0), _probe({"s": 3}, 1.0)]
+    started = time.monotonic()
+    record = await engine._speed_up({}, runner, engine.executor.python_path(root), None, {"s": [1, 2, 3]}, 50, {}, {},
+                                    SimpleNamespace(seconds=10.0), 10.0, budget_s=600.0, probes=probes)
+    assert time.monotonic() - started < 50, "the setting that sleeps a minute was sampled"
+    assert record["rounds"] and record["rounds"][0]["outcome"] == "refused"  # the sample ran, and the model was asked

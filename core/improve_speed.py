@@ -55,9 +55,52 @@ def sample_cells(grid: dict[str, list[Any]], oracles: list[dict[str, Any]] | Non
     return cells
 
 
+#: A sampled setting may take this many times what the timing measured for it before FI stops it.
+SAMPLE_ALLOWANCE = 3.0
+
+
+def bounded_sample(cells: list[dict[str, Any]], probes: list[Any] | None, *, runs: int, deterministic: bool,
+                   budget_s: float, samples: int) -> tuple[list[dict[str, Any]], dict[str, int], str]:
+    """The settings of the sample FI can afford, and the time each may take, from what the timing measured: a setting
+    the timing did not see finish (``at_least``) is left out (its cost is not known, only that it is large), a setting
+    the timing never ran is costed as the base, and each is given :data:`SAMPLE_ALLOWANCE` times its measured cost. The
+    ``samples`` samples the step runs (before, and after each edit) together fit in ``budget_s``: the costliest settings
+    are left out first. ``([], {}, why)`` when none can be sampled in that time."""
+    by_key = {_tr.cell_key(p.cell): p for p in probes or [] if getattr(p, "cell", None) is not None}
+    base = next((p for p in probes or [] if getattr(p, "axis", 0) is None), None)
+    n = 1 if deterministic else SAMPLE_TRIALS
+
+    def cost(p: Any) -> float:
+        if getattr(p, "fixed_s", None) is not None and getattr(p, "per_trial_s", None) is not None:
+            return max(0.0, float(p.fixed_s)) + n * max(0.0, float(p.per_trial_s))
+        return float(p.seconds) * (1 if deterministic else n / max(1, int(runs)))
+
+    costed: list[tuple[float, dict[str, Any]]] = []
+    for cell in cells:
+        p = by_key.get(_tr.cell_key(cell)) or base
+        if p is None or getattr(p, "at_least", False):
+            continue
+        costed.append((cost(p), cell))
+    if not costed:
+        return [], {}, "the timing saw none of the sample's settings finish, so their cost is not known"
+    share = budget_s / max(1, samples) / REPEATS
+    kept = list(costed)
+    while kept and sum(c for c, _cell in kept) > share:
+        kept.remove(max(kept, key=lambda item: item[0]))
+    if not kept:
+        cheapest = min(c for c, _cell in costed)
+        return [], {}, (f"one setting of the sample takes about {_estimate.plain_duration(cheapest)}, more than the "
+                        f"{_estimate.plain_duration(share)} the time for timing leaves each sample")
+    order = {id(cell): i for i, cell in enumerate(cells)}
+    kept.sort(key=lambda item: order[id(item[1])])
+    return ([cell for _c, cell in kept],
+            {_tr.cell_key(cell): max(60, math.ceil(SAMPLE_ALLOWANCE * c)) for c, cell in kept}, "")
+
+
 async def run_sample(executor: Any, python: Path | str, quest_root: Path, module: str, cells: list[dict[str, Any]], *,
                      deterministic: bool, thresholds: dict[str, Any] | None, in_each_run: dict[str, list[Any]] | None,
-                     env: dict[str, str] | None, timeout_s: int, log: Any = None) -> Sample:
+                     env: dict[str, str] | None, timeout_s: int, log: Any = None,
+                     timeouts: dict[str, int] | None = None) -> Sample:
     """Run ``SAMPLE_TRIALS`` fixed-seed trials of each cell (``REPEATS`` times) and return the values of the first run and
     the least time any run took (the calls only, the first trial of each cell left out)."""
     quest_root = Path(quest_root)
@@ -83,7 +126,8 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
                 "trials": [{"trial": t, "seed": None if deterministic else _tr.trial_seed(0, key, t)} for t in range(n)],
                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
             await ex.execute([str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
-                              out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
+                              out.relative_to(quest_root).as_posix()], cwd=quest_root,
+                             timeout_s=(timeouts or {}).get(key, timeout_s), env=env)
             try:
                 rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
             except (OSError, ValueError):
