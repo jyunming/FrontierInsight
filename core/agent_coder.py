@@ -1,4 +1,4 @@
-"""EXPERIMENTAL, not wired into the engine yet: a coding agent (Claude CLI) writes and fixes the quest's code in ``code/``.
+"""A coding agent (Claude CLI) writes and fixes the quest's code in ``code/`` (agent mode, :mod:`core.agent_build`).
 
 The agent works in the quest's ``code/`` folder the way a person would: it writes files, runs Python, reads the errors and
 tries again. Its own report counts for nothing: FI runs its own checks on the files the agent leaves, and when one fails

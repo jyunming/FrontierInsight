@@ -72,6 +72,7 @@ from .latex_text import escape_latex_backslashes
 from .vscode_bridge import BridgeError
 from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
+from . import agent_coder as _agent_coder
 from . import audit_log as _audit_log
 from . import confirmations as _confirmations
 from . import record_anchor as _record_anchor
@@ -115,6 +116,9 @@ from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
 from . import gate_receipt as _gate_receipt
 from . import plot_scope as _plot_scope
+from .agent_build import AgentBuildMixin, RepairForAgent
+from .agent_build import _Lines as _AgentLines
+from .agent_build import writes_code as _writes_code
 from .run_checks import RunChecksMixin
 from .result_checks import ResultChecksMixin
 from .static_checks import StaticChecksMixin
@@ -717,7 +721,7 @@ _REDERIVE_BECAUSE = {
     "tests": "could not be met by code that follows its formula",
 }
 
-class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
+class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
     def __init__(
@@ -797,6 +801,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             config.engine.skills_dirs, scan_known=config.engine.skills_scan_known_dirs,
         )
         self._prompts = _load_prompts()
+        # Who repairs code a check finds wrong: the chat model (``chat``), or, with ``engine.code_writer: agent``, the coding
+        # agent, to which the checks report instead (core/agent_build.py).
+        self._repairs_go_to = "agent" if config.engine.code_writer == "agent" else "chat"
         self._client: LLMClient | None = None
         # Throttle bookkeeping for ``_llm_heartbeat``. Keyed by node
         # name so concurrent ensembled calls don't share one bucket.
@@ -10303,6 +10310,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         extend = [str(p).strip() for p in state.get("refine_extend") or [] if str(p).strip()]
         # A number the person asked to have added extends the script that exists; the scaffold is for a first script.
         outline = {} if extend else self._outline_with_example_names(state, state.get("implement_outline") or {})
+        if self._agent_mode():
+            # One coding agent writes the whole program; FI's checks before the run judge it (core/agent_build.py).
+            return await self._implement_by_agent(state, outline or self._outline_with_example_names(
+                state, state.get("implement_outline") or {}), extend)
         body_prompt = self._prompts.get("implement_body")
         if outline and outline.get("scaffold") and body_prompt is not None:
             self._log.info(
@@ -13467,6 +13478,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     # --analyze has no experiment to design, so there is no design to audit.
                     "design_audit": "not_applicable" if self.config.engine.analyze_local_first else "on",
                     **(_phased.evidence_settings(self.quest_root) if _phased.enabled(self.config) else {}),
+                    # A coding agent wrote the code (engine.code_writer: agent): whether it ran in a container.
+                    **_agent_coder.evidence_settings(self.quest_root),
                 },
             )
             if not write:
@@ -14503,6 +14516,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         limit = int(self.config.engine.improve_rounds or 0)
         if limit <= 0:
             return "engine.improve_rounds is 0"
+        if self._agent_mode():
+            return "the coding agent wrote this code, and FI does not change it with a chat model"
         if state.get("no_simulation_resolved") or state.get("survey_mode_resolved"):
             return "this quest runs no simulation"
         if _phased.enabled(self.config) and _phased.stage(self.quest_root) in (_phased.CONFIRM, _phased.CONFIRMED):
@@ -16463,6 +16478,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return None, repaired, rewrote
 
     async def _node_execute(self, state: QuestState) -> QuestState:
+        if not self._agent_mode():
+            return await self._node_execute_steps(state)
+        lines = _AgentLines()
+        self._log.addHandler(lines)
+        try:
+            return await self._node_execute_steps(state)
+        except RepairForAgent as asked:
+            # A check after the checks before the run asked for a repair of the coding agent's code: a failed run, for the
+            # agent's round in the repair step (core/agent_build.py).
+            self._log.warning("[execute] %s did not pass; the coding agent is sent what it found", asked.what)
+            return self._agent_failure_as_run(asked, lines.lines)
+        finally:
+            self._log.removeHandler(lines)
+
+    async def _node_execute_steps(self, state: QuestState) -> QuestState:
         # Unconditional tamper check (the re-audit's P1-6): every other frozen-protocol reader
         # (_protocol_of, _run_manifest_problems, the oracle gate) returns early -- skipping
         # _resolved_frozen() entirely -- when ITS OWN check is configured "off", so a hand-edited
@@ -16760,7 +16790,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
         # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
-        stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
+        if self._agent_mode():
+            # The coding agent fixes what the checks find, round by round, until they pass (core/agent_build.py).
+            stop, oracle_code, gate_repaired = await self._agent_build(state, py, exec_env, seed_path)
+        else:
+            stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
         if stop is not None:
             return stop
         # A setting of the grid FI's reading finds no use of, once the checks of the code are clean (a misspelt read is the
@@ -18269,6 +18303,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
         # The one round the redraw gets, spent whatever the model answers.
         spent: QuestState = {"figure_overlap_repaired": True} if overlaps else {}
+        if self._agent_mode():
+            # The coding agent fixes its own code (core/agent_build.py): one round, with what the run said.
+            return await self._reflect_by_agent(state, iters, bump, returncode_for_prompt, stdout_for_prompt,
+                                                exec_result, spent)
         prompt = self._prompts["execute_reflect"].substitute(
             topic_block=self._topic_block(),
             # Whole, always: the reply is the full corrected script, and a model shown only the first 8000 characters
@@ -23209,6 +23247,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         nodes (evidence_gate, review, review_panel.*, claim_check, cross_check,
         relevance_guard) run at 0 for reproducible decisions; generative nodes
         use the 0.2 default. Pass an explicit value to override."""
+        if self._repairs_go_to == "agent" and _writes_code(node):
+            raise RepairForAgent(str(node))  # the code is the coding agent's: the check reports to it (core/agent_build.py)
         assert self._client is not None
         if node == "plan_revise":
             self._plan_chat_calls = getattr(self, "_plan_chat_calls", 0) + 1  # counted before it is made, so a failure counts
@@ -25411,6 +25451,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "implement_outline",                # two-stage implement: scaffold
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
+        "implement_agent",                  # engine.code_writer: agent -- the coding agent's task (core/agent_build.py)
         "implement_function",               # the model's package: ONE function body for ONE equation
         "implement_function_repair",        # ONE function repaired alone (never the whole script)
         "implement_module_repair",          # the failing functions of the model's package, with the passing ones named
