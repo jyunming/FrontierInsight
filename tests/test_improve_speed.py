@@ -52,7 +52,12 @@ def _edit(find: str, replace: str) -> str:
     return json.dumps({"file": "simulate.py", "find": find, "replace": replace, "why": "test"})
 
 
-def _engine(tmp_path: Path, rounds: int = 3) -> Engine:
+#: The same simulation, which also reports a number that is different on every run of the same code.
+NOISY = SLOW.replace("import numpy as np\n", "import time\n\nimport numpy as np\n", 1).replace(
+    '"scale": float(cell["s"])}', '"scale": float(cell["s"]), "elapsed": time.perf_counter()}')
+
+
+def _engine(tmp_path: Path, rounds: int = 3, source: str = SLOW) -> Engine:
     cfg = Config(
         topic="sum of squares", title="speed", provider=ProviderConfig(name="openai"),
         engine=EngineConfig(max_iterations=1, review_loop=False, execute_replicates=1, pilot_run=False, improve_rounds=rounds),
@@ -63,7 +68,7 @@ def _engine(tmp_path: Path, rounds: int = 3) -> Engine:
     engine = Engine(cfg)
     root = engine.quest_root
     (root / "code").mkdir(parents=True, exist_ok=True)
-    (root / "code" / "simulate.py").write_bytes(SLOW.encode("utf-8"))
+    (root / "code" / "simulate.py").write_bytes(source.encode("utf-8"))
     (root / "code" / "experiment.py").write_bytes(ANALYSIS.encode("utf-8"))
     protocol = plan.normalize_protocol({"grid": {"s": [1, 2, 3]}, "runs_per_setting": 50, "oracles": [], "criteria": [],
                                         "metrics": [{"id": "ms", "kind": "mean", "estimand": "m", "unit": "run"}]})[0]
@@ -102,6 +107,34 @@ async def test_a_change_that_alters_a_number_is_not_kept_and_one_that_keeps_them
     assert out["rounds"][1]["outcome"] == "kept" and out["kept"] is True and out["calls"] == 2
     assert "np.sum(x * x)" in text and "x[:200]" not in text
     assert out["speedup"] > 1.5
+
+
+def test_numbers_left_out_are_exactly_the_ones_named_and_another_change_still_counts() -> None:
+    a = sp.Sample(seconds=1.0, values={"k": [{"x": 1.0, "t": 5.0}, {"x": 1.0, "t": 6.0}]})
+    b = sp.Sample(seconds=1.0, values={"k": [{"x": 1.0, "t": 7.0}, {"x": 1.5, "t": 8.0}]})
+    both = {("k", 0, "/t"), ("k", 1, "/t")}
+    assert len(sp.disagreements(a, b)) == 3
+    assert sp.disagreements(a, b, ignore=both) == ["k trial 1 /x: 1 -> 1.5"]
+    assert sp.varying(a, b) == both | {("k", 1, "/x")}
+    assert sp.varying(a, a) == set() and sp.count_numbers(a) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_number_that_changes_between_two_runs_of_the_same_code_does_not_stop_a_faster_edit_being_kept(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, source=NOISY)
+    out = await _speed(engine, _Model([_edit(LOOP, FAST)]))
+    assert out["rounds"][0]["outcome"] == "kept" and out["kept"] is True
+    assert out["varying"] and all("elapsed" in v for v in out["varying"])
+    assert "np.sum(x * x)" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_an_edit_that_changes_a_real_result_is_not_kept_though_a_varying_number_is_left_out(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, rounds=1, source=NOISY)
+    out = await _speed(engine, _Model([_edit(LOOP, CHEAT)]))
+    assert out["kept"] is False and out["rounds"][0]["outcome"] == "not kept"
+    assert "mean_square" in out["rounds"][0]["reason"] and "elapsed" not in out["rounds"][0]["reason"]
+    assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == NOISY
 
 
 @pytest.mark.asyncio

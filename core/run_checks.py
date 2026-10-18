@@ -1233,7 +1233,7 @@ class RunChecksMixin:
             # The sample is held to what the timing measured: a setting it did not see finish is left out, each gets a
             # few times its measured cost, and every sample of the step fits in the time left for timing.
             cells, timeouts, why = _speed.bounded_sample(cells, probes, runs=runs, deterministic=runner.deterministic,
-                                                         budget_s=budget_s, samples=1 + limit)
+                                                         budget_s=budget_s, samples=2 + limit)
             if not cells:
                 log.info("[improve] The simulation is not sped up: %s.", why)
                 return {"goal": "speed", "limit_s": limit_s, "rounds": [], "kept": False, "calls": 0, "probes": None,
@@ -1257,6 +1257,23 @@ class RunChecksMixin:
         if first.failed or first.seconds <= 0:
             record["stopped"] = f"the sample did not run ({first.failed or 'no time measured'})"
             return record
+        # The unchanged code is run a second time: a number that is not the same in both runs is not fixed by the code (a
+        # measure of its own run time, say), so it cannot show that an edit changed a result and is left out of every comparison.
+        again = await sample()
+        if again.failed:
+            record["stopped"] = f"the sample did not run a second time ({again.failed})"
+            return record
+        noisy = _speed.varying(first, again)
+        if noisy:
+            names = sorted(noisy)
+            shown = [f"{k or 'its only setting'} trial {t} {n}" for k, t, n in names[:3]]
+            record["varying"] = shown
+            log.info("[improve] %d number(s) of the sample are not the same from one run of the unchanged code to the next "
+                     "(first: %s); edits are judged on the other numbers.", len(noisy), shown[0])
+            if len(noisy) >= _speed.count_numbers(first):
+                record["stopped"] = "every number of the sample differs from one run of the unchanged code to the next, so an edit cannot be judged"
+                log.info("[improve] The simulation is not sped up: %s.", record["stopped"])
+                return record
         needed = padded / max(limit_s, 1e-9)
         target = needed * _speed.MARGIN
         original = _improve.snapshot(root)
@@ -1314,7 +1331,7 @@ class RunChecksMixin:
                 break
             if after.failed:
                 entry.update(outcome="not kept", reason=f"the sample did not run ({after.failed})")
-            elif (bad := _speed.disagreements(first, after)):
+            elif (bad := _speed.disagreements(first, after, ignore=noisy)):
                 entry.update(outcome="not kept", reason=f"{len(bad)} number(s) of the sample changed, first: {bad[0]}")
             elif not _speed.fast_enough(best["sample"].seconds, after.seconds):
                 entry.update(outcome="not kept", reason=f"the sample took {after.seconds:.3f} s against "
