@@ -621,7 +621,7 @@ def test_a_deterministic_study_is_not_seed_checked(tmp_path: Path) -> None:
     assert ok is None and "deterministic" in why
 
 
-TIMED = '''
+SPANS_TIMED = '''
 import json, os, time
 
 def run_trial(cell, trial_id, seed):
@@ -681,7 +681,7 @@ def test_settings_run_at_the_same_time_up_to_the_number_set(tmp_path: Path) -> N
     def spans(name: str, at_once: int) -> list[list[float]]:
         out = spans_dir / name
         out.mkdir(parents=True)
-        _root, run = _run_at_once(tmp_path, name, TIMED, {"k": [1, 2, 3, 4]}, at_once=at_once, runs=1,
+        _root, run = _run_at_once(tmp_path, name, SPANS_TIMED, {"k": [1, 2, 3, 4]}, at_once=at_once, runs=1,
                                   env={**os.environ, "FI_TEST_SPANS": str(out)})
         assert run.ok_trials == 4, run.stderr()
         return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out.glob("*.json"))]
