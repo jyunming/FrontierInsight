@@ -921,17 +921,25 @@ async def test_a_simulation_with_no_results_goes_back_once_then_stops_with_no_pa
     monkeypatch.setattr(engine, "_chat", fake_chat)
     state = {"topic": "t", "literature": _gate_sources(30), "cross_check": _ONE_SUPPORTED, "result_json": {},
              "exec_result": {"returncode": 1}, "iteration": 0}
-    first = await engine._node_evidence_gate(state)
+    first = await engine._node_evidence_gate({**state, "exec_reflect_iter": 3, "exec_give_up_reason": "still crashes"})
     ev = first["evidence_assessment"]
-    assert (ev["verdict"], ev["route"], ev["decided_by"]) == ("insufficient", "redesign", "rule") and calls == []
-    assert first["iteration"] == 1 and first["evidence_no_result_retries"] == 1
-    assert engine._route_after_evidence_gate(first) == "redesign"
-    # The second time (or with no iteration left) there is nothing to write up: the quest stops with no paper.
+    # The script could not run to the end: the code's fault, so the same design is written into code again (no design
+    # iteration is spent, and the new code starts with its own repairs).
+    assert (ev["verdict"], ev["route"], ev["decided_by"]) == ("insufficient", "rewrite_code", "rule") and calls == []
+    assert "iteration" not in first and first["evidence_no_result_retries"] == 1 and first["evidence_code_rewritten"]
+    assert first["exec_reflect_iter"] == 0 and first["exec_give_up_reason"] == ""
+    assert engine._route_after_evidence_gate(first) == "rewrite_code"
+    # The second time there is nothing to write up: the quest stops with no paper.
     again = await engine._node_evidence_gate({**state, **first})
     ev = again["evidence_assessment"]
     assert (ev["verdict"], ev["route"]) == ("insufficient", "stuck") and "no results (exit code 1)" in ev["gaps"][0]
+    # A crash is written again even with no design iteration left: the design is not touched.
     last = await engine._node_evidence_gate({**state, "iteration": 2})
-    assert last["evidence_assessment"]["route"] == "stuck"
+    assert last["evidence_assessment"]["route"] == "rewrite_code"
+    # A script that finished (exit 0) with nothing measured is not a crash: the design is asked for once more, as before.
+    finished = await engine._node_evidence_gate({**state, "exec_result": {"returncode": 0}})
+    assert finished["evidence_assessment"]["route"] == "redesign" and finished["iteration"] == 1
+    assert not finished.get("evidence_code_rewritten")
     # A quest on user data, or with results, is not this case.
     assert engine._no_results_verdict({**state, "no_simulation_resolved": True}) is None
     assert engine._no_results_verdict({**state, "result_json": {"x": 1}}) is None
@@ -1152,7 +1160,7 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert "evidence_gate" in g.branches
     ev_branch = next(iter(g.branches["evidence_gate"].values()))
     assert ev_branch.ends == {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings",
-                              "repair_crash": "execute"}
+                              "repair_crash": "execute", "rewrite_code": "implement"}
     design_branch = next(iter(g.branches["design"].values()))
     # Two-stage implement: the simulate-path routing key stays
     # ``implement`` (for resume contract compatibility — the 609990
