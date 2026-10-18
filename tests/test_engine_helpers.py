@@ -927,7 +927,8 @@ async def test_a_simulation_with_no_results_goes_back_once_then_stops_with_no_pa
     # iteration is spent, and the new code starts with its own repairs).
     assert (ev["verdict"], ev["route"], ev["decided_by"]) == ("insufficient", "rewrite_code", "rule") and calls == []
     # The rewrite is its own once-only try: the design's retry is left for a run that finishes with nothing measured.
-    assert "iteration" not in first and "evidence_no_result_retries" not in first and first["evidence_code_rewritten"]
+    assert "iteration" not in first and "evidence_no_result_retries" not in first
+    assert first["evidence_code_rewritten_at"] == 0  # the design round whose code was written again
     assert first["exec_reflect_iter"] == 0 and first["exec_give_up_reason"] == ""
     assert engine._route_after_evidence_gate(first) == "rewrite_code"
     # The second time there is nothing to write up: the quest stops with no paper.
@@ -940,15 +941,18 @@ async def test_a_simulation_with_no_results_goes_back_once_then_stops_with_no_pa
     # A script that finished (exit 0) with nothing measured is not a crash: the design is asked for once more, as before.
     finished = await engine._node_evidence_gate({**state, "exec_result": {"returncode": 0}})
     assert finished["evidence_assessment"]["route"] == "redesign" and finished["iteration"] == 1
-    assert not finished.get("evidence_code_rewritten")
+    assert finished.get("evidence_code_rewritten_at") is None
     # A script stopped for running past its time did not crash: the study is too large, which only a design can change.
     timed_out = await engine._node_evidence_gate({**state, "exec_result": {"returncode": -1, "timed_out": True}})
-    assert timed_out["evidence_assessment"]["route"] == "redesign" and not timed_out.get("evidence_code_rewritten")
+    assert timed_out["evidence_assessment"]["route"] == "redesign" and timed_out.get("evidence_code_rewritten_at") is None
     # The code written again finished, but measured nothing: the design is still asked for once.
     after_rewrite = await engine._node_evidence_gate({**state, **first, "exec_result": {"returncode": 0}})
     assert after_rewrite["evidence_assessment"]["route"] == "redesign" and after_rewrite["iteration"] == 1
-    # And a redesigned script that crashes once the rewrite is spent stops: nothing is left to try.
-    spent = await engine._node_evidence_gate({**state, **first, **after_rewrite, "exec_result": {"returncode": 1}})
+    # The new design's code crashes: it gets its own rewrite (once per design), and the next crash of it stops.
+    redesigned = {**state, **first, **after_rewrite, "exec_result": {"returncode": 1}}
+    own = await engine._node_evidence_gate(redesigned)
+    assert own["evidence_assessment"]["route"] == "rewrite_code" and own["evidence_code_rewritten_at"] == 1
+    spent = await engine._node_evidence_gate({**redesigned, **own})
     assert spent["evidence_assessment"]["route"] == "stuck"
     # A quest on user data, or with results, is not this case.
     assert engine._no_results_verdict({**state, "no_simulation_resolved": True}) is None

@@ -152,7 +152,7 @@ async def test_a_crash_the_rewritten_code_does_not_have_is_written_up_from_the_s
 def test_the_stop_names_a_crash_and_a_finished_run_differently(tmp_path: Path) -> None:
     eng = Engine(_cfg(tmp_path))
     base = {"exec_result": {"returncode": 1}, "iteration": 2, "evidence_no_result_retries": 1,  # tried once more
-            "evidence_code_rewritten": True}
+            "evidence_code_rewritten_at": 2}
     assert eng._no_results_verdict({**base, "result_json": None})["stuck_reason"] == "crashed"
     assert eng._no_results_verdict({**base, "exec_result": {"returncode": 0}, "result_json": {}})["stuck_reason"] == "no_numbers"
     assert eng._no_results_verdict({**base, "exec_result": {"returncode": 0}, "exec_give_up_reason": "x",
@@ -175,7 +175,7 @@ async def test_the_stop_says_only_what_happened(
     eng = Engine(_cfg(tmp_path))
     out = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": reason},
                                              "evidence_no_result_retries": redesigned,
-                                             "evidence_code_rewritten": rewritten})
+                                             "evidence_code_rewritten_at": 0 if rewritten else None})
     record = out["stuck"]
     text = record["problem"] + " " + " ".join(record["tried"]) + " " + record["why_repairs_ended"]
     assert said in text
@@ -185,3 +185,13 @@ async def test_the_stop_says_only_what_happened(
         assert "back to the design" not in text
     if not redesigned and not rewritten:
         assert "again" not in text.replace("asked for again", "")
+
+
+@pytest.mark.asyncio
+async def test_a_run_stopped_for_its_time_is_not_said_to_have_failed_with_an_error(tmp_path: Path) -> None:
+    eng = Engine(_cfg(tmp_path))
+    out = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": "crashed"}, "evidence_no_result_retries": 1,
+                                             "exec_result": {"returncode": -1, "timed_out": True}})
+    text = out["stuck"]["problem"] + " " + " ".join(out["stuck"]["tried"]) + " " + out["stuck"]["why_repairs_ended"]
+    assert "ran past the time it is allowed" in text and "stopped for running past the time allowed" in text
+    assert "with an error" not in text and "could not run to the end" not in text
