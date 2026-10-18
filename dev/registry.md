@@ -665,7 +665,11 @@ same PR that adds, splits or renames one.
   drops the files it created, and a trial run in the quest folder itself (the timing runs of `run_estimate`) goes through
   `execute_keeping_only_finished`, which lists the working folders at its start (`working_files`, names only; not `.fi/`,
   `raw/`, `needs/`, `paper/`) and removes what appeared (`remove_created_since`), so a leftover lock never makes the next
-  trial wait. Tests: `tests/test_outside_run.py`, `tests/test_trial_runner.py`, `tests/test_killed_trial_leftovers.py`.
+  trial wait. `SHARED_CACHE` (`data/results/cache/`) is linked into a cell's copy (a junction on Windows), not copied, so the
+  settings share it; `prepare_shared_cache` moves aside what another version of `code/` kept there (record
+  `.fi/shared_cache.json`); `OutsideExecutor._clean_shared` removes what a stopped setting left there when no other ran
+  beside it. Tests: `tests/test_outside_run.py`, `tests/test_trial_runner.py`, `tests/test_killed_trial_leftovers.py`,
+  `tests/test_shared_cache.py`.
 - `core/function_steps.py` — the model's package written one function at a time: `model_functions` (the outline's
   `implements` / `depends_on`, dependency order), `replace_function` (splice one function, its imports and helpers into
   `model.py`, parameters and `# E<n>` label kept), `FunctionFiller` (fill, import-check, equation test, repair alone,
