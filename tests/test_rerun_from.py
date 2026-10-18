@@ -35,6 +35,16 @@ def test_the_backup_takes_what_the_step_and_later_ones_made_and_leaves_its_input
     assert rerun_from.back_up(tmp_path, "review") == (None, [])
 
 
+def test_a_new_plan_is_asked_about_its_grid_again() -> None:
+    """The grid asks are counted by the plan model's name, not by the plan: a rerun from the plan that kept a record of
+    the "one more ask after the topic's additions" would never make that ask for the new plan."""
+    from core import engine as _engine
+    look = rerun_from._OWN["plan"]
+    for name in (_engine._GRID_ASKED, _engine._GRID_ASKED_AGAIN, _engine._DRAFTED_GRID_ASKED,
+                 _engine._DRAFTED_GRID_ASKED_AGAIN):
+        assert f".fi/{name}" in look, name
+
+
 def _cfg(tmp_path: Path) -> Config:
     return Config(
         topic="smoke-test topic for rerunning from a step",
