@@ -679,16 +679,24 @@ def joined_sub_studies(old_protocol: dict[str, Any], grid: dict[str, Any], said:
     does not multiply the other parts. ``said``: the answer's own ``sub_studies`` (the part each added setting belongs to;
     a part it names that the plan already has takes its added settings, any other is a new part). ``None`` when the plan
     has no sub-studies and the answer names none (the added setting joins the one grid, as before). An added setting that no
-    part has is a part of its own (every other setting held at its first value), never crossed with the rest. Whether the
-    result can be read is for :func:`core.plan.normalize_protocol` to say."""
+    part has is a part of its own (every other setting held at its first value), never crossed with the rest. A part that
+    held a setting at a value the new grid no longer has holds it at its first value, as a part that says none does (the
+    plan would otherwise not be read, and what the topic asked for would be lost). Whether the result can be read is for
+    :func:`core.plan.normalize_protocol` to say."""
     have = old_protocol.get("grid") if isinstance(old_protocol.get("grid"), dict) else {}
     added = [a for a in grid if a not in have]
     old = [dict(s) for s in old_protocol.get("sub_studies") or [] if isinstance(s, dict)]
     asked = [s for s in said if isinstance(s, dict)] if isinstance(said, list) else []
-    if not added or not (old or asked):
+
+    def kept(hold: Any) -> dict[str, Any]:
+        return {a: v for a, v in (hold.items() if isinstance(hold, dict) else ())
+                if not isinstance(grid.get(a), list) or v in grid[a]}
+
+    stale = any(kept(s.get("hold")) != (s.get("hold") or {}) for s in old)
+    if not (added or stale) or not (old or asked):
         return None
     subs = old or [{"name": "", "vary": list(have), "hold": {}}]
-    subs = [{**s, "vary": list(s.get("vary") or []), "hold": dict(s.get("hold") or {})} for s in subs]
+    subs = [{**s, "vary": list(s.get("vary") or []), "hold": kept(s.get("hold"))} for s in subs]
     by_name = {" ".join(str(s.get("name") or "").split()).lower(): s for s in subs if str(s.get("name") or "").strip()}
     for entry in asked:
         vary = [a for a in entry.get("vary") or [] if isinstance(a, str) and a in grid] if isinstance(entry.get("vary"), list) else []
