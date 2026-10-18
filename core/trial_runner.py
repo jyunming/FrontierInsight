@@ -1461,6 +1461,79 @@ async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, mo
     return True, ""
 
 
+async def _seeded_once(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
+                       seed: int, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+                       log: Any = None) -> tuple[dict[str, float] | None, float, str]:
+    """One call of ``run_trial`` in a new process with FI's seed: ``(its numbers by record key, the seconds the call
+    took, "")``, or ``(None, 0, why)``."""
+    rows, result = await _run_batch(executor, python, quest_root, module, entry="run_trial", cell=dict(cell),
+                                    trials=[{"trial": 0, "seed": int(seed)}], timeout_s=timeout_s, env=env,
+                                    thresholds=thresholds, log=log)
+    for row in rows:
+        if row.get("load_error"):
+            return None, 0.0, str(row["load_error"])
+        if row.get("status") == "ok":
+            numbers = {_in_run.record_key(k, n) if k else n: v for k, n, v in _in_run.flat("", row.get("values") or {})}
+            seconds = row.get("duration_s")
+            return numbers, float(seconds) if isinstance(seconds, (int, float)) else 0.0, ""
+        if row.get("status") == "failed":
+            return None, 0.0, str(row.get("reason") or "run_trial failed")
+    return None, 0.0, ("run_trial ran out of time" if getattr(result, "timed_out", False)
+                       else f"run_trial did not report (exit code {result.returncode})")
+
+
+def _is_run_time(first: tuple[Any, float], again: tuple[Any, float]) -> bool:
+    """A number that differs between two same-seed runs is the run's own time when, in both runs, it lies between zero and
+    the seconds the call took (FI's harness times the call): a time cannot be longer than the call it was taken in. No
+    name is read."""
+    return all(isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= v <= seconds * 1.05 + 1e-3
+               for v, seconds in (first, again))
+
+
+async def run_trial_seed_check(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *,
+                               cell: dict[str, Any], seed: int, timeout_s: int, deterministic: bool = False,
+                               varies: set[str] | frozenset[str] | None = None, env: dict[str, str] | None = None,
+                               thresholds: dict[str, Any] | None = None, log: Any = None) -> tuple[bool | None, str]:
+    """Whether ``run_trial`` uses the seed FI gives it: FI calls it on one setting with seed ``s``, with ``s`` again and
+    with ``s + 1`` (each call in a new process): ``(True, "")``, ``(False, what is wrong)`` or ``(None, why it could not
+    be judged)``.
+
+    * Two calls with the same seed must return the same numbers. A number that differs and lies within the call's own
+      duration is a time (it is left out of the next step and named in the answer); any other number that differs means
+      the run does not repeat with its seed.
+    * The call with ``s + 1`` must change at least one of the numbers that repeated (only those named in ``varies``,
+      when the protocol says which numbers have spread), or the run ignores the seed (an own generator, an own fixed
+      seed or none).
+
+    A ``deterministic`` study draws nothing and is not checked."""
+    if deterministic:
+        return None, "the study is deterministic, so no seed is used"
+    kw: dict[str, Any] = dict(cell=cell, timeout_s=timeout_s, env=env, thresholds=thresholds, log=log)
+    first = await _seeded_once(executor, python, quest_root, module, seed=seed, **kw)
+    if first[0] is None:
+        return None, first[2]
+    again = await _seeded_once(executor, python, quest_root, module, seed=seed, **kw)
+    if again[0] is None:
+        return None, again[2]
+    other = await _seeded_once(executor, python, quest_root, module, seed=seed + 1, **kw)
+    if other[0] is None:
+        return None, other[2]
+    a, b, c = first[0], again[0], other[0]
+    names = sorted(set(a) | set(b))
+    moved = [n for n in names if n not in a or n not in b or not _same_value(a[n], b[n])]
+    timings = [n for n in moved if n in a and n in b and _is_run_time((a[n], first[1]), (b[n], again[1]))]
+    unsteady = [n for n in moved if n not in timings]
+    if unsteady:
+        shown = ", ".join(f"{n}: {a.get(n)!r} then {b.get(n)!r}" for n in unsteady[:3])
+        return False, f"the run does not repeat with the same seed ({shown})"
+    stable = [n for n in names if n not in timings and (not varies or n in varies)]
+    if not stable:
+        return None, ("every number the run returned is its own time" if timings else "the run returned no number to compare")
+    if all(n in c and _same_value(a[n], c[n]) for n in stable):
+        return False, "the run ignores the seed FI gives it (another seed returned the same numbers)"
+    return True, ""
+
+
 def _check_from(name: str, measure: str, values: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     """The check an oracle's measure gives on what one run returned: ``(check or None, the problem or "")``."""
     if measure in values:  # one returned name, as every oracle was before formulas: read as it is
