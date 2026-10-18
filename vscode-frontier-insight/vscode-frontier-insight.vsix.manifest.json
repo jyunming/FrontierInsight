@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "4c0b21fbc90ad5f9edf22831a57d4455605795bf455e0a7d1fe3e0d0e0c4a391",
+  "vsix_sha256": "ecfe5111242c8729f6f865369c70df9151d545833615701e3c373df28f2edeb9",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -90,8 +90,8 @@
       "bytes": 5589
     },
     "extension/out/roots.js": {
-      "sha256": "3e20660452605c02d3676911d52714abebdb48da5d092050fbfe02c1f9be59d8",
-      "bytes": 11341
+      "sha256": "5b5cbf6403808617b7a47f2d4c83674f5aaaad4a1abe6d301e324461c511d23f",
+      "bytes": 11377
     },
     "extension/out/skill-args.js": {
       "sha256": "8a5032dd52542fdc0aa25d9a3152743762e6fb0935f4cc4da97902ee0dcf8c40",
