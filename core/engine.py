@@ -19404,8 +19404,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if rewrite_code:
             # The design stays as it is (no design iteration is spent); the new code gets its own repairs.
             patch.update(_FRESH_SCRIPT)
-            patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
-            patch["evidence_code_rewritten"] = True
+            patch["evidence_code_rewritten"] = True  # once; the design's own retry (below) is counted apart
         elif redesign:
             patch["iteration"] = int(state.get("iteration", 0) or 0) + 1
             patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
@@ -19450,11 +19449,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         repairs = int(state.get("exec_reflect_iter") or 0)
         # Said only when it happened: a quest with no iteration left stops on the first pass, with no second design.
         redesigned = int(state.get("evidence_no_result_retries") or 0) >= 1
-        rewritten = redesigned and bool(state.get("evidence_code_rewritten"))
-        again = (", even after the code was written again from the same design" if rewritten else
-                 ", even after the design was asked for again" if redesigned else "")
+        rewritten = bool(state.get("evidence_code_rewritten"))  # its own once-only try, counted apart from the design's
+        ran_again = redesigned or rewritten
+        tried_more = [x for x in ("the code was written again from the same design" if rewritten else "",
+                                  "the design was asked for again" if redesigned else "") if x]
+        again = (", even after " + " and ".join(tried_more)) if tried_more else ""
         repaired = f"repaired the script {repairs} time{'s' if repairs != 1 else ''}" if repairs else ""
-        after = " and ".join(x for x in (repaired, "wrote the code again from the same design" if rewritten else
+        after = " and ".join(x for x in (repaired, "wrote the code again from the same design" if rewritten else "",
                                          "asked for the design again" if redesigned else "") if x)
         # A result that holds numbers, but none of the study's quantities and says it failed (see _reports_no_quantity).
         bare = self._reports_no_quantity(state, state.get("result_json")) if no_numbers else ""
@@ -19466,16 +19467,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                    "so FI has nothing measured to write up" if crashed else
                    "the experiment ran, but the model's reading of its results could not be read, even when asked twice, "
                    "so FI has no findings to write up")
-        redo = (["wrote the code again once from the same design (the design was not changed)"] if rewritten else
-                ["sent the quest back to the design once, so the script was written again"] if redesigned else [])
+        redo = ((["wrote the code again once from the same design (the design was not changed)"] if rewritten else [])
+                + (["sent the quest back to the design once, so the script was written again"] if redesigned else []))
         tried = ([("ran the experiment and read the result it printed: it says it failed and has no number for the study's "
                    "quantities" if bare else "ran the experiment and read the result it printed: no number in it"), *redo,
                   *([("ran it again: the result still holds none of the study's quantities" if bare else
-                      "ran it again: the result still has no number in it")] if redesigned else [])] if no_numbers else
+                      "ran it again: the result still has no number in it")] if ran_again else [])] if no_numbers else
                  [*(["asked the model to repair the script when it failed"
                      + (f" ({repairs} repair{'s' if repairs != 1 else ''})" if repairs else "")] if repairs else
                     ["ran the experiment: it stopped with an error"]), *redo,
-                  *(["ran it again: it still could not run to the end"] if redesigned else [])] if crashed else
+                  *(["ran it again: it still could not run to the end"] if ran_again else [])] if crashed else
                  ["asked the model to analyse the results",
                   "read its reply as written, then again with the backslashes of formulas kept as written",
                   "asked the model a second time for one short answer; that reply could not be read either"])
@@ -19917,8 +19918,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # "Could not run to the end" only when the script really exited with an error; one that finished (exit 0) and printed
         # nothing measured is the other wording, whether or not a repair was tried.
         crashed = exec_result.get("returncode") not in (0, None)
-        tried_again = int(state.get("evidence_no_result_retries") or 0) >= 1
-        if crashed and not flat and not tried_again:
+        # A script stopped for running past the time allowed did not crash: the study is too large for it, which a new
+        # design can change and new code of the same design cannot.
+        code_fault = crashed and not flat and not exec_result.get("timed_out")
+        if code_fault:
+            if state.get("evidence_code_rewritten"):
+                # The code was already written again from this design and still could not run to the end: a new design
+                # is no answer to a crash (see below), so nothing is left to try.
+                return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
+                        "stuck_reason": "crashed"}
             # The script could not run to the end, even after its repairs: the code's fault, not the design's. In the
             # quest records of every no-result run sent back to design, the cause was a script that crashed; where a quest
             # then recovered, the new design varied the same settings and measured the same quantities (only the code was
@@ -19927,8 +19935,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._log.warning("[evidence_gate] %s; the design stays as it is and its code is written again once", why)
             return {"verdict": "insufficient", "rationale": why + "; the code is written again from the same design",
                     "gaps": [why], "rewrite_code": True}
+        # A script that finished with nothing measured (or ran past its time) is asked of the design once, whether or not
+        # its code was written again before: that is a different failure from a crash.
         if (
-            not tried_again
+            int(state.get("evidence_no_result_retries") or 0) < 1
             and int(state.get("iteration", 0) or 0) < self.config.engine.max_iterations
         ):
             self._log.warning("[evidence_gate] %s; sending the quest back to design once", why)
