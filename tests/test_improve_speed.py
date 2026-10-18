@@ -1,0 +1,130 @@
+"""The speed goal of the improve loop (core/improve_speed.py, ``RunChecksMixin._speed_up``) and the two small switches of the
+correctness loop (retry after a round not kept; a check that now meets its bar is better). A fake model answers; FI runs
+the sample itself on this interpreter. No real model is called."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from core import frozen_protocol as fp, improve, improve_speed as sp, plan
+from core import run_estimate as est
+from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig
+from core.engine import Engine
+
+SLOW = '''import numpy as np
+
+
+def run_trial(cell, trial_id, seed):
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=2000)
+    total = 0.0
+    for v in x:
+        total += v * v
+    return {"mean_square": total / len(x), "scale": float(cell["s"])}
+'''
+FAST = ("    total = float(np.sum(x * x))\n")
+LOOP = "    total = 0.0\n    for v in x:\n        total += v * v\n"
+CHEAT = "    x = x[:200]\n    total = 0.0\n    for v in x:\n        total += v * v\n"
+ANALYSIS = "print('RESULT_JSON: {}')\n"
+
+
+class _Model:
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = list(replies)
+        self.prompts: list[str] = []
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        self.prompts.append(messages[-1]["content"])
+        assert messages[-1]["content"].startswith("# Make the Simulation Faster")
+        return self.replies.pop(0) if self.replies else "{}"
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _edit(find: str, replace: str) -> str:
+    return json.dumps({"file": "simulate.py", "find": find, "replace": replace, "why": "test"})
+
+
+def _engine(tmp_path: Path, rounds: int = 3) -> Engine:
+    cfg = Config(
+        topic="sum of squares", title="speed", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False, execute_replicates=1, pilot_run=False, improve_rounds=rounds),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
+        pauses=PausesConfig(plan="off", papers=False, review="off"),
+    )
+    engine = Engine(cfg)
+    root = engine.quest_root
+    (root / "code").mkdir(parents=True, exist_ok=True)
+    (root / "code" / "simulate.py").write_bytes(SLOW.encode("utf-8"))
+    (root / "code" / "experiment.py").write_bytes(ANALYSIS.encode("utf-8"))
+    protocol = plan.normalize_protocol({"grid": {"s": [1, 2, 3]}, "runs_per_setting": 50, "oracles": [], "criteria": [],
+                                        "metrics": [{"id": "ms", "kind": "mean", "estimand": "m", "unit": "run"}]})[0]
+    fp.freeze(root, protocol, approved_by="human: test", source="plan.md")
+    engine._trial_mode = True
+    return engine
+
+
+async def _speed(engine: Engine, model: _Model) -> dict[str, Any]:
+    engine._client = model
+    root = engine.quest_root
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=False)
+    grid = {"s": [1, 2, 3]}
+    big = SimpleNamespace(seconds=10.0)
+    return await engine._speed_up({}, runner, engine.executor.python_path(root), None, grid, 50, {}, {}, big, 10.0)
+
+
+def test_the_sample_must_return_the_same_numbers_and_take_clearly_less_time() -> None:
+    a = sp.Sample(seconds=1.0, values={"k": [{"x": 1.0, "n": {"y": 2.0}}]})
+    same = sp.Sample(seconds=0.5, values={"k": [{"x": 1.0 + 1e-12, "n": {"y": 2.0}}]})
+    off = sp.Sample(seconds=0.5, values={"k": [{"x": 1.001, "n": {"y": 2.0}}]})
+    gone = sp.Sample(seconds=0.5, values={"k": [{"x": 1.0}]})
+    assert sp.disagreements(a, same) == []
+    assert len(sp.disagreements(a, off)) == 1 and "x" in sp.disagreements(a, off)[0]
+    assert sp.disagreements(a, gone) and "only in one" in sp.disagreements(a, gone)[0]
+    assert sp.fast_enough(1.0, 0.7) and not sp.fast_enough(1.0, 0.8) and not sp.fast_enough(0.0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_a_change_that_alters_a_number_is_not_kept_and_one_that_keeps_them_and_is_faster_is_kept(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    model = _Model([_edit(LOOP, CHEAT), _edit(LOOP, FAST)])
+    out = await _speed(engine, model)
+    text = (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert out["rounds"][0]["outcome"] == "not kept" and "number(s) of the sample changed" in out["rounds"][0]["reason"]
+    assert out["rounds"][1]["outcome"] == "kept" and out["kept"] is True and out["calls"] == 2
+    assert "np.sum(x * x)" in text and "x[:200]" not in text
+    assert out["speedup"] > 1.5
+
+
+@pytest.mark.asyncio
+async def test_a_change_that_is_not_faster_is_put_back(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, rounds=1)
+    out = await _speed(engine, _Model([_edit("    total = 0.0\n", "    total = 0.0 + 0.0\n")]))
+    assert out["kept"] is False and out["rounds"][0]["outcome"] == "not kept"
+    assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SLOW
+
+
+def test_retry_and_bar_switches_are_off_unless_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FI_IMPROVE_RETRY", raising=False)
+    monkeypatch.delenv("FI_IMPROVE_BAR", raising=False)
+    row = {"name": "c", "direction": "lower", "target": 0.0, "tolerance": 1e-12, "counts": True}
+    before = [{**row, "value": 1.1e-16, "met": False}]
+    after = [{**row, "value": 0.0, "met": True}]
+    assert improve.compare(before, after)[0]["change"] == "same"
+    monkeypatch.setenv("FI_IMPROVE_BAR", "1")
+    assert improve.compare(before, after)[0]["change"] == "better"
+    assert improve.retry_hint([{"outcome": "not kept"}]) == ""
+    monkeypatch.setenv("FI_IMPROVE_RETRY", "1")
+    assert "different cause" in improve.retry_hint([{"outcome": "not kept"}])
+    assert improve.retry_hint([{"outcome": "kept"}]) == ""
+
+
+def test_estimate_module_still_exposes_what_the_speed_loop_uses() -> None:
+    assert callable(est.probe_cells) and callable(est.plain_duration) and est.SAFETY > 1
