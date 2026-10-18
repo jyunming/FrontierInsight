@@ -98,8 +98,15 @@ External prerequisites are all optional and feature-gated:
 
 **Dataset adapters** (`core/datasets/`): the no-simulation `auto_collect_data` node can additionally pull structured data via adapters listed in `engine.dataset_adapters`. The abstract base is `core/datasets/base.py::DatasetAdapter` — a single `async def search(self, query: str, *, top_k: int) -> list[DatasetRow]`. Shipped adapters: `worldbank.py` (country-indicator tables via the WorldBank Indicators API, stdlib `urllib`) and `wikipedia.py` (opensearch + page-summary lookups for qualitative topics). Adapter failures log a WARNING and return `[]`; `Engine._run_dataset_adapters` sums counts and keeps the quest moving. Adding a new adapter is a single-file change plus a registry entry; no graph edit.
 
-## Test topics, live runs and reports
+## Test topics, live runs and reports to the maintainer
 
+- **Public in English, internal in Chinese.** Everything committed is public, so it is written in English: code,
+  comments, prompts, tests, docs, this file, commit messages and PR descriptions. Chinese stays outside the repository
+  (handovers, plans and reports for the maintainer, and every reply to the maintainer, in Traditional Chinese). Inside
+  the repository Chinese is allowed only as data: a quoted string or a code span (text a user may type, such as a
+  regular expression for Chinese words), test fixtures, the historical record `docs/audits/`, and a `*.zh-TW.md`
+  translation next to its English original (the English one is the authority).
+  `tests/test_public_text_english.py` fails on anything else and names the file and line.
 - **A test topic is only a test.** Real research topics used to validate FI (in live runs and replays) never shape what
   goes into the repo: code, prompts, unit tests, docs, commit messages and PR descriptions do not use that topic's words
   or carry a special case for it. Fixtures use neutral made-up topics, and every fix must be general.
@@ -107,6 +114,16 @@ External prerequisites are all optional and feature-gated:
   FI's own time estimate); a problem is reported with a proposed way forward as soon as it shows, not after the run ends.
 - **Report outcomes, not process.** Say what is done, what is left, how much better it is, what it cost and its quality;
   say "not measured" for what was not measured, and never "verified" for what was not observed directly.
+- **What the maintainer may not have seen — only when there is something.** After an answer, add at most three points,
+  each one passing all three tests: it is new (not in the answer above, not something the maintainer said or decided);
+  it is concrete (it names the run, file, number or rule); and it changes something (a result, a cost, an earlier
+  decision, or it needs the maintainer's decision). Decisions come first, each with what every option changes and a
+  recommendation; then gaps, risks and conflicts. Each point is one sentence of fact and one of what it changes or what
+  is asked. Never progress news ("still running"), a repeat of the answer, reminders of rules, general advice or what is
+  already handled. When no point passes, there is no such section; it is never filled to a count.
+- **A handover every 48 hours of work.** What is done and what is open, what waits for the maintainer, the tests
+  actually rerun (none rerun means saying so, not reusing an old number), and when the next one is due; it is a
+  snapshot, the code and records stay the authority. It goes where the maintainer keeps handovers.
 
 ## Conventions and gotchas worth knowing
 
