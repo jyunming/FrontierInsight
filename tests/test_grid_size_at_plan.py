@@ -1,4 +1,4 @@
-"""A plan whose `protocol.grid` holds the axes of several separate sub-studies (a real source-and-focus study: fourteen axes,
+"""A plan whose `protocol.grid` holds the axes of several separate sub-studies (a real study of separate parts: fourteen axes,
 147,604,654,080,000 settings, FI lists at most 500,000) is told so by FI at the plan, with the plan's own arithmetic, and
 asked once to rewrite the grid; a rewrite that fits goes on, one that does not ends in the honest stop at design, before any
 code is written and not hours into the run. A grid that fits is not asked anything. Fake model only."""
@@ -18,22 +18,22 @@ from core import plan
 from tests.plan_parts_helpers import as_parts
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, _engine, _NO_OBJECTIONS
 
-TOPIC = "Compare light-source shapes for the focus range of a 193 nm layer at many pitches"
+TOPIC = "Compare fin shapes for the heat flow of a plate at many spacings"
 MARK = "The experiment in this plan cannot run as written"
-#: The axes of the real plan's `protocol.grid` (d3 duv), as the plan wrote them: name -> number of values.
-AXES = {"source": 5, "pitch": 135, "conventional_sigma": 13, "annular_sigma_inner_outer": 52, "xdipole_pole_centre": 10,
-        "xdipole_pole_radius": 3, "neighbour_distance_nm": 39, "ambit_conventional_sigma": 18, "ambit_source_type": 4,
-        "source_design_class": 2, "pitch_nm": 32, "dipole_pole_centre": 10, "dipole_pole_radius": 3,
-        "source_parametrisation": 2}
+#: The axes of a real plan's `protocol.grid` (renamed), with the number of values the plan gave each.
+AXES = {"shape": 5, "spacing": 135, "plain_width": 13, "ring_inner_outer": 52, "pair_x_centre": 10,
+        "pair_x_radius": 3, "gap_to_next": 39, "reach_width": 18, "reach_kind": 4,
+        "design_class": 2, "spacing_mm": 32, "pair_centre": 10, "pair_radius": 3,
+        "form": 2}
 BIG = {name: list(range(n)) for name, n in AXES.items()}
-SMALL = {"source": [0, 1, 2, 3, 4], "pitch": list(range(20))}
+SMALL = {"shape": [0, 1, 2, 3, 4], "spacing": list(range(20))}
 
 
 def test_the_real_grid_is_counted_and_named_axis_by_axis() -> None:
     said = search.grid_too_large(BIG)
     assert "147,604,654,080,000" in said and "500,000" in said and "`protocol.grid`" in said
     assert math.prod(AXES.values()) == 147_604_654_080_000
-    assert said.index("`pitch` 135 values") < said.index("`annular_sigma_inner_outer` 52 values") < said.index("`source` 5 values")
+    assert said.index("`spacing` 135 values") < said.index("`ring_inner_outer` 52 values") < said.index("`shape` 5 values")
     # the same count the run stops on
     with pytest.raises(search.TooManySettings) as caught:
         search.check_listable(BIG)
@@ -102,7 +102,7 @@ async def test_the_plan_is_asked_once_and_a_grid_that_fits_goes_on(tmp_path: Pat
     model = Model(eng, [_set(grid=BIG, sub_studies=PARTS, tolerance_changed=True)], _draft(BIG))
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     assert len(model.asked) == 1 and _record(eng)["count"] == 1
-    assert "147,604,654,080,000" in model.asked[0] and "`pitch` 135 values" in model.asked[0]
+    assert "147,604,654,080,000" in model.asked[0] and "`spacing` 135 values" in model.asked[0]
     state = {"topic": TOPIC, "iteration": 0}
     patch = await eng._node_design(state)
     protocol = patch["design"]["protocol"]
@@ -168,16 +168,16 @@ async def test_a_redesign_drafted_at_design_is_asked_once_per_round_and_a_grid_t
 
     async def chat(prompt: str, **kw: Any) -> str:
         sent.append(prompt)
-        return json.dumps({"grid": SMALL, "in_each_run": {"method": ["abbe", "hopkins"]}, "constants": {"k": 1}})
+        return json.dumps({"grid": SMALL, "in_each_run": {"method": ["fast", "exact"]}, "constants": {"k": 1}})
 
     eng._chat = chat  # type: ignore[method-assign]
     eng._client = object()
     state = {"topic": TOPIC, "iteration": 1}
-    design = {"protocol": {"grid": {**BIG, "method": ["abbe", "hopkins"]}, "runs_per_setting": 3}}
+    design = {"protocol": {"grid": {**BIG, "method": ["fast", "exact"]}, "runs_per_setting": 3}}
     out = await eng._ask_design_for_the_grid(state, design, iteration=1)
     assert len(sent) == 1 and "must not be crossed with one another" in sent[0] and "settings in `protocol.grid` are" in sent[0]
     protocol = out["protocol"]
-    assert protocol["grid"] == SMALL and protocol["in_each_run"] == {"method": ["abbe", "hopkins"]}
+    assert protocol["grid"] == SMALL and protocol["in_each_run"] == {"method": ["fast", "exact"]}
     assert protocol["constants"] == {"k": 1} and protocol["runs_per_setting"] == 3
     again = await eng._ask_design_for_the_grid(state, design, iteration=1)
     assert len(sent) == 1 and again is design  # the same round asks nothing more
