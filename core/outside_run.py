@@ -24,6 +24,7 @@ This is not a sandbox. Code that searches the disk by absolute path, or starts f
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import hashlib
@@ -70,6 +71,64 @@ def new_scratch(base: Path | str | None = None) -> Path:
     root = scratch_base(base) / uuid.uuid4().hex
     root.mkdir(parents=True, exist_ok=False)
     return root
+
+
+#: Folders a trial killed for its time is not checked in: FI's own records (written by FI, never by the trial) and the
+#: quest's environment and history.
+NOT_CHECKED_AFTER_KILL = ("needs", ".fi", "paper", "raw", ".venv", ".git")
+
+
+def working_files(quest_root: Path | str) -> set[str]:
+    """The names (relative, with ``/``) of the files under the quest's working folders (``code/``, ``data/``, ``inputs/``
+    and any other folder but :data:`NOT_CHECKED_AFTER_KILL`): the list taken when a trial starts. Names only, nothing is
+    read, so it stays cheap beside a large data folder."""
+    root = Path(quest_root)
+    out: set[str] = set()
+    if not root.is_dir():
+        return out
+    for top in root.iterdir():
+        if not top.is_dir() or top.name in NOT_CHECKED_AFTER_KILL or top.name in _SKIP_DIRS:
+            continue
+        for here, names, leaves in os.walk(top):
+            names[:] = [n for n in names if n not in _SKIP_DIRS]
+            out.update((Path(here) / leaf).relative_to(root).as_posix() for leaf in leaves if not leaf.endswith(".pyc"))
+    return out
+
+
+def remove_created_since(quest_root: Path | str, before: set[str]) -> list[str]:
+    """Remove the files under the quest's working folders that were not in ``before``; the paths removed. For a trial
+    FI stopped for its time: it did not finish, so what it was writing (a lock, a half-written cache entry) is not
+    something the next trial may trust."""
+    root = Path(quest_root)
+    gone: list[str] = []
+    for rel in sorted(working_files(root) - before):
+        try:
+            (root / rel).unlink()
+            gone.append(rel)
+        except OSError:
+            continue
+    return gone
+
+
+def say_removed(log: Any, gone: list[str]) -> None:
+    if gone:
+        shown = ", ".join(gone[:5]) + (f" and {len(gone) - 5} more" if len(gone) > 5 else "")
+        log.warning("[execute] a trial stopped for its time left %d file%s it was writing (%s); removed, so the next "
+                    "trial does not wait on %s", len(gone), "" if len(gone) == 1 else "s", shown,
+                    "it" if len(gone) == 1 else "them")
+
+
+async def execute_keeping_only_finished(executor: Any, cmd: list[str], *, cwd: Path, timeout_s: int,
+                                        env: dict[str, str] | None = None, log: Any = None) -> Any:
+    """``executor.execute(...)`` for a trial that runs in the quest folder itself: when FI stopped it for its time, the
+    files it created are removed (see :func:`remove_created_since`); a trial that finished keeps what it wrote."""
+    root = Path(cwd)
+    before = await asyncio.to_thread(working_files, root)
+    result = await executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+    if getattr(result, "timed_out", False):
+        gone = await asyncio.to_thread(remove_created_since, root, before)
+        say_removed(log if log is not None else logging.getLogger(f"frontier_insight.{root.resolve().name}"), gone)
+    return result
 
 
 def _never(rel: str) -> bool:
@@ -125,6 +184,10 @@ class OutsideCopy:
         self._before: dict[str, Any] = {}
         self.brought_back: list[str] = []
         self.left_out: list[str] = []
+        self.unfinished: list[str] = []
+
+    def _named(self, rel: str) -> bool:
+        return any(rel == n or rel.startswith(n + "/") for n in self.named)
 
     def make(self) -> Path:
         root = self.root = new_scratch(self._base)
@@ -174,10 +237,11 @@ class OutsideCopy:
             text = text.replace(a, b)
         return text
 
-    def bring_back(self) -> list[str]:
+    def bring_back(self, *, stopped: bool = False) -> list[str]:
         """Copy into the quest what the run wrote (created, changed, removed), except into FI's own folders
         (:data:`FI_OWNED`, other than the named paths): those are left out and listed in :attr:`left_out`. The paths
-        written back."""
+        written back. ``stopped``: FI stopped the run for its time, so it did not finish; a file it created (not a path
+        FI named for it) is not written back, and is listed in :attr:`unfinished`."""
         assert self.root is not None
         now = _files(self.root)
         back: list[str] = []
@@ -186,6 +250,9 @@ class OutsideCopy:
                 continue
             if not self._comes_back(rel):
                 self.left_out.append(rel)
+                continue
+            if stopped and rel in now and rel not in self._before and not self._named(rel):
+                self.unfinished.append(rel)
                 continue
             dst = self.quest_root / rel
             if rel not in now:
@@ -270,8 +337,6 @@ class OutsideExecutor:
         return value
 
     async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
-        import asyncio
-
         if Path(cwd).resolve() != self.quest_root:
             return await self.inner.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
         named = named_paths(self.quest_root, [*cmd[1:], *(env or {}).values()])
@@ -282,7 +347,10 @@ class OutsideExecutor:
             argv = [cmd[0], *(self._map(a, root) for a in cmd[1:])]
             run_env = {k: self._map(v, root) for k, v in env.items()} if env is not None else None
             result = await self.inner.execute(argv, cwd=root, timeout_s=timeout_s, env=run_env)
-            await asyncio.to_thread(box.bring_back)
+            stopped = bool(getattr(result, "timed_out", False))
+            await asyncio.to_thread(box.bring_back, stopped=stopped)
+            if box.unfinished:
+                say_removed(self._log, box.unfinished)
             dropped = [r for r in box.left_out if not r.endswith(".pyc") and "/__pycache__/" not in f"/{r}"]
             if dropped:
                 self._log.warning("[run] the code ran from a copy outside the quest folder and wrote into FI's own "

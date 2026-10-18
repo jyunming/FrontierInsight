@@ -661,7 +661,11 @@ same PR that adds, splits or renames one.
   `trial_runner.run_trials`, `trial_runner._run_one` (every oracle case) and `TrialsRunner.execute` (the analysis). Not
   a sandbox: the interpreter is still the quest's `.venv/`, and a search by absolute path still finds the quest. Not
   yet used by the finding tests, the second-version comparison, the warm-up/pilot runs, `optimise`,
-  `run_estimate`, `split_run` or a cluster job. Tests: `tests/test_outside_run.py`, `tests/test_trial_runner.py`.
+  `split_run` or a cluster job. A trial FI stopped for its time did not finish: `OutsideCopy.bring_back(stopped=True)`
+  drops the files it created, and a trial run in the quest folder itself (the timing runs of `run_estimate`) goes through
+  `execute_keeping_only_finished`, which lists the working folders at its start (`working_files`, names only; not `.fi/`,
+  `raw/`, `needs/`, `paper/`) and removes what appeared (`remove_created_since`), so a leftover lock never makes the next
+  trial wait. Tests: `tests/test_outside_run.py`, `tests/test_trial_runner.py`, `tests/test_killed_trial_leftovers.py`.
 - `core/function_steps.py` — the model's package written one function at a time: `model_functions` (the outline's
   `implements` / `depends_on`, dependency order), `replace_function` (splice one function, its imports and helpers into
   `model.py`, parameters and `# E<n>` label kept), `FunctionFiller` (fill, import-check, equation test, repair alone,

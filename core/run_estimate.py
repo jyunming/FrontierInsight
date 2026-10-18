@@ -65,6 +65,7 @@ from typing import Any, Iterable
 
 from . import in_run as _in_run
 from . import optimise_search as _search
+from . import outside_run as _outside
 from . import trial_runner as _tr
 
 #: The margin added to the measured total before it is compared with the time allowed.
@@ -450,9 +451,9 @@ async def _time_one(
                                 **({"stop_after_s": TIMING_LATER_S} if n > 1 else {})},
                                default=str), encoding="utf-8")
     t0 = time.monotonic()
-    result = await executor.execute(
-        [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
-         out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
+    result = await _outside.execute_keeping_only_finished(
+        executor, [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
+                   out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
     wall = time.monotonic() - t0
     try:
         rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -726,9 +727,9 @@ async def run_values(
                                 "cell": {**cell, **inside}, "levels": _in_run.level_cells(inside),
                                 "trials": [{"trial": 0, "seed": None if deterministic else _tr.trial_seed(0, key, 0)}],
                                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
-    await executor.execute(
-        [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
-         out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
+    await _outside.execute_keeping_only_finished(
+        executor, [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
+                   out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
     try:
         rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
     except (OSError, ValueError):
