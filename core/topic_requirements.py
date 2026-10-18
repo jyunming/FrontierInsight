@@ -553,11 +553,13 @@ def judge_parts(req: dict[str, Any], plan: dict[str, Any], unresolved: list[str]
         if mapped is not None and mapped[0] == "judge":
             row["plan_says_it_is_covered_by"] = mapped[1]
         items.append(row)
+    # Everything the plan has, uncut: the reader answers "missing" for what it is not shown, so a value past a cut (the
+    # 47th of 50 settings) was judged absent from a plan that sweeps it.
     shown = {
-        "settings_swept": {a: v[:40] for a, v in plan["axes"].items()},
-        "metrics": [{"id": i, "text": " ".join(t.split())[:200]} for i, t in plan["metrics"]][:60],
-        "equations": [{"id": e["id"], "formula": e["formula"][:300], "source": e["source"][:200]} for e in plan["equations"]][:40],
-        "assumptions": plan["assumptions"][:800],
+        "settings_swept": dict(plan["axes"]),
+        "metrics": [{"id": i, "text": " ".join(t.split())} for i, t in plan["metrics"]],
+        "equations": [{"id": e["id"], "formula": e["formula"], "source": e["source"]} for e in plan["equations"]],
+        "assumptions": plan["assumptions"],
     }
     return json.dumps(items, indent=2, ensure_ascii=False), json.dumps(shown, indent=2, ensure_ascii=False, default=str)
 
