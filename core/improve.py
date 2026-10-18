@@ -69,6 +69,26 @@ STOP_NO_MODEL = "the model could not be asked for a change"
 STOP_CUT_SHORT = "the loop was cut short before it finished"
 
 
+# --- prototype switches (for the measurement only; the final code keeps what the maintainer picks) --------------------
+
+def retry_on() -> bool:
+    """O1: a round that is not kept does not end the loop (``FI_IMPROVE_RETRY=1``)."""
+    return os.environ.get("FI_IMPROVE_RETRY") == "1"
+
+
+def bar_on() -> bool:
+    """A check that goes from not meeting its bar to meeting it is better, as one that stops meeting it is worse."""
+    return os.environ.get("FI_IMPROVE_BAR") == "1"
+
+
+def retry_hint(rounds: list[dict[str, Any]]) -> str:
+    """O1: after a round that was not kept, tell the next one to try something different."""
+    if not retry_on() or not any(r.get("outcome") in ("not kept", "refused") for r in rounds):
+        return ""
+    return (" Earlier rounds in this quest changed nothing for the better (see the changes already tried, with what FI "
+            "measured after each). Do not repeat or vary one of them: find a different cause.")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -732,6 +752,8 @@ def compare(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[d
             change = "better" if da < db - tol else "worse" if da > db + tol else "same"
             if rb.get("met") is True and ra.get("met") is False:
                 change = "worse"  # it no longer meets its bar, however small the step that took it there
+            elif bar_on() and rb.get("met") is False and ra.get("met") is True:
+                change = "better"  # and one that now meets it is better, however small the step
         out.append({"name": name, "before": vb, "after": va, "tolerance": tol, "change": change,
                     "met": ra.get("met") if ra else None})
     return out

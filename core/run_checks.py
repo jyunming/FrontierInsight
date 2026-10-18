@@ -599,7 +599,8 @@ class RunChecksMixin:
         reduced = prior.get("reduced") if prior.get("fits") is not None else None
         # FI lowers the runs once; the lowered run is timed again, and a resume after the cut does not cut a second time.
         cut_done = bool(reduced) and prior.get("fits") is False
-        for _round in range(2):
+        speed_done = False
+        for _round in range(3):
             grid, runs, thresholds = self._grid_and_runs(state)
             inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
             key = self._sizing_key(runner, grid, runs, limit_s, inside)
@@ -645,6 +646,18 @@ class RunChecksMixin:
                 _estimate.write_record(self.quest_root, {**base, "fits": True})  # type: ignore[attr-defined]
                 return None
             self._log.warning("[execute] %s, so it would not finish within it", line)  # type: ignore[attr-defined]
+            from . import improve_speed as _speed
+
+            if (_speed.on() and not speed_done and not cut_done and int(self.config.engine.improve_rounds or 0) > 0  # type: ignore[attr-defined]
+                    and isinstance(runner, _trial_runner.TrialsRunner)):
+                # Prototype (O2): before the runs are cut or the quest stops, try to make the simulation itself faster.
+                speed_done = True
+                sped = await self._speed_up(state, runner, python, env, grid, runs, thresholds, inside, est, limit_s)
+                if sped.get("kept"):
+                    self._log.info("[execute] the simulation was made %.1f times faster; timing the study again",  # type: ignore[attr-defined]
+                                   sped.get("speedup", 1.0))
+                    cached.clear()
+                    continue
             protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
             if cut_done:
                 # The shorter run, timed again, is still over: over the topic's limit but within FI's own, it runs and the
@@ -1176,6 +1189,110 @@ class RunChecksMixin:
             tried=[*[str(t) for t in fault.get("tried") or []],
                    f"sent the simulation back to be repaired with these numbers ({repairs} repair"
                    f"{'s' if repairs != 1 else ''}); the fault stood"])
+
+    async def _speed_up(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
+                        thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float) -> dict[str, Any]:
+        """Prototype (O2): up to ``engine.improve_rounds`` edits of the simulation, each kept only when a fixed sample of
+        trials (same settings, trials and seeds) returns the same numbers and takes clearly less time. The caller times the
+        study again. ``{"kept": bool, "rounds": [...], "calls": n, "speedup": x}``."""
+        import asyncio
+
+        from . import improve as _improve
+        from . import improve_speed as _speed
+
+        root = self.quest_root  # type: ignore[attr-defined]
+        limit = int(self.config.engine.improve_rounds or 0)  # type: ignore[attr-defined]
+        module = runner.simulate.relative_to(root).as_posix()
+        cells = _speed.sample_cells(grid)
+        settings: dict[str, list[Any]] = {}
+        for cell in cells:
+            for key, value in cell.items():
+                if isinstance(value, (int, float, str)) and not isinstance(value, bool):
+                    settings.setdefault(str(key), []).append(value)
+        timeout_s = max(60, int(self.config.execution.timeout_s))  # type: ignore[attr-defined]
+
+        async def sample() -> Any:
+            return await _speed.run_sample(self.executor, python, root, module, cells,  # type: ignore[attr-defined]
+                                           deterministic=runner.deterministic, thresholds=thresholds, in_each_run=inside,
+                                           env=env, timeout_s=timeout_s, log=self._log)  # type: ignore[attr-defined]
+
+        first = await sample()
+        record: dict[str, Any] = {"goal": "speed", "limit_s": limit_s, "estimate_s": est.seconds * _estimate.SAFETY,
+                                  "rounds": [], "kept": False, "calls": 0, "sample_s_before": first.seconds}
+        if first.failed or first.seconds <= 0:
+            record["stopped"] = f"the sample did not run ({first.failed or 'no time measured'})"
+            return record
+        needed = est.seconds * _estimate.SAFETY / max(limit_s, 1e-9)
+        original = _improve.snapshot(root)
+        best = {"files": original, "sample": first}
+        tried = {_improve.fingerprint(original)}
+        block = _speed.speed_block(est.seconds * _estimate.SAFETY, limit_s, first, cells, runs)
+        self._log.info("[improve] the study would not fit the time allowed; trying to make the simulation %.1f times "  # type: ignore[attr-defined]
+                       "faster without changing a number", needed)
+        used = 0
+        while used < limit:
+            used += 1
+            files = _improve.snapshot(root)
+            allowed = _improve.editable(root)
+            prompt = self._prompts["improve_speed"].substitute(  # type: ignore[attr-defined]
+                topic_block=self._topic_block(), speed_block=block,  # type: ignore[attr-defined]
+                history_block=_improve.history_block(record["rounds"]), editable=", ".join(allowed) or "(none)",
+                code_block=_improve.code_block(files, allowed), rounds_left=f"This is round {used} of {limit}.")
+            entry: dict[str, Any] = {"round": used}
+            record["rounds"].append(entry)
+            try:
+                reply = await self._chat(prompt, node="improve")  # type: ignore[attr-defined]
+                record["calls"] += 1
+            except Exception as e:  # noqa: BLE001
+                entry.update(outcome="not asked", reason=repr(e)[:200])
+                break
+            from .engine import _parse_json_lenient
+
+            edit, why = _improve.parse_edit(_parse_json_lenient(reply, node="improve"))
+            new_text = None
+            if edit is not None:
+                new_text, why = _improve.check_edit(files, edit, allowed, tried=tried, expected=[], measures=None,
+                                                    settings=settings)
+            if edit is None or new_text is None:
+                entry.update(outcome="refused", reason=why, why=edit.why if edit else "")
+                continue
+            name = _improve.edited_path(edit)
+            candidate = {**files, name: new_text}
+            tried.add(_improve.fingerprint(candidate))
+            entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit))
+            _improve.restore(root, candidate)
+            saved = _improve.guard_bytes(root)
+            before_guard = _improve.guard_hashes(root)
+            after = await sample()
+            touched = _improve.changed(before_guard, _improve.guard_hashes(root))
+            if touched:
+                _improve.put_back(root, saved)
+                _improve.restore(root, best["files"])
+                entry.update(outcome="aborted", reason="its run changed " + ", ".join(touched[:4]))
+                break
+            if after.failed:
+                entry.update(outcome="not kept", reason=f"the sample did not run ({after.failed})")
+            elif (bad := _speed.disagreements(first, after)):
+                entry.update(outcome="not kept", reason=f"{len(bad)} number(s) of the sample changed, first: {bad[0]}")
+            elif not _speed.fast_enough(best["sample"].seconds, after.seconds):
+                entry.update(outcome="not kept", reason=f"the sample took {after.seconds:.3f} s against "
+                                                         f"{best['sample'].seconds:.3f} s: not clearly faster")
+            else:
+                entry.update(outcome="kept", reason=f"the sample took {after.seconds:.3f} s against "
+                                                    f"{best['sample'].seconds:.3f} s, the same numbers")
+                best = {"files": candidate, "sample": after}
+                record["kept"] = True
+            if entry["outcome"] != "kept":
+                _improve.restore(root, best["files"])
+            self._log.info("[improve] speed round %d %s: %s", used, entry["outcome"], entry.get("reason"))  # type: ignore[attr-defined]
+            if record["kept"] and first.seconds / max(best["sample"].seconds, 1e-9) >= needed:
+                break
+        _improve.restore(root, best["files"])
+        record["sample_s_after"] = best["sample"].seconds
+        record["speedup"] = first.seconds / max(best["sample"].seconds, 1e-9)
+        record["needed"] = needed
+        await asyncio.sleep(0)
+        return record
 
     def _stop_too_long(self, text: str) -> dict[str, Any]:
         """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""

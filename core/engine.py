@@ -14651,7 +14651,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     history_block=_improve.history_block(record["rounds"]),
                     editable=", ".join(allowed) or "(none)",
                     code_block=_improve.code_block(files, allowed),
-                    rounds_left=f"This is round {used} of {limit}.",
+                    rounds_left=f"This is round {used} of {limit}." + _improve.retry_hint(record["rounds"]),
                 )
                 entry: dict[str, Any] = {"round": used, "at": _improve._now()}
                 record["rounds"].append(entry)
@@ -14799,7 +14799,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if kept and _improve.all_met(best["rows"]):
                     stopped = _improve.STOP_ALL_MET
                     break
-                if not verdict["better"]:
+                if not verdict["better"] and not _improve.retry_on():
                     stopped = _improve.STOP_PLATEAU
                     break
         finally:
@@ -25143,6 +25143,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "code_finding_test",                # a small test that fails on the current code because of one finding
         "execute_reflect", "analyze",
         "improve",              # one change to the simulation against its checks of correctness
+        "improve_speed",        # one change that makes a study that would not fit the time allowed faster
         "cross_check",
         "cross_check_verify",   # CoVe-style second-pass verification
         "claim_check",          # ground each paper claim to evidence
