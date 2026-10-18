@@ -481,7 +481,7 @@ class QuestState(TypedDict, total=False):
     # or, when the script could not run to the end, its code written again from the same design.
     evidence_no_result_retries: int
     # That try was the code written again from the same design (the script crashed), not a new design.
-    evidence_code_rewritten: bool
+    evidence_code_rewritten_at: int  # the design round (``iteration``) whose code was written again after no result
     paper_md: str
     # A fingerprint of the study the current draft was written from (design,
     # analysis, results, figures, cross-check and the user's feedback). A revise
@@ -19404,7 +19404,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if rewrite_code:
             # The design stays as it is (no design iteration is spent); the new code gets its own repairs.
             patch.update(_FRESH_SCRIPT)
-            patch["evidence_code_rewritten"] = True  # once; the design's own retry (below) is counted apart
+            # Once per design (a new design's code gets its own); the design's own retry (below) is counted apart.
+            patch["evidence_code_rewritten_at"] = int(state.get("iteration", 0) or 0)
         elif redesign:
             patch["iteration"] = int(state.get("iteration", 0) or 0) + 1
             patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
@@ -19449,7 +19450,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         repairs = int(state.get("exec_reflect_iter") or 0)
         # Said only when it happened: a quest with no iteration left stops on the first pass, with no second design.
         redesigned = int(state.get("evidence_no_result_retries") or 0) >= 1
-        rewritten = bool(state.get("evidence_code_rewritten"))  # its own once-only try, counted apart from the design's
+        rewritten = state.get("evidence_code_rewritten_at") is not None  # its own try, counted apart from the design's
+        timed_out = bool((state.get("exec_result") or {}).get("timed_out"))  # stopped for its time, not by an error
         ran_again = redesigned or rewritten
         tried_more = [x for x in ("the code was written again from the same design" if rewritten else "",
                                   "the design was asked for again" if redesigned else "") if x]
@@ -19459,11 +19461,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                          "asked for the design again" if redesigned else "") if x)
         # A result that holds numbers, but none of the study's quantities and says it failed (see _reports_no_quantity).
         bare = self._reports_no_quantity(state, state.get("result_json")) if no_numbers else ""
+        not_done = "ran past the time it is allowed" if timed_out else "could not run to the end"
         problem = ((f"the experiment ran, but its result holds none of the study's quantities ({bare}){again}, so FI has "
                     "nothing measured to write up" if bare else
                     f"the experiment ran, but its result has no number in it{again}, so FI has nothing measured to write up")
                    if no_numbers else
-                   f"the experiment could not run to the end{', even after FI ' + after if after else ''}, "
+                   f"the experiment {not_done}{', even after FI ' + after if after else ''}, "
                    "so FI has nothing measured to write up" if crashed else
                    "the experiment ran, but the model's reading of its results could not be read, even when asked twice, "
                    "so FI has no findings to write up")
@@ -19475,14 +19478,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                       "ran it again: the result still has no number in it")] if ran_again else [])] if no_numbers else
                  [*(["asked the model to repair the script when it failed"
                      + (f" ({repairs} repair{'s' if repairs != 1 else ''})" if repairs else "")] if repairs else
-                    ["ran the experiment: it stopped with an error"]), *redo,
-                  *(["ran it again: it still could not run to the end"] if ran_again else [])] if crashed else
+                    [f"ran the experiment: {'it was stopped for running past the time allowed' if timed_out else 'it stopped with an error'}"]),
+                  *redo, *([f"ran it again: it still {not_done}"] if ran_again else [])] if crashed else
                  ["asked the model to analyse the results",
                   "read its reply as written, then again with the backslashes of formulas kept as written",
                   "asked the model a second time for one short answer; that reply could not be read either"])
         ended = (("the run gave no result with a number for the study's quantities" if bare else
                   "the run gave no result with a number in it") + again if no_numbers else
-                 "the script could not run to the end" + again if crashed else "the analysis could not be read twice")
+                 f"the script {not_done}" + again if crashed else "the analysis could not be read twice")
         if claims and reason not in ("flat", "no_numbers", "crashed"):
             # The paper claimed what FI's own records contradict, even after it was written again (core/record_claims.py).
             problem = (f"the paper still claims what FI's own records contradict, even after it was written again "
@@ -19922,7 +19925,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # design can change and new code of the same design cannot.
         code_fault = crashed and not flat and not exec_result.get("timed_out")
         if code_fault:
-            if state.get("evidence_code_rewritten"):
+            if state.get("evidence_code_rewritten_at") == int(state.get("iteration", 0) or 0):
                 # The code was already written again from this design and still could not run to the end: a new design
                 # is no answer to a crash (see below), so nothing is left to try.
                 return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
