@@ -708,6 +708,10 @@ def joined_sub_studies(old_protocol: dict[str, Any], grid: dict[str, Any], said:
             by_name[name.lower()] = fresh
     varied = {a for s in subs for a in s["vary"]}
     subs += [{"name": a, "vary": [a], "hold": {}} for a in added if a not in varied]
+    for s in subs:  # every part says the value it holds each setting it does not vary at (the first, if it did not say)
+        for axis, values in grid.items():
+            if axis not in s["vary"] and axis not in s["hold"] and isinstance(values, list) and len(values) > 1:
+                s["hold"][axis] = values[0]
     return subs
 
 

@@ -26,8 +26,14 @@ SUBS = [
 ]
 
 
+def _held(parts, grid=GRID):
+    """``parts`` with the value each holds every setting it does not vary at (the first, when it says none)."""
+    return [{**p, "hold": {**{a: v[0] for a, v in grid.items() if a not in p["vary"] and len(v) > 1}, **p.get("hold", {})}}
+            for p in parts]
+
+
 def _protocol(**more):
-    return {"grid": {k: list(v) for k, v in GRID.items()}, "sub_studies": [dict(s) for s in SUBS], **more}
+    return {"grid": {k: list(v) for k, v in GRID.items()}, "sub_studies": _held(SUBS), **more}
 
 
 def test_without_sub_studies_the_settings_are_the_full_product_in_the_same_order() -> None:
@@ -114,16 +120,24 @@ def _normalized(**protocol):
     return plan.normalize_protocol({"grid": {k: list(v) for k, v in GRID.items()}, **protocol})
 
 
+FULL = [  # the same division, each part saying the value it holds every setting it does not vary at
+    {"name": "sources", "vary": ["family", "defocus", "ring"], "hold": {"dipole_radius": 0.1, "ambit_type": "a"}},
+    {"name": "dipole", "vary": ["dipole_radius"], "hold": {"family": "dipole", "ring": 0.5, "ambit_type": "a", "defocus": 0}},
+    {"name": "ambit", "vary": ["ambit_type", "defocus"], "hold": {"family": "conv", "dipole_radius": 0.1, "ring": 0.5}},
+]
+
+
 def test_the_plan_check_reads_a_good_division_and_names_each_planted_fault() -> None:
-    fixed, why = _normalized(sub_studies=[dict(s) for s in SUBS])
+    fixed, why = _normalized(sub_studies=[dict(s) for s in FULL])
     assert why is None and [s["name"] for s in fixed["sub_studies"]] == ["sources", "dipole", "ambit"]
-    assert fixed["sub_studies"][1]["hold"] == {"family": "dipole"}
+    assert fixed["sub_studies"][1]["hold"] == {"family": "dipole", "ring": 0.5, "ambit_type": "a", "defocus": 0}
     assert isinstance(search.study_grid(fixed), search.StudyGrid)
     faults = {
-        "not a setting of": [{"vary": ["nope", "family"]}] + SUBS,
-        "no entry of `protocol.sub_studies` varies": SUBS[1:],  # family, ring, defocus... are in no sub-study
-        "not one of its values": [dict(SUBS[0], hold={"ambit_type": "zzz"}), SUBS[2]],
-        "both varies and holds": [dict(SUBS[0], hold={"family": "conv"}), SUBS[2]],
+        "not a setting of": [{"vary": ["nope", "family"]}] + FULL,
+        "no entry of `protocol.sub_studies` varies": FULL[1:],  # family and ring are neither varied nor held at all values
+        "not one of its values": [dict(FULL[0], hold={"ambit_type": "zzz"}), FULL[2]],
+        "both varies and holds": [dict(FULL[0], hold={"family": "conv"}), FULL[2]],
+        "does not say the value it holds": SUBS,  # the parts do not say what they hold the other settings at
         "needs `vary`": [{"name": "empty", "vary": []}],
         "lists a setting twice": [{"vary": ["family", "family"]}],
         "must be a list": "family",
@@ -242,7 +256,7 @@ def test_a_setting_added_to_a_plan_that_has_sub_studies_without_a_part_is_a_part
     new = {"protocol": {"grid": {**GRID, "noise": [0.0, 0.1, 0.2]}}}
     merged = topic.merge(old, new, [])
     protocol = plan.normalize_protocol(merged["protocol"])[0]
-    assert protocol["sub_studies"][-1] == {"name": "noise", "vary": ["noise"], "hold": {}}
+    assert protocol["sub_studies"][-1] == {"name": "noise", "vary": ["noise"], "hold": {a: v[0] for a, v in GRID.items()}}
     before = search.grid_size(search.study_grid(old["protocol"]))
     assert search.grid_size(search.study_grid(protocol)) == before + 2  # three values at the base: two new settings
     # a part of the plan the answer names takes the setting

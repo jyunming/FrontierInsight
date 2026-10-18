@@ -187,6 +187,12 @@ async def test_a_redesign_drafted_at_design_is_asked_once_per_round_and_a_grid_t
     assert len(sent) == 1  # a grid that fits is never asked about
 
 
+def held(grid: dict[str, Any], parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``parts`` with the value each holds every setting it does not vary at (the first, when it says none)."""
+    return [{**p, "hold": {**{a: v[0] for a, v in grid.items() if a not in p["vary"] and len(v) > 1}, **p.get("hold", {})}}
+            for p in parts]
+
+
 PARTS = [
     {"name": "sources", "vary": ["source", "pitch", "conventional_sigma"]},
     {"name": "annular", "vary": ["annular_sigma_inner_outer", "source_design_class", "pitch_nm"]},
@@ -194,6 +200,7 @@ PARTS = [
     {"name": "ambit", "vary": ["neighbour_distance_nm", "ambit_conventional_sigma", "ambit_source_type"]},
     {"name": "parametrisation", "vary": ["source_parametrisation"]},
 ]
+PARTS = held(BIG, PARTS)
 
 
 @pytest.mark.asyncio
