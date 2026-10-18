@@ -217,6 +217,14 @@ same PR that adds, splits or renames one.
   record, on disk in `.fi/improve/raw/`) / `_improve_fresh_run` (`_FRESH_SCRIPT` and no cached trials for a rerun) /
   `_improve_after_rerun` (the headline "changed" note via `code_project.record_note`), prompt `agents/improve.md`,
   config `engine.improve_rounds`; each round's row is `criteria.record(..., improve=...)`.
+- `core/improve_speed.py` — the improve loop with the goal of speed, run before the study when the timing says it would
+  not fit the time allowed. `sample_cells` (the timed settings plus each known-answer case of the plan), `run_sample`
+  (fixed-seed trials through the harness in an outside copy, the least time of two repeats), `disagreements` (a number
+  not the same to 9 digits, or only in one run), `fast_enough`. `RunChecksMixin._speed_up` (`core/run_checks.py`) asks
+  for one change per round (prompt `agents/improve_speed.md`), applies `improve.check_edit` with `improve.guards` over
+  every check of the plan, keeps a change on the sample alone, and times the study twice (the slower timing stands);
+  `_size_the_run` calls it once, before the runs are lowered or the quest stops. `improve.only_noise` is the
+  start condition of the correctness loop (nothing to change when every unmet check is flagged or inside its tolerance).
 - `core/optimisation_plan.py` — the kind of study (`study_type`: `measure` or `find_best_design`; `study_type_of`
   reads a design with an `optimisation` block as a search whatever it says) and the plan's `protocol.optimisation`
   block for a search for the best design: `normalize` / `repair` (hooked into `core/plan.py`'s `normalize_protocol`

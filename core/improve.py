@@ -69,6 +69,72 @@ STOP_NO_MODEL = "the model could not be asked for a change"
 STOP_CUT_SHORT = "the loop was cut short before it finished"
 
 
+# --- when the loop does not start, and what an edit may not touch ------------------------------------------------------
+
+#: The words ``criteria.evaluate`` gives a check that a second model flagged (its row's ``why``).
+FLAGGED_WHY = "not shown: a second model found"
+
+
+def _within_tolerance(r: dict[str, Any]) -> bool:
+    """The value is on the wrong side of its bar by no more than the check's own tolerance."""
+    value, target, tol = _num(r.get("value")), _num(r.get("target")), abs(_num(r.get("tolerance")) or 0.0)
+    if value is None or target is None:
+        return False
+    if r.get("direction") == "lower":
+        return value <= target + tol
+    if r.get("direction") == "higher":
+        return value >= target - tol
+    return False
+
+
+def only_noise(rows: list[dict[str, Any]]) -> str:
+    """Why no edit can help, or ``""``: every check that is not met is one a second model flagged (it stays unmet whatever
+    the code does) or is already within its own tolerance of its bar (a difference the check itself calls noise). A check
+    with no bar, or one that fails by more than its tolerance, is something an edit may fix, so it returns ``""``."""
+    unmet = [r for r in counted(rows) if r.get("met") is not True]
+    if not unmet:
+        return ""
+    if all(r.get("flagged") or str(r.get("why") or "").startswith(FLAGGED_WHY) or _within_tolerance(r) for r in unmet):
+        return ("every check that is not met is either one a second model flagged (a change to the code cannot clear that) "
+                "or already within its own tolerance of its bar (a difference the check itself calls noise)")
+    return ""
+
+
+def measure_keys(measure: Any) -> set[str]:
+    """The names a check's measure reads from what the simulation returns: the name itself, or each name in an expression
+    such as ``abs(R_bh - R_bh_loop)`` (not the functions it calls). A measure written as a sentence gives none."""
+    text = str(measure or "").strip()
+    if not text:
+        return set()
+    try:
+        tree = ast.parse(text, mode="eval")
+    except (SyntaxError, ValueError):
+        return set()
+    called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and id(n) not in called}
+
+
+def guards(protocol: dict[str, Any], oracles: list[dict[str, Any]], countable: list[dict[str, Any]],
+           trial_names: set[str]) -> tuple[list[float], set[str], dict[str, list[Any]]]:
+    """What an edit must not write in (the values the checks expect and the criteria's targets), must not change the
+    computation of (the numbers the checks read) and must not test for (the checks' own settings)."""
+    from . import oracle_check as _oracle
+
+    expected = [v for v in (_num(x) for x in [*(o.get("expected") for o in oracles),
+                                              *(c.get("target") for c in countable if c.get("direction") == "target")])
+                if v is not None]
+    cases = [case for case in (_oracle.case_of(o) for o in oracles) if case]
+    measures: set[str] = set(trial_names)
+    for case in cases:
+        measures |= measure_keys(case[1])
+    settings: dict[str, list[Any]] = {}
+    for case in cases:
+        for key, value in case[0].items():
+            if isinstance(value, (int, float, str)) and not isinstance(value, bool):
+                settings.setdefault(str(key), []).append(value)
+    return expected, measures, settings
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -732,6 +798,8 @@ def compare(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[d
             change = "better" if da < db - tol else "worse" if da > db + tol else "same"
             if rb.get("met") is True and ra.get("met") is False:
                 change = "worse"  # it no longer meets its bar, however small the step that took it there
+            elif rb.get("met") is False and ra.get("met") is True:
+                change = "better"  # and one that now meets it is better, however small the step
         out.append({"name": name, "before": vb, "after": va, "tolerance": tol, "change": change,
                     "met": ra.get("met") if ra else None})
     return out
