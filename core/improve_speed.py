@@ -1,4 +1,4 @@
-"""Prototype (O2, for the measurement): make a study that does not fit the time allowed fit, without changing a result.
+"""Make a study that does not fit the time allowed fit, without changing a result.
 
 FI runs a fixed sample of the study itself, before and after one edit of the simulation: the same settings, the same
 trials, the same seeds. The edit is kept only when every number the sample returns is the same (to nine digits; a
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,16 +21,14 @@ from . import run_estimate as _estimate
 from . import trial_runner as _tr
 
 #: Trials of each sampled setting (the first is a warm-up and is not timed).
-SAMPLE_TRIALS = 5
+SAMPLE_TRIALS = 12
 #: The sample is run this many times; the faster of the runs is the time (noise is slower, never faster).
 REPEATS = 2
 #: An edit is kept only when the sample takes at most this share of the time it took before.
 KEEP_BELOW = 0.75
 RTOL, ATOL = 1e-9, 1e-12
-
-
-def on() -> bool:
-    return os.environ.get("FI_IMPROVE_SPEED") == "1"
+#: The speed-up is sought until the sample is this much faster than the study needs (a margin for the noise of a timing).
+MARGIN = 1.25
 
 
 @dataclass
@@ -41,9 +38,21 @@ class Sample:
     failed: str = ""
 
 
-def sample_cells(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
-    """The settings of the sample: the ones FI times anyway (the base and each setting's two ends)."""
-    return [dict(cell) for _axis, _index, cell in _estimate.probe_cells(grid)]
+def sample_cells(grid: dict[str, list[Any]], oracles: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """The settings of the sample: the ones FI times anyway (the base and each setting's two ends), and the setting of
+    each known-answer case of the plan (the other settings taken from the base), so a speed-up is held to the cases the
+    plan's checks run, too."""
+    from . import oracle_check as _oracle
+
+    cells = [dict(cell) for _axis, _index, cell in _estimate.probe_cells(grid)]
+    base = dict(cells[0]) if cells else {}
+    for o in oracles or []:
+        case = _oracle.case_of(o)
+        if case and isinstance(case[0], dict):
+            cell = {**base, **{k: v for k, v in case[0].items() if k in base}}
+            if cell not in cells:
+                cells.append(cell)
+    return cells
 
 
 async def run_sample(executor: Any, python: Path | str, quest_root: Path, module: str, cells: list[dict[str, Any]], *,

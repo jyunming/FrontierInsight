@@ -111,20 +111,73 @@ async def test_a_change_that_is_not_faster_is_put_back(tmp_path: Path) -> None:
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SLOW
 
 
-def test_retry_and_bar_switches_are_off_unless_asked(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("FI_IMPROVE_RETRY", raising=False)
-    monkeypatch.delenv("FI_IMPROVE_BAR", raising=False)
-    row = {"name": "c", "direction": "lower", "target": 0.0, "tolerance": 1e-12, "counts": True}
-    before = [{**row, "value": 1.1e-16, "met": False}]
-    after = [{**row, "value": 0.0, "met": True}]
-    assert improve.compare(before, after)[0]["change"] == "same"
-    monkeypatch.setenv("FI_IMPROVE_BAR", "1")
+def _row(name: str, value: float, met: bool, *, target: float = 0.0, tolerance: float = 1e-3, **more: Any) -> dict[str, Any]:
+    return {"name": name, "value": value, "met": met, "direction": "lower", "target": target, "tolerance": tolerance,
+            "counts": True, **more}
+
+
+def test_a_check_that_now_meets_its_bar_is_better_however_small_the_step() -> None:
+    before = [_row("c", 1.1e-16, False, tolerance=1e-12)]
+    after = [_row("c", 0.0, True, tolerance=1e-12)]
     assert improve.compare(before, after)[0]["change"] == "better"
-    assert improve.retry_hint([{"outcome": "not kept"}]) == ""
-    monkeypatch.setenv("FI_IMPROVE_RETRY", "1")
-    assert "different cause" in improve.retry_hint([{"outcome": "not kept"}])
-    assert improve.retry_hint([{"outcome": "kept"}]) == ""
+    assert improve.compare(after, before)[0]["change"] == "worse"  # and one that stops meeting it is still worse
+    assert improve.verdict(improve.compare(before, after))["best"] is True
+
+
+def test_the_loop_does_not_start_for_a_flagged_check_or_one_already_within_its_tolerance() -> None:
+    flagged = _row("a", 0.0, False, why=improve.FLAGGED_WHY + " that the code is flagged (x)")
+    noise = _row("b", 0.0012, False, tolerance=0.0025)
+    assert improve.only_noise([flagged]) and improve.only_noise([noise]) and improve.only_noise([flagged, noise])
+    # a check that fails by more than its tolerance, one with no bar, or a mix that holds one of them, still starts it
+    assert improve.only_noise([_row("c", 0.5, False)]) == ""
+    assert improve.only_noise([noise, _row("c", 0.5, False)]) == ""
+    assert improve.only_noise([{**_row("d", 3.0, False), "target": None}]) == ""
+    assert improve.only_noise([_row("e", 0.0, True)]) == ""
+    assert improve.only_noise([_row("f", 5.0, False, direction="higher", target=5.001, tolerance=0.01)])
+
+
+SECOND = """def loop_count(p):
+    return sum(1 for x in p if x < 0.5)
+
+
+def run_trial(cell, trial_id, seed):
+    p = [0.1, 0.9]
+    out = {}
+    out["R"] = len([x for x in p if x < 0.5])
+    out["R_loop"] = float(loop_count(p))
+    return out
+"""
+
+
+def test_a_speed_up_may_not_make_an_independent_check_read_the_other_side() -> None:
+    oracle = {"name": "agree", "kind": "second_implementation", "expected": 0, "case": {"m": 20},
+              "measure": "abs(R - R_loop)"}
+    expected, measures, settings = improve.guards({}, [oracle], [], set())
+    assert {"R", "R_loop"} <= measures and settings == {"m": [20]}
+    files = {"simulate.py": SECOND}
+    bend = improve.Edit(file="simulate.py", find='out["R_loop"] = float(loop_count(p))',
+                        replace='out["R_loop"] = float(out["R"])', why="faster")
+    new, why = improve.check_edit(files, bend, ["simulate.py"], tried=set(), expected=expected, measures=measures,
+                                  settings=settings)
+    assert new is None and "worked out where the simulation returns it" in why
+    honest = improve.Edit(file="simulate.py", find="    return sum(1 for x in p if x < 0.5)",
+                          replace="    return len([x for x in p if x < 0.5])", why="faster")
+    new, why = improve.check_edit(files, honest, ["simulate.py"], tried=set(), expected=expected, measures=measures,
+                                  settings=settings)
+    assert new is not None, why
 
 
 def test_estimate_module_still_exposes_what_the_speed_loop_uses() -> None:
     assert callable(est.probe_cells) and callable(est.plain_duration) and est.SAFETY > 1
+
+
+@pytest.mark.asyncio
+async def test_a_quest_whose_unmet_check_is_inside_its_own_tolerance_makes_no_change_and_says_why(tmp_path: Path) -> None:
+    from tests import test_improve as ti
+
+    noisy = {**ti.C_ERR, "tolerance": 0.05}  # Euler's error at dt=0.1 is about 0.018: not met, but inside 0.05 of the bar
+    engine, model = await ti._quest(tmp_path, [ti._edit(ti.EULER, ti.RK4)], criteria=[noisy])
+    out = await engine._node_improve(dict(ti.STATE))
+    assert out == {"improve_rerun": False} and model.prompts == []
+    assert "already within its own tolerance of its bar" in ti._log(engine)
+    assert ti.EULER in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")

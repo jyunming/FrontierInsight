@@ -14419,6 +14419,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             why = "no check of correctness was measured by FI in this run"
         if why is None and _improve.all_met(baseline):
             why = "every check of correctness is already met"
+        if why is None and (noise := _improve.only_noise(baseline)):
+            why = noise
         if why is not None:
             self._log.info("[improve] no change to the simulation: %s", why)
             return done
@@ -14600,15 +14602,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         trial_names = {c["trials"] for c in countable if c.get("trials")}
         # What an edit must not write in (the values the checks expect, the criteria's targets), what it must not change
         # the computation of (the numbers the checks read), and what it must not test for (the checks' own settings).
-        expected = [v for v in (_improve._num(x) for x in [*(o.get("expected") for o in oracles),
-                                                           *(c.get("target") for c in countable
-                                                             if c.get("direction") == "target")]) if v is not None]
-        measures = {str(case[1]) for case in (_oracle.case_of(o) for o in oracles) if case} | set(trial_names)
-        settings: dict[str, list[Any]] = {}
-        for case in (_oracle.case_of(o) for o in oracles):
-            for key, value in (case[0].items() if case else []):
-                if isinstance(value, (int, float, str)) and not isinstance(value, bool):
-                    settings.setdefault(str(key), []).append(value)
+        expected, measures, settings = _improve.guards(protocol, oracles, countable, trial_names)
         original = _improve.snapshot(root)
         _improve.save_snapshot(root, "original", original, fi_real=getattr(self, "_fi_real", None))
         _improve.save_snapshot(root, "best", original, fi_real=getattr(self, "_fi_real", None))
@@ -14651,7 +14645,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     history_block=_improve.history_block(record["rounds"]),
                     editable=", ".join(allowed) or "(none)",
                     code_block=_improve.code_block(files, allowed),
-                    rounds_left=f"This is round {used} of {limit}." + _improve.retry_hint(record["rounds"]),
+                    rounds_left=f"This is round {used} of {limit}.",
                 )
                 entry: dict[str, Any] = {"round": used, "at": _improve._now()}
                 record["rounds"].append(entry)
@@ -14799,7 +14793,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if kept and _improve.all_met(best["rows"]):
                     stopped = _improve.STOP_ALL_MET
                     break
-                if not verdict["better"] and not _improve.retry_on():
+                if not verdict["better"]:
                     stopped = _improve.STOP_PLATEAU
                     break
         finally:
