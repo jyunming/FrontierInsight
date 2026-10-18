@@ -37,8 +37,9 @@ read ``<package>/model.py``. A card with neither an example nor a relation is li
 record. A function can be shown passages from the literature (``passages``, :mod:`core.step_passages`) and, for a step with an
 example, the example's inputs; the expected output is shown only in the repair that follows a failed example.
 
-The most the step can ask of the model in a quest is ``max_calls`` (:data:`MAX_CALLS`): at
-most ``functions x (1 + repairs)`` per pass, and never more than that in all passes together. Every call is counted in
+The most the step can ask of the model in a quest is ``max_calls``, which the caller sets to :func:`max_calls_for` the
+number of functions (:data:`CALLS_PER_FUNCTION` each), and never more than that in all passes together; there is no limit
+on the number of functions. Every call is counted in
 ``.fi/function_steps.json``, which also keeps each function's status, so a resume does not fill a function that is done.
 """
 
@@ -851,7 +852,7 @@ def failing(record: dict[str, Any]) -> list[str]:
 
 def spend(quest_root: Path, max_calls: int) -> bool:
     """Count one more request of the step in the quest's total (``.fi/function_steps.json``); ``False`` when the most
-    the step may make in the quest (:data:`MAX_CALLS`) is spent."""
+    the step may make in the quest (``max_calls``, normally :func:`max_calls_for` the number of functions) is spent."""
     record = load(quest_root)
     if int(record.get("calls_total") or 0) >= int(max_calls):
         return False
