@@ -8458,6 +8458,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             await self._read_topic_before_the_prompt(state)
             prompt = self._design_prompt(state)
             design = await self._design_reply(prompt, node="design")
+            # Before the audit, so the receipt it leaves is for the design that runs (the hypothesis is part of it).
+            design = self._keep_hypothesis_after_an_empty_run(state, design)
             design, objections = await self._audit_design(state, design)
             # After the freeze a redesign keeps the frozen protocol; a different one is an amendment request.
             design = self._hold_design_to_frozen(state, design)
