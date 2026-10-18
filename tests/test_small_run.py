@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from core import optimise_search as search
 from core import small_run
 from core.execution import SharedInterpreterExecutor
 
@@ -92,3 +93,36 @@ def test_the_reader_is_shown_the_small_run() -> None:
     filled = string.Template(text).substitute(topic="t", requirements="[]", plan="{}", code="c", previous="",
                                               small_run="Setting a=1: 3 of 3 trial(s) ran")
     assert "What the code gave when FI ran it" in filled and "Setting a=1: 3 of 3" in filled
+
+
+class _Hangs:
+    """An executor whose every process runs out of the time it is given; it records that time."""
+
+    def __init__(self) -> None:
+        self.given: list[int] = []
+
+    async def execute(self, cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001, ANN201
+        from core.execution import ExecutionResult
+
+        self.given.append(int(timeout_s))
+        return ExecutionResult(returncode=-1, stdout="", stderr="", duration_s=float(timeout_s), timed_out=True)
+
+
+def test_a_study_of_parts_runs_a_setting_of_every_part_each_with_its_share_of_the_time(tmp_path: Path) -> None:
+    grid = search.study_grid({"grid": {"kind": ["a", "b"], "n": [1, 2, 3]},
+                              "sub_studies": [{"name": "as", "vary": ["n"], "hold": {"kind": "a"}},
+                                              {"name": "bs", "vary": ["n"], "hold": {"kind": "b"}}]})
+    assert small_run.settings(grid) == [{"kind": "a", "n": 2}, {"kind": "b", "n": 2}]  # not the corners of the whole grid
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text("def run_cell(cell):" + chr(10) + "    return {'y': 1.0}" + chr(10), encoding="utf-8")
+    ex = _Hangs()
+    got = asyncio.run(small_run.run(ex, sys.executable, root, "code/simulate.py", grid, deterministic=True, timeout_s=60))
+    assert len(ex.given) == 2 and ex.given[0] <= 30, "one part that hangs cannot take the time of the next"
+    assert got.timed_out and "in 2 of them" in got.says()
+    # a plan without parts keeps the middle and the two corners, and the whole time for the first
+    plain = {"n": [1, 2, 3, 4, 5]}
+    assert small_run.settings(plain) == [{"n": 3}, {"n": 1}, {"n": 5}]
+    ex2 = _Hangs()
+    asyncio.run(small_run.run(ex2, sys.executable, root, "code/simulate.py", plain, deterministic=True, timeout_s=60))
+    assert ex2.given[0] == 60

@@ -976,7 +976,7 @@ class RunChecksMixin:
         if _optim.has_block(state.get("design")) or _optimise.block_of(protocol) is not None:
             return None
         self._small_run_ctx = (state, py, exec_env)
-        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}  # knows its sub-studies
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
         deterministic = "run_trial" not in set(getattr(self, "_trial_entries", set()) or ())
         key = _small.key_of(simulate, grid, deterministic, thresholds)
