@@ -146,12 +146,12 @@ def test_a_policy_that_says_the_opposite_is_not_a_declaration_of_shared_streams(
     assert len(pc.rng_notes({"seed_policy": policy}, {"e.py": REUSED})) == 1
 
 
-# What a live DUV quest wrote: a list of spawned streams in one statement, indexed in the next, cached once per run. FI read
+# What a live quest wrote: a list of spawned streams in one statement, indexed in the next, cached once per run. FI read
 # the bare SeedSequence as a generator built from nothing, repaired twice and stopped a quest whose code did what its plan said.
 TWO_STATEMENTS = """
 import numpy as np
 _C = {}
-def _freeform(cell):
+def _restarts(cell):
     if "ff" in _C:
         return _C["ff"]
     ss = np.random.SeedSequence(20260).spawn(10)
@@ -161,7 +161,7 @@ def _freeform(cell):
     _C["ff"] = starts
     return starts
 for c in (1, 2):
-    _freeform(c)
+    _restarts(c)
 """
 
 
@@ -169,7 +169,7 @@ def test_a_stream_spawned_in_one_statement_and_indexed_in_the_next_does_not_stop
     protocol = {"seed_policy": "Each restart uses its own Generator from SeedSequence(20260).spawn(10)[restart index]"}
     assert pc.check(protocol, {"simulate.py": TWO_STATEMENTS}) == []
     (note,) = pc.rng_notes(protocol, {"simulate.py": TWO_STATEMENTS})
-    assert "`_freeform`" in note and "could not tell" in note
+    assert "`_restarts`" in note and "could not tell" in note
 
 
 def test_under_the_trial_contract_the_seed_record_is_the_judge_and_nothing_is_noted() -> None:
