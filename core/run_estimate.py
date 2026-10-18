@@ -126,7 +126,7 @@ class Probe:
     """One timed setting: the whole setting's cost as the real run would pay it (``seconds``), and whether it is only a
     lower bound (the timed trial did not finish within its allowance)."""
 
-    axis: str | None
+    axis: Any  # the setting's name; None for the base; CORNER or PART for the probes that are not one setting's end
     index: int | None
     cell: dict[str, Any]
     seconds: float
@@ -205,9 +205,25 @@ def probe_cells(grid: dict[str, list[Any]]) -> list[tuple[str | None, int | None
 COSTLY = 2.0
 #: Up to this many settings are added one by one when the settings interact; beyond it the mean ratios are used, capped.
 ENUM_LIMIT = 50000
-CORNER = "together"
+
+
+class _Label:
+    """A probe's label that is not a setting's name (:attr:`Probe.axis` holds either). It equals only itself, so a study
+    whose setting is called ``part`` or ``together`` is timed and summed like any other setting."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return self.name
+
+
+#: The label of the probe that times the most expensive setting (every costly end together).
+CORNER = _Label("together")
 #: The label of a probe that times one setting of a sub-study (``Probe.index``: the number of the sub-study, from 0).
-PART = "part"
+PART = _Label("part")
 
 
 def _cost_ratio(p: Probe, base: Probe) -> float:

@@ -139,6 +139,19 @@ def test_a_simulation_run_once_per_setting_is_timed_as_one_call(tmp_path: Path) 
     assert 0.55 < by[3] < 1.5 and by[3] > 1.8 * by[1]
 
 
+def test_a_setting_named_like_a_probe_label_is_timed_like_any_other(tmp_path: Path) -> None:
+    """A study may call a setting ``part`` or ``together``: the labels of the probes that are not one setting's end must
+    not be taken for it (a plain grid with a setting ``part`` crashed the timing)."""
+    source = TOY_CELL.replace('cell["n"]', 'cell["part"]').replace('0.2 *', '0.01 *')
+    for name in ("part", "together"):
+        root = _quest(tmp_path / name, source.replace('"part"', f'"{name}"'))
+        grid = {name: [1, 2, 3], "other": [0, 1]}
+        probes, why = _measure(root, grid, 1, True)
+        assert why == "" and probes is not None
+        e = est.estimate(grid, 1, True, probes)
+        assert e is not None and e.complete and e.parts == 0 and set(e.ratios) == {name, "other"}
+
+
 def test_a_simulation_that_fails_when_timed_says_where_and_why(tmp_path: Path) -> None:
     root = _quest(tmp_path, "def run_trial(cell, trial, seed):\n    raise RuntimeError('broken')\n")
     probes, why = _measure(root, {"n": [1, 2]}, 3, False)
