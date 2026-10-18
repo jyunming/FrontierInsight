@@ -133,7 +133,7 @@ def test_a_step_without_a_function_or_with_the_wrong_parameters_is_a_note_not_a_
 
 
 def test_limits_and_call_scale() -> None:
-    assert fs.MAX_FUNCTIONS == 16 and fs.max_calls_for(5) == 20 and fs.max_calls_for(16) == 64
+    assert not hasattr(fs, "MAX_FUNCTIONS") and fs.max_calls_for(5) == 20 and fs.max_calls_for(16) == 64
 
 
 # --- writing the functions -----------------------------------------------------------------------------------------------

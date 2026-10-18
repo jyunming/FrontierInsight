@@ -84,7 +84,7 @@ _NUMERIC_CALLS = ("linspace", "logspace", "geomspace", "arange", "range")
 class Mismatch:
     """One way the script differs from the protocol."""
 
-    kind: str  # "grid", "runs", "threshold" or "rng"
+    kind: str  # "grid", "runs" or "threshold"
     name: str  # the axis, or the threshold, as the protocol names it
     expected: list[float]
     found: list[float] = field(default_factory=list)  # what the script holds under a matching name
@@ -110,14 +110,6 @@ class Mismatch:
             return (
                 f"the protocol fixes {self.name} at {want}; {self.where} is {_fmt(self.found)}"
                 + (f": it {' and '.join(parts)}" if parts else "")
-            )
-        if self.kind == "rng":
-            return (
-                f"the protocol's seed policy is independent random streams, but {self.where} builds its random generator "
-                f"from the seed alone, so every call restarts the same stream and the settings it is called for share "
-                f"their random numbers (derive the stream from the setting as well, for example "
-                f"np.random.SeedSequence([seed, setting index]), or declare common random numbers in the protocol's "
-                f"seed_policy and analyse the settings as paired)"
             )
         if self.kind == "runs":
             return (
@@ -268,7 +260,9 @@ class _Reader(ast.NodeVisitor):
 
 _RNG_BUILDERS = {"default_rng", "RandomState", "Random", "seed", "manual_seed", "SeedSequence", "Generator"}
 _SHARED_STREAMS_RE = re.compile(
-    r"common random|paired|\bcrn\b|shared (random )?(stream|seed)|same (random )?(stream|seed)|coupled", re.IGNORECASE
+    # A word that says the opposite ("unpaired", "not paired", "No common random numbers") is not a declaration of shared streams.
+    r"(?<!no )(?<!not )(?<!without )common random|(?<!not )(?<!n't )\bpaired\b|\bcrn\b|"
+    r"shared (random )?(stream|seed)|same (random )?(stream|seed)|coupled", re.IGNORECASE
 )
 
 
@@ -328,6 +322,30 @@ def rng_reuse(source: str) -> list[tuple[str, int]]:
                 out.append((fn.name, call.lineno))
                 break
     return out
+
+
+# ``run_trial`` is the entry FI's seed record reads (``run_facts.seed_verdict``); a ``run_cell`` study has no such judge.
+_SEED_JUDGED = re.compile(r"^def\s+run_trial\s*\(", re.MULTILINE)
+
+
+def rng_notes(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[str]:
+    """What :func:`rng_reuse` finds, as notes in plain words: never a difference, never a stop, never a repair.
+
+    Reading free code cannot tell a stream that restarts for every setting from one that is built once and cached, from a
+    bootstrap that is reseeded on purpose, or from a plan that wants the same random numbers in every setting; all of
+    those look the same, and a wrong guess stopped a quest whose code was right. So the reading is kept as a note for the
+    reader of the code and of the paper. Where FI hands every trial its own seed (``run_trial``) FI's seed record
+    (:func:`core.run_facts.seed_verdict`) is the judge, and nothing is noted."""
+    if not isinstance(protocol, dict) or _SEED_JUDGED.search(scripts.get("simulate.py", "")):
+        return []
+    if _SHARED_STREAMS_RE.search(str(protocol.get("seed_policy") or "")):
+        return []
+    return [
+        f"FI could not tell from the code whether the settings of `{fn}` ({script}, line {line}) draw their own random "
+        f"numbers or the same ones: it builds its random generator from something that does not depend on its "
+        f"arguments. The seeds FI records for the run decide, not this reading."
+        for script, source in scripts.items() for fn, line in rng_reuse(source)
+    ]
 
 
 def _oracle_only_names(tree: ast.AST) -> set[str]:
@@ -504,12 +522,6 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
                 "runs", "runs_per_setting", [float(runs)], sorted({f.values[0] for f in counts}),
                 f"{first.name} in {first.script}, line {first.line}",
             ))
-
-    policy = str(protocol.get("seed_policy") or "")
-    if not _SHARED_STREAMS_RE.search(policy):
-        for script, source in scripts.items():
-            for fn_name, line in rng_reuse(source):
-                out.append(Mismatch("rng", fn_name, [], [], f"`{fn_name}` in {script}, line {line}"))
 
     thresholds = protocol.get("thresholds") if not fi_runs_trials else None  # FI hands them to the analysis
     for name, v in (thresholds.items() if isinstance(thresholds, dict) else []):

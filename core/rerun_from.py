@@ -133,15 +133,20 @@ _PROTOCOL = ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_AMENDMENT_PENDING.jso
 # From the design on: the protocol, the design's audit, and everything the run and the writing made from it.
 # A search for the best design (core/optimise.py): its best design and FI's record of the search go with the run.
 _SEARCH = ["results/best_design.json", ".fi/optimisation", "needs/OPTIMUM_CHECK.json"]
-_FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RUN_RECORDS, "needs/EVIDENCE.json",
+# What FI asked of the model about a design it drafted, counted per design round (not by the design's hash): a new design
+# round is asked again.
+_DESIGN_ASKS = [".fi/drafted_grid_asked.json", ".fi/drafted_grid_asked_again.json", ".fi/drafted_parts_asked.json",
+                ".fi/drafted_search_asked.json", ".fi/topic_design_asked.json"]
+_FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RUN_RECORDS, "needs/EVIDENCE.json", *_DESIGN_ASKS,
                 # The test run of the checks before the study is read once per protocol: a new one reads it again.
                 ".fi/oracle_dry_run.json",
                 "code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, "data/auto_collected", *_PAPER]
 # The once-per-plan look at the plan's checks (core/oracle_forms.py): a new plan is looked at again.
 _PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_corrections.json",
-              ".fi/topic_requirements.json", ".fi/topic_covered.json", ".fi/topic_asked.json", ".fi/topic_design_asked.json",
+              ".fi/topic_requirements.json", ".fi/topic_covered.json", ".fi/topic_asked.json",
               # The plan's parts asked of its model and the ledger of its simplifications belong to the plan written.
-              ".fi/protocol_part_asked.json", ".fi/grid_asked.json", ".fi/drafted_grid_asked.json", ".fi/ledger_asked.json", ".fi/ledger.json"]
+              ".fi/protocol_part_asked.json", ".fi/grid_asked.json", ".fi/grid_asked_again.json", ".fi/search_block_asked.json",
+              ".fi/plan_sources_asked.json", ".fi/ledger_asked.json", ".fi/ledger.json"]
 
 _OWN: dict[str, list[str]] = {
     # The review's own file is its check of the paper against FI's records; what is made from the reviewed paper is made

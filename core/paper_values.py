@@ -34,6 +34,7 @@ Nothing here knows what a metric or an axis means; the names are the plan's.
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import re
@@ -63,6 +64,10 @@ _OPEN = "<!-- fi:v {{{{v:{key}}}}} -->"
 CLOSE = "<!-- /fi:v -->"
 _MARK = re.compile(r"<!-- fi:v \{\{v:(.*?)\}\} -->(.*?)<!-- /fi:v -->", re.S)
 _PLACEHOLDER = re.compile(r"\{\{v:([^{}]{1,300})\}\}")
+#: A number of the method FI computes from the plan's own numbers: the writer types ``{{calc:1 - 0.05 / 2}}``, FI keeps it
+#: as the key ``calc:1 - 0.05 / 2`` (filled, marked and taken out like every other key) and shows it to the writer as typed.
+CALC = "calc:"
+_CALC_TYPED = re.compile(r"\{\{\s*calc\s*:\s*([^{}\n]{1,300}?)\s*\}\}")
 _WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
 
 
@@ -183,7 +188,7 @@ class Hit:
     reason: str
 
     def text(self) -> str:
-        return f"{{{{v:{self.key}}}}} is {NOT_RECORDED}: {self.reason}"
+        return f"{placeholder(self.key)} is {NOT_RECORDED}: {self.reason}"
 
 
 @dataclass
@@ -301,6 +306,8 @@ class Records:
     left_out: dict[str, str] = field(default_factory=dict)
     _refs_cache: dict[str, Any] = field(default_factory=dict)
     _alias_cache: dict[str, str] | None = None
+    #: The topic as the person wrote it: its numbers may be used in a ``{{calc:...}}``, as they may be typed.
+    topic: str = ""
 
     def aliases(self) -> dict[str, str]:
         """FI's short name for each axis whose own name a key cannot hold (a name with a comma, ``=``, ``@``, ``|`` or a brace,
@@ -832,12 +839,92 @@ def _check_left_out(rec: Records, key: Key) -> None:
                             + "; say in the limitations that it was left out, do not report it")
 
 
+def placeholder(key: str) -> str:
+    """The key as the writer types it: ``{{calc:...}}`` for an expression, ``{{v:...}}`` for a result."""
+    return "{{" + key + "}}" if key.startswith(CALC) else "{{v:" + key + "}}"
+
+
+def keyed_calcs(markdown: str) -> str:
+    """``markdown`` with each ``{{calc:EXPR}}`` the writer typed made the key ``{{v:calc:EXPR}}``, so FI fills it as a key."""
+    return _CALC_TYPED.sub(lambda m: "{{v:" + CALC + m.group(1) + "}}", markdown or "")
+
+
+def _calc_text(x: float) -> str:
+    """An expression's value as a method's number is written: four significant figures, no trailing zeros (``1.96``,
+    ``0.975``, ``3.182``, ``400``)."""
+    if x == int(x) and abs(x) < 1e15:
+        return str(int(x))
+    text = sig(x, 4)
+    return _clean(text.rstrip("0").rstrip(".")) if "." in text and "e" not in text else text
+
+
+def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "") -> Value:
+    """``{{calc:expression}}`` computed by FI. Every number in it must be one the writer may type (a number the plan or the
+    topic states, or a whole number from 0 to 10; :mod:`core.typed_numbers`), so an expression can only work out what the
+    plan already fixes (a quantile, a level, a reference value, a count from the grid), never carry a number of its own.
+    It may call FI's calculator functions, ``ndtr``/``ndtri`` (the standard normal distribution and its quantile) and
+    ``t_quantile(p, df)`` (the Student-t quantile). An expression FI does not compute reads ``not recorded`` with why."""
+    from decimal import Decimal
+
+    from . import oracle_forms as _forms
+    from . import typed_numbers as _typed
+
+    key = CALC + expression
+    try:
+        if not isinstance(protocol, dict) or not protocol:
+            raise _Unfilled("FI has no plan to compute it from")
+        plan = _typed.plan_numbers(protocol, topic)
+        # The numbers are read from the parsed expression, not from its text: ``.97``, ``1_234`` or ``0x1F`` is a number of
+        # its own however it is spelled.
+        try:
+            tree = ast.parse(expression, mode="eval")
+        except (SyntaxError, ValueError) as e:
+            raise _Unfilled(f"FI cannot read it ({e.__class__.__name__})") from None
+        own: list[str] = []
+        of_the_plan = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or isinstance(node.value, bool) \
+                    or not isinstance(node.value, (int, float)):
+                continue
+            try:
+                d = Decimal(repr(node.value))
+            except ArithmeticError:
+                d = None
+            # A constant is never negative in the tree (``-0.5`` is a minus before 0.5), so a negative plan number counts.
+            small = d is not None and d.is_finite() and d == d.to_integral_value() and 0 <= d <= 10
+            if d is not None and d.is_finite() and (d in plan or -d in plan):
+                # A whole number from 0 to 10 is allowed anyway: only another plan number shows the plan fixes the value.
+                of_the_plan += 0 if small else 1
+            elif not small:
+                own.append(repr(node.value))
+        if own:
+            raise _Unfilled(f"it uses {', '.join(dict.fromkeys(own))}, which the plan and the topic do not state; write it "
+                            "from the plan's own numbers as the plan writes them (a two-sided level is 1 - alpha / 2 with "
+                            "the plan's alpha), or say the number in words")
+        # Whole numbers alone make any number (6 / 7): an expression works out something from at least one of the plan's
+        # or the topic's numbers. A bound, not a proof: 0.05 * 9 * 9 still passes.
+        if not of_the_plan:
+            raise _Unfilled("it uses none of the plan's or the topic's numbers, so it is not a number the plan fixes; type "
+                            "a whole number as it is, or say the number in words")
+        ev = _forms.evaluate(expression, {}, special={"ndtr": _forms._ndtr, "ndtri": _forms._ndtri,
+                                                      "t_quantile": _stats.t_quantile})
+        if ev.value is None:
+            why = (f"it names {', '.join(ev.missing)}, which is no number" if ev.missing
+                   else ev.unreadable or ev.problem or "it cannot be computed")
+            raise _Unfilled(f"FI cannot compute it ({why})")
+        return Value(key, _calc_text(float(ev.value)), numbers=[float(ev.value)], inputs={"expression": expression})
+    except _Unfilled as why:
+        return Value(key, NOT_RECORDED, Hit(key, str(why)))
+
+
 def resolve(text: str, rec: Records | None) -> Value:
     """The key's value rendered, or ``not recorded`` with a :class:`Hit` saying why. Never a guess."""
     shown = text.strip()
     if shown.startswith("{{"):
         shown = shown[2:-2] if shown.endswith("}}") else shown[2:]
     shown = shown[2:] if shown.startswith("v:") else shown
+    if shown.startswith(CALC):
+        return calc(shown[len(CALC):].strip(), rec.protocol if rec else None, rec.topic if rec else "")
     try:
         key = parse(shown)
         if rec is None or not rec.cells:
@@ -892,7 +979,9 @@ def fill_values(markdown: str, rec: Records | None, plain: Any = None) -> tuple[
         values.append(value)
         return value.text if plain is not None and plain(m.start()) else value.marked
 
-    return _PLACEHOLDER.sub(one, markdown or ""), values
+    # A {{calc:...}} turned into its key keeps the length a caller's ``plain`` offsets were taken at only when none is
+    # typed, so the caller makes the keys first (core/paper_facts.py:render); here they are made for any other caller.
+    return _PLACEHOLDER.sub(one, keyed_calcs(markdown)), values
 
 
 def fill(markdown: str, rec: Records | None) -> tuple[str, list[Hit]]:
@@ -904,7 +993,7 @@ def fill(markdown: str, rec: Records | None) -> tuple[str, list[Hit]]:
 def keys_in(markdown: str) -> list[str]:
     """The keys of a paper, filled or not, in order of first use."""
     found = [m.group(1).strip() for m in _MARK.finditer(markdown or "")]
-    found += [m.group(1).strip() for m in _PLACEHOLDER.finditer(_MARK.sub("", markdown or ""))]
+    found += [m.group(1).strip() for m in _PLACEHOLDER.finditer(keyed_calcs(_MARK.sub("", markdown or "")))]
     return list(dict.fromkeys(found))
 
 
@@ -977,7 +1066,7 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
 
 def to_placeholders(markdown: str) -> str:
     """A filled paper turned back into keys, for the next writer round."""
-    return _MARK.sub(lambda m: "{{v:" + m.group(1) + "}}", markdown or "")
+    return _MARK.sub(lambda m: placeholder(m.group(1)), markdown or "")
 
 
 def without_marks(markdown: str) -> str:

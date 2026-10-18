@@ -84,8 +84,8 @@ def _as_list(value: Any) -> list[str]:
 #: The parts of the protocol. A model sometimes writes one of them beside ``protocol:`` (at the top level of the design
 #: block) instead of under it; the plan's readers look only under ``protocol``, so the part read as absent.
 PROTOCOL_PARTS = (
-    "optimisation", "grid", "in_each_run", "runs_per_setting", "min_runs_per_setting", "numerical_axes", "thresholds",
-    "constants", "metrics",
+    "optimisation", "grid", "sub_studies", "in_each_run", "runs_per_setting", "min_runs_per_setting", "numerical_axes",
+    "thresholds", "constants", "metrics",
     "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
 )
 
@@ -243,6 +243,106 @@ def _grid_values(axis: Any, values: Any, part: str = "grid") -> tuple[list[Any] 
     return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
 
 
+def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """``(the sub-studies, None)`` or ``(None, why)``, read from ``protocol.sub_studies``. Each sub-study names the settings of
+    ``protocol.grid`` it varies (``vary``: all their values, crossed) and the value it holds each other setting
+    at (``hold``: every setting of the grid it does not vary must say it). The study's settings are the settings of all of
+    them together. A setting with several values is compared when some sub-study varies it or the sub-studies hold it at all
+    its values between them; otherwise some of its values would never be run, so that is refused."""
+    where = "`protocol.sub_studies`"
+    if not isinstance(grid, dict) or not grid:
+        return None, f"{where} divides the settings of `protocol.grid`, which is missing"
+    if not isinstance(subs, list) or not subs or not all(isinstance(s, dict) for s in subs):
+        return None, (f"{where} must be a list; each entry has a `name` and the `vary` list of the settings of "
+                      "`protocol.grid` that part of the study varies and `hold`: the value it holds every other setting at")
+    inside = inside if isinstance(inside, dict) else {}
+    fixed: list[dict[str, Any]] = []
+    for number, sub in enumerate(subs, start=1):
+        name = " ".join(str(sub.get("name") or "").split())
+        here = f"{where} entry {number}" + (f" (`{name}`)" if name else "")
+        vary = sub.get("vary")
+        if not isinstance(vary, list) or not vary or not all(isinstance(a, str) and a.strip() for a in vary):
+            return None, f"{here} needs `vary`: the list of settings of `protocol.grid` it varies"
+        vary = [a.strip() for a in vary]
+        if len(set(vary)) < len(vary):
+            return None, f"{here} lists a setting twice in `vary`"
+        for axis in vary:
+            if axis in inside:
+                return None, (f"{here} varies `{axis}`, which every run goes through together "
+                              "(`protocol.in_each_run`); it is not a setting of a sub-study")
+            if axis not in grid:
+                return None, (f"{here} varies `{axis}`, which is not a setting of `protocol.grid` "
+                              f"(it has: {', '.join(str(a) for a in grid)})")
+        hold = sub.get("hold")
+        if hold is not None and not isinstance(hold, dict):
+            return None, f"{here}: `hold` must map a setting of `protocol.grid` to the value it is held at"
+        held: dict[str, Any] = {}
+        for axis, value in (hold or {}).items():
+            if axis not in grid:
+                return None, f"{here} holds `{axis}`, which is not a setting of `protocol.grid`"
+            if axis in vary:
+                return None, f"{here} both varies and holds `{axis}`: it is one or the other"
+            match = [v for v in grid[axis] if v == value]
+            if not match:
+                return None, f"{here} holds `{axis}` at {value!r}, which is not one of its values in `protocol.grid`: {grid[axis]}"
+            held[str(axis)] = match[0]
+        unheld = [a for a, v in grid.items() if a not in vary and a not in held and len(v) > 1]
+        if unheld:
+            return None, (f"{here} does not say the value it holds {', '.join(f'`{a}`' for a in unheld)} at: add each to "
+                          "`hold` (a value it has in `protocol.grid`), or to `vary` if this part crosses it")
+        fixed.append({"name": name, "vary": vary, "hold": held})
+    for axis, values in grid.items():
+        if len(values) > 1 and not any(axis in sub["vary"] for sub in fixed):
+            held_at = [sub["hold"][axis] for sub in fixed if axis in sub["hold"]]
+            missing = [v for v in values if not any(v == h for h in held_at)]
+            if missing:
+                return None, (f"`{axis}` is a setting of `protocol.grid` that no entry of {where} varies, and the entries do "
+                              f"not hold it at {', '.join(repr(v) for v in missing)}, so those values would never be run: add "
+                              "it to the `vary` of the sub-study it belongs to, or give a sub-study that value in its `hold`")
+    return fixed, None
+
+
+def lost_settings(before: Any, after: Any) -> list[str]:
+    """The settings the plan ``before`` compared that ``after`` no longer has: a setting of ``protocol.grid`` or
+    ``protocol.in_each_run`` that is in neither of them now. One that had a single value may have become a fixed number
+    (``protocol.constants``); one that took several values may not (its other values would never be run). ``before`` and
+    ``after`` are protocols. The check for every rewrite of the grid: a setting is never dropped without being said."""
+    before = before if isinstance(before, dict) else {}
+    after = after if isinstance(after, dict) else {}
+    kept = {str(k) for key in ("grid", "in_each_run") if isinstance(after.get(key), dict) for k in after[key]}
+    fixed = {str(k) for k in after.get("constants") or {}} if isinstance(after.get("constants"), dict) else set()
+    lost: list[str] = []
+    for key in ("grid", "in_each_run"):
+        for name, values in (before.get(key) if isinstance(before.get(key), dict) else {}).items():
+            many = isinstance(values, (list, tuple)) and len(values) > 1
+            if str(name) not in kept and (many or str(name) not in fixed):
+                lost.append(str(name))
+    return lost
+
+
+def lost_settings_reason(lost: list[str]) -> str:
+    """The sentence that goes back to the plan's model when a rewrite dropped settings."""
+    names = ", ".join(f"`{n}`" for n in lost)
+    return (f"{names} {'is' if len(lost) == 1 else 'are'} in the plan now and missing from your answer. Every setting the plan "
+            "has must stay in `protocol.grid` or `protocol.in_each_run`, with all its values (only a setting with a single "
+            "value may become a fixed number in `protocol.constants`).")
+
+
+def sub_studies_without(subs: Any, names: Any) -> list[dict[str, Any]]:
+    """``subs`` (the entries of ``protocol.sub_studies``) without the settings ``names`` (settings that left the grid): each
+    entry loses them from its ``vary`` and ``hold``, and an entry that varies nothing now is dropped."""
+    gone = set(names)
+    out: list[dict[str, Any]] = []
+    for entry in subs if isinstance(subs, list) else []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("vary"), list):
+            continue
+        vary = [a for a in entry["vary"] if a not in gone]
+        if vary:
+            hold = entry.get("hold") if isinstance(entry.get("hold"), dict) else {}
+            out.append({**entry, "vary": vary, "hold": {a: v for a, v in hold.items() if a not in gone}})
+    return out
+
+
 def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None]:
     """``(protocol, None)`` when the experiment protocol block can be checked against a script, else ``(None, why)``.
 
@@ -290,6 +390,12 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
                               "`protocol.in_each_run` (all its values in one run): it is one or the other")
             fixed_inside[str(factor)] = fixed_values or []
         out["in_each_run"] = fixed_inside
+    subs = out.get("sub_studies")
+    if subs is not None:
+        fixed_subs, why = _sub_studies(subs, out.get("grid"), out.get("in_each_run"))
+        if why:
+            return None, why
+        out["sub_studies"] = fixed_subs
     runs = out.get("runs_per_setting")
     if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):
         return None, "`protocol.runs_per_setting` must be a whole number of at least 1"
@@ -576,13 +682,18 @@ _PROTOCOL_KEY = re.compile(r"`protocol\.([A-Za-z_]+)")
 
 #: The parts of the protocol that change what is measured: when one cannot be read, FI asks the plan's model to write it
 #: (``Engine._ask_plan_for_the_parts``), and the note says so in these words.
-ASKED_PARTS = ("grid", "in_each_run", "metrics", "runs_per_setting", "precision")
+ASKED_PARTS = ("grid", "sub_studies", "in_each_run", "metrics", "runs_per_setting", "precision")
 ASK_MARK = "FI asks the plan's model to write"
 PART_RULES = {
     "grid": "`protocol.grid`: the settings the experiment varies, as a mapping from each setting's name to the list of "
             "values it takes. Each list is non-empty and holds only numbers, or only names (text), never a mix: numbers "
             "such as [0.1, 0.2, 0.4], or names such as [euler, rk4]. Take the settings to vary from `variables.independent`, "
             "the method and the topic.",
+    "sub_studies": "`protocol.sub_studies`: the separate parts of the study, a list; each entry has a `name` and `vary`, the "
+                   "list of settings of `protocol.grid` that part crosses with one another (all their values), and "
+                   "optionally `hold`, a mapping from another setting of the grid to the value the part keeps it at (a "
+                   "setting it neither varies nor holds stays at its first value). Every setting of the grid with more than "
+                   "one value is varied by at least one part.",
     "in_each_run": "`protocol.in_each_run`: what every run goes through together, all its values in one run on the same "
                    "random numbers (one fit across all of them, every method applied to the same simulated data), as a "
                    "mapping from each such factor's name to the list of ALL its values: at least two, each listed once, "
@@ -693,14 +804,20 @@ def grid_request(topic: str, problem: str) -> str:
         "How the grid is run:\n"
         "- FI runs every combination of the values of the settings in `protocol.grid`: each setting multiplies every other.\n"
         "- Settings that belong to separate parts of the study (each varied on its own, for example one study per method) "
-        "cannot share one grid: together they multiply into a count nobody can run.\n"
-        "Rewrite the plan's settings so the grid fits, in any of these ways:\n"
-        "- keep in `protocol.grid` only the settings that are meant to be crossed with one another;\n"
-        "- hold every other setting at one value, in `protocol.constants`;\n"
+        "must not be crossed with one another: together they multiply into a count nobody can run. Divide them in "
+        "`protocol.sub_studies` instead.\n"
+        "Rewrite the plan's settings so the study fits, in any of these ways:\n"
+        "- keep every setting and its values in `protocol.grid`, and write `protocol.sub_studies`: one entry for each separate "
+        "part of the study, with a `name`, `vary` (the settings that part crosses with one another) and `hold` (the value it "
+        "keeps EVERY other setting of `protocol.grid` at: one of that setting's values). A setting can be in several parts, "
+        "and a setting can be held at a different value in each part. The study then has the settings of each part, not "
+        "every combination of all of them, and no comparison is lost;\n"
+        "- fix at one value, in `protocol.constants`, a setting that has a single value already;\n"
         "- move a factor that each run compares inside it (all its values in one run) to `protocol.in_each_run`, where its "
         "values do not multiply the settings;\n"
         "- or give a setting fewer values.\n"
-        "Write `protocol.grid` again, and `protocol.constants` and `protocol.in_each_run` as they must now be (each whole). "
+        "Write `protocol.grid` again, with `protocol.sub_studies` if you divide it, and `protocol.constants` and "
+        "`protocol.in_each_run` as they must now be (each whole). "
         "Change nothing else in the plan.")
 
 

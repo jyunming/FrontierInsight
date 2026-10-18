@@ -104,9 +104,55 @@ async def test_a_script_that_cannot_run_to_the_end_is_said_so_not_called_a_resul
     assert "could not run to the end" in capsys.readouterr().out
 
 
+CRASH_CODE = _FAKE_EXPERIMENT_CODE.replace("print('RESULT_JSON: {\"score\": 0.987}')",
+                                           "raise RuntimeError('the script is broken')")
+
+
+@pytest.mark.asyncio
+async def test_a_script_that_still_crashes_is_written_again_once_from_the_same_design_then_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert CRASH_CODE != _FAKE_EXPERIMENT_CODE
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _chat(calls, CRASH_CODE))
+    eng = Engine(_cfg(tmp_path))
+    art = await eng.run()
+    assert art.paper_md is None and "Writing" not in calls
+    assert calls.count("Experiment Design") == 1, "a crash never sends the quest back to design"
+    assert calls.count("Implementation") >= 2, "the code was written again"
+    log = (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "the design stays as it is and its code is written again once" in log
+    assert "sending the quest back to design once" not in log
+    record = json.loads((eng.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert "wrote the code again from the same design" in record["problem"]
+    assert "asked for the design again" not in record["problem"]
+    assert any("from the same design (the design was not changed)" in line for line in record["tried"])
+
+
+@pytest.mark.asyncio
+async def test_a_crash_the_rewritten_code_does_not_have_is_written_up_from_the_same_design(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    crashing = _chat(calls, CRASH_CODE)
+    working = _chat(calls, _FAKE_EXPERIMENT_CODE)
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        # The code written first crashes (and its repairs change nothing); the code written again works.
+        rewritten = "the design stays as it is" in (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+        return await (working if rewritten else crashing)(self, messages, **kw)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", chat)
+    eng = Engine(_cfg(tmp_path))
+    art = await eng.run()
+    assert art.paper_md is not None and not (eng.quest_root / "needs" / "STUCK.json").is_file()
+    assert calls.count("Experiment Design") == 1, "the design the paper reports is the one the plan froze"
+
+
 def test_the_stop_names_a_crash_and_a_finished_run_differently(tmp_path: Path) -> None:
     eng = Engine(_cfg(tmp_path))
-    base = {"exec_result": {"returncode": 1}, "iteration": 2}
+    base = {"exec_result": {"returncode": 1}, "iteration": 2, "evidence_no_result_retries": 1,  # tried once more
+            "evidence_code_rewritten_at": 2}
     assert eng._no_results_verdict({**base, "result_json": None})["stuck_reason"] == "crashed"
     assert eng._no_results_verdict({**base, "exec_result": {"returncode": 0}, "result_json": {}})["stuck_reason"] == "no_numbers"
     assert eng._no_results_verdict({**base, "exec_result": {"returncode": 0}, "exec_give_up_reason": "x",
@@ -114,22 +160,38 @@ def test_the_stop_names_a_crash_and_a_finished_run_differently(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason, redesigned, said, not_said", [
-    ("crashed", 0, "could not run to the end", "asked for the design again"),
-    ("crashed", 1, "even after the design was asked for again", ""),
-    ("no_numbers", 0, "has no number in it", "asked for again"),
-    ("no_numbers", 1, "even after the design was asked for again", ""),
+@pytest.mark.parametrize("reason, redesigned, rewritten, said, not_said", [
+    ("crashed", 0, False, "could not run to the end", "asked for the design again"),
+    ("crashed", 1, False, "even after the design was asked for again", ""),
+    ("crashed", 0, True, "even after FI wrote the code again from the same design", "asked for the design again"),
+    ("crashed", 1, True, "wrote the code again from the same design and asked for the design again", ""),
+    ("no_numbers", 1, True, "even after the code was written again from the same design and the design was asked", ""),
+    ("no_numbers", 0, False, "has no number in it", "asked for again"),
+    ("no_numbers", 1, False, "even after the design was asked for again", ""),
 ])
 async def test_the_stop_says_only_what_happened(
-    tmp_path: Path, reason: str, redesigned: int, said: str, not_said: str,
+    tmp_path: Path, reason: str, redesigned: int, rewritten: bool, said: str, not_said: str,
 ) -> None:
     eng = Engine(_cfg(tmp_path))
     out = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": reason},
-                                             "evidence_no_result_retries": redesigned})
+                                             "evidence_no_result_retries": redesigned,
+                                             "evidence_code_rewritten_at": 0 if rewritten else None})
     record = out["stuck"]
     text = record["problem"] + " " + " ".join(record["tried"]) + " " + record["why_repairs_ended"]
     assert said in text
     if not_said:
         assert not_said not in text
     if not redesigned:
-        assert "back to the design" not in text and "again" not in text.replace("asked for again", "")
+        assert "back to the design" not in text
+    if not redesigned and not rewritten:
+        assert "again" not in text.replace("asked for again", "")
+
+
+@pytest.mark.asyncio
+async def test_a_run_stopped_for_its_time_is_not_said_to_have_failed_with_an_error(tmp_path: Path) -> None:
+    eng = Engine(_cfg(tmp_path))
+    out = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": "crashed"}, "evidence_no_result_retries": 1,
+                                             "exec_result": {"returncode": -1, "timed_out": True}})
+    text = out["stuck"]["problem"] + " " + " ".join(out["stuck"]["tried"]) + " " + out["stuck"]["why_repairs_ended"]
+    assert "ran past the time it is allowed" in text and "stopped for running past the time allowed" in text
+    assert "with an error" not in text and "could not run to the end" not in text

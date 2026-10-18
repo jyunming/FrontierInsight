@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import optimise_search as _search
 from . import trial_checks as _checks
 from . import trial_runner as _trials
 
@@ -55,7 +56,15 @@ def budget(timeout_s: Any) -> int:
 
 def settings(grid: dict[str, Any] | None) -> list[dict[str, Any]]:
     """The settings the small run uses: the middle value of every axis, then every axis at its first value, then every
-    axis at its last value (the two corners), each once."""
+    axis at its last value (the two corners), each once. A study of separate parts (a grid that knows its ``sub_studies``) has
+    no such corners (they are not settings of any part): one real setting of every part is run instead (:func:`core.optimise_search.part_cells`)."""
+    parts = _search.part_cells(grid) if getattr(grid, "sub_studies", None) else []
+    if parts:
+        out = []
+        for _name, cell in parts:
+            if cell not in out:
+                out.append(cell)
+        return out
     axes = {str(k): list(v) for k, v in (grid or {}).items() if isinstance(v, (list, tuple)) and len(v)}
     if not axes:
         return [{}]
@@ -115,7 +124,8 @@ class SmallRun:
                     f"{first.failed} of {first.planned}, {why})")
         failed = sum(s.failed for s in self.settings)
         return (f"{n} trial(s) at {len(self.settings)} setting(s) ran" + (f", {failed} failed" if failed else "")
-                + (" (the small run's time ran out before some settings)" if self.timed_out else ""))
+                + (f" (the small run's time ran out in {sum(1 for s in self.settings if s.timed_out)} of them; "
+                   "a setting that did not finish is slower than the time it was given)" if self.timed_out else ""))
 
     def directive(self) -> str:
         """For the repair of a failed run: what failed, where, and the last traceback."""
@@ -189,7 +199,10 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
     load_error = ""
     # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
     executor = _trials._outside_executor(executor, quest_root)
-    for i, cell in enumerate(settings(grid)):
+    chosen = settings(grid)
+    parts_run = bool(getattr(grid, "sub_studies", None)) and len(chosen) > 1
+    total = len(chosen)
+    for i, cell in enumerate(chosen):
         sub = folder / f"s{i}"
         sub.mkdir(parents=True, exist_ok=True)
         plan = _trials._plan(quest_root, module, {k: [v] for k, v in cell.items()}, runs_per_setting=TRIALS,
@@ -199,6 +212,9 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
             setting = Setting(task["key"], len(task["trials"]))
             out.append(setting)
             left = int(timeout_s - (time.monotonic() - started))
+            if parts_run:
+                # every part is run: each setting gets an equal share of what is left, so one slow part cannot take the time of the rest
+                left = left // max(1, total - len(out) + 1)
             if left <= 0:
                 setting.timed_out = True
                 continue

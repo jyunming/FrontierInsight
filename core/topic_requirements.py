@@ -553,11 +553,13 @@ def judge_parts(req: dict[str, Any], plan: dict[str, Any], unresolved: list[str]
         if mapped is not None and mapped[0] == "judge":
             row["plan_says_it_is_covered_by"] = mapped[1]
         items.append(row)
+    # Everything the plan has, uncut: the reader answers "missing" for what it is not shown, so a value past a cut (the
+    # 47th of 50 settings) was judged absent from a plan that sweeps it.
     shown = {
-        "settings_swept": {a: v[:40] for a, v in plan["axes"].items()},
-        "metrics": [{"id": i, "text": " ".join(t.split())[:200]} for i, t in plan["metrics"]][:60],
-        "equations": [{"id": e["id"], "formula": e["formula"][:300], "source": e["source"][:200]} for e in plan["equations"]][:40],
-        "assumptions": plan["assumptions"][:800],
+        "settings_swept": dict(plan["axes"]),
+        "metrics": [{"id": i, "text": " ".join(t.split())} for i, t in plan["metrics"]],
+        "equations": [{"id": e["id"], "formula": e["formula"], "source": e["source"]} for e in plan["equations"]],
+        "assumptions": plan["assumptions"],
     }
     return json.dumps(items, indent=2, ensure_ascii=False), json.dumps(shown, indent=2, ensure_ascii=False, default=str)
 
@@ -650,7 +652,11 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False, req
         "the best design, a design variable of `protocol.optimisation` with its range, and its value in `protocol.optimisation.baseline.values`). "
         "When the topic's words put all its values into each run (one fit across all of them, every method applied to the "
         "same simulated data), it is a key of `protocol.in_each_run` with all its values instead, not a setting of "
-        "`protocol.grid`: a grid setting is run on its own, once per value. ")
+        "`protocol.grid`: a grid setting is run on its own, once per value. "
+        "Every setting of `protocol.grid` is crossed with every other, unless the plan divides the study into separate "
+        "parts in `protocol.sub_studies` (each part lists, in `vary`, the settings it crosses; the others stay at one value). "
+        "When a setting you add belongs to one part of the study only, do not cross it with the rest: write "
+        "`protocol.sub_studies` with the part it belongs to (the parts the plan already has by their `name`, or a new part). ")
     return (
         "The topic asks for things this plan does not yet include:\n" + "\n".join(lines)
         + f"\n\nThe topic: “{' '.join(str(topic or '').split())[:1500]}”\n\n"
@@ -666,6 +672,74 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False, req
         "`equation:<the equation id>`). FI checks that each named element exists and covers what the topic states. Change "
         "nothing else: not a check, a threshold, a tolerance, a criterion, or a setting the plan already has right."
         + ("\n\nWhat FI read the topic to ask for, with its id for each:\n" + "\n".join(items) if items else ""))
+
+
+def joined_sub_studies(old_protocol: dict[str, Any], grid: dict[str, Any], said: Any) -> list[dict[str, Any]] | None:
+    """The ``protocol.sub_studies`` after settings were added to ``grid``, so that a setting added for one part of the study
+    does not multiply the other parts. ``said``: the answer's own ``sub_studies`` (the part each added setting belongs to;
+    a part it names that the plan already has takes its added settings, any other is a new part). ``None`` when the plan
+    has no sub-studies and the answer names none (the added setting joins the one grid, as before). An added setting that no
+    part has is a part of its own (every other setting held at its first value), never crossed with the rest. A part that
+    held a setting at a value the new grid no longer has holds it at its first value, as a part that says none does (the
+    plan would otherwise not be read, and what the topic asked for would be lost). Whether the result can be read is for
+    :func:`core.plan.normalize_protocol` to say."""
+    have = old_protocol.get("grid") if isinstance(old_protocol.get("grid"), dict) else {}
+    added = [a for a in grid if a not in have]
+    old = [dict(s) for s in old_protocol.get("sub_studies") or [] if isinstance(s, dict)]
+    asked = [s for s in said if isinstance(s, dict)] if isinstance(said, list) else []
+
+    def kept(hold: Any) -> dict[str, Any]:
+        return {a: v for a, v in (hold.items() if isinstance(hold, dict) else ())
+                if not isinstance(grid.get(a), list) or v in grid[a]}
+
+    stale = any(kept(s.get("hold")) != (s.get("hold") or {}) for s in old)
+    if not (added or stale) or not (old or asked):
+        return None
+    subs = old or [{"name": "", "vary": list(have), "hold": {}}]
+    subs = [{**s, "vary": list(s.get("vary") or []), "hold": kept(s.get("hold"))} for s in subs]
+    by_name = {" ".join(str(s.get("name") or "").split()).lower(): s for s in subs if str(s.get("name") or "").strip()}
+    for entry in asked:
+        vary = [a for a in entry.get("vary") or [] if isinstance(a, str) and a in grid] if isinstance(entry.get("vary"), list) else []
+        if not vary:
+            continue
+        name = " ".join(str(entry.get("name") or "").split())
+        home = by_name.get(name.lower()) if name else None
+        if home is not None:
+            for axis in vary:
+                if axis in added and axis not in home["vary"]:
+                    home["vary"].append(axis)
+                    home["hold"].pop(axis, None)
+            continue
+        hold = entry.get("hold") if isinstance(entry.get("hold"), dict) else {}
+        fresh = {"name": name, "vary": vary,
+                 "hold": {a: v for a, v in hold.items() if a in grid and a not in vary and v in grid[a]}}
+        subs.append(fresh)
+        if name:
+            by_name[name.lower()] = fresh
+    varied = {a for s in subs for a in s["vary"]}
+    subs += [{"name": a, "vary": [a], "hold": {}} for a in added if a not in varied]
+    for s in subs:  # every part says the value it holds each setting it does not vary at (the first, if it did not say)
+        for axis, values in grid.items():
+            if axis not in s["vary"] and axis not in s["hold"] and isinstance(values, list) and len(values) > 1:
+                s["hold"][axis] = values[0]
+    return subs
+
+
+def moved_holds(old_protocol: Any, new_protocol: Any) -> list[str]:
+    """Each part of the study whose held value of a setting :func:`joined_sub_studies` had to change (the new values of the
+    setting no longer have it), in plain words: what the part studies changed, and the person is told."""
+    old = {str(s.get("name") or ""): s.get("hold") or {} for s in (old_protocol or {}).get("sub_studies") or []
+           if isinstance(s, dict) and isinstance(s.get("hold"), dict)} if isinstance(old_protocol, dict) else {}
+    out: list[str] = []
+    for s in (new_protocol or {}).get("sub_studies") or [] if isinstance(new_protocol, dict) else []:
+        if not isinstance(s, dict) or not isinstance(s.get("hold"), dict):
+            continue
+        name = str(s.get("name") or "")
+        for axis, value in (old.get(name) or {}).items():
+            if axis in s["hold"] and s["hold"][axis] != value:
+                out.append(f"part `{name}` held `{axis}` at {value!r}, which the new values of `{axis}` no longer have; "
+                           f"it now holds it at {s['hold'][axis]!r}")
+    return out
 
 
 def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -726,6 +800,9 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
                     grid[axis] = values
                     taken = True
         protocol["grid"] = grid
+        subs = joined_sub_studies(o, grid, n.get("sub_studies"))
+        if subs is not None:
+            protocol["sub_studies"] = subs
     for key, ident in (("metrics", "id"),):
         added = [m for m in (n.get(key) if isinstance(n.get(key), list) else []) if isinstance(m, dict) and m.get(ident)]
         have = {str(m.get(ident)) for m in (o.get(key) if isinstance(o.get(key), list) else []) if isinstance(m, dict)}

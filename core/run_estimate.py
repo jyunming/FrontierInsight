@@ -64,6 +64,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import in_run as _in_run
+from . import optimise_search as _search
+from . import outside_run as _outside
+from . import trial_checks as _checks
 from . import trial_runner as _tr
 
 #: The margin added to the measured total before it is compared with the time allowed.
@@ -106,6 +109,10 @@ def axes_of(grid: dict[str, list[Any]]) -> list[tuple[str, list[Any]]]:
 
 
 def cell_count(grid: dict[str, list[Any]]) -> int:
+    """How many settings the study has: every combination of the values, or, for a grid with sub-studies, the settings in
+    at least one of them."""
+    if getattr(grid, "sub_studies", None) and len(axes_of(grid)) == len(grid):
+        return _search.grid_size(grid)
     n = 1
     for _name, values in axes_of(grid):
         n *= len(values)
@@ -121,7 +128,7 @@ class Probe:
     """One timed setting: the whole setting's cost as the real run would pay it (``seconds``), and whether it is only a
     lower bound (the timed trial did not finish within its allowance)."""
 
-    axis: str | None
+    axis: Any  # the setting's name; None for the base; CORNER or PART for the probes that are not one setting's end
     index: int | None
     cell: dict[str, Any]
     seconds: float
@@ -169,6 +176,12 @@ class Estimate:
     together: dict[str, Any] | None = None
     #: ``{metric: the largest standard deviation any timed setting's trials showed}``.
     spreads: dict[str, float] = field(default_factory=dict)
+    #: A study of separate parts: how many parts it has, and how many of them had a setting timed (a part not timed makes the
+    #: estimate a lower bound). ``0, 0`` for a study of one grid.
+    parts: int = 0
+    parts_timed: int = 0
+    #: ``[(part, its settings, the seconds one of its settings took)]``: the cost summed per part.
+    part_costs: list[tuple[str, int, float]] = field(default_factory=list)
 
 
 def probe_key(cell: dict[str, Any], runs: int) -> str:
@@ -194,7 +207,25 @@ def probe_cells(grid: dict[str, list[Any]]) -> list[tuple[str | None, int | None
 COSTLY = 2.0
 #: Up to this many settings are added one by one when the settings interact; beyond it the mean ratios are used, capped.
 ENUM_LIMIT = 50000
-CORNER = "together"
+
+
+class _Label:
+    """A probe's label that is not a setting's name (:attr:`Probe.axis` holds either). It equals only itself, so a study
+    whose setting is called ``part`` or ``together`` is timed and summed like any other setting."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return self.name
+
+
+#: The label of the probe that times the most expensive setting (every costly end together).
+CORNER = _Label("together")
+#: The label of a probe that times one setting of a sub-study (``Probe.index``: the number of the sub-study, from 0).
+PART = _Label("part")
 
 
 def _cost_ratio(p: Probe, base: Probe) -> float:
@@ -262,7 +293,7 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
     axes = axes_of(grid)
     ratios: dict[str, dict[str, float]] = {}
     per_axis: list[list[float]] = []
-    complete = sum(1 for p in probes if p.axis != CORNER) == len(probe_cells(grid))
+    complete = sum(1 for p in probes if p.axis not in (CORNER, PART)) == len(probe_cells(grid))
     for name, values in axes:
         mid = len(values) // 2
         known = {mid: 1.0}
@@ -276,6 +307,10 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
     for per_value in per_axis:
         mean_ratio *= sum(per_value) / len(per_value)
     total_ratio = cells * mean_ratio
+    # Sub-studies: the settings of the study are those of each sub-study (not every combination), so the cost is summed over them.
+    staged = bool(getattr(grid, "sub_studies", None)) and len(axes) == len(grid)
+    if staged:
+        total_ratio = _search.grid_weight(grid, {name: per_axis[k] for k, (name, _v) in enumerate(axes)})
     costly = costly_ends(grid, probes)
     corner = next((p for p in probes if p.axis == CORNER), None)
     together = None
@@ -289,13 +324,28 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
         together = {"cell": dict(corner.cell), "ratio": round(c, 3)}
         if cells <= ENUM_LIMIT:
             total_ratio = 0.0
-            for combo in itertools.product(*per_axis):
+            for combo in (itertools.product(*per_axis) if not staged else
+                          ([per_axis[k][i] for k, i in enumerate(picked)] for picked in _search.iter_grid_indexes(grid))):
                 total_ratio += min(math.prod(combo) * scale, max(c, 1.0))
         else:
             total_ratio = min(total_ratio * scale, cells * max(c, 1.0))
-    return Estimate(seconds=base.seconds * total_ratio, at_least=any(p.at_least for p in probes), complete=complete,
+    seconds, at_least = base.seconds * total_ratio, any(p.at_least for p in probes)
+    sizes = _search.sub_study_sizes(grid) if staged else []
+    timed_parts = {p.index: p for p in probes if p.axis == PART}
+    part_costs: list[tuple[str, int, float]] = []
+    if sizes and timed_parts:
+        # Settings of different parts can cost very different amounts (what a run computes differs), so the cost is summed
+        # per part: its settings times the time of a setting of it that was timed (the base's time for a part not timed, and
+        # then the total is only a lower bound). The larger of this and the per-setting reading above is taken.
+        for k, (name, size) in enumerate(sizes):
+            probe = timed_parts.get(k)
+            part_costs.append((name, size, probe.seconds if probe is not None else base.seconds))
+        seconds = max(seconds, sum(size * cost for _n, size, cost in part_costs))
+        at_least = at_least or len(timed_parts) < len(sizes)
+    return Estimate(seconds=seconds, at_least=at_least, complete=complete,
                     cells=cells, trials=trial_count(grid, runs, deterministic), ratios=ratios, base=dict(base.cell),
-                    base_seconds=base.seconds, timed=len(probes), together=together, spreads=spreads_of(probes))
+                    base_seconds=base.seconds, timed=len(probes), together=together, spreads=spreads_of(probes),
+                    parts=len(sizes) if timed_parts else 0, parts_timed=len(timed_parts), part_costs=part_costs)
 
 
 def spreads_of(probes: list[Probe]) -> dict[str, float]:
@@ -336,7 +386,7 @@ async def measure(
     started = time.monotonic()
     probes: list[Probe] = []
 
-    async def time_cell(axis: str | None, index: int | None, cell: dict[str, Any]) -> tuple[bool, str]:
+    async def time_cell(axis: str | None, index: int | None, cell: dict[str, Any], most_s: float = 0.0) -> tuple[bool, str]:
         """Time one setting into ``probes``; ``(False, why)`` when the simulation could not be timed."""
         key = probe_key(cell, runs)
         if cached and key in cached:
@@ -347,7 +397,7 @@ async def measure(
         left = budget_s - (time.monotonic() - started)
         if probes and left < 5:
             return True, "budget"
-        timeout = int(max(5, min(allowance, max(left, 60.0) if not probes else left)))
+        timeout = int(max(5, min(max(allowance, most_s), max(left, 60.0) if not probes else left)))
         probe, why = await _time_one(executor, python, quest_root, module, cell, runs=runs, deterministic=deterministic,
                                      timeout_s=timeout, env=env, thresholds=thresholds, in_each_run=in_each_run)
         if probe is None:
@@ -356,8 +406,14 @@ async def measure(
         probes.append(probe)
         return True, ""
 
-    for axis, index, cell in probe_cells(grid):
-        ok, why = await time_cell(axis, index, cell)
+    cells = probe_cells(grid)
+    # A study of separate parts: one setting of every part is timed right after the base, before the time for timing runs out.
+    # A setting of a part that does not finish in (the time allowed / the part's settings) shows the part alone is over the limit,
+    # so that is the most a part's setting is given (a lower bound it leaves is then already over).
+    parts = [(PART, k, cell) for k, (_name, cell) in enumerate(_search.part_cells(grid))]
+    sizes = [size for _name, size in _search.sub_study_sizes(grid)]
+    for axis, index, cell in cells[:1] + parts + cells[1:]:
+        ok, why = await time_cell(axis, index, cell, math.ceil(limit_s / max(1, sizes[index])) + 1 if axis == PART else 0.0)
         if not ok:
             return None, why
         if why == "budget":
@@ -396,9 +452,9 @@ async def _time_one(
                                 **({"stop_after_s": TIMING_LATER_S} if n > 1 else {})},
                                default=str), encoding="utf-8")
     t0 = time.monotonic()
-    result = await executor.execute(
-        [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
-         out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
+    result = await _outside.execute_keeping_only_finished(
+        executor, [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
+                   out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
     wall = time.monotonic() - t0
     try:
         rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -411,12 +467,16 @@ async def _time_one(
     if loaded is not None:
         return None, f"the simulation could not be loaded ({loaded['load_error']})"
     done = sorted((r for r in rows if r.get("status") == "ok"), key=lambda r: int(r.get("trial") or 0))
-    failed = next((r for r in rows if r.get("status") == "failed"), None)
-    if failed is not None:
-        where = _tr.last_frame(str(failed.get("traceback") or ""), quest_root)
-        return None, f"a trial failed: {failed.get('reason') or 'no reason given'}" + (f" (at {where})" if where else "")
+    failures = [r for r in rows if r.get("status") == "failed"]
     # One trial, or for a stochastic setting at least two (the harness stops once the later ones took TIMING_LATER_S).
     wanted = min(n, 2)
+    # A trial that fails now and then is judged as the full run judges it (core/trial_checks.py: more than half failing at
+    # a setting is a fault): the timing does not hold the simulation to a stricter rule than the run does. A setting where
+    # too few trials finish to time it, or more than that share failed, is a setting the simulation fails at.
+    if failures and (len(done) < wanted or len(failures) > _checks.FAULT_FRACTION * (len(done) + len(failures))):
+        failed = failures[0]
+        where = _tr.last_frame(str(failed.get("traceback") or ""), quest_root)
+        return None, f"a trial failed: {failed.get('reason') or 'no reason given'}" + (f" (at {where})" if where else "")
     if getattr(result, "timed_out", False) and len(done) < wanted:
         # Past its allowance with `len(done)` trials in: the next one costs at least what is left of the allowance.
         per_trial = timeout_s / (len(done) + 1)
@@ -672,9 +732,9 @@ async def run_values(
                                 "cell": {**cell, **inside}, "levels": _in_run.level_cells(inside),
                                 "trials": [{"trial": 0, "seed": None if deterministic else _tr.trial_seed(0, key, 0)}],
                                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
-    await executor.execute(
-        [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
-         out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
+    await _outside.execute_keeping_only_finished(
+        executor, [str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
+                   out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=env)
     try:
         rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
     except (OSError, ValueError):
@@ -776,8 +836,12 @@ def write_record(quest_root: Path, record: dict[str, Any]) -> bool:
 def says(est: Estimate, limit_s: float, *, topic: bool = False) -> str:
     """The one plain line for run.log and the console. ``topic``: the limit is the one the topic states."""
     whose = "the topic's" if topic else "the"
-    return (f"FI estimates the experiment takes {'at least ' if est.at_least else 'about '}"
+    line = (f"FI estimates the experiment takes {'at least ' if est.at_least else 'about '}"
             f"{plain_duration(est.seconds * SAFETY)}; {whose} limit is {plain_duration(limit_s)}")
+    if est.parts and est.parts_timed < est.parts:
+        line += (f" (the time FI allows for timing ran out after {est.parts_timed} of the study's {est.parts} parts, so the "
+                 "rest are counted at the cost of the base: this is a lower bound)")
+    return line
 
 
 def progress_line(done_cells: int, cells: int, done_trials: int, trials: int, elapsed_s: float) -> str:

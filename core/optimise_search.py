@@ -978,9 +978,135 @@ class TooManySettings(ValueError):
     """A grid has more settings than FI lists. The message is what a person reads."""
 
 
+class StudyGrid(dict):
+    """A protocol's ``grid`` (each setting with every value it takes) together with its ``sub_studies``: separate parts of
+    the study that each vary only some of the settings, the others held at one value. Everywhere but in counting and
+    listing the settings it is the plain dict of axes, so every reader of the grid keeps working. ``sub_studies``: a list of
+    ``{"name", "vary": [axes], "hold": {axis: value}}`` (a setting a sub-study neither varies nor holds is held at its first
+    value). ``everywhere``: settings every setting of the study is crossed with (what each run compares inside it)."""
+
+    def __init__(self, grid, sub_studies=(), everywhere=()):
+        super().__init__(grid)
+        self.sub_studies = [dict(s) for s in sub_studies]
+        self.everywhere = tuple(everywhere)
+
+
+def _value_index(values, wanted):
+    for i, value in enumerate(values):
+        if value == wanted:
+            return i
+    return None
+
+
+def study_grid(protocol):
+    """The ``grid`` of a protocol (``{}`` when it has none). With ``sub_studies`` that read (each one varying settings of the
+    grid, each held value one of its values) it is a :class:`StudyGrid`, so counting and listing the settings give the union
+    of the sub-studies' settings; sub-studies that do not read are left out (the plan check names what is wrong with them)."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    subs = protocol.get("sub_studies")
+    if not grid or not isinstance(subs, list) or not subs:
+        return grid
+    found = []
+    for sub in subs:
+        vary, hold = (sub.get("vary"), sub.get("hold") or {}) if isinstance(sub, dict) else (None, None)
+        if (not isinstance(vary, list) or not vary or not all(isinstance(a, str) and a in grid for a in vary)
+                or not isinstance(hold, dict)
+                or not all(isinstance(a, str) and a in grid and isinstance(grid[a], (list, tuple))
+                           and _value_index(grid[a], v) is not None for a, v in hold.items())):
+            return grid
+        found.append({"name": str(sub.get("name") or ""), "vary": list(vary), "hold": dict(hold)})
+    return StudyGrid(grid, found)
+
+
+def with_everywhere(grid, inside):
+    """``grid`` with the settings ``inside`` (a dict) added, each crossed with every setting of the study; a grid with
+    sub-studies stays one."""
+    merged = {**grid, **inside}
+    if not getattr(grid, "sub_studies", None):
+        return merged
+    return StudyGrid(merged, grid.sub_studies, tuple(getattr(grid, "everywhere", ())) + tuple(inside))
+
+
+def with_axes(grid, axes):
+    """``axes`` (a dict) as a grid of the same kind as ``grid``: with its sub-studies when it has them."""
+    if not getattr(grid, "sub_studies", None):
+        return axes
+    return StudyGrid(axes, grid.sub_studies, getattr(grid, "everywhere", ()))
+
+
+def _axis_choices(grid, sub):
+    """For one sub-study, the indexes of the values each axis of ``grid`` takes in it (all of them, or the one it is held at)."""
+    out = []
+    for name, values in grid.items():
+        if name in sub["vary"] or name in grid.everywhere:
+            out.append(list(range(len(values))))
+        else:
+            held = _value_index(values, sub["hold"][name]) if name in sub["hold"] else 0
+            out.append([held or 0])
+    return out
+
+
+#: Counting the settings that two or more sub-studies share by inclusion-exclusion takes 2^n steps, so it is done for up to this
+#: many sub-studies; beyond it :func:`grid_size` lists the settings to count them when the sum of the parts is under the limit
+#: FI lists, and otherwise gives that sum (an upper bound: the study is stopped for its size either way).
+MAX_EXACT_SUB_STUDIES = 12
+
+
+def grid_weight(grid, weights=None):
+    """The sum, over the settings of a grid, of the product of one weight per axis (``weights``: ``{axis: [a weight for
+    each of its values]}``; an axis without one weighs 1 per value, so the sum is the number of settings). For a grid
+    with sub-studies it is the sum over the settings in at least one of them (one two share is counted once), worked out
+    without listing any: the weight of the settings in all of a set of sub-studies is the product, axis by axis, of the
+    weights of the values they all have, and a setting in several sub-studies is taken out of the sum as often as it was
+    added. A time estimate that gives each value a cost ratio sums them the same way."""
+    names = list(grid)
+    each = [list(weights.get(name) or [1] * len(grid[name])) if weights else [1] * len(grid[name]) for name in names]
+    subs = getattr(grid, "sub_studies", None)
+    if not subs:
+        return math.prod(sum(w) for w in each)
+    choices = [_axis_choices(grid, sub) for sub in subs]
+    if len(subs) > MAX_EXACT_SUB_STUDIES:
+        return sum(math.prod(sum(each[k][i] for i in c) for k, c in enumerate(one)) for one in choices)
+    total = 0
+    for bits in range(1, 1 << len(subs)):
+        chosen = [choices[i] for i in range(len(subs)) if bits >> i & 1]
+        shared = 1
+        for k in range(len(names)):
+            shared *= sum(each[k][i] for i in set.intersection(*(set(one[k]) for one in chosen)))
+            if not shared:
+                break
+        total += shared if len(chosen) % 2 else -shared
+    return total
+
+
 def grid_size(grid):
-    """How many settings a grid names: the product of its axes' lengths, counted without listing any."""
-    return math.prod(len(values) for values in grid.values())
+    """How many settings a grid names, counted without listing any: the product of its axes' lengths; for a grid with
+    sub-studies, the settings in at least one of them (a setting two of them share is counted once). Always the length of
+    :func:`grid_cells`, except above :data:`MAX_EXACT_SUB_STUDIES` sub-studies and more settings than FI lists, where it is the
+    sum of the sub-studies' (at least the count, over the limit either way)."""
+    subs = getattr(grid, "sub_studies", None)
+    total = grid_weight(grid)
+    if subs and len(subs) > MAX_EXACT_SUB_STUDIES and total <= MAX_LISTED_SETTINGS:
+        return sum(1 for _ in iter_grid_indexes(grid))
+    return total
+
+
+def sub_study_sizes(grid):
+    """``[(name, settings)]`` of the sub-studies of a :class:`StudyGrid` (a setting two share is in both), else ``[]``."""
+    return [(sub.get("name") or f"sub-study {i}", math.prod(len(c) for c in _axis_choices(grid, sub)))
+            for i, sub in enumerate(getattr(grid, "sub_studies", None) or [], start=1)]
+
+
+def part_cells(grid):
+    """``[(name, setting)]``: for each sub-study of a :class:`StudyGrid`, one real setting of it (every setting it varies at its
+    middle value, every other at the value it holds), else ``[]``. A part can cost far more than another (what a run of it
+    computes differs), so timing a setting of every part is how its cost is known."""
+    out = []
+    for i, sub in enumerate(getattr(grid, "sub_studies", None) or [], start=1):
+        picks = [c[len(c) // 2] for c in _axis_choices(grid, sub)]
+        out.append((sub.get("name") or f"sub-study {i}", {name: values[k] for (name, values), k in zip(grid.items(), picks)}))
+    return out
 
 
 def check_listable(grid):
@@ -997,25 +1123,55 @@ def grid_too_large(grid):
     """``""`` when a protocol's ``grid`` is a size FI lists, else one plain sentence: the count (the same
     :func:`grid_size` that :func:`check_listable` stops on, which the trial runner, the run manifest and the script's own
     list all hold to), each setting with its number of values (the most first), and FI's limit. Only ``grid`` multiplies
-    the settings: what every run compares inside it (``in_each_run``) is not in it, and ``constants`` have one value."""
+    the settings: what every run compares inside it (``in_each_run``) is not in it, and ``constants`` have one value. With
+    ``sub_studies`` only the settings of one sub-study multiply: the sentence gives each sub-study's count."""
     if not isinstance(grid, dict) or not grid:
         return ""
     listed = {str(k): (v if isinstance(v, (list, tuple)) else [v]) for k, v in grid.items()}
+    if getattr(grid, "sub_studies", None):
+        listed = StudyGrid(listed, grid.sub_studies, grid.everywhere)
     counts = {k: len(v) for k, v in listed.items()}
     size = grid_size(listed)
     if size <= MAX_LISTED_SETTINGS:
         return ""
+    if getattr(listed, "sub_studies", None):
+        parts = ", ".join(f"`{name}` {n:,}" for name, n in sorted(sub_study_sizes(listed), key=lambda kv: -kv[1]))
+        return (f"the settings in `protocol.grid` and `protocol.sub_studies` are {size:,} (the settings of each sub-study, "
+                f"every combination of the values of the settings it varies): {parts}; FI does not list or run more than "
+                f"{MAX_LISTED_SETTINGS:,}")
     axes = ", ".join(f"`{k}` {n} value{'s' if n != 1 else ''}"
                      for k, n in sorted(counts.items(), key=lambda kv: -kv[1]) if n > 1)
     return (f"the settings in `protocol.grid` are {size:,} (every combination of the values of its {len(counts)} settings, "
             f"each multiplying every other): {axes}; FI does not list or run more than {MAX_LISTED_SETTINGS:,}")
 
 
-def grid_cells(grid):
-    """Every combination of a grid's values (axes in order), as the trial runner makes them."""
-    check_listable(grid)
+def iter_grid_indexes(grid):
+    """The settings of :func:`grid_cells` one at a time, each as the index of its value on every axis (axes in order),
+    without the size check (a caller that takes only the first few)."""
+    subs = getattr(grid, "sub_studies", None)
+    if not subs:
+        yield from itertools.product(*(range(len(v)) for v in grid.values()))
+        return
+    seen = set()
+    for sub in subs:
+        for picked in itertools.product(*_axis_choices(grid, sub)):
+            if picked not in seen:
+                seen.add(picked)
+                yield picked
+
+
+def iter_grid_cells(grid):
+    """The settings of :func:`grid_cells` one at a time, without the size check."""
     axes = list(grid.items())
-    return [dict(zip((a for a, _ in axes), combo)) for combo in itertools.product(*(v for _, v in axes))]
+    for picked in iter_grid_indexes(grid):
+        yield {a: v[i] for (a, v), i in zip(axes, picked)}
+
+
+def grid_cells(grid):
+    """Every setting of a grid, as the trial runner makes them: every combination of the values (axes in order), or, for a
+    grid with sub-studies, the settings of each sub-study in turn without the ones an earlier sub-study already has."""
+    check_listable(grid)
+    return list(iter_grid_cells(grid))
 
 
 def run_sync(block, evaluate, *, seed, method=None, scan_step=None, drive_step=None, deadline=None,

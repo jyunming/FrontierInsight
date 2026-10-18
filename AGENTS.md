@@ -8,7 +8,7 @@ Frontier Insight (FI) is a Windows + Linux native automated research pipeline. *
 
 The graph has two paths after `design`. The simulate path is `implement → execute → execute_reflect → improve → analyze` (`improve`, `core/improve.py`, changes the simulation one step at a time against the protocol's checks of correctness, bounded by `engine.improve_rounds`, and sends a kept version back to `execute` once); the no-simulation path (when `state.no_simulation_resolved` is True, decided at `clarify` or via `engine.no_simulation: true` in YAML) is `auto_collect_data → wait_for_data → data_load → analyze`. Both converge at `analyze → cross_check → write → review`.
 
-Three feedback loops: (a) `execute_reflect → execute` — fix a crashed script, bounded by `engine.exec_reflect_max_iterations`; (b) `cross_check → design` — `analyze.next_step == re_experiment` re-routes to design only when FI's own record shows the plan's precision target missed and a larger run fits the time allowed (`broaden_lit` re-enters `literature`); (c) `review → write` — the paper is written again for what the review found; a revise verdict or an objection to the design that no check of FI's confirms is kept in the quality report (`QUALITY.md`) and never changes the design (`review → design` only for a person's note the rewrite left unanswered). `review` can also go to `implement` (a computed number is wrong; re-run, a small fixed number of times) and to `human_feedback`; a person's refine goes `human_feedback → write`, and `write → design` only when the writer names a point that needs a new experiment; `evidence_gate → literature` broadens (bounded) and `evidence_gate → design` retries once when the run produced no results. Loops (b) and (c) share `engine.max_iterations` as the budget; loop (a) has its own counter so a broken script doesn't eat the design-iteration budget. `no_simulation_resolved` is sticky across re-entries, so a redesign on a no-sim quest goes back through `auto_collect_data`, not `implement`.
+Three feedback loops: (a) `execute_reflect → execute` — fix a crashed script, bounded by `engine.exec_reflect_max_iterations`; (b) `cross_check → design` — `analyze.next_step == re_experiment` re-routes to design only when FI's own record shows the plan's precision target missed and a larger run fits the time allowed (`broaden_lit` re-enters `literature`); (c) `review → write` — the paper is written again for what the review found; a revise verdict or an objection to the design that no check of FI's confirms is kept in the quality report (`QUALITY.md`) and never changes the design (`review → design` only for a person's note the rewrite left unanswered). `review` can also go to `implement` (a computed number is wrong; re-run, a small fixed number of times) and to `human_feedback`; a person's refine goes `human_feedback → write`, and `write → design` only when the writer names a point that needs a new experiment; `evidence_gate → literature` broadens (bounded) and `evidence_gate → design` retries once when the run produced no results, except that a script that could not run to the end goes `evidence_gate → implement`: the same design's code is written again, once per design. Loops (b) and (c) share `engine.max_iterations` as the budget; loop (a) has its own counter so a broken script doesn't eat the design-iteration budget. `no_simulation_resolved` is sticky across re-entries, so a redesign on a no-sim quest goes back through `auto_collect_data`, not `implement`.
 
 ## A core requirement: rigorous architecture, simple surface
 
@@ -24,6 +24,25 @@ rarest CLI commands out of the default `--help` without removing or renaming a s
 `summary_line()` defaults to a level's plain-language sentence, never the raw six-way identifier. Before adding a new
 user-visible name (a config key, a CLI flag, a file name, a log line), prefer extending something that already exists
 over inventing a new one, and prefer a plain question over a technical field name wherever a person has to answer it.
+
+## How to fix, and how to bring a decision to the maintainer
+
+- **Fix the root cause, not the instance.** When a check misjudges a case, ask where the wrong fact comes from and
+  move its source, rather than adding a rule for that case. A check that guesses after the fact from free text or
+  free code (which result a typed number belongs to, which setting a piece of code reads, what a caption's words
+  mean) gets a new exception for every new wording and keeps failing on the next real input; the root fix is that
+  FI produces the fact itself from its own records (as `{{seed}}`, `{{run_time}}` and `{{not_done:<id>}}` do in
+  `core/paper_facts.py`), or that the heuristic is removed. If a fix is an added exception, say so plainly.
+- **Decide trade-offs with a test, not by judgement.** Before choosing between approaches (stop vs go on, strict vs
+  lenient, model-typed vs FI-filled), run them on the same cases: real inputs whose verdict is known (good) and the
+  same inputs with one planted fault each (bad), scored on faults caught, false flags and false stops, against the
+  project goal (no fabricated result; false stops at most 10%). When the model's behaviour decides it, run a small
+  A/B with the real model and state the cost first.
+- **Bring the maintainer results, not open questions.** A decision goes to the maintainer only after that test:
+  each option with its measured gains and costs and a recommendation. Do not hand over a list of untested choices.
+- **A fix counts as fixed only when its original failing input is shown fixed** (a replay of the real record or
+  quest, or a live run), with a known positive showing the check still fires. Passing unit tests and a review are
+  not that evidence. Only shown fixes go into a PR.
 
 ## Before building a new feature: check what already exists
 
@@ -63,7 +82,7 @@ header that fails `--check`), `export <template>`, `qmd-index` / `lancedb-sync` 
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -v                                         # full suite, ~9 minutes (real venv creates)
+python -m pytest -v tests/test_<changed>.py                 # only the tests of what you changed (see Tests)
 python launch.py --config examples/integrator_bakeoff/config.yaml
 python launch.py --fleet a.yaml b.yaml --max-concurrent 4 --memory-cap-mb 4096
 python launch.py --config my.yaml --resume <quest_id>       # re-enter a crashed quest from its sqlite checkpoint
@@ -98,6 +117,33 @@ External prerequisites are all optional and feature-gated:
 
 **Dataset adapters** (`core/datasets/`): the no-simulation `auto_collect_data` node can additionally pull structured data via adapters listed in `engine.dataset_adapters`. The abstract base is `core/datasets/base.py::DatasetAdapter` — a single `async def search(self, query: str, *, top_k: int) -> list[DatasetRow]`. Shipped adapters: `worldbank.py` (country-indicator tables via the WorldBank Indicators API, stdlib `urllib`) and `wikipedia.py` (opensearch + page-summary lookups for qualitative topics). Adapter failures log a WARNING and return `[]`; `Engine._run_dataset_adapters` sums counts and keeps the quest moving. Adding a new adapter is a single-file change plus a registry entry; no graph edit.
 
+## Test topics, live runs and reports to the maintainer
+
+- **Public in English, internal in Chinese.** Everything committed is public, so it is written in English: code,
+  comments, prompts, tests, docs, this file, commit messages and PR descriptions. Chinese stays outside the repository
+  (handovers, plans and reports for the maintainer, and every reply to the maintainer, in Traditional Chinese). Inside
+  the repository Chinese is allowed only as data: a quoted string or a code span (text a user may type, such as a
+  regular expression for Chinese words), test fixtures, the historical record `docs/audits/`, and a `*.zh-TW.md`
+  translation next to its English original (the English one is the authority).
+  `tests/test_public_text_english.py` fails on anything else and names the file and line.
+- **A test topic is only a test.** Real research topics used to validate FI (in live runs and replays) never shape what
+  goes into the repo: code, prompts, unit tests, docs, commit messages and PR descriptions do not use that topic's words
+  or carry a special case for it. Fixtures use neutral made-up topics, and every fix must be general.
+- **Watch a live run while it runs.** A long real run is watched throughout (stops, errors, the size of the study and
+  FI's own time estimate); a problem is reported with a proposed way forward as soon as it shows, not after the run ends.
+- **Report outcomes, not process.** Say what is done, what is left, how much better it is, what it cost and its quality;
+  say "not measured" for what was not measured, and never "verified" for what was not observed directly.
+- **What the maintainer may not have seen — only when there is something.** After an answer, add at most three points,
+  each one passing all three tests: it is new (not in the answer above, not something the maintainer said or decided);
+  it is concrete (it names the run, file, number or rule); and it changes something (a result, a cost, an earlier
+  decision, or it needs the maintainer's decision). Decisions come first, each with what every option changes and a
+  recommendation; then gaps, risks and conflicts. Each point is one sentence of fact and one of what it changes or what
+  is asked. Never progress news ("still running"), a repeat of the answer, reminders of rules, general advice or what is
+  already handled. When no point passes, there is no such section; it is never filled to a count.
+- **A handover every 48 hours of work.** What is done and what is open, what waits for the maintainer, the tests
+  actually rerun (none rerun means saying so, not reusing an old number), and when the next one is due; it is a
+  snapshot, the code and records stay the authority. It goes where the maintainer keeps handovers.
+
 ## Conventions and gotchas worth knowing
 
 - **Tilde expansion is manual.** `Config` uses `field_validator(..., mode="before")` to expand `~` in path-shaped YAML fields (`output_dir`, `axon_config` when given as a path, every entry in `knowledge.local_papers`). When adding new path fields, mirror that pattern — pydantic does not expand `~`.
@@ -118,6 +164,8 @@ merge requirements for you).
 
 - **Docs pass first.** Re-check every doc the branch touches (README, `docs/**`, `vscode-frontier-insight/README.md`) for correctness and readability before opening, not as a follow-up — a doc edited three commits ago can go stale from a later commit in the same branch.
 - **One external code review of the diff, always.** Every PR gets at least one review from a tool outside this session (Codex CLI, another Claude session, or `agy`) before it opens, even though it slows the PR down — that slowdown is accepted, not a reason to skip it. Write the diff/prompt to a file and have the reviewer produce a written report, not a verbal summary; read it and decide, finding by finding, what to fix.
+- **A review finds bugs; it does not show a fix works.** The evidence that a fix works is its original failing input
+  shown fixed (see "How to fix" above); a PR lists that evidence per fix.
 - **Re-review after applying that review's fixes, before opening.** A fix for one finding can silently introduce or miss a new bug — a construction site the first fix didn't cover, a fix that only half-applies. Once every finding from the first pass is addressed, run a second, targeted pass that checks each changed file specifically against the finding it was meant to fix (a full fresh review is not required, but skipping this step is not an option). Applying a suggested fix is not the same claim as verifying the fix is correct.
 - **Keep `dev/registry.md` current** in the same PR that adds, splits, or renames a module-level responsibility.
 
@@ -147,7 +195,12 @@ Haiku-class model) and run several at once, keeping a larger model for judgment 
 
 ## Tests
 
-`tests/test_config.py` covers the YAML schema and tilde expansion. `tests/test_execution.py` covers `VenvExecutor` (creates a real venv — slow). `tests/test_engine_smoke.py` runs the full DAG with a fake LLM, real venv, real matplotlib install, real subprocess — a regression detector for the engine plumbing. `tests/test_engine_helpers.py` is the unit-test workhorse for the engine resolver / routing helpers (128+ cases). `tests/test_fleet.py` runs two engines concurrently. `tests/test_knowledge.py` covers source adapters, dedup, router-LLM happy/failure paths, local-paper load + pin, PDF magic-bytes check + login-wall rejection, structured-ingest helpers (spine / header / topic event), external-ref spine writes. `tests/test_knowledge_writeback.py` verifies the cross-quest memory write-back call shape and the accept-gate. `tests/test_docker_executor.py` mocks docker-py for unit tests and gates real-daemon integration tests on `info["OSType"] == "linux"` so Windows-mode daemons skip cleanly. Dataset adapters: `tests/test_dataset_adapters.py` (WorldBank registry, country/indicator extraction, table rendering) and `tests/test_wikipedia_adapter.py` (opensearch + summary fetch). VSCode extension: `tests/test_vscode_extension_typescript.py` (tsc + vsce package round-trip) and `tests/test_vscode_extension_icon.py` (the 128×128 RGBA contract + README references). Per-PM-command modules have their own files (`tests/test_{digest,portfolio,critique,proposal}.py`). **Tests do not call real LLM APIs**; introduce new tests with `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` (or `Knowledge.asearch`) to keep that property.
+**Run only the tests of what you changed.** Locally, run the changed or new test files and the tests that call the
+changed functions — never the whole suite (it takes about two hours on Windows and nearly every file imports
+`core/engine.py`, so "related tests" grows to all of them). After merging branches, run only the tests of functions
+the merge touched or conflicted on. CI runs the full suite on every PR.
+
+Test files are mostly named after the module or feature they cover (`tests/test_<name>.py`; grep `tests/` to find them). `tests/test_engine_smoke.py` runs the full DAG with a fake LLM and a real venv — the regression detector for engine plumbing. `tests/test_docker_executor.py` gates real-daemon tests on `info["OSType"] == "linux"` so Windows-mode daemons skip. **Tests do not call real LLM APIs**; introduce new tests with `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` (or `Knowledge.asearch`) to keep that property.
 
 **CI split** (`.github/workflows/ci.yml`): the workflow runs on pull requests only (a merge to main is not re-tested). The **fast tier** runs on both ubuntu-latest and windows-latest with `-m "not slow"` plus an explicit `--ignore` for the three e2e files, in parallel workers (`-n auto --dist loadfile`) and split into shards that run side by side (2 on ubuntu, 3 on Windows): `tests/conftest.py` keeps, for `FI_TEST_SHARD=k/n`, only the test files whose path hashes to shard `k`, so one OS's shards together run every fast-tier test once (unset, it does nothing — a local run is unchanged). Each shard uploads its coverage data; a `coverage floor` job per OS joins them and applies the 65% floor to the whole. The **slow tier** runs on ubuntu only, alongside the fast tier and also in parallel workers, and covers (a) the three e2e files (`test_engine_smoke.py`, `test_self_correction_e2e.py`, `test_web_e2e.py`) and (b) any `@pytest.mark.slow`-tagged test outside them; pytest rc=5 ("no tests collected") is treated as success there. Both tiers gate every code PR — the slow tier was historically post-merge only, but two slow-tier-only regressions slipped past in quick succession, so the gate moved to pre-merge. Exceptions: PRs whose title contains `[ext-only]` skip the Python fast and slow tiers (the `vscode extension compile` job covers them); and the top-level `paths-ignore: ["**.md", "docs/**", "outputs/**"]` filter skips the whole workflow for docs-only PRs.
 

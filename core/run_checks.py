@@ -30,6 +30,7 @@ from typing import Any
 
 from . import frozen_protocol as _frozen
 from . import in_run as _in_run
+from . import optimise_search as _optimise_search
 from . import oracle_forms as _forms
 from . import plan as _plan
 from . import run_estimate as _estimate
@@ -545,14 +546,15 @@ class RunChecksMixin:
 
     def _grid_and_runs(self, state: Any) -> tuple[dict[str, list[Any]], int, dict[str, Any]]:
         protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
-        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-        grid = {str(k): list(v) for k, v in grid.items() if isinstance(v, list) and v}
+        whole = _optimise_search.study_grid(protocol)
+        grid = _optimise_search.with_axes(whole, {str(k): list(v) for k, v in whole.items() if isinstance(v, list) and v})
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
         return grid, max(1, int(protocol.get("runs_per_setting") or 1)), thresholds
 
     def _sizing_key(self, runner: Any, grid: dict[str, list[Any]], runs: int, limit_s: float,
                     inside: dict[str, list[Any]] | None = None) -> str:
-        what = {"grid": grid, **({"in_each_run": inside} if inside else {})}
+        what = {"grid": grid, **({"sub_studies": grid.sub_studies} if getattr(grid, "sub_studies", None) else {}),
+                **({"in_each_run": inside} if inside else {})}
         return _trial_runner._run_key(runner.simulate, what, runs, 0, runner.deterministic) + f"|{int(limit_s)}"
 
     async def _size_the_run(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
@@ -599,7 +601,8 @@ class RunChecksMixin:
         reduced = prior.get("reduced") if prior.get("fits") is not None else None
         # FI lowers the runs once; the lowered run is timed again, and a resume after the cut does not cut a second time.
         cut_done = bool(reduced) and prior.get("fits") is False
-        for _round in range(2):
+        speed_done = False
+        for _round in range(3):
             grid, runs, thresholds = self._grid_and_runs(state)
             inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
             key = self._sizing_key(runner, grid, runs, limit_s, inside)
@@ -645,6 +648,18 @@ class RunChecksMixin:
                 _estimate.write_record(self.quest_root, {**base, "fits": True})  # type: ignore[attr-defined]
                 return None
             self._log.warning("[execute] %s, so it would not finish within it", line)  # type: ignore[attr-defined]
+            if (not speed_done and not cut_done and int(self.config.engine.improve_rounds or 0) > 0  # type: ignore[attr-defined]
+                    and isinstance(runner, _trial_runner.TrialsRunner)):
+                # Before the runs are cut or the quest stops: try to make the simulation itself faster, same numbers.
+                speed_done = True
+                sped = await self._speed_up(state, runner, python, env, grid, runs, thresholds, inside, est, limit_s,
+                                            budget_s=max(0.0, budget_s - self._pilot_spent), probes=probes)
+                if sped.get("kept"):
+                    cached.clear()
+                    # the slower of two timings of the faster simulation is the one the next decision is made on
+                    for p in sped.get("probes") or []:
+                        cached[_estimate.probe_key(p.cell, runs)] = p
+                    continue
             protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
             if cut_done:
                 # The shorter run, timed again, is still over: over the topic's limit but within FI's own, it runs and the
@@ -974,7 +989,7 @@ class RunChecksMixin:
         if _optim.has_block(state.get("design")) or _optimise.block_of(protocol) is not None:
             return None
         self._small_run_ctx = (state, py, exec_env)
-        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}  # knows its sub-studies
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
         deterministic = "run_trial" not in set(getattr(self, "_trial_entries", set()) or ())
         key = _small.key_of(simulate, grid, deterministic, thresholds)
@@ -1176,6 +1191,203 @@ class RunChecksMixin:
             tried=[*[str(t) for t in fault.get("tried") or []],
                    f"sent the simulation back to be repaired with these numbers ({repairs} repair"
                    f"{'s' if repairs != 1 else ''}); the fault stood"])
+
+    async def _speed_up(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
+                        thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
+                        budget_s: float = 600.0, probes: list[Any] | None = None) -> dict[str, Any]:
+        """The study would not fit the time allowed: up to ``engine.improve_rounds`` edits that make the simulation itself
+        faster without changing a number (core/improve_speed.py). FI runs a fixed sample of trials, the checks' own cases
+        included, before and after each edit; an edit is kept only when every number is the same and the sample takes
+        clearly less time, and it passes every guard the correctness loop has. The study is then timed twice and the
+        slower timing stands (``probes``), so the noise of one timing cannot make it fit. ``{"kept": bool, "rounds": [...],
+        "calls": n, "speedup": x, "probes": [...] | None}``."""
+        import asyncio
+
+        from . import changelog as _changelog
+        from . import code_project as _code_project
+        from . import criteria as _criteria
+        from . import improve as _improve
+        from . import improve_speed as _speed
+        from . import oracle_check as _oracle
+
+        root = self.quest_root  # type: ignore[attr-defined]
+        log = self._log  # type: ignore[attr-defined]
+        limit = int(self.config.engine.improve_rounds or 0)  # type: ignore[attr-defined]
+        module = runner.simulate.relative_to(root).as_posix()
+        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        # The guards of the correctness loop, over every check of the plan (not only the ones a criterion names): a speed-up
+        # may not write in a value a check expects, change how a check's number is worked out (so a second implementation
+        # stays a second implementation), or recognise the setting a check runs on.
+        oracles = [o for o in _oracle.declared(protocol)]
+        countable = _criteria.countable(protocol)
+        trial_names = {c["trials"] for c in countable if c.get("trials")}
+        expected, measures, settings = _improve.guards(protocol, oracles, countable, trial_names)
+        cells = _speed.sample_cells(grid, oracles)
+        for cell in cells:
+            for key, value in cell.items():
+                if isinstance(value, (int, float, str)) and not isinstance(value, bool):
+                    settings.setdefault(str(key), []).append(value)
+        timeout_s = max(60, int(self.config.execution.timeout_s))  # type: ignore[attr-defined]
+        timeouts: dict[str, int] | None = None
+        if probes is not None:
+            # The sample is held to what the timing measured: a setting it did not see finish is left out, each gets a
+            # few times its measured cost, and every sample of the step fits in the time left for timing.
+            cells, timeouts, why = _speed.bounded_sample(cells, probes, runs=runs, deterministic=runner.deterministic,
+                                                         budget_s=budget_s, samples=2 + limit)
+            if not cells:
+                log.info("[improve] The simulation is not sped up: %s.", why)
+                return {"goal": "speed", "limit_s": limit_s, "rounds": [], "kept": False, "calls": 0, "probes": None,
+                        "stopped": why}
+            if why:
+                log.info("[improve] %s; a speed-up is not tried on them.", why[0].upper() + why[1:])
+
+        async def sample() -> Any:
+            return await _speed.run_sample(self.executor, python, root, module, cells,  # type: ignore[attr-defined]
+                                           deterministic=runner.deterministic, thresholds=thresholds, in_each_run=inside,
+                                           env=env, timeout_s=timeout_s, log=log, timeouts=timeouts)
+
+        async def time_study() -> list[Any] | None:
+            probes, _why = await _estimate.measure(
+                self.executor, python, root, module, grid, runs=runs, deterministic=runner.deterministic,  # type: ignore[attr-defined]
+                limit_s=limit_s, budget_s=budget_s, env=env, thresholds=thresholds, cached=None, in_each_run=inside)
+            return probes
+
+        padded = est.seconds * _estimate.SAFETY
+        record: dict[str, Any] = {"goal": "speed", "limit_s": limit_s, "estimate_s": padded, "rounds": [], "kept": False,
+                                  "calls": 0, "probes": None}
+        first = await sample()
+        if first.failed or first.seconds <= 0:
+            record["stopped"] = f"the sample did not run ({first.failed or 'no time measured'})"
+            return record
+        # The unchanged code is run a second time: a number that is not the same in both runs is not fixed by the code (a
+        # measure of its own run time, say), so it cannot show that an edit changed a result and is left out of every comparison.
+        again = await sample()
+        if again.failed:
+            record["stopped"] = f"the sample did not run a second time ({again.failed})"
+            return record
+        noisy = _speed.varying(first, again)
+        if noisy:
+            names = sorted(noisy)
+            shown = [f"{k or 'its only setting'} trial {t} {n}" for k, t, n in names[:3]]
+            record["varying"] = shown
+            which = sorted({n.strip("/") for _k, _t, n in noisy})
+            log.info("[improve] %d number(s) of the sample change from one run of the unchanged code to the next (%s); a "
+                     "speed-up is judged on the other numbers.", len(noisy),
+                     ", ".join(which[:3]) + (f" and {len(which) - 3} more" if len(which) > 3 else ""))
+            if len(noisy) >= _speed.count_numbers(first):
+                record["stopped"] = "every number of the sample differs from one run of the unchanged code to the next, so an edit cannot be judged"
+                log.info("[improve] The simulation is not sped up: %s.", record["stopped"])
+                return record
+        needed = padded / max(limit_s, 1e-9)
+        target = needed * _speed.MARGIN
+        original = _improve.snapshot(root)
+        best = {"files": original, "sample": first}
+        tried = {_improve.fingerprint(original)}
+        block = _speed.speed_block(padded, limit_s, first, cells, runs)
+        log.info("[improve] The study would take about %s, more than the %s allowed. Trying to make the simulation itself "
+                 "faster without changing any result (up to %d change(s)).", _estimate.plain_duration(padded),
+                 _estimate.plain_duration(limit_s), limit)
+        self._progress("[improve] The study is too slow for the time allowed; trying to make the simulation faster "  # type: ignore[attr-defined]
+                       "without changing any result.")
+        used = 0
+        while used < limit:
+            used += 1
+            files = _improve.snapshot(root)
+            allowed = _improve.editable(root)
+            prompt = self._prompts["improve_speed"].substitute(  # type: ignore[attr-defined]
+                topic_block=self._topic_block(), speed_block=block,  # type: ignore[attr-defined]
+                history_block=_improve.history_block(record["rounds"]), editable=", ".join(allowed) or "(none)",
+                code_block=_improve.code_block(files, allowed), rounds_left=f"This is round {used} of {limit}.")
+            entry: dict[str, Any] = {"round": used}
+            record["rounds"].append(entry)
+            try:
+                reply = await self._chat(prompt, node="improve")  # type: ignore[attr-defined]
+                record["calls"] += 1
+            except Exception as e:  # noqa: BLE001 -- no answer is no change
+                entry.update(outcome="not asked", reason=repr(e)[:200])
+                break
+            from .engine import _parse_json_lenient
+
+            edit, why = _improve.parse_edit(_parse_json_lenient(reply, node="improve"))
+            new_text = None
+            if edit is not None:
+                new_text, why = _improve.check_edit(files, edit, allowed, tried=tried, expected=expected,
+                                                    measures=measures, settings=settings)
+            if edit is None or new_text is None:
+                entry.update(outcome="refused", reason=why, why=edit.why if edit else "")
+                log.info("[improve] Speed-up %d refused before it ran: %s", used, why)
+                continue
+            name = _improve.edited_path(edit)
+            candidate = {**files, name: new_text}
+            tried.add(_improve.fingerprint(candidate))
+            entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit))
+            _improve.restore(root, candidate)
+            saved = _improve.guard_bytes(root)
+            before_guard = _improve.guard_hashes(root)
+            after = await sample()
+            touched = _improve.changed(before_guard, _improve.guard_hashes(root))
+            if touched:
+                _improve.put_back(root, saved)
+                _improve.restore(root, best["files"])
+                entry.update(outcome="aborted", reason="its run changed " + ", ".join(touched[:4]))
+                log.warning("[improve] Speed-up %d stopped: its test run changed %s, which FI judges the code by; the "
+                            "earlier version is back.", used, ", ".join(touched[:4]))
+                break
+            if after.failed:
+                entry.update(outcome="not kept", reason=f"the sample did not run ({after.failed})")
+            elif (bad := _speed.disagreements(first, after, ignore=noisy)):
+                entry.update(outcome="not kept", reason=f"{len(bad)} number(s) of the sample changed, first: {bad[0]}")
+            elif not _speed.fast_enough(best["sample"].seconds, after.seconds):
+                entry.update(outcome="not kept", reason=f"the sample took {after.seconds:.3f} s against "
+                                                         f"{best['sample'].seconds:.3f} s: not clearly faster")
+            else:
+                entry.update(outcome="kept", reason=f"the sample took {after.seconds:.3f} s against "
+                                                    f"{best['sample'].seconds:.3f} s, with the same numbers")
+                best = {"files": candidate, "sample": after}
+                record["kept"] = True
+                await asyncio.to_thread(
+                    _code_project.record_change, root, f"speed-up {used}: {edit.why}", category="changed",
+                    results=_changelog.results(
+                        "no: every number of a fixed sample of trials (the checks' own cases included) is the same, "
+                        f"and the sample runs {first.seconds / max(best['sample'].seconds, 1e-9):.1f} times faster."),
+                    log=log)
+            if entry["outcome"] != "kept":
+                _improve.restore(root, best["files"])
+            log.info("[improve] Speed-up %d %s: %s", used, "kept" if entry["outcome"] == "kept" else "not kept",
+                     entry.get("reason"))
+            if record["kept"] and first.seconds / max(best["sample"].seconds, 1e-9) >= target:
+                break
+        _improve.restore(root, best["files"])
+        record["sample_s_before"] = first.seconds
+        record["sample_s_after"] = best["sample"].seconds
+        record["speedup"] = first.seconds / max(best["sample"].seconds, 1e-9)
+        record["needed"] = needed
+        if record["kept"]:
+            # Timed twice; the slower timing stands (one timing of the same study differs by a quarter or more).
+            runs_timed = []
+            for _ in range(2):
+                probes = await time_study()
+                if probes is None:
+                    break
+                e = _estimate.estimate(grid, runs, runner.deterministic, probes)
+                if e is not None:
+                    runs_timed.append((e.seconds, probes))
+            if len(runs_timed) == 2:
+                slower = max(runs_timed, key=lambda t: t[0])
+                record["probes"] = slower[1]
+                record["estimate_after_s"] = [round(t[0] * _estimate.SAFETY, 1) for t in runs_timed]
+            log.info("[improve] The simulation is %.1f times faster with the same numbers on the sample%s.", record["speedup"],
+                     f"; timed twice, the study would now take about {_estimate.plain_duration(max(record['estimate_after_s']))}"
+                     if record.get("estimate_after_s") else "")
+        else:
+            log.info("[improve] No change made the simulation clearly faster with the same numbers; it is left as it was.")
+        try:
+            (root / ".fi").mkdir(parents=True, exist_ok=True)
+            (root / ".fi" / "improve_speed.json").write_text(
+                json.dumps({k: v for k, v in record.items() if k != "probes"}, indent=1, default=str), encoding="utf-8")
+        except OSError:
+            pass
+        return record
 
     def _stop_too_long(self, text: str) -> dict[str, Any]:
         """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""

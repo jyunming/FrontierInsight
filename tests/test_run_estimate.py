@@ -7,6 +7,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+from core import optimise_search as search
 from core import run_estimate as est
 from core import trial_runner
 from core.execution import ExecutionResult, SharedInterpreterExecutor
@@ -136,6 +137,41 @@ def test_a_simulation_run_once_per_setting_is_timed_as_one_call(tmp_path: Path) 
     assert why == "" and probes is not None
     by = {p.cell["n"]: p.seconds for p in probes}
     assert 0.55 < by[3] < 1.5 and by[3] > 1.8 * by[1]
+
+
+def test_a_setting_named_like_a_probe_label_is_timed_like_any_other(tmp_path: Path) -> None:
+    """A study may call a setting ``part`` or ``together``: the labels of the probes that are not one setting's end must
+    not be taken for it (a plain grid with a setting ``part`` crashed the timing)."""
+    source = TOY_CELL.replace('cell["n"]', 'cell["part"]').replace('0.2 *', '0.01 *')
+    for name in ("part", "together"):
+        root = _quest(tmp_path / name, source.replace('"part"', f'"{name}"'))
+        grid = {name: [1, 2, 3], "other": [0, 1]}
+        probes, why = _measure(root, grid, 1, True)
+        assert why == "" and probes is not None
+        e = est.estimate(grid, 1, True, probes)
+        assert e is not None and e.complete and e.parts == 0 and set(e.ratios) == {name, "other"}
+
+
+SOMETIMES_FAILS = '''
+import time
+
+def run_trial(cell, trial, seed):
+    time.sleep(0.25)
+    if trial COND:
+        raise RuntimeError("this trial did not converge")
+    return {"y": float(cell["n"]) + (seed % 3)}
+'''
+
+
+def test_a_trial_that_fails_now_and_then_is_timed_as_the_run_judges_it(tmp_path: Path) -> None:
+    """One failed trial among those timed is not a setting the simulation fails at: the full run judges the share that
+    fail (more than half at a setting is a fault), and the timing holds the simulation to that rule, not a stricter one."""
+    root = _quest(tmp_path / "a", SOMETIMES_FAILS.replace("COND", "== 1"))
+    probes, why = _measure(root, {"n": [1, 2]}, 50, False)
+    assert why == "" and probes is not None and all(p.seconds > 0 for p in probes), why
+    root = _quest(tmp_path / "b", SOMETIMES_FAILS.replace("COND", "% 4"))  # three of every four fail
+    probes, why = _measure(root, {"n": [1, 2]}, 50, False)
+    assert probes is None and "a trial failed: RuntimeError: this trial did not converge" in why, why
 
 
 def test_a_simulation_that_fails_when_timed_says_where_and_why(tmp_path: Path) -> None:
@@ -299,3 +335,72 @@ def test_a_smaller_run_timed_again_is_held_to_the_limit_without_the_margin() -> 
     e = est.Estimate(seconds=100.0, at_least=False, complete=True, cells=1, trials=1)
     assert est.known_too_long(e, 120.0) and not est.known_too_long(e, 120.0, timed_again=True)
     assert est.known_too_long(e, 90.0, timed_again=True)
+
+
+# --- a study of separate parts: the cost is timed and summed per part ---------------------------------------------------------
+
+PARTS_GRID = {"kind": ["b", "a"], "n": [1, 2, 3, 4, 5, 6], "m": [1, 2, 3]}
+PARTS = [{"name": "as", "vary": ["n"], "hold": {"kind": "a", "m": 2}}, {"name": "bs", "vary": ["n"], "hold": {"kind": "b", "m": 1}},
+         {"name": "ms", "vary": ["m"], "hold": {"kind": "a", "n": 4}}]
+
+
+def _parts_grid() -> search.StudyGrid:
+    return search.study_grid({"grid": PARTS_GRID, "sub_studies": PARTS})
+
+
+def test_a_setting_of_every_part_is_a_real_setting_of_that_part() -> None:
+    cells = search.part_cells(_parts_grid())
+    assert cells == [("as", {"kind": "a", "n": 4, "m": 2}), ("bs", {"kind": "b", "n": 4, "m": 1}),
+                     ("ms", {"kind": "a", "n": 4, "m": 2})]
+    assert search.part_cells({"kind": ["a", "b"]}) == []  # a grid without parts has none
+
+
+def test_the_cost_is_summed_per_part_so_one_costly_part_is_not_averaged_away() -> None:
+    grid = _parts_grid()
+    base = est.Probe(None, None, {"kind": "a", "n": 4, "m": 2}, 1.0)
+    fast = est.Probe(est.PART, 0, {"kind": "a", "n": 4, "m": 2}, 1.0)
+    slow = est.Probe(est.PART, 1, {"kind": "b", "n": 4, "m": 1}, 100.0)
+    last = est.Probe(est.PART, 2, {"kind": "a", "n": 4, "m": 2}, 1.0)
+    old = est.estimate(grid, 1, True, [base])  # what the timing of the base alone says: every setting costs about 1 s
+    new = est.estimate(grid, 1, True, [base, fast, slow, last])
+    assert old is not None and new is not None and old.seconds < 20 and not old.at_least
+    assert new.seconds >= 6 * 1.0 + 6 * 100.0 + 3 * 1.0 and new.parts == 3 and new.parts_timed == 3
+    assert [(n, size) for n, size, _c in new.part_costs] == [("as", 6), ("bs", 6), ("ms", 3)]
+    # a part not timed counts at the base's cost, and the estimate says it is a lower bound
+    cut = est.estimate(grid, 1, True, [base, fast])
+    assert cut is not None and cut.at_least and cut.parts_timed == 1
+    assert "lower bound" in est.says(cut, 100.0) and "1 of the study's 3 parts" in est.says(cut, 100.0)
+    # a study of one grid is estimated as before
+    plain = {"n": [1, 2, 3]}
+    one = est.estimate(plain, 1, True, [est.Probe(None, None, {"n": 2}, 1.0), est.Probe("n", 0, {"n": 1}, 1.0),
+                                        est.Probe("n", 2, {"n": 3}, 1.0)])
+    assert one is not None and one.parts == 0 and abs(one.seconds - 3.0) < 1e-9
+
+
+class _SlowPart(SharedInterpreterExecutor):
+    """Runs the toy simulation, except that a setting of kind ``b`` with m = 1 runs out of its allowance."""
+
+    def __init__(self) -> None:
+        super().__init__(python_version="3.11")
+
+    async def execute(self, cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001, ANN201
+        import json
+
+        cell = json.loads((Path(cwd) / cmd[2]).read_text(encoding="utf-8"))["cell"]
+        if cell.get("kind") == "b" and cell.get("m") == 1:
+            return ExecutionResult(returncode=-1, stdout="", stderr="", duration_s=float(timeout_s), timed_out=True)
+        return await super().execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+
+def test_replay_a_part_that_never_finishes_makes_the_estimate_a_lower_bound_over_the_limit(tmp_path: Path) -> None:
+    root = _quest(tmp_path, TOY_CELL.replace("0.2 * cell[\"n\"]", "0.01 * cell[\"n\"]"))
+    grid, ex = _parts_grid(), _SlowPart()
+    probes, why = asyncio.run(est.measure(ex, sys.executable, root, "code/simulate.py", grid, runs=1, deterministic=True,
+                                          limit_s=600.0, budget_s=600.0))
+    assert why == "" and probes is not None
+    assert sorted(p.index for p in probes if p.axis == est.PART) == [0, 1, 2], "a setting of every part was timed"
+    e = est.estimate(grid, 1, True, probes)
+    assert e is not None and e.at_least and est.known_too_long(e, 600.0)
+    # timed as before (no setting of the parts), the same study looks small: the slow part is never reached
+    before = est.estimate(grid, 1, True, [p for p in probes if p.axis != est.PART])
+    assert before is not None and not est.known_too_long(before, 600.0)

@@ -294,7 +294,9 @@ def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mism
         out.append(
             f"{name}: you typed {shown}, which {'are not numbers' if many else 'is not a number'} of the plan or the topic. "
             "If it is a result, place its key from the \"Results you can place\" list (FI fills it in); if no key gives it, "
-            "leave it out or say it in words. A number of the method is written exactly as the plan writes it. "
+            "leave it out or say it in words. A number of the method is written exactly as the plan writes it; one the plan "
+            "does not state but that is computed from the plan's numbers (a quantile, a confidence level, a reference value, "
+            "a count from the grid) is written as {{calc:EXPR}}, which FI computes. "
             f"— “{sentence[:400]}”")
     rest = sum(len(tokens) for _s, tokens in rep.sentences[MAX_SENTENCES:])
     if rest:

@@ -37,8 +37,9 @@ read ``<package>/model.py``. A card with neither an example nor a relation is li
 record. A function can be shown passages from the literature (``passages``, :mod:`core.step_passages`) and, for a step with an
 example, the example's inputs; the expected output is shown only in the repair that follows a failed example.
 
-The most the step can ask of the model in a quest is ``max_calls`` (:data:`MAX_CALLS`): at
-most ``functions x (1 + repairs)`` per pass, and never more than that in all passes together. Every call is counted in
+The most the step can ask of the model in a quest is ``max_calls``, which the caller sets to :func:`max_calls_for` the
+number of functions (:data:`CALLS_PER_FUNCTION` each), and never more than that in all passes together; there is no limit
+on the number of functions. Every call is counted in
 ``.fi/function_steps.json``, which also keeps each function's status, so a resume does not fill a function that is done.
 """
 
@@ -58,12 +59,11 @@ from . import plan_steps as _plan_steps
 from . import step_static as _step_static
 
 RECORD = Path(".fi") / "function_steps.json"
-#: Fixed limits (not settings): repairs of ONE function before the code is written whole; model functions above which the
-#: code is written whole; the most requests the step (fills, repairs, and the repairs after the equation tests) may make
-#: in a whole quest.
+#: Fixed limits (not settings): repairs of ONE function before the code is written whole; the most requests the step
+#: (fills, repairs, and the repairs after the equation tests) may make in a whole quest. There is no limit on the number
+#: of functions: the request budget (:func:`max_calls_for`) grows with it and is what bounds the step.
 REPAIRS = 2
 MODULE_REPAIRS = 2
-MAX_FUNCTIONS = 16
 MAX_CALLS = 40
 #: Requests the step may make for ``n`` functions in a whole quest (one fill and up to :data:`REPAIRS` repairs, and a
 #: little over for the module's repairs); the quest-wide count in the record (:func:`spend`) is what holds it. The caller
@@ -417,6 +417,130 @@ def is_stub(source: str, name: str) -> bool:
     return any(isinstance(n, ast.Raise) and _STUB_MARK in ast.dump(n) for n in ast.walk(node))
 
 
+def _name_key(name: str) -> str:
+    return name.lower().replace("_", "")
+
+
+def pair_parameter_names(have: list[str], want: list[str]) -> dict[str, str] | None:
+    """``{name the function has: name it must have}`` when every name in ``have`` (the function's parameters that are not
+    wanted) has exactly one partner in ``want`` (the wanted names the function lacks) that is the same word apart from
+    capitals and underscores (``rate`` and ``Rate``, ``rate_max`` and ``ratemax``): the one pairing with no second reading.
+    Any other difference (a different word, a different number of names) is never paired: which name means which is
+    not something FI can know, and a function with a parameter for another quantity must go to the repair, not be
+    renamed into passing."""
+    if not have or len(have) != len(want):
+        return None
+    pairs: dict[str, str] = {}
+    for h in have:
+        same = [w for w in want if _name_key(w) == _name_key(h)]
+        if len(same) != 1 or len([x for x in have if _name_key(x) == _name_key(h)]) != 1:
+            return None
+        pairs[h] = same[0]
+    return pairs if len(set(pairs.values())) == len(pairs) else None
+
+
+def rename_parameters(source: str, name: str, renames: dict[str, str], *, callers: list[str] | None = None) -> str | None:
+    """``source`` with the parameters of the top-level function ``name`` renamed (``renames``: old to new) in its ``def``
+    line and wherever its body reads them, or ``None`` when that cannot be done without changing what the code means: the
+    function is not there, an old name is not one of its parameters, a new name is already used inside the function, an
+    inner function or lambda has a parameter of the same name, or some code (``callers``: more module texts, besides
+    ``source``) calls the function with a keyword of an old name. Only the text of the names changes; the result is checked
+    to be the same code under the new names."""
+    node = _find(source, name)
+    if node is None or not renames:
+        return None
+    a = node.args
+    if a.vararg or a.kwarg:
+        return None
+    own = {x.arg for x in [*a.posonlyargs, *a.args, *a.kwonlyargs]}
+    if not set(renames) <= own or len(set(renames.values())) != len(renames):
+        return None
+    used = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)} | {n.arg for n in ast.walk(node) if isinstance(n, ast.arg)}
+    if (used - set(renames)) & set(renames.values()):
+        return None
+    for n in ast.walk(node):
+        if isinstance(n, (ast.Global, ast.Nonlocal)) and set(n.names) & set(renames):
+            return None
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) and n is not node and (
+                {x.arg for x in ast.walk(n.args) if isinstance(x, ast.arg)} & set(renames)):
+            return None
+    for text in [source, *(callers or [])]:
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            continue
+        for c in ast.walk(tree):
+            if isinstance(c, ast.Call) and ((isinstance(c.func, ast.Name) and c.func.id == name)
+                                            or (isinstance(c.func, ast.Attribute) and c.func.attr == name)):
+                if any(k.arg in renames for k in c.keywords):
+                    return None
+    spots: list[tuple[int, int, str, str]] = []  # (line, utf-8 column, old, new)
+    for x in [*a.posonlyargs, *a.args, *a.kwonlyargs]:
+        if x.arg in renames:
+            spots.append((x.lineno, x.col_offset, x.arg, renames[x.arg]))
+    for stmt in node.body:
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.Name) and n.id in renames:
+                spots.append((n.lineno, n.col_offset, n.id, renames[n.id]))
+    lines = source.splitlines(keepends=True)
+    for line, col, old, new in sorted(spots, reverse=True):
+        raw = lines[line - 1].encode("utf-8")
+        if raw[col:col + len(old)] != old.encode("utf-8"):
+            return None
+        lines[line - 1] = (raw[:col] + new.encode("utf-8") + raw[col + len(old):]).decode("utf-8")
+    out = "".join(lines)
+
+    expected = ast.parse(source)
+    target = next(n for n in expected.body if isinstance(n, ast.FunctionDef) and n.name == name)
+    for x in [*target.args.posonlyargs, *target.args.args, *target.args.kwonlyargs]:
+        x.arg = renames.get(x.arg, x.arg)
+    for stmt in target.body:
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.Name) and n.id in renames:
+                n.id = renames[n.id]
+    try:
+        return out if ast.dump(ast.parse(out)) == ast.dump(expected) else None
+    except SyntaxError:
+        return None
+
+
+def match_parameter_names(source: str, name: str, wanted: list[str], *, callers: list[str] | None = None) -> str | None:
+    """``source`` with the parameters of function ``name`` renamed to ``wanted`` (the parameters the function must have), when
+    the only difference is names that differ only in capitals or underscores (:func:`pair_parameter_names`); ``None`` when there is nothing to
+    rename or no safe rename."""
+    node = _find(source, name)
+    if node is None:
+        return None
+    have = [n for n in _param_names(node) if not n.startswith("*")]
+    extra = [n for n in have if n not in wanted]
+    lacking = [n for n in wanted if n not in have and not n.startswith("*")]
+    pairs = pair_parameter_names(extra, lacking)
+    return rename_parameters(source, name, pairs, callers=callers) if pairs else None
+
+
+def match_example_names(source: str, name: str, inputs: list[str], *, random: bool = False,
+                        callers: list[str] | None = None) -> tuple[str | None, dict[str, str]]:
+    """``(source with the parameters of function ``name`` named as the plan's worked example names its inputs, the renames
+    made)``, or ``(None, {})`` when there is nothing to do or no safe rename. The test calls the function by the example's
+    input names (:func:`core.equation_tests.parameter_problems`): an input the function has no parameter for is paired with a
+    parameter that has no default and is no input (a random equation's ``rng``/``seed`` are FI's), when the two names differ only
+    in capitals or underscores (:func:`pair_parameter_names`). A parameter with a default is a setting and is never renamed."""
+    node = _find(source, name)
+    if node is None or node.args.vararg or node.args.kwarg:
+        return None, {}
+    a = node.args
+    positional = [*a.posonlyargs, *a.args]
+    required = [x.arg for x in positional[:len(positional) - len(a.defaults)]]
+    required += [x.arg for x, d in zip(a.kwonlyargs, a.kw_defaults) if d is None]
+    everything = {x.arg for x in [*positional, *a.kwonlyargs]}
+    given = set(inputs) | ({*_eqt.RNG_PARAMS, _eqt.SEED_PARAM} if random else set())
+    lacking = [n for n in inputs if n not in everything]
+    extra = [n for n in required if n not in given]
+    pairs = pair_parameter_names(extra, lacking) if lacking else None
+    renamed = rename_parameters(source, name, pairs, callers=callers) if pairs else None
+    return (renamed, pairs or {}) if renamed is not None else (None, {})
+
+
 def changed_signatures(source: str, fixed: dict[str, str]) -> list[str]:
     """For each function of ``fixed`` (its name to the ``def`` line the outline gave it) that ``source`` defines at the
     top level with other parameters: a plain sentence saying so. The outline is the one place a function's parameters
@@ -476,6 +600,14 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
     if node is None:
         return None, f"the reply holds no function named `{name}`"
     want = _param_names(ast.parse(signature.rstrip().rstrip(":") + ":\n    pass").body[0])  # type: ignore[arg-type]
+    if _param_names(node) != want:
+        # A reply that only names a parameter otherwise (``width_max`` for ``width``) is the function with its names put
+        # right by FI when only capitals or underscores differ; any other difference is refused.
+        renamed = match_parameter_names(reply, name, want, callers=[source])
+        if renamed is not None:
+            reply = renamed
+            new_tree = ast.parse(reply)
+            node = next(n for n in new_tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
     if _param_names(node) != want:
         return None, ("the function's parameters must be exactly (" + ", ".join(want) + "), as the outline fixed them; "
                       "the reply has (" + ", ".join(_param_names(node)) + ")")
@@ -720,7 +852,7 @@ def failing(record: dict[str, Any]) -> list[str]:
 
 def spend(quest_root: Path, max_calls: int) -> bool:
     """Count one more request of the step in the quest's total (``.fi/function_steps.json``); ``False`` when the most
-    the step may make in the quest (:data:`MAX_CALLS`) is spent."""
+    the step may make in the quest (``max_calls``, normally :func:`max_calls_for` the number of functions) is spent."""
     record = load(quest_root)
     if int(record.get("calls_total") or 0) >= int(max_calls):
         return False

@@ -134,6 +134,16 @@ def test_check_fixed_by_a_later_attempt(tmp_path: Path) -> None:
     assert _stage(qr.build(root), "run")["problems"]["fixed"] == 1
 
 
+def test_a_reading_of_the_code_that_could_not_decide_is_listed_as_a_note_not_a_stop(tmp_path: Path) -> None:
+    root = _finished(tmp_path / "q-note")
+    note = "FI could not tell from the code whether the settings of `cell` (simulate.py, line 6) draw their own random numbers"
+    _w(root / "needs" / "PROTOCOL_CHECK.json", {"status": "ok", "attempts": [], "differences": [], "notes": [note]})
+    checks = _stage(qr.build(root), "checks")["problems"]
+    assert checks["left_out"] == 1 and checks["not_fixed"] == 0
+    qr.write(root)
+    assert "could not tell from the code" in (root / "QUALITY.md").read_text(encoding="utf-8")
+
+
 def test_crash_and_timeout_suggestions(tmp_path: Path) -> None:
     root = tmp_path / "q-crash"
     _calls(root, [_call("implement", outcome="ReadTimeout"), _call("implement", outcome="ReadTimeout"),

@@ -991,7 +991,8 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
     known = facts(root, topic=topic, fallback_s=fallback_s)
     items = {i.id.lower(): i for i in required_items(root)}
     unfilled: list[str] = []
-    text = to_placeholders(markdown)
+    # A {{calc:...}} is a key FI fills with the result numbers below, not a fact of the run.
+    text = _values.keyed_calcs(to_placeholders(markdown))
     hidden = _hidden_spans(text)
 
     def fill(m: re.Match[str]) -> str:
@@ -1202,10 +1203,11 @@ def value_hits(paper_md: str, quest_root: Path | str) -> list[str]:
     reasons = _values.unavailable_reasons(quest_root)
     out: list[str] = []
     for key in _values.unfilled_in(paper_md):
-        at = bare.find("{{v:" + key + "}}")
+        shown = _values.placeholder(key)
+        at = bare.find(shown)
         why = reasons.get(key) or "FI has no record for it"
-        sentence = _typed.sentence_around(bare, at, at + len(key)) if at >= 0 else ""
-        out.append(f"{HIT}: {{{{v:{key}}}}} is not recorded ({why}). Fix the key so FI can fill it, or leave the number out."
+        sentence = _typed.sentence_around(bare, at, at + len(shown)) if at >= 0 else ""
+        out.append(f"{HIT}: {shown} is not recorded ({why}). Fix the key so FI can fill it, or leave the number out."
                    + (f" \u2014 \u201c{sentence[:400]}\u201d" if sentence else ""))
     return out
 

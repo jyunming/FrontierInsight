@@ -475,6 +475,22 @@ def test_an_axis_whose_values_merely_fit_is_not_a_cover_and_a_formula_needs_the_
     assert unread == [] and unjudged == ["room temperature", "cooling law"], "no answer is named as unchecked, never a pass"
 
 
+def test_the_reader_is_shown_every_value_of_a_setting_and_every_metric_and_equation() -> None:
+    # A setting with 50 values whose last ones are the levels the topic names: a reader shown only the first 40 judged the
+    # level missing from a plan that sweeps it.
+    values = [f"kind_a_{i}" for i in range(46)] + ["best_alpha", "best_beta", "best_gamma", "free_shape"]
+    req = tr.parse({"factors": [{"name": "light pattern", "levels": ["alpha", "free shape"], "main": True}]})
+    view = tr.view(_draft(grid={"pattern_id": values}, topic_map=[{"item": "light pattern", "by": "setting:pattern_id"}]))
+    view["metrics"] = [(f"m{i}", f"m{i} quantity {i} " + "x" * 300) for i in range(70)]
+    view["equations"] = [{"id": f"E{i}", "formula": "y = " + "a + " * 100 + "b", "source": "s"} for i in range(45)]
+    view["assumptions"] = "assume " * 300 + "the last assumption"
+    shown = json.loads(tr.judge_parts(req, view, ["F1"])[1])
+    assert shown["settings_swept"]["pattern_id"] == values
+    assert len(shown["metrics"]) == 70 and shown["metrics"][-1]["text"].endswith("x" * 300)
+    assert len(shown["equations"]) == 45 and shown["equations"][-1]["formula"].endswith("+ b")
+    assert shown["assumptions"].endswith("the last assumption")
+
+
 @pytest.mark.asyncio
 async def test_a_formula_mapped_to_an_unrelated_equation_that_the_reader_rejects_is_a_limitation_not_a_stop(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
