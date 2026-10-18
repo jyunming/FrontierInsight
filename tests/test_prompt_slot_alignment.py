@@ -26,8 +26,10 @@ VAR = re.compile(r"(?<!\$)(?:\$\$)*\$(?:\{)?([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def _substitute_calls() -> dict[str, set[str]]:
-    """Map prompt name -> the kwargs engine.py passes to its substitute()."""
-    src = inspect.getsource(engine_mod)
+    """Map prompt name -> the kwargs engine.py (and the engine's mixins that render a prompt) pass to its substitute()."""
+    import core.agent_build as agent_build_mod
+
+    src = inspect.getsource(engine_mod) + "\n" + inspect.getsource(agent_build_mod)
     calls: dict[str, set[str]] = {}
 
     def _kwargs_from(start: int) -> set[str]:
