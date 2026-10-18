@@ -246,7 +246,8 @@ same PR that adds, splits or renames one.
   A grid of more settings than FI lists: `optimise_search.grid_too_large` (the count lives with `grid_size` /
   `check_listable`, which every runner holds to; returns the plain sentence or `""`), `Engine._ask_plan_for_the_grid`
   (`plan.grid_request`; one ask per plan through `_ask_plan_to_complete`, record `.fi/grid_asked.json`; keeps only `grid`,
-  `in_each_run`, `constants`), and `Engine._grid_too_large_stop` (the run's `too_long` stop, at implement and execute).
+  `sub_studies`, `in_each_run`, `constants`), and `Engine._grid_too_large_stop` (the run's `too_long` stop, at implement and execute).
+- `core/optimise_search.py::StudyGrid` / `study_grid(protocol)` — a protocol's `grid` that also knows its `sub_studies` (`vary` / `hold` per part; `everywhere` for what `in_each_run` crosses with every setting). The one place that counts (`grid_size`, `grid_weight`: exact by inclusion-exclusion, a time estimate sums the same way) and lists (`grid_cells`, `iter_grid_indexes`) the settings of a study; `trial_runner.cells`, `run_manifest._all_cells`, `reference_values.grid_settings`, `run_estimate.cell_count` / `estimate` and the `cells` of the `code/run.py` template (`code_project.py`, which cannot import FI) all go through it or repeat its rule (tests keep them equal). `plan._sub_studies` reads and refuses `protocol.sub_studies`; `topic_requirements.joined_sub_studies` puts a setting added for the topic into a part; `Engine._ask_plan_for_the_grid(again=True)` counts the plan again after the topic added to it.
 - `core/optimise.py` — the engine runs the search for the best design: `OptimisationRunner` (the executor stand-in
   `_node_execute` picks when the design has an `optimisation` block and two scripts, instead of
   `trial_runner.TrialsRunner`; it runs the search, then `experiment.py` with `FI_OPTIMISATION` / `FI_BEST_DESIGN`, and

@@ -40,7 +40,6 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
-from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -183,13 +182,10 @@ HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + HAR
 
 
 def cells(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
-    """Every combination of the grid's values, axes in the grid's order, values in theirs. An empty grid is one cell
-    with no axes (a study that runs one setting)."""
-    _search.check_listable(grid)
-    axes = list(grid.items())
-    if not axes:
-        return [{}]
-    return [dict(zip((a for a, _ in axes), combo)) for combo in product(*(v for _, v in axes))]
+    """Every combination of the grid's values, axes in the grid's order, values in theirs (for a grid with sub-studies, the
+    settings of each in turn, none twice: :func:`core.optimise_search.grid_cells`). An empty grid is one cell with no axes
+    (a study that runs one setting)."""
+    return _search.grid_cells(grid)
 
 
 def _fmt(value: Any) -> str:
@@ -778,7 +774,7 @@ class TrialsRunner:
         self.trial_fault, self.left_out_settings = None, []
         base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
-        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        grid = _search.study_grid(protocol)
         runs = int(protocol.get("runs_per_setting") or 1)
         key = _run_key(self.simulate, protocol, runs, base, self.deterministic)
         # A paired metric compares the settings trial by trial: each trial number gets one seed across the settings.
@@ -1844,7 +1840,7 @@ def given_rows_problems(protocol: dict[str, Any] | None, rows_by_cell: dict[str,
 
     if not isinstance(protocol, dict) or result_json is None:
         return [], []
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid = _search.study_grid(protocol)
     given_of = {str(m["id"]): str(m["given"]) for m in protocol.get("metrics") or []
                 if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")}
     if not given_of:
@@ -2183,7 +2179,7 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
 
     if not isinstance(protocol, dict) or not per_cell or result_json is None:
         return []
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid = _search.study_grid(protocol)
     means = [str(m["id"]) for m in protocol.get("metrics") or []
              if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")]
     names = sorted({n for by_name in per_cell.values() for n in by_name})

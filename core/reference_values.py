@@ -41,6 +41,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from . import optimise_search as _search
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 
@@ -154,6 +155,9 @@ def grid_settings(protocol: dict[str, Any] | None, limit: int = MAX_CHECKED_SETT
     axes = grid_axes(protocol)
     if not axes:
         return [{}]
+    grid = _search.study_grid(protocol)
+    if getattr(grid, "sub_studies", None) and len(axes) == len(grid):  # the settings of its sub-studies, not every combination
+        return list(itertools.islice(_search.iter_grid_cells(grid), limit))
     return [dict(zip(axes, combo)) for combo in itertools.islice(itertools.product(*axes.values()), limit)]
 
 

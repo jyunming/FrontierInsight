@@ -53,7 +53,7 @@ def test_the_request_states_the_arithmetic_and_what_the_plan_can_do() -> None:
     ask = plan.grid_request(TOPIC, search.grid_too_large(BIG))
     assert "147,604,654,080,000" in ask and "every combination" in ask
     assert "`protocol.constants`" in ask and "`protocol.in_each_run`" in ask and "fewer values" in ask
-    assert "cannot share one grid" in ask
+    assert "must not be crossed with one another" in ask
 
 
 def _draft(grid: dict[str, list[Any]], **protocol: Any) -> dict[str, Any]:
@@ -99,16 +99,14 @@ def _record(eng: Any) -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_the_plan_is_asked_once_and_a_grid_that_fits_goes_on(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
-    model = Model(eng, [_set(grid=SMALL, constants={"pitch_nm": 90}, in_each_run={"method": ["abbe", "hopkins"]},
-                             tolerance_changed=True)], _draft(BIG))
+    model = Model(eng, [_set(grid=BIG, sub_studies=PARTS, tolerance_changed=True)], _draft(BIG))
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     assert len(model.asked) == 1 and _record(eng)["count"] == 1
     assert "147,604,654,080,000" in model.asked[0] and "`pitch` 135 values" in model.asked[0]
     state = {"topic": TOPIC, "iteration": 0}
     patch = await eng._node_design(state)
     protocol = patch["design"]["protocol"]
-    assert protocol["grid"] == SMALL and protocol["constants"] == {"pitch_nm": 90}
-    assert protocol["in_each_run"] == {"method": ["abbe", "hopkins"]}
+    assert protocol["grid"] == BIG and len(protocol["sub_studies"]) == len(PARTS)
     assert len(model.asked) == 1, "the design step asks nothing more"
     assert eng._grid_too_large_stop(state) is None
     text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
@@ -177,7 +175,7 @@ async def test_a_redesign_drafted_at_design_is_asked_once_per_round_and_a_grid_t
     state = {"topic": TOPIC, "iteration": 1}
     design = {"protocol": {"grid": {**BIG, "method": ["abbe", "hopkins"]}, "runs_per_setting": 3}}
     out = await eng._ask_design_for_the_grid(state, design, iteration=1)
-    assert len(sent) == 1 and "cannot share one grid" in sent[0] and "settings in `protocol.grid` are" in sent[0]
+    assert len(sent) == 1 and "must not be crossed with one another" in sent[0] and "settings in `protocol.grid` are" in sent[0]
     protocol = out["protocol"]
     assert protocol["grid"] == SMALL and protocol["in_each_run"] == {"method": ["abbe", "hopkins"]}
     assert protocol["constants"] == {"k": 1} and protocol["runs_per_setting"] == 3
@@ -187,3 +185,53 @@ async def test_a_redesign_drafted_at_design_is_asked_once_per_round_and_a_grid_t
     assert stop is not None and "asked the plan's model" in " ".join(stop["exec_result"]["too_long_tried"])
     await eng._ask_design_for_the_grid(state, {"protocol": {"grid": SMALL}}, iteration=2)
     assert len(sent) == 1  # a grid that fits is never asked about
+
+
+def held(grid: dict[str, Any], parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``parts`` with the value each holds every setting it does not vary at (the first, when it says none)."""
+    return [{**p, "hold": {**{a: v[0] for a, v in grid.items() if a not in p["vary"] and len(v) > 1}, **p.get("hold", {})}}
+            for p in parts]
+
+
+NAMES = list(BIG)  # the settings of the real plan this test is built from, in its order; the parts below group them
+PARTS = [{"name": f"part{n}", "vary": [NAMES[i] for i in idx]}
+         for n, idx in enumerate([(0, 1, 2), (3, 9, 10), (4, 5, 11, 12), (6, 7, 8), (13,)], start=1)]
+PARTS = held(BIG, PARTS)
+
+
+@pytest.mark.asyncio
+async def test_the_plan_that_divides_its_grid_into_sub_studies_fits_and_nothing_is_lost(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Model(eng, [_set(grid=BIG, sub_studies=PARTS)], _draft(BIG))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    assert len(model.asked) == 1 and "sub_studies" in model.asked[0]
+    state = {"topic": TOPIC, "iteration": 0}
+    patch = await eng._node_design(state)
+    protocol = patch["design"]["protocol"]
+    assert protocol["grid"] == BIG and [s["name"] for s in protocol["sub_studies"]] == [p["name"] for p in PARTS]
+    study = search.study_grid(protocol)
+    assert search.grid_too_large(study) == "" and search.grid_size(study) < 20_000 < math.prod(AXES.values())
+    assert {a for c in search.grid_cells(study) for a in c} == set(AXES)  # every setting carries every axis
+    for axis, values in BIG.items():
+        assert {c[axis] for c in search.grid_cells(study)} == set(values), axis  # no comparison lost
+    assert len(model.asked) == 1 and eng._grid_too_large_stop(state) is None
+
+
+@pytest.mark.asyncio
+async def test_a_grid_written_again_replaces_the_division_into_sub_studies_it_no_longer_matches(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], _draft(BIG, sub_studies=PARTS))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    assert "sub_studies" in text  # a plan that already divides its grid is not asked anything
+    wider = {**BIG, "extra": [0, 1]}
+    kept = eng._keep_only_the_parts(text, {"protocol": {"grid": wider}}, ["grid", "sub_studies", "in_each_run", "constants"])
+    protocol = plan.parse(kept).design["protocol"]
+    assert protocol["grid"] == wider and "sub_studies" not in protocol  # the old parts do not cover the new grid
+    with pytest.raises(ValueError, match="no entry of `protocol.sub_studies` varies"):  # parts that leave a setting out
+        eng._keep_only_the_parts(text, {"protocol": {"grid": BIG, "sub_studies": PARTS[:2]}}, ["grid", "sub_studies"])
+    assert plan.parse(text).design["protocol"]["grid"] == BIG  # the grid is not taken without its division
+    moved = eng._keep_only_the_parts(text, {"protocol": {"in_each_run": {NAMES[1]: [0, 1]}}}, ["in_each_run"])
+    inside = plan.parse(moved).design["protocol"]
+    assert NAMES[1] not in inside["grid"] and all(NAMES[1] not in p["vary"] for p in inside["sub_studies"])
+    assert search.grid_size(search.study_grid(inside)) > 0

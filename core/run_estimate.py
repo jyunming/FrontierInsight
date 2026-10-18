@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import in_run as _in_run
+from . import optimise_search as _search
 from . import trial_runner as _tr
 
 #: The margin added to the measured total before it is compared with the time allowed.
@@ -106,6 +107,10 @@ def axes_of(grid: dict[str, list[Any]]) -> list[tuple[str, list[Any]]]:
 
 
 def cell_count(grid: dict[str, list[Any]]) -> int:
+    """How many settings the study has: every combination of the values, or, for a grid with sub-studies, the settings in
+    at least one of them."""
+    if getattr(grid, "sub_studies", None) and len(axes_of(grid)) == len(grid):
+        return _search.grid_size(grid)
     n = 1
     for _name, values in axes_of(grid):
         n *= len(values)
@@ -276,6 +281,10 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
     for per_value in per_axis:
         mean_ratio *= sum(per_value) / len(per_value)
     total_ratio = cells * mean_ratio
+    # Sub-studies: the settings of the study are those of each sub-study (not every combination), so the cost is summed over them.
+    staged = bool(getattr(grid, "sub_studies", None)) and len(axes) == len(grid)
+    if staged:
+        total_ratio = _search.grid_weight(grid, {name: per_axis[k] for k, (name, _v) in enumerate(axes)})
     costly = costly_ends(grid, probes)
     corner = next((p for p in probes if p.axis == CORNER), None)
     together = None
@@ -289,7 +298,8 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
         together = {"cell": dict(corner.cell), "ratio": round(c, 3)}
         if cells <= ENUM_LIMIT:
             total_ratio = 0.0
-            for combo in itertools.product(*per_axis):
+            for combo in (itertools.product(*per_axis) if not staged else
+                          ([per_axis[k][i] for k, i in enumerate(picked)] for picked in _search.iter_grid_indexes(grid))):
                 total_ratio += min(math.prod(combo) * scale, max(c, 1.0))
         else:
             total_ratio = min(total_ratio * scale, cells * max(c, 1.0))
