@@ -5828,14 +5828,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
         def lacks(now: Any) -> list[str]:
             wanted, missing, why = self._search_problems(state, now)
-            if not (wanted and missing):
+            # A first scan the plan wrote and FI's reading left out is asked back, not lost without a word: the search
+            # could start without it, but what it was to compare would not be run (it never stops the quest).
+            left = self._scan_left_out(now) if wanted else []
+            if not (wanted and (missing or left)):
                 return []
             # The plain words for the card, and the reader's exact reason for run.log (what the ask quotes to the model).
-            return [*_optim.plain_gaps(now, why, self._scan_limit_s()), *([f"the block cannot be read: {why}"] if why else [])]
+            return [*_optim.plain_gaps(now, why, self._scan_limit_s()), *([f"the block cannot be read: {why}"] if why else []),
+                    *[f"the first scan was left out: {n}" for n in left]]
 
         def request(now: Any, text: str) -> str:
             _wanted, missing, _why = self._search_problems(state, now)
             topic = state.get("topic") or self.config.topic
+            if not missing:  # only a first scan left out: that part alone is asked for, with the reader's reasons
+                return _optim.scan_request(topic, self._scan_left_out(now), left_out=True)
             scan = [m for m in missing if m.startswith("the coarse scan cannot run")]
             if scan and len(scan) == len(missing):
                 return _optim.scan_request(topic, scan)  # the block is complete: only the scan is to be rewritten
@@ -5846,7 +5852,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A scan that cannot run is the only thing wrong: the plan is asked once to rewrite it (a rewrite that still does not
         # fit is not asked for again; the honest stop that follows says why, at design, not hours into the run).
         _wanted, now_missing, _why = self._search_problems(state, design)
-        scan_only = bool(now_missing) and all(m.startswith("the coarse scan cannot run") for m in now_missing)
+        scan_only = (all(m.startswith("the coarse scan cannot run") for m in now_missing)
+                     if now_missing else bool(self._scan_left_out(design)))
         return await self._ask_plan_to_complete(
             design, plan_sha, lacks=lacks, request=request, keep=self._keep_only_the_search, file=_SEARCH_ASKED,
             what="search for the best design", short="the search",
@@ -6804,6 +6811,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     found[part] = line.strip().lstrip("-").strip()
         return found
 
+    def _scan_left_out(self, design: Any) -> list[str]:
+        """The notes FI wrote into plan.md when its reading of the search block left out a part of the first scan
+        (``grid``, ``sub_studies``, ``in_each_run``: :func:`core.optimisation_plan.repair`) that the block still lacks, each
+        with the reader's exact reason; empty for a design with no search block. Only FI's own notes are read."""
+        path = _plan.plan_path(self.quest_root)
+        if not _optim.has_block(design) or not path.is_file():
+            return []
+        block = design["protocol"]["optimisation"]
+        found: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            note = line.strip().lstrip("-").strip()
+            if note not in found and any(f"`protocol.optimisation.{part}` {_optim.LEFT_OUT_UNREAD}" in line
+                                         and block.get(part) is None for part in ("grid", "sub_studies", "in_each_run")):
+                found.append(note)
+        return found
+
     def _keep_only_the_parts(self, before_text: str, answer: dict[str, Any], parts: list[str], passages: str = "") -> str | None:
         """``before_text`` with only the asked ``parts`` of the protocol taken from ``answer`` (the model's JSON, shaped like
         the design block; each part only when it can be read as the plan reads it); everything else, a check, a threshold, a tolerance, is the plan's own as it was.
@@ -7488,6 +7511,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     if key in merged:
                         put_back.append(str(key).replace("_", " "))
                     merged[key] = value
+            # A scan the answer writes anew (the plan had none that could be used) brings the conditions it is compared
+            # across: each one the plan did not hold yet is added under `fixed`, at the value the answer holds it at, as
+            # the reader requires; every value the plan already held stays the plan's own.
+            new_grid, new_fixed = block.get("grid"), block.get("fixed")
+            if (("grid" in unreadable or not old_block.get("grid")) and isinstance(new_grid, dict)
+                    and isinstance(new_fixed, dict) and isinstance(merged.get("fixed"), dict)):
+                added = {k: v for k, v in new_fixed.items() if k in new_grid and k not in merged["fixed"]}
+                if added:
+                    if {k: v for k, v in new_fixed.items() if k not in added} == merged["fixed"]:
+                        put_back = [p for p in put_back if p != "fixed"]  # the answer only added: nothing was put back
+                    merged["fixed"] = {**merged["fixed"], **added}
             if put_back:
                 self._log.warning("[plan] the plan's model also changed what the plan already said about %s; FI kept the "
                                   "plan's own", ", ".join(put_back))
@@ -26844,7 +26878,8 @@ Rules for the block:
 - `search_method`: name a built-in one unless the topic asks for a library; a `scipy:` or `optuna:` method is used only when the quest's environment has that library. A coarse `grid` goes with `global_then_local`.
 - For a study with randomness, add `runs_per_evaluation` (runs per evaluation during the search) and `check_runs` (new runs for each design at the check).
 - Every setting of the scan is crossed with every other, unless `sub_studies` divides it, as in a measurement: alternatives that each have their own parameters are separate parts (each varies its own parameters and holds the rest), so they do not multiply one another. Leave `sub_studies` out when the scan is one part.
-- `in_each_run` holds the values every evaluation goes through together (a design judged over several cases at once): FI gives the simulation each list whole, and the objective is one number over all of them. It is not a setting of the scan.
+- A setting of the scan that is a number and not a design variable is a condition: list it under `fixed` as well, with the value the search holds it at (a setting whose values are names needs no such entry).
+- `in_each_run` holds only what the objective itself is computed over: the cases one design is judged across at once (several load cases, say), which the objective combines into one number. FI gives the simulation each list whole. It is not a setting of the scan, and it is not where alternatives are compared: two ways of computing the same number are an oracle check (`second_implementation`), and alternatives the study compares are settings of the scan, in parts of their own. Every evaluation runs every value in it, so each value adds to the time of every evaluation.
 
 Do not write `study_type: find_best_design` without an `optimisation` block (the quest stops until it has one), nor an `optimisation` block beside a top-level `grid` (that grid is then moved into the block as its coarse scan). A measurement leaves `optimisation` out.
 """

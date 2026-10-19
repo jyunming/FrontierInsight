@@ -198,8 +198,11 @@ def search(study):
     runs = 1 if entry == "run_cell" else int(study.get("runs_per_evaluation") or 1)
 
     def scan(grid):
-        summary = run_trials({"entry": entry, "grid": grid, "runs_per_setting": runs, "base_seed": base,
-                              "paired": True, "thresholds": study.get("thresholds") or {}})
+        # The scan's parts and what every evaluation goes through, as FI ran them (a part is not kept by JSON).
+        summary = run_trials({"entry": entry, "grid": dict(grid), "runs_per_setting": runs, "base_seed": base,
+                              "paired": True, "thresholds": study.get("thresholds") or {},
+                              "sub_studies": getattr(grid, "sub_studies", None) or block.get("sub_studies"),
+                              "in_each_run": block.get("in_each_run") or {}})
         (WORK / "raw" / "trials.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         os.environ["FI_TRIALS"] = "raw/trials.json"
         return fi_search.scan_rows(summary, block)

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import difflib
 import itertools
+import json
 import math
 import re
 from typing import Any
@@ -647,15 +648,25 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
     if inside is not None:
         if not isinstance(inside, dict) or not inside:
             return None, f"{_P}.in_each_run` must map each setting every evaluation goes through to its list of values"
+        from . import plan as _plan
+
+        read: dict[str, list[Any]] = {}
         for name, values in inside.items():
-            if not isinstance(values, list) or len(values) < 2:
+            # Read as a measurement's `in_each_run` is: numbers, names or tuples, each value once.
+            kept, why = _plan._grid_values(name, values, part="optimisation.in_each_run")
+            if why:
+                return None, why
+            if len({json.dumps(float(v) if _number(v) else v) for v in kept or []}) < len(kept or []):
+                return None, f"{_P}.in_each_run` `{name}` lists the same value twice: list every value one time"
+            if len(kept or []) < 2:
                 return None, (f"{_P}.in_each_run` `{name}` must list two or more values (one value is a condition: "
                               f"put it under `{_P[1:]}.fixed`)")
             if str(name) in variables or str(name) in {str(k) for k in (fixed or {})} \
-                    or str(name) in (out.get("grid") or {}):
-                return None, (f"{_P}.in_each_run` `{name}` is also a design variable, a condition held fixed or a "
-                              "setting of the scan: it is one of them")
-        out["in_each_run"] = {str(k): list(v) for k, v in inside.items()}
+                    or str(name) in (out.get("grid") or {}) or str(name) in (out.get("numerical_settings") or {}):
+                return None, (f"{_P}.in_each_run` `{name}` is also a design variable, a condition held fixed, a "
+                              "numerical setting or a setting of the scan: it is one of them")
+            read[str(name)] = list(kept or [])
+        out["in_each_run"] = read
 
     # The scan divided into parts, each varying only some of its settings, as a measurement's `sub_studies` divide its grid.
     subs = out.get("sub_studies")
@@ -667,6 +678,8 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
             for old, new in (("`protocol.sub_studies`", f"{_P}.sub_studies`"), ("`protocol.grid`", f"{_P}.grid`"),
                              ("`protocol.in_each_run`", f"{_P}.in_each_run`")):
                 why = why.replace(old, new)
+            if not why.startswith(_P):  # the block's repair reads the part a message is about from its first words
+                why = f"{_P}.sub_studies`: {why}"
             return None, why
         out["sub_studies"] = fixed_subs
     return out, None
@@ -674,14 +687,22 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
 
 def scan_size(block: dict[str, Any]) -> int:
     """How many designs the coarse scan runs (0 without one): every combination of its settings, or with
-    ``sub_studies`` the settings of its parts together (a setting two parts share is run once)."""
+    ``sub_studies`` the settings of its parts together (a setting two parts share is run once). 0 for a block that cannot
+    be read that far (the plan check says why)."""
     if not (isinstance(block.get("grid"), dict) and block["grid"]):
         return 0
-    return int(_optimise_search.grid_size(_optimise_search.scan_grid(block)))
+    try:
+        return int(_optimise_search.grid_size(_optimise_search.scan_grid(block)))
+    except (KeyError, TypeError, ValueError):
+        return 0
 
 
 _ENTRY = re.compile(r"entry (\d+)")
 _NAMED = re.compile(r"`protocol\.optimisation\.(\w+)` `([^`]+)`")
+
+
+#: How :func:`repair` says that a part of the block was left out (the engine finds a left-out first scan by it).
+LEFT_OUT_UNREAD = "was left out of the plan because it could not be read"
 
 
 def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
@@ -783,8 +804,7 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 continue
         if key in out:
             del out[key]
-            notes.append(f"`protocol.optimisation.{key}` was left out of the plan because it could not be read ({why}); "
-                         "it is not used")
+            notes.append(f"`protocol.optimisation.{key}` {LEFT_OUT_UNREAD} ({why}); it is not used")
             continue
         return None, notes + [f"the optimisation block was left out because it could not be repaired ({why})"]
     return None, notes + ["the optimisation block was left out because it could not be repaired"]
@@ -962,21 +982,39 @@ def cell_of_names(block: dict[str, Any]) -> list[str]:
     return [str(k) for k in fixed] if isinstance(fixed, dict) else []
 
 
-def scan_request(topic: str, problems: list[str]) -> str:
+def scan_request(topic: str, problems: list[str], *, left_out: bool = False) -> str:
     """The request FI makes of the plan's model when the coarse scan of its search cannot run: the plan's own arithmetic
-    (``problems``, from :func:`scan_problem`), the rule behind it, and what to rewrite. FI chooses nothing for the plan."""
+    (``problems``, from :func:`scan_problem`), the rule behind it, and what to rewrite. FI chooses nothing for the plan.
+    ``left_out``: the scan could not be read and FI's reading left it out (``problems`` are FI's notes saying why); the
+    search would start without it, and what it was to compare would not be run."""
+    opening = ("This study is a search for the best design, and a part of it in the plan could not be read (its first scan, "
+               "or what every evaluation goes through), so FI left it out: the search would start without it, and what that "
+               "part was to compare would not be run."
+               if left_out else
+               "This study is a search for the best design, and the coarse scan in the plan cannot run as written, so the "
+               "search would stop before it starts.")
     return (
-        "This study is a search for the best design, and the coarse scan in the plan cannot run as written, so the search "
-        "would stop before it starts. The topic: “" + " ".join(str(topic or "").split())[:600] + "”.\n"
-        "What cannot run:\n" + "\n".join(f"- {p}" for p in problems) + "\n\n"
+        opening + " The topic: “" + " ".join(str(topic or "").split())[:600] + "”.\n"
+        + ("What was left out, and why:\n" if left_out else "What cannot run:\n")
+        + "\n".join(f"- {p}" for p in problems) + "\n\n"
         "How the scan counts:\n"
-        "- Every setting in `protocol.optimisation.grid` multiplies every other one: the scan is every combination.\n"
+        "- Every setting in `protocol.optimisation.grid` multiplies every other one: the scan is every combination, "
+        "unless `protocol.optimisation.sub_studies` divides it into parts (each with a `name`, the `vary` list of the "
+        "settings it crosses, and `hold`: the value it keeps every other setting of the scan at); the scan is then the "
+        "settings of its parts.\n"
         "- A condition the plan holds fixed (`fixed`) that is also in the scan is measured at each of its values, but only "
         "its held value can start the search, so it makes the scan larger without helping the search.\n"
         "- A setting that matters for only some of the settings compared (for example a parameter of just one of the "
-        "alternatives) multiplies all the others when it is a setting of the scan.\n"
-        "Rewrite `protocol.optimisation.grid` so the scan fits: fewer settings in it, or fewer values for each. Keep "
-        "everything else in the block as it is.")
+        "alternatives) multiplies all the others when it is a setting of the scan: give it a part of its own.\n"
+        "- A setting of the scan that is a number and not a design variable is a condition: it is also listed under "
+        "`protocol.optimisation.fixed`, with the value the search holds it at.\n"
+        + ("Write the part that was left out (`protocol.optimisation.grid` and `protocol.optimisation.sub_studies`, or "
+           "`protocol.optimisation.in_each_run`) again so it can be read, with what the plan meant it to hold. "
+           "`in_each_run` holds only what the objective is computed over (the cases one design is judged across at once), "
+           "never a setting of the scan, a condition held fixed or a numerical setting. Keep everything else in the block "
+           "as it is." if left_out else
+           "Rewrite `protocol.optimisation.grid` (and `protocol.optimisation.sub_studies`) so the scan fits: parts that do "
+           "not multiply one another, fewer settings, or fewer values for each. Keep everything else in the block as it is."))
 
 
 #: The one plain request a person can make to turn a search for the best design into a measurement over the settings the

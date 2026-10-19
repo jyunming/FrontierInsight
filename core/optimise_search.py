@@ -376,6 +376,8 @@ def scan_rows(summary, block):
                 if str(k) in held]
     out = []
     for cell in (summary or {}).get("cells") or []:
+        if cell.get("level") is not None:
+            continue  # the numbers one run gave per value it went through: the same design, already its own row
         # A cell at another value of a condition the plan holds fixed is a comparison: it is kept in the trial record,
         # but it is not a design evaluated under the search's conditions, so it never seeds the search.
         if any(not _same(cell.get("cell", {}).get(k), held[k]) for k in compared):
