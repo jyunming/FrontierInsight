@@ -1313,3 +1313,64 @@ def test_a_sentence_found_unsupported_stays_so_while_the_paper_holds_it_unchange
     _set_chat(eng, json.dumps({"claims": [{"claim": planted, "basis": "experiment", "citation_index": None,
                                            "evidence": "the results hold it"}], "summary": ""}))
     assert asyncio.run(eng._node_claim_check(state))["claim_grounding"]["unsupported"] == []  # type: ignore[arg-type]
+
+
+def _trial_record(root: Path) -> None:
+    cells = [{"cell": {"n": n}, "key": f"n={n}", "metrics": {"score": {"values": vals}}}
+             for n, vals in ((5, [1.10, 1.30, 1.20, 1.25]), (40, [2.71, 2.69, 2.70, 2.72]))]
+    (root / "raw").mkdir(parents=True, exist_ok=True)
+    (root / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+
+
+def test_a_setting_s_row_of_fi_s_tables_is_evidence_for_the_check(tmp_path: Path) -> None:
+    """Delivered papers kept sentences about one setting's value as unsupported while FI's own tables of every setting,
+    the ones the writer was given, showed the value: the check saw the run's summary only."""
+    _trial_record(tmp_path)
+    eng = _engine(tmp_path)
+    seen = _capture(eng)
+    state = {"topic": "t", "paper_md": _paper(tmp_path, "# Paper\n\nAt n = 40 the score is 2.705.\n"),
+             "analysis": {}, "result_json": {"pooled": 1.9}, "literature": []}
+    asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    block = _evidence_block(seen[0])
+    assert "FI'S TABLES OF EVERY SETTING" in block and "n=40" in block and "2.705" in block
+
+
+def test_the_check_reads_the_tables_the_writer_was_given(tmp_path: Path) -> None:
+    from core import results_by_setting
+
+    _trial_record(tmp_path)
+    results_by_setting.keep_writer_note(tmp_path, "the tables as the writer saw them: n=5 row 1.21")
+    assert results_by_setting.claim_note(tmp_path, None) == "the tables as the writer saw them: n=5 row 1.21"
+    results_by_setting.keep_writer_note(tmp_path, "")  # a later run gave the writer none: built again from the record
+    assert not (tmp_path / results_by_setting.WRITER_NOTE).exists()
+    assert "2.705" in results_by_setting.claim_note(tmp_path, None)
+
+
+def test_the_check_s_tables_leave_out_a_quantity_fi_left_out_and_stay_bounded(tmp_path: Path) -> None:
+    from core import results_by_setting
+
+    cells = [{"cell": {"n": n}, "key": f"n={n}",
+              "metrics": {"score": {"values": [1.0 + n, 1.1 + n, 1.2 + n]}, "drift": {"values": [7.71, 7.72, 7.73]}}}
+             for n in (5, 40)]
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / "needs").mkdir()
+    (tmp_path / "needs" / "RESULT_CHECK.json").write_text(json.dumps({"removed_quantities": ["drift"], "note": "x"}),
+                                                          encoding="utf-8")
+    note = results_by_setting.claim_note(tmp_path, None)
+    assert "score" in note and "drift" not in note and "7.72" not in note
+    long = "".join(f"| row {i} | {'v' * 60} |\n" for i in range(2000))
+    results_by_setting.keep_writer_note(tmp_path, long)
+    shown = results_by_setting.claim_note(tmp_path, None)
+    assert len(shown) <= results_by_setting.CLAIM_NOTE_MAX_CHARS + 100 and shown.endswith("results_by_setting.csv)")
+    (tmp_path / results_by_setting.WRITER_NOTE).write_bytes(b"\xff\xfe broken")  # not text: built again
+    assert "score" in results_by_setting.claim_note(tmp_path, None)
+
+
+def test_a_run_with_no_figure_says_so_to_the_check(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    seen = _capture(eng)
+    state = {"topic": "t", "paper_md": _paper(tmp_path, "# Paper\n\nNo figure was drawn.\n"), "analysis": {},
+             "result_json": {"x": 1}, "literature": [], "figures": []}
+    asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    assert "FI's record holds no figure from this run" in seen[0]

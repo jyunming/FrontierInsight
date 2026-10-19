@@ -379,7 +379,9 @@ same PR that adds, splits or renames one.
   (trial table while it fits, else these tables, else a slice, else the file), `write` (`paper/results_by_setting.*`,
   `paper/reference_values.json`, and `PAPER_BLOCK` = `.fi/results_table.md` from `paper_block`: every row up to
   `PAPER_MAX_ROWS`, else the slice, else one sentence naming the files; called in `Engine._write_whole_paper` beside
-  `trial_table.write`), and
+  `trial_table.write`), `keep_writer_note` (`WRITER_NOTE` = `.fi/writer_tables.md`, what the writer was given, kept at
+  the write step) and `claim_note` (that note for `Engine._node_claim_check`'s evidence, or built again from the trial
+  record for a paper written before it was kept), and
   `summaries` / `rows`.
 - `core/numeric_warnings.py` — solver/runtime warnings from a run's own stderr that a paper must not be written over.
 - `core/plausibility.py` — the design's declared `result_assertions` (legal ranges for a result) checked in code, including caps the script puts on a result (`clamp_constants`; `direct_caps`: a cap written where a value is reported -- proven at its whole path in the printed result, or a warning (`engine._assertion_warnings`); `caps_of_other_values`: caps proven to be another value's, which do not count for a value on its bound).

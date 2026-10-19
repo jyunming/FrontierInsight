@@ -144,6 +144,24 @@ def test_a_reading_of_the_code_that_could_not_decide_is_listed_as_a_note_not_a_s
     assert "could not tell from the code" in (root / "QUALITY.md").read_text(encoding="utf-8")
 
 
+def test_a_precision_target_no_run_could_judge_is_said(tmp_path: Path) -> None:
+    """A study that ran each setting once has no interval; the plan's precision target was then judged by nothing, and
+    the report said nothing about it. The fact is the precision check's own, kept in the evidence record."""
+    root = _finished(tmp_path / "q-once")
+    _w(root / "needs" / "EVIDENCE.json", {"status": "executed",
+                                          "precision_not_judged": {"target": 0.05, "metric": "peak_width"}})
+    run = _stage(qr.build(root), "run")["problems"]
+    assert run["left_out"] == 1 and run["not_fixed"] == 0
+    assert "`peak_width`" in run["items"][0]["text"] and "was not judged" in run["items"][0]["text"]
+    _w(root / "needs" / "EVIDENCE.json", {"status": "executed"})  # the target was held to an interval
+    assert _stage(qr.build(root), "run")["problems"]["left_out"] == 0
+    for bad in ({"target": "0.05"}, {"target": True}, {"target": float("inf")}, {"target": 10 ** 400}, "not a record", {}):
+        _w(root / "needs" / "EVIDENCE.json", {"status": "executed", "precision_not_judged": bad})
+        assert _stage(qr.build(root), "run")["problems"]["left_out"] == 0, bad
+    _w(root / "needs" / "EVIDENCE.json", "{not json")
+    assert _stage(qr.build(root), "run")["problems"]["left_out"] == 0
+
+
 def test_crash_and_timeout_suggestions(tmp_path: Path) -> None:
     root = tmp_path / "q-crash"
     _calls(root, [_call("implement", outcome="ReadTimeout"), _call("implement", outcome="ReadTimeout"),

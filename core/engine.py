@@ -13414,6 +13414,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 )
                 self._annotate_precision(state, aggregate)
                 missed = [k for k, v in aggregate.items() if isinstance(v, dict) and v.get("precision_reached") is False]
+                judged = any(isinstance(v, dict) and "target_half_width" in v for v in aggregate.values())
+            else:
+                judged = False
+            # The plan's precision target that no result was held to (each setting ran once, so no interval): a gap, kept
+            # in the record, never read as a target reached.
+            precision = (self._protocol_block(state) or {}).get("precision")
+            target = precision.get("target_half_width") if isinstance(precision, dict) else None
+            not_judged = ({"target": float(target), "metric": str(precision.get("metric") or "").strip()}
+                          if not judged and (state.get("result_json") or replicates)
+                          and isinstance(target, (int, float)) and not isinstance(target, bool)
+                          and 0 < target < 1e300 else None)
             replicates_for_specs = state.get("result_json_replicates") or []
             protocol_now = self._protocol_block(state)
             try:
@@ -13448,7 +13459,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 oracle_source_gaps=oracle_source_gaps, equation_label_gaps=label_gaps,
-                independence_gaps=independence_gaps,
+                independence_gaps=independence_gaps, precision_not_judged=not_judged,
                 settings={
                     "protocol_check": self.config.engine.protocol_check,
                     "oracle_check": self.config.engine.oracle_check,
@@ -20092,6 +20103,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except Exception as e:  # noqa: BLE001 -- the table is a help to the writer, never a reason to stop
             self._log.warning("[write] FI's table of the trials could not be written (%s)", e)
             table_note = ""
+        try:  # the claim check reads what the writer was given
+            _results_by_setting.keep_writer_note(self.quest_root, table_note)
+        except OSError as e:
+            self._log.warning("[write] FI could not keep the tables the writer was given (%s)", e)
         if table_note:
             evidence_note = f"{evidence_note}\n\n{table_note}".strip()
         record_note = self._paper_record_section(state)
@@ -20887,6 +20902,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # seed 0's RESULT_JSON holds neither of. They follow the results, one
         # line each, and outside the budget above: they are a few lines that
         # the results must never be able to push out.
+        # FI's tables of every setting, the ones the writer was given: a sentence about one setting's value is checked
+        # against its row, not against the run's own summary alone. Outside the budget above, as the intervals below.
+        try:
+            tables = _results_by_setting.claim_note(self.quest_root, self._protocol_block(state), self._judged_checks())
+        except Exception as e:  # noqa: BLE001 -- evidence FI cannot read is left out, never a reason to stop
+            self._log.warning("[claim_check] FI's tables of every setting could not be read (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            tables = ""
+        if tables.strip():
+            evidence_block += ("\n\nFI'S TABLES OF EVERY SETTING (FI's own record of the trials, the tables the writer "
+                               "was given; a number the paper states for a setting is in the evidence when its row "
+                               "here shows it):\n" + tables.strip())
         intervals = _replicate_result_intervals(state)
         if intervals:
             n_seeds = len(state.get("result_json_replicates") or [])
@@ -27086,6 +27113,8 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
         parts.append(oracle_note.replace("[FI NOTE] ", "", 1).replace("the results below", "the results above"))
     if state.get("figures"):
         parts.append("What each figure draws:\n" + _figure_list_for_prompt(state))
+    else:  # a paper that says so is right: the figure list is FI's record, and an empty one is a fact too
+        parts.append("What each figure draws: FI's record holds no figure from this run.")
     return "\n\n".join(parts) or "(nothing recorded)"
 
 
