@@ -13414,6 +13414,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 )
                 self._annotate_precision(state, aggregate)
                 missed = [k for k, v in aggregate.items() if isinstance(v, dict) and v.get("precision_reached") is False]
+                judged = any(isinstance(v, dict) and "target_half_width" in v for v in aggregate.values())
+            else:
+                judged = False
+            # The plan's precision target that no result was held to (each setting ran once, so no interval): a gap, kept
+            # in the record, never read as a target reached.
+            precision = (self._protocol_block(state) or {}).get("precision")
+            target = precision.get("target_half_width") if isinstance(precision, dict) else None
+            not_judged = ({"target": float(target), "metric": str(precision.get("metric") or "").strip()}
+                          if not judged and isinstance(target, (int, float)) and not isinstance(target, bool)
+                          and math.isfinite(target) and target > 0 else None)
             replicates_for_specs = state.get("result_json_replicates") or []
             protocol_now = self._protocol_block(state)
             try:
@@ -13448,7 +13458,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 oracle_source_gaps=oracle_source_gaps, equation_label_gaps=label_gaps,
-                independence_gaps=independence_gaps,
+                independence_gaps=independence_gaps, precision_not_judged=not_judged,
                 settings={
                     "protocol_check": self.config.engine.protocol_check,
                     "oracle_check": self.config.engine.oracle_check,

@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import re
 import time
 from collections import Counter, defaultdict
@@ -438,25 +439,17 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
 
 
 def _precision_not_judged(q: _Quest) -> list[dict[str, str]]:
-    """The plan's precision target is the half-width of a 95% interval from repeated runs of a setting. When each setting
-    ran once (FI's record of the trials it ran: as many trials as settings), there is no interval and FI judged nothing
-    against the target; without this line nothing said so."""
-    from . import frozen_protocol as _frozen
+    """The plan's precision target is the half-width of a 95% interval from repeated runs of a setting. When no result
+    of the run had such an interval (each setting ran once), FI judged nothing against the target; the evidence record
+    keeps that fact from the precision check itself (``needs/EVIDENCE.json`` ``precision_not_judged``)."""
+    from . import evidence as _evidence
 
-    protocol = _frozen.protocol_of(q.root) or {}
-    precision = _dict(protocol.get("precision"))
-    target = precision.get("target_half_width")
-    if not isinstance(target, (int, float)) or isinstance(target, bool):
+    fact = _dict(q.evidence.get("precision_not_judged"))
+    target = fact.get("target")
+    if not isinstance(target, (int, float)) or isinstance(target, bool) or not math.isfinite(target):
         return []
-    ran = _dict(_dict(_json(q.root / ".fi" / "run_facts.json")).get("trials_run"))
-    trials, cells = ran.get("trials"), ran.get("cells")
-    if not (isinstance(trials, int) and isinstance(cells, int) and 0 < trials <= cells):
-        return []
-    metric = str(precision.get("metric") or "").strip()
-    on = f" on `{metric}`" if metric else ""
-    return [_problem("run", f"the plan's precision target (a 95% interval of ±{target:g}{on}) was not judged: each setting "
-                            f"ran once ({trials} trials for {cells} settings), so there is no interval to hold to it",
-                     "FI's precision check", "left out", ".fi/run_facts.json")]
+    return [_problem("run", _evidence.precision_not_judged_words(fact), "FI's precision check", "left out",
+                     "needs/EVIDENCE.json")]
 
 
 def _pilot_summary(q: _Quest) -> dict[str, Any] | None:

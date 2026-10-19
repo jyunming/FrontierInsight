@@ -146,17 +146,19 @@ def test_a_reading_of_the_code_that_could_not_decide_is_listed_as_a_note_not_a_s
 
 def test_a_precision_target_no_run_could_judge_is_said(tmp_path: Path) -> None:
     """A study that ran each setting once has no interval; the plan's precision target was then judged by nothing, and
-    the report said nothing about it."""
-    from core import frozen_protocol
-
+    the report said nothing about it. The fact is the precision check's own, kept in the evidence record."""
     root = _finished(tmp_path / "q-once")
-    frozen_protocol.freeze(root, {"precision": {"target_half_width": 0.05, "metric": "peak_width"}},
-                           approved_by="test", source="test")
-    _w(root / ".fi" / "run_facts.json", {"trials_run": {"trials": 12, "cells": 12}})
+    _w(root / "needs" / "EVIDENCE.json", {"status": "executed",
+                                          "precision_not_judged": {"target": 0.05, "metric": "peak_width"}})
     run = _stage(qr.build(root), "run")["problems"]
     assert run["left_out"] == 1 and run["not_fixed"] == 0
-    assert "`peak_width`" in run["items"][0]["text"] and "ran once" in run["items"][0]["text"]
-    _w(root / ".fi" / "run_facts.json", {"trials_run": {"trials": 120, "cells": 12}})  # repeated runs: judged elsewhere
+    assert "`peak_width`" in run["items"][0]["text"] and "was not judged" in run["items"][0]["text"]
+    _w(root / "needs" / "EVIDENCE.json", {"status": "executed"})  # the target was held to an interval
+    assert _stage(qr.build(root), "run")["problems"]["left_out"] == 0
+    for bad in ({"target": "0.05"}, {"target": True}, {"target": float("inf")}, "not a record", {}):
+        _w(root / "needs" / "EVIDENCE.json", {"status": "executed", "precision_not_judged": bad})
+        assert _stage(qr.build(root), "run")["problems"]["left_out"] == 0, bad
+    _w(root / "needs" / "EVIDENCE.json", "{not json")
     assert _stage(qr.build(root), "run")["problems"]["left_out"] == 0
 
 

@@ -322,12 +322,13 @@ def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
     settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
     oracle_source_gaps: list[str] | None = None, equation_label_gaps: list[str] | None = None,
-    independence_gaps: list[str] | None = None,
+    independence_gaps: list[str] | None = None, precision_not_judged: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The quest's evidence status, the ladder with what each level guarantees, and the gaps below the next level.
 
     ``state`` is the final (or paused) state; ``precision_missed`` names the probabilities whose pooled interval did not
-    reach the protocol's target; ``statistics_gaps`` says what keeps the statistics from being adequate
+    reach the protocol's target; ``precision_not_judged`` (``target``, ``metric``) is the protocol's target when FI pooled
+    no interval to hold to it (each setting ran once, say), a gap kept in the record; ``statistics_gaps`` says what keeps the statistics from being adequate
     (:func:`core.metric_spec.coverage_gaps`); ``oracle_source_gaps`` names each oracle whose expected value has no
     source a reader can check (:func:`core.oracle_check.source_gaps`), a gap below ``independently_validated``; ``equation_label_gaps`` says which equations of the plan's model the
     simulation does not mark where it implements them (a comment ``# E1``), a gap at the same level: the oracles test the
@@ -549,6 +550,8 @@ def assess(
     stat_gaps = gaps["statistically_adequate"]
     for name in precision_missed or []:
         stat_gaps.append(f"the target precision was not reached for {name}")
+    if precision_not_judged:
+        stat_gaps.append(precision_not_judged_words(precision_not_judged))
     for gap in statistics_gaps or []:
         stat_gaps.append(f"the statistics are not shown to be adequate: {gap}")
     if protocol is not None and int((manifest_record or {}).get("failed_trials") or 0) and not str(protocol.get("failure_policy") or "").strip():
@@ -790,6 +793,8 @@ def assess(
         "ladder": ladder,
         "rigor_profile": settings.get("rigor_profile") or "default",
     }
+    if precision_not_judged:
+        record["precision_not_judged"] = dict(precision_not_judged)  # read by the quality report (QUALITY.md)
     kept = state.get("acceptance") if isinstance(state.get("acceptance"), dict) else {}
     if not accepted_by and not pending and kept.get("by") in ("person", "automatic"):
         # Accepted although the review did not accept it (its verdict is already the gap): still say who accepted.
@@ -821,6 +826,15 @@ def assess(
         # Written before the seal that names it: whoever reads it checks the seal (verify_seal).
         record["trace_seal"] = "pending"
     return record
+
+
+def precision_not_judged_words(fact: dict[str, Any]) -> str:
+    """The sentence for a precision target no result of the run was held to (``fact``: ``target`` and ``metric``, as
+    :func:`assess` keeps it under ``precision_not_judged``)."""
+    metric = str(fact.get("metric") or "").strip()
+    return (f"the plan's precision target (a 95% interval no wider than ±{float(fact['target']):g}"
+            + (f" on `{metric}`" if metric else "") + ") was not judged: FI found no interval pooled from repeated runs "
+            "of a setting to hold to it")
 
 
 def verify_seal(quest_root: Path, record: Any) -> Any:

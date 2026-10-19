@@ -195,6 +195,48 @@ def test_a_missed_precision_target_and_an_unaccepted_review_keep_it_from_publica
     assert unreviewed["gaps"] == ["the paper has not been reviewed yet"]
 
 
+def test_a_precision_target_no_result_was_held_to_is_a_gap_not_a_target_reached(tmp_path: Path) -> None:
+    """Each setting ran once, so no interval: the target was judged by nothing, and the ladder read it as reached."""
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    fact = {"target": 0.05, "metric": "peak_width"}
+    got = evidence.assess(root, _state(), precision_not_judged=fact, settings=ON)
+    assert got["status"] == "independently_validated"
+    assert got["gaps"] == [evidence.precision_not_judged_words(fact)] and "`peak_width`" in got["gaps"][0]
+    assert got["precision_not_judged"] == fact
+    assert "precision_not_judged" not in evidence.assess(root, _state(), settings=ON)
+
+
+def _engine_with_precision(tmp_path: Path, precision: dict[str, Any] | None) -> Engine:
+    engine = Engine(Config(
+        topic="t", title="t", provider=ProviderConfig(name="openai"), engine=EngineConfig(),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    ))
+    engine._protocol_block = lambda _state: ({"precision": precision} if precision is not None else {})  # type: ignore[method-assign]
+    return engine
+
+
+def test_the_evidence_record_keeps_a_precision_target_no_result_was_held_to(tmp_path: Path,
+                                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import engine as engine_mod
+
+    once = _engine_with_precision(tmp_path / "a", {"target_half_width": 0.05, "metric": "peak_width"})
+    record = once._write_evidence({"result_json_replicates": [{"peak_width": 1.0}]}, write=False)
+    assert record["precision_not_judged"] == {"target": 0.05, "metric": "peak_width"}
+    assert any("was not judged" in g for g in record["all_gaps"]["statistically_adequate"])
+    # No target, or a target that is not a positive number: nothing to judge, no gap.
+    for i, precision in enumerate((None, {"target_half_width": 0}, {"target_half_width": "0.05"},
+                                   {"target_half_width": True})):
+        quiet = _engine_with_precision(tmp_path / f"b{i}", precision)
+        assert "precision_not_judged" not in quiet._write_evidence({}, write=False), precision
+    # Repeated runs give the metric an interval, held to the target: judged, not a gap.
+    monkeypatch.setattr(engine_mod, "_aggregate_result_json_replicates", lambda *_a, **_k: {
+        "peak_width": {"ci_method": engine_mod._CI_WILSON, "ci_lower": 0.40, "ci_upper": 0.46}})
+    judged = _engine_with_precision(tmp_path / "c", {"target_half_width": 0.05, "metric": "peak_width"})
+    record = judged._write_evidence({"result_json_replicates": [{"peak_width": 1.0}, {"peak_width": 0.0}]}, write=False)
+    assert "precision_not_judged" not in record
+
+
 def test_a_quest_waiting_for_the_reviews_human_decision_is_not_publication_ready(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     (root / ".fi").mkdir()
