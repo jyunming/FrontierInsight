@@ -639,7 +639,10 @@ def test_each_setting_is_given_what_is_left_of_the_study_s_time(tmp_path: Path) 
     run = asyncio.run(trial_runner.run_trials(
         _Slow(), sys.executable, root, "code/simulate.py", {"rate_a": [1.0, 1.5, 2.5, 3.0, 3.5, 4.0]}, runs_per_setting=1,
         base_seed=0, deterministic=False, timeout_s=3, run_id="r1", at_once=2))
-    assert given[:2] == [3, 3] and 2 <= len(given) < 6 and all(t < 3 for t in given[2:]), given
+    # Whole seconds left, rounded down: the first two start at once with the study's time less the moment it took to
+    # start them (3, or 2 where the clock reads that moment), and every later one with less than they had.
+    assert all(t in (2, 3) for t in given[:2]) and 2 <= len(given) < 6, given
+    assert all(t < min(given[:2]) for t in given[2:]), given
     out_of_time = [c for c in run.cells if c.timed_out]
     assert len(out_of_time) == 6 - len(given), "a setting that would start after the deadline is not run"
     assert all(r["reason"] == trial_runner.OUT_OF_TIME for c in out_of_time for r in c.rows)
