@@ -291,10 +291,20 @@ class AgentBuildMixin:
         failed, None not judged)``. The gate stops at the first check that fails, so only that one of its checks is seen."""
         from . import code_checks as _code_checks
 
-        lines = _Lines()
-        self._log.addHandler(lines)  # type: ignore[attr-defined]
+        from . import split_run as _split_run
+
         found: list[str] = []
         checks: dict[str, bool | None] = {}
+        # A round that left no script (it ran out of time before writing one) is a finding for the next round: the
+        # checks below read the script, and one real round that wrote nothing in its 20 minutes stopped the quest there.
+        if not (self.quest_root / "code" / _split_run.ANALYSIS_NAME).is_file():  # type: ignore[attr-defined]
+            checks["run"] = False
+            found.append(f"There is no `{_split_run.ANALYSIS_NAME}` in the folder: the code was not written. Write "
+                         f"`{_split_run.ANALYSIS_NAME}` (and `{_split_run.SIMULATE_NAME}` where the plan needs it) "
+                         "first, then run it on a small case; keep each of your own runs short.")
+            return None, found, checks
+        lines = _Lines()
+        self._log.addHandler(lines)  # type: ignore[attr-defined]
         try:
             stop, oracle_code, repaired = await self._gate_pass(state, py, exec_env, seed_path)  # type: ignore[attr-defined]
         except RepairForAgent as asked:

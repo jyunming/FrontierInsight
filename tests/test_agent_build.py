@@ -529,3 +529,18 @@ def test_no_expected_value_or_tolerance_of_the_plan_reaches_the_agent(tmp_path: 
         for value in HIDDEN:
             assert not re.search(rf"(?<![\d.]){re.escape(value)}(?!\d)", prompt), (k, value, prompt[-1500:])
         assert not re.search(r"7\.31e-0?4|6\.17e-0?4", prompt), (k, prompt[-1500:])
+
+
+def test_a_round_that_wrote_no_script_is_sent_back_not_a_crash(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A real first round ran out of its 20 minutes before writing any script, and FI's checks then read the missing
+    file and stopped the quest on an error."""
+    agent = _Agent([lambda code: code.mkdir(parents=True, exist_ok=True), _write(2)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    assert not (eng.quest_root / "code" / "experiment.py").exists()
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False), "the next round wrote the script and the checks passed"
+    assert "There is no `experiment.py`" in agent.prompts[1]
