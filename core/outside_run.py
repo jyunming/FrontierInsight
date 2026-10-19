@@ -113,27 +113,11 @@ def remove_created_since(quest_root: Path | str, before: set[str], left: list[st
     FI stopped for its time: it did not finish, so what it was writing (a lock, a half-written cache entry) is not
     something the next trial may trust. A file that cannot be removed (on Windows a handle of the stopped process can
     outlive it for a moment) is tried once more, then added to ``left``."""
-    import time
-
     root = Path(quest_root)
-    gone: list[str] = []
     created = working_files(root) - before
     # A finished value in the shared folder stays (unfinished_shared): only its locks and temporary files go.
     shared = {r for r in created if r == SHARED_CACHE or r.startswith(SHARED_CACHE + "/")}
-    for rel in sorted((created - shared) | set(unfinished_shared(shared))):
-        for attempt in range(2):
-            try:
-                (root / rel).unlink()
-                gone.append(rel)
-                break
-            except FileNotFoundError:
-                break
-            except OSError:
-                if attempt == 0:
-                    time.sleep(0.5)
-                elif left is not None:
-                    left.append(rel)
-    return gone
+    return _remove_files(root, sorted((created - shared) | set(unfinished_shared(shared))), left)
 
 
 def unfinished_shared(rels: list[str] | set[str]) -> list[str]:
@@ -154,7 +138,8 @@ def unfinished_shared(rels: list[str] | set[str]) -> list[str]:
 
 
 def _remove_files(quest_root: Path | str, rels: list[str], left: list[str] | None = None) -> list[str]:
-    """Remove these files of the quest (each tried twice, as in :func:`remove_created_since`); the ones removed."""
+    """Remove these files of the quest; the ones removed. A file that cannot be removed is tried once more, then added
+    to ``left``."""
     import time
 
     root = Path(quest_root)
