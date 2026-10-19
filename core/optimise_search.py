@@ -323,20 +323,32 @@ def check_settings(block):
     return out
 
 
+def in_each_run(block):
+    """The values every evaluation goes through together (``in_each_run``: all of them in one run, as in a measurement),
+    each a list; ``{}`` when the block has none."""
+    inside = block.get("in_each_run") if isinstance(block.get("in_each_run"), dict) else {}
+    return {str(k): list(v) for k, v in inside.items() if isinstance(v, list)}
+
+
 def cell_of(block, design):
-    """What the simulation is called with: the conditions held fixed, the search's numerical settings, the design."""
+    """What the simulation is called with: the conditions held fixed, the search's numerical settings, the values every
+    evaluation goes through together (each list whole), the design."""
     fixed = block.get("fixed") if isinstance(block.get("fixed"), dict) else {}
-    return {**{str(k): v for k, v in fixed.items()}, **search_settings(block), **design}
+    return {**{str(k): v for k, v in fixed.items()}, **search_settings(block), **in_each_run(block), **design}
 
 
 def scan_grid(block):
     """The coarse scan as a grid of cells: every fixed condition and search setting at its one value, each design
     variable over the scan's values (or at the baseline's value when the scan leaves it out). A condition held fixed that
     the scan names is compared over the scan's values: those cells are measured and kept, and none but the cells at the
-    value the plan holds can start the search (:func:`scan_rows`)."""
+    value the plan holds can start the search (:func:`scan_rows`). With ``sub_studies`` the scan is a :class:`StudyGrid`:
+    each part varies only some of the scan's settings, the others held, as a measurement's sub-studies do. The values
+    every evaluation goes through together (:func:`in_each_run`) are not settings of the scan: the trial runner gives each
+    cell all of them."""
     grid = block.get("grid") if isinstance(block.get("grid"), dict) else {}
     baseline = block["baseline"]["values"]
-    out = {name: [value] for name, value in cell_of(block, {}).items()}
+    inside = in_each_run(block)
+    out = {name: [value] for name, value in cell_of(block, {}).items() if name not in inside}
     for name, values in grid.items():
         if str(name) in out and isinstance(values, list) and values:
             out[str(name)] = list(values)
@@ -344,6 +356,9 @@ def scan_grid(block):
         name = str(v["name"])
         values = grid.get(name)
         out[name] = list(values) if isinstance(values, list) and values else [baseline[name]]
+    subs = block.get("sub_studies")
+    if isinstance(subs, list) and subs and all(isinstance(s, dict) for s in subs):
+        return StudyGrid(out, subs)
     return out
 
 
@@ -361,6 +376,8 @@ def scan_rows(summary, block):
                 if str(k) in held]
     out = []
     for cell in (summary or {}).get("cells") or []:
+        if cell.get("level") is not None:
+            continue  # the numbers one run gave per value it went through: the same design, already its own row
         # A cell at another value of a condition the plan holds fixed is a comparison: it is kept in the trial record,
         # but it is not a design evaluated under the search's conditions, so it never seeds the search.
         if any(not _same(cell.get("cell", {}).get(k), held[k]) for k in compared):

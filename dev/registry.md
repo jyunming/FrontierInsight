@@ -304,7 +304,7 @@ same PR that adds, splits or renames one.
   into `.fi/optimisation/` and into `code/fi_search.py`): `search` (a generator of evaluate / drive requests; `bounded_local`,
   `global_then_local`, `exhaustive`, and a scipy / Optuna method replayed step by step by `drive`), `run_sync` (the
   same search driven in one process: `code/run.py`, the tests), `judge` (feasibility and failures), `best_design`
-  (the record), `ledger_lines`, `scan_grid` / `scan_rows` (the coarse scan as trial-runner cells; an axis may be a condition of `fixed`, and only the cells at its held value become designs), and copies of
+  (the record), `ledger_lines`, `scan_grid` / `scan_rows` (the coarse scan as trial-runner cells, a `StudyGrid` when the block has `sub_studies`; an axis may be a condition of `fixed`, and only the cells at its held value become designs), `in_each_run` (the values every evaluation goes through together; `cell_of` gives each list whole), and copies of
   `optimisation_plan.effective_method` / `check_levels` that `tests/test_optimise_runner.py` keeps equal.
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; a metric's optional `known_value` (the true value, the names run_trial returns for the estimate and

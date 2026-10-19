@@ -391,6 +391,10 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
             fixed_inside[str(factor)] = fixed_values or []
         out["in_each_run"] = fixed_inside
     subs = out.get("sub_studies")
+    if subs is not None and out.get("optimisation") is not None and out.get("grid") is None:
+        return None, ("`protocol.sub_studies` cannot stand beside `protocol.optimisation`: a search for the best design "
+                      "divides its coarse scan in `protocol.optimisation.sub_studies` (the settings of "
+                      "`protocol.optimisation.grid` each part varies, and the value it holds the others at)")
     if subs is not None:
         fixed_subs, why = _sub_studies(subs, out.get("grid"), out.get("in_each_run"))
         if why:
@@ -482,8 +486,8 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         from . import optimisation_plan
 
         if out.get("in_each_run") is not None:
-            return None, ("`protocol.optimisation` and `protocol.in_each_run` cannot both be given: a search for the best "
-                          "design runs one design at a time")
+            return None, ("`protocol.in_each_run` cannot stand beside `protocol.optimisation`: the values every evaluation "
+                          "of a design goes through together go in `protocol.optimisation.in_each_run`")
         if out.get("grid") is not None:
             return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
                           "best design puts the settings it compares, and a coarse scan run before it, in "
@@ -841,6 +845,17 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
         key = match.group(1) if match else ""
         if key not in out:
             return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
+        if key in ("sub_studies", "in_each_run") and isinstance(out.get("optimisation"), dict) \
+                and "cannot stand beside `protocol.optimisation`" in (why or ""):
+            # A search's scan parts, or what each of its evaluations goes through, written beside the block: moved into it.
+            if out["optimisation"].get(key) is None:
+                out["optimisation"] = {**out["optimisation"], key: out[key]}
+                notes.append(f"`protocol.{key}` was moved into `protocol.optimisation.{key}`: a search for the best design "
+                             "keeps it in its own block")
+            else:
+                notes.append(f"`protocol.{key}` was left out: the search's block has its own `{key}`")
+            del out[key]
+            continue
         if key == "metrics":
             # A reference value that cannot be used is left out, not the metric it belongs to.
             from . import reference_values
