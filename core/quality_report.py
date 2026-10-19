@@ -429,11 +429,34 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
     if _list(pilot.get("problems")):
         out.append(_problem("run", _one(str(_list(pilot["problems"])[0]), 200), "FI's pilot check",
                             "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
+    out += _precision_not_judged(q)
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
     if stop and not any(p["found_by"].startswith("FI's run-record check") for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",
                             "FI's run-record check", "not fixed", ".fi/run_manifest_stop.json"))
     return out
+
+
+def _precision_not_judged(q: _Quest) -> list[dict[str, str]]:
+    """The plan's precision target is the half-width of a 95% interval from repeated runs of a setting. When each setting
+    ran once (FI's record of the trials it ran: as many trials as settings), there is no interval and FI judged nothing
+    against the target; without this line nothing said so."""
+    from . import frozen_protocol as _frozen
+
+    protocol = _frozen.protocol_of(q.root) or {}
+    precision = _dict(protocol.get("precision"))
+    target = precision.get("target_half_width")
+    if not isinstance(target, (int, float)) or isinstance(target, bool):
+        return []
+    ran = _dict(_dict(_json(q.root / ".fi" / "run_facts.json")).get("trials_run"))
+    trials, cells = ran.get("trials"), ran.get("cells")
+    if not (isinstance(trials, int) and isinstance(cells, int) and 0 < trials <= cells):
+        return []
+    metric = str(precision.get("metric") or "").strip()
+    on = f" on `{metric}`" if metric else ""
+    return [_problem("run", f"the plan's precision target (a 95% interval of ±{target:g}{on}) was not judged: each setting "
+                            f"ran once ({trials} trials for {cells} settings), so there is no interval to hold to it",
+                     "FI's precision check", "left out", ".fi/run_facts.json")]
 
 
 def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
