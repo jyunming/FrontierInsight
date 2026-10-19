@@ -157,6 +157,15 @@ def element_count(variable: dict[str, Any]) -> int:
     return math.prod(shape_of(variable)) if is_array(variable) else 1
 
 
+def free_count(variable: dict[str, Any]) -> int:
+    """How many of a design variable's numbers the search changes: an array's element whose ``low`` equals its ``high``
+    is held at that one value (an element outside the region the design may use), not searched."""
+    if not is_array(variable):
+        return 1
+    return sum(1 for index in indices(shape_of(variable))
+               if bound_at(variable["low"], index) != bound_at(variable["high"], index))
+
+
 def element_name(name: str, index: tuple[int, ...]) -> str:
     """How an element of an array variable is named in the records of a check: ``source[1,3]``."""
     return f"{name}[{','.join(str(i) for i in index)}]"
@@ -308,13 +317,18 @@ def _array_variable(out: dict[str, Any], where: str) -> tuple[dict[str, Any] | N
             why = None if _number(bound) else "it must be a number or a list of numbers"
         if why:
             return None, f"{where}: `{key}` must be a number, or a list of numbers of shape {shape} ({why})"
+    # An element whose `low` equals its `high` is held at that value (the design may not use it: a pixel outside the
+    # region a source may fill, a node on a fixed edge); the search changes the others.
     for index in indices(shape):
         low, high = bound_at(out["low"], index), bound_at(out["high"], index)
         at = f" at {list(index)}" if len(indices(shape)) > 1 else ""
-        if low >= high:
-            return None, f"{where}: `low` ({low}) must be below `high` ({high}){at}"
+        if low > high:
+            return None, f"{where}: `low` ({low}) must not be above `high` ({high}){at}"
         if kind == "integer" and not (_whole(low) and _whole(high)):
             return None, f"{where}: an `integer` variable has whole-number `low` and `high`{at}"
+    if not free_count(out):
+        return None, (f"{where}: every element has `low` equal to `high`, so there is nothing to search: a value that "
+                      "does not change is a setting in `fixed`")
     return out, None
 
 
@@ -878,7 +892,7 @@ def budget(block: dict[str, Any]) -> dict[str, Any]:
     settings = block.get("numerical_settings") if isinstance(block.get("numerical_settings"), dict) else {}
     levels = max((len(check_levels(s if isinstance(s, dict) else {"search": s})[0]) for s in settings.values()),
                  default=0) or 1
-    continuous = sum(min(PROBE_ELEMENTS, element_count(v)) for v in block.get("design_variables") or []
+    continuous = sum(min(PROBE_ELEMENTS, free_count(v)) for v in block.get("design_variables") or []
                      if kind_of(v) in ("continuous", "integer"))
     runs = int(block.get("runs_per_evaluation") or 1)
     check_runs = int(block.get("check_runs") or block.get("runs_per_evaluation") or 1)
@@ -1109,7 +1123,9 @@ def _range(variable: dict[str, Any]) -> str:
         low, high = variable["low"], variable["high"]
         span = (f"{_fmt(low)} to {_fmt(high)}{' ' + unit if unit else ''}" if not isinstance(low, list)
                 and not isinstance(high, list) else f"its own range for each element{' (' + unit + ')' if unit else ''}")
-        return (f"an array of shape {shape} ({element_count(variable)} numbers); each element {span}"
+        held = element_count(variable) - free_count(variable)
+        return (f"an array of shape {shape} ({element_count(variable)} numbers"
+                + (f", {held} of them held at their one value" if held else "") + f"); each element {span}"
                 + (" (whole numbers)" if kind == "integer" else ""))
     if kind == "choice":
         return "one of " + ", ".join(_flat(v) for v in variable["values"])
@@ -1217,7 +1233,7 @@ def plan_lines(design: Any) -> list[str]:
         lines += ["**Numerical settings:** none named. If the simulation has a mesh size, a time step or a tolerance, "
                   "name it under `numerical_settings`: otherwise the best design is only recomputed at the same "
                   "settings, which cannot tell a real improvement from a numerical error.", ""]
-    dims = sum(element_count(v) for v in block["design_variables"] if kind_of(v) != "choice")
+    dims = sum(free_count(v) for v in block["design_variables"] if kind_of(v) != "choice")
     per_start = (block.get("evaluation_budget") or {}).get("per_start") if isinstance(block.get("evaluation_budget"), dict) else None
     if (any(is_array(v) for v in block["design_variables"]) and _whole(per_start) and per_start < dims + 1
             and method in ("bounded_local", "global_then_local")):

@@ -181,9 +181,10 @@ same PR that adds, splits or renames one.
 - `core/refinement_check.py` — a measurement's numerical settings (`protocol.numerical_settings`, read by
   `plan._numerical_settings`; each is a one-value setting of the grid): `settings` (levels and ratios, FI's rule from
   `optimisation_plan.check_levels`), `pick_cells` (where each headline result is lowest and highest, then spread),
-  `judge` (lost value, no effect, `optimum_check.numerical_error` against the result's spread over the study), `run`
-  (each setting once per level through `run_estimate._time_one`, outside FI's record), `write` / `read`
-  (`needs/REFINEMENT_CHECK.json`), `lines`, `evidence_gaps`. Called by `Engine._refinement_check` in `_node_execute`
+  `judge` (headline results only; lost value, no effect, the study's value's distance to the finest level plus
+  `optimum_check.numerical_error` against the result's spread over the study), `run` (each setting once per level
+  through `run_estimate._time_one`, outside FI's record, the time shared by what is left), `key` (the settings
+  judged), `write` / `read` (`needs/REFINEMENT_CHECK.json`), `lines`, `evidence_gaps`. Called by `Engine._refinement_check` in `_node_execute`
   after a successful two-script run; the gaps join `_write_evidence`'s list and the lines the writer's evidence.
 - `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of
   correctness, each from a declared oracle or FI's trial record; never a headline metric or the

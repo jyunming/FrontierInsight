@@ -352,7 +352,8 @@ def _probed(space: Any) -> list[int]:
     """The coordinates the check nudges: every number of a scalar variable, and at most ``PROBE_ELEMENTS`` elements of an
     array variable, spread evenly over it (two evaluations per element would otherwise be the whole check)."""
     groups: dict[str, list[int]] = {}
-    for k, v in enumerate(space.scalars):
+    for k in getattr(space, "free", range(len(space.scalars))):  # an element held at its one value is not nudged
+        v = space.scalars[k]
         groups.setdefault(str(v.get("of") or v["name"]), []).append(k)
     out: list[int] = []
     for members in groups.values():

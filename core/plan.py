@@ -884,7 +884,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
         key = match.group(1) if match else ""
         if key not in out:
             return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
-        if key in ("sub_studies", "in_each_run") and isinstance(out.get("optimisation"), dict) \
+        if key in ("sub_studies", "in_each_run", "numerical_settings") and isinstance(out.get("optimisation"), dict) \
                 and "cannot stand beside `protocol.optimisation`" in (why or ""):
             # A search's scan parts, or what each of its evaluations goes through, written beside the block: moved into it.
             if out["optimisation"].get(key) is None:
@@ -895,6 +895,17 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 notes.append(f"`protocol.{key}` was left out: the search's block has its own `{key}`")
             del out[key]
             continue
+        if key == "numerical_settings" and isinstance(out["numerical_settings"], dict):
+            # One numerical setting that cannot be read is left out, not every one of them.
+            kept_n = {n: item for n, item in out["numerical_settings"].items()
+                      if _numerical_settings({n: item}, out)[0] is not None}
+            if kept_n and len(kept_n) < len(out["numerical_settings"]):
+                for n in [n for n in out["numerical_settings"] if n not in kept_n]:
+                    notes.append(f"the numerical setting `{n}` was left out of `protocol.numerical_settings` because it "
+                                 f"could not be read ({_numerical_settings({n: out['numerical_settings'][n]}, out)[1]}); "
+                                 "the others are run again at their finer values")
+                out["numerical_settings"] = kept_n
+                continue
         if key == "metrics":
             # A reference value that cannot be used is left out, not the metric it belongs to.
             from . import reference_values

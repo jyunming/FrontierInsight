@@ -79,7 +79,8 @@ def test_the_settings_run_again_are_where_each_headline_is_lowest_and_highest() 
     cells.append({"cell": {"gap_mm": 1.0, "step_mm": 0.1, "case": 1}, "level": {"case": 1},
                   "metrics": {"width": {"values": [-100.0]}}})
     picked = rc.pick_cells(cells, {"width"}, most=2)
-    assert [c["gap_mm"] for c in picked] == [3.0, 2.0]
+    # the lowest width is at one value compared inside the run at gap 1: that run setting is picked, without the value
+    assert picked == [{"gap_mm": 1.0, "step_mm": 0.1}, {"gap_mm": 2.0, "step_mm": 0.1}]
 
 
 @pytest.mark.asyncio
@@ -116,6 +117,9 @@ async def test_a_study_with_random_numbers_is_not_judged_here(tmp_path: Path) ->
     record = await rc.run(None, "python", tmp_path, protocol, deterministic=False, timeout_s=60, env=None,
                           thresholds=None, in_each_run=None, names=set())
     assert record["status"] == "not_judged" and rc.lines(record)
+    rc.write(tmp_path, record)
+    gaps = rc.evidence_gaps(tmp_path, protocol)
+    assert gaps and "random numbers" in gaps[0], "a check the plan asked for and FI did not make is a gap, not a pass"
 
 
 def test_no_record_on_a_plan_with_numerical_settings_is_a_gap_and_none_without_them(tmp_path: Path) -> None:
@@ -130,3 +134,87 @@ def test_a_search_s_first_scan_is_run_again_at_the_search_s_finer_settings() -> 
     s = rc.settings({"optimisation": block})
     assert s["step_mm"]["levels"] == [0.1, 0.05]
     assert rc.settings({"optimisation": {**block, "grid": None}}) == {}, "a search with no scan: its own check covers it"
+
+
+@pytest.mark.parametrize("values", [[1.0, 0.8, 0.79], [1.0, 0.5, 0.5]])
+def test_the_error_judged_is_the_study_s_value_not_the_finest_level_s(values: list[float]) -> None:
+    # The finest two levels agree, but the study's value (the paper's number) is far from them.
+    v = rc.judge(SETTING, {"gap=1": [{"width": x} for x in values]}, {"width": 1.0}, {"width"})
+    assert v["verdict"] == "not_converged"
+    assert v["results"][0]["error"] >= abs(values[0] - values[-1])
+
+
+def test_a_result_that_stays_put_is_converged() -> None:
+    v = rc.judge(SETTING, {"gap=1": [{"width": 10.0}, {"width": 10.001}, {"width": 10.0011}]}, {"width": 5.0}, {"width"})
+    assert v["verdict"] == "converged"
+
+
+def test_only_the_headline_results_are_judged_but_any_change_counts() -> None:
+    # An iteration count the study never moves changes a little with the step: not a headline, not judged.
+    runs = {"gap=1": [{"width": 10.0, "iterations": 40.0}, {"width": 10.0, "iterations": 41.0},
+                      {"width": 10.0, "iterations": 41.5}]}
+    v = rc.judge(SETTING, runs, {"width": 5.0, "iterations": 0.0}, {"width"})
+    assert v["verdict"] == "converged" and {r["result"] for r in v["results"]} == {"width"}
+
+
+def test_a_headline_result_the_study_never_moves_is_judged_against_its_own_value() -> None:
+    v = rc.judge(SETTING, {"gap=1": [{"width": 10.0}, {"width": 10.5}, {"width": 10.6}]}, {"width": 0.0}, {"width"})
+    assert v["verdict"] == "not_converged" and v["results"][0]["against"] == "value"
+
+
+@pytest.mark.asyncio
+async def test_a_setting_that_could_not_be_run_again_is_a_gap_even_when_the_rest_converge(monkeypatch,
+                                                                                          tmp_path: Path) -> None:
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    (tmp_path / "raw").mkdir()
+    cells = [{"cell": {"gap_mm": g, "step_mm": 0.1}, "metrics": {"width": {"values": [10.0 * g]}}}
+             for g in (1.0, 2.0, 3.0, 4.0)]
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    allowed: list[int] = []
+
+    async def fake_time_one(executor, python, quest_root, module, cell, **kw):  # noqa: ANN001
+        allowed.append(kw["timeout_s"])
+        if cell["gap_mm"] == 4.0 and cell["step_mm"] == 0.025:  # the highest setting does not finish at the finest step
+            return run_estimate.Probe(None, None, dict(cell), 1.0, trials=[], at_least=True), "did not finish in time"
+        return run_estimate.Probe(None, None, dict(cell), 1.0, trials=[{"width": 10.0 * cell["gap_mm"]
+                                                                         + cell["step_mm"] * 1e-3}]), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", fake_time_one)
+    protocol, _why = plan.normalize_protocol(dict(PROTOCOL))
+    record = await rc.run(None, "python", tmp_path, protocol, deterministic=True, timeout_s=600, env=None,
+                          thresholds=None, in_each_run=None, names={"width"})
+    rc.write(tmp_path, record)
+    step = record["settings"]["step_mm"]
+    assert step["verdict"] == "converged" and step["not_run"] == 1 and record["status"] == "gaps"
+    gaps = rc.evidence_gaps(tmp_path, protocol)
+    assert gaps and "could not be run again" in gaps[0]
+    assert max(allowed) > allowed[0], "a later run gets the time the earlier, quicker runs did not use"
+
+
+def test_a_record_on_other_settings_is_a_gap(tmp_path: Path) -> None:
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    protocol, _why = plan.normalize_protocol(dict(PROTOCOL))
+    rc.write(tmp_path, {"code_sha256": rc._hidden.code_sha(tmp_path), "key": rc.key(protocol), "status": "converged",
+                        "settings": {"step_mm": {"verdict": "converged"}}})
+    assert rc.evidence_gaps(tmp_path, protocol) == []
+    other, _why = plan.normalize_protocol({**PROTOCOL, "grid": {"gap_mm": [1.0, 2.0, 3.0, 5.0]}})
+    assert "other settings" in rc.evidence_gaps(tmp_path, other)[0]
+
+
+def test_one_unreadable_numerical_setting_is_left_out_not_all_of_them() -> None:
+    protocol = {"grid": {"gap_mm": [1.0, 2.0, 3.0, 4.0, 5.0], "step_mm": [0.1, 0.2, 0.3, 0.4, 0.5]},
+                "numerical_settings": {"step_mm": {"search": 0.1}, "points": {"search": 64, "finer": "larger"}}}
+    fixed, notes = plan.repair_protocol(protocol)
+    assert fixed is not None and set(fixed["numerical_settings"]) == {"points"}
+    assert fixed["grid"]["step_mm"] == [0.1, 0.2, 0.3, 0.4, 0.5]
+    assert any("`step_mm` was left out" in n for n in notes)
+
+
+def test_numerical_settings_beside_a_search_are_moved_into_it() -> None:
+    protocol = {"optimisation": {"objective": {"quantity": "width", "goal": "max"},
+                                 "variables": {"gap_mm": {"min": 1.0, "max": 5.0}}},
+                "numerical_settings": {"step_mm": {"search": 0.1}}}
+    fixed, notes = plan.repair_protocol(protocol)
+    assert any("moved into `protocol.optimisation.numerical_settings`" in n for n in notes), notes

@@ -172,10 +172,13 @@ class Space:
         # One coordinate per number: an array variable is one coordinate per element.
         self.scalars = scalar_variables(self.variables)
         self.scalar_kinds = [_kind(v) for v in self.scalars]
+        # The coordinates the search moves: an array element whose low equals its high is held at that value.
+        self.free = [k for k, (v, kind) in enumerate(zip(self.scalars, self.scalar_kinds))
+                     if kind == "choice" or "of" not in v or v["low"] != v["high"]]
 
     @property
     def dims(self):
-        return len(self.scalars)
+        return len(self.free)
 
     def flat(self, design):
         """The values of a design, one per coordinate (an array variable's elements, row-major)."""
@@ -202,10 +205,13 @@ class Space:
 
     def element_design(self, flat_by_element):
         """A design from a mapping of coordinate names (``name`` or ``name[i,j]``) to values, as a library method gives it."""
-        return self.fold([flat_by_element[str(v["name"])] for v in self.scalars])
+        return self.fold([flat_by_element.get(str(v["name"]), v.get("low")) if "of" in v and v["low"] == v["high"]
+                          else flat_by_element[str(v["name"])] for v in self.scalars])
 
     def value(self, index, u):
-        v, kind = self.scalars[index], self.scalar_kinds[index]
+        """The value of the ``index``-th coordinate the search moves (one of :attr:`free`) at ``u`` of its range."""
+        k = self.free[index]
+        v, kind = self.scalars[k], self.scalar_kinds[k]
         u = 0.5 if not _number(u) else min(1.0, max(0.0, float(u)))
         if kind == "choice":
             values = v["values"]
@@ -218,7 +224,10 @@ class Space:
 
     def design(self, u):
         """The design at a point of the unit cube (clipped into it; whole numbers rounded)."""
-        return self.fold([self.value(i, u[i]) for i in range(self.dims)])
+        flat = [v.get("low") for v in self.scalars]  # an element held at its one value stays there
+        for i, k in enumerate(self.free):
+            flat[k] = self.value(i, u[i])
+        return self.fold(flat)
 
     def canonical(self, design):
         """A design with each value in its variable's type: an int for a whole-numbered one, a float otherwise."""
@@ -233,8 +242,11 @@ class Space:
         return self.fold(flat)
 
     def unit(self, design):
+        """Where a design is in the unit cube the search moves in (one coordinate per number it changes)."""
         out = []
-        for value, kind, v in zip(self.flat(design), self.scalar_kinds, self.scalars):
+        flat = self.flat(design)
+        for k in self.free:
+            value, kind, v = flat[k], self.scalar_kinds[k], self.scalars[k]
             if kind == "choice":
                 values = [str(c) for c in v["values"]]
                 index = values.index(str(value)) if str(value) in values else 0
@@ -289,7 +301,8 @@ class Space:
         """The first step of a local search along each coordinate: a tenth of the range, at least one whole number
         or one choice."""
         out = []
-        for kind, v in zip(self.scalar_kinds, self.scalars):
+        for k in self.free:
+            kind, v = self.scalar_kinds[k], self.scalars[k]
             if kind == "choice":
                 out.append(max(0.1, 1.0 / len(v["values"])))
             elif kind == "integer":
@@ -879,8 +892,10 @@ class _Search:
     # a library's method, run where the library is
 
     def _drive_spec(self, answers, starts):
-        return {"method": self.method_used, "seed": self.seed, "variables": self.space.scalars,
-                "baseline": {str(v["name"]): x for v, x in zip(self.space.scalars, self.space.flat(self.baseline))},
+        free = [self.space.scalars[k] for k in self.space.free]  # an element held at its one value is not given
+        flat = self.space.flat(self.baseline)
+        return {"method": self.method_used, "seed": self.seed, "variables": free,
+                "baseline": {str(self.space.scalars[k]["name"]): flat[k] for k in self.space.free},
                 "starts": starts, "per_start": self.per_start, "total": self.total,
                 "answers": answers}
 
