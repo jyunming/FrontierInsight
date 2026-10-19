@@ -218,7 +218,7 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
                 apart = True
                 break
             if any(name in c["metrics"] for c in members):  # a record that never returned a value has no row for it
-                merged[name] = {**whole, **_missing_of(c["metrics"].get(name) for c in members)}
+                merged[name] = {**whole, **_missing_of(_each_set_once(c["metrics"].get(name) for c in members))}
         if apart and len(members) > 1:
             kept_apart.append(_label(setting))
             for c in members:
@@ -334,6 +334,23 @@ def _ref_text(kind: str, ref: float | None) -> str:
     if ref is None:
         return "no reference"
     return {"bound": "≤ ", "lower_bound": "≥ "}.get(kind, "") + _sig(ref)
+
+
+def _each_set_once(summaries: Any) -> list[dict[str, Any]]:
+    """The summaries of the pooled records with a set of trials counted once, as ``n`` counts it (same ``digest``): a copy
+    that gave the very same trials gave the very same runs with no value. A record with no number at all has no digest to
+    tell by, so it is told by its runs with no value and their reasons (the two kinds of key cannot meet: a digest is hex)."""
+    seen: set[str] = set()
+    out = []
+    for s in summaries:
+        if not s:
+            continue
+        key = s["digest"] if s.get("n") else json.dumps([int(s.get("missing") or 0),
+                                                         sorted((s.get("why_missing") or {}).items())], default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
 
 
 def _missing_of(summaries: Any) -> dict[str, Any]:
