@@ -209,3 +209,110 @@ def test_a_stopped_trials_finished_shared_values_survive_its_cleanup(tmp_path: P
     assert sorted(gone) == sorted([f"{SHARED_CACHE}/b.json.lock", f"{SHARED_CACHE}/c.npz.tmp99",
                                    f"{SHARED_CACHE}/d.12.tmp", "data/made.tmp"])
     assert (cache / "a.npz").exists() and (cache / "b.json").exists()
+
+
+def test_a_folder_of_other_code_that_cannot_be_moved_aside_is_not_shared(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    root = _quest(tmp_path)
+    outside_run.prepare_shared_cache(root)
+    (root / SHARED_CACHE / "shared.json").write_text('{"v": 1}', encoding="utf-8")
+    record = (root / outside_run.SHARED_CACHE_RECORD).read_text(encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(SIM.replace("* v", "* v + 0"), encoding="utf-8")  # a repair
+    real = outside_run.os.replace
+
+    def held_open(src, dst):  # noqa: ANN001, ANN202
+        if Path(src) == root / SHARED_CACHE:
+            raise PermissionError("a file in it is open")
+        return real(src, dst)
+
+    monkeypatch.setattr(outside_run.os, "replace", held_open)
+    monkeypatch.setattr(outside_run, "_link_folder", lambda link, target: (_ for _ in ()).throw(AssertionError("linked")))
+    assert outside_run.prepare_shared_cache(root) is None
+    assert (root / outside_run.SHARED_CACHE_RECORD).read_text(encoding="utf-8") == record, "still the earlier code's"
+    ex = OutsideExecutor(SharedInterpreterExecutor(python_version="3.11"), root, base=tmp_path / "s",
+                         log=logging.getLogger("t"))
+    asyncio.run(ex.execute([sys.executable, "-c", "print(1)"], cwd=root, timeout_s=30))
+    assert ex.last is not None and ex.last.linked == [] and ex.last.not_shared
+
+
+def test_settings_starting_at_once_move_aside_only_the_earlier_code_s_folder(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    import threading
+    import time
+
+    root = _quest(tmp_path)
+    outside_run.prepare_shared_cache(root)
+    (root / SHARED_CACHE / "old.json").write_text("{}", encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(SIM.replace("* v", "* v + 0"), encoding="utf-8")  # a repair
+    version = outside_run.code_version(root)
+    start = threading.Barrier(6)
+
+    def late(r):  # noqa: ANN001, ANN202
+        # all six start together; five read FI's record while the first is still moving the folder aside
+        if start.wait() != 0:
+            time.sleep(0.1)
+        return version
+
+    monkeypatch.setattr(outside_run, "code_version", late)
+    real = outside_run.os.replace
+    first = threading.Event()
+
+    def slow_move(src, dst):  # noqa: ANN001, ANN202
+        out = real(src, dst)
+        if Path(src) == root / SHARED_CACHE and not first.is_set():
+            first.set()
+            (root / SHARED_CACHE).mkdir()
+            (root / SHARED_CACHE / "fresh.json").write_text("{}", encoding="utf-8")  # a setting already writing there
+            time.sleep(0.3)
+        return out
+
+    monkeypatch.setattr(outside_run.os, "replace", slow_move)
+    threads = [threading.Thread(target=outside_run.prepare_shared_cache, args=(root,)) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(list((root / ".fi" / "previous").glob("shared_cache_*"))) == 1
+    assert (root / SHARED_CACHE / "fresh.json").is_file(), "the folder the new code writes into stays where it is"
+
+
+def test_what_settings_stopped_together_left_unfinished_is_removed_once_none_runs(tmp_path: Path) -> None:
+    root = _quest(tmp_path)
+    inner = _Writes()
+    ex = OutsideExecutor(inner, root, base=tmp_path / "s", log=logging.getLogger("t"))
+
+    async def both() -> None:
+        inner.gates = {"first": asyncio.Event(), "second": asyncio.Event()}
+        a = asyncio.create_task(ex.execute(["python", "first"], cwd=root, timeout_s=5))
+        b = asyncio.create_task(ex.execute(["python", "second"], cwd=root, timeout_s=5))
+        await asyncio.sleep(0.5)
+        inner.gates["first"].set()
+        inner.gates["second"].set()
+        await asyncio.gather(a, b)
+        await ex.settle()
+
+    outside_run.prepare_shared_cache(root)
+    (root / SHARED_CACHE / "before.lock").write_text("x", encoding="utf-8")  # not this batch's: left alone
+    asyncio.run(both())
+    assert not (root / SHARED_CACHE / "first.lock").exists() and not (root / SHARED_CACHE / "second.lock").exists()
+    assert (root / SHARED_CACHE / "before.lock").exists()
+
+
+def test_a_container_run_does_not_get_a_link_it_cannot_follow(tmp_path: Path) -> None:
+    from core.execution import DockerExecutor
+
+    root = _quest(tmp_path)
+    (root / SHARED_CACHE).mkdir(parents=True)
+    inner = object.__new__(DockerExecutor)
+
+    async def fake(cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001, ANN202
+        return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.1)
+
+    inner.execute = fake  # type: ignore[method-assign]
+    ex = OutsideExecutor(inner, root, base=tmp_path / "s", log=logging.getLogger("t"))
+    asyncio.run(ex.execute(["python", "x"], cwd=root, timeout_s=5))
+    assert ex.last is not None and ex.last.linked == [] and ex.last.not_shared
+
+
+def test_only_temporary_names_count_as_unfinished() -> None:
+    names = ["a.npz", "x.tmp_table.npz", "b.json.lock", "c.npz.tmp99", "d.12.tmp", "e.tmp.npy", "f.tmp"]
+    got = outside_run.unfinished_shared({f"{SHARED_CACHE}/{n}" for n in names})
+    assert sorted(r.rsplit("/", 1)[-1] for r in got) == ["b.json.lock", "c.npz.tmp99", "d.12.tmp", "e.tmp.npy", "f.tmp"]

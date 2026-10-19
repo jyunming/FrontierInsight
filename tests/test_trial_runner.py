@@ -18,11 +18,11 @@ import random, warnings, sys
 def run_trial(cell, trial_id, seed):
     rng = random.Random(seed)
     print("noise the simulation prints")               # must never pass for a result
-    if cell["R0"] == 2.0 and trial_id == 1:
+    if cell["rate_a"] == 2.0 and trial_id == 1:
         raise ValueError("diverged")
     if trial_id == 2:
         warnings.warn("overflow encountered in exp", RuntimeWarning)
-    return {"infected": cell["R0"] * 100 + rng.random(), "peak_day": 10.0 + trial_id}
+    return {"tally": cell["rate_a"] * 100 + rng.random(), "peak_step": 10.0 + trial_id}
 '''
 
 CRASH = '''
@@ -52,28 +52,28 @@ def _run(tmp_path: Path, source: str, grid: dict, *, runs: int = 3, deterministi
 
 
 def test_cells_and_seeds_are_fixed_by_the_protocol() -> None:
-    grid = {"R0": [1.5, 2.0], "N": [100]}
-    assert trial_runner.cells(grid) == [{"R0": 1.5, "N": 100}, {"R0": 2.0, "N": 100}]
-    assert trial_runner.cell_key({"R0": 1.5, "N": 100}) == "R0=1.5,N=100"
-    a = trial_runner.trial_seed(0, "R0=1.5,N=100", 0)
-    assert a == trial_runner.trial_seed(0, "R0=1.5,N=100", 0)
-    assert len({trial_runner.trial_seed(0, k, t) for k in ("R0=1.5,N=100", "R0=2.0,N=100") for t in range(50)}) == 100
+    grid = {"rate_a": [1.5, 2.0], "N": [100]}
+    assert trial_runner.cells(grid) == [{"rate_a": 1.5, "N": 100}, {"rate_a": 2.0, "N": 100}]
+    assert trial_runner.cell_key({"rate_a": 1.5, "N": 100}) == "rate_a=1.5,N=100"
+    a = trial_runner.trial_seed(0, "rate_a=1.5,N=100", 0)
+    assert a == trial_runner.trial_seed(0, "rate_a=1.5,N=100", 0)
+    assert len({trial_runner.trial_seed(0, k, t) for k in ("rate_a=1.5,N=100", "rate_a=2.0,N=100") for t in range(50)}) == 100
 
 
 def test_fi_writes_the_ledger_and_the_per_cell_summary(tmp_path: Path) -> None:
-    root, run = _run(tmp_path, SIM, {"R0": [1.5, 2.0]})
+    root, run = _run(tmp_path, SIM, {"rate_a": [1.5, 2.0]})
     assert run.ok_trials == 5 and run.failed_trials == 1
     rows = trial_runner.read_ledger(root)
     assert len(rows) == 6 and {r["status"] for r in rows} == {"ok", "failed"}
     failed = next(r for r in rows if r["status"] == "failed")
-    assert failed["cell"] == "R0=2.0" and "diverged" in failed["reason"]
+    assert failed["cell"] == "rate_a=2.0" and "diverged" in failed["reason"]
     # The existing checker reads FI's rows, and finds the grid and counts complete.
-    manifest, row_problems = run_manifest.manifest_from_ledger({"grid": {"R0": [1.5, 2.0]}, "runs_per_setting": 3}, rows, {})
+    manifest, row_problems = run_manifest.manifest_from_ledger({"grid": {"rate_a": [1.5, 2.0]}, "runs_per_setting": 3}, rows, {})
     assert not row_problems and len(manifest["failed_trials"]) == 1
     summary = json.loads(run.summary_path.read_text(encoding="utf-8"))
     first = summary["cells"][0]
-    assert first["key"] == "R0=1.5" and first["ok"] == 3 and first["metrics"]["infected"]["count"] == 3
-    assert 150 < first["metrics"]["infected"]["total"] / 3 < 151
+    assert first["key"] == "rate_a=1.5" and first["ok"] == 3 and first["metrics"]["tally"]["count"] == 3
+    assert 150 < first["metrics"]["tally"]["total"] / 3 < 151
     assert "noise the simulation prints" in run.stderr() and "overflow encountered" not in json.dumps(summary)
     from core import numeric_warnings
     assert any("overflow encountered in exp" in str(w) for w in numeric_warnings.scan(run.stderr(), {})),         "a warning inside a trial reaches the numeric check"
@@ -114,11 +114,11 @@ def test_a_deterministic_study_runs_each_cell_once(tmp_path: Path) -> None:
 
 
 def test_the_harness_is_written_fresh_so_an_edited_one_never_runs(tmp_path: Path) -> None:
-    root, _ = _run(tmp_path, SIM, {"R0": [1.5]})
+    root, _ = _run(tmp_path, SIM, {"rate_a": [1.5]})
     harness = root / trial_runner.HARNESS_PATH
     harness.write_text("print('tampered')", encoding="utf-8")
     asyncio.run(trial_runner.run_trials(
-        SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", {"R0": [1.5]},
+        SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", {"rate_a": [1.5]},
         runs_per_setting=1, base_seed=0, deterministic=False, timeout_s=60,
     ))
     assert "tampered" not in harness.read_text(encoding="utf-8")
@@ -127,7 +127,7 @@ def test_the_harness_is_written_fresh_so_an_edited_one_never_runs(tmp_path: Path
 ANALYSIS = '''
 import json, os
 data = json.load(open(os.environ["FI_TRIALS"], encoding="utf-8"))
-cells = {c["key"]: c["metrics"]["infected"]["count"] for c in data["cells"]}
+cells = {c["key"]: c["metrics"]["tally"]["count"] for c in data["cells"]}
 print("RESULT_JSON: " + json.dumps({"counts": cells}))
 '''
 
@@ -148,12 +148,12 @@ def test_the_runner_runs_every_trial_then_the_analysis_on_fis_summary(tmp_path: 
     assert trial_runner.entries(root / "code" / "simulate.py") == {"run_trial"}
     runner = trial_runner.TrialsRunner(
         SharedInterpreterExecutor(python_version="3.11"), quest_root=root,
-        protocol={"grid": {"R0": [1.5, 2.0]}, "runs_per_setting": 3}, deterministic=False,
+        protocol={"grid": {"rate_a": [1.5, 2.0]}, "runs_per_setting": 3}, deterministic=False,
         simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
     )
     result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=60,
                                         env={"FI_REPLICATE_SEED": "0"}))
-    assert result.returncode == 0 and '"R0=2.0": 2' in result.stdout
+    assert result.returncode == 0 and '"rate_a=2.0": 2' in result.stdout
     assert "noise the simulation prints" in result.stderr, "the simulation's stderr reaches the numeric check"
     from core import numeric_warnings
     assert any("overflow encountered in exp" in str(w) for w in numeric_warnings.scan(result.stderr, {}))
@@ -187,7 +187,7 @@ def test_unchanged_trials_are_not_run_again_for_a_new_analysis(tmp_path: Path) -
 
     def runner():  # noqa: ANN202
         return trial_runner.TrialsRunner(
-            Counting(python_version="3.11"), quest_root=root, protocol=lambda: {"grid": {"R0": [1.5]}, "runs_per_setting": 2},
+            Counting(python_version="3.11"), quest_root=root, protocol=lambda: {"grid": {"rate_a": [1.5]}, "runs_per_setting": 2},
             deterministic=False, simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
         )
 
@@ -250,7 +250,7 @@ def test_a_ledger_edited_by_hand_makes_the_trials_run_again(tmp_path: Path) -> N
     (root / "code").mkdir(parents=True)
     (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
     (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
-    protocol = {"grid": {"R0": [1.5]}, "runs_per_setting": 2}
+    protocol = {"grid": {"rate_a": [1.5]}, "runs_per_setting": 2}
 
     def runner():  # noqa: ANN202
         return trial_runner.TrialsRunner(
@@ -262,7 +262,7 @@ def test_a_ledger_edited_by_hand_makes_the_trials_run_again(tmp_path: Path) -> N
     asyncio.run(runner().execute(cmd, cwd=root, timeout_s=60, env={}))
     assert trial_runner._load_run(root, trial_runner._run_key(root / "code" / "simulate.py", protocol, 2, 0, False))
     ledger = root / "raw" / "ledger.jsonl"
-    ledger.write_text(ledger.read_text(encoding="utf-8") + '{"event": "trial", "cell": "R0=1.5", "trial": 9}\n',
+    ledger.write_text(ledger.read_text(encoding="utf-8") + '{"event": "trial", "cell": "rate_a=1.5", "trial": 9}\n',
                       encoding="utf-8")
     assert trial_runner._load_run(root, trial_runner._run_key(root / "code" / "simulate.py", protocol, 2, 0, False)) is None
 
@@ -270,10 +270,10 @@ def test_a_ledger_edited_by_hand_makes_the_trials_run_again(tmp_path: Path) -> N
 def test_the_protocol_check_still_catches_a_contradiction_under_the_trial_contract() -> None:
     from core import protocol_check
 
-    protocol = {"grid": {"R0": [0.9, 1.5, 3.0]}, "runs_per_setting": 300, "thresholds": {"outbreak": 0.1}}
+    protocol = {"grid": {"rate_a": [0.9, 1.5, 3.0]}, "runs_per_setting": 300, "thresholds": {"surge": 0.1}}
     sim = "def run_trial(cell, trial_id, seed):\n    return {'x': 1.0}\n"
     assert protocol_check.check(protocol, {"simulate.py": sim, "experiment.py": "print(1)\n"}) == []
-    wrong = "R0_LIST = [0.9, 2.0, 5.0]\nNUM_RUNS = 30\nprint(R0_LIST, NUM_RUNS)\n"
+    wrong = "rate_a_LIST = [0.9, 2.0, 5.0]\nNUM_RUNS = 30\nprint(rate_a_LIST, NUM_RUNS)\n"
     found = protocol_check.check(protocol, {"simulate.py": sim, "experiment.py": wrong})
     assert {m.kind for m in found} >= {"grid", "runs"}, found
 
@@ -323,7 +323,7 @@ def test_a_named_setting_runs_like_a_number(tmp_path: Path) -> None:
     root = tmp_path / "quest"
     (root / "code").mkdir(parents=True)
     (root / "code" / "simulate.py").write_text(METHOD_SIM, encoding="utf-8")
-    (root / "code" / "experiment.py").write_text(ANALYSIS.replace("infected", "err"), encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(ANALYSIS.replace("tally", "err"), encoding="utf-8")
     runner = trial_runner.TrialsRunner(
         SharedInterpreterExecutor(python_version="3.11"), quest_root=root, protocol=lambda: proto, deterministic=False,
         simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
@@ -584,10 +584,10 @@ def _without_timing(value):
 
 def test_the_ledger_and_the_summary_are_the_same_whether_settings_run_one_after_another_or_at_once(
         tmp_path: Path) -> None:
-    grid = {"R0": [1.5, 2.0, 2.5, 3.0], "N": [100, 200]}
+    grid = {"rate_a": [1.5, 2.0, 2.5, 3.0], "N": [100, 200]}
     one_root, one = _run_at_once(tmp_path, "one", SIM, grid, at_once=1)
     many_root, many = _run_at_once(tmp_path, "many", SIM, grid, at_once=4,
-                                   cost=lambda cell: cell["R0"] * cell["N"])  # started in another order than planned
+                                   cost=lambda cell: cell["rate_a"] * cell["N"])  # started in another order than planned
     assert one.ok_trials == many.ok_trials == 22 and one.failed_trials == many.failed_trials == 2
 
     def ledger(root: Path) -> str:
@@ -637,7 +637,7 @@ def test_each_setting_is_given_what_is_left_of_the_study_s_time(tmp_path: Path) 
     (root / "code").mkdir(parents=True)
     (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
     run = asyncio.run(trial_runner.run_trials(
-        _Slow(), sys.executable, root, "code/simulate.py", {"R0": [1.0, 1.5, 2.5, 3.0, 3.5, 4.0]}, runs_per_setting=1,
+        _Slow(), sys.executable, root, "code/simulate.py", {"rate_a": [1.0, 1.5, 2.5, 3.0, 3.5, 4.0]}, runs_per_setting=1,
         base_seed=0, deterministic=False, timeout_s=3, run_id="r1", at_once=2))
     assert given[:2] == [3, 3] and 2 <= len(given) < 6 and all(t < 3 for t in given[2:]), given
     out_of_time = [c for c in run.cells if c.timed_out]

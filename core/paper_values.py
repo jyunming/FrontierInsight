@@ -35,6 +35,8 @@ Nothing here knows what a metric or an axis means; the names are the plan's.
 from __future__ import annotations
 
 import ast
+import bisect
+import itertools
 import json
 import math
 import re
@@ -333,35 +335,45 @@ class Records:
 
     def at_setting(self, metric: str, values: dict[str, Any]) -> list[dict[str, Any]] | None:
         """The cells carrying ``metric`` whose setting may be the one ``values`` names (an axis -> value for every axis
-        those cells carry), found by lookup; ``None`` when ``values`` does not name exactly those axes. A candidate
-        only: the caller still compares each value as :func:`_same` does."""
+        those cells carry), found by lookup; ``None`` when ``values`` does not name exactly those axes. The cells are
+        kept by each value exactly as recorded, and a value named is matched to the recorded values as :func:`_same`
+        compares them, so no cell the comparison would find is missed; the caller still compares each one."""
         def make() -> dict[str, Any]:
             return {}
         index = self._once("at_setting", make)
         if metric not in index:
             cells = self.carrying(metric)
             names = tuple(sorted({a for c in cells for a in c["cell"]}))
-            table: dict[tuple, list[dict[str, Any]]] = {}
-            for c in cells:
+            table: dict[tuple, list[tuple[int, dict[str, Any]]]] = {}
+            recorded = {a: _Recorded() for a in names}
+            for i, c in enumerate(cells):
                 if len(c["cell"]) == len(names):
-                    table.setdefault(tuple(_norm(c["cell"][a]) for a in names), []).append(c)
-            index[metric] = (names, table, sum(len(v) for v in table.values()) == len(cells))
-        names, table, whole = index[metric]
+                    key = tuple(_exact(c["cell"][a]) for a in names)
+                    table.setdefault(key, []).append((i, c))
+                    for a, k in zip(names, key):
+                        recorded[a].add(k, c["cell"][a])
+            index[metric] = (names, table, recorded, sum(len(v) for v in table.values()) == len(cells))
+        names, table, recorded, whole = index[metric]
         if not whole or set(values) != set(names):
             return None
-        return table.get(tuple(_norm(values[a]) for a in names), [])
+        options = [recorded[a].find(values[a]) for a in names]
+        return _in_order([table.get(key, []) for key in itertools.product(*options)])
 
     def at_value(self, metric: str | None, axis: str, value: Any) -> list[dict[str, Any]]:
-        """The cells carrying ``metric`` (any cell for ``None``) whose ``axis`` may hold ``value``, found by lookup (a
-        candidate only, as :meth:`at_setting`'s)."""
+        """The cells carrying ``metric`` (any cell for ``None``) whose ``axis`` may hold ``value``, found by lookup (no
+        cell missed, as :meth:`at_setting`'s)."""
         index = self._once("at_value", dict)
         if (metric, axis) not in index:
-            table: dict[tuple[bool, str], list[dict[str, Any]]] = {}
-            for c in self.carrying(metric):
+            table: dict[Any, list[tuple[int, dict[str, Any]]]] = {}
+            recorded = _Recorded()
+            for i, c in enumerate(self.carrying(metric)):
                 if axis in c["cell"]:
-                    table.setdefault(_norm(c["cell"][axis]), []).append(c)
-            index[(metric, axis)] = table
-        return index[(metric, axis)].get(_norm(value), [])
+                    key = _exact(c["cell"][axis])
+                    table.setdefault(key, []).append((i, c))
+                    recorded.add(key, c["cell"][axis])
+            index[(metric, axis)] = (table, recorded)
+        table, recorded = index[(metric, axis)]
+        return _in_order([table[k] for k in recorded.find(value)])
 
     def levels(self, metric: str, axis: str) -> list[list[dict[str, Any]]]:
         """The cells carrying ``metric`` grouped by their value of ``axis`` (as its JSON text), in the record's order."""
@@ -470,11 +482,64 @@ def load(quest_root: Path | str, protocol: dict[str, Any] | None = None,
     return from_cells(cells, protocol, unread, left_out) if isinstance(cells, list) else None
 
 
-def _norm(value: Any) -> tuple[bool, str]:
-    """``value`` as :func:`_same` compares it, to look a setting up by: a number to 9 significant digits, else its text."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return True, format(float(value), ".9g")
-    return False, str(value).strip().lower()
+def _exact(value: Any) -> Any:
+    """``value`` exactly as recorded, to keep the cells of one recorded value together (1, 1.0, True and "1" apart)."""
+    if value is None or isinstance(value, (str, int, float)):
+        return type(value).__name__, repr(value)
+    return "json", json.dumps(value, default=str, sort_keys=True)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+class _Recorded:
+    """The values one axis holds in the record, each under its :func:`_exact` key, found again by a value as
+    :func:`_same` compares them: by their text, and a number also by the numbers within its tolerance (sorted, so a
+    look-up does not compare every value an axis holds)."""
+
+    def __init__(self) -> None:
+        self.values: dict[Any, Any] = {}
+        self.by_text: dict[str, list[Any]] = {}
+        self._numbers: list[tuple[float, Any]] = []
+        self._sorted = True
+        self._found: dict[Any, list[Any]] = {}  # a value looked up before (a sheet asks the same values many times)
+
+    def add(self, key: Any, value: Any) -> None:
+        if key in self.values:
+            return
+        self.values[key] = value
+        self._found.clear()
+        self.by_text.setdefault(str(value).strip().lower(), []).append(key)
+        if _is_number(value) and math.isfinite(value):
+            self._numbers.append((float(value), key))
+            self._sorted = False
+
+    def find(self, value: Any) -> list[Any]:
+        asked = _exact(value)
+        if asked not in self._found:
+            self._found[asked] = self._find(value)
+        return self._found[asked]
+
+    def _find(self, value: Any) -> list[Any]:
+        keys = list(self.by_text.get(str(value).strip().lower(), []))
+        if _is_number(value) and math.isfinite(value):
+            if not self._sorted:
+                self._numbers.sort()
+                self._sorted = True
+            width = max(2e-9 * abs(value), 1e-12) * 1.01  # wider than _same's tolerance; each is compared below
+            i = bisect.bisect_left(self._numbers, (value - width,))
+            while i < len(self._numbers) and self._numbers[i][0] <= value + width:
+                keys.append(self._numbers[i][1])
+                i += 1
+        return [k for k in dict.fromkeys(keys) if _same(value, self.values[k])]
+
+
+def _in_order(buckets: list[list[tuple[int, dict[str, Any]]]]) -> list[dict[str, Any]]:
+    """The cells of these buckets in the record's order (as a scan of every cell finds them)."""
+    if len(buckets) == 1:
+        return [c for _i, c in buckets[0]]
+    return [c for _i, c in sorted((x for b in buckets for x in b), key=lambda x: x[0])]
 
 
 def _same(a: Any, b: Any) -> bool:

@@ -72,7 +72,7 @@ def _many(settings: int, levels: int) -> list[dict]:
         for lv in range(levels):
             cells.append({"cell": {"size": float(s), "shift": lv * 0.1, "route": "Direct"}, "level": {"shift": lv * 0.1},
                           "metrics": {"k": {"values": [float(s) + lv]}, "w": {"values": [1.0, 2.0, float(lv)]}}})
-        cells.append({"cell": {"size": float(s), "route": "Direct"}, "metrics": {"ea": {"values": [1.0, 2.0, 3.0]}}})
+        cells.append({"cell": {"size": float(s), "route": "Direct"}, "metrics": {"u": {"values": [1.0, 2.0, 3.0]}}})
     return cells
 
 
@@ -93,5 +93,18 @@ def test_the_sheet_of_a_record_per_value_is_built_without_rescanning_it(monkeypa
     real = pv._same
     monkeypatch.setattr(pv, "_same", lambda a, b: scanned.append(1) or real(a, b))
     text = pv.sheet(rec)
-    assert "{{v:w:mean_ci @ size=0.0, shift=0.0, route=Direct}}" in text or "Too many settings" in text
+    assert "Too many settings" in text  # 3,060 records: the capped list, its lines worked out by lookup
     assert len(scanned) < 1000 * len(rec.cells), len(scanned)  # it was 23,000 per record
+
+
+def test_a_lookup_finds_every_record_the_comparison_calls_the_same():
+    """A value is found again as it is compared: a number written as text, minus zero, a number within the comparison's
+    tolerance; a lookup that kept records by a rounded form missed some of them while it found others."""
+    values = [1, "1", 1.0, -0.0, 0.0, 1e-13, 2.0, 2.0 + 1e-10, 0.1234567894999, 0.1234567895001, "Direct", " direct", True,
+              float("nan"), float("inf")]
+    cells = [{"cell": {"size": v, "route": "a"}, "metrics": {"k": {"values": [float(i)]}}} for i, v in enumerate(values)]
+    rec = pv.from_cells(cells, {})
+    for q in values + [0.12345678950, "2.0", "true"]:
+        scan = [c for c in rec.carrying("k") if pv._same(q, c["cell"]["size"])]
+        assert rec.at_value("k", "size", q) == scan, q
+        assert rec.at_setting("k", {"size": q, "route": "a"}) == scan, q

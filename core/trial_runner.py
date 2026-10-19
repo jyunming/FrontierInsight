@@ -466,7 +466,10 @@ async def run_trials(
                 cwd=quest_root, timeout_s=max(1, left), env=env,
             )
 
-    await asyncio.gather(*(one(task) for task in _costliest_first(plan, cost)))
+    try:
+        await asyncio.gather(*(one(task) for task in _costliest_first(plan, cost)))
+    finally:
+        await executor.settle()
     return _collect(quest_root, plan, results, run_id=run_id, thresholds=thresholds, not_reported="")
 
 

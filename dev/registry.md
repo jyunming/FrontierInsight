@@ -669,7 +669,9 @@ same PR that adds, splits or renames one.
   settings share it; `prepare_shared_cache` moves aside what another version of the simulation's code kept there (`code_version`:
   `simulate.py` and its model package, not the analysis script; record `.fi/shared_cache.json`);
   `OutsideExecutor._clean_shared` removes the locks and temporary files a stopped setting left there
-  (`unfinished_shared`) when no other ran beside it, and keeps the values it finished. Tests: `tests/test_outside_run.py`, `tests/test_trial_runner.py`, `tests/test_killed_trial_leftovers.py`,
+  (`unfinished_shared`) when no other ran beside it, and keeps the values it finished; `OutsideExecutor.settle` (after
+  `run_trials`' batch) removes those of settings stopped side by side. `prepare_shared_cache` runs one at a time per
+  quest (a lock file in `.fi/`) and returns None when the old folder cannot be moved aside; no link under docker. Tests: `tests/test_outside_run.py`, `tests/test_trial_runner.py`, `tests/test_killed_trial_leftovers.py`,
   `tests/test_shared_cache.py`.
 - `core/function_steps.py` — the model's package written one function at a time: `model_functions` (the outline's
   `implements` / `depends_on`, dependency order), `replace_function` (splice one function, its imports and helpers into
