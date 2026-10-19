@@ -76,6 +76,80 @@ import importlib.util, json, math, sys, time, traceback, warnings
 def _number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
+def _fi_capture(cfg):
+    # What each named function of the model's package is called with when the simulation runs (core/second_impl.py):
+    # the first few distinct calls, each argument by its parameter's name, kept only when every argument is plain data
+    # (numbers, text, real arrays up to a size). The functions themselves are called as they are.
+    import functools, importlib, inspect
+    try:
+        import numpy as np
+    except Exception:
+        np = None
+    mod = importlib.import_module(cfg["module"])
+    limit, most = int(cfg.get("limit") or 3), int(cfg.get("max_elements") or 20000)
+    seen = {}
+
+    def conv(x, left):
+        if np is not None and isinstance(x, np.ndarray):
+            if x.dtype.kind not in "biuf" or x.size > left[0]:
+                raise TypeError("not plain data")
+            left[0] -= x.size
+            return x.tolist()
+        if np is not None and isinstance(x, np.generic):
+            x = x.item()
+        if x is None or isinstance(x, (bool, str)):
+            return x
+        if isinstance(x, int):
+            return x
+        if isinstance(x, float):
+            if not math.isfinite(x):
+                raise TypeError("not finite")
+            return x
+        if isinstance(x, (list, tuple)):
+            left[0] -= len(x)
+            if left[0] < 0:
+                raise TypeError("too large")
+            return [conv(i, left) for i in x]
+        raise TypeError("not plain data")
+
+    def wrap(name, fn):
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return fn
+        if any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in sig.parameters.values()):
+            return fn
+
+        @functools.wraps(fn)
+        def recorded(*a, **k):
+            cases = seen.setdefault(name, [])
+            if len(cases) < limit:
+                try:
+                    bound = sig.bind(*a, **k)
+                    left = [most]
+                    case = {p: conv(v, left) for p, v in bound.arguments.items()}
+                    if case not in cases:
+                        cases.append(case)
+                except Exception:
+                    pass
+            return fn(*a, **k)
+        return recorded
+
+    originals = {}
+    for name in cfg.get("names") or []:
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            originals[name] = fn
+            setattr(mod, name, wrap(name, fn))
+    prefix = str(cfg["module"]).split(".")[0]
+    for mname, m in list(sys.modules.items()):  # a module of the package that imported a function by name
+        if m is None or not (mname == prefix or mname.startswith(prefix + ".")):
+            continue
+        for name, fn in originals.items():
+            if getattr(m, name, None) is fn:
+                setattr(m, name, getattr(mod, name))
+    return seen
+
 def main():
     import os
     clock0 = time.perf_counter()
@@ -97,6 +171,12 @@ def main():
     del sys.argv[1:]
     # The simulation's own folder is where its imports are (a helper module beside simulate.py).
     sys.path.insert(0, os.path.dirname(os.path.abspath(spec["module"])))
+    capture, captured = spec.pop("capture", None), None
+    if capture:
+        try:
+            captured = _fi_capture(capture)
+        except Exception:
+            captured = None
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
@@ -179,6 +259,12 @@ def main():
             if later >= float(stop_after):
                 break
     out.close()
+    if captured is not None:
+        try:
+            with open(capture["path"], "w", encoding="utf-8") as fh:
+                json.dump(captured, fh)
+        except Exception:
+            pass
     sys.stdout = real_stdout
 
 main()

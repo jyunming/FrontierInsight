@@ -15,6 +15,10 @@ and compares the answers:
 * ``unconfirmed``: the comparison could not be made (no inputs, a version that would not load, a request that was lost,
   the call limit). Never a repair, never a stop.
 
+The inputs come from the plan's worked example when it has one; otherwise from FI's own record of what the function is
+called with when the simulation runs once at a setting of the plan (:func:`capture_inputs`, through FI's trial harness),
+so a function the plan gives no example for is still compared, on the very inputs the study gives it.
+
 ``unresolved`` and ``unconfirmed`` come with one plain sentence for QUALITY.md and the paper's limitations
 (:func:`limitations`); an ``unresolved`` one is an item FI fills into the paper's Limitations itself and checks is there
 (:mod:`core.paper_facts`). Nothing here stops a quest and nothing asks a person.
@@ -49,6 +53,11 @@ from . import function_steps as _fs
 
 RECORD = Path(".fi") / "second_impl.json"
 DIR = Path(".fi") / "second_impl"
+#: What each key function was called with when FI ran the simulation once (:func:`capture_inputs`).
+CAPTURED = DIR / "captured_inputs.json"
+#: The calls kept per function, and the most numbers kept from one call.
+CAPTURE_CALLS = 3
+CAPTURE_ELEMENTS = 20000
 #: Fixed limits (not settings).
 MAX_KEY = 6
 MAX_ROUNDS = 2
@@ -286,9 +295,11 @@ def _signature_defaults(signature: str) -> dict[str, Any] | None:
     return case or None
 
 
-def example_inputs(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The inputs of the plan's worked example (the INPUTS only, never the expected value), else the signature's defaults
-    when it has them for every parameter, else ``None``."""
+def example_inputs(spec: _fs.Spec, protocol: dict[str, Any] | None,
+                   captured: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any] | None:
+    """The inputs of the plan's worked example (the INPUTS only, never the expected value), else the first call FI
+    recorded when the simulation ran (``captured``, :func:`capture_inputs`), else the signature's defaults when it has
+    them for every parameter, else ``None``."""
     row: dict[str, Any] | None = None
     if spec.kind == _fs.STEP and spec.card and spec.card.get("example") is not None:
         pseudo = {"model": {"equations": [{"id": spec.equation, "formula": spec.card.get("does") or spec.card.get("name") or "step",
@@ -305,7 +316,63 @@ def example_inputs(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str,
         case = {k: v for k, v in row["inputs"].items() if k in params}
         if case:
             return case
+    calls = (captured or {}).get(spec.name) or []
+    if calls and isinstance(calls[0], dict) and calls[0]:
+        return dict(calls[0])
     return _signature_defaults(spec.signature)
+
+
+async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root: Path | str, package: str,
+                         names: list[str], cells: list[dict[str, Any]], *, deterministic: bool,
+                         in_each_run: dict[str, list[Any]] | None = None,
+                         thresholds: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
+    """FI runs the simulation at each of ``cells`` in turn (settings of the plan; each part of a study takes other paths
+    through the code) through its own trial harness, with each of ``names`` (functions of the package's model) recording
+    the distinct calls it gets, each argument by its parameter's name, kept only when every argument is plain data
+    (numbers, text, real arrays of at most :data:`CAPTURE_ELEMENTS` numbers); it stops once every function has
+    :data:`CAPTURE_CALLS` calls. ``run(argv)`` runs ``python <argv>`` from the quest folder. Saved in :data:`CAPTURED`;
+    ``{}`` when no run could be made. Never an expected value: only what each function is given."""
+    from . import trial_runner as _trials
+
+    root = Path(quest_root)
+    folder = root / DIR / "capture"
+    folder.mkdir(parents=True, exist_ok=True)
+    (root / _trials.HARNESS_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
+    (root / CAPTURED).unlink(missing_ok=True)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for index, cell in enumerate(cells):
+        if all(len(out.get(n, [])) >= CAPTURE_CALLS for n in names):
+            break
+        plan = _trials._plan(root, "code/simulate.py", {k: [v] for k, v in cell.items()}, runs_per_setting=1,
+                             base_seed=0, deterministic=deterministic, folder=folder,
+                             out_name=f"cell{index}" + "-{index}.out.jsonl", thresholds=thresholds,
+                             in_each_run=in_each_run)
+        if not plan:
+            continue
+        task = plan[0]
+        spec_path = root / task["spec"]
+        part = DIR / "capture" / f"calls{index}.json"
+        data = json.loads(spec_path.read_text(encoding="utf-8"))
+        data["capture"] = {"module": f"{package}.model", "names": list(names), "path": part.as_posix(),
+                           "limit": CAPTURE_CALLS, "max_elements": CAPTURE_ELEMENTS}
+        spec_path.write_text(json.dumps(data, default=str), encoding="utf-8")
+        try:
+            await run([_trials.HARNESS_PATH.as_posix(), task["spec"], task["out"]])
+            got = json.loads((root / part).read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 -- this setting gave no record of the calls; the next one may
+            continue
+        for n, calls in (got.items() if isinstance(got, dict) else []):
+            if str(n) not in names or not isinstance(calls, list):
+                continue
+            kept = out.setdefault(str(n), [])
+            for c in calls:
+                if isinstance(c, dict) and c and c not in kept and len(kept) < CAPTURE_CALLS:
+                    kept.append(c)
+    out = {n: calls for n, calls in out.items() if calls}
+    if out:
+        (root / CAPTURED).write_text(json.dumps(out), encoding="utf-8")
+    return out
 
 
 def ranges_of(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str, Any]:
@@ -751,7 +818,8 @@ class SecondImpl:
                  prompts: dict[str, string.Template], chat: ChatFn, run: RunFn, repair_main: RepairFn, still_passes: PassesFn,
                  passages: dict[str, str] | None = None, family_of: FamilyFn | None = None, topic_block: str = "",
                  cap: int = MAX_KEY, log: Any = None,
-                 verify_package: Callable[[], Awaitable[str]] | None = None) -> None:
+                 verify_package: Callable[[], Awaitable[str]] | None = None,
+                 captured: dict[str, list[dict[str, Any]]] | None = None) -> None:
         self.root, self.package, self.specs, self.protocol = Path(quest_root), package, list(specs), protocol
         self.prompts, self.chat, self.run = prompts, chat, run
         self.repair_main, self.still_passes = repair_main, still_passes
@@ -764,6 +832,8 @@ class SecondImpl:
         self.log = log or logging.getLogger(__name__)
         self.model_path = self.root / "code" / package / "model.py"
         self.record: dict[str, Any] = {}
+        #: What each function was called with when FI ran the simulation once (:func:`capture_inputs`).
+        self.captured = {str(k): list(v) for k, v in (captured or {}).items() if isinstance(v, list)}
 
     # -- bookkeeping --
 
@@ -851,7 +921,7 @@ class SecondImpl:
         main_source = _function_source(self.model_path, spec.name)
         try:
             prompt = write_prompt(spec, template=self.prompts["write"], protocol=self.protocol, specs=self.specs,
-                                  passages=self._spec_passages(spec), example=example_inputs(spec, self.protocol),
+                                  passages=self._spec_passages(spec), example=example_inputs(spec, self.protocol, self.captured),
                                   topic_block=self.topic_block, rewrite=rewrite, main_source=main_source)
         except ValueError as e:
             return str(e)
@@ -877,9 +947,9 @@ class SecondImpl:
     def _inputs_problem(self, spec: _fs.Spec) -> str:
         """Why the function cannot be called with inputs FI knows (``""`` when it can): checked before a second version is
         asked for, so no request is spent on a function that can only end unconfirmed."""
-        base = example_inputs(spec, self.protocol)
+        base = example_inputs(spec, self.protocol, self.captured)
         if not base:
-            return "the plan gives no example inputs to call it with"
+            return "the plan gives no example inputs to call it with, and FI's run of the simulation did not call it"
         if not all(p in base for p in _required(spec.signature)):
             return "the example inputs do not cover the function's parameters"
         return ""
@@ -889,8 +959,12 @@ class SecondImpl:
         why = self._inputs_problem(spec)
         if why:
             return {"status": UNCONFIRMED, "why": why, "disagreements": [], "retry": False}
-        base = example_inputs(spec, self.protocol)
+        base = example_inputs(spec, self.protocol, self.captured)
         inputs = build_inputs(base, ranges_of(spec, self.protocol))
+        # Every other call FI recorded is an input too: the settings the study really gives the function.
+        for call in self.captured.get(spec.name, [])[1:]:
+            if len(inputs) < MAX_INPUTS + CAPTURE_CALLS and call not in inputs:
+                inputs.append(dict(call))
         (self.root / DIR).mkdir(parents=True, exist_ok=True)
         inputs_path = DIR / f"{spec.name}.inputs.json"
         (self.root / inputs_path).write_text(json.dumps(inputs), encoding="utf-8")

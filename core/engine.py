@@ -12749,9 +12749,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             async def verify_package() -> str:
                 return await self._equation_test_failures(protocol, exec_env, self._outline_equation_names(state))
 
+            captured = await self._captured_calls(state, protocol, package, specs, exec_env)
             before = self._package_snapshot()
             result = await _second_impl.second_versions(
-                verify_package=verify_package,
+                verify_package=verify_package, captured=captured,
                 quest_root=self.quest_root, package=package, specs=specs, protocol=protocol,
                 prompts={"write": self._prompts["second_impl_write"], "adjudicate": self._prompts["second_impl_adjudicate"]},
                 chat=chat, run=self._run_in_env, repair_main=repair_main, still_passes=still_passes, passages=passages,
@@ -12782,6 +12783,54 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except Exception as e:  # noqa: BLE001 -- a second version is a check on top; its failure never stops a quest
             self._log.warning("[implement] the check with a second version of the model's functions could not be made: %r", e)
             return False
+
+    async def _captured_calls(self, state: QuestState, protocol: dict[str, Any], package: str, specs: list[Any],
+                              exec_env: Any) -> dict[str, list[dict[str, Any]]]:
+        """What the key functions the plan gives no worked example for are called with when FI runs the simulation once
+        (core/second_impl.py::capture_inputs): at the settings of FI's small run (core/small_run.py::settings; each part
+        of a study takes other paths through the code), a search's baseline design first. ``{}`` when every key function
+        has the plan's example, or no run can be made."""
+        selected, _skipped = _second_impl.key_functions(specs, protocol)
+        names = [s.name for s in selected if not _second_impl.example_inputs(s, protocol)]
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        if not names or not simulate.is_file():
+            return {}
+        try:
+            from . import small_run as _small
+
+            block = _optimise.block_of(protocol)
+            if block is not None:
+                normal, _why = _optim.normalize(block)
+                if normal is None:
+                    return {}
+                cells = [_optimise_search.cell_of(normal, (normal.get("baseline") or {}).get("values") or {})]
+                if isinstance(normal.get("grid"), dict) and normal["grid"]:  # a search's first scan: a measurement
+                    cells += _small.settings(_optimise_search.scan_grid(normal))
+                inside = None
+            else:
+                grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
+                cells = _small.settings(grid)
+                inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
+            if not cells:
+                return {}
+            deterministic = "run_trial" not in _trial_runner.entries(simulate)
+            thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+
+            from .small_run import budget as _small_run_budget
+
+            async def run(argv: list[str]) -> Any:
+                return await self._run_in_env(argv, timeout_s=_small_run_budget(self.config.execution.timeout_s),
+                                              env=dict(exec_env or {}))
+
+            got = await _second_impl.capture_inputs(run, self.quest_root, package, names, cells,
+                                                    deterministic=deterministic, in_each_run=inside, thresholds=thresholds)
+        except Exception as e:  # noqa: BLE001 -- a record of the calls is an aid to a check; never a stop
+            self._log.info("[implement] what the model's functions are called with could not be recorded: %r", e)
+            return {}
+        if got:
+            self._log.info("[implement] FI ran the simulation once and recorded what %d function(s) the plan gives no "
+                           "example for are called with: %s", len(got), ", ".join(sorted(got)))
+        return got
 
     async def _fill_model_functions(self, state: QuestState, outline: dict[str, Any]) -> bool:
         """After the outline, before the code is written whole: fill the model's package one function at a time, each

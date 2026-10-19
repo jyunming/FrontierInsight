@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import criteria as _criteria
 from . import hidden_check as _hidden
 from . import in_run as _in_run
 from . import optimisation_plan as _optim
@@ -87,17 +88,22 @@ def key(protocol: dict[str, Any] | None) -> str:
     what each run goes through, a search's scan too). A change to one calls for the check again."""
     block = protocol.get("optimisation") if isinstance(protocol, dict) and isinstance(protocol.get("optimisation"), dict) \
         else {}
-    study = {part: (protocol or {}).get(part) for part in ("grid", "sub_studies", "in_each_run")} if isinstance(
-        protocol, dict) else {}
-    scan = {part: block.get(part) for part in ("grid", "sub_studies", "in_each_run")}
+    study = {part: (protocol or {}).get(part) for part in ("grid", "sub_studies", "in_each_run", "constants",
+                                                           "thresholds")} if isinstance(protocol, dict) else {}
+    scan = {part: block.get(part) for part in ("grid", "sub_studies", "in_each_run", "fixed", "design_variables",
+                                               "baseline")}
     return hashlib.sha256(json.dumps([settings(protocol), study, scan], sort_keys=True, default=str).encode(
         "utf-8")).hexdigest()
 
 
 def _judged(name: str, names: set[str]) -> bool:
-    """A headline result, or a headline result at one value compared inside each run (``pitch=80: dof``); every result
-    when no headline is named."""
-    return not names or str(name) in names or str(name).split(": ", 1)[-1] in names
+    """A headline result, or a headline result at one value compared inside each run (``pitch=80: dof``), the names
+    compared as the headline check compares them (``mean_width`` is ``Mean width``); every result when no headline is
+    named."""
+    if not names:
+        return True
+    keys = {_criteria._key(n) for n in names}
+    return _criteria._key(name) in keys or _criteria._key(str(name).split(": ", 1)[-1]) in keys
 
 
 def _mean(metric: Any) -> float | None:
@@ -126,7 +132,8 @@ def pick_cells(cells: list[dict[str, Any]], names: set[str], most: int = MAX_CEL
         level = c.get("level") if isinstance(c.get("level"), dict) else {}
         return {k: v for k, v in c["cell"].items() if k not in level}
 
-    wanted = sorted(names) or sorted({str(n) for c in records for n in (c.get("metrics") or {})})
+    every = sorted({str(n) for c in records for n in (c.get("metrics") or {})})
+    wanted = [n for n in every if _judged(n, names)] or every  # a headline named as no result is: every result
     for name in wanted:
         scored = [(m, run_setting(c)) for c in records
                   if (m := _mean((c.get("metrics") or {}).get(name))) is not None]
@@ -176,6 +183,9 @@ def judge(setting: dict[str, Any], runs: dict[str, list[dict[str, float]]], spre
     only ones judged (every result when none is named); every result counts for whether anything changed."""
     results: list[dict[str, Any]] = []
     changed = False
+    returned = {n for levels in runs.values() for level in levels for n in level}
+    if names and not any(_judged(n, names) for n in returned):
+        names = set()  # the headline is named as no result the run returns: every result is judged, never none
     for cell_key, levels in runs.items():
         for name in sorted({n for level in levels for n in level}):
             values = [level.get(name) for level in levels]
@@ -195,7 +205,9 @@ def judge(setting: dict[str, Any], runs: dict[str, list[dict[str, float]]], spre
             # level, plus what the finest level may still be off by.
             error = None if finest.get("error") is None else abs(values[0] - values[-1]) + finest["error"]
             scale, against = spread.get(name) or 0.0, "spread"
-            if scale <= 0:  # a result the study never moves: there is no spread, so its own value is the scale
+            if scale <= 1e-6 * max(abs(v) for v in values):
+                # A result the study never moves (its spread is nothing, or round-off): there is no spread to judge
+                # by, so its own value is the scale.
                 scale, against = abs(values[-1]), "value"
             share = (error / scale) if error is not None and scale > 0 else None
             tiny = error is not None and error <= 1e-12 * (1.0 + abs(values[-1]))

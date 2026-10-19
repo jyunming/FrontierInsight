@@ -218,3 +218,22 @@ def test_numerical_settings_beside_a_search_are_moved_into_it() -> None:
                 "numerical_settings": {"step_mm": {"search": 0.1}}}
     fixed, notes = plan.repair_protocol(protocol)
     assert any("moved into `protocol.optimisation.numerical_settings`" in n for n in notes), notes
+
+
+def test_a_headline_named_as_the_headline_check_names_it_is_judged() -> None:
+    # criteria.headline_names gives "meanwidth" for a result returned as "mean_width"
+    runs = {"gap=1": [{"mean_width": 10.0}, {"mean_width": 9.0}, {"mean_width": 8.9}]}
+    v = rc.judge(SETTING, runs, {"mean_width": 5.0}, {"meanwidth"})
+    assert v["verdict"] == "not_converged" and v["results"][0]["result"] == "mean_width"
+
+
+def test_a_headline_that_names_no_result_judges_every_result() -> None:
+    runs = {"gap=1": [{"width": 10.0}, {"width": 9.0}, {"width": 8.9}]}
+    v = rc.judge(SETTING, runs, {"width": 5.0}, {"something_else"})
+    assert v["verdict"] == "not_converged"
+
+
+def test_a_spread_of_round_off_is_no_spread() -> None:
+    runs = {"gap=1": [{"width": 10.0}, {"width": 10.0001}, {"width": 10.00011}]}
+    v = rc.judge(SETTING, runs, {"width": 1e-9}, {"width"})
+    assert v["verdict"] == "converged" and v["results"][0]["against"] == "value"
