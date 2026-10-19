@@ -15713,11 +15713,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         design = state.get("design") if isinstance(state.get("design"), dict) else {}
         variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
         names = set(_criteria.headline_names(protocol)) | {str(v) for v in variables.get("dependent") or []}
+        block = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else None
+        if block is not None:  # a search's first scan: what it optimises and what it is limited by
+            names |= {str((block.get("objective") or {}).get("quantity") or "")} | {
+                str(c.get("quantity") or "") for c in block.get("constraints") or [] if isinstance(c, dict)}
+            names.discard("")
+        inside = (_optimise_search.in_each_run(block) if block is not None else _in_run.of(protocol)) or None
         try:
             record = await self._await_with_heartbeat(_refine.run(
                 self.executor, python, self.quest_root, protocol, deterministic="run_trial" not in _trial_runner.entries(self.quest_root / "code" / "simulate.py"),
                 timeout_s=timeout, env=env, thresholds=protocol.get("thresholds") or {},
-                in_each_run=_in_run.of(protocol) or None, names=names),
+                in_each_run=inside, names=names),
                 label="running the headline results again at finer numerical settings")
             _refine.write(self.quest_root, record)
         except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
@@ -26877,6 +26883,10 @@ Each oracle's `kind` is one of six: `special_case` (a special or limiting case w
 
 `oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. Give every oracle a `case` and a `measure`: FI calls the simulation's own function (run_cell for a deterministic simulation, run_trial for a random one) on that case itself before the main run and judges the number it returns, so the check does not rest on anything the script reports about itself. A deterministic simulation's oracles always get a case. For a random simulation a case is ONE trial with one seed, so give a case to a check one trial shows exactly (an invariant every trial keeps, a setting whose outcome is certain, such as no outbreak at R0 = 0); a check that needs many trials (a probability, a mean) has no case and is answered by the script's own oracle(). A check without a `case` is the script's own word and does not count as independent validation. (A quest set to keep one script, `execution.split_analysis: false`, has no such function: its script answers every check itself when FI_ORACLE=1, and none of them counts.) A run whose checks do not pass never reaches the main sweep.
 
+A result that is a yes or no, or a count of settings past a threshold, needs a check on each side: a setting where it must come out yes and one where it must come out no (each a `special_case` in `oracles`), and the plan says over which settings it changes; a result that is the same at nearly every setting of the study measures nothing there.
+
+When a quantity is calibrated separately for each condition the study compares (set to meet a target, anchored, normalised per condition), the calibration can make or remove the difference being compared: add a part of the study in which one shared calibration is used for every condition, and compare the two.
+
 Mistakes that stop a run, each seen in real quests:
 - A thing the topic names that you leave out or approximate, with no entry in `simplifications`, or a metric with no entry in `definitions`, is sent back to you to write.
 - A `quote` in `definitions` that is not in the sources listed above is sent back to you: quote the source word for word, or leave `quote` empty and name your own definition in `simplifications` (put its id in `differs`).
@@ -26938,6 +26948,7 @@ Rules for the block:
 - Each design variable's range has a physical meaning and lies where the model holds (`model.holds_for`).
 - A design that is a set of numbers (the pixels of a source, a profile) is ONE design variable with a `shape` (a list of 1 to 3 whole numbers, at most 1024 elements in all), `kind` `continuous` or `integer`, and `low` / `high` as one number for every element or a list of that shape; its baseline value is a list of that shape. The search changes every element. Never write a list for `low`, `high` or a baseline value without the `shape`, and never put an array under `grid` (the grid scans single numbers).
 - The baseline is a real, feasible design (it meets every constraint): it gives a value for every design variable, inside its range, and says where it comes from. Make one oracle check the baseline design.
+- `numerical_settings` lists every numerical resolution of the simulation that could change a result (how finely a source, a pupil, a field or a time is sampled, a step, a mesh size): FI also runs the first scan's lowest and highest results again at the finer values and says whether they are converged.
 - The search and the check use the same model; what differs is that the check recomputes the best designs and the baseline at finer numerical settings (and, with randomness, with new seeds), so an improvement that is only a numerical error does not count. `check` values must be really finer than `search`, each level at least 1.1 times finer than the one before (a mesh size of 0.5 is checked at 0.25 and 0.125). Leave `check` out and FI uses half, then a quarter, of the search value.
 - Leave out `improvement_tolerance` unless the topic or the field says how much better counts: a design then counts as better only when it beats the baseline by more than the numerical error of the two designs.
 - `search_method`: name a built-in one unless the topic asks for a library; a `scipy:` or `optuna:` method is used only when the quest's environment has that library. A coarse `grid` goes with `global_then_local`.

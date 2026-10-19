@@ -123,3 +123,10 @@ def test_no_record_on_a_plan_with_numerical_settings_is_a_gap_and_none_without_t
     assert rc.evidence_gaps(tmp_path, protocol)
     assert rc.evidence_gaps(tmp_path, {"grid": {"a": [1, 2]}}) == []
     assert math.isfinite(rc.DEFAULT_TOLERANCE)
+
+
+def test_a_search_s_first_scan_is_run_again_at_the_search_s_finer_settings() -> None:
+    block = {"grid": {"gap_mm": [1.0, 2.0]}, "numerical_settings": {"step_mm": {"search": 0.1, "check": [0.05]}}}
+    s = rc.settings({"optimisation": block})
+    assert s["step_mm"]["levels"] == [0.1, 0.05]
+    assert rc.settings({"optimisation": {**block, "grid": None}}) == {}, "a search with no scan: its own check covers it"

@@ -46,10 +46,20 @@ DEFAULT_TOLERANCE = 0.05
 
 def settings(protocol: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """The measurement's numerical settings, each with its ``levels`` (the study's value, then the finer ones) and the
-    ``ratios`` from one level to the next; ``{}`` for a search (its own check: core/optimum_check.py) or none."""
-    if not isinstance(protocol, dict) or protocol.get("optimisation") is not None:
+    ``ratios`` from one level to the next: a measurement's ``protocol.numerical_settings``, or for a search with a first
+    scan the search's own (``protocol.optimisation.numerical_settings``); ``{}`` for a search without a scan (its best
+    designs have their own check: core/optimum_check.py) or none."""
+    if not isinstance(protocol, dict):
         return {}
-    raw = protocol.get("numerical_settings")
+    block = protocol.get("optimisation")
+    if block is not None:
+        # A search's first scan is a measurement of its own (core/optimise_search.py::scan_grid): its results are run
+        # again at the search's finer numerical settings too. The best designs have their own check (optimum_check).
+        if not (isinstance(block, dict) and isinstance(block.get("grid"), dict) and block["grid"]):
+            return {}
+        raw = block.get("numerical_settings")
+    else:
+        raw = protocol.get("numerical_settings")
     out: dict[str, dict[str, Any]] = {}
     for name, item in (raw.items() if isinstance(raw, dict) else []):
         if not isinstance(item, dict) or not isinstance(item.get("search"), (int, float)):
