@@ -178,6 +178,13 @@ same PR that adds, splits or renames one.
   `write` / `load` / `record_sha` (`needs/HIDDEN_CHECK.json`), `evidence_gaps` (reads the trace's `hidden_check`
   events, `Engine._hidden_check_written`). Called by `Engine._hidden_check` in `_node_execute` after a successful
   two-script run; never stops a quest.
+- `core/refinement_check.py` — a measurement's numerical settings (`protocol.numerical_settings`, read by
+  `plan._numerical_settings`; each is a one-value setting of the grid): `settings` (levels and ratios, FI's rule from
+  `optimisation_plan.check_levels`), `pick_cells` (where each headline result is lowest and highest, then spread),
+  `judge` (lost value, no effect, `optimum_check.numerical_error` against the result's spread over the study), `run`
+  (each setting once per level through `run_estimate._time_one`, outside FI's record), `write` / `read`
+  (`needs/REFINEMENT_CHECK.json`), `lines`, `evidence_gaps`. Called by `Engine._refinement_check` in `_node_execute`
+  after a successful two-script run; the gaps join `_write_evidence`'s list and the lines the writer's evidence.
 - `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of
   correctness, each from a declared oracle or FI's trial record; never a headline metric or the
   script's results). `normalize` (strict, called by `plan.normalize_protocol`) / `repair` (a draft, called by

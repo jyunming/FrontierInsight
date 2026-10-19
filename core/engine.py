@@ -142,6 +142,7 @@ from . import function_steps as _function_steps
 from . import second_impl as _second_impl
 from . import step_passages as _step_passages
 from . import hidden_check as _hidden
+from . import refinement_check as _refine
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
 from . import optimise as _optimise
@@ -13489,7 +13490,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.warning("[evidence] whether the checks are independent of their writer could not be checked: %r", e)
                 independence_gaps = [f"whether the checks are independent of the model that wrote them could not be "
                                      f"checked ({type(e).__name__})"]
-            independence_gaps = [*independence_gaps, *self._static_check_gaps()]  # core/static_checks.py
+            independence_gaps = [*independence_gaps, *self._static_check_gaps(),  # core/static_checks.py
+                                 *_refine.evidence_gaps(self.quest_root, self._protocol_block(state))]
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 oracle_source_gaps=oracle_source_gaps, equation_label_gaps=label_gaps,
@@ -15697,6 +15699,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if record.get("status") == "passed":
             self._log.info("[oracle] %d check(s) also passed at a setting the code never saw", len(record["cases"]))
 
+    async def _refinement_check(self, state: QuestState, python: Path | str, env: dict[str, str] | None) -> None:
+        """After a run, a measurement's numerical settings (``protocol.numerical_settings``): FI runs the settings where each
+        headline result was lowest and highest again at the finer values and judges convergence (core/refinement_check.py),
+        kept in ``needs/REFINEMENT_CHECK.json``. Never stops the quest; what is not converged is a gap in the evidence."""
+        protocol = self._protocol_block(state)
+        if not _refine.settings(protocol):
+            return
+        record = _refine.read(self.quest_root)
+        if record and record.get("code_sha256") == _hidden.code_sha(self.quest_root):
+            return  # already run on this code (a resume)
+        timeout = max(60, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac))
+        design = state.get("design") if isinstance(state.get("design"), dict) else {}
+        variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
+        names = set(_criteria.headline_names(protocol)) | {str(v) for v in variables.get("dependent") or []}
+        try:
+            record = await self._await_with_heartbeat(_refine.run(
+                self.executor, python, self.quest_root, protocol, deterministic="run_trial" not in _trial_runner.entries(self.quest_root / "code" / "simulate.py"),
+                timeout_s=timeout, env=env, thresholds=protocol.get("thresholds") or {},
+                in_each_run=_in_run.of(protocol) or None, names=names),
+                label="running the headline results again at finer numerical settings")
+            _refine.write(self.quest_root, record)
+        except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
+            self._log.warning("[execute] the headline results could not be run again at finer numerical settings: %r", e)
+            return
+        for line in _refine.lines(record):
+            self._log.info("[execute] %s", line)
+
     def _independence_gaps(self, protocol: dict[str, Any] | None) -> list[str]:
         """Under ``rigor_profile: research``: why the checks are not shown independent of the model that wrote them (a
         usable second reading by another model, core/oracle_review.py; the checks at a setting the code never saw,
@@ -17100,6 +17129,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             await asyncio.to_thread(self._save_run_data, run_started, split)
             if split and self.config.rigor_profile == "research":
                 await self._hidden_check(state, py, primary_env)  # the checks at a setting the code never saw
+            if split:
+                await self._refinement_check(state, py, primary_env)  # the headline results at finer numerical settings
         if manifest_status == "stopped":
             try:
                 plain_stop = (_run_manifest.plain_difference(self._manifest_differences)
@@ -20110,6 +20141,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             evidence_note = f"{evidence_note}\n\n{best_note}".strip()
         if once_note := self._ran_once_note():
             evidence_note = f"{evidence_note}\n\n{once_note}".strip()
+        if _refine.settings(self._protocol_block(state)) and (refined := _refine.lines(_refine.read(self.quest_root))):
+            evidence_note = (f"{evidence_note}\n\nFI ran the headline results again at finer numerical settings "
+                             "(needs/REFINEMENT_CHECK.json); the paper says what this found:\n"
+                             + "\n".join(f"- {line}" for line in refined)).strip()
         if typed_note := self._typed_figures_note():
             evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
         if code_note := _code_review.write_note(self.quest_root, self.quest_root / "code"):
@@ -26798,6 +26833,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "grid": {"<parameter, named as the code will name it>": [<every value it takes>]},
   "sub_studies": [{"name": "<a separate part of the study, in a few words>", "vary": ["<the settings of `grid` this part crosses with one another>"], "hold": {"<each other setting of `grid` with several values>": <the value this part keeps it at>}}],
   "in_each_run": {"<what ONE run goes through all of together: the conditions one fit spans, the methods applied to the same simulated data>": [<all its values>]},
+  "numerical_settings": {"<each numerical resolution of the simulation, named as the code names it: a sampling density, a step, a mesh size, a number of points>": {"search": <the one value the study runs at>, "check": [<finer values FI runs the headline results again at>], "finer": "<smaller | larger>"}},
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
   "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it and keeps every setting; only the topic's own time limit may take them below it (down to 10), and the paper then says so; leave out for a deterministic study>,
   "thresholds": {"<name>": <value>},
@@ -26832,6 +26868,8 @@ Each oracle's `kind` is one of six: `special_case` (a special or limiting case w
 @@LEDGER@@
 
 @@STEPS@@
+
+`numerical_settings` names every numerical resolution of the simulation whose value could change a result (how finely a source, a pupil, a field or a time is sampled, a step, a mesh size, a number of terms), with the one value the study uses: the code reads each from the setting it is given, as it reads a setting of `grid`, never from a number of its own. After the run FI itself runs the settings where each headline result is lowest and highest again at the finer `check` values (each at least 1.1 times finer than the one before; left out, FI uses half and a quarter, or twice and four times for a count) and says in the paper whether the results are converged. A resolution left out of `numerical_settings` is one nobody checked.
 
 `known_value` is for a number the simulation estimates and knows the true value of (a parameter it generates the data with and then recovers): give the true value, the names run_trial returns for the estimate and for its standard error and/or the two ends of its interval, and the interval's level. FI then counts itself, from the trials, how far the estimates lie from the true value, whether the standard errors match the spread of the estimates, and, when the two ends of the interval are named, how often that interval covers the true value (FI judges coverage only from the interval the trial reports, so name its two ends when the code computes one, for example a t interval); a code whose uncertainty is wrong is sent back. When your design fixes the interval's multiplier (t with 3 degrees of freedom, or the normal quantile), give it as `degrees_of_freedom`: FI then recovers the multiplier the code used from the trials' own intervals and standard errors and sends the code back if it differs from yours. Give the true value on the scale of the estimate (the log of a value when the estimate is a log). A true value the study fixes (an activation energy of 50 kJ/mol the data are generated with, and the log of a frequency factor that follows from it) goes into `constants` under a name, with its number, and `true_value` names it; a true value that follows from other constants may instead be written as a formula of their names (for example `log(k_ref) + Ea / (R * T_ref)`), which FI computes itself. Leave `known_value` out for a number with no known true value; the paper then says its uncertainty was not checked against the truth. Leave `undefined_when` out unless the number truly has no value at some settings.
 
