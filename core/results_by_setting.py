@@ -58,6 +58,11 @@ _FI_SCRIPTS = frozenset({"run.py", "fi_search.py"})
 PAPER_MAX_ROWS = 60
 #: The tables as they go into the paper, written beside FI's other records for core/paper_facts.py to fill in.
 PAPER_BLOCK = Path(".fi") / "results_table.md"
+#: What the writer was given of FI's tables (:func:`writer_note`), kept so the claim check reads the same text.
+WRITER_NOTE = Path(".fi") / "writer_tables.md"
+#: The most of that note the claim check is given. ``writer_note`` caps its rows, not their width; the largest of 35
+#: delivered papers' notes was about 26,000 characters, under this.
+CLAIM_NOTE_MAX_CHARS = 40_000
 
 
 # --- which grid axes the simulation reads ----------------------------------------------------------------------------
@@ -622,6 +627,34 @@ def writer_note(trial_rows: list[dict[str, Any]], built: Built | None, cap: int 
                 ("\n\n" + extra if extra else "") + "\n\n" + "\n".join(markdown(t) for t in cut))
     return (head + f" They have {total} rows, too many for this note even as a slice: quote a setting's numbers only "
             "from those files." + ("\n\n" + extra if extra else ""))
+
+
+def keep_writer_note(quest_root: Path, note: str) -> None:
+    """Keep what the writer was given (:data:`WRITER_NOTE`); with nothing given, an earlier run's note is removed."""
+    path = Path(quest_root) / WRITER_NOTE
+    if note.strip():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(note, encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
+
+
+def claim_note(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[str, Any]] | None = None) -> str:
+    """FI's tables of every setting for the claim check: what the writer was given (:data:`WRITER_NOTE`), or, for a
+    paper written before FI kept it, the same note built again from the trial record. A sentence about one setting's
+    value cites a row of these tables, and a check that saw only the run's own summary called it unsupported (in a
+    sample of 60 sentences delivered papers kept as unsupported, 26 were backed by FI's records, about half of them by
+    a setting's row)."""
+    path = Path(quest_root) / WRITER_NOTE
+    try:
+        note = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):  # not kept, or not readable as text: built again
+        rows, built = from_quest(Path(quest_root), protocol, judged)
+        note = writer_note(rows, built)
+    if len(note) <= CLAIM_NOTE_MAX_CHARS:
+        return note
+    cut = note[:CLAIM_NOTE_MAX_CHARS].rsplit("\n", 1)[0]
+    return cut + "\n(the tables continue; every row is in paper/results_by_setting.csv)"
 
 
 def paper_block(built: Built | None, cap: int | None = None) -> str:
