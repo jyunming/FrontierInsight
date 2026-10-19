@@ -427,9 +427,9 @@ def test_a_container_started_with_the_runners_flags_sees_only_code(tmp_path: Pat
 
 def test_the_copy_is_named_by_a_random_id_never_by_the_quest(tmp_path: Path) -> None:
     runner = ac.ClaudeCliRunner(mode="host", work_root=tmp_path / "work")
-    quest = tmp_path / "out" / "1791991314-kinetics-parameter-recovery-9da3c6"
+    quest = tmp_path / "out" / "1791991314-example-topic-study-9da3c6"
     work = runner.workdir(quest)
-    assert quest.name not in str(work) and "kinetics" not in str(work)
+    assert quest.name not in str(work) and "example-topic" not in str(work)
     assert len(work.parent.name) == 32 and int(work.parent.name, 16) >= 0
     assert runner.workdir(quest) == work, "a resume finds the same copy (the id is kept in the quest's .fi/)"
 

@@ -161,10 +161,10 @@ def test_a_repair_is_not_taken_for_a_failed_model_call() -> None:
 
 
 def test_numbers_are_taken_out_of_what_the_agent_is_shown_and_names_are_kept() -> None:
-    line = "[oracle] the check 'c1' at pitch80 (E1) measured 0.61, expected 6.2e-1 within 0.01 after 3 runs"
+    line = "[oracle] the check 'c1' at size80 (E1) measured 0.61, expected 6.2e-1 within 0.01 after 3 runs"
     shown = ab.without_numbers(line)
     assert "0.61" not in shown and "6.2e-1" not in shown and "0.01" not in shown and " 3 " not in shown
-    assert "pitch80" in shown and "E1" in shown and "c1" in shown
+    assert "size80" in shown and "E1" in shown and "c1" in shown
 
 
 # --- the loop before the run --------------------------------------------------------------------------------------------

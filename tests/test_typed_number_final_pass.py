@@ -1,7 +1,7 @@
 """When no round is left, a whole-paper draft gets one edit of its sentences with numbers FI did not fill before any is
 taken out; ``{{calc:EXPR}}`` lets that edit keep a number of the method FI computes from the plan's numbers.
 
-The engine tests run write -> review -> (edit) -> review with a fake model on the s2 kinetics trial record, as
+The engine tests run write -> review -> (edit) -> review with a fake model on a real trial record of an earlier round, as
 tests/test_paper_keys_wiring.py does."""
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ CALC = "{{calc:1 - (1 - 0.95) / 2}}"
 
 
 def _paper() -> str:
-    return (f"# Kinetics\n\n## Abstract\nWe study the bias.\n\n## Methods\nThe run took {{{{run_time}}}}. Intervals used "
+    return (f"# Parameter bias\n\n## Abstract\nWe study the bias.\n\n## Methods\nThe run took {{{{run_time}}}}. Intervals used "
             f"the t quantile at level {LEVEL}.\n\n## Results\nThe SD of the bias was {KEY_SD} at noise 0.01, and the mean "
             f"bias was {TYPED} in the main grid.\n\n## Discussion\nIt is small.\n")
 

@@ -133,7 +133,7 @@ _NUMBER = re.compile(r"(?<![A-Za-z_\d.])[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\
 
 
 def without_numbers(text: str) -> str:
-    """``text`` with every stand-alone number replaced by ``…`` (a name like ``E1`` or ``pitch80`` is kept): a line of the
+    """``text`` with every stand-alone number replaced by ``…`` (a name like ``E1`` or ``size80`` is kept): a line of the
     run log can name a check's expected value, which the agent must never see."""
     return _NUMBER.sub("…", text)
 
