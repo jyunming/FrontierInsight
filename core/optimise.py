@@ -538,7 +538,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         trial_run = await _trials.run_trials(
             executor, python, quest_root, module, grid, runs_per_setting=runs, base_seed=int(base_seed),
             deterministic=entry == "run_cell", timeout_s=max(1, math.ceil(left)), env=env,
-            thresholds=thresholds, paired=True,
+            thresholds=thresholds, paired=True, in_each_run=_search.in_each_run(block) or None,
         )
         stderr_parts.append(trial_run.stderr())
         summary = json.loads(trial_run.summary_path.read_text(encoding="utf-8"))

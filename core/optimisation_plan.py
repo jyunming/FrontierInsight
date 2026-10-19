@@ -640,7 +640,44 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
         if why:
             return None, why
         out["grid"] = {str(axis): (v if isinstance(v, list) else [v]) for axis, v in grid.items()}
+
+    # What every evaluation goes through together (all the values in one run, as a measurement's `in_each_run`): the
+    # objective of one design can be a result over all of them.
+    inside = out.get("in_each_run")
+    if inside is not None:
+        if not isinstance(inside, dict) or not inside:
+            return None, f"{_P}.in_each_run` must map each setting every evaluation goes through to its list of values"
+        for name, values in inside.items():
+            if not isinstance(values, list) or len(values) < 2:
+                return None, (f"{_P}.in_each_run` `{name}` must list two or more values (one value is a condition: "
+                              f"put it under `{_P[1:]}.fixed`)")
+            if str(name) in variables or str(name) in {str(k) for k in (fixed or {})} \
+                    or str(name) in (out.get("grid") or {}):
+                return None, (f"{_P}.in_each_run` `{name}` is also a design variable, a condition held fixed or a "
+                              "setting of the scan: it is one of them")
+        out["in_each_run"] = {str(k): list(v) for k, v in inside.items()}
+
+    # The scan divided into parts, each varying only some of its settings, as a measurement's `sub_studies` divide its grid.
+    subs = out.get("sub_studies")
+    if subs is not None:
+        from . import plan as _plan
+
+        fixed_subs, why = _plan._sub_studies(subs, out.get("grid"), out.get("in_each_run"))
+        if why:
+            for old, new in (("`protocol.sub_studies`", f"{_P}.sub_studies`"), ("`protocol.grid`", f"{_P}.grid`"),
+                             ("`protocol.in_each_run`", f"{_P}.in_each_run`")):
+                why = why.replace(old, new)
+            return None, why
+        out["sub_studies"] = fixed_subs
     return out, None
+
+
+def scan_size(block: dict[str, Any]) -> int:
+    """How many designs the coarse scan runs (0 without one): every combination of its settings, or with
+    ``sub_studies`` the settings of its parts together (a setting two parts share is run once)."""
+    if not (isinstance(block.get("grid"), dict) and block["grid"]):
+        return 0
+    return int(_optimise_search.grid_size(_optimise_search.scan_grid(block)))
 
 
 _ENTRY = re.compile(r"entry (\d+)")
@@ -801,12 +838,7 @@ def evaluations(block: dict[str, Any]) -> tuple[int | None, int]:
     """``(search evaluations the budget allows, or None when no budget is written; evaluations of the coarse scan)``."""
     budget = block.get("evaluation_budget")
     search = int(budget["starts"]) * int(budget["per_start"]) if isinstance(budget, dict) else None
-    scan = 0
-    if isinstance(block.get("grid"), dict) and block["grid"]:
-        scan = 1
-        for values in block["grid"].values():
-            scan *= len(values)
-    return search, scan
+    return search, scan_size(block)
 
 
 def budget(block: dict[str, Any]) -> dict[str, Any]:
@@ -884,12 +916,11 @@ def scan_problem(design: Any, limit_s: float | None = None) -> str:
     if block is None or not (isinstance(block.get("grid"), dict) and block["grid"]):
         return ""
     try:
-        axes = {k: v for k, v in _optimise_search.scan_grid(block).items() if len(v) > 1}
+        scan = _optimise_search.scan_grid(block)
+        axes = {k: v for k, v in scan.items() if len(v) > 1}
+        total = int(_optimise_search.grid_size(scan))
     except (KeyError, TypeError, ValueError):
         return ""
-    total = 1
-    for values in axes.values():
-        total *= len(values)
     if total <= 1:
         return ""
     limit = _optimise_search.MAX_LISTED_SETTINGS
@@ -902,8 +933,13 @@ def scan_problem(design: Any, limit_s: float | None = None) -> str:
     held = set(cell_of_names(block))
     listing = ", ".join(f"`{k}` {len(v)} value{'s' if len(v) != 1 else ''}"
                         + (" (a condition the plan holds fixed)" if k in held else "") for k, v in axes.items())
-    sentence = (f"the coarse scan cannot run: it is {total:,} settings, every combination of the {len(axes)} settings of "
-                f"`protocol.optimisation.grid` that have more than one value (each multiplies every other): {listing}")
+    if getattr(scan, "sub_studies", None):
+        parts = ", ".join(f"`{name}` {n:,}" for name, n in _optimise_search.sub_study_sizes(scan))
+        sentence = (f"the coarse scan cannot run: it is {total:,} settings, the settings of its parts "
+                    f"(`protocol.optimisation.sub_studies`, each every combination of the settings it varies): {parts}")
+    else:
+        sentence = (f"the coarse scan cannot run: it is {total:,} settings, every combination of the {len(axes)} settings "
+                    f"of `protocol.optimisation.grid` that have more than one value (each multiplies every other): {listing}")
     if too_many:
         sentence += f"; FI does not list or run more than {limit:,}"
     if too_long:

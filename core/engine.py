@@ -26814,6 +26814,7 @@ _STUDY_TYPE_DIRECTIVE = """
 Add a design key `study_type` (a sibling of `hypothesis`, NOT inside `plan` or `protocol`):
 - `measure` when the topic asks how a result changes, or which of some fixed alternatives does better, over settings you choose (the protocol has a `grid`);
 - `find_best_design` when it asks for the design, setting or parameter values that make one result as low or as high as possible, perhaps within limits: the fin spacing and thickness that give the lowest heat-sink temperature, the lightest truss cross-section whose stress stays under a limit, the controller gain with the least overshoot.
+- A topic that asks for both (how results change over settings it names, AND the best design) is `find_best_design`: the settings it compares are the block's coarse `grid` below, run and plotted before the search, and the design FI searches for is a design variable. FI runs the search itself and records every evaluation; the simulation computes the result of ONE design and never searches, fits a surrogate or loops over designs itself.
 
 A search for the best design has NO top-level `grid`: its protocol has an `optimisation` block instead (`oracles` and `model` are still required, as above):
 
@@ -26827,6 +26828,8 @@ A search for the best design has NO top-level `grid`: its protocol has an `optim
   "evaluation_budget": {"starts": <whole number of starting points>, "per_start": <whole number of evaluations each>, "seconds_per_evaluation": <your estimate of one evaluation, or leave out>},
   "search_method": "<bounded_local | global_then_local | exhaustive | scipy:<function> | optuna:<sampler>>",
   "grid": {"<design variable, a condition listed in fixed that the study should also be compared across, or a setting whose values are names>": [<a coarse scan run before the search, plotted; only a cell at the value held in fixed can start the search; leave out when not wanted>]},
+  "sub_studies": [{"name": "<one part of the scan, e.g. one family of alternatives>", "vary": [<the settings of grid this part varies, crossed>], "hold": {"<every other setting of grid with more than one value>": <the value this part holds it at>}}],
+  "in_each_run": {"<a setting every evaluation of one design goes through together, e.g. load_case>": [<all its values: the objective is one result over all of them>]},
   "improvement_tolerance": {"value": <number, in the objective's unit; a fraction when relative, 0.05 = 5%>, "mode": "<absolute | relative>"},
   "target": <the value of the objective the person hopes to reach, only when the topic names one>
 }
@@ -26840,6 +26843,8 @@ Rules for the block:
 - Leave out `improvement_tolerance` unless the topic or the field says how much better counts: a design then counts as better only when it beats the baseline by more than the numerical error of the two designs.
 - `search_method`: name a built-in one unless the topic asks for a library; a `scipy:` or `optuna:` method is used only when the quest's environment has that library. A coarse `grid` goes with `global_then_local`.
 - For a study with randomness, add `runs_per_evaluation` (runs per evaluation during the search) and `check_runs` (new runs for each design at the check).
+- Every setting of the scan is crossed with every other, unless `sub_studies` divides it, as in a measurement: alternatives that each have their own parameters are separate parts (each varies its own parameters and holds the rest), so they do not multiply one another. Leave `sub_studies` out when the scan is one part.
+- `in_each_run` holds the values every evaluation goes through together (a design judged over several cases at once): FI gives the simulation each list whole, and the objective is one number over all of them. It is not a setting of the scan.
 
 Do not write `study_type: find_best_design` without an `optimisation` block (the quest stops until it has one), nor an `optimisation` block beside a top-level `grid` (that grid is then moved into the block as its coarse scan). A measurement leaves `optimisation` out.
 """
