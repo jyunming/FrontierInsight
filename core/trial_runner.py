@@ -155,6 +155,9 @@ def main():
                 if kept is None:
                     raise TypeError(why)
                 row.update(status="ok", values=kept)
+                reasons = missing_reasons(value, kept)
+                if reasons:
+                    row[WHY_MISSING] = reasons
             except BaseException as e:
                 if isinstance(e, KeyboardInterrupt):
                     raise

@@ -133,7 +133,8 @@ def run_cell_child(study, index, out_path):
             kept, why = read_returned(value, levels, entry)
             if kept is None:
                 raise TypeError(why)
-            rows.append({"trial": trial, "ok": True, "values": kept})
+            rows.append({"trial": trial, "ok": True, "values": kept,
+                         **({WHY_MISSING: missing_reasons(value, kept)} if missing_reasons(value, kept) else {})})
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
