@@ -87,6 +87,21 @@ def _level_of(key, levels):
     return None
 
 
+def none_as_nan(value):
+    """``value`` with ``None`` read as NaN, a value that does not exist, also inside a list or a mapping of numbers. The
+    code writer is told to return ``null`` for a value that is undefined (and a plan's failure policy says so too), and
+    the harness reads that as no value, as it reads NaN, not as a broken run: a real study's settings where a value
+    did not exist returned ``None`` as its plan said, and the run was refused for it."""
+    nan = float("nan")
+    if value is None:
+        return nan
+    if isinstance(value, (list, tuple)):
+        return [nan if x is None else x for x in value]
+    if isinstance(value, dict):
+        return {k: (nan if x is None else x) for k, x in value.items()}
+    return value
+
+
 def read_returned(value, levels, entry):
     """``(the values, "")`` or ``(None, why)`` for what the simulation function returned for one run.
 
@@ -100,6 +115,7 @@ def read_returned(value, levels, entry):
     bad = []
     for name, v in value.items():
         name = str(name)
+        v = none_as_nan(v)
         if _number(v):
             out[name] = float(v)
             continue

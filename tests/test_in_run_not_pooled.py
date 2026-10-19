@@ -64,3 +64,47 @@ def test_sheet_still_offers_the_whole_pool_of_a_one_number_per_run_metric_and_no
     lines = [x for x in sheet.splitlines() if x.startswith("- ")]
     assert any(x.startswith("- {{v:ea:mean_ci @ sigma=all, estimator=all}}") for x in lines)
     assert len(lines) == len(set(lines))
+
+
+def _many(settings: int, levels: int) -> list[dict]:
+    cells = []
+    for s in range(settings):
+        for lv in range(levels):
+            cells.append({"cell": {"size": float(s), "shift": lv * 0.1, "route": "Direct"}, "level": {"shift": lv * 0.1},
+                          "metrics": {"k": {"values": [float(s) + lv]}, "w": {"values": [1.0, 2.0, float(lv)]}}})
+        cells.append({"cell": {"size": float(s), "route": "Direct"}, "metrics": {"u": {"values": [1.0, 2.0, 3.0]}}})
+    return cells
+
+
+def test_a_setting_is_found_by_its_values_as_the_comparison_finds_it():
+    rec = pv.from_cells(_many(3, 4), {"in_each_run": {"shift": [0.0, 0.1, 0.2, 0.30000000000000004]}})
+    by_text = pv.resolve("w @ size=2, shift=0.3, route=direct", rec)  # 0.30000000000000004 and "Direct", as compared
+    assert by_text.filled and by_text.inputs["trials"] == 3
+    assert pv.resolve("w @ size=2, shift=0.30000000000000004, route=Direct", rec).text == by_text.text
+    assert not pv.resolve("w @ size=7, shift=0.3, route=Direct", rec).filled
+    assert pv.resolve("w @ size=all, shift=0.1, route=Direct", rec).inputs["trials"] == 9
+
+
+def test_the_sheet_of_a_record_per_value_is_built_without_rescanning_it(monkeypatch):
+    """A real study compared 102 values inside each of 4452 runs: 455,292 records, and the writer's sheet looked up
+    every key by scanning all of them (each axis list again too), for hours. Each lookup reads only its setting now."""
+    rec = pv.from_cells(_many(60, 50), {"in_each_run": {"shift": [lv * 0.1 for lv in range(50)]}})
+    scanned = []
+    real = pv._same
+    monkeypatch.setattr(pv, "_same", lambda a, b: scanned.append(1) or real(a, b))
+    text = pv.sheet(rec)
+    assert "Too many settings" in text  # 3,060 records: the capped list, its lines worked out by lookup
+    assert len(scanned) < 1000 * len(rec.cells), len(scanned)  # it was 23,000 per record
+
+
+def test_a_lookup_finds_every_record_the_comparison_calls_the_same():
+    """A value is found again as it is compared: a number written as text, minus zero, a number within the comparison's
+    tolerance; a lookup that kept records by a rounded form missed some of them while it found others."""
+    values = [1, "1", 1.0, -0.0, 0.0, 1e-13, 2.0, 2.0 + 1e-10, 0.1234567894999, 0.1234567895001, "Direct", " direct", True,
+              float("nan"), float("inf")]
+    cells = [{"cell": {"size": v, "route": "a"}, "metrics": {"k": {"values": [float(i)]}}} for i, v in enumerate(values)]
+    rec = pv.from_cells(cells, {})
+    for q in values + [0.12345678950, "2.0", "true"]:
+        scan = [c for c in rec.carrying("k") if pv._same(q, c["cell"]["size"])]
+        assert rec.at_value("k", "size", q) == scan, q
+        assert rec.at_setting("k", {"size": q, "route": "a"}) == scan, q

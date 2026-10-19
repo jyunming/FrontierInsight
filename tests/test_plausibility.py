@@ -101,7 +101,7 @@ def test_no_assertions_means_no_violations() -> None:
 def test_unmatched_path_is_not_a_violation() -> None:
     """An assertion about a metric the run never emitted is not a failure —
     it is an assertion with nothing to say."""
-    d = _design({"path": "nils", "min": 1.0})
+    d = _design({"path": "gain", "min": 1.0})
     assert pl.check_design({"contrast": 0.4}, d) == []
 
 
@@ -324,6 +324,27 @@ def test_a_bounded_quantity_a_repair_renamed_is_reported() -> None:
     assert [x.kind for x in v] == ["missing"]
     assert "wilcoxon_p_one_sided is no longer in the results" in v[0].describe()
     assert "report it again under the name `wilcoxon_p_one_sided`" in v[0].describe()
+
+
+_GAIN = _design({"path": "gain", "min": 0.5, "max": 5})
+
+
+def test_a_bounded_quantity_reported_as_a_list_is_there_and_each_item_is_checked() -> None:
+    """A real run first reported a bounded quantity as one number, then as a list of one number per setting: the gate
+    called it no longer in the results and sent the run to a repair, and never checked the listed values."""
+    seen = pl.bounded_paths({"gain": 1.2}, _GAIN)
+    assert seen == ["gain"]
+    assert pl.check_design({"gain": [0.8, 3.3, 3.6]}, _GAIN, seen=seen) == []
+    assert pl.check_design({"by": {"a": {"gain": [[1.0, 2.0], [4.0]]}}}, _GAIN, seen=seen) == []
+    v = pl.check_design({"gain": [0.8, 7.0, 3.6]}, _GAIN, seen=seen)
+    assert [(x.kind, x.path, x.value) for x in v] == [("out_of_range", "gain[1]", 7.0)]
+    assert pl.bounded_paths({"gain": [1.0, 2.0]}, _GAIN) == ["gain"]
+
+
+def test_a_list_of_records_still_names_each_record_s_own_keys() -> None:
+    assert pl.check_design({"sweep": [{"gain": 1.0}, {"gain": 9.0}]}, _GAIN) != []
+    assert pl.check_design({"gain_by_setting": [9.0, 9.0]}, _GAIN) == []
+    assert pl.check_design([9.0, 9.0], _GAIN) == []
 
 
 def test_a_bounded_quantity_reported_as_null_is_not_missing() -> None:

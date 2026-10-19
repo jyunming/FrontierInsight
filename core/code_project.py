@@ -172,6 +172,8 @@ def evaluate_child(spec_path, out_path):
             value = fn(dict(spec["cell"])) if entry == "run_cell" else fn(dict(spec["cell"]), trial["trial"], trial["seed"])
             if not isinstance(value, dict) or not value:
                 raise TypeError(f"{entry}() must return a dict of numbers")
+            # None is a value that does not exist (the code writer's null), read as NaN as the trial harness reads it.
+            value = {k: float("nan") if v is None else v for k, v in value.items()}
             bad = [k for k, v in value.items() if not is_number(v)]
             if bad:
                 raise TypeError(f"{entry}() returned non-numbers for {bad[:5]}")

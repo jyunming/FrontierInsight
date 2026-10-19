@@ -175,11 +175,14 @@ from types import MappingProxyType
 from typing import Any, NamedTuple
 
 # Assertion paths are matched against the flattened result_json keys used
-# by ``numeric_oracle.flatten_numbers`` — "metrics.contrast", "cd_nm",
-# "sweep[0].nils". A trailing ".*" or a bare name matches any leaf whose
-# final segment equals it, so a design can say "cd_nm" without knowing how
-# deeply the script nested it.
-_LEAF = re.compile(r"[^.\[\]]+$")
+# by ``numeric_oracle.flatten_numbers`` — "metrics.contrast", "width_mm",
+# "sweep[0].gain". A trailing ".*" or a bare name matches any leaf whose
+# final segment equals it, so a design can say "width_mm" without knowing how
+# deeply the script nested it. A list's items are values of the key that holds
+# the list ("gain[3]" is a value of "gain"): a run that reported a bounded
+# quantity as one number per setting in a list had no value checked against its
+# bound, and was sent to a repair for a quantity "no longer in the results".
+_LEAF = re.compile(r"([^.\[\]]+)(?:\[\d+\])*$")
 
 
 @dataclass(frozen=True)
@@ -867,7 +870,7 @@ def _matches(assertion_path: str, leaf_path: str) -> bool:
     if a == leaf_path:
         return True
     m = _LEAF.search(leaf_path)
-    return bool(m and m.group(0) == a)
+    return bool(m and m.group(1) == a)
 
 
 class _PathIndex:
@@ -890,7 +893,7 @@ class _PathIndex:
         self._full = full
         last: dict[str, list[int]] = {}
         if names is None:
-            names = (m.group(0) if (m := _LEAF.search(p)) else None for p in paths)
+            names = (m.group(1) if (m := _LEAF.search(p)) else None for p in paths)
         for i, name in enumerate(names):
             if name is not None:
                 try:
@@ -1086,15 +1089,21 @@ class LeafWalk:
         return self._present_index
 
     def _names(self, at: Any) -> list[str | None]:
-        """The final segment ``_LEAF`` finds in each of these leaves' paths. A list item ends in ``]``, so it has none;
-        a key with no ``.``, ``[`` or ``]`` in it is the segment itself; anything else is read off the path."""
-        lasts, paths = self._last, self._paths
+        """The final segment ``_LEAF`` finds in each of these leaves' paths. A list item takes the name of the key that
+        holds the list (found once per list); a key with no ``.``, ``[`` or ``]`` in it is the segment itself; anything
+        else is read off the path."""
+        lasts, paths, ptoks = self._last, self._paths, self._ptoks
         seen: dict[str, str | None] = {}
+        of_list: dict[int, str | None] = {}
         out: list[str | None] = []
         for j in at:
             last = lasts[j]
             if type(last) is int:
-                out.append(None)
+                tokens = ptoks[j]  # one tuple for every item of a list
+                if id(tokens) not in of_list:
+                    m = _LEAF.search(paths[j])
+                    of_list[id(tokens)] = m.group(1) if m else None
+                out.append(of_list[id(tokens)])
                 continue
             name = seen.get(last) if last else None  # an empty key's segment depends on the path: not cached
             if name is None:
@@ -1102,7 +1111,7 @@ class LeafWalk:
                     name = last
                 else:
                     m = _LEAF.search(paths[j])
-                    name = m.group(0) if m else None
+                    name = m.group(1) if m else None
                 if last:
                     seen[last] = name
             out.append(name)

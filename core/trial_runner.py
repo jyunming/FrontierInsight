@@ -32,11 +32,13 @@ experiment's ``code/submit.py`` submits the array the way the cluster's skill sa
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import json
 from collections import Counter
 from collections.abc import Collection
 import math
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -427,11 +429,13 @@ async def run_trials(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
     runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
     run_id: str = "", thresholds: dict[str, Any] | None = None, paired: bool = False, on_plan: Any = None,
-    in_each_run: dict[str, list[Any]] | None = None, log: Any = None,
+    in_each_run: dict[str, list[Any]] | None = None, log: Any = None, at_once: int = 1, cost: Any = None,
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
     the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study. ``on_plan(plan)`` is told the
-    plan before the first cell runs (for a progress line while it does)."""
+    plan before the first cell runs (for a progress line while it does). ``at_once``: how many cells run at the same
+    time (:func:`settings_at_once`); ``cost(cell)``: what a cell is expected to cost, when known, so the costliest start
+    first and none is left to run alone at the end. The ledger and the summary are the same whatever the two are."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -448,16 +452,55 @@ async def run_trials(
     # are not next to the code; FI's harness, the cell's spec and its results file come and go by FI's own list.
     executor = _outside.OutsideExecutor(executor, quest_root, log=log)
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
-    for task in plan:
-        left = int(timeout_s - (time.monotonic() - started))
-        if left <= 0:
-            results[task["index"]] = type("NotRun", (), {"returncode": -1, "timed_out": True, "stderr": ""})()
-            continue
-        results[task["index"]] = await executor.execute(
-            [str(python), HARNESS_PATH.as_posix(), task["spec"], task["out"]],
-            cwd=quest_root, timeout_s=max(1, left), env=env,
-        )
+    gate = asyncio.Semaphore(max(1, int(at_once or 1)))
+
+    async def one(task: dict[str, Any]) -> None:
+        async with gate:
+            # What is left of the study's time when this cell starts (cells running at once share one deadline).
+            left = int(timeout_s - (time.monotonic() - started))
+            if left <= 0:
+                results[task["index"]] = type("NotRun", (), {"returncode": -1, "timed_out": True, "stderr": ""})()
+                return
+            results[task["index"]] = await executor.execute(
+                [str(python), HARNESS_PATH.as_posix(), task["spec"], task["out"]],
+                cwd=quest_root, timeout_s=max(1, left), env=env,
+            )
+
+    try:
+        await asyncio.gather(*(one(task) for task in _costliest_first(plan, cost)))
+    finally:
+        await executor.settle()
     return _collect(quest_root, plan, results, run_id=run_id, thresholds=thresholds, not_reported="")
+
+
+#: ``execution.settings_at_once: auto`` runs half the machine's cores' worth of settings at once (the rest is left for FI
+#: and for what the simulations share, such as memory bandwidth), and at most this many.
+AUTO_AT_ONCE_MOST = 8
+
+
+def settings_at_once(value: Any, *, cores: int | None = None, fleet: int = 1) -> int:
+    """How many settings of the study run at the same time: ``execution.settings_at_once`` as a number (at least 1), or
+    for ``"auto"`` half the cores (at most :data:`AUTO_AT_ONCE_MOST`), shared among the ``fleet`` quests running at once."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(1, value)
+    cores = int(cores or os.cpu_count() or 1)
+    return max(1, min(AUTO_AT_ONCE_MOST, cores // 2) // max(1, int(fleet or 1)))
+
+
+def _costliest_first(plan: list[dict[str, Any]], cost: Any) -> list[dict[str, Any]]:
+    """The plan's cells in the order they start: the costliest first when ``cost(cell)`` can tell (a tie keeps the plan's
+    order), else the plan's order."""
+    if cost is None:
+        return list(plan)
+
+    def of(task: dict[str, Any]) -> float:
+        try:
+            value = float(cost(task["cell"]))
+        except Exception:  # noqa: BLE001 -- a cost that cannot be worked out puts the cell where the plan has it
+            return 0.0
+        return value if math.isfinite(value) else 0.0
+
+    return sorted(plan, key=lambda t: (-of(t), t["index"]))
 
 
 def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int,
@@ -689,8 +732,12 @@ class TrialsRunner:
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, deterministic: bool,
                  simulate: Path, analysis: Path, log: Any = None, submit: Path | None = None,
-                 leave_out: Any = None, repairs_left: Any = None) -> None:
+                 leave_out: Any = None, repairs_left: Any = None, at_once: int = 1) -> None:
         self.executor = executor
+        #: How many settings of the study run at the same time (:func:`settings_at_once`), and what each is expected to cost
+        #: (``cost(cell)`` from FI's timing, set by the sizing step; ``None`` until then): the costliest start first.
+        self.at_once = max(1, int(at_once or 1))
+        self.cost: Any = None
         self.quest_root = Path(quest_root)
         self._protocol = protocol
         self.deterministic = deterministic
@@ -840,11 +887,17 @@ class TrialsRunner:
                             "to simulate.py is needed."),
                 )
             ran_from = time.monotonic()
+            if self.at_once > 1:
+                said = f"{self.at_once} settings of the study run at the same time (execution.settings_at_once)"
+                print(f"[FI] {said}")
+                if self.log is not None:
+                    self.log.info("[execute] %s", said)
             run = await run_trials(
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                paired=paired, on_plan=self._note_plan, in_each_run=inside, log=self.log,
+                paired=paired, on_plan=self._note_plan, in_each_run=inside, log=self.log, at_once=self.at_once,
+                cost=self.cost,
             )
             self._plan_seen = None
             _save_run(self.quest_root, key, run)

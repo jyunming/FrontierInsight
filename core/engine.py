@@ -14736,6 +14736,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     timeout_s=self.config.execution.timeout_s, env=env, thresholds=thresholds,
                     paired=any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or []),
                     in_each_run=_in_run.of(protocol), log=self._log,
+                    at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
                 )
                 series = _improve.series_of(run, trial_names)
                 if run.ok_trials == 0:
@@ -16638,6 +16639,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                       and not state.get("exec_give_up_reason")),
                 submit=(self.quest_root / "code" / _trial_runner.SUBMIT_NAME
                         if self.config.execution.background_jobs else None),
+                at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
             )
         elif split:
             runner = _split_run.SplitRunner(
@@ -27185,28 +27187,97 @@ def _claim_results_block(result_json: Any, *, query: str, budget: int) -> str:
         return (f"{head}, the first {max(room, 0):,} of {len(whole):,} "
                 f"characters:\n{whole[:max(room, 0)]}")[:budget]
 
-    if not isinstance(summarised, dict) or len(summarised) < 2:
+    if not isinstance(summarised, dict) or not summarised:
         return _leading_slice()
     from .passages import rank_by_relevance
     names = list(summarised)
-    blocks = {name: json.dumps({name: summarised[name]}, indent=2) for name in names}
-    scores = rank_by_relevance([blocks[name] for name in names], query)
-    kept: set[str] = set()
+    units = [u for name in names for u in _claim_result_units(name, name, summarised[name], max(room, 1), top=True)]
+    # A table's rows are ranked with its column names, which say what each number in a row is.
+    scores = rank_by_relevance([f"{h}\n{t}" if h else t for _g, h, t in units], query)
+    # The branches that fit whole come first, as before a large branch was shown in parts, so the check never sees less
+    # than it did: ranked with the many rows of a split table, the headline values were pushed out once the budget held
+    # most of the rows. A branch too large to fit is shown in parts in the room left.
+    pieces = Counter(group for group, _h, _t in units)
+    first = {i for i, (group, _h, _t) in enumerate(units) if pieces[group] == 1}
+    kept: set[int] = set()
+    headers: set[str] = set()
     used = 0
-    for i in sorted(range(len(names)), key=lambda i: scores[i], reverse=True):
-        if used + len(blocks[names[i]]) <= room:
-            kept.add(names[i])
-            used += len(blocks[names[i]])
+    for i in sorted(range(len(units)), key=lambda i: (i in first, scores[i]), reverse=True):
+        _group, header, text = units[i]
+        cost = len(text) + 1 + (len(header) + 1 if header and header not in headers else 0)
+        if used + cost <= room:
+            kept.add(i)
+            used += cost
+            if header:
+                headers.add(header)
     if not kept:
         return _leading_slice()
-    body = "\n".join(blocks[name] for name in names if name in kept)
-    left_out = [name for name in names if name not in kept]
+    lines: list[str] = []
+    shown: set[str] = set()
+    for i, (_group, header, text) in enumerate(units):
+        if i in kept:
+            if header and header not in shown:
+                lines.append(header)
+                shown.add(header)
+            lines.append(text)
+    body = "\n".join(lines)
+    total = Counter(g for g, _h, _t in units)
+    kept_of = Counter(units[i][0] for i in kept)
+    left_out = [name for name in names if not kept_of[name]]
+    partly = [f"{name} ({kept_of[name]} of {total[name]} parts)" for name in names if 0 < kept_of[name] < total[name]]
     # Name a few of the branches that did not fit; a sweep can have hundreds,
     # and the note must not itself crowd out the results.
     missed = ", ".join(left_out[:3]) + (
         f" and {len(left_out) - 3} more" if len(left_out) > 3 else "")
-    note = f", the branches most related to the paper ({missed} did not fit)" if left_out else ""
+    notes = ([f"{missed} did not fit"] if left_out else []) + ([f"shown in part: {', '.join(partly[:3])}"] if partly else [])
+    note = f", the parts most related to the paper ({'; '.join(notes)})" if notes else ""
     return f"{head}{note}:\n{body}"[:budget]
+
+
+def _claim_cell(value: Any) -> bool:
+    """A value one cell of a results table holds: a number, a word, or a short list of them (an interval)."""
+    plain = (str, int, float, bool)
+    if value is None or isinstance(value, plain):
+        return True
+    return isinstance(value, list) and len(value) <= 4 and all(v is None or isinstance(v, plain) for v in value)
+
+
+def _claim_result_units(group: str, path: str, value: Any, room: int, *, top: bool = False) -> list[tuple[str, str, str]]:
+    """``value`` (at ``path``, under the top-level branch ``group``) as pieces of at most ``room`` characters, each
+    ``(group, table header or "", text)``. A branch that fits is one piece, whole. One that does not is split into its
+    children rather than dropped: one real run's 25 settings were a single 168,000-character branch, so not one
+    setting reached the check and every claim about the grid was called unsupported. Children that are mappings
+    become the rows of one table, whose column names are said once in its header, so a setting is one short line."""
+    if top:
+        text = json.dumps({path: value}, indent=2)
+    else:
+        text = f"{path}: {json.dumps(value, separators=(', ', ': '))}"
+    if len(text) <= room or not isinstance(value, (dict, list)) or len(value) < 2:
+        return [(group, "", text[:room])]
+    children = list(value.items()) if isinstance(value, dict) else list(enumerate(value))
+
+    def label(key: Any) -> str:
+        return f"{path}.{key}" if isinstance(value, dict) else f"{path}[{key}]"
+
+    rows = [child for _key, child in children if isinstance(child, dict)]
+    columns: list[str] = []
+    for row in rows:
+        columns += [c for c, cell in row.items() if _claim_cell(cell) and c not in columns]
+    header = ""
+    if len(rows) >= 2 and columns:
+        header = f"{path}: a table, one row per item ({len(children)} items); columns: " + " | ".join(columns)
+    out: list[tuple[str, str, str]] = []
+    for key, child in children:
+        if not (header and isinstance(child, dict)):
+            out += _claim_result_units(group, label(key), child, room)
+            continue
+        cells = " | ".join(json.dumps(child[c], separators=(",", ":")) if c in child and _claim_cell(child[c]) else "-"
+                           for c in columns)
+        out.append((group, header, f"{label(key)}: {cells}"[:room]))
+        for c, cell in child.items():
+            if not _claim_cell(cell):
+                out += _claim_result_units(group, f"{label(key)}.{c}", cell, room)
+    return out
 
 
 def _normalized_text(text: str) -> str:

@@ -35,6 +35,8 @@ Nothing here knows what a metric or an axis means; the names are the plan's.
 from __future__ import annotations
 
 import ast
+import bisect
+import itertools
 import json
 import math
 import re
@@ -308,6 +310,84 @@ class Records:
     _alias_cache: dict[str, str] | None = None
     #: The topic as the person wrote it: its numbers may be used in a ``{{calc:...}}``, as they may be typed.
     topic: str = ""
+    #: What :meth:`axes`, :meth:`metrics`, :meth:`in_run_axes` and :meth:`carrying` found, worked out once (the cells
+    #: never change; the axes depend on ``unread`` too). A study with values compared inside each run has a record per
+    #: value: a real one had 455,292, and each key worked these out again over all of them.
+    _derived: dict[Any, Any] = field(default_factory=dict)
+
+    def _once(self, name: str, make: Any) -> Any:
+        key = (name, self.unread)
+        if key not in self._derived:
+            self._derived[key] = make()
+        return self._derived[key]
+
+    def carrying(self, metric: str | None) -> list[dict[str, Any]]:
+        """The cells that carry ``metric`` (every cell for ``None``), in the record's order."""
+        if metric is None:
+            return self.cells
+        def make() -> dict[str, list[dict[str, Any]]]:
+            out: dict[str, list[dict[str, Any]]] = {}
+            for c in self.cells:
+                for m in c["metrics"]:
+                    out.setdefault(m, []).append(c)
+            return out
+        return self._once("carrying", make).get(metric, [])
+
+    def at_setting(self, metric: str, values: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """The cells carrying ``metric`` whose setting may be the one ``values`` names (an axis -> value for every axis
+        those cells carry), found by lookup; ``None`` when ``values`` does not name exactly those axes. The cells are
+        kept by each value exactly as recorded, and a value named is matched to the recorded values as :func:`_same`
+        compares them, so no cell the comparison would find is missed; the caller still compares each one."""
+        def make() -> dict[str, Any]:
+            return {}
+        index = self._once("at_setting", make)
+        if metric not in index:
+            cells = self.carrying(metric)
+            names = tuple(sorted({a for c in cells for a in c["cell"]}))
+            table: dict[tuple, list[tuple[int, dict[str, Any]]]] = {}
+            recorded = {a: _Recorded() for a in names}
+            for i, c in enumerate(cells):
+                if len(c["cell"]) == len(names):
+                    key = tuple(_exact(c["cell"][a]) for a in names)
+                    table.setdefault(key, []).append((i, c))
+                    for a, k in zip(names, key):
+                        recorded[a].add(k, c["cell"][a])
+            index[metric] = (names, table, recorded, sum(len(v) for v in table.values()) == len(cells))
+        names, table, recorded, whole = index[metric]
+        if not whole or set(values) != set(names):
+            return None
+        options = [recorded[a].find(values[a]) for a in names]
+        return _in_order([table.get(key, []) for key in itertools.product(*options)])
+
+    def at_value(self, metric: str | None, axis: str, value: Any) -> list[dict[str, Any]]:
+        """The cells carrying ``metric`` (any cell for ``None``) whose ``axis`` may hold ``value``, found by lookup (no
+        cell missed, as :meth:`at_setting`'s)."""
+        index = self._once("at_value", dict)
+        if (metric, axis) not in index:
+            table: dict[Any, list[tuple[int, dict[str, Any]]]] = {}
+            recorded = _Recorded()
+            for i, c in enumerate(self.carrying(metric)):
+                if axis in c["cell"]:
+                    key = _exact(c["cell"][axis])
+                    table.setdefault(key, []).append((i, c))
+                    recorded.add(key, c["cell"][axis])
+            index[(metric, axis)] = (table, recorded)
+        table, recorded = index[(metric, axis)]
+        return _in_order([table[k] for k in recorded.find(value)])
+
+    def levels(self, metric: str, axis: str) -> list[list[dict[str, Any]]]:
+        """The cells carrying ``metric`` grouped by their value of ``axis`` (as its JSON text), in the record's order."""
+        index = self._once("levels", dict)
+        if (metric, axis) not in index:
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for c in self.carrying(metric):
+                if axis in c["cell"]:
+                    groups.setdefault(json.dumps(c["cell"][axis], default=str), []).append(c)
+            index[(metric, axis)] = list(groups.values())
+        return index[(metric, axis)]
+
+    def position(self, cell: dict[str, Any]) -> int:
+        return self._once("position", lambda: {id(c): i for i, c in enumerate(self.cells)})[id(cell)]
 
     def aliases(self) -> dict[str, str]:
         """FI's short name for each axis whose own name a key cannot hold (a name with a comma, ``=``, ``@``, ``|`` or a brace,
@@ -346,29 +426,31 @@ class Records:
 
     def axes(self) -> dict[str, list[Any]]:
         """Every axis the cells carry and its values, in the record's order (an unread axis is not one)."""
-        found: dict[str, list[Any]] = {}
-        for c in self.cells:
-            for k, v in c["cell"].items():
-                if k not in self.unread and v not in found.setdefault(k, []):
-                    found[k].append(v)
-        return found
+        def make() -> dict[str, list[Any]]:
+            found: dict[str, list[Any]] = {}
+            for c in self.cells:
+                for k, v in c["cell"].items():
+                    if k not in self.unread and v not in found.setdefault(k, []):
+                        found[k].append(v)
+            return found
+        return {k: list(vs) for k, vs in self._once("axes", make).items()}
 
     def varied(self) -> list[str]:
         return [k for k, vs in self.axes().items() if len(vs) > 1]
 
     def metrics(self) -> list[str]:
-        names: list[str] = []
-        for c in self.cells:
-            names.extend(m for m in c["metrics"] if m not in names)
-        return names
+        return list(self._once("metrics", lambda: list(dict.fromkeys(m for c in self.cells for m in c["metrics"]))))
 
     def in_run_axes(self) -> list[str]:
         """The axes whose values are compared inside each run (the plan's ``in_each_run``, and the ``level`` a value's own
         record carries): the values of such an axis come from the same trials, so no key pools them."""
-        names: list[str] = [str(k) for k in (_in_run.of(self.protocol) or {})]
-        for c in self.cells:
-            names.extend(k for k in (c.get("level") or {}) if k not in names)
-        return [k for k in names if k in self.axes()]
+        def make() -> list[str]:
+            names: list[str] = [str(k) for k in (_in_run.of(self.protocol) or {})]
+            for c in self.cells:
+                names.extend(k for k in (c.get("level") or {}) if k not in names)
+            axes = self.axes()
+            return [k for k in names if k in axes]
+        return list(self._once("in_run_axes", make))
 
 
 def _unkeyable(name: str) -> bool:
@@ -400,6 +482,66 @@ def load(quest_root: Path | str, protocol: dict[str, Any] | None = None,
     return from_cells(cells, protocol, unread, left_out) if isinstance(cells, list) else None
 
 
+def _exact(value: Any) -> Any:
+    """``value`` exactly as recorded, to keep the cells of one recorded value together (1, 1.0, True and "1" apart)."""
+    if value is None or isinstance(value, (str, int, float)):
+        return type(value).__name__, repr(value)
+    return "json", json.dumps(value, default=str, sort_keys=True)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+class _Recorded:
+    """The values one axis holds in the record, each under its :func:`_exact` key, found again by a value as
+    :func:`_same` compares them: by their text, and a number also by the numbers within its tolerance (sorted, so a
+    look-up does not compare every value an axis holds)."""
+
+    def __init__(self) -> None:
+        self.values: dict[Any, Any] = {}
+        self.by_text: dict[str, list[Any]] = {}
+        self._numbers: list[tuple[float, Any]] = []
+        self._sorted = True
+        self._found: dict[Any, list[Any]] = {}  # a value looked up before (a sheet asks the same values many times)
+
+    def add(self, key: Any, value: Any) -> None:
+        if key in self.values:
+            return
+        self.values[key] = value
+        self._found.clear()
+        self.by_text.setdefault(str(value).strip().lower(), []).append(key)
+        if _is_number(value) and math.isfinite(value):
+            self._numbers.append((float(value), key))
+            self._sorted = False
+
+    def find(self, value: Any) -> list[Any]:
+        asked = _exact(value)
+        if asked not in self._found:
+            self._found[asked] = self._find(value)
+        return self._found[asked]
+
+    def _find(self, value: Any) -> list[Any]:
+        keys = list(self.by_text.get(str(value).strip().lower(), []))
+        if _is_number(value) and math.isfinite(value):
+            if not self._sorted:
+                self._numbers.sort()
+                self._sorted = True
+            width = max(2e-9 * abs(value), 1e-12) * 1.01  # wider than _same's tolerance; each is compared below
+            i = bisect.bisect_left(self._numbers, (value - width,))
+            while i < len(self._numbers) and self._numbers[i][0] <= value + width:
+                keys.append(self._numbers[i][1])
+                i += 1
+        return [k for k in dict.fromkeys(keys) if _same(value, self.values[k])]
+
+
+def _in_order(buckets: list[list[tuple[int, dict[str, Any]]]]) -> list[dict[str, Any]]:
+    """The cells of these buckets in the record's order (as a scan of every cell finds them)."""
+    if len(buckets) == 1:
+        return [c for _i, c in buckets[0]]
+    return [c for _i, c in sorted((x for b in buckets for x in b), key=lambda x: x[0])]
+
+
 def _same(a: Any, b: Any) -> bool:
     if isinstance(a, (int, float)) and not isinstance(a, bool) and isinstance(b, (int, float)) and not isinstance(b, bool):
         return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
@@ -424,14 +566,37 @@ def _check_where(rec: Records, where: dict[str, Pick], *, allow_each: bool = Tru
                         "(say =<value>, =all or =each)")
 
 
+def _pooled_inside(rec: Records, axis: str, names: str) -> str:
+    return (f"{rec.short(axis)} is compared inside each run: its values ({names}) are computed from the same trials, "
+            f"so FI does not pool them (the same trials would be counted once per value). Name one value of it, "
+            f"e.g. {rec.short(axis)}={names.split(', ')[0]}")
+
+
 def _matching(rec: Records, where: dict[str, Pick], metric: str) -> list[dict[str, Any]]:
     """The cells that carry ``metric`` at the setting ``where`` names; each setting's copies (the same trials under an
     axis nothing reads) once."""
-    cells = [c for c in rec.cells
-             if all(p.kind != "value" or (a in c["cell"] and _same(c["cell"][a], p.value)) for a, p in where.items())]
-    carrying = [c for c in cells if metric in c["metrics"]]
+    def at(c: dict[str, Any]) -> bool:
+        return all(p.kind != "value" or (a in c["cell"] and _same(c["cell"][a], p.value)) for a, p in where.items())
+
+    for axis in rec.in_run_axes():
+        # A key that pools an axis compared inside each run is refused below; told here from the first matching cell of
+        # each of its values, before the whole record is read for it (a real record had 450,840 cells of one quantity).
+        if where.get(axis, Pick("value")).kind == "all":
+            firsts = [c for c in (next((c for c in group if at(c)), None) for group in rec.levels(metric, axis)) if c]
+            if len(firsts) > 1:
+                names = ", ".join(str(c["cell"][axis]) for c in sorted(firsts, key=rec.position))
+                raise _Unfilled(_pooled_inside(rec, axis, names))
+    named = {a: p.value for a, p in where.items() if p.kind == "value"}
+    # A key that names every axis by its value is one setting: found by lookup, since a study with values compared
+    # inside each run has a record per value (a real one had 455,292) and each key scanned them all.
+    found = rec.at_setting(metric, named) if len(named) == len(where) else None
+    if found is None and named:  # one setting of some axes: the fewest cells any of them names
+        found = min((rec.at_value(metric, a, v) for a, v in named.items()), key=len)
+    carrying = [c for c in (found or rec.carrying(metric)) if at(c)]
     if not carrying:
-        raise _Unfilled(f"no trials of {metric} at that setting" if cells else "no trials at that combination of settings")
+        some = min((rec.at_value(None, a, v) for a, v in named.items()), key=len) if named else rec.cells
+        raise _Unfilled(f"no trials of {metric} at that setting" if any(at(c) for c in (some or rec.cells))
+                        else "no trials at that combination of settings")
     for axis in rec.in_run_axes():
         if where.get(axis, Pick("value")).kind != "all":
             continue
@@ -439,10 +604,7 @@ def _matching(rec: Records, where: dict[str, Pick], metric: str) -> list[dict[st
         if len(levels) > 1:
             names = ", ".join(str(next(c["cell"][axis] for c in carrying if axis in c["cell"]
                                        and json.dumps(c["cell"][axis], default=str) == lv)) for lv in levels)
-            raise _Unfilled(
-                f"{rec.short(axis)} is compared inside each run: its values ({names}) are computed from the same trials, "
-                f"so FI does not pool them (the same trials would be counted once per value). Name one value of it, "
-                f"e.g. {rec.short(axis)}={names.split(', ')[0]}")
+            raise _Unfilled(_pooled_inside(rec, axis, names))
     if rec.unread:
         seen: set[tuple[str, str]] = set()
         out = []
@@ -484,7 +646,7 @@ def set_by_setting(rec: Records) -> list[str]:
     """The quantities of the record that are values each setting sets and that differ between settings, in the record's
     order (the theory lines): the ones that have no value over several settings."""
     return [m for m in rec.metrics()
-            if _differs_between_settings([c for c in rec.cells if m in c["metrics"]], m)]
+            if _differs_between_settings(rec.carrying(m), m)]
 
 
 # --- statistics ---------------------------------------------------------------------------------------------------
@@ -701,9 +863,9 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
     if key.form not in _SCALAR and not (key.reducer == "count_where" and key.form == "mean"):
         raise _Unfilled(f"{key.reducer} works on one number per setting; {key.form} is not")
     combos: list[tuple[Any, ...]] = []
-    for c in rec.cells:
+    for c in rec.carrying(key.metric):
         combo = tuple(c["cell"].get(a) for a in each)
-        if key.metric in c["metrics"] and combo not in combos:
+        if combo not in combos:
             combos.append(combo)
     if not combos:
         raise _Unfilled(f"no trials of {key.metric}")
@@ -766,9 +928,9 @@ def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
         raise _Unfilled(f"vs judges a mean, an sd or a corr by the 95% interval of the measured value; {key.form} has none "
                         f"(use form {', '.join(_VS_INTERVAL)})")
     combos: list[tuple[Any, ...]] = []
-    for c in rec.cells:
+    for c in rec.carrying(key.metric):
         combo = tuple(c["cell"].get(a) for a in each)
-        if key.metric in c["metrics"] and combo not in combos:
+        if combo not in combos:
             combos.append(combo)
     if not combos:
         raise _Unfilled(f"no trials of {key.metric}")
@@ -1078,6 +1240,9 @@ def without_marks(markdown: str) -> str:
 
 #: The sheet lists at most this many lines before it falls back to pooled lines and each metric's extremes.
 SHEET_MAX_LINES = 150
+#: The most lines the fallback lists. Past studies' fallbacks were up to 676 lines and are listed whole; a study with 447
+#: quantities over 455,292 records had 44,811 (16 MB) for the writer to read.
+SHEET_MAX_SHOWN = 700
 SHEET_GRAMMAR = (
     "Any key of this form can be placed, even one whose value is not listed here; FI fills it from its records: "
     "{{v:<value>[:<form>] @ axis=<value>|all, ...}}. Forms: " + ", ".join(FORMS) + ". Ops: " + ", ".join(OPS) + ". Comparison with a reference or theory value, worded by FI: | vs ref  or  | vs <value>" +
@@ -1131,11 +1296,69 @@ def _set_by_setting_line(rec: Records, varied: list[str]) -> str:
             "{{... | ratio " + names[0] + " | range}} gives only the range.\n")
 
 
-def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
+def _metric_lines(rec: Records, metric: str, axes: dict[str, list[Any]], varied: list[str],
+                  usable: dict[str, list[Any]], sets: frozenset[str]) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+    """One quantity's part of the sheet: its line per setting (headed by its name), its lowest and highest mean (headed),
+    and its pooled lines, each with the axis it is a line of (``""`` for one pinned to the values compared in a run)."""
+    lines: list[tuple[float, str]] = []
+    seen: set[str] = set()
+    for c in rec.carrying(metric):
+        where = {a: v for a, v in c["cell"].items() if a in axes and a not in rec.unread}
+        if not all(_addressable(v) for v in where.values()) or json.dumps(where, default=str) in seen:
+            continue
+        seen.add(json.dumps(where, default=str))
+        line = _sheet_line(rec, metric, where, sets)
+        if line:
+            mean = _tt.summary(_trials([c], metric))["mean"] if _tt._values(c["metrics"][metric]) else 0.0
+            lines.append((mean, line))
+    full = [f"{metric}:"] + [line for _, line in lines]
+    extremes: list[str] = []
+    if lines:
+        extremes = [f"{metric}: lowest and highest mean", min(lines, key=lambda x: x[0])[1],
+                    max(lines, key=lambda x: x[0])[1]]
+    pooled: list[tuple[str, str]] = []
+    for axis in varied:
+        for value in usable[axis]:
+            where = {a: (value if a == axis else Pick("all")) for a in varied}
+            line = _sheet_line(rec, metric, where, sets)
+            if line:
+                pooled.append((axis, line))
+    if varied:
+        # A pooled line over the grid's axes: an axis compared inside each run is never pooled, so where this metric's
+        # cells hold more than one of its values it is pinned to each in turn (the refusal in _matching); a metric that
+        # is one number per run has no such axis in its cells and is pooled whole.
+        carrying = rec.carrying(metric)
+        inside = [a for a in varied if a in rec.in_run_axes()
+                  and len({json.dumps(c["cell"][a], default=str) for c in carrying if a in c["cell"]}) > 1]
+        combos: list[dict[str, Any]] = [{}]
+        for a in inside:
+            combos = [dict(base, **{a: v}) for base in combos for v in usable[a]]
+        for pin in combos:
+            line = _sheet_line(rec, metric, {a: (pin[a] if a in pin else Pick("all")) for a in varied}, sets)
+            if line:
+                pooled.append(("", line))
+    return full, extremes, pooled
+
+
+def _planned(rec: Records, names: list[str]) -> list[str]:
+    """The quantities of the record the plan names (its ``metrics``, by ``id``), in the plan's order."""
+    metrics = rec.protocol.get("metrics") if isinstance(rec.protocol, dict) else None
+    ids = [str(m.get("id")) for m in metrics if isinstance(m, dict) and m.get("id")] if isinstance(metrics, list) else []
+    return [m for m in dict.fromkeys(ids) if m in names]
+
+
+def _keys(lines: list[str]) -> int:
+    return sum(1 for line in lines if line.startswith("- "))
+
+
+def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int = SHEET_MAX_SHOWN) -> str:
     """The "Results you can place" block: for each value the trials recorded, a line per setting (the key and the value
     as FI will write it, with its SD and the plan's reference where there are any), then the pooled line of each axis.
     A pure function of the records. Over ``max_lines``, only the pooled lines and each value's lowest and highest
-    setting are listed, and the grammar line says any key can still be placed."""
+    setting are listed, and the grammar line says any key can still be placed. When those are over ``max_shown``, the
+    lowest and highest of each quantity come first, the plan's quantities before the others (at most half the lines),
+    then pooled lines taken in turn from each of the plan's quantities and axes, then from the others, ``max_shown``
+    lines in all."""
     if rec is None or not rec.cells:
         return ("Results you can place: none. This study has no per-setting trial record, so FI cannot fill in "
                 "any result number; do not type one.")
@@ -1143,52 +1366,60 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES) -> str:
     varied = rec.varied()
     usable = {a: [v for v in vs if _addressable(v)] for a, vs in axes.items()}
     names = [m for m in rec.metrics()]
-    sets = frozenset(m for m in names if _setting_values([c for c in rec.cells if m in c["metrics"]], m) is not None)
-    full: list[str] = []
-    pooled: list[str] = []
-    extremes: list[str] = []
-    for metric in names:
-        lines: list[tuple[float, str]] = []
-        seen: set[str] = set()
-        for c in rec.cells:
-            if metric not in c["metrics"]:
-                continue
-            where = {a: v for a, v in c["cell"].items() if a in axes and a not in rec.unread}
-            if not all(_addressable(v) for v in where.values()) or json.dumps(where, default=str) in seen:
-                continue
-            seen.add(json.dumps(where, default=str))
-            line = _sheet_line(rec, metric, where, sets)
-            if line:
-                mean = _tt.summary(_trials([c], metric))["mean"] if _tt._values(c["metrics"][metric]) else 0.0
-                lines.append((mean, line))
-        full.append(f"{metric}:")
-        full.extend(line for _, line in lines)
-        if lines:
-            extremes.append(f"{metric}: lowest and highest mean")
-            extremes.extend([min(lines, key=lambda x: x[0])[1], max(lines, key=lambda x: x[0])[1]])
-        for axis in varied:
-            for value in usable[axis]:
-                where = {a: (value if a == axis else Pick("all")) for a in varied}
-                line = _sheet_line(rec, metric, where, sets)
-                if line:
-                    pooled.append(line)
-        if varied:
-            # A pooled line over the grid's axes: an axis compared inside each run is never pooled, so where this metric's
-            # cells hold more than one of its values it is pinned to each in turn (the refusal in _matching); a metric that
-            # is one number per run has no such axis in its cells and is pooled whole.
-            carrying = [c for c in rec.cells if metric in c["metrics"]]
-            inside = [a for a in varied if a in rec.in_run_axes()
-                      and len({json.dumps(c["cell"][a], default=str) for c in carrying if a in c["cell"]}) > 1]
-            combos: list[dict[str, Any]] = [{}]
-            for a in inside:
-                combos = [dict(base, **{a: v}) for base in combos for v in usable[a]]
-            for pin in combos:
-                line = _sheet_line(rec, metric, {a: (pin[a] if a in pin else Pick("all")) for a in varied}, sets)
-                if line:
-                    pooled.append(line)
+    sets = frozenset(m for m in names if _setting_values(rec.carrying(m), m) is not None)
+    planned = _planned(rec, names)
+    order = planned + [m for m in names if m not in planned]
+    parts: dict[str, tuple[list[str], list[str], list[tuple[str, str]]]] = {}
+
+    def part(metric: str) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+        if metric not in parts:
+            parts[metric] = _metric_lines(rec, metric, axes, varied, usable, sets)
+        return parts[metric]
+
+    full_n = pooled_n = extremes_n = 0
+    capped = False
+    for i, metric in enumerate(order):
+        full, ext, pool = part(metric)
+        full_n, extremes_n = full_n + _keys(full), extremes_n + _keys(ext)
+        pooled_n += _keys(list(dict.fromkeys(line for _, line in pool)))
+        # Over both limits, with every planned quantity worked out: the lines of the rest are worked out only
+        # while there is room left to show them.
+        if full_n + pooled_n > max_lines and pooled_n + extremes_n > max_shown and i + 1 >= len(planned):
+            capped = True
+            break
     head = ("Results you can place (FI fills each key in from its records; never type a result). "
             "A line shows the key and what it will read as.")
-    pooled = list(dict.fromkeys(pooled))  # a line pinned to one value can also be the line of that value's own axis
+    if capped:
+        body = ["Too many settings to list; the lowest and highest mean of each quantity (the plan's first), then pooled "
+                "lines, as many as fit (any other key can still be placed):"]
+        room, ext_room = max_shown, max_shown // 2  # the extremes take at most half: pooled lines are kept too
+        for metric in order:
+            if min(room, ext_room) < 2:
+                break
+            ext = part(metric)[1]
+            if ext and min(room, ext_room) >= _keys(ext):
+                body.extend(ext)
+                room, ext_room = room - _keys(ext), ext_room - _keys(ext)
+        listed = set(body)
+        for group in (planned, [m for m in order if m not in planned]):
+            queues = []  # one per quantity and axis, taken in turn
+            for metric in group:
+                if room <= 0:
+                    break
+                for axis in dict.fromkeys(a for a, _ in part(metric)[2]):
+                    queues.append([ln for a, ln in part(metric)[2] if a == axis])
+            while room > 0 and any(queues):
+                for q in queues:
+                    if q and room > 0:
+                        line = q.pop(0)
+                        if line not in listed:  # a line pinned to one value can also be the line of its own axis
+                            listed.add(line)
+                            body.append(line)
+                            room -= 1
+        return head + "\n" + "\n".join(body) + "\n" + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
+    full = [line for m in names for line in parts[m][0]]
+    pooled = list(dict.fromkeys(line for m in names for _, line in parts[m][2]))  # a line pinned to one value can also be the line of that value's own axis
+    extremes = [line for m in names for line in parts[m][1]]
     body = full + ["Pooled (the trials of the other axes together; sd is the within-setting pooled SD):"] + pooled
     if sum(1 for line in body if line.startswith("- ")) > max_lines:
         body = ["Too many settings to list; the pooled lines and each value's extremes:"] + pooled + extremes

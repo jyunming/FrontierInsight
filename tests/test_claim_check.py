@@ -1005,8 +1005,8 @@ def test_the_results_branch_the_findings_name_reaches_the_check(tmp_path: Path) 
     block = _evidence_block(seen[0])
     assert "exact_outbreak_probability" in block
     assert "0.2287960881" in block
-    # The sweep did not fit, so none of its contents crowd the block.
-    assert "conditional_major_final_size_fraction" not in block
+    # The sweep did not fit whole: it is split and fills only the room the branch the findings name leaves.
+    assert "shown in part:" in block
     # And the array behind the validation is named and bounded, not printed.
     assert "exact_final_size_pmf" in block
     assert "[101 values, 0 to 0.1]" in block

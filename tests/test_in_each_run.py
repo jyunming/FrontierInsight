@@ -52,8 +52,8 @@ LEVELS = in_run.level_cells({"T": [300.0, 310.0, 320.0]})
 
 
 def test_a_number_per_value_is_read_from_a_mapping_or_a_list_in_the_order_given() -> None:
-    by_name, why = in_run.read_returned({"Ea": 5.0, "k": {"300.0": 1.0, 310: 2.0, "T=320.0": 3.0}}, LEVELS, "run_trial")
-    assert why == "" and by_name == {"Ea": 5.0, "k": {"T=300.0": 1.0, "T=310.0": 2.0, "T=320.0": 3.0}}
+    by_name, why = in_run.read_returned({"a": 5.0, "k": {"300.0": 1.0, 310: 2.0, "T=320.0": 3.0}}, LEVELS, "run_trial")
+    assert why == "" and by_name == {"a": 5.0, "k": {"T=300.0": 1.0, "T=310.0": 2.0, "T=320.0": 3.0}}
     as_list, why = in_run.read_returned({"k": [1.0, 2.0, 3.0]}, LEVELS, "run_trial")
     assert why == "" and as_list == {"k": {"T=300.0": 1.0, "T=310.0": 2.0, "T=320.0": 3.0}}
 
@@ -68,9 +68,9 @@ def test_a_number_per_value_must_give_every_value_and_nothing_else() -> None:
 
 
 def test_a_check_reads_a_number_per_value_at_the_value_its_case_names_or_as_the_list() -> None:
-    got = {"Ea": 5.0, "k": {"T=300.0": 1.0, "T=310.0": 2.0, "T=320.0": 3.0}}
-    assert in_run.for_case(got, LEVELS, {"T": 310}) == {"Ea": 5.0, "k": 2.0}
-    assert in_run.for_case(got, LEVELS, {}) == {"Ea": 5.0, "k": [1.0, 2.0, 3.0]}
+    got = {"a": 5.0, "k": {"T=300.0": 1.0, "T=310.0": 2.0, "T=320.0": 3.0}}
+    assert in_run.for_case(got, LEVELS, {"T": 310}) == {"a": 5.0, "k": 2.0}
+    assert in_run.for_case(got, LEVELS, {}) == {"a": 5.0, "k": [1.0, 2.0, 3.0]}
 
 
 # --- the plan -------------------------------------------------------------------------------------------------------------
@@ -276,3 +276,11 @@ def test_a_value_compared_inside_each_run_gets_no_record_when_the_run_returned_n
                  for i in range(3)]
     kept = in_run.summary_cells({"n": 5}, "n=5", 3, per_value, levels)
     assert len(kept) == 1 + len(levels) and all(c["metrics"]["k"]["count"] == 3 for c in kept[1:])
+
+
+def test_none_is_read_as_no_value_inside_a_run_too() -> None:
+    got, why = in_run.read_returned({"a": None, "k": {"300.0": 1.0, "310.0": None, "320.0": 3.0}}, LEVELS, "run_trial")
+    assert why == "" and math.isnan(got["a"]) and math.isnan(got["k"]["T=310.0"])
+    as_list, why = in_run.read_returned({"k": [1.0, None, 3.0]}, LEVELS, "run_trial")
+    assert why == "" and math.isnan(as_list["k"]["T=310.0"])
+    assert "non-numbers" in in_run.read_returned({"k": "none"}, [], "run_trial")[1]
