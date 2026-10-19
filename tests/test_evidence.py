@@ -226,9 +226,13 @@ def test_the_evidence_record_keeps_a_precision_target_no_result_was_held_to(tmp_
     assert any("was not judged" in g for g in record["all_gaps"]["statistically_adequate"])
     # No target, or a target that is not a positive number: nothing to judge, no gap.
     for i, precision in enumerate((None, {"target_half_width": 0}, {"target_half_width": "0.05"},
-                                   {"target_half_width": True})):
+                                   {"target_half_width": True}, {"target_half_width": 10 ** 400})):
         quiet = _engine_with_precision(tmp_path / f"b{i}", precision)
-        assert "precision_not_judged" not in quiet._write_evidence({}, write=False), precision
+        record = quiet._write_evidence({"result_json": {"peak_width": 1.0}}, write=False)
+        assert "precision_not_judged" not in record, precision
+    # A run that produced no result has nothing to hold to the target: that is said elsewhere, not as this gap.
+    crashed = _engine_with_precision(tmp_path / "d", {"target_half_width": 0.05})
+    assert "precision_not_judged" not in crashed._write_evidence({}, write=False)
     # Repeated runs give the metric an interval, held to the target: judged, not a gap.
     monkeypatch.setattr(engine_mod, "_aggregate_result_json_replicates", lambda *_a, **_k: {
         "peak_width": {"ci_method": engine_mod._CI_WILSON, "ci_lower": 0.40, "ci_upper": 0.46}})

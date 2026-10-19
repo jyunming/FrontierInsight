@@ -13422,8 +13422,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             precision = (self._protocol_block(state) or {}).get("precision")
             target = precision.get("target_half_width") if isinstance(precision, dict) else None
             not_judged = ({"target": float(target), "metric": str(precision.get("metric") or "").strip()}
-                          if not judged and isinstance(target, (int, float)) and not isinstance(target, bool)
-                          and math.isfinite(target) and target > 0 else None)
+                          if not judged and (state.get("result_json") or replicates)
+                          and isinstance(target, (int, float)) and not isinstance(target, bool)
+                          and 0 < target < 1e300 else None)
             replicates_for_specs = state.get("result_json_replicates") or []
             protocol_now = self._protocol_block(state)
             try:

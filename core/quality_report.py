@@ -16,7 +16,6 @@ from __future__ import annotations
 import csv
 import io
 import json
-import math
 import re
 import time
 from collections import Counter, defaultdict
@@ -446,7 +445,7 @@ def _precision_not_judged(q: _Quest) -> list[dict[str, str]]:
 
     fact = _dict(q.evidence.get("precision_not_judged"))
     target = fact.get("target")
-    if not isinstance(target, (int, float)) or isinstance(target, bool) or not math.isfinite(target):
+    if not isinstance(target, (int, float)) or isinstance(target, bool) or not abs(target) < 1e300:
         return []
     return [_problem("run", _evidence.precision_not_judged_words(fact), "FI's precision check", "left out",
                      "needs/EVIDENCE.json")]

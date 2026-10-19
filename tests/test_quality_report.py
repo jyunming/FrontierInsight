@@ -155,7 +155,7 @@ def test_a_precision_target_no_run_could_judge_is_said(tmp_path: Path) -> None:
     assert "`peak_width`" in run["items"][0]["text"] and "was not judged" in run["items"][0]["text"]
     _w(root / "needs" / "EVIDENCE.json", {"status": "executed"})  # the target was held to an interval
     assert _stage(qr.build(root), "run")["problems"]["left_out"] == 0
-    for bad in ({"target": "0.05"}, {"target": True}, {"target": float("inf")}, "not a record", {}):
+    for bad in ({"target": "0.05"}, {"target": True}, {"target": float("inf")}, {"target": 10 ** 400}, "not a record", {}):
         _w(root / "needs" / "EVIDENCE.json", {"status": "executed", "precision_not_judged": bad})
         assert _stage(qr.build(root), "run")["problems"]["left_out"] == 0, bad
     _w(root / "needs" / "EVIDENCE.json", "{not json")
