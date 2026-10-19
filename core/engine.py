@@ -18273,7 +18273,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "parameter), fix it. If the value is genuinely what the method "
                 "produces here (a scheme that diverges at this step size, an "
                 "unstable fit), that is a finding, not a bug: emit null for that "
-                "value and a flag saying why (for example \"diverged\": true). "
+                "value and say why under \"why_missing\" (for example \"why_missing\": {\"<name>\": \"diverged\"}). "
                 "NEVER clamp, cap or clip a result to the bound or replace it "
                 "with any constant: a capped value is detected and rejected, and "
                 "it would state something false."
@@ -26542,7 +26542,8 @@ to the same simulated data). FI gives each run the whole list in its cell, in th
 that list); the function uses every value of it, never a value or a list of its own. A number the run gives once (fitted
 across all the values, a difference between two of them on the same data) is returned as a number. A number it gives FOR
 EACH value is returned as a mapping of each value to its number (`"power": {"bonferroni": 0.41, "bh": 0.52}`), or as a list
-of one number per value in the order the run was given them; every value is there (NaN where it does not exist).
+of one number per value in the order the run was given them; every value is there (null where it does not exist, with
+the reason under `"why_missing"`).
 In FI_TRIALS each setting is followed by one record per value (its `cell` and `key` name the value too, as in
 `"key": "m=20,procedure=bh"`, with `"level"`): a number per value is in the value's own record and a number per run in the
 setting's own, each once. The analysis reports each from where it is, and never counts a number per run once per value.
@@ -26567,8 +26568,11 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
 - Each equation of the design's `model` whose role is `generates` carries its id in a comment (`# E1`) on or above the
   code that computes it (in simulate.py, or in the model's package when the code has one).
 - The function RETURNS a flat dict of numbers, one entry per quantity the analysis needs from that trial
-  (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a failed or diverged trial RAISES an exception with the
-  reason instead of returning a made-up value. It does not write files, print results, or keep state between calls.
+  (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a trial whose code fails RAISES an exception with the
+  reason instead of returning a made-up value. A quantity the method cannot give at this setting (it diverged, there is
+  no crossing in the range, the feature does not print) is `null`, with the reason under `"why_missing"`
+  (`"why_missing": {"peak_day": "no outbreak"}`), never a stand-in number (0, -1, a bound): FI keeps the reason beside the
+  missing value and the tables say it. It does not write files, print results, or keep state between calls.
 - When a protocol metric is a mean over the trials a proportion counts (`"given": "p_outbreak"`), the dict also holds,
   under that proportion's own id, 1 (this trial is in the subset) or 0 (it is not) for EVERY trial, and the value being
   averaged under that mean metric's own id (mean id `final_size_given_outbreak`:
