@@ -404,3 +404,37 @@ def test_replay_a_part_that_never_finishes_makes_the_estimate_a_lower_bound_over
     # timed as before (no setting of the parts), the same study looks small: the slow part is never reached
     before = est.estimate(grid, 1, True, [p for p in probes if p.axis != est.PART])
     assert before is not None and not est.known_too_long(before, 600.0)
+
+
+def test_settings_run_at_once_spread_the_work_but_never_beat_the_costliest_setting() -> None:
+    grid = {"mesh": [8, 16, 32], "damping": [0.1, 0.5]}
+    probes = [est.Probe(None, None, {"mesh": 16, "damping": 0.5}, 10.0),
+              est.Probe("mesh", 0, {"mesh": 8, "damping": 0.5}, 5.0),
+              est.Probe("mesh", 2, {"mesh": 32, "damping": 0.5}, 40.0),
+              est.Probe("damping", 0, {"mesh": 16, "damping": 0.1}, 20.0)]
+    serial = est.estimate(grid, 5, False, probes)
+    assert serial is not None and serial.at_once == 1
+    # Four at once, each twice as slow as alone: the work spread over four, each setting doubled.
+    four = est.estimate(grid, 5, False, probes, at_once=4, slowdown=2.0)
+    assert four is not None and abs(four.seconds - serial.seconds * 2.0 / 4) < 1e-9
+    assert four.work_seconds == serial.seconds and four.at_once == 4 and four.slowdown == 2.0
+    # Eight at once with no slowdown: spread over eight would be less than the costliest timed setting (40 s) takes.
+    eight = est.estimate(grid, 5, False, probes, at_once=8)
+    assert eight is not None and eight.seconds == 40.0
+    line = est.says(four, 3600)
+    assert "4 settings run at the same time, each taking 2.0 times as long as alone, as FI measured" in line
+    assert "the run takes at least as long as its costliest setting" in line
+    assert "at the same time" not in est.says(serial, 3600)
+    # The fit for the time allowed reads the same wall time.
+    assert est.seconds_at(grid, 5, 5, False, probes, at_once=4, slowdown=2.0) == four.seconds
+
+
+def test_each_setting_s_expected_cost_follows_the_timed_ones() -> None:
+    grid = {"mesh": [8, 16, 32], "damping": [0.1, 0.5]}
+    probes = [est.Probe(None, None, {"mesh": 16, "damping": 0.5}, 10.0),
+              est.Probe("mesh", 2, {"mesh": 32, "damping": 0.5}, 40.0),
+              est.Probe("damping", 0, {"mesh": 16, "damping": 0.1}, 20.0)]
+    cost = est.setting_cost(grid, probes)
+    assert cost is not None
+    assert abs(cost({"mesh": 32, "damping": 0.1}) - 80.0) < 1e-9 and abs(cost({"mesh": 16, "damping": 0.5}) - 10.0) < 1e-9
+    assert est.setting_cost(grid, probes[1:]) is None, "no cost without the base"

@@ -32,7 +32,7 @@ Respond with a single JSON object, no prose, no markdown fence:
     {
       "claim": "<the claim, quoted or closely paraphrased from the paper>",
       "basis": "<experiment | citation | unsupported>",
-      "citation_index": <the [N] this maps to, or null>,
+      "citation_index": <the source: its References number (e.g. 3), its Further reading label as a string (e.g. "W2"), or null>,
       "quote": "<for citation: the supporting words copied exactly from that source's text; otherwise null>",
       "evidence": "<for experiment: which number/finding; for citation: what the source supports; for unsupported: why nothing backs it>"
     },
@@ -42,7 +42,7 @@ Respond with a single JSON object, no prose, no markdown fence:
 }
 ```
 
-`basis` MUST be one of the three exact lowercase strings. Every claim with `basis: "citation"` MUST give a `citation_index` that exists in the references list in the Inputs section; otherwise use `basis: "unsupported"`.
+`basis` MUST be one of the three exact lowercase strings. Every claim with `basis: "citation"` MUST give a `citation_index` that names a source in the Inputs section (a References number or a Further reading label such as `"W2"`); otherwise use `basis: "unsupported"`.
 
 ---
 

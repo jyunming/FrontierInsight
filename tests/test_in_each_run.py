@@ -276,3 +276,11 @@ def test_a_value_compared_inside_each_run_gets_no_record_when_the_run_returned_n
                  for i in range(3)]
     kept = in_run.summary_cells({"n": 5}, "n=5", 3, per_value, levels)
     assert len(kept) == 1 + len(levels) and all(c["metrics"]["k"]["count"] == 3 for c in kept[1:])
+
+
+def test_none_is_read_as_no_value_inside_a_run_too() -> None:
+    got, why = in_run.read_returned({"Ea": None, "k": {"300.0": 1.0, "310.0": None, "320.0": 3.0}}, LEVELS, "run_trial")
+    assert why == "" and math.isnan(got["Ea"]) and math.isnan(got["k"]["T=310.0"])
+    as_list, why = in_run.read_returned({"k": [1.0, None, 3.0]}, LEVELS, "run_trial")
+    assert why == "" and math.isnan(as_list["k"]["T=310.0"])
+    assert "non-numbers" in in_run.read_returned({"k": "none"}, [], "run_trial")[1]

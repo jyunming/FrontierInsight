@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import os
 import sys
 from pathlib import Path
 
@@ -505,7 +507,7 @@ def run_trial(cell, trial_id, seed):
     for rel in ("cache/traj_%d.txt" % trial_id, "outputs/table.csv", "needs/forged.json", ".fi/x.txt", "code/stray.py"):
         Path(rel).parent.mkdir(parents=True, exist_ok=True)
         Path(rel).write_text("x", encoding="utf-8")
-    return {"sees_raw": float(Path("raw/old.txt").is_file()), "sees_results": float(Path("data/results").is_dir()),
+    return {"sees_raw": float(Path("raw/old.txt").is_file()), "sees_results": float(Path("data/results/r.csv").is_file()),
             "sees_inputs": float(Path("inputs/table.csv").is_file())}
 '''
 
@@ -545,3 +547,148 @@ def test_a_cell_keeps_what_it_writes_outside_fis_folders_gets_only_inputs_and_ev
     assert not (root / "code" / "stray.py").exists()
     said = "\n".join(seen)
     assert all(p in said for p in ("needs/forged.json", ".fi/x.txt", "code/stray.py")), said
+
+
+TIMED = '''
+import json, os, time
+
+def run_trial(cell, trial_id, seed):
+    start = time.time()
+    time.sleep(0.6)
+    with open(os.path.join(os.environ["FI_TEST_SPANS"], f"{cell['k']}_{trial_id}.json"), "w") as fh:
+        json.dump([start, time.time()], fh)
+    return {"y": cell["k"] * 2.0}
+'''
+
+
+def _run_at_once(tmp_path: Path, name: str, source: str, grid: dict, *, at_once: int, cost=None, runs: int = 3,
+                 env: dict | None = None):
+    root = tmp_path / name
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(source, encoding="utf-8")
+    run = asyncio.run(trial_runner.run_trials(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"),
+        sys.executable, root, "code/simulate.py", grid, runs_per_setting=runs, base_seed=0, deterministic=False,
+        timeout_s=120, run_id="r1", at_once=at_once, cost=cost, env=env))
+    return root, run
+
+
+def _without_timing(value):
+    """The record with the fields that are clock readings taken out (when a line was written, how long a trial took)."""
+    if isinstance(value, dict):
+        return {k: _without_timing(v) for k, v in value.items() if k not in ("at", "duration_s")}
+    if isinstance(value, list):
+        return [_without_timing(v) for v in value]
+    return value
+
+
+def test_the_ledger_and_the_summary_are_the_same_whether_settings_run_one_after_another_or_at_once(
+        tmp_path: Path) -> None:
+    grid = {"R0": [1.5, 2.0, 2.5, 3.0], "N": [100, 200]}
+    one_root, one = _run_at_once(tmp_path, "one", SIM, grid, at_once=1)
+    many_root, many = _run_at_once(tmp_path, "many", SIM, grid, at_once=4,
+                                   cost=lambda cell: cell["R0"] * cell["N"])  # started in another order than planned
+    assert one.ok_trials == many.ok_trials == 22 and one.failed_trials == many.failed_trials == 2
+
+    def ledger(root: Path) -> str:
+        rows = [json.loads(line) for line in (root / "raw" / trial_runner.LEDGER_NAME).read_text(
+            encoding="utf-8").splitlines()]
+        return json.dumps(_without_timing(rows), sort_keys=True)
+
+    def summary(root: Path) -> str:
+        return json.dumps(_without_timing(json.loads((root / "raw" / trial_runner.SUMMARY_NAME).read_text(
+            encoding="utf-8"))), sort_keys=True)
+
+    assert ledger(one_root) == ledger(many_root), "same values, seeds and order of records"
+    assert summary(one_root) == summary(many_root)
+
+
+def test_settings_run_at_the_same_time_up_to_the_number_set(tmp_path: Path) -> None:
+    spans_dir = tmp_path / "spans"
+
+    def spans(name: str, at_once: int) -> list[list[float]]:
+        out = spans_dir / name
+        out.mkdir(parents=True)
+        _root, run = _run_at_once(tmp_path, name, TIMED, {"k": [1, 2, 3, 4]}, at_once=at_once, runs=1,
+                                  env={**os.environ, "FI_TEST_SPANS": str(out)})
+        assert run.ok_trials == 4, run.stderr()
+        return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out.glob("*.json"))]
+
+    def most_at_once(found: list[list[float]]) -> int:
+        return max(sum(1 for s, e in found if s <= t < e) for t, _e in found)
+
+    assert most_at_once(spans("one", 1)) == 1
+    assert 2 <= most_at_once(spans("two", 2)) <= 2
+
+
+def test_each_setting_is_given_what_is_left_of_the_study_s_time(tmp_path: Path) -> None:
+    """Settings running at once share the whole study's deadline; one that would start after it is not run."""
+    from core.execution import ExecutionResult
+
+    given: list[int] = []
+
+    class _Slow:
+        async def execute(self, cmd, *, cwd, timeout_s, env=None):
+            given.append(timeout_s)
+            await asyncio.sleep(1.2)
+            return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=1.2)
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
+    run = asyncio.run(trial_runner.run_trials(
+        _Slow(), sys.executable, root, "code/simulate.py", {"R0": [1.0, 1.5, 2.5, 3.0, 3.5, 4.0]}, runs_per_setting=1,
+        base_seed=0, deterministic=False, timeout_s=3, run_id="r1", at_once=2))
+    assert given[:2] == [3, 3] and 2 <= len(given) < 6 and all(t < 3 for t in given[2:]), given
+    out_of_time = [c for c in run.cells if c.timed_out]
+    assert len(out_of_time) == 6 - len(given), "a setting that would start after the deadline is not run"
+    assert all(r["reason"] == trial_runner.OUT_OF_TIME for c in out_of_time for r in c.rows)
+
+
+def test_the_costliest_settings_start_first() -> None:
+    plan = [{"index": i, "cell": {"n": n}} for i, n in enumerate([1, 8, 2, 8, 4])]
+    order = [t["index"] for t in trial_runner._costliest_first(plan, lambda cell: cell["n"])]
+    assert order == [1, 3, 4, 2, 0], "costliest first; a tie keeps the plan's order"
+    assert [t["index"] for t in trial_runner._costliest_first(plan, None)] == [0, 1, 2, 3, 4]
+
+    def broken(cell):
+        raise KeyError("x")
+
+    assert [t["index"] for t in trial_runner._costliest_first(plan, broken)] == [0, 1, 2, 3, 4]
+
+
+def test_auto_runs_half_the_cores_worth_of_settings_at_once() -> None:
+    assert trial_runner.settings_at_once(3) == 3
+    assert trial_runner.settings_at_once(0) == 1
+    assert trial_runner.settings_at_once("auto", cores=16) == 8
+    assert trial_runner.settings_at_once("auto", cores=32) == trial_runner.AUTO_AT_ONCE_MOST == 8
+    assert trial_runner.settings_at_once("auto", cores=6) == 3
+    assert trial_runner.settings_at_once("auto", cores=1) == 1
+    assert trial_runner.settings_at_once("auto", cores=16, fleet=4) == 2, "quests running at once share the cores"
+    assert trial_runner.settings_at_once("auto", cores=16, fleet=20) == 1
+
+
+NO_VALUE_BELOW = '''
+def run_cell(cell):
+    if cell["size"] < 90:
+        return {"width": None, "margin": 0.0}   # below this size the width does not exist: null, as the plan says
+    return {"width": cell["size"] / 2.0, "margin": 100.0}
+'''
+
+
+def test_a_value_returned_as_none_is_no_value_not_a_failed_run(tmp_path: Path) -> None:
+    """The code writer is told to return null for a value that does not exist. A real study did that for the settings
+    where a value did not exist, as its plan said, and every one of those runs was refused as returning non-numbers."""
+    root, run = _run(tmp_path, NO_VALUE_BELOW, {"size": [80, 100]}, runs=1, deterministic=True)
+    assert run.failed_trials == 0 and run.ok_trials == 2
+    values = [json.loads(x)["values"] for path in sorted((root / ".fi" / "trials").glob("cell*.out.jsonl"))
+              for x in path.read_text(encoding="utf-8").splitlines() if '"values"' in x]
+    by_margin = {v["margin"]: v for v in values}
+    assert math.isnan(by_margin[0.0]["width"]) and by_margin[100.0]["width"] == 50.0
+
+
+def test_a_returned_text_is_still_refused(tmp_path: Path) -> None:
+    root, run = _run(tmp_path, 'def run_cell(cell):\n    return {"width": "n/a"}\n', {"size": [80]}, runs=1,
+                     deterministic=True)
+    assert run.failed_trials == 1
+    assert "non-numbers" in trial_runner.read_ledger(root)[0]["reason"]

@@ -266,6 +266,19 @@ def test_sheet_cap_keeps_the_grammar_and_the_pooled_lines(s2):
     assert "Name every axis" in short and "noise_sigma=all" in short
 
 
+def test_a_fallback_too_long_to_read_lists_the_plan_s_quantities_first_and_stays_in_its_limit(s2):
+    """A real study recorded 447 quantities over 455,292 records: its fallback list was 44,811 lines (16 MB)."""
+    whole = pv.sheet(s2, max_lines=10)
+    rec = pv.from_cells(s2.cells, {"metrics": [{"id": "coverage_Ea"}]})
+    short = pv.sheet(rec, max_lines=10, max_shown=12)
+    lines = [line for line in short.splitlines() if line.startswith("- ")]
+    assert len(lines) == 12 and len(set(lines)) == 12 and all(line in whole for line in lines)
+    assert short.index("coverage_Ea: lowest and highest mean") < short.index("Ea_rel_bias: lowest and highest mean")  # plan first
+    assert "noise_sigma=all" in short and "n_points=all" in short  # each axis's pooled lines, in turn
+    assert "Name every axis" in short and "any other key can still be placed" in short
+    assert pv.sheet(rec, max_lines=10) == pv.sheet(s2, max_lines=10)  # under the limit: as it was
+
+
 def test_sheet_without_records_says_so():
     assert "none" in pv.sheet(None)
 

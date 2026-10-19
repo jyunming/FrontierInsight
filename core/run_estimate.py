@@ -54,6 +54,7 @@ findings go to the existing repair of the simulation (``RunChecksMixin._pilot_ga
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import math
@@ -182,6 +183,11 @@ class Estimate:
     parts_timed: int = 0
     #: ``[(part, its settings, the seconds one of its settings took)]``: the cost summed per part.
     part_costs: list[tuple[str, int, float]] = field(default_factory=list)
+    #: How many settings run at the same time, and how many times longer a setting takes then than alone (as FI measured
+    #: it): ``seconds`` is then the time the run takes, ``work_seconds`` what its settings take one after another.
+    at_once: int = 1
+    slowdown: float = 1.0
+    work_seconds: float = 0.0
 
 
 def probe_key(cell: dict[str, Any], runs: int) -> str:
@@ -279,8 +285,12 @@ def _interpolated(known: dict[int, float], n: int) -> list[float]:
     return out
 
 
-def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes: list[Probe]) -> Estimate | None:
+def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes: list[Probe], *, at_once: int = 1,
+             slowdown: float = 1.0) -> Estimate | None:
     """The total time of the study from the timed settings, or ``None`` when the base was not timed.
+
+    ``at_once`` settings running at the same time, each ``slowdown`` times slower than alone (:func:`slowdown_at_once`):
+    the run takes the settings' time spread over them, and never less than its costliest timed setting takes then.
 
     Each setting alone changes the cost by the ratio measured for its values (read in proportion between timed ones). Settings
     are not assumed to multiply: when two or more are each costly, the base with all of them at their costly ends was timed
@@ -342,10 +352,37 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
             part_costs.append((name, size, probe.seconds if probe is not None else base.seconds))
         seconds = max(seconds, sum(size * cost for _n, size, cost in part_costs))
         at_least = at_least or len(timed_parts) < len(sizes)
+    work, n, slower = seconds, max(1, int(at_once or 1)), max(1.0, float(slowdown or 1.0))
+    if n > 1:
+        # Spread over the settings running at once, each as much slower as FI measured; the costliest setting timed is
+        # the shortest such a run can be (it runs in one process, however many others run beside it).
+        seconds = max(work * slower / n, max(p.seconds for p in probes) * slower)
     return Estimate(seconds=seconds, at_least=at_least, complete=complete,
                     cells=cells, trials=trial_count(grid, runs, deterministic), ratios=ratios, base=dict(base.cell),
                     base_seconds=base.seconds, timed=len(probes), together=together, spreads=spreads_of(probes),
-                    parts=len(sizes) if timed_parts else 0, parts_timed=len(timed_parts), part_costs=part_costs)
+                    parts=len(sizes) if timed_parts else 0, parts_timed=len(timed_parts), part_costs=part_costs,
+                    at_once=n, slowdown=slower if n > 1 else 1.0, work_seconds=work)
+
+
+def setting_cost(grid: dict[str, list[Any]], probes: list[Probe]) -> Any:
+    """``cost(cell)``: what one setting is expected to take, from the timed settings (each setting's value read in
+    proportion between the timed ones, as :func:`estimate` reads them), for running the costliest first; ``None`` when the
+    base was not timed."""
+    base = next((p for p in probes if p.axis is None), None)
+    if base is None or base.seconds <= 0:
+        return None
+    by_axis: dict[str, dict[str, float]] = {}
+    for name, values in axes_of(grid):
+        known = {len(values) // 2: 1.0}
+        for p in probes:
+            if p.axis == name and p.index is not None:
+                known[p.index] = p.seconds / base.seconds
+        by_axis[name] = {_tr.cell_key({name: v}): r for v, r in zip(values, _interpolated(known, len(values)))}
+
+    def cost(cell: dict[str, Any]) -> float:
+        return base.seconds * math.prod(by_axis.get(k, {}).get(_tr.cell_key({k: v}), 1.0) for k, v in cell.items())
+
+    return cost
 
 
 def spreads_of(probes: list[Probe]) -> dict[str, float]:
@@ -432,12 +469,12 @@ async def measure(
 async def _time_one(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, cell: dict[str, Any], *, runs: int,
     deterministic: bool, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-    in_each_run: dict[str, list[Any]] | None = None,
+    in_each_run: dict[str, list[Any]] | None = None, name: str = "pilot",
 ) -> tuple[Probe | None, str]:
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
     (quest_root / _tr.HARNESS_PATH).write_text(_tr.HARNESS_SOURCE, encoding="utf-8")
-    spec, out = work / "pilot.json", work / "pilot.out.jsonl"
+    spec, out = work / f"{name}.json", work / f"{name}.out.jsonl"
     out.unlink(missing_ok=True)
     key = _tr.cell_key(cell)
     # A stochastic setting: its first trial, then more until the later ones have taken TIMING_LATER_S (at most
@@ -514,6 +551,31 @@ async def _time_one(
     return Probe(None, None, cell, max(seconds, 1e-6), spread=spread,
                  trials=[dict(r.get("values") or {}) for r in done[:2]], fixed_s=fixed, per_trial_s=per_trial,
                  timed_trials=len(done), call_s=sum(durations)), ""
+
+
+async def slowdown_at_once(
+    executor: Any, python: Path | str, quest_root: Path, module: Path | str, cell: dict[str, Any], *, at_once: int,
+    runs: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+    in_each_run: dict[str, list[Any]] | None = None,
+) -> tuple[float | None, str]:
+    """How many times longer ``cell`` takes when ``at_once`` copies of it run at the same time than when it runs alone, both
+    timed now, one after the other (so a cache an earlier timing filled serves both): what running the study's settings at
+    once costs each of them on this machine. ``(None, why)`` when a timing did not finish or failed."""
+    kw: dict[str, Any] = dict(runs=runs, deterministic=deterministic, env=env, thresholds=thresholds,
+                              in_each_run=in_each_run)
+    t0 = time.monotonic()
+    alone, why = await _time_one(executor, python, quest_root, module, cell, timeout_s=timeout_s, name="alone", **kw)
+    took = time.monotonic() - t0  # what the timing itself took (it times a few trials, not the whole setting)
+    if alone is None or alone.at_least or alone.seconds <= 0:
+        return None, why or "the setting did not finish alone in the time for timing"
+    allowance = int(max(10, math.ceil(2 * took * max(1, int(at_once))) + 10))  # twice as slow as one after another
+    together = await asyncio.gather(*(
+        _time_one(executor, python, quest_root, module, cell, timeout_s=allowance, name=f"at_once{i}", **kw)
+        for i in range(max(1, int(at_once)))))
+    if any(p is None or p.at_least for p, _w in together):
+        return None, next((w for p, w in together if w), "") or "a setting did not finish beside the others"
+    mean = sum(p.seconds for p, _w in together if p is not None) / len(together)
+    return max(1.0, mean / alone.seconds), ""
 
 
 # ---- the correctness pilot -----------------------------------------------------------------------------------------------
@@ -838,6 +900,10 @@ def says(est: Estimate, limit_s: float, *, topic: bool = False) -> str:
     whose = "the topic's" if topic else "the"
     line = (f"FI estimates the experiment takes {'at least ' if est.at_least else 'about '}"
             f"{plain_duration(est.seconds * SAFETY)}; {whose} limit is {plain_duration(limit_s)}")
+    if est.at_once > 1:
+        slower = f", each taking {est.slowdown:.1f} times as long as alone, as FI measured" if est.slowdown >= 1.05 else ""
+        line += (f" ({est.at_once} settings run at the same time{slower}; one after another they would take "
+                 f"{plain_duration(est.work_seconds * SAFETY)}, and the run takes at least as long as its costliest setting)")
     if est.parts and est.parts_timed < est.parts:
         line += (f" (the time FI allows for timing ran out after {est.parts_timed} of the study's {est.parts} parts, so the "
                  "rest are counted at the cost of the base: this is a lower bound)")
@@ -952,10 +1018,11 @@ def floor_is_stated(protocol: dict[str, Any] | None) -> bool:
     return isinstance(target, (int, float)) and not isinstance(target, bool) and float(target) > 0
 
 
-def seconds_at(grid: dict[str, list[Any]], runs: int, runs_now: int, deterministic: bool, probes: list[Probe]) -> float | None:
+def seconds_at(grid: dict[str, list[Any]], runs: int, runs_now: int, deterministic: bool, probes: list[Probe], *,
+               at_once: int = 1, slowdown: float = 1.0) -> float | None:
     """The estimate (without the margin) of the same study with ``runs`` runs per setting, from the settings timed for
     ``runs_now``: each setting's process and first call are paid once whatever the runs, the rest scales with them."""
-    est = estimate(grid, runs, deterministic, [p.at(runs, runs_now) for p in probes])
+    est = estimate(grid, runs, deterministic, [p.at(runs, runs_now) for p in probes], at_once=at_once, slowdown=slowdown)
     return None if est is None else est.seconds
 
 
@@ -975,7 +1042,8 @@ class Fit:
 
 
 def fit_runs(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes: list[Probe], protocol: dict[str, Any] | None,
-             *, limit_s: float, topic_limit: bool, spreads: dict[str, float] | None = None) -> Fit | None:
+             *, limit_s: float, topic_limit: bool, spreads: dict[str, float] | None = None, at_once: int = 1,
+             slowdown: float = 1.0) -> Fit | None:
     """The most runs per setting (fewer than ``runs``) whose estimate, with its margin, fits ``limit_s``, every setting kept;
     ``None`` when none does. For FI's own limit the fewest allowed is the plan's own (:func:`runs_floor`, when the plan
     states one: FI invents no number of runs for its own limit, and with a target on a mean whose spread is not known it
@@ -1006,7 +1074,7 @@ def fit_runs(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
         return None
 
     def fits_at(n: int) -> float | None:
-        s = seconds_at(grid, n, runs, deterministic, probes)
+        s = seconds_at(grid, n, runs, deterministic, probes, at_once=at_once, slowdown=slowdown)
         return s if s is not None and s * SAFETY <= limit_s else None
 
     if fits_at(lowest) is None:
