@@ -219,3 +219,24 @@ def test_a_sentence_still_flagged_after_the_rewrites_is_taken_out_and_the_quest_
     assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": 0}) != "stuck"
     from core import quality_report
     assert "this was taken out: The optimised design lowers" in quality_report.render(quality_report.build(eng.quest_root, running=False))
+
+
+def test_every_sentence_of_a_kind_is_taken_out_and_a_later_pass_adds_to_the_list(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check names the first sentence of each kind: a second sentence of the same claim stayed in the paper after
+    the first was taken out, and a later pass replaced the list of what was taken out with its own."""
+    eng = _engine(tmp_path, monkeypatch)
+    _write_records(eng, NOT_BETTER, CHECK_NOT_SHOWN, {"status": "went_on_failing"})
+    two = OVERCLAIM.replace("heat sink.", "heat sink.\n\nThe optimised design also lowers the mass of the fins.")
+    state = {**_paper_on_disk(eng, two), "record_rewrites": 2}
+    assert eng._record_contradiction_hits(two, state) == []
+    paper = (eng.quest_root / "paper" / "paper.md").read_text(encoding="utf-8")
+    assert "The optimised design lowers" not in paper and "also lowers the mass" not in paper
+    taken = [e["text"] for e in json.loads((eng.quest_root / rc.TAKEN_OUT).read_text(encoding="utf-8"))["taken_out"]]
+    assert any(t.startswith("The optimised design lowers") for t in taken)
+    assert any(t.startswith("The optimised design also lowers") for t in taken)
+    later = paper + "\nThe optimised design is the one to build.\n"
+    (eng.quest_root / "paper" / "paper.md").write_text(later, encoding="utf-8")
+    eng._record_contradiction_hits(later, state)
+    again = [e["text"] for e in json.loads((eng.quest_root / rc.TAKEN_OUT).read_text(encoding="utf-8"))["taken_out"]]
+    assert set(taken) <= set(again) and any(t.startswith("The optimised design is the one") for t in again)

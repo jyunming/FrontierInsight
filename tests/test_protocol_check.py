@@ -497,3 +497,5 @@ def test_the_plans_fewest_runs_in_the_analysis_is_not_a_different_run_count() ->
     assert pc.check(protocol, {"experiment.py": analysis}) == []
     other = pc.check(protocol, {"experiment.py": "C_VALUES = [1.0, 2.0]\nN_RUNS = 50\n"})
     assert [m.kind for m in other] == ["runs"], "a count the plan does not give is still a difference"
+    same = pc.check(protocol, {"experiment.py": "C_VALUES = [1.0, 2.0]\nN_RUNS = 10\n"})
+    assert [m.kind for m in same] == ["runs"], "only a floor on the runs may hold the plan's fewest runs"

@@ -694,7 +694,9 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                "share": "at least one starting point used its whole share of the budget before it converged",
                "time": "the search's time limit (execution.timeout_s) was reached before every starting point "
                        "converged",
-               "target": "the continued search stopped as soon as a design reached the target asked for"
+               "target": "the continued search stopped as soon as a design reached the target asked for",
+               "no_effect": "the search stopped early: its first designs, which between them changed every number of "
+                            "the design, all gave the baseline's results"
                }.get(stopped, f"the search stopped because {stopped or 'of an unknown reason'}")
         checks["budget"] = {"status": FAILED, "says": (
             f"{why}: the design is the best of {ev.get('search')} evaluations, not shown to be the best the search "
