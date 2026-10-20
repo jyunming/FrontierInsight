@@ -48,7 +48,7 @@ def fit_k(t, c) -> tuple:
 
 
 # S2
-def weighted_arrhenius(k_hat, var_ln_k, T) -> dict:
+def weighted_temperature_law(k_hat, var_ln_k, T) -> dict:
     # WLS of ln k_hat on centred 1/T with weights 1/var_ln_k; returns Ea_hat, lnA_hat, 2x2 (Ea,lnA) nominal covariance, residual-scaled covariance, reduced chi-square; unit weights if all variances are zero.
     R_gas = globals().get("R", 8.314462618)
     k_hat = np.asarray(k_hat, dtype=float)

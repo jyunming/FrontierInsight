@@ -385,3 +385,63 @@ def test_numbers_that_cannot_be_told_apart_by_their_own_size_are_not_called_flat
     assert flat._all_same([0.0, 0.0, 0.0])
     assert not flat._all_same([0.0, 1e-30]), "a zero beside a number that is not zero: undecided, never flat"
     assert not flat._all_same([-1e-15, 1e-15]), "noise around zero is not a constant"
+
+
+# --- one setting that changes nothing, while others do ----------------------------------------------------------------
+
+def test_a_setting_that_changes_no_result_while_another_does_is_named() -> None:
+    cells = [_cell({"flow": f, "coating": c, "mesh": m}, {"t_out": 20.0 - f, "drop": 0.1 * f})
+             for f in (1.0, 2.0) for c in ("bare", "painted") for m in (0.5, 0.25)]
+    assert flat.observed_flat_sweep(cells) is None, "results move: not a flat sweep"
+    got = flat.unchanged_axes(cells, skip={"mesh"})
+    assert got == [("coating", 4)], "the coating and nothing else; a numerical setting is the finer check's to judge"
+    note = flat.unchanged_axes_note(got)
+    assert "`coating`" in note and "not a comparison" in note and "``" not in note
+
+
+def test_a_setting_that_moves_any_result_once_or_has_one_pair_is_not_named() -> None:
+    moving = [_cell({"flow": f, "coating": c}, {"t_out": 20.0 - f + (0.5 if (c, f) == ("painted", 2.0) else 0.0)})
+              for f in (1.0, 2.0) for c in ("bare", "painted")]
+    assert flat.unchanged_axes(moving) == []
+    one_pair = [_cell({"flow": 1.0, "coating": "bare"}, {"t_out": 19.0}),
+                _cell({"flow": 1.0, "coating": "painted"}, {"t_out": 19.0}),
+                _cell({"flow": 2.0, "coating": "bare"}, {"t_out": 18.0})]
+    assert flat.unchanged_axes(one_pair) == [], "one pair proves nothing"
+
+
+def test_a_sweep_with_a_setting_that_changes_nothing_runs_and_says_so(tmp_path: Path) -> None:
+    root = _quest(tmp_path, 'def run_cell(cell):\n    return {"t_out": 20.0 - cell["flow"], "drop": 0.0}\n')
+    (root / "code" / "experiment.py").write_text(SWEEP_ANALYSIS, encoding="utf-8")
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=root,
+        protocol={"grid": {"flow": [1.0, 2.0, 3.0], "coating": ["bare", "painted"]}}, deterministic=True,
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    result = asyncio.run(runner.execute(cmd, cwd=root, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert result.returncode == 0 and runner.flat is None, "an observation, not a fault: the run goes on"
+    assert runner.no_difference and "`coating`" in runner.no_difference and "`flow`" not in runner.no_difference
+
+
+@pytest.mark.asyncio
+async def test_a_coarse_scan_setting_that_changes_nothing_is_said_before_the_search_and_kept_in_its_record(
+        tmp_path: Path) -> None:
+    root = _quest(tmp_path, WORKING_SIM)
+    protocol = {"optimisation": _block(fixed={"finish": "matte"},
+                                       grid={"fin": [1.0, 4.0], "finish": ["matte", "gloss"]})}
+    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
+                                         simulate=root / "code" / "simulate.py",
+                                         analysis=root / "code" / "experiment.py")
+    result = await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert runner.no_difference and "`finish`" in runner.no_difference and "`fin`" not in runner.no_difference
+    best = json.loads((root / "results" / "best_design.json").read_text(encoding="utf-8"))
+    assert "`finish`" in best["scan_settings_without_effect"]
+
+
+def test_a_setting_that_moves_only_the_numbers_per_value_inside_each_run_is_not_named() -> None:
+    """A run that goes through several values itself returns a number per value: those count as results too. A fitted
+    constant that ignores the setting beside them must not make the setting look like one that changes nothing."""
+    cells = [_cell({"coating": c, "flow": f},
+                   {"constant": 1.5, "t_out": {"speed=1": 20.0 - f * (2.0 if c == "painted" else 1.0), "speed=2": 18.0}})
+             for c in ("bare", "painted") for f in (1.0, 2.0, 3.0)]
+    assert flat.unchanged_axes(cells) == []

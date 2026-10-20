@@ -481,6 +481,24 @@ def test_a_rewrite_that_drops_an_equation_gets_it_back_and_a_looser_bar_is_refus
     assert tighter[0]["tolerance"] == 1e-4
 
 
+def test_a_check_rewritten_to_measure_another_quantity_is_held_to_its_width_against_the_size_expected() -> None:
+    # A check of a small fraction (0.5 within 0.1, 20%) rewritten to measure a time (300 s within 30 s, 10%): the two
+    # absolute widths are of other quantities, and the rewrite is the stricter of the two.
+    was = [{"name": "cooling", "measure": "frac_left", "expected": 0.5, "tolerance": 0.1, "tolerance_mode": "absolute"}]
+    stricter = orv.never_looser(was, [{"name": "cooling", "measure": "half_time_s", "expected": 300, "tolerance": 30,
+                                       "tolerance_mode": "absolute"}])
+    assert stricter[0]["tolerance"] == 30 and stricter[0]["measure"] == "half_time_s"
+    looser = orv.never_looser(was, [{"name": "cooling", "measure": "half_time_s", "expected": 300, "tolerance": 90,
+                                     "tolerance_mode": "absolute"}])
+    assert looser[0]["tolerance"] == pytest.approx(60) and looser[0]["tolerance_mode"] == "absolute",         "the old bar, 20% of what is expected, is kept"
+    as_share = orv.never_looser(was, [{"name": "cooling", "measure": "half_time_s", "expected": 300, "tolerance": 0.5,
+                                       "tolerance_mode": "relative"}])
+    assert as_share[0]["tolerance"] == pytest.approx(0.2) and as_share[0]["tolerance_mode"] == "relative"
+    same = orv.never_looser(was, [{"name": "cooling", "measure": "frac_left", "expected": 0.5, "tolerance": 0.3,
+                                   "tolerance_mode": "absolute"}])
+    assert same[0]["tolerance"] == 0.1, "an expected value that did not move keeps the old rule"
+
+
 def test_an_equation_the_reader_cannot_tell_is_not_recorded_as_standard() -> None:
     reply = {**_cup_review(), "equations": [{"id": "E1", "standard": "yes"}, {"id": "E2", "standard": ""}]}
     review = orv.parse(reply, CUP_PROTOCOL)

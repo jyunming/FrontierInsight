@@ -15,8 +15,8 @@
   "in_each_run": {
     "method": [
       "uncorrected",
-      "bonferroni",
-      "benjamini_hochberg"
+      "strict",
+      "adaptive"
     ]
   },
   "runs_per_setting": 4000,

@@ -688,3 +688,136 @@ def test_the_log_lines_say_plainly_that_the_values_are_the_searchs_and_are_check
     assert "at the search's own settings (mesh = 0.5); FI checks them at finer settings next" in text
     assert "not checked at finer numerical settings" not in text
     assert math.isfinite(record["improvement"]["value"])
+
+
+class _Killed(Exception):
+    """The quest stopped (killed, the machine restarted) in the middle of the search."""
+
+
+class _KilledAfter(LocalExecutor):
+    def __init__(self, calls: int) -> None:
+        super().__init__()
+        self.left = calls
+
+    async def execute(self, cmd: list[str], **kw: Any) -> ExecutionResult:
+        if self.left <= 0:
+            raise _Killed()
+        self.left -= 1
+        return await super().execute(cmd, **kw)
+
+
+def _without_times(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{k: v for k, v in r.items() if k != "elapsed_s"} for r in rows if r.get("event") == "evaluation"]
+
+
+@pytest.mark.asyncio
+async def test_a_search_stopped_before_its_end_goes_on_from_where_it_stopped(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    whole = _quest(tmp_path / "whole")
+    await _run(whole, protocol)
+    total = _count(whole)
+    root = _quest(tmp_path / "stopped")
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    assert _count(root) == 7 and (root / optimise.JOURNAL).is_file()
+    run = await _run(root, protocol)
+    assert _count(root) == total, "the 7 evaluations done before the stop are not run again"
+    assert _without_times(_ledger(root)) == _without_times(_ledger(whole)), "the same search as one never stopped"
+    assert run.record["continued"]["evaluations_taken_from_the_stopped_search"] == 7
+    assert not (root / optimise.JOURNAL).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_search_of_other_code_is_not_continued(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    simulate = root / "code" / "simulate.py"
+    simulate.write_text(simulate.read_text(encoding="utf-8").replace('"g": x + y', '"g": x - y'), encoding="utf-8")
+    run = await _run(root, protocol)
+    assert _count(root) == 7 + run.record["evaluations"]["search"], "every evaluation of the new code is run"
+    assert "continued" not in run.record
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_search_is_not_continued_after_a_repair_of_the_models_package(tmp_path: Path) -> None:
+    """A repair of the model's own package (code/<package>/) changes what the simulation computes, as an edit of
+    simulate.py does."""
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    (root / "code" / "model").mkdir()
+    (root / "code" / "model" / "core.py").write_text("SCALE = 2.0\n", encoding="utf-8")
+    run = await _run(root, protocol)
+    assert "continued" not in run.record
+    assert _count(root) == 7 + run.record["evaluations"]["search"], "every evaluation of the repaired code is run"
+
+
+@pytest.mark.asyncio
+async def test_a_record_cut_off_when_the_search_stopped_does_not_swallow_the_next_one(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    journal = root / optimise.JOURNAL
+    text = journal.read_text(encoding="utf-8")
+    journal.write_text(text[: len(text) - 1 - len(text.rstrip("\n").splitlines()[-1]) // 2], encoding="utf-8")
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(3), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    run = await _run(root, protocol)
+    assert run.record["continued"]["evaluations_taken_from_the_stopped_search"] == 6 + 3, \
+        "the cut record is lost, the three after it are kept"
+
+
+class _OneStopped(LocalExecutor):
+    """The process of the third evaluation is stopped from outside (memory, a kill) before it reports."""
+
+    def __init__(self, kill_after: int) -> None:
+        super().__init__()
+        self.made = 0
+        self.kill_after = kill_after
+
+    async def execute(self, cmd: list[str], **kw: Any) -> ExecutionResult:
+        self.made += 1
+        if self.made > self.kill_after:
+            raise _Killed()
+        if self.made == 3:
+            return ExecutionResult(returncode=-9, stdout="", stderr="", duration_s=0.1)
+        return await super().execute(cmd, **kw)
+
+
+@pytest.mark.asyncio
+async def test_an_evaluation_stopped_from_outside_is_run_again_on_resume(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    with pytest.raises(_Killed):
+        await optimise.run_search(_OneStopped(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    rows = [json.loads(line) for line in (root / optimise.JOURNAL).read_text(encoding="utf-8").splitlines()[1:]]
+    assert len(rows) == 6 and not any("process" in r["reply"] for r in rows), rows
+
+
+def test_the_frozen_studys_key_covers_the_models_package_and_not_its_tests(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    block = protocol["optimisation"]
+    simulate = root / "code" / "simulate.py"
+    keys = lambda: (optimise._run_key(root, simulate, block, 0, "run_cell", None),  # noqa: E731
+                    optimise._study_key(root, simulate, block, "run_cell", None))
+    before = keys()
+    (root / "code" / "tests").mkdir()
+    (root / "code" / "tests" / "test_model.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    (root / "code" / ".pytest_cache").mkdir()
+    (root / "code" / ".pytest_cache" / "v").write_text("x", encoding="utf-8")
+    assert keys() == before, "a unit test or a cache is not the simulation"
+    (root / "code" / "model").mkdir()
+    (root / "code" / "model" / "core.py").write_text("SCALE = 2.0\n", encoding="utf-8")
+    after = keys()
+    assert after[0] != before[0] and after[1] != before[1]

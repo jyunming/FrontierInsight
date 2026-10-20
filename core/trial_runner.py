@@ -76,6 +76,126 @@ import importlib.util, json, math, sys, time, traceback, warnings
 def _number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
+def _fi_capture(cfg):
+    # What each named function of the model's package is called with when the simulation runs (core/second_impl.py):
+    # the first few distinct calls, each argument by its parameter's name, kept only when every argument is plain data
+    # (numbers, text, real arrays up to a size). The functions themselves are called as they are.
+    import functools, importlib, inspect
+    try:
+        import numpy as np
+    except Exception:
+        np = None
+    mod = importlib.import_module(cfg["module"])
+    limit, most = int(cfg.get("limit") or 3), int(cfg.get("max_elements") or 20000)
+    # ``shift``: ``{"name", "scale"}``, the one function whose result is changed by that share before the caller gets it
+    # (does a result depend on it?); ``counts``: how often each named function was called; ``shifted``: how many of the
+    # shifted function's results held a number that could be changed.
+    shift = cfg.get("shift") or {}
+    shifted_name, scale = shift.get("name"), float(shift.get("scale") or 0.0)
+    seen, counts, shifted = {}, {}, {}
+
+    def conv(x, left):
+        if np is not None and isinstance(x, np.ndarray):
+            if x.dtype.kind not in "biuf" or x.size > left[0]:
+                raise TypeError("not plain data")
+            left[0] -= x.size
+            return x.tolist()
+        if np is not None and isinstance(x, np.generic):
+            x = x.item()
+        if x is None or isinstance(x, (bool, str)):
+            return x
+        if isinstance(x, int):
+            return x
+        if isinstance(x, float):
+            if not math.isfinite(x):
+                raise TypeError("not finite")
+            return x
+        if isinstance(x, (list, tuple)):
+            left[0] -= len(x)
+            if left[0] < 0:
+                raise TypeError("too large")
+            return [conv(i, left) for i in x]
+        raise TypeError("not plain data")
+
+    # Each number is changed by its own share (scale times the next of these, in turn): a share common to all of them
+    # would vanish in a result that only uses their ratios (weights of a fit, a normalised distribution).
+    pattern, turn = (1.0, -0.7, 0.4, -0.9, 0.6, -0.3, 0.8, -0.5), [0]
+
+    def factors(n):
+        out = [1.0 + scale * pattern[(turn[0] + i) % len(pattern)] for i in range(n)]
+        turn[0] += n
+        return out
+
+    def changed(x, hit):
+        # Every real or complex number in what the function returned is changed; whole numbers and flags stay as they
+        # are (a count or an index), and so does anything that is not a number, a list, a tuple or a dict of them.
+        if np is not None and isinstance(x, np.ndarray):
+            if x.dtype.kind in "fc" and x.size:
+                hit[0] = hit[0] or bool(np.any(x != 0))
+                return x * np.asarray(factors(x.size)).reshape(x.shape)
+            return x
+        if np is not None and isinstance(x, np.generic):
+            if x.dtype.kind in "fc":
+                hit[0] = hit[0] or bool(x != 0)
+                return x * factors(1)[0]
+            return x
+        if isinstance(x, bool) or isinstance(x, int):
+            return x
+        if isinstance(x, (float, complex)):
+            hit[0] = hit[0] or x != 0  # a zero stays zero: changing it by a share changes nothing
+            return x * factors(1)[0]
+        if isinstance(x, dict):
+            return {k: changed(v, hit) for k, v in x.items()}
+        if isinstance(x, tuple):
+            items = [changed(v, hit) for v in x]
+            return type(x)(*items) if hasattr(x, "_fields") else tuple(items)
+        if isinstance(x, list):
+            return [changed(v, hit) for v in x]
+        return x
+
+    def wrap(name, fn):
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return fn
+        plain = not any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in sig.parameters.values())
+
+        @functools.wraps(fn)
+        def recorded(*a, **k):
+            counts[name] = counts.get(name, 0) + 1
+            cases = seen.setdefault(name, [])
+            if plain and len(cases) < limit:
+                try:
+                    bound = sig.bind(*a, **k)
+                    left = [most]
+                    case = {p: conv(v, left) for p, v in bound.arguments.items()}
+                    if case not in cases:
+                        cases.append(case)
+                except Exception:
+                    pass
+            got = fn(*a, **k)
+            if name == shifted_name:
+                hit = [False]
+                got = changed(got, hit)
+                shifted[name] = shifted.get(name, 0) + (1 if hit[0] else 0)
+            return got
+        return recorded
+
+    originals = {}
+    for name in cfg.get("names") or []:
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            originals[name] = fn
+            setattr(mod, name, wrap(name, fn))
+    prefix = str(cfg["module"]).split(".")[0]
+    for mname, m in list(sys.modules.items()):  # a module of the package that imported a function by name
+        if m is None or not (mname == prefix or mname.startswith(prefix + ".")):
+            continue
+        for name, fn in originals.items():
+            if getattr(m, name, None) is fn:
+                setattr(m, name, getattr(mod, name))
+    return {"cases": seen, "counts": counts, "shifted": shifted}
+
 def main():
     import os
     clock0 = time.perf_counter()
@@ -97,6 +217,12 @@ def main():
     del sys.argv[1:]
     # The simulation's own folder is where its imports are (a helper module beside simulate.py).
     sys.path.insert(0, os.path.dirname(os.path.abspath(spec["module"])))
+    capture, captured = spec.pop("capture", None), None
+    if capture:
+        try:
+            captured = _fi_capture(capture)
+        except Exception:
+            captured = None
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
@@ -155,6 +281,9 @@ def main():
                 if kept is None:
                     raise TypeError(why)
                 row.update(status="ok", values=kept)
+                reasons = missing_reasons(value, kept)
+                if reasons:
+                    row[WHY_MISSING] = reasons
             except BaseException as e:
                 if isinstance(e, KeyboardInterrupt):
                     raise
@@ -176,11 +305,30 @@ def main():
             if later >= float(stop_after):
                 break
     out.close()
+    if captured is not None:
+        try:
+            with open(capture["path"], "w", encoding="utf-8") as fh:
+                json.dump(captured, fh)
+        except Exception:
+            pass
     sys.stdout = real_stdout
 
 main()
 '''
 HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + HARNESS_BODY
+
+
+def numerical_axes(protocol: Any) -> set[str]:
+    """The names of the numerical settings of a protocol (a measurement's ``numerical_settings``, or a search's under
+    ``optimisation``): resolutions FI's check at finer settings judges, never a setting the study compares."""
+    out: set[str] = set()
+    if not isinstance(protocol, dict):
+        return out
+    for block in (protocol, protocol.get("optimisation")):
+        settings = block.get("numerical_settings") if isinstance(block, dict) else None
+        if isinstance(settings, dict):
+            out.update(str(k) for k in settings)
+    return out
 
 
 def cells(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
@@ -933,6 +1081,13 @@ class TrialsRunner:
             if self.log is not None:
                 self.log.info("[execute] every setting gave the same numbers, and the simulation's code does read the settings: "
                               "kept as an observed absence of difference, not a fault. %s", self.no_difference)
+        elif seen is None:
+            # Some results moved, but one setting may still have moved none of them (core/flat_output.py).
+            unchanged = _flat.unchanged_axes(run.cells, skip=numerical_axes(protocol))
+            if unchanged:
+                self.no_difference = _flat.unchanged_axes_note(unchanged)
+                if self.log is not None:
+                    self.log.warning("[execute] %s", self.no_difference)
         if flat is not None:
             self.flat = flat
             self.failed_script = self.simulate.name
@@ -1316,8 +1471,9 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
     returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number.
 
     With values compared inside each run (``in_each_run``), the run is given every one of them, as in the study, with the
-    study's seed for the case's setting; a number per value is then read at the value the case names, or kept as the
-    list of every value when the case names none (:func:`core.in_run.for_case`).
+    study's seed for the case's setting (and a number the case names that the study does not compare, :func:`case_inside`);
+    a number per value is then read at the value the case names, or kept as the list of every value when the case names
+    none (:func:`core.in_run.for_case`).
 
     ``paired``: the study runs trial ``t`` of every setting on one seed (common random numbers), so the case's trial
     gets that seed too (:func:`trial_seed` with ``key=""``), the one the reported trial had."""
@@ -1326,6 +1482,7 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
         return await _run_case(executor, python, quest_root, module, cell=dict(cell), timeout_s=timeout_s, env=env,
                                thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
                                seed_key="" if paired else None, log=log)
+    inside = case_inside(inside, cell)
     levels = _in_run.level_cells(inside)
     setting = {k: v for k, v in cell.items() if k not in inside}
     named = {k: v for k, v in cell.items() if k in inside}
@@ -1368,6 +1525,20 @@ async def _run_case(executor: Any, python: Path | str, quest_root: Path, module:
                           env=env, thresholds=thresholds, label=f"{entry}()", trial=int(trial), levels=levels, log=log)
 
 
+def case_inside(inside: dict[str, list[Any]], cell: dict[str, Any]) -> dict[str, list[Any]]:
+    """The values a run on a check's case compares inside it: the study's, with each number the case names that the
+    study does not compare added at the end. A factor whose values are numbers can be run at any number, so a check of a
+    limiting case (a value near zero, say) runs on the simulation itself; a choice the study does not have is not added
+    (the simulation has no such alternative), so it is refused as before."""
+    out = {k: list(v) for k, v in inside.items()}
+    for k, v in cell.items():
+        values = out.get(k)
+        if (values and _in_run._number(v) and all(_in_run._number(x) for x in values)
+                and not any(_in_run._same_level_value(v, x) for x in values)):
+            out[k] = [*values, v]
+    return out
+
+
 async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *,
                           cell: dict[str, Any], trials: list[int], timeout_s: int, env: dict[str, str] | None = None,
                           thresholds: dict[str, Any] | None = None, in_each_run: dict[str, list[Any]] | None = None,
@@ -1390,6 +1561,7 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
     named: dict[str, Any] = {}
     given, key = dict(cell), cell_key(cell)
     if inside:
+        inside = case_inside(inside, cell)
         levels = _in_run.level_cells(inside)
         setting = {k: v for k, v in cell.items() if k not in inside}
         named = {k: v for k, v in cell.items() if k in inside}
@@ -1511,6 +1683,79 @@ async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, mo
         if changed:
             shown = ", ".join(f"{k}: {first.get(k)!r} then {second.get(k)!r}" for k in changed[:3])
             return False, f"the setting {cell.get('key')} returned other numbers ({shown})"
+    return True, ""
+
+
+async def _seeded_once(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
+                       seed: int, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+                       log: Any = None) -> tuple[dict[str, float] | None, float, str]:
+    """One call of ``run_trial`` in a new process with FI's seed: ``(its numbers by record key, the seconds the call
+    took, "")``, or ``(None, 0, why)``."""
+    rows, result = await _run_batch(executor, python, quest_root, module, entry="run_trial", cell=dict(cell),
+                                    trials=[{"trial": 0, "seed": int(seed)}], timeout_s=timeout_s, env=env,
+                                    thresholds=thresholds, log=log)
+    for row in rows:
+        if row.get("load_error"):
+            return None, 0.0, str(row["load_error"])
+        if row.get("status") == "ok":
+            numbers = {_in_run.record_key(k, n) if k else n: v for k, n, v in _in_run.flat("", row.get("values") or {})}
+            seconds = row.get("duration_s")
+            return numbers, float(seconds) if isinstance(seconds, (int, float)) else 0.0, ""
+        if row.get("status") == "failed":
+            return None, 0.0, str(row.get("reason") or "run_trial failed")
+    return None, 0.0, ("run_trial ran out of time" if getattr(result, "timed_out", False)
+                       else f"run_trial did not report (exit code {result.returncode})")
+
+
+def _is_run_time(first: tuple[Any, float], again: tuple[Any, float]) -> bool:
+    """A number that differs between two same-seed runs is the run's own time when, in both runs, it lies between zero and
+    the seconds the call took (FI's harness times the call): a time cannot be longer than the call it was taken in. No
+    name is read."""
+    return all(isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= v <= seconds * 1.05 + 1e-3
+               for v, seconds in (first, again))
+
+
+async def run_trial_seed_check(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *,
+                               cell: dict[str, Any], seed: int, timeout_s: int, deterministic: bool = False,
+                               varies: set[str] | frozenset[str] | None = None, env: dict[str, str] | None = None,
+                               thresholds: dict[str, Any] | None = None, log: Any = None) -> tuple[bool | None, str]:
+    """Whether ``run_trial`` uses the seed FI gives it: FI calls it on one setting with seed ``s``, with ``s`` again and
+    with ``s + 1`` (each call in a new process): ``(True, "")``, ``(False, what is wrong)`` or ``(None, why it could not
+    be judged)``.
+
+    * Two calls with the same seed must return the same numbers. A number that differs and lies within the call's own
+      duration is a time (it is left out of the next step and named in the answer); any other number that differs means
+      the run does not repeat with its seed.
+    * The call with ``s + 1`` must change at least one of the numbers that repeated (only those named in ``varies``,
+      when the protocol says which numbers have spread), or the run ignores the seed (an own generator, an own fixed
+      seed or none).
+
+    A ``deterministic`` study draws nothing and is not checked."""
+    if deterministic:
+        return None, "the study is deterministic, so no seed is used"
+    kw: dict[str, Any] = dict(cell=cell, timeout_s=timeout_s, env=env, thresholds=thresholds, log=log)
+    first = await _seeded_once(executor, python, quest_root, module, seed=seed, **kw)
+    if first[0] is None:
+        return None, first[2]
+    again = await _seeded_once(executor, python, quest_root, module, seed=seed, **kw)
+    if again[0] is None:
+        return None, again[2]
+    other = await _seeded_once(executor, python, quest_root, module, seed=seed + 1, **kw)
+    if other[0] is None:
+        return None, other[2]
+    a, b, c = first[0], again[0], other[0]
+    names = sorted(set(a) | set(b))
+    moved = [n for n in names if n not in a or n not in b or not _same_value(a[n], b[n])]
+    timings = [n for n in moved if n in a and n in b and _is_run_time((a[n], first[1]), (b[n], again[1]))]
+    unsteady = [n for n in moved if n not in timings]
+    if unsteady:
+        shown = ", ".join(f"{n}: {a.get(n)!r} then {b.get(n)!r}" for n in unsteady[:3])
+        return False, f"the run does not repeat with the same seed ({shown})"
+    stable = [n for n in names if n not in timings and (not varies or n in varies)]
+    if not stable:
+        return None, ("every number the run returned is its own time" if timings else "the run returned no number to compare")
+    if all(n in c and _same_value(a[n], c[n]) for n in stable):
+        return False, "the run ignores the seed FI gives it (another seed returned the same numbers)"
     return True, ""
 
 

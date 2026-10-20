@@ -35,8 +35,10 @@ DIRECTIVE_TEXT = (
     "Also write `protocol.simplifications` and `protocol.definitions`. Every item the topic asks for must appear in the "
     "plan as a setting, a metric or an equation; an item you leave out or approximate goes in `simplifications` as "
     '`{"id": "X1", "replaces": "<what the topic asks for>", "because": "<why you do not do it exactly>", '
-    '"effect": "<what this could change in the result>", "probe": "<one sentence: how a run could show whether it '
-    'matters>"}`. Every metric and key quantity has an entry in `definitions`. Take each definition from the '
+    '"effect": "<how large a change it makes to the headline result: a number with its unit, from a closed form '
+    'or a limiting case worked out at the studied settings, when one gives it; in words only when none does>", '
+    '"probe": "<one sentence: how a run could show whether it matters>"}`. A simplification whose size a closed form '
+    'gives is also a check in `oracles` or a result the simulation returns, so the run measures it. Every metric and key quantity has an entry in `definitions`. Take each definition from the '
     "literature you found, quote it, and cite it: "
     '`{"metric": "<metric id>", "defined_as": "<one line>", "source": "[n]", "quote": "<the passage from that source that '
     'states the definition, word for word>", "differs": ""}`. If you define it differently from the quote, say so in '

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import difflib
 import itertools
+import json
 import math
 import re
 from typing import Any
@@ -154,6 +155,15 @@ def indices(shape: list[int]) -> list[tuple[int, ...]]:
 def element_count(variable: dict[str, Any]) -> int:
     """How many numbers a design variable holds: one for a scalar, the product of its shape for an array."""
     return math.prod(shape_of(variable)) if is_array(variable) else 1
+
+
+def free_count(variable: dict[str, Any]) -> int:
+    """How many of a design variable's numbers the search changes: an array's element whose ``low`` equals its ``high``
+    is held at that one value (an element outside the region the design may use), not searched."""
+    if not is_array(variable):
+        return 1
+    return sum(1 for index in indices(shape_of(variable))
+               if bound_at(variable["low"], index) != bound_at(variable["high"], index))
 
 
 def element_name(name: str, index: tuple[int, ...]) -> str:
@@ -307,13 +317,18 @@ def _array_variable(out: dict[str, Any], where: str) -> tuple[dict[str, Any] | N
             why = None if _number(bound) else "it must be a number or a list of numbers"
         if why:
             return None, f"{where}: `{key}` must be a number, or a list of numbers of shape {shape} ({why})"
+    # An element whose `low` equals its `high` is held at that value (the design may not use it: a pixel outside the
+    # region a source may fill, a node on a fixed edge); the search changes the others.
     for index in indices(shape):
         low, high = bound_at(out["low"], index), bound_at(out["high"], index)
         at = f" at {list(index)}" if len(indices(shape)) > 1 else ""
-        if low >= high:
-            return None, f"{where}: `low` ({low}) must be below `high` ({high}){at}"
+        if low > high:
+            return None, f"{where}: `low` ({low}) must not be above `high` ({high}){at}"
         if kind == "integer" and not (_whole(low) and _whole(high)):
             return None, f"{where}: an `integer` variable has whole-number `low` and `high`{at}"
+    if not free_count(out):
+        return None, (f"{where}: every element has `low` equal to `high`, so there is nothing to search: a value that "
+                      "does not change is a setting in `fixed`")
     return out, None
 
 
@@ -331,6 +346,9 @@ def array_problem(variable: dict[str, Any], value: Any) -> str | None:
             x = x[i]
         low, high = bound_at(variable["low"], index), bound_at(variable["high"], index)
         at = f" at {list(index)}" if len(shape) > 1 or shape[0] > 1 else ""
+        if low == high and x != low:
+            return (f"{x!r}{at} is not the value {_fmt(low)} this element is held at (its `low` equals its `high`): "
+                    f"write {_fmt(low)} there")
         if not low <= x <= high:
             return f"{x!r}{at} is outside its range {_fmt(low)} to {_fmt(high)}"
         if kind == "integer" and not _whole(x):
@@ -410,6 +428,10 @@ def _setting(name: str, item: Any) -> tuple[dict[str, Any] | None, str | None]:
         return None, f"{where}: `finer` must be `smaller` (a mesh size, a time step) or `larger` (a count of elements)"
     if out.get("finer") is not None:
         out["finer"] = finer
+    tolerance = out.get("tolerance")
+    if tolerance is not None and not (_number(tolerance) and 0 < tolerance < 1):
+        return None, (f"{where}: `tolerance` must be a fraction between 0 and 1 (0.05 means a change of 5% of the "
+                      "result's spread counts as converged), or leave it out")
     check = out.get("check")
     if check is None:
         return out, None
@@ -640,11 +662,68 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
         if why:
             return None, why
         out["grid"] = {str(axis): (v if isinstance(v, list) else [v]) for axis, v in grid.items()}
+
+    # What every evaluation goes through together (all the values in one run, as a measurement's `in_each_run`): the
+    # objective of one design can be a result over all of them.
+    inside = out.get("in_each_run")
+    if inside is not None:
+        if not isinstance(inside, dict) or not inside:
+            return None, f"{_P}.in_each_run` must map each setting every evaluation goes through to its list of values"
+        from . import plan as _plan
+
+        read: dict[str, list[Any]] = {}
+        for name, values in inside.items():
+            # Read as a measurement's `in_each_run` is: numbers, names or tuples, each value once.
+            kept, why = _plan._grid_values(name, values, part="optimisation.in_each_run")
+            if why:
+                return None, why
+            if len({json.dumps(float(v) if _number(v) else v) for v in kept or []}) < len(kept or []):
+                return None, f"{_P}.in_each_run` `{name}` lists the same value twice: list every value one time"
+            if len(kept or []) < 2:
+                return None, (f"{_P}.in_each_run` `{name}` must list two or more values (one value is a condition: "
+                              f"put it under `{_P[1:]}.fixed`)")
+            if str(name) in variables or str(name) in {str(k) for k in (fixed or {})} \
+                    or str(name) in (out.get("grid") or {}) or str(name) in (out.get("numerical_settings") or {}):
+                return None, (f"{_P}.in_each_run` `{name}` is also a design variable, a condition held fixed, a "
+                              "numerical setting or a setting of the scan: it is one of them")
+            read[str(name)] = list(kept or [])
+        out["in_each_run"] = read
+
+    # The scan divided into parts, each varying only some of its settings, as a measurement's `sub_studies` divide its grid.
+    subs = out.get("sub_studies")
+    if subs is not None:
+        from . import plan as _plan
+
+        fixed_subs, why = _plan._sub_studies(subs, out.get("grid"), out.get("in_each_run"))
+        if why:
+            for old, new in (("`protocol.sub_studies`", f"{_P}.sub_studies`"), ("`protocol.grid`", f"{_P}.grid`"),
+                             ("`protocol.in_each_run`", f"{_P}.in_each_run`")):
+                why = why.replace(old, new)
+            if not why.startswith(_P):  # the block's repair reads the part a message is about from its first words
+                why = f"{_P}.sub_studies`: {why}"
+            return None, why
+        out["sub_studies"] = fixed_subs
     return out, None
+
+
+def scan_size(block: dict[str, Any]) -> int:
+    """How many designs the coarse scan runs (0 without one): every combination of its settings, or with
+    ``sub_studies`` the settings of its parts together (a setting two parts share is run once). 0 for a block that cannot
+    be read that far (the plan check says why)."""
+    if not (isinstance(block.get("grid"), dict) and block["grid"]):
+        return 0
+    try:
+        return int(_optimise_search.grid_size(_optimise_search.scan_grid(block)))
+    except (KeyError, TypeError, ValueError):
+        return 0
 
 
 _ENTRY = re.compile(r"entry (\d+)")
 _NAMED = re.compile(r"`protocol\.optimisation\.(\w+)` `([^`]+)`")
+
+
+#: How :func:`repair` says that a part of the block was left out (the engine finds a left-out first scan by it).
+LEFT_OUT_UNREAD = "was left out of the plan because it could not be read"
 
 
 def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
@@ -746,8 +825,7 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 continue
         if key in out:
             del out[key]
-            notes.append(f"`protocol.optimisation.{key}` was left out of the plan because it could not be read ({why}); "
-                         "it is not used")
+            notes.append(f"`protocol.optimisation.{key}` {LEFT_OUT_UNREAD} ({why}); it is not used")
             continue
         return None, notes + [f"the optimisation block was left out because it could not be repaired ({why})"]
     return None, notes + ["the optimisation block was left out because it could not be repaired"]
@@ -801,12 +879,7 @@ def evaluations(block: dict[str, Any]) -> tuple[int | None, int]:
     """``(search evaluations the budget allows, or None when no budget is written; evaluations of the coarse scan)``."""
     budget = block.get("evaluation_budget")
     search = int(budget["starts"]) * int(budget["per_start"]) if isinstance(budget, dict) else None
-    scan = 0
-    if isinstance(block.get("grid"), dict) and block["grid"]:
-        scan = 1
-        for values in block["grid"].values():
-            scan *= len(values)
-    return search, scan
+    return search, scan_size(block)
 
 
 def budget(block: dict[str, Any]) -> dict[str, Any]:
@@ -826,7 +899,7 @@ def budget(block: dict[str, Any]) -> dict[str, Any]:
     settings = block.get("numerical_settings") if isinstance(block.get("numerical_settings"), dict) else {}
     levels = max((len(check_levels(s if isinstance(s, dict) else {"search": s})[0]) for s in settings.values()),
                  default=0) or 1
-    continuous = sum(min(PROBE_ELEMENTS, element_count(v)) for v in block.get("design_variables") or []
+    continuous = sum(min(PROBE_ELEMENTS, free_count(v)) for v in block.get("design_variables") or []
                      if kind_of(v) in ("continuous", "integer"))
     runs = int(block.get("runs_per_evaluation") or 1)
     check_runs = int(block.get("check_runs") or block.get("runs_per_evaluation") or 1)
@@ -884,12 +957,11 @@ def scan_problem(design: Any, limit_s: float | None = None) -> str:
     if block is None or not (isinstance(block.get("grid"), dict) and block["grid"]):
         return ""
     try:
-        axes = {k: v for k, v in _optimise_search.scan_grid(block).items() if len(v) > 1}
+        scan = _optimise_search.scan_grid(block)
+        axes = {k: v for k, v in scan.items() if len(v) > 1}
+        total = int(_optimise_search.grid_size(scan))
     except (KeyError, TypeError, ValueError):
         return ""
-    total = 1
-    for values in axes.values():
-        total *= len(values)
     if total <= 1:
         return ""
     limit = _optimise_search.MAX_LISTED_SETTINGS
@@ -902,8 +974,13 @@ def scan_problem(design: Any, limit_s: float | None = None) -> str:
     held = set(cell_of_names(block))
     listing = ", ".join(f"`{k}` {len(v)} value{'s' if len(v) != 1 else ''}"
                         + (" (a condition the plan holds fixed)" if k in held else "") for k, v in axes.items())
-    sentence = (f"the coarse scan cannot run: it is {total:,} settings, every combination of the {len(axes)} settings of "
-                f"`protocol.optimisation.grid` that have more than one value (each multiplies every other): {listing}")
+    if getattr(scan, "sub_studies", None):
+        parts = ", ".join(f"`{name}` {n:,}" for name, n in _optimise_search.sub_study_sizes(scan))
+        sentence = (f"the coarse scan cannot run: it is {total:,} settings, the settings of its parts "
+                    f"(`protocol.optimisation.sub_studies`, each every combination of the settings it varies): {parts}")
+    else:
+        sentence = (f"the coarse scan cannot run: it is {total:,} settings, every combination of the {len(axes)} settings "
+                    f"of `protocol.optimisation.grid` that have more than one value (each multiplies every other): {listing}")
     if too_many:
         sentence += f"; FI does not list or run more than {limit:,}"
     if too_long:
@@ -926,21 +1003,39 @@ def cell_of_names(block: dict[str, Any]) -> list[str]:
     return [str(k) for k in fixed] if isinstance(fixed, dict) else []
 
 
-def scan_request(topic: str, problems: list[str]) -> str:
+def scan_request(topic: str, problems: list[str], *, left_out: bool = False) -> str:
     """The request FI makes of the plan's model when the coarse scan of its search cannot run: the plan's own arithmetic
-    (``problems``, from :func:`scan_problem`), the rule behind it, and what to rewrite. FI chooses nothing for the plan."""
+    (``problems``, from :func:`scan_problem`), the rule behind it, and what to rewrite. FI chooses nothing for the plan.
+    ``left_out``: the scan could not be read and FI's reading left it out (``problems`` are FI's notes saying why); the
+    search would start without it, and what it was to compare would not be run."""
+    opening = ("This study is a search for the best design, and a part of it in the plan could not be read (its first scan, "
+               "or what every evaluation goes through), so FI left it out: the search would start without it, and what that "
+               "part was to compare would not be run."
+               if left_out else
+               "This study is a search for the best design, and the coarse scan in the plan cannot run as written, so the "
+               "search would stop before it starts.")
     return (
-        "This study is a search for the best design, and the coarse scan in the plan cannot run as written, so the search "
-        "would stop before it starts. The topic: “" + " ".join(str(topic or "").split())[:600] + "”.\n"
-        "What cannot run:\n" + "\n".join(f"- {p}" for p in problems) + "\n\n"
+        opening + " The topic: “" + " ".join(str(topic or "").split())[:600] + "”.\n"
+        + ("What was left out, and why:\n" if left_out else "What cannot run:\n")
+        + "\n".join(f"- {p}" for p in problems) + "\n\n"
         "How the scan counts:\n"
-        "- Every setting in `protocol.optimisation.grid` multiplies every other one: the scan is every combination.\n"
+        "- Every setting in `protocol.optimisation.grid` multiplies every other one: the scan is every combination, "
+        "unless `protocol.optimisation.sub_studies` divides it into parts (each with a `name`, the `vary` list of the "
+        "settings it crosses, and `hold`: the value it keeps every other setting of the scan at); the scan is then the "
+        "settings of its parts.\n"
         "- A condition the plan holds fixed (`fixed`) that is also in the scan is measured at each of its values, but only "
         "its held value can start the search, so it makes the scan larger without helping the search.\n"
         "- A setting that matters for only some of the settings compared (for example a parameter of just one of the "
-        "alternatives) multiplies all the others when it is a setting of the scan.\n"
-        "Rewrite `protocol.optimisation.grid` so the scan fits: fewer settings in it, or fewer values for each. Keep "
-        "everything else in the block as it is.")
+        "alternatives) multiplies all the others when it is a setting of the scan: give it a part of its own.\n"
+        "- A setting of the scan that is a number and not a design variable is a condition: it is also listed under "
+        "`protocol.optimisation.fixed`, with the value the search holds it at.\n"
+        + ("Write the part that was left out (`protocol.optimisation.grid` and `protocol.optimisation.sub_studies`, or "
+           "`protocol.optimisation.in_each_run`) again so it can be read, with what the plan meant it to hold. "
+           "`in_each_run` holds only what the objective is computed over (the cases one design is judged across at once), "
+           "never a setting of the scan, a condition held fixed or a numerical setting. Keep everything else in the block "
+           "as it is." if left_out else
+           "Rewrite `protocol.optimisation.grid` (and `protocol.optimisation.sub_studies`) so the scan fits: parts that do "
+           "not multiply one another, fewer settings, or fewer values for each. Keep everything else in the block as it is."))
 
 
 #: The one plain request a person can make to turn a search for the best design into a measurement over the settings the
@@ -1035,7 +1130,9 @@ def _range(variable: dict[str, Any]) -> str:
         low, high = variable["low"], variable["high"]
         span = (f"{_fmt(low)} to {_fmt(high)}{' ' + unit if unit else ''}" if not isinstance(low, list)
                 and not isinstance(high, list) else f"its own range for each element{' (' + unit + ')' if unit else ''}")
-        return (f"an array of shape {shape} ({element_count(variable)} numbers); each element {span}"
+        held = element_count(variable) - free_count(variable)
+        return (f"an array of shape {shape} ({element_count(variable)} numbers"
+                + (f", {held} of them held at their one value" if held else "") + f"); each element {span}"
                 + (" (whole numbers)" if kind == "integer" else ""))
     if kind == "choice":
         return "one of " + ", ".join(_flat(v) for v in variable["values"])
@@ -1143,7 +1240,7 @@ def plan_lines(design: Any) -> list[str]:
         lines += ["**Numerical settings:** none named. If the simulation has a mesh size, a time step or a tolerance, "
                   "name it under `numerical_settings`: otherwise the best design is only recomputed at the same "
                   "settings, which cannot tell a real improvement from a numerical error.", ""]
-    dims = sum(element_count(v) for v in block["design_variables"] if kind_of(v) != "choice")
+    dims = sum(free_count(v) for v in block["design_variables"] if kind_of(v) != "choice")
     per_start = (block.get("evaluation_budget") or {}).get("per_start") if isinstance(block.get("evaluation_budget"), dict) else None
     if (any(is_array(v) for v in block["design_variables"]) and _whole(per_start) and per_start < dims + 1
             and method in ("bounded_local", "global_then_local")):

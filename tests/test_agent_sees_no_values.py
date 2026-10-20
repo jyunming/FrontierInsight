@@ -11,7 +11,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "agent_cheats"
 
 
 def test_the_check_prose_keeps_its_meaning_without_the_numbers() -> None:
-    protocol = json.loads((FIXTURES / "kinetics" / "protocol.json").read_text(encoding="utf-8"))
+    protocol = json.loads((FIXTURES / "decay" / "protocol.json").read_text(encoding="utf-8"))
     shown = _stripped(protocol)
     o = next(x for x in shown["oracles"] if x["name"] == "noise_free_lnA")
     assert set(o) >= {"name", "kind", "check", "case", "measure"}

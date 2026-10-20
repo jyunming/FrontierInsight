@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from . import flat_output as _flat
+from . import metric_spec as _metric_spec
 from . import optimisation_plan as _plan
 from . import optimise_search as _search
 from . import outside_run as _outside
@@ -53,6 +54,10 @@ LEDGER_PATH = Path(_trials.RAW_DIRNAME) / "optimisation_ledger.jsonl"
 BEST_PATH = Path("results") / "best_design.json"
 WORK_DIR = Path(".fi") / "optimisation"
 RECORD = WORK_DIR / "run.json"
+#: Each evaluation the search has had answered, written as it is answered (the first line names the search's key), so a
+#: search stopped before its end (the quest killed or the machine restarted) is continued on resume, not run again from
+#: its start. Removed once the search's record is written.
+JOURNAL = WORK_DIR / "searched.jsonl"
 SEARCH_SOURCE = WORK_DIR / "optimise_search.py"
 #: The rounds of a continued search a person asked for (core/optimise_refine.py), kept for the plan they were asked under.
 ROUNDS_PATH = WORK_DIR / "continue.json"
@@ -139,9 +144,10 @@ def _key_rounds(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
              rounds: list[dict[str, Any]] | None = None) -> str:
-    """What decides a search: the simulation and the modules beside it, the optimisation block, the seed, the entry,
-    the thresholds, and FI's own harness and search code. (A package installed since is not in it: a search that got no
-    result is never kept, so a search that failed for a missing package runs again anyway.)"""
+    """What decides a search: the simulation and the modules beside it, the files below ``code/`` it may use (the
+    model's package, a parameter file), the optimisation block, the seed, the entry, the thresholds, and FI's own harness
+    and search code. (A package installed since is not in it: a search that got no result is never kept, so a search
+    that failed for a missing package runs again anyway.)"""
     parts: list[bytes] = []
     code = Path(quest_root) / "code"
     for path in sorted([Path(simulate), *(p for p in code.glob("*.py") if p.name not in _NOT_THE_SIMULATION
@@ -150,6 +156,14 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
             parts.append(path.name.encode() + b"\0" + path.read_bytes())
         except OSError:
             parts.append(path.name.encode() + b"\0")
+    # A repair of the model's package changes what the simulation computes: a search of the code before it is another
+    # search. (Only files below code/, so a quest with none keeps the key it had.)
+    for path in _below_code(code):
+        rel = path.relative_to(code).as_posix().encode()
+        try:
+            parts.append(rel + b"\0" + path.read_bytes())
+        except OSError:
+            parts.append(rel + b"\0")
     parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
     what: list[Any] = [block, base, entry, thresholds]
@@ -157,6 +171,19 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
         # A continued search is another search; without rounds the key is the one an earlier version of FI kept.
         what.append(_key_rounds(rounds))
     return _sha(b"\1".join(parts) + json.dumps(what, sort_keys=True, default=str).encode())
+
+
+def _below_code(code: Path) -> list[Path]:
+    """The files in folders below ``code/`` the simulation may use (the model's package, a parameter file in it): not
+    notes (``*.md``), the package's unit tests (``code/tests/``), caches or hidden folders (``__pycache__``, ``.git``,
+    ``.pytest_cache``)."""
+    out = []
+    for p in code.rglob("*"):
+        parts = p.relative_to(code).parts
+        if (p.is_file() and len(parts) > 1 and p.suffix.lower() != ".md" and parts[0] != "tests"
+                and not any(part == "__pycache__" or part.startswith(".") for part in parts)):
+            out.append(p)
+    return sorted(out)
 
 
 def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: str, thresholds: Any) -> str:
@@ -173,6 +200,13 @@ def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: s
             parts.append(path.name.encode() + b"\0" + _phased._code_digest(path).encode())
         except OSError:
             parts.append(path.name.encode() + b"\0")
+    for path in _below_code(code):  # the model's package, as in :func:`_run_key`
+        rel = path.relative_to(code).as_posix().encode()
+        try:
+            parts.append(rel + b"\0" + (_phased._code_digest(path).encode() if path.suffix == ".py"
+                                         else path.read_bytes()))
+        except OSError:
+            parts.append(rel + b"\0")
     parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
     return _sha(b"\1".join(parts) + json.dumps([block, entry, thresholds], sort_keys=True, default=str).encode())
@@ -343,9 +377,11 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
         if row is None:
             why = (f"the evaluation's process stopped (exit code {getattr(result, 'returncode', '?')}) before it "
                    "reported")
-            return {"failed": why, "elapsed_s": elapsed}, stderr, ""
+            # Stopped from outside (memory, a kill) as often as by the design: not an answer a resume may take again.
+            return {"failed": why, "elapsed_s": elapsed, "process": True}, stderr, ""
         if t["trial"] in twice:
-            return {"failed": "a run of this design was reported more than once", "elapsed_s": elapsed}, stderr, ""
+            return {"failed": "a run of this design was reported more than once", "elapsed_s": elapsed,
+                    "process": True}, stderr, ""
         if row.get("status") != "ok" or row.get("seed") != t["seed"]:
             why = str(row.get("reason") or "the reported seed is not the one FI gave") if row.get("status") != "ok" \
                 else "the reported seed is not the one FI gave"
@@ -353,6 +389,50 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
         rows.append(row)
     return {"values": _mean_values(rows), "trials": [dict(r.get("values") or {}) for r in rows],
             "elapsed_s": elapsed}, stderr, ""
+
+
+def _read_journal(path: Path, key: str, space: Any) -> tuple[dict[str, dict[str, Any]], float]:
+    """The answers a stopped search of ``key`` had (keyed as the replay is) and the seconds its evaluations took. A
+    journal of another key (other code, plan or seed) is not this search's: nothing is taken from it."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}, 0.0
+    try:
+        head = json.loads(lines[0]) if lines else None
+    except ValueError:
+        head = None
+    if not isinstance(head, dict) or head.get("key") != key:
+        return {}, 0.0
+    answers: dict[str, dict[str, Any]] = {}
+    seconds = 0.0
+    for line in lines[1:]:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # the line being written when the search stopped
+        if not (isinstance(row, dict) and isinstance(row.get("design"), dict) and isinstance(row.get("reply"), dict)):
+            continue
+        try:
+            at = space.key(space.canonical(row["design"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        answers[at] = row["reply"]
+        if isinstance(row["reply"].get("elapsed_s"), (int, float)):
+            seconds += float(row["reply"]["elapsed_s"])
+    return answers, seconds
+
+
+def _journal(path: Path, design: dict[str, Any], reply: dict[str, Any]) -> None:
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"design": design, "reply": reply}, default=str) + "\n")
+    except OSError:
+        pass  # the journal only saves time on a resume; the search goes on without it
+
+
+def _fmt_pace(per_minute: float) -> str:
+    return f"{per_minute:.0f}" if per_minute >= 10 else f"{per_minute:.2g}"
 
 
 async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, Any], *, timeout_s: int,
@@ -515,6 +595,27 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     if warnings and log is not None:
         log.warning("[optimise] the simulation's own code may search for a design itself (%s): FI runs the search and "
                     "each call must compute the one design it is given", "; ".join(warnings[:5]))
+    # A search of this same key stopped before its end: the evaluations it had answered are taken from its journal.
+    # The search is the same from the same seed, so it asks for them again in the same order and goes on from there.
+    journal = quest_root / JOURNAL
+    journaled, before_s = _read_journal(journal, key, _search.Space(block["design_variables"]))
+    if journaled:
+        replay.update(journaled)
+        try:
+            with journal.open("rb") as fh:
+                fh.seek(-1, 2)
+                cut = fh.read(1) != b"\n"
+            if cut:
+                with journal.open("a", encoding="utf-8") as fh:
+                    fh.write("\n")
+        except OSError:
+            pass
+        if log is not None:
+            log.info("[optimise] continuing the search that stopped before its end: %d evaluation(s) it had done are "
+                     "taken from FI's record of them, not run again", len(journaled))
+    else:
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(json.dumps({"key": key}) + "\n", encoding="utf-8")
     started = time.monotonic()
     deadline = started + max(1, int(timeout_s))
     runs = int(block.get("runs_per_evaluation") or 1) if entry == "run_trial" else 1
@@ -522,6 +623,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     method, _where = _plan.effective_method(block)
 
     scan_rows: list[dict[str, Any]] = []
+    scan_note: list[str] = []
     if not (isinstance(block.get("grid"), dict) and block["grid"]):
         # No coarse scan: an earlier measurement's trial record is not this search's.
         for rel in (Path(_trials.RAW_DIRNAME) / _trials.LEDGER_NAME, Path(_trials.RAW_DIRNAME) / _trials.SUMMARY_NAME,
@@ -538,7 +640,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         trial_run = await _trials.run_trials(
             executor, python, quest_root, module, grid, runs_per_setting=runs, base_seed=int(base_seed),
             deterministic=entry == "run_cell", timeout_s=max(1, math.ceil(left)), env=env,
-            thresholds=thresholds, paired=True,
+            thresholds=thresholds, paired=True, in_each_run=_search.in_each_run(block) or None,
         )
         stderr_parts.append(trial_run.stderr())
         summary = json.loads(trial_run.summary_path.read_text(encoding="utf-8"))
@@ -546,12 +648,31 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         for cell in summary.get("cells") or []:
             cell["reason"] = reasons.get(cell.get("key"), "")
         rows = _search.scan_rows(summary, block)
+        unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol))
+        if unchanged:
+            scan_note.append(_flat.unchanged_axes_note(unchanged))
+            if log is not None:
+                log.warning("[optimise] the coarse scan: %s", scan_note[-1])
         if log is not None:
-            log.info("[optimise] the coarse scan ran %d design(s) after the baseline (%d worked); it is not counted in "
-                     "the search's budget", len(rows), sum(1 for r in rows if r.get("values") is not None))
+            ran = sum(1 for c in summary.get("cells") or [] if c.get("level") is None)
+            worked = sum(1 for r in rows if r.get("values") is not None)
+            if ran > len(rows):
+                log.info("[optimise] the coarse scan ran %d setting(s), not counted in the search's budget: %d of them "
+                         "under the conditions the search holds (%d worked) can start the search, the other %d are "
+                         "comparisons kept for the paper", ran, len(rows), worked, ran - len(rows))
+            else:
+                log.info("[optimise] the coarse scan ran %d design(s) after the baseline (%d worked); it is not counted "
+                         "in the search's budget", len(rows), worked)
         return rows
 
-    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds)
+    # The plan's results, watched for a design that changes none of them (core/optimise_search.py, ``no_effect``).
+    # Not a result the plan itself expects to stay put (an invariant, a fixed-input check): its staying put says nothing
+    # about the design.
+    from . import degenerate_results as _degenerate
+
+    constant = _degenerate.expected_constants(protocol)
+    results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
+    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds, results=results)
     replay_space = _search.Space(block["design_variables"]) if replay else None
     load_error = ""
     done_outcome: dict[str, Any] | None = None
@@ -580,6 +701,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                     )
                     if err:
                         stderr_parts.append(err)
+                    if ("values" in reply or "failed" in reply) and not load_error and not reply.get("process") \
+                            and isinstance(request.get("design"), dict):
+                        _journal(journal, request["design"], reply)
             else:
                 left = deadline - time.monotonic()
                 reply = (await _drive(executor, python, quest_root, request["spec"], timeout_s=left, env=env)
@@ -590,12 +714,17 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 evaluated += 1
             if log is not None and time.monotonic() - last_note > 60:
                 last_note = time.monotonic()
-                log.info("[optimise] still searching: %d evaluation(s) so far", evaluated)
+                limit = _plan.budget(block).get("search")
+                minutes = (time.monotonic() - started) / 60
+                pace = (f", about {_fmt_pace((evaluated - len(journaled)) / minutes)} a minute"
+                        if minutes > 0 and evaluated > len(journaled) else "")
+                log.info("[optimise] still searching: %d%s evaluation(s) so far%s", evaluated,
+                         f" of at most {limit}" if isinstance(limit, int) and limit > 0 else "", pace)
             request = gen.send(reply)
     except StopIteration as stop:
         done_outcome = stop.value
     outcome = done_outcome or {}
-    elapsed = time.monotonic() - started
+    elapsed = time.monotonic() - started + before_s
     planned = _plan.budget(block)
     extra = {
         "time": {"seconds": round(elapsed, 3),
@@ -609,12 +738,17 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     }
     if outcome.get("stopped_because") == "time":
         extra["time"]["limit_seconds"] = int(timeout_s)
+    if journaled:
+        extra["continued"] = {"evaluations_taken_from_the_stopped_search": len(journaled),
+                              "seconds_before_the_stop": round(before_s, 3)}
     record = _search.best_design(outcome, block, seed=int(base_seed),
                                  check={str(n): _plan.check_levels(s if isinstance(s, dict) else {"search": s})[0]
                                         for n, s in (block.get("numerical_settings") or {}).items()},
                                  extra=extra)
     if warnings:
         record["simulation_may_search_itself"] = warnings
+    if scan_note:
+        record["scan_settings_without_effect"] = scan_note[-1]
     ledger_text = "\n".join(_search.ledger_lines(outcome, block)) + "\n"
     record["ledger_sha256"] = _sha(ledger_text.encode("utf-8"))
     best_text = json.dumps(record, indent=1) + "\n"
@@ -626,6 +760,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     (quest_root / BEST_PATH).write_bytes(best_text.encode("utf-8"))
     stderr = "\n".join(p for p in stderr_parts if p)[-_STDERR_KEEP:]
     record_text = _save(quest_root, key, ledger_text, best_text, stderr, bool(scan_rows), study_key)
+    journal.unlink(missing_ok=True)
     record = json.loads(best_text)
     return SearchRun(record=record, rows=outcome.get("rows") or [], stderr=stderr, scan=bool(scan_rows),
                      load_error=load_error, files=_files(ledger_text, best_text, record_text))
@@ -644,6 +779,8 @@ _STOPPED = {
     "the simulation could not be loaded": "the simulation could not be loaded",
     "target": "a design reached the target asked for",
     "not_run": "it did not run: the search before it had stopped (its time limit, or every evaluation failed)",
+    "no_effect": "the first designs it tried, which between them changed every number of the design, all gave the "
+                 "baseline's results",
 }
 
 
@@ -817,6 +954,8 @@ class OptimisationRunner:
         self.failed_script: str | None = None
         #: Why the last run was sent back as a simulation that does not use its inputs (core/flat_output.py), or ``None``.
         self.flat: str | None = None
+        #: The observation of settings that changed no result (core/flat_output.py), for the analysis and the writer.
+        self.no_difference: str | None = None
         self.last: SearchRun | None = None
         #: FI's check at finer settings, from memory: ``(its text, the key it is kept under)``.
         self.last_check: tuple[str | None, str | None] = (None, None)
@@ -896,6 +1035,9 @@ class OptimisationRunner:
                                timeout_s=timeout_s, env=env, log=self.log,
                                frozen=self._is_frozen())
         self.last = run
+        # The coarse scan's settings that changed no result (core/flat_output.py), kept in the search's record so a
+        # search used again says it too.
+        self.no_difference = str((run.record or {}).get("scan_settings_without_effect") or "") or None
         if self.log is not None and not run.reused:
             for line in summary_lines(run.record):
                 self.log.info("%s", line)
@@ -922,6 +1064,13 @@ class OptimisationRunner:
         # the few that survived. Sent back to be repaired while a repair is left, then a stop (core/trial_checks.py).
         if (sent := self._check_trials(run, started)) is not None:
             return sent
+        # The first designs of the search, which between them moved every number of the design, all gave the baseline's
+        # results (core/optimise_search.py stopped it then, not after its whole budget): FI measured that the design
+        # changes nothing at the settings the search holds, whatever the code seems to read.
+        no_effect = ((run.record or {}).get("evaluations") or {}).get("no_effect")
+        if isinstance(no_effect, dict):
+            return self._flat_result(_flat.no_effect_search(no_effect, _plan.normalize(block_of(protocol))[0]
+                                                            or block_of(protocol) or {}), run, started)
         # A search in which every design gave the very same numbers, and whose simulation's code never lets the design reach
         # what it returns, is not a result: the simulation does not use the design it is given. It is sent back to be repaired
         # like one that does not run (core/flat_output.py). The same numbers from a simulation that does read the design are

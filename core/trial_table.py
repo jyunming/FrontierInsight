@@ -24,6 +24,7 @@ from array import array
 from pathlib import Path
 from typing import Any
 
+from core import in_run as _in_run
 from core import stats as _stats
 from core.result_checks import left_out_by_record as _left_out_by_record
 
@@ -72,6 +73,19 @@ def summary(values: list[float]) -> dict[str, Any]:
             "digest": hashlib.sha256(array("d", values).tobytes()).hexdigest()[:16]}
 
 
+def missing(metric: Any) -> dict[str, Any]:
+    """How many of a result's runs gave no number (``missing``) and why, as the runs said (``why_missing``:
+    ``{reason: runs}``, :data:`core.in_run.WHY_MISSING`); ``{}`` when every run gave one."""
+    raw = metric.get("values") if isinstance(metric, dict) else metric
+    if not isinstance(raw, (list, tuple)):
+        return {}
+    count = sum(1 for v in raw if not (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))))
+    if not count:
+        return {}
+    why = metric.get(_in_run.WHY_MISSING) if isinstance(metric, dict) else None
+    return {"missing": count, **({"why_missing": dict(why)} if isinstance(why, dict) and why else {})}
+
+
 def summaries(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Each record of ``raw/trials.json`` as ``{"cell", "key", "level", "metrics": {name: summary}}`` (see
     :func:`summary`), in the record's order, with the record's counts of runs (``planned``, ``ok``, ``failed``) when it
@@ -84,7 +98,7 @@ def summaries(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
         label = str(c.get("key") or ", ".join(f"{k}={v}" for k, v in setting.items()) or "the one setting")
         entry: dict[str, Any] = {
             "cell": setting, "key": label, "level": dict(level) if isinstance(level, dict) and level else None,
-            "metrics": {str(name): summary(_values(metric)) for name, metric in c["metrics"].items()}}
+            "metrics": {str(name): {**summary(_values(metric)), **missing(metric)} for name, metric in c["metrics"].items()}}
         entry.update({k: c[k] for k in ("planned", "ok", "failed")
                       if isinstance(c.get(k), int) and not isinstance(c.get(k), bool)})
         out.append(entry)

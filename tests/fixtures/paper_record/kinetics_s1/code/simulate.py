@@ -1,5 +1,5 @@
 # NOTE: the shipped package model.py reads module-level names it never defines (C0 in fit_k,
-# T_Q95 and EA_TRUE in interval_contains, R in weighted_arrhenius via globals()). Without them
+# T_Q95 and EA_TRUE in interval_contains, R in weighted_temperature_law via globals()). Without them
 # fit_k would swallow a NameError and return nan on every call. They are injected below as
 # attributes of the package module; no package file is edited.
 import json
@@ -65,9 +65,9 @@ def run_trial(cell: dict, trial_id: int, seed: int) -> dict:
         k_hat[i], var_k[i] = kh, vk
         var_k_theory[i] = sigma ** 2 / np.sum(t ** 2 * np.exp(-2.0 * k_true[i] * t))
 
-    fit = model.weighted_arrhenius(k_hat, var_k / k_hat ** 2, T_arr)
+    fit = model.weighted_temperature_law(k_hat, var_k / k_hat ** 2, T_arr)
     # theory: same weighted regression evaluated at the true k with linearised variances
-    th = model.weighted_arrhenius(k_true, var_k_theory / k_true ** 2, T_arr)
+    th = model.weighted_temperature_law(k_true, var_k_theory / k_true ** 2, T_arr)
     cov_th = th["cov"]
 
     Ea_hat, lnA_hat = fit["Ea_hat"], fit["lnA_hat"]

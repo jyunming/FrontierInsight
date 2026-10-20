@@ -218,7 +218,7 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
                 apart = True
                 break
             if any(name in c["metrics"] for c in members):  # a record that never returned a value has no row for it
-                merged[name] = whole
+                merged[name] = {**whole, **_missing_of(_each_set_once(c["metrics"].get(name) for c in members))}
         if apart and len(members) > 1:
             kept_apart.append(_label(setting))
             for c in members:
@@ -336,6 +336,46 @@ def _ref_text(kind: str, ref: float | None) -> str:
     return {"bound": "≤ ", "lower_bound": "≥ "}.get(kind, "") + _sig(ref)
 
 
+def _each_set_once(summaries: Any) -> list[dict[str, Any]]:
+    """The summaries of the pooled records with a set of trials counted once, as ``n`` counts it (same ``digest``): a copy
+    that gave the very same trials gave the very same runs with no value. A record with no number at all has no digest to
+    tell by, so it is told by its runs with no value and their reasons (the two kinds of key cannot meet: a digest is hex)."""
+    seen: set[str] = set()
+    out = []
+    for s in summaries:
+        if not s:
+            continue
+        key = s["digest"] if s.get("n") else json.dumps([int(s.get("missing") or 0),
+                                                         sorted((s.get("why_missing") or {}).items())], default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
+def _missing_of(summaries: Any) -> dict[str, Any]:
+    """The runs with no value of the records pooled into one setting, and their reasons, added up."""
+    count, why = 0, {}
+    for s in summaries:
+        count += int((s or {}).get("missing") or 0)
+        for reason, n in ((s or {}).get("why_missing") or {}).items():
+            why[reason] = why.get(reason, 0) + int(n)
+    return {"missing": count, **({"why_missing": why} if why else {})} if count else {}
+
+
+def _missing_text(summary: dict[str, Any] | None, *, every: bool = False) -> str:
+    """`` (2 runs with no value: no crossing in the focus range)``: the runs of a setting that gave no number for a result,
+    and why, as the runs said (core/in_run.py ``why_missing``); ``""`` when every run gave one."""
+    count = int((summary or {}).get("missing") or 0)
+    if not count:
+        return ""
+    why = (summary or {}).get("why_missing") or {}
+    reasons = "; ".join(f"{r}" + (f" ({n})" if len(why) > 1 else "") for r, n in sorted(why.items(), key=lambda kv: -kv[1]))
+    if every:
+        return f": {reasons}" if reasons else ""
+    return f" ({count} run{'s' if count != 1 else ''} with no value" + (f": {reasons}" if reasons else "") + ")"
+
+
 def _axis_text(v: Any) -> str:
     from .trial_runner import _fmt
 
@@ -451,12 +491,12 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
             if summary and summary.get("n"):
                 methods.add(method)
                 mean = summary["mean"]
-                cells += [str(summary["n"]), format_pm(mean, lower, upper)]
+                cells += [str(summary["n"]), format_pm(mean, lower, upper) + _missing_text(summary)]
                 if not binary:
                     cells.append(_sig(summary["sd"]))
                 verdict = comparison(kind, ref, mean, lower, upper, int(summary["n"]))
             else:
-                cells += ["0", "no value"]
+                cells += ["0", "no value" + _missing_text(summary, every=True)]
                 if not binary:
                     cells.append("")
                 mean = None
