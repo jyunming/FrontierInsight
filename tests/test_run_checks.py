@@ -907,3 +907,29 @@ def test_a_study_too_long_names_what_a_new_value_pays_once_apart_from_each_setti
     plain = RunChecksMixin._what_fits(run_estimate.Estimate(seconds=240 * 12.0, at_least=False, complete=True, cells=240,
                                                             trials=240), 3600.0)
     assert plain is not None and "once_s" not in plain and "first time" not in _fit_request("too long", plain)
+
+
+@pytest.mark.asyncio
+async def test_a_search_whose_evaluations_do_not_fit_the_time_left_after_its_scan_asks_the_plan_to_fit(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real search claimed 0.3 s per evaluation and planned 20,000 of them; one new design took about 15 s, so the search
+    could not have finished a tenth of its budget in the time it shares with its scan. The scan alone fits; the scan and
+    the search together do not, and the plan is asked to fit them."""
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    block["evaluation_budget"] = {"starts": 8, "per_start": 2500, "seconds_per_evaluation": 0.3}
+    eng, runner = await _search_engine(tmp_path, block)
+
+    async def fifteen(*a: Any, **k: Any) -> Any:
+        return run_estimate.Probe(None, None, {}, 15.0), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", fifteen)
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None
+    text = patch["exec_result"]["too_long"]
+    assert "the coarse scan's 3 settings and the search's 20,000 evaluations" in text, text
+    fit = patch["exec_result"]["too_long_fit"]
+    assert fit["search"] is True and fit["settings"] == 20003
+    assert fit["settings_that_fit"] == int(3600 / (1.5 * 15.0))
+    block["evaluation_budget"]["per_start"] = 10  # 80 evaluations: 83 x 15 s = 21 min, 31 min with the margin
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None

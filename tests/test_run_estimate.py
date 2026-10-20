@@ -491,7 +491,7 @@ from pathlib import Path
 def run_cell(cell):
     store = Path("cache_{}.json".format(cell["material"]))
     if not store.exists():
-        time.sleep(1.5)
+        time.sleep(3.0)
         store.write_text("{}")
     time.sleep(0.05)
     return {"y": float(cell["material"] + cell["size"])}
@@ -507,9 +507,9 @@ def test_a_simulation_whose_settings_share_a_cache_is_timed_for_what_a_new_value
     assert base.first_s is not None and base.once_s > 1.0, "the base was run again and took far less"
     e = est.estimate(grid, 1, True, probes)
     assert e is not None and e.once_axes == ["material"]
-    # 3 new materials at 1.5 s once, 30 settings at 0.05 s plus a process start each; without the split every setting
+    # 3 new materials at 3 s once, 30 settings at 0.05 s plus a process start each; without the split every setting
     # with a timed material would count its 1.5 s
-    assert abs(e.once_s - 4.5) < 1.5
+    assert 4.5 < e.once_s < 13.5, "about 3 x 3 s"
     first = est.estimate(grid, 1, True, [est.Probe(p.axis, p.index, p.cell, p.first_s or p.seconds) for p in probes])
     assert first is not None and e.seconds < first.seconds
 

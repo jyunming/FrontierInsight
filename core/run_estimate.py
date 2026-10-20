@@ -5,7 +5,8 @@ A study is every setting of the plan's grid times its runs per setting, each set
 with the time the study is allowed (the topic's own limit when it states one, else ``execution.timeout_s``):
 
 * **What is timed.** One *base* setting (the middle value of every setting that varies) and, for each varying setting, the
-  base with that one setting at its first and at its last value: at most ``1 + 2 * MAX_AXES`` settings. A numerical
+  base with that one setting at its first and at its last value (and its quarter points, below): at most
+  ``1 + 4 * MAX_AXES`` settings, plus the second runs. A numerical
   resolution that dominates the cost (a finer mesh, a smaller step) is a setting like any other, so it shows up as a
   large factor between the base and one end. A setting of many values (:data:`QUARTERS_FROM`) is timed at its quarter
   points too, since a cost can peak inside its range. The base is run a second time: when that takes far less
@@ -65,6 +66,7 @@ import json
 import math
 import statistics
 import time
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -229,13 +231,17 @@ def probe_cells(grid: dict[str, list[Any]]) -> list[tuple[str | None, int | None
     out: list[tuple[str | None, int | None, dict[str, Any]]] = [(None, None, dict(base))]
     varying = sorted([a for a in axes if len(a[1]) >= 2], key=lambda a: -len(a[1]))[:MAX_AXES]
     order = {name: i for i, (name, _v) in enumerate(axes)}
+    inner: list[tuple[str | None, int | None, dict[str, Any]]] = []
     for name, values in sorted(varying, key=lambda a: order[a[0]]):
         n = len(values)
-        # a setting of many values is timed at its quarter points too: its cost can peak between its two ends
-        inner = {n // 4, (3 * n) // 4} if n >= QUARTERS_FROM else set()
-        for index in sorted(({0, n - 1} | inner) - {mids[name]}):
+        for index in sorted({0, n - 1} - {mids[name]}):
             out.append((name, index, {**base, name: values[index]}))
-    return out
+        # a setting of many values is timed at its quarter points too (its cost can peak between its two ends), after
+        # every setting's ends, so a timing cut short by its budget has the ends of every setting first
+        if n >= QUARTERS_FROM:
+            inner.extend((name, index, {**base, name: values[index]})
+                         for index in sorted({n // 4, (3 * n) // 4} - {mids[name], 0, n - 1}))
+    return out + inner
 
 
 #: A setting whose end costs at least this many times the base is "costly".
@@ -382,12 +388,16 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
         seconds = max(seconds, sum(size * cost for _n, size, cost in part_costs))
         at_least = at_least or len(timed_parts) < len(sizes)
     once_s, once_axes = _once_cost(grid, probes, base, axes, staged)
-    seconds += once_s
-    work, n, slower = seconds, max(1, int(at_once or 1)), max(1.0, float(slowdown or 1.0))
+    # a part of the study pays at least what its own timed setting paid the first time
+    once_s = max(once_s, sum(p.once_s for p in timed_parts.values()))
+    work, n, slower = seconds + once_s, max(1, int(at_once or 1)), max(1.0, float(slowdown or 1.0))
+    seconds = work
     if n > 1:
         # Spread over the settings running at once, each as much slower as FI measured; the costliest setting timed is
-        # the shortest such a run can be (it runs in one process, however many others run beside it).
-        seconds = max(work * slower / n, max(p.seconds for p in probes) * slower)
+        # the shortest such a run can be (it runs in one process, however many others run beside it). What is paid once is
+        # not spread: the settings that run beside the first one with a value need what it computes.
+        seconds = max((work - once_s) * slower / n + once_s * slower,
+                      max((p.first_s or p.seconds) for p in probes) * slower)
     return Estimate(seconds=seconds, at_least=at_least, complete=complete,
                     cells=cells, trials=trial_count(grid, runs, deterministic), ratios=ratios, base=dict(base.cell),
                     base_seconds=base.seconds, timed=len(probes), together=together, spreads=spreads_of(probes),
@@ -395,21 +405,42 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
                     at_once=n, slowdown=slower if n > 1 else 1.0, work_seconds=work, once_s=once_s, once_axes=once_axes)
 
 
+def _reused(first: Probe, again: Probe) -> bool:
+    """Whether the second run of a setting took far less than its first because it reused what the first computed: judged
+    on the time inside the simulation when both runs measured it, so a slower first process start (files not yet read
+    from disk) is not taken for a cache."""
+    if first.call_s is not None and again.call_s is not None and first.call_s > 0:
+        return again.call_s * ONCE <= first.call_s and again.seconds * ONCE <= first.seconds
+    return again.seconds * ONCE <= first.seconds
+
+
+def with_once(est: Estimate | None, seen: Estimate | None) -> Estimate | None:
+    """``est`` with at least the cost paid once that an earlier timing of the same study saw (``seen``): the earlier timing
+    filled the cache the settings share, so a later one (fewer runs, a faster simulation) finds it warm and sees no such
+    cost, while the real run, on a cache of its own, pays it again."""
+    if est is None or seen is None or seen.once_s <= est.once_s:
+        return est
+    extra = seen.once_s - est.once_s
+    return dataclasses.replace(est, seconds=est.seconds + extra * est.slowdown, work_seconds=est.work_seconds + extra,
+                               once_s=seen.once_s, once_axes=list(seen.once_axes))
+
+
 def _once_cost(grid: dict[str, list[Any]], probes: list[Probe], base: Probe, axes: list[tuple[str, list[Any]]],
                staged: bool) -> tuple[float, list[str]]:
     """What the study pays once rather than at every setting, and the settings whose every new value pays it.
 
     The base was run twice; what its first run took beyond its second is what a new value pays once. A setting whose other
-    values, timed after the base, still paid such a cost (at least ``1 / ONCE`` of the base's) is one whose every new value
-    computes something new: the cost is paid once per value of it (per combination of values, when several are such
-    settings), read between the timed values in proportion. When no setting is, it is paid once for the whole study."""
+    values, timed after the base, also took far longer the first time is one whose every new value computes something new:
+    the cost is paid once per value of it, read between the timed values in proportion, and per combination of values when
+    several are such settings (the larger count: their caches may be kept per combination). When no setting is, it is paid
+    once for the whole study."""
     paid = base.once_s
     if paid <= 0:
         return 0.0, []
     per_axis: dict[int, list[float]] = {}
     for k, (name, values) in enumerate(axes):
         timed = [p for p in probes if p.axis == name and p.index is not None]
-        if any(p.once_s * ONCE >= paid for p in timed):
+        if any(p.once_s > 0 for p in timed):
             known = {len(values) // 2: 1.0}
             for p in timed:
                 known[int(p.index)] = max(p.once_s / paid, 1e-6)  # type: ignore[arg-type]
@@ -504,6 +535,8 @@ async def measure(
             hit = cached[key]
             probes.append(Probe(axis, index, cell, hit.seconds, hit.at_least, dict(hit.spread), [dict(t) for t in hit.trials],
                                 hit.fixed_s, hit.per_trial_s, hit.timed_trials, hit.call_s, hit.first_s))
+            if axis is None:
+                shares[0] = hit.first_s is not None
             return True, ""
         left = budget_s - (time.monotonic() - started)
         if probes and left < 5:
@@ -531,7 +564,7 @@ async def measure(
                 again, _why = await _time_one(executor, python, quest_root, module, cell, runs=runs,
                                               deterministic=deterministic, timeout_s=int(max(5, min(timeout, left))),
                                               env=env, thresholds=thresholds, in_each_run=in_each_run)
-            if again is not None and not again.at_least and again.seconds * ONCE <= probe.seconds:
+            if again is not None and not again.at_least and _reused(probe, again):
                 again.first_s, again.spread, again.trials = probe.seconds, probe.spread, probe.trials
                 probe = again
             if axis is None:

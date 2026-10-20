@@ -636,6 +636,8 @@ class RunChecksMixin:
         speed_done = False
         at_once = int(getattr(runner, "at_once", 1) or 1)
         slowdown: float | None = None  # measured once, only when the settings one after another would not fit
+        # The timing with the most paid once: a later timing runs on the cache the earlier one filled (run_estimate.with_once).
+        once_seen: _estimate.Estimate | None = None
         for _round in range(3):
             grid, runs, thresholds = self._grid_and_runs(state)
             inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
@@ -664,15 +666,18 @@ class RunChecksMixin:
                 return broken
             if isinstance(runner, _trial_runner.TrialsRunner):
                 runner.cost = _estimate.setting_cost(grid, probes)  # the run starts the costliest settings first
-            est = _estimate.estimate(grid, runs, runner.deterministic, probes)
+            est = _estimate.with_once(_estimate.estimate(grid, runs, runner.deterministic, probes), once_seen)
             if est is None:
                 return None
+            if est.once_s > (once_seen.once_s if once_seen is not None else 0.0):
+                once_seen = est
             if at_once > 1 and _estimate.known_too_long(est, limit_s):
                 if slowdown is None:
                     slowdown = await self._slowdown_at_once(runner, python, env, probes, runs, thresholds, inside,
                                                             at_once, budget_s)
                 if slowdown is not None:
-                    est = _estimate.estimate(grid, runs, runner.deterministic, probes, at_once=at_once, slowdown=slowdown)
+                    est = _estimate.with_once(_estimate.estimate(grid, runs, runner.deterministic, probes, at_once=at_once,
+                                                                 slowdown=slowdown), once_seen)
             line = _estimate.says(est, limit_s, topic=by_topic)
             base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
@@ -835,11 +840,13 @@ class RunChecksMixin:
         """The coarse scan of a search for the best design runs every setting of the plan's grid, so its size is counted
         (the product of the axes' lengths, nothing listed) and its time added up BEFORE anything lists or runs the settings.
         More settings than FI lists: the quest's plain stop. Otherwise the scan's time is the larger of the plan's own estimate
-        and FI's timing of the scan's settings as a measurement's are timed (a plan's claim alone is not trusted); over ``execution.timeout_s``:
-        the same stop, as for a measurement (FI does not run a smaller scan than the plan's). ``None`` to go on.
+        and FI's timing of the scan's settings as a measurement's are timed (a plan's claim alone is not trusted), and the
+        search's evaluations, which share the scan's time, are added at what one new design (the search's baseline) costs;
+        over ``execution.timeout_s``: the same stop, as for a measurement (FI does not run a smaller scan than the plan's),
+        with what fits for the plan. ``None`` to go on.
 
-        Not skipped for a frozen protocol or a background job: the search runs here either way, sizing never changes the
-        protocol, and the check is arithmetic and at most one timed evaluation, so a resume may repeat it."""
+        Not skipped for a frozen protocol or a background job: the search runs here either way and sizing never changes the
+        protocol; the timing is bounded by ``engine.pilot_timeout_frac`` of the time allowed, and a resume repeats it."""
         from . import optimisation_plan as _optimisation_plan
         from . import optimise as _optimise
         from . import optimise_search as _optimise_search
@@ -888,10 +895,39 @@ class RunChecksMixin:
             est = _estimate.Estimate(seconds=per_setting * scan, at_least=False, complete=True, cells=scan, trials=scan * runs)
         if est is None:
             return None
+        searched = 0
         if not _estimate.known_too_long(est, limit_s):
-            self._log.info("[execute] the search's coarse scan: %s", _estimate.says(est, limit_s))  # type: ignore[attr-defined]
-            return None
+            # The search shares the scan's time (one deadline for both, core/optimise.py): every evaluation is a design
+            # the scan did not compute, so it costs what the search's own baseline costs the first time it runs, timed
+            # once here (never less than the plan's own claim).
+            search_n = int(_optimisation_plan.evaluations(block)[0] or 0) * runs
+            per_eval = per_setting
+            if search_n:
+                baseline = _optimise.complete_case(self._protocol_block(state), {})  # type: ignore[attr-defined]
+                allowance = max(60.0, 3.0 * limit_s / max(1, scan * runs + search_n))
+                probe, why = await _estimate._time_one(
+                    self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                    baseline, runs=runs, deterministic=deterministic, timeout_s=int(max(5, min(allowance, limit_s))),
+                    env=env, thresholds=thresholds)
+                if probe is None:
+                    self._log.warning("[execute] FI could not time one evaluation of the search's baseline (%s)", why)  # type: ignore[attr-defined]
+                elif per_eval is None or probe.seconds > per_eval:
+                    per_eval = probe.seconds
+            if search_n and per_eval:
+                together = _estimate.Estimate(seconds=est.seconds + per_eval * search_n, at_least=est.at_least,
+                                              complete=est.complete, cells=scan + search_n, trials=scan * runs + search_n,
+                                              once_s=est.once_s, once_axes=list(est.once_axes))
+                if _estimate.known_too_long(together, limit_s):
+                    est, searched = together, search_n
+            if not searched:
+                self._log.info("[execute] the search's coarse scan: %s", _estimate.says(est, limit_s))  # type: ignore[attr-defined]
+                return None
         text = self._too_long_text(est, limit_s, cut=False)
+        if searched:
+            text = (f"the coarse scan's {scan:,} settings and the search's {searched:,} evaluations would take "
+                    f"{'at least ' if est.at_least else 'about '}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}"
+                    f", more than the {_estimate.plain_duration(limit_s)} allowed (one new design takes about "
+                    f"{_estimate.plain_duration(per_eval or 0.0)}); FI does not run a smaller study than the plan's")
         self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
         fits_in = self._what_fits(est, limit_s, search=True)
         if fits_in is not None:
