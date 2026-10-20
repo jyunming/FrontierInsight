@@ -776,7 +776,7 @@ async def test_a_scan_evaluation_cut_at_its_allowance_is_timed_again_before_the_
     monkeypatch.setattr(run_estimate, "_time_one", timed)
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
-    assert allowed == [60, 180]  # a twentieth of the hour allowed
+    assert allowed[:2] == [60, 180]  # a twentieth of the hour allowed
     fit = patch["exec_result"]["too_long_fit"]
     assert fit["seconds_per_setting"] == 98.0 and fit["at_least"] is False and fit["search"] is True
     assert fit["settings_that_fit"] == int(3600 / (1.5 * 98.0))
@@ -889,3 +889,21 @@ async def test_the_slowdown_is_measured_on_the_costliest_setting_that_finished_a
     timed.clear()
     assert await eng._slowdown_at_once(runner, sys.executable, None, probes[2:3], 40, {}, None, 4, 300.0) is None
     assert timed == [] and "no timed setting finished" in _log(eng)
+
+
+def test_a_study_too_long_names_what_a_new_value_pays_once_apart_from_each_setting() -> None:
+    """A study whose settings share a cache: 7 new materials at 300 s once and 240 settings at 12 s. The settings that fit are
+    counted from the time left after what is paid once, and the plan is told which values cost the most."""
+    from core.engine import _fit_request
+    from core.run_checks import RunChecksMixin
+
+    e = run_estimate.Estimate(seconds=240 * 12.0 + 2100.0, at_least=False, complete=True, cells=240, trials=240,
+                              once_s=2100.0, once_axes=["material"])
+    fit = RunChecksMixin._what_fits(e, 3600.0)
+    assert fit is not None and fit["seconds_per_setting"] == 12.0 and fit["once_s"] == 2100.0
+    assert fit["settings_that_fit"] == int((3600.0 / run_estimate.SAFETY - 2100.0) / 12.0)
+    text = _fit_request("too long", fit)
+    assert "Every new value of material costs extra the first time" in text and "fewer values of material" in text
+    plain = RunChecksMixin._what_fits(run_estimate.Estimate(seconds=240 * 12.0, at_least=False, complete=True, cells=240,
+                                                            trials=240), 3600.0)
+    assert plain is not None and "once_s" not in plain and "first time" not in _fit_request("too long", plain)

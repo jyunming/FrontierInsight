@@ -834,8 +834,8 @@ class RunChecksMixin:
     async def _size_the_scan(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
         """The coarse scan of a search for the best design runs every setting of the plan's grid, so its size is counted
         (the product of the axes' lengths, nothing listed) and its time added up BEFORE anything lists or runs the settings.
-        More settings than FI lists: the quest's plain stop. Otherwise the time of one setting is the larger of the plan's own
-        estimate and one real evaluation of the baseline (a plan's claim alone is not trusted); over ``execution.timeout_s``:
+        More settings than FI lists: the quest's plain stop. Otherwise the scan's time is the larger of the plan's own estimate
+        and FI's timing of the scan's settings as a measurement's are timed (a plan's claim alone is not trusted); over ``execution.timeout_s``:
         the same stop, as for a measurement (FI does not run a smaller scan than the plan's). ``None`` to go on.
 
         Not skipped for a frozen protocol or a background job: the search runs here either way, sizing never changes the
@@ -862,43 +862,35 @@ class RunChecksMixin:
         limit_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
         claimed = (block.get("evaluation_budget") or {}).get("seconds_per_evaluation")
         per_setting = float(claimed) * runs if isinstance(claimed, (int, float)) and not isinstance(claimed, bool)             and claimed > 0 else None
-        at_least = False
-        baseline = _optimise.complete_case(self._protocol_block(state), {})  # type: ignore[attr-defined]
-        # The same allowance a measurement's timed trial gets (core/run_estimate.py::measure), for this many trials.
-        allowance = max(60.0, 3.0 * limit_s / max(1, scan * runs))
-        probe, why = await _estimate._time_one(
-            self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
-            baseline, runs=runs, deterministic=deterministic, timeout_s=int(max(5, min(allowance, limit_s))), env=env,
-            thresholds=(self._protocol_block(state) or {}).get("thresholds"))  # type: ignore[attr-defined]
-        if probe is None:
-            # A baseline that cannot be timed fails in the real run, where it is repaired; the plan's claim, when it gave one,
-            # still counts, and the count above has already kept the listing within what memory holds.
-            self._log.warning("[execute] FI could not time one evaluation of the search's baseline (%s)", why)  # type: ignore[attr-defined]
-        elif per_setting is None or probe.seconds > per_setting:
-            per_setting, at_least = probe.seconds, probe.at_least
-        if per_setting is None:
+        thresholds = (self._protocol_block(state) or {}).get("thresholds")  # type: ignore[attr-defined]
+        # The scan's settings are timed as a measurement's are (core/run_estimate.py::measure): the base twice, each setting
+        # at its ends (and quarter points), every part of the scan, so a cost that depends on the settings, or is paid once
+        # per new value and reused, is counted as the scan will pay it; one evaluation of the baseline alone was not.
+        est: _estimate.Estimate | None = None
+        try:
+            grid = _optimise_search.scan_grid(block)
+            inside = _optimise_search.in_each_run(block)
+        except (KeyError, TypeError, ValueError):
+            grid, inside = None, {}
+        if grid is not None:
+            budget_s = max(limit_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
+            probes, why = await _estimate.measure(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                grid, runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
+                thresholds=thresholds, in_each_run=inside or None)
+            if probes is None:
+                # A setting that cannot be timed fails in the real run, where it is repaired; the plan's claim, when it gave
+                # one, still counts, and the count above has already kept the listing within what memory holds.
+                self._log.warning("[execute] FI could not time the search's coarse scan (%s)", why)  # type: ignore[attr-defined]
+            else:
+                est = _estimate.estimate(grid, runs, deterministic, probes)
+        if per_setting is not None and (est is None or per_setting * scan > est.seconds):
+            est = _estimate.Estimate(seconds=per_setting * scan, at_least=False, complete=True, cells=scan, trials=scan * runs)
+        if est is None:
             return None
-        est = _estimate.Estimate(seconds=per_setting * scan, at_least=at_least, complete=True, cells=scan, trials=scan * runs)
         if not _estimate.known_too_long(est, limit_s):
+            self._log.info("[execute] the search's coarse scan: %s", _estimate.says(est, limit_s))  # type: ignore[attr-defined]
             return None
-        if at_least and probe is not None:
-            # The one evaluation ran past its allowance, so its time is only a lower bound: the scan is too long either
-            # way, but the plan is asked to fit what one setting costs, so that one setting is timed again, with up to a
-            # twentieth of the time allowed.
-            longer = int(max(5, min(limit_s, max(allowance, limit_s / 20.0))))
-            if longer > allowance:
-                again, why = await _estimate._time_one(
-                    self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
-                    baseline, runs=runs, deterministic=deterministic, timeout_s=longer, env=env,
-                    thresholds=(self._protocol_block(state) or {}).get("thresholds"))  # type: ignore[attr-defined]
-                if again is not None and again.seconds > per_setting:
-                    per_setting, at_least = again.seconds, again.at_least
-                    est = _estimate.Estimate(seconds=per_setting * scan, at_least=at_least, complete=True, cells=scan,
-                                             trials=scan * runs)
-                    self._log.info("[execute] one evaluation of the search's baseline, timed again with %d s: %s%.0f s",  # type: ignore[attr-defined]
-                                   longer, "at least " if at_least else "", per_setting)
-                elif again is None:
-                    self._log.warning("[execute] FI could not time one evaluation of the search's baseline again (%s)", why)  # type: ignore[attr-defined]
         text = self._too_long_text(est, limit_s, cut=False)
         self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
         fits_in = self._what_fits(est, limit_s, search=True)
@@ -1517,10 +1509,16 @@ class RunChecksMixin:
         settings the plan has. ``None`` when nothing was measured."""
         if est.cells <= 0 or est.seconds <= 0:
             return None
-        per = est.seconds / est.cells
-        return {"seconds_per_setting": round(per, 3), "at_least": bool(est.at_least), "settings": int(est.cells),
-                "settings_that_fit": max(1, int(limit_s / (_estimate.SAFETY * per))), "limit_s": float(limit_s),
-                "search": bool(search)}
+        # What is paid once per new value is not a cost of every setting: it is named apart, so the plan can take fewer of
+        # those values, and the settings that fit are counted from what is left of the time.
+        once = min(float(est.once_s), est.seconds * 0.999)
+        per = (est.seconds - once) / est.cells
+        room = max(per, limit_s / _estimate.SAFETY - once)
+        out = {"seconds_per_setting": round(per, 3), "at_least": bool(est.at_least), "settings": int(est.cells),
+               "settings_that_fit": max(1, int(room / per)), "limit_s": float(limit_s), "search": bool(search)}
+        if once > 0:
+            out.update(once_s=round(once, 1), once_axes=list(est.once_axes))
+        return out
 
     def _stop_before_run(self, text: str, kind: str, tried: list[str] | None = None,
                          advice: str | None = None) -> dict[str, Any]:

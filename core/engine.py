@@ -26993,6 +26993,14 @@ def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -
             search += (f" After the search, FI checks the best designs at finer settings: about {check} more "
                        f"evaluations, not part of the search's budget, so the coarse scan and the search together "
                        f"have at most {room}.")
+    once = float(fit.get("once_s") or 0.0)
+    if once > 0:
+        axes = [str(a) for a in fit.get("once_axes") or []]
+        payer = (f"Every new value of {', '.join(axes)} costs extra the first time" if axes
+                 else "The first setting costs extra")
+        search += (f" {payer} (about {_run_estimate.plain_duration(once)} in all for this study): later settings reuse "
+                   "what it computed, so " + ("fewer values of " + ", ".join(axes) + " save the most time." if axes else
+                                              "that cost does not grow with the settings."))
     return (f"FI timed the study before running it: {why}. One setting takes {each} on this machine, so about {n} "
             f"settings fit the {limit} allowed with FI's margin. Rewrite the design so that the whole study has at most "
             f"{n} settings in all, counting every setting of the grid, of every sub-study and of a search's coarse scan."
