@@ -550,6 +550,80 @@ def test_a_cell_keeps_what_it_writes_outside_fis_folders_gets_only_inputs_and_ev
 
 
 TIMED = '''
+# --- FI checks at run time that run_trial uses the seed FI gives it --------------------------------------------------
+
+SEEDED = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    rng = random.Random(seed)
+    return {"y": cell["a"] + rng.random(), "n": 5.0}
+'''
+OWN_RNG = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    return {"y": cell["a"] + random.SystemRandom().random(), "n": 5.0}
+'''
+OWN_SEED = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    return {"y": cell["a"] + random.Random(1234).random(), "n": 5.0}
+'''
+NO_DRAW = '''
+def run_trial(cell, trial_id, seed):
+    return {"y": cell["a"] * 2.0}
+'''
+TIMED = '''
+import random, time
+
+def run_trial(cell, trial_id, seed):
+    t0 = time.perf_counter()
+    x = random.Random(seed).random()
+    time.sleep(0.01)
+    return {"y": cell["a"] + x, "took": time.perf_counter() - t0}
+'''
+
+
+def _seed_check(tmp_path: Path, source: str, **kw):
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(source, encoding="utf-8")
+    return asyncio.run(trial_runner.run_trial_seed_check(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"),
+        sys.executable, root, "code/simulate.py", cell={"a": 1.0}, seed=7, timeout_s=60, **kw))
+
+
+def test_a_run_trial_that_uses_the_seed_passes(tmp_path: Path) -> None:
+    assert _seed_check(tmp_path, SEEDED) == (True, "")
+
+
+def test_a_run_trial_with_its_own_generator_fails(tmp_path: Path) -> None:
+    ok, why = _seed_check(tmp_path, OWN_RNG)
+    assert ok is False and "does not repeat with the same seed" in why
+
+
+def test_a_run_trial_with_its_own_fixed_seed_fails(tmp_path: Path) -> None:
+    ok, why = _seed_check(tmp_path, OWN_SEED)
+    assert ok is False and "ignores the seed FI gives it" in why
+
+
+def test_a_run_trial_that_draws_nothing_fails_the_seed_check(tmp_path: Path) -> None:
+    ok, why = _seed_check(tmp_path, NO_DRAW)
+    assert ok is False and "ignores the seed" in why
+
+
+def test_a_time_beside_a_seeded_result_passes(tmp_path: Path) -> None:
+    assert _seed_check(tmp_path, TIMED) == (True, "")
+
+
+def test_a_deterministic_study_is_not_seed_checked(tmp_path: Path) -> None:
+    ok, why = _seed_check(tmp_path, NO_DRAW, deterministic=True)
+    assert ok is None and "deterministic" in why
+
+
+SPANS_TIMED = '''
 import json, os, time
 
 def run_trial(cell, trial_id, seed):

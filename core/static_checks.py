@@ -29,6 +29,14 @@ _COUNTER = "static_checks.json"
 RECORD_DIR = "needs"
 
 
+def static_checks() -> list[tuple[str, Any, str]]:
+    """``(name, module, what a fault that stands after the repairs does)`` for each static check, in the order they run:
+    ``stop`` ends the quest without a paper, ``note`` is recorded for the evidence and the paper, ``headline`` stops only
+    when the module says a headline result rests on it (and is a note otherwise)."""
+    return [("grid_keys", _grid_keys, "stop"), ("typed_constants", _constants, "headline"),
+            ("independent_check", _independent, "note")]
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -44,8 +52,7 @@ class StaticChecksMixin:
     #: ``note`` is recorded for the evidence and the paper, ``headline`` stops only when the module says a headline
     #: result rests on it (and is a note otherwise).
     def _static_checks(self) -> list[tuple[str, Any, str]]:
-        return [("grid_keys", _grid_keys, "stop"), ("typed_constants", _constants, "headline"),
-                ("independent_check", _independent, "note")]
+        return static_checks()
 
     def _static_files(self) -> dict[str, str]:
         return _grid_keys.code_files(self.quest_root / "code")  # type: ignore[attr-defined]

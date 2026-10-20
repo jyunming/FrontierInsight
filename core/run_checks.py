@@ -80,6 +80,83 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def typed_result_exempt(protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> set[str]:
+    """Names the plan fixes (its fixed settings, the grid's settings, what each run compares, the thresholds): echoed back,
+    not results. The one place that list is made (the engine's check and :mod:`core.code_checks` both read it)."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    design = design if isinstance(design, dict) else {}
+    names = set(_forms.fixed_settings_of_design({**design, "protocol": protocol}))
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    names |= {str(k) for k in grid} | {str(k) for k in _in_run.of(protocol) or {}}
+    thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
+    return names | {str(k) for k in thresholds}
+
+
+def settings_the_study_compares(fi_dir: Path, design: Any, protocol: dict[str, Any], axes: list[str]) -> dict[str, str]:
+    """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records: a
+    factor the topic compares (:func:`core.topic_requirements.compared_axes`, read from ``fi_dir``), a key of a check's
+    case, of ``in_each_run``, or a name a metric or the plan's comparisons use."""
+    from . import in_run as _in_run
+    from . import oracle_check as _oracle
+    from . import topic_requirements as _tr
+
+    design = design if isinstance(design, dict) else {}
+    out: dict[str, str] = {}
+    req = _read_json(Path(fi_dir) / _tr.FILE)
+    if isinstance(req, dict) and isinstance(req.get("factors"), list):
+        for axis, factor in _tr.compared_axes(req, design, protocol).items():
+            out.setdefault(axis, f"the topic compares {factor}")
+    for oracle in _oracle.declared(protocol):
+        own = _oracle.case_of(oracle)
+        for axis in (own[0] or {}) if own else {}:
+            out.setdefault(str(axis), f"the check `{oracle.get('name')}` runs at a value of it")
+    for axis in _in_run.of(protocol) or {}:
+        out.setdefault(str(axis), "each run compares its values")
+
+    def names(value: Any) -> set[str]:
+        if isinstance(value, str):
+            return {value}
+        if isinstance(value, dict):
+            return {n for v in value.values() for n in names(v)}
+        if isinstance(value, list):
+            return {n for v in value for n in names(v)}
+        return set()
+
+    for metric in protocol.get("metrics") or []:
+        for axis in names({k: v for k, v in metric.items() if k not in ("id", "description", "kind")}
+                          if isinstance(metric, dict) else {}):
+            out.setdefault(axis, f"the metric `{metric.get('id')}` is given per value of it")
+    for axis in names(protocol.get("comparisons")) | names(design.get("comparisons")):
+        out.setdefault(axis, "the plan compares its values")
+    return {axis: why for axis, why in out.items() if axis in axes}
+
+
+def unread_findings(files: dict[str, str], protocol: dict[str, Any], design: Any, fi_dir: Path) -> tuple[
+        list[Any], dict[str, str], list[str], str]:
+    """FI's reading of which settings of ``protocol.grid`` the code never reads: ``(misread, compared, unread, why)``.
+    ``misread``: reads of a name the plan does not give (a fault the static check owns: nothing else is said then).
+    ``compared``: ``{setting: why}`` for a swept setting the code never reads that the study compares (a fault of the
+    code; :func:`settings_the_study_compares`). ``unread``: the swept settings nothing reads (the compared ones among
+    them), or ``[]`` with ``why`` when the reading is not certain. Nothing is run and no model is asked."""
+    from . import grid_keys as _grid_keys
+    from . import unread_settings as _unread
+
+    misread = _grid_keys.problems(files, protocol, design)
+    if misread:
+        return misread, {}, [], ""
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    # A setting the study compares and the simulation itself never reads is the simulation's fault, even when the
+    # analysis reads it (then it groups results that differ in nothing but their seeds).
+    swept = [str(a) for a, v in grid.items() if isinstance(v, list) and len(v) >= 2]
+    simulated, _why = _unread.setting_reads(files, analysis=False)
+    if simulated is not None and any(a in simulated for a in swept):
+        compared = settings_the_study_compares(fi_dir, design, protocol, [a for a in swept if a not in simulated])
+        if compared:
+            return [], compared, [], ""
+    unread, why = _unread.unread_axes(files, protocol)
+    return [], (settings_the_study_compares(fi_dir, design, protocol, unread) if unread else {}), unread, why
+
+
 class RunChecksMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -90,11 +167,7 @@ class RunChecksMixin:
         not results."""
         protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
         design = state.get("design") if isinstance(state.get("design"), dict) else {}
-        names = set(_forms.fixed_settings_of_design({**design, "protocol": protocol}))
-        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-        names |= {str(k) for k in grid} | {str(k) for k in _in_run.of(protocol) or {}}
-        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
-        return names | {str(k) for k in thresholds}
+        return typed_result_exempt(protocol, design)
 
     def _typed_results_in_simulation(self, state: Any) -> tuple[Path, list[_typed.TypedResult]]:
         path = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
@@ -437,7 +510,6 @@ class RunChecksMixin:
         Returns the failed run for the repair, or ``None`` to go on."""
         from . import engine as _e
         from . import grid_keys as _grid_keys
-        from . import unread_settings as _unread
 
         if _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
             return None
@@ -447,28 +519,18 @@ class RunChecksMixin:
             return None
         files = {rel: text for rel, text in _grid_keys.code_files(simulate.parent).items()
                  if rel not in ("run.py", _trial_runner.SUBMIT_NAME)}
-        misread = _grid_keys.problems(files, protocol, state.get("design"))
+        misread, compared, unread, why = unread_findings(files, protocol, state.get("design"), self.fi_dir)  # type: ignore[attr-defined]
         if misread:
             self._log.info("[execute] the code reads a name the plan does not give (%s); left to the check of the code",  # type: ignore[attr-defined]
                            ", ".join(f"`{k}`" for r in misread for k in r.keys) or "a fixed number of runs")
             return None
-        # A setting the study compares and the simulation itself never reads is the simulation's fault, even when the
-        # analysis reads it (then it groups results that differ in nothing but their seeds).
-        swept = [str(a) for a, v in grid.items() if isinstance(v, list) and len(v) >= 2]
-        simulated, _why = _unread.setting_reads(files, analysis=False)
-        if simulated is not None and any(a in simulated for a in swept):
-            compared = self._settings_the_study_compares(state, protocol, [a for a in swept if a not in simulated])
-            if compared:
-                return self._unread_compared_setting(state, grid, compared, simulate)
-        unread, why = _unread.unread_axes(files, protocol)
+        if compared:
+            return self._unread_compared_setting(state, grid, compared, simulate)
         if not unread:
             if why:
                 self._log.info("[execute] FI could not tell whether the code reads every setting of the grid (%s); "  # type: ignore[attr-defined]
                                "every setting is kept and run", why)
             return None
-        compared = self._settings_the_study_compares(state, protocol, unread)
-        if compared:
-            return self._unread_compared_setting(state, grid, compared, simulate)
         line = (f"FI's reading of the code finds no use of {', '.join(f'`{k}`' for k in unread)}; every setting is kept "
                 "and run.")
         self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
@@ -486,42 +548,9 @@ class RunChecksMixin:
         return None
 
     def _settings_the_study_compares(self, state: Any, protocol: dict[str, Any], axes: list[str]) -> dict[str, str]:
-        """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records: a
-        factor the topic compares (:func:`core.topic_requirements.compared_axes`), a key of a check's case, of
-        ``in_each_run``, or a name a metric or the plan's comparisons use."""
-        from . import in_run as _in_run
-        from . import oracle_check as _oracle
-        from . import topic_requirements as _tr
-
-        out: dict[str, str] = {}
-        req = _read_json(self.fi_dir / _tr.FILE)  # type: ignore[attr-defined]
-        if isinstance(req, dict) and isinstance(req.get("factors"), list):
-            for axis, factor in _tr.compared_axes(req, state.get("design") or {}, protocol).items():
-                out.setdefault(axis, f"the topic compares {factor}")
-        for oracle in _oracle.declared(protocol):
-            own = _oracle.case_of(oracle)
-            for axis in (own[0] or {}) if own else {}:
-                out.setdefault(str(axis), f"the check `{oracle.get('name')}` runs at a value of it")
-        for axis in _in_run.of(protocol) or {}:
-            out.setdefault(str(axis), "each run compares its values")
-
-        def names(value: Any) -> set[str]:
-            if isinstance(value, str):
-                return {value}
-            if isinstance(value, dict):
-                return {n for v in value.values() for n in names(v)}
-            if isinstance(value, list):
-                return {n for v in value for n in names(v)}
-            return set()
-
-        for metric in protocol.get("metrics") or []:
-            for axis in names({k: v for k, v in metric.items() if k not in ("id", "description", "kind")}
-                              if isinstance(metric, dict) else {}):
-                out.setdefault(axis, f"the metric `{metric.get('id')}` is given per value of it")
-        design = state.get("design") if isinstance(state.get("design"), dict) else {}
-        for axis in names(protocol.get("comparisons")) | names(design.get("comparisons")):
-            out.setdefault(axis, "the plan compares its values")
-        return {axis: why for axis, why in out.items() if axis in axes}
+        """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records
+        (:func:`settings_the_study_compares`)."""
+        return settings_the_study_compares(self.fi_dir, state.get("design"), protocol, axes)  # type: ignore[attr-defined]
 
     def _unread_compared_setting(self, state: Any, grid: dict[str, Any], compared: dict[str, str],
                                  simulate: Path) -> dict[str, Any] | None:
