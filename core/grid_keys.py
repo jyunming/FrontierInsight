@@ -955,7 +955,9 @@ def code_files(code_dir: Path) -> dict[str, str]:
         return out
     for path in sorted(code_dir.rglob("*.py")):
         rel = path.relative_to(code_dir)
-        if "__pycache__" in rel.parts or "tests" in rel.parts or re.match(r"test_", path.name) or ".venv" in rel.parts:
+        # code/skills/: FI's copy of the selected skills' files (Engine._skill_files_to_code), the skill's code.
+        if "__pycache__" in rel.parts or "tests" in rel.parts or re.match(r"test_", path.name) or ".venv" in rel.parts \
+                or rel.parts[0] == "skills":
             continue
         try:
             out[rel.as_posix()] = path.read_text(encoding="utf-8")

@@ -632,3 +632,27 @@ def test_a_round_fi_did_not_keep_for_reaching_outside_its_folder_is_told_why(tmp
     assert out == (None, None, False)
     assert "FI did not keep your last round, because its code reaches outside its folder" in agent.prompts[1]
     assert "expanduser" in agent.prompts[1]
+
+
+def test_what_a_readers_extension_added_beyond_the_protocol_is_not_sent_back_to_the_agent(tmp_path: Path,
+                                                                                          monkeypatch) -> None:  # noqa: ANN001
+    """A reader asked for one more setting; the agent added it, and the checks before the run told the agent the code
+    differed from the plan, so it was asked to take out what the person asked for."""
+    agent = _Agent([_write_grid("[1.0, 2.0, 3.0]")])
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr(eng, "_protocol_of", lambda _state: {"grid": {"c": [1.0, 2.0]}})
+    monkeypatch.setattr(eng, "_skill_files_to_code", lambda _state: [])
+
+    async def no_refresh(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+    monkeypatch.setattr(eng, "_refresh_code_project", no_refresh)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    asyncio.run(eng._implement_by_agent({}, {}, ["the result at c = 3"]))
+    record = json.loads((eng.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "extended_by_person" and record["differences"]
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False) and len(agent.prompts) == 1, "nothing was sent back for the person's setting"
+    record = json.loads((eng.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "extended_by_person"

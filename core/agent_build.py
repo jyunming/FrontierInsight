@@ -274,6 +274,16 @@ class AgentBuildMixin:
         coder = await self._code_agent()
         self._skill_files_to_code(state)  # type: ignore[attr-defined]
         result = await coder.write(self._agent_task(state, outline, extra))
+        if extend:
+            # What the extension added beyond the frozen protocol is recorded as the person's request, as the chat
+            # writer's is (Engine._enforce_protocol with ``extended``), so the checks before the run do not fight it.
+            protocol = self._protocol_of(state)  # type: ignore[attr-defined]
+            if protocol is not None:
+                from . import protocol_check as _protocol_check
+
+                added = [m.message() for m in _protocol_check.check(protocol, self._scripts_on_disk())]  # type: ignore[attr-defined]
+                self._protocol_record({"status": "extended_by_person", "attempts": [], "differences": added,  # type: ignore[attr-defined]
+                                       "protocol": protocol, "written_by": "the coding agent"})
         code_path = self.quest_root / "code" / "experiment.py"  # type: ignore[attr-defined]
         code = code_path.read_text(encoding="utf-8") if code_path.is_file() else ""
         if not result.ok and not code:
@@ -298,13 +308,20 @@ class AgentBuildMixin:
         protocol = self._protocol_of(state)  # type: ignore[attr-defined]
         if protocol is None:
             return False
-        differences = [m.message() for m in _protocol_check.check(protocol, self._scripts_on_disk())]  # type: ignore[attr-defined]
+        # What a reader's extension added beyond the frozen protocol is the person's request (Engine._enforce_protocol
+        # with ``extended``): sent back as a difference, the agent was told to take out what the person asked for.
+        by_person = self._goes_beyond_protocol_by_request()  # type: ignore[attr-defined]
+        differences = [m.message() for m in _protocol_check.check(protocol, self._scripts_on_disk())  # type: ignore[attr-defined]
+                       if m.message() not in set(by_person)]
+        checks["protocol"] = not differences
+        if by_person and not differences:
+            return False  # the record of the person's extension stays as it is
         block = self.config.engine.protocol_check == "block"  # type: ignore[attr-defined]
         self._protocol_record({  # type: ignore[attr-defined]
             "status": "ok" if not differences else ("stopped" if block else "warned"),
             "attempts": [{"attempt": 0, "differences": differences}], "differences": differences,
-            "protocol": protocol, "written_by": "the coding agent"})
-        checks["protocol"] = not differences
+            "protocol": protocol, "written_by": "the coding agent",
+            **({"added_by_person": by_person} if by_person else {})})
         if not differences:
             return False
         found.append("The code differs from the plan's protocol: " + "; ".join(differences[:8])

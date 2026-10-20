@@ -334,7 +334,8 @@ def direct_callers(code: Path, rel: str, name: str) -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
     for path in sorted(code.rglob("*.py")):
         other = path.relative_to(code).as_posix()
-        if any(part in ("tests", "__pycache__") for part in path.relative_to(code).parts[:-1]):
+        if any(part in ("tests", "__pycache__") for part in path.relative_to(code).parts[:-1]) \
+                or path.relative_to(code).parts[0] == "skills":  # FI's copy of the skills' files (not the study's code)
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))

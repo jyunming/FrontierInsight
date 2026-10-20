@@ -11522,6 +11522,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         record = _read_json_or_none_path(self.quest_root / "needs" / "PROTOCOL_CHECK.json")
         if isinstance(record, dict) and record.get("status") == "extended_by_person":
             return [str(d) for d in record.get("differences") or []]
+        if isinstance(record, dict):
+            # The coding agent's later check keeps the person's additions beside a difference of its own
+            # (AgentBuildMixin._agent_protocol).
+            return [str(d) for d in record.get("added_by_person") or []]
         return []
 
     def _protocol_drift_not_asked_for(self, protocol: dict[str, Any]) -> list[str]:
@@ -21913,7 +21917,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 instructions, surface = mount.translate(instructions), mount.translate(surface)
             in_code_base = f"{_SKILLS_IN_CODE}/{skill.name}" if in_code and mount is None and not not_mounted else ""
             if in_code_base:
-                for spelling in {str(skill.path), Path(skill.path).as_posix()}:
+                spellings = {str(skill.path), Path(skill.path).as_posix()}
+                try:  # a skill's text often names its folder in the home form (`~/.../skills/<name>`)
+                    home_rel = Path(skill.path).resolve().relative_to(Path.home().resolve())
+                    spellings |= {f"~/{home_rel.as_posix()}", f"~\\{home_rel}"}
+                except (ValueError, OSError, RuntimeError):
+                    pass
+                for spelling in sorted(spellings, key=len, reverse=True):
                     instructions, surface = (instructions.replace(spelling, in_code_base),
                                              surface.replace(spelling, in_code_base))
             parts.append(instructions)
@@ -30997,7 +31007,8 @@ def _figure_label_found(state: QuestState, code_dir: Path | None = None) -> list
         sources: list[str] = []
         if code_dir is not None and Path(code_dir).is_dir():
             for path in sorted(Path(code_dir).rglob("*.py")):
-                if path.name in ("replot_layout.py", "replot_figures.py") or len(sources) >= 50:
+                if path.name in ("replot_layout.py", "replot_figures.py") or len(sources) >= 50 \
+                        or path.relative_to(code_dir).parts[0] == _SKILLS_IN_CODE:
                     continue
                 try:
                     sources.append(path.read_text(encoding="utf-8", errors="replace")[:400_000])

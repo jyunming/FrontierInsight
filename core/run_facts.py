@@ -170,7 +170,8 @@ def _code_files(code_dir: Path) -> list[Path]:
     out = []
     for path in sorted(code_dir.rglob("*.py")):
         parts = path.relative_to(code_dir).parts
-        if any(p.startswith(".") or p in _SKIP_PARTS or p.startswith("test_") for p in parts):
+        # code/skills/: FI's copy of the selected skills' files (Engine._skill_files_to_code), not the study's code.
+        if any(p.startswith(".") or p in _SKIP_PARTS or p.startswith("test_") for p in parts) or parts[:1] == ("skills",):
             continue
         out.append(path)
     return out

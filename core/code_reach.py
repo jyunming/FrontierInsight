@@ -82,9 +82,10 @@ class _Module:
 
 
 def _python_files(code_dir: Path) -> list[Path]:
+    # code/skills/ is FI's copy of the selected skills' files (Engine._skill_files_to_code), not the study's code.
     return sorted(p for p in code_dir.rglob("*.py")
                   if not any(part in ("tests", "__pycache__") or part.startswith(".") for part in p.relative_to(code_dir).parts[:-1])
-                  and not p.name.startswith("test_"))
+                  and p.relative_to(code_dir).parts[0] != "skills" and not p.name.startswith("test_"))
 
 
 def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -> set[tuple[str, str]] | None:
