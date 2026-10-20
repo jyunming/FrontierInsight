@@ -636,6 +636,25 @@ def _item_lines(req: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+def kept_when_smaller(req: dict[str, Any] | None) -> list[str]:
+    """What a study made smaller must still vary, from FI's record of the topic: one line per setting the topic names,
+    with every level it states, or the two ends of the range it states (the fewest values that still cover it, as
+    :func:`_covers` judges a setting)."""
+    lines = []
+    for item in (req or {}).get("factors") or []:
+        if not isinstance(item, dict) or not str(item.get("name") or "").strip():
+            continue
+        levels = [str(v) for v in item.get("levels") or []]
+        rng = item.get("range") or []
+        if levels:
+            lines.append(f"- {item['name']}: every level ({', '.join(levels[:12])})")
+        elif len(rng) == 2:
+            lines.append(f"- {item['name']}: at least {rng[0]:g} and {rng[1]:g}, the two ends of the range the topic states")
+        else:
+            lines.append(f"- {item['name']}: at least two values")
+    return lines
+
+
 def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False, req: dict[str, Any] | None = None) -> str:
     """The request to the plan's model for what the topic asks and the plan lacks. Nothing else may change. ``search``:
     the plan is a search for the best design, which has no ``protocol.grid`` beside its block (the settings to compare

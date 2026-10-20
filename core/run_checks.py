@@ -646,7 +646,7 @@ class RunChecksMixin:
                                record.get("says") or "the experiment fits")
                 return None
             if record.get("key") == key and record.get("stopped"):
-                return self._stop_too_long(str(record["stopped"]))
+                return self._stop_too_long(str(record["stopped"]), fit=record.get("fit"))
             probes, why = await _estimate.measure(
                 self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
                 runs=runs, deterministic=runner.deterministic, limit_s=limit_s,
@@ -754,13 +754,15 @@ class RunChecksMixin:
                         return None
             if fit is None:
                 text = self._too_long_text(est, hard_s)
-                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text})  # type: ignore[attr-defined]
-                return self._stop_too_long(text)
+                fits_in = self._what_fits(est, hard_s)
+                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
+                return self._stop_too_long(text, fit=fits_in)
             note = self._lower_the_runs(state, runs, fit, est, limit_s, grid, protocol, topic=by_topic, over_topic=over_topic)
             if note is None:
                 text = self._too_long_text(est, hard_s)
-                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text})  # type: ignore[attr-defined]
-                return self._stop_too_long(text)
+                fits_in = self._what_fits(est, hard_s)
+                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
+                return self._stop_too_long(text, fit=fits_in)
             cut_done = True
             reduced = note
             self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fit.runs}
@@ -879,9 +881,35 @@ class RunChecksMixin:
         est = _estimate.Estimate(seconds=per_setting * scan, at_least=at_least, complete=True, cells=scan, trials=scan * runs)
         if not _estimate.known_too_long(est, limit_s):
             return None
+        if at_least and probe is not None:
+            # The one evaluation ran past its allowance, so its time is only a lower bound: the scan is too long either
+            # way, but the plan is asked to fit what one setting costs, so that one setting is timed again, with up to a
+            # twentieth of the time allowed.
+            longer = int(max(5, min(limit_s, max(allowance, limit_s / 20.0))))
+            if longer > allowance:
+                again, why = await _estimate._time_one(
+                    self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                    baseline, runs=runs, deterministic=deterministic, timeout_s=longer, env=env,
+                    thresholds=(self._protocol_block(state) or {}).get("thresholds"))  # type: ignore[attr-defined]
+                if again is not None and again.seconds > per_setting:
+                    per_setting, at_least = again.seconds, again.at_least
+                    est = _estimate.Estimate(seconds=per_setting * scan, at_least=at_least, complete=True, cells=scan,
+                                             trials=scan * runs)
+                    self._log.info("[execute] one evaluation of the search's baseline, timed again with %d s: %s%.0f s",  # type: ignore[attr-defined]
+                                   longer, "at least " if at_least else "", per_setting)
+                elif again is None:
+                    self._log.warning("[execute] FI could not time one evaluation of the search's baseline again (%s)", why)  # type: ignore[attr-defined]
         text = self._too_long_text(est, limit_s, cut=False)
         self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
-        return self._stop_too_long(text)
+        fits_in = self._what_fits(est, limit_s, search=True)
+        if fits_in is not None:
+            # FI's own check of the best design at finer settings runs after the search and is not in its budget: the plan
+            # is told what it costs, so the scan and the search are sized to the time left.
+            try:
+                fits_in["check"] = int(_optimisation_plan.budget(block).get("check") or 0)
+            except (KeyError, TypeError, ValueError):
+                pass
+        return self._stop_too_long(text, fit=fits_in)
 
     async def _pilot_gate(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]],
                           probes: list[_estimate.Probe], thresholds: dict[str, Any], limit_s: float,
@@ -1474,9 +1502,25 @@ class RunChecksMixin:
             pass
         return record
 
-    def _stop_too_long(self, text: str) -> dict[str, Any]:
-        """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""
-        return self._stop_before_run(text, "too_long")
+    def _stop_too_long(self, text: str, fit: dict[str, Any] | None = None) -> dict[str, Any]:
+        """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written. ``fit``
+        (:meth:`_what_fits`): what FI measured, which lets the evidence gate ask the plan once for a study that fits."""
+        out = self._stop_before_run(text, "too_long")
+        if fit:
+            out["exec_result"]["too_long_fit"] = dict(fit)
+        return out
+
+    @staticmethod
+    def _what_fits(est: _estimate.Estimate, limit_s: float, *, search: bool = False) -> dict[str, Any] | None:
+        """What FI measured about a study too long to run: the seconds one setting takes (as the run would take them,
+        with the settings that run at the same time), how many settings fit the time allowed with FI's margin, and the
+        settings the plan has. ``None`` when nothing was measured."""
+        if est.cells <= 0 or est.seconds <= 0:
+            return None
+        per = est.seconds / est.cells
+        return {"seconds_per_setting": round(per, 3), "at_least": bool(est.at_least), "settings": int(est.cells),
+                "settings_that_fit": max(1, int(limit_s / (_estimate.SAFETY * per))), "limit_s": float(limit_s),
+                "search": bool(search)}
 
     def _stop_before_run(self, text: str, kind: str, tried: list[str] | None = None,
                          advice: str | None = None) -> dict[str, Any]:

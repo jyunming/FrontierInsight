@@ -488,6 +488,12 @@ class QuestState(TypedDict, total=False):
     # How many times the evidence_gate has given a simulation with no results another try (at most once): back to design,
     # or, when the script could not run to the end, its code written again from the same design.
     evidence_no_result_retries: int
+    # Times the plan was asked to fit the time FI measured, after the study was too long to run (at most once; it
+    # spends no design iteration: nothing ran).
+    evidence_fit_redesigns: int
+    # plan.md was rewritten for the next design (a study that fits the time FI measured): the design node reads its
+    # design block again instead of asking for a new design. Cleared by the design node.
+    design_from_plan: bool
     # That try was the code written again from the same design (the script crashed), not a new design.
     evidence_code_rewritten_at: int  # the design round (``iteration``) whose code was written again after no result
     paper_md: str
@@ -8496,11 +8502,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         settled = self._settle_pending_amendment(state)
         if settled is not None:
             design = settled
-        elif iteration == 0 and not state.get("design"):
+        elif (iteration == 0 and not state.get("design")) or state.get("design_from_plan"):
             # The plan step wrote plan.md and, when asked, stopped for the person to read and edit it. Its design
             # block is the design, exactly: nothing is asked of the model again, and what a person changed runs.
             # Only when no design exists yet: every way back into this node after a result bumps ``iteration``,
-            # and a design already in state must never be replaced by the plan on a repair or a refine.
+            # and a design already in state must never be replaced by the plan on a repair or a refine. The one
+            # exception is a plan rewritten for the next design (``design_from_plan``: a study that fits the time FI
+            # measured, before anything ran).
             design, plan_sha = self._design_from_plan()
             objections = state.get("design_objections")
         if design is None:
@@ -8550,7 +8558,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha, again=True)
         elif not plan_sha and _study_size(design) > size_before:  # a redesign: the same, with its own request
             design = await self._ask_design_for_the_grid(state, design, iteration=iteration, again=True)
-        out: dict[str, Any] = {"design": design}
+        out: dict[str, Any] = {"design": design, "design_from_plan": False}
         # Provenance for the hypothesis itself. The DAG lets `review` and
         # `cross_check` route back here, so a design CAN be rewritten after
         # its results are known. That iteration is legitimate research, but a
@@ -10770,6 +10778,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 approved_by += f"; {oracle_note} too"
             else:
                 approved_by = f"auto: nobody approved the rest of this protocol (pauses.plan={mode}); {oracle_note}"
+        if int(state.get("evidence_fit_redesigns") or 0) and approved_by.startswith("human"):
+            # The person read plan.md; FI then had it rewritten to fit the time it measured, so they did not read this one.
+            approved_by = ("auto: FI had the plan rewritten to fit the time it measured after the person read it "
+                           f"(pauses.plan={mode}), and nobody approved the protocol it rewrote")
         iteration = int(state.get("iteration", 0) or 0)
         source = "plan.md" if iteration == 0 else f"design at iteration {iteration} (a quest begun before the protocol was frozen)"
         if at_confirm:
@@ -19701,6 +19713,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # An experiment that produced no results goes back to design once while there is an iteration left (the new
         # script gets its own repairs); after that the verdict stays insufficient and the writer is told why.
         redesign = bool(parsed.get("redesign")) and status == "ok"
+        fitted = ""
+        if redesign and parsed.get("fit_request"):
+            # The study was too long to run: plan.md is rewritten to fit the time FI measured before the design is read
+            # again. An answer that cannot be used leaves the stop as it was.
+            try:
+                done = await self._rewrite_plan(str(parsed["fit_request"]), _plan.plan_path(self.quest_root), by="engine",
+                                                note="a study that fits the time FI measured, asked by FI")
+                fitted = f"plan.md was rewritten (version {(done or {}).get('version')}) to fit the time FI measured"
+                self._log.warning("[evidence_gate] %s; the new design is timed again before it runs", _one_line(fitted, 300))
+            except Exception as exc:  # noqa: BLE001 -- the stop stands
+                self._log.warning("[evidence_gate] the plan could not be rewritten to fit the time FI measured (%s); "
+                                  "stopping without a paper", _one_line(str(exc), 200))
+                redesign = False
+                parsed = {**parsed, "stuck": True, "stuck_reason": "too_long"}
         # A script that could not run to the end, even after its repairs, is the code's fault, not the design's: the same
         # design is written into code again (core/engine.py::_no_results_verdict).
         rewrite_code = bool(parsed.get("rewrite_code")) and status == "ok"
@@ -19754,6 +19780,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             patch.update(_FRESH_SCRIPT)
             # Once per design (a new design's code gets its own); the design's own retry (below) is counted apart.
             patch["evidence_code_rewritten_at"] = int(state.get("iteration", 0) or 0)
+        elif redesign and parsed.get("fit_request"):
+            # Nothing of the study ran and no result was seen: the rewritten plan is still the plan's first design, so no
+            # design iteration is spent, and it is timed and checked before the run as the first one was.
+            patch["evidence_fit_redesigns"] = int(state.get("evidence_fit_redesigns") or 0) + 1
+            patch["design_from_plan"] = True
         elif redesign:
             patch["iteration"] = int(state.get("iteration", 0) or 0) + 1
             patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
@@ -20215,6 +20246,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # Stopped before anything ran (the execute step's record of it): the gate states that, whatever the code or the
             # results hold, so the reason the quest reports is the one that stopped it.
             why = str(exec_result[stopped])  # type: ignore[index]
+            fit = exec_result.get("too_long_fit") if stopped == "too_long" else None  # type: ignore[union-attr]
+            if (isinstance(fit, dict) and int(state.get("evidence_fit_redesigns") or 0) < 1
+                    and int(state.get("iteration", 0) or 0) == 0 and _plan.plan_path(self.quest_root).is_file()):
+                # The plan was written before anything was timed: its model is told what FI measured and asked, once, for
+                # a study that fits (FI itself never chooses which settings to leave out). The new design is timed again.
+                self._log.warning("[evidence_gate] %s; the plan is asked once for a study that fits the time FI measured",
+                                  why)
+                return {"verdict": "insufficient", "rationale": why + "; the plan was asked for a study that fits",
+                        "gaps": [why], "redesign": True,
+                        "fit_request": _fit_request(why, fit, _topic_req.kept_when_smaller(self._topic_requirements_read()))}
             self._log.warning("[evidence_gate] %s; stopping without a paper", why)
             return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True, "stuck_reason": stopped}
         if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
@@ -26930,6 +26971,39 @@ _FILL_MARKER = "plan_sources_asked.json"
 # ``cannot_repair``: FI's repairs of the code ended and the problem stands (the run record differs from the protocol, the
 # numerics still warn, the code still lacks what the plan requires ...): the quest ends without a paper, nobody debugs.
 _STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair", "no_search", "topic_unmet")
+
+
+def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -> str:
+    """The request to the plan's model when the study was too long to run (Engine._no_results_verdict): what FI measured,
+    how many settings fit, and what may and may not change. FI itself leaves no setting out. ``kept``: what the topic
+    asks to vary, from FI's record of it (``topic_requirements.kept_when_smaller``), which the smaller study still varies."""
+    from . import run_estimate as _run_estimate
+
+    per = float(fit.get("seconds_per_setting") or 0.0)
+    n = int(fit.get("settings_that_fit") or 1)
+    limit = _run_estimate.plain_duration(float(fit.get("limit_s") or 0.0))
+    each = (f"at least {per:.0f} s" if fit.get("at_least") else f"about {per:.0f} s") if per >= 1 else f"about {per:.2g} s"
+    check = int(fit.get("check") or 0)
+    room = max(1, n - check)
+    search = ""
+    if fit.get("search"):
+        search = (" A search's evaluations count as settings too: each costs about as much as one setting, so its "
+                  "evaluation_budget (starts times per_start) is part of the same total.")
+        if check:
+            search += (f" After the search, FI checks the best designs at finer settings: about {check} more "
+                       f"evaluations, not part of the search's budget, so the coarse scan and the search together "
+                       f"have at most {room}.")
+    return (f"FI timed the study before running it: {why}. One setting takes {each} on this machine, so about {n} "
+            f"settings fit the {limit} allowed with FI's margin. Rewrite the design so that the whole study has at most "
+            f"{n} settings in all, counting every setting of the grid, of every sub-study and of a search's coarse scan."
+            f"{search} Keep every comparison and every quantity the topic asks for, and every check, threshold and "
+            "tolerance as it is: take fewer values of a swept setting, spread over the same range, give a part of the study "
+            "fewer settings, or give a search fewer evaluations. Say in the simplifications what was made smaller and that "
+            "it was made smaller to fit the time FI measured."
+            + ("\n\nWhat the topic asks to vary stays varied, in whichever part of the study varies it now:\n"
+               + "\n".join(kept) if kept else ""))
+
+
 _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 #: The parts of a protocol that a redesign writes itself: it is never given the plan's in their place by

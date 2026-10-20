@@ -971,7 +971,7 @@ async def test_without_the_plan_stop_an_oracle_the_engine_added_is_recorded_as_n
 
 
 def _freeze_with(tmp_path: Path, *, plan_mode: str, held: bool, added: dict[str, Any] | None,
-                 replaced_by: str | None = None) -> str:
+                 replaced_by: str | None = None, fitted: int = 0) -> str:
     """What ``approved_by`` the freeze writes for a protocol with ORACLE, given the plan stop and the gate's record."""
     from core import frozen_protocol
     from core.config import PausesConfig
@@ -989,7 +989,7 @@ def _freeze_with(tmp_path: Path, *, plan_mode: str, held: bool, added: dict[str,
         (engine.fi_dir / "paused_at_plan.flag").write_text("plan", encoding="utf-8")
     if added is not None:
         (engine.fi_dir / "oracles_added.json").write_text(json.dumps(added), encoding="utf-8")
-    engine._freeze_protocol_if_due({"design": {"protocol": protocol}, "iteration": 0})
+    engine._freeze_protocol_if_due({"design": {"protocol": protocol}, "iteration": 0, "evidence_fit_redesigns": fitted})
     return str(frozen_protocol.load(engine.quest_root)["approved_by"])
 
 
@@ -1002,6 +1002,9 @@ def test_the_freeze_never_says_a_person_approved_what_they_were_not_shown(tmp_pa
     # The setting says ask, but the quest never stopped at the plan: nobody read it.
     assert _freeze_with(tmp_path / "a", plan_mode="ask", held=False, added=None).startswith("auto:")
     assert _freeze_with(tmp_path / "h", plan_mode="ask", held=True, added=None).startswith("human:")
+    # The person read the plan, then FI had it rewritten to fit the time it measured: nobody read the protocol that runs.
+    fitted = _freeze_with(tmp_path / "f", plan_mode="ask", held=True, added=None, fitted=1)
+    assert fitted.startswith("auto: FI had the plan rewritten to fit the time it measured after the person read it")
     # Shown at the stop for the added checks, then the plan stop was turned off: the oracles were still shown.
     shown_then_off = _freeze_with(tmp_path / "s", plan_mode="off", held=True, added=seen)
     assert shown_then_off.startswith("auto:") and "held for the person to read" in shown_then_off

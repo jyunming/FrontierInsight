@@ -369,6 +369,27 @@ async def test_a_later_pass_redesigns_from_the_review_not_from_the_plan(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_a_plan_rewritten_to_fit_the_time_is_the_next_design(tmp_path: Path) -> None:
+    """A study too long to run had plan.md rewritten by the plan's model to fit the time FI measured: the design node
+    reads that plan again instead of drafting a new design, and the next pass is drafted as before."""
+    eng = _engine(tmp_path, [json.dumps({})] * 4)
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    smaller = {**DESIGN, "method": "the same study with fewer settings"}
+    path.write_text(plan.render("OPC", EXTRA, smaller), encoding="utf-8")
+    state = {"topic": "a test topic", "iteration": 0, "design": DESIGN, "design_from_plan": True}
+    patch = await eng._node_design(state)
+    assert patch["design"] == smaller and patch["design_from_plan"] is False
+    assert patch["design_history"][-1]["plan_sha256"] == plan.sha256(path.read_text(encoding="utf-8"))
+    # The plan's design is read and audited, as at the first pass; no design is drafted.
+    assert not any("**Experiment Design** stage" in _prompt(c) for c in eng._client.chat.await_args_list)
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[json.dumps({**DESIGN, "hypothesis": "drafted"}),
+                                                                    json.dumps({})])})()
+    later = await eng._node_design({**state, **patch, "iteration": 1})
+    assert later["design"]["hypothesis"] == "drafted"
+
+
+@pytest.mark.asyncio
 async def test_an_unreadable_plan_at_design_falls_back_to_drafting(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [json.dumps(DESIGN), json.dumps({})])
     path = plan.plan_path(eng.quest_root)

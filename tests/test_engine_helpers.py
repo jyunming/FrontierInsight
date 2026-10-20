@@ -959,6 +959,61 @@ async def test_a_simulation_with_no_results_goes_back_once_then_stops_with_no_pa
     assert engine._no_results_verdict({**state, "result_json": {"x": 1}}) is None
 
 
+async def test_a_study_too_long_to_run_asks_the_plan_once_for_one_that_fits_then_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real plan's study had thousands of settings at about 100 s each, for an 8 h limit: FI timed it, stopped, and
+    wrote no paper. The plan was written before anything was timed, so its model is told what FI measured, once."""
+    from core import plan as _plan
+
+    cfg = _route_config(tmp_path, review_loop=True, max_iterations=2)
+    engine = Engine(cfg)
+    asked: list[tuple[str, str]] = []
+
+    async def fake_rewrite(request, path, by="person", note=""):  # noqa: ANN001
+        asked.append((request, by))
+        return {"version": 2, "sha256": "x", "path": str(path)}
+
+    async def no_chat(prompt, node=None):  # noqa: ANN001
+        raise AssertionError("the gate decides a stop by rule")
+
+    monkeypatch.setattr(engine, "_rewrite_plan", fake_rewrite)
+    monkeypatch.setattr(engine, "_chat", no_chat)
+    why = "the experiment's 3802 settings would take at least 3 days, more than the 8 hours allowed"
+    fit = {"seconds_per_setting": 98.0, "at_least": False, "settings": 3802, "settings_that_fit": 195,
+           "limit_s": 28800.0, "search": True, "check": 70}
+    state = {"topic": "t", "literature": _gate_sources(30), "result_json": {}, "iteration": 0,
+             "exec_result": {"returncode": 1, "too_long": why, "too_long_fit": fit}, "exec_give_up_reason": why}
+    # No plan.md on disk: there is nothing to rewrite, so the stop stands.
+    plain = await engine._node_evidence_gate(state)
+    assert plain["evidence_assessment"]["route"] == "stuck" and asked == []
+    _plan.plan_path(engine.quest_root).parent.mkdir(parents=True, exist_ok=True)
+    _plan.plan_path(engine.quest_root).write_text("# plan\n", encoding="utf-8")
+    first = await engine._node_evidence_gate(state)
+    # Nothing ran: no design iteration is spent, so the smaller design is timed and checked as the plan's first one.
+    assert first["evidence_assessment"]["route"] == "redesign" and "iteration" not in first
+    assert first["evidence_fit_redesigns"] == 1 and "evidence_no_result_retries" not in first
+    assert first["design_from_plan"] is True  # the design node reads the rewritten plan, not a new draft
+    (request, by), = asked
+    assert by == "engine" and "about 195 settings fit the 8 h" in request and "evaluation_budget" in request
+    assert "about 70 more evaluations" in request and "together have at most 125" in request
+    assert "every check, threshold and tolerance as it is" in request
+    # The new design is still too long: asked once already, the quest stops plainly.
+    again = await engine._node_evidence_gate({**state, **first})
+    assert again["evidence_assessment"]["route"] == "stuck" and len(asked) == 1
+    # A stop with nothing measured (no fit) stops as before.
+    unmeasured = {**state, "exec_result": {"returncode": 1, "too_long": why}}
+    assert (await engine._node_evidence_gate(unmeasured))["evidence_assessment"]["route"] == "stuck"
+    # An answer that cannot be used leaves the stop as it was.
+
+    async def broken_rewrite(request, path, by="person", note=""):  # noqa: ANN001
+        raise ValueError("the reply was not a plan")
+
+    monkeypatch.setattr(engine, "_rewrite_plan", broken_rewrite)
+    failed = await engine._node_evidence_gate(state)
+    assert failed["evidence_assessment"]["route"] == "stuck" and "iteration" not in failed
+
+
 async def test_auto_collect_relevance_guards_reused_literature(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

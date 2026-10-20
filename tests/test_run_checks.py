@@ -371,8 +371,17 @@ async def test_a_run_that_cannot_fit_at_the_fewest_runs_stops_plainly_and_a_resu
     assert await eng._node_execute_reflect({"exec_result": patch["exec_result"],
                                             "exec_give_up_reason": text}) == {}
     assert eng._route_after_execute_reflect({"exec_result": patch["exec_result"], "exec_give_up_reason": text}) == "stuck"
+    # The plan was written before anything was timed: its model is asked once, with what FI measured, for a study that
+    # fits; asked once already, the stop stands.
+    fit = patch["exec_result"]["too_long_fit"]
+    assert fit["settings"] == 3 and fit["limit_s"] == 6 and fit["settings_that_fit"] >= 1 and fit["seconds_per_setting"] > 0
+    first = eng._no_results_verdict({"exec_result": patch["exec_result"], "result_json": {},
+                                     "exec_give_up_reason": text, "iteration": 0})
+    assert first is not None and first["redesign"] is True and not first.get("stuck")
+    assert f"about {fit['settings_that_fit']} settings fit" in first["fit_request"]
+    assert "every check, threshold and tolerance as it is" in first["fit_request"]
     verdict = eng._no_results_verdict({"exec_result": patch["exec_result"], "result_json": {},
-                                       "exec_give_up_reason": text, "iteration": 0})
+                                       "exec_give_up_reason": text, "iteration": 0, "evidence_fit_redesigns": 1})
     assert verdict is not None and verdict["stuck"] is True and verdict["stuck_reason"] == "too_long"
     stuck = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": "too_long"},
                                                "exec_result": patch["exec_result"]})
@@ -745,6 +754,34 @@ async def test_a_tiny_claimed_time_is_raised_to_the_measured_one(tmp_path: Path,
     monkeypatch.setattr(run_estimate, "_time_one", slow)
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
+
+
+@pytest.mark.asyncio
+async def test_a_scan_evaluation_cut_at_its_allowance_is_timed_again_before_the_plan_is_asked_to_fit(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real scan's one timed evaluation was cut at 60 s, so FI knew only "at least 60 s" while one setting took 98 s: a
+    plan sized to the lower bound would not fit either. The one setting is timed again with longer, and the plan is asked
+    to fit the time measured."""
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = dict(_MID_GRID)
+    eng, runner = await _search_engine(tmp_path, block)
+    allowed: list[int] = []
+
+    async def timed(*a: Any, timeout_s: int, **k: Any) -> Any:
+        allowed.append(timeout_s)
+        if timeout_s <= 60:
+            return run_estimate.Probe(None, None, {}, 60.0, at_least=True), ""
+        return run_estimate.Probe(None, None, {}, 98.0), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", timed)
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
+    assert allowed == [60, 180]  # a twentieth of the hour allowed
+    fit = patch["exec_result"]["too_long_fit"]
+    assert fit["seconds_per_setting"] == 98.0 and fit["at_least"] is False and fit["search"] is True
+    assert fit["settings_that_fit"] == int(3600 / (1.5 * 98.0))
+    # FI's own check of the best design comes after the search and is counted for the plan too.
+    assert fit["check"] > 0
 
 
 @pytest.mark.asyncio

@@ -615,3 +615,22 @@ async def test_a_failed_call_for_the_topic_is_noted_and_the_next_try_is_still_ma
     design, _sha = await eng._hold_the_design_to_the_topic(state, redesign, "")
     assert design["protocol"]["grid"]["lid_material"] == ["paper", "foam", "steel"]
     assert len(prompts) == 2 and "connection reset" in prompts[1]
+
+
+def test_a_study_made_smaller_is_told_what_the_topic_asks_to_vary() -> None:
+    """A real plan rewritten to fit the time FI measured cut two settings the topic asks to vary to one value each, and
+    the design that would run then lacked them: the fit request names each one with what still covers it."""
+    from core.engine import _fit_request
+
+    req = {"factors": [{"name": "lid material", "levels": ["paper", "foam", "steel"]},
+                       {"name": "starting temperature", "range": [20.0, 90.0]},
+                       {"name": "stirring", "levels": [], "range": []}]}
+    kept = tr.kept_when_smaller(req)
+    assert kept == ["- lid material: every level (paper, foam, steel)",
+                    "- starting temperature: at least 20 and 90, the two ends of the range the topic states",
+                    "- stirring: at least two values"]
+    fit = {"seconds_per_setting": 98.0, "settings_that_fit": 195, "limit_s": 28800.0}
+    text = _fit_request("the study's 3,802 settings would take about 4 days", fit, kept)
+    assert text.endswith("\n".join(kept)) and "stays varied" in text
+    assert "stays varied" not in _fit_request("too long", fit, [])
+    assert tr.kept_when_smaller(None) == []
