@@ -376,7 +376,7 @@ async def test_a_plan_rewritten_to_fit_the_time_is_the_next_design(tmp_path: Pat
     path = plan.plan_path(eng.quest_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     smaller = {**DESIGN, "method": "the same study with fewer settings"}
-    path.write_text(plan.render("OPC", EXTRA, smaller), encoding="utf-8")
+    path.write_text(plan.render("a test topic", EXTRA, smaller), encoding="utf-8")
     state = {"topic": "a test topic", "iteration": 0, "design": DESIGN, "design_from_plan": True}
     patch = await eng._node_design(state)
     assert patch["design"] == smaller and patch["design_from_plan"] is False
