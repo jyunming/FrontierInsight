@@ -12564,15 +12564,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "reports how long the run took.")
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
-                          env: dict[str, str] | None = None, outside: bool = False) -> tuple[int, str, str]:
+                          env: dict[str, str] | None = None, outside: bool = False,
+                          apart: bool = False) -> tuple[int, str, str]:
         """Run ``python <argv>`` from the quest folder, in the quest's environment (a venv, the shared interpreter, or the
         Docker container): ``(returncode, stdout, stderr)``. ``outside``: from a copy of ``code/`` outside the quest
-        folder (core/outside_run.py), so FI's records are not next to the code that runs."""
+        folder (core/outside_run.py), so FI's records are not next to the code that runs. ``apart``: from such a copy
+        that does not share the study's kept values and gives back only the paths ``argv`` names."""
         py = self.executor.python_path(self.quest_root)
         # A function rewritten within the same second to the same size would be read from its stale compiled copy.
         for cache in (self.quest_root / "code").glob("**/__pycache__"):
             shutil.rmtree(cache, ignore_errors=True)
-        executor = _outside_run.OutsideExecutor(self.executor, self.quest_root, log=self._log) if outside else self.executor
+        executor = (_outside_run.OutsideExecutor(self.executor, self.quest_root, log=self._log, share=not apart,
+                                                 only_named=apart) if outside or apart else self.executor)
         env = {k: v for k, v in env.items() if k != "FI_CHECKS_DIR"} if env is not None else None
         try:
             # From the quest folder with paths relative to it: in Docker that folder is what is mounted as /work.
@@ -12785,13 +12788,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return False
 
     async def _captured_calls(self, state: QuestState, protocol: dict[str, Any], package: str, specs: list[Any],
-                              exec_env: Any) -> dict[str, list[dict[str, Any]]]:
-        """What the key functions the plan gives no worked example for are called with when FI runs the simulation once
-        (core/second_impl.py::capture_inputs): at the settings of FI's small run (core/small_run.py::settings; each part
-        of a study takes other paths through the code), a search's baseline design first. ``{}`` when every key function
-        has the plan's example, or no run can be made."""
+                              exec_env: Any, *, depends: bool = False) -> dict[str, list[dict[str, Any]]]:
+        """What the key functions are called with when FI runs the simulation (core/second_impl.py::capture_inputs): at
+        the settings of FI's small run (core/small_run.py::settings; each part of a study takes other paths through the
+        code), a search's baseline design first; with ``depends`` then whether the headline results depend on each of
+        them (core/second_impl.py::dependence: each one's result changed where it is called). ``{}`` when no run can be
+        made."""
+        if depends:
+            (self.quest_root / _second_impl.DEPENDENCE).unlink(missing_ok=True)  # a record of earlier code says nothing
         selected, _skipped = _second_impl.key_functions(specs, protocol)
-        names = [s.name for s in selected if not _second_impl.example_inputs(s, protocol)]
+        names = [s.name for s in selected]
         simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
         if not names or not simulate.is_file():
             return {}
@@ -12819,18 +12825,78 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             from .small_run import budget as _small_run_budget
 
             async def run(argv: list[str]) -> Any:
+                # Apart from the study: a run with a function's result changed must neither read the values the study
+                # kept (data/results/cache/) nor leave its own there.
                 return await self._run_in_env(argv, timeout_s=_small_run_budget(self.config.execution.timeout_s),
-                                              env=dict(exec_env or {}))
+                                              env=dict(exec_env or {}), apart=True)
 
-            got = await _second_impl.capture_inputs(run, self.quest_root, package, names, cells,
-                                                    deterministic=deterministic, in_each_run=inside, thresholds=thresholds)
+            budget = 2 * _small_run_budget(self.config.execution.timeout_s)  # each of the two checks, in all
+            got = await self._await_with_heartbeat(
+                _second_impl.capture_inputs(run, self.quest_root, package, names, cells, deterministic=deterministic,
+                                            in_each_run=inside, thresholds=thresholds, budget_s=budget),
+                label="recording what the tested functions are called with")
         except Exception as e:  # noqa: BLE001 -- a record of the calls is an aid to a check; never a stop
             self._log.info("[implement] what the model's functions are called with could not be recorded: %r", e)
             return {}
         if got:
-            self._log.info("[implement] FI ran the simulation once and recorded what %d function(s) the plan gives no "
-                           "example for are called with: %s", len(got), ", ".join(sorted(got)))
+            self._log.info("[implement] FI ran the simulation and recorded what %d checked function(s) are called with: %s",
+                           len(got), ", ".join(sorted(got)))
+        if not depends:
+            return got
+        try:
+            found = await self._await_with_heartbeat(
+                _second_impl.dependence(run, self.quest_root, package, names,
+                                        self._headline_result_names(state, protocol, dependent=False),
+                                        deterministic=deterministic,
+                                        in_each_run=inside, thresholds=thresholds, budget_s=budget),
+                label="checking whether the headline results use the tested functions")
+            for line in _second_impl.dependence_sentences(found):
+                self._log.warning("[execute] %s", line)
+        except Exception as e:  # noqa: BLE001 -- a check on top; never a stop
+            self._log.info("[execute] whether the headline results depend on the checked functions could not be "
+                           "checked: %r", e)
         return got
+
+    async def _dependence_check(self, state: QuestState, exec_env: Any) -> None:
+        """After the study ran on code no step changes any more: whether its headline results are computed with the
+        model's tested functions (:meth:`_captured_calls` with ``depends``; core/second_impl.py::dependence). A function
+        the headline results do not use is a gap in the evidence. Never a stop; skipped on a resume when the record was
+        made on this code."""
+        try:
+            if not self.config.execution.code_function_steps or not self._runs_code(state):
+                return
+            if _second_impl.read_dependence(self.quest_root):
+                return  # already made on this code (a resume)
+            package = self._package_in_use(state)
+            protocol = self._protocol_block(state)
+            record = _function_steps.load(self.quest_root)
+            if not package or not isinstance(protocol, dict) or record.get("package") != package:
+                return
+            specs, _notes = _function_steps.model_functions(state.get("implement_outline") or {}, protocol)
+            done = {n for n, e in (record.get("functions") or {}).items()
+                    if isinstance(e, dict) and e.get("status") == _function_steps.DONE}
+            specs = [s for s in specs if s.name in done]
+            if specs:
+                await self._captured_calls(state, protocol, package, specs, exec_env, depends=True)
+        except Exception as e:  # noqa: BLE001 -- a check on top; never a stop
+            self._log.info("[execute] whether the headline results use the tested functions could not be checked: %r", e)
+
+    def _headline_result_names(self, state: QuestState, protocol: dict[str, Any] | None, *,
+                               dependent: bool = True) -> set[str]:
+        """The headline results: the protocol's headline metrics and (with ``dependent``) the design's dependent
+        variables, and for a search what it optimises and what limits it. Without ``dependent`` only names a run
+        returns its results under: a dependent variable is often written as a phrase."""
+        protocol = protocol if isinstance(protocol, dict) else {}
+        design = state.get("design") if isinstance(state.get("design"), dict) else {}
+        variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
+        names = set(_criteria.headline_names(protocol)) | (
+            {str(v) for v in variables.get("dependent") or []} if dependent else set())
+        block = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else None
+        if block is not None:
+            names |= {str((block.get("objective") or {}).get("quantity") or "")} | {
+                str(c.get("quantity") or "") for c in block.get("constraints") or [] if isinstance(c, dict)}
+        names.discard("")
+        return names
 
     async def _fill_model_functions(self, state: QuestState, outline: dict[str, Any]) -> bool:
         """After the outline, before the code is written whole: fill the model's package one function at a time, each
@@ -13540,7 +13606,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 independence_gaps = [f"whether the checks are independent of the model that wrote them could not be "
                                      f"checked ({type(e).__name__})"]
             independence_gaps = [*independence_gaps, *self._static_check_gaps(),  # core/static_checks.py
-                                 *_refine.evidence_gaps(self.quest_root, self._protocol_block(state))]
+                                 *_refine.evidence_gaps(self.quest_root, self._protocol_block(state)),
+                                 *_second_impl.dependence_gaps(self.quest_root)]
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 oracle_source_gaps=oracle_source_gaps, equation_label_gaps=label_gaps,
@@ -15760,14 +15827,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 and record.get("key") == _refine.key(protocol):
             return  # already run on this code and these settings (a resume)
         timeout = max(60, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac))
-        design = state.get("design") if isinstance(state.get("design"), dict) else {}
-        variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
-        names = set(_criteria.headline_names(protocol)) | {str(v) for v in variables.get("dependent") or []}
+        names = self._headline_result_names(state, protocol)
         block = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else None
-        if block is not None:  # a search's first scan: what it optimises and what it is limited by
-            names |= {str((block.get("objective") or {}).get("quantity") or "")} | {
-                str(c.get("quantity") or "") for c in block.get("constraints") or [] if isinstance(c, dict)}
-            names.discard("")
         inside = (_optimise_search.in_each_run(block) if block is not None else _in_run.of(protocol)) or None
         try:
             record = await self._await_with_heartbeat(_refine.run(
@@ -17187,6 +17248,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 await self._hidden_check(state, py, primary_env)  # the checks at a setting the code never saw
             if split:
                 await self._refinement_check(state, py, primary_env)  # the headline results at finer numerical settings
+            # Are the headline results computed with the model's functions FI tested? On the code as it ran.
+            await self._dependence_check(state, primary_env)
         if manifest_status == "stopped":
             try:
                 plain_stop = (_run_manifest.plain_difference(self._manifest_differences)
@@ -20201,6 +20264,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             evidence_note = (f"{evidence_note}\n\nFI ran the headline results again at finer numerical settings "
                              "(needs/REFINEMENT_CHECK.json); the paper says what this found:\n"
                              + "\n".join(f"- {line}" for line in refined)).strip()
+        if depends := _second_impl.dependence_sentences(_second_impl.read_dependence(self.quest_root)):
+            evidence_note = (f"{evidence_note}\n\nFI changed the result of each tested function of the model where "
+                             "the simulation calls it, to see whether the headline results are computed with it "
+                             "(.fi/second_impl/dependence.json); say this plainly where the paper says what was checked:\n"
+                             + "\n".join(f"- {line}" for line in depends)).strip()
         if typed_note := self._typed_figures_note():
             evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
         if code_note := _code_review.write_note(self.quest_root, self.quest_root / "code"):

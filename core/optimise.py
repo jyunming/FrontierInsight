@@ -547,8 +547,15 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             cell["reason"] = reasons.get(cell.get("key"), "")
         rows = _search.scan_rows(summary, block)
         if log is not None:
-            log.info("[optimise] the coarse scan ran %d design(s) after the baseline (%d worked); it is not counted in "
-                     "the search's budget", len(rows), sum(1 for r in rows if r.get("values") is not None))
+            ran = sum(1 for c in summary.get("cells") or [] if c.get("level") is None)
+            worked = sum(1 for r in rows if r.get("values") is not None)
+            if ran > len(rows):
+                log.info("[optimise] the coarse scan ran %d setting(s), not counted in the search's budget: %d of them "
+                         "under the conditions the search holds (%d worked) can start the search, the other %d are "
+                         "comparisons kept for the paper", ran, len(rows), worked, ran - len(rows))
+            else:
+                log.info("[optimise] the coarse scan ran %d design(s) after the baseline (%d worked); it is not counted "
+                         "in the search's budget", len(rows), worked)
         return rows
 
     gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds)

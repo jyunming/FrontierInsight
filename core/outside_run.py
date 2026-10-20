@@ -370,11 +370,14 @@ class OutsideCopy:
     this run (copied in when they are there, written back when the run changed them)."""
 
     def __init__(self, quest_root: Path | str, *, named: list[str] | tuple[str, ...] = (), base: Path | str | None = None,
-                 inputs: tuple[str, ...] = CELL_INPUTS, skip: tuple[str, ...] = CELL_SKIP, share: bool = True) -> None:
+                 inputs: tuple[str, ...] = CELL_INPUTS, skip: tuple[str, ...] = CELL_SKIP, share: bool = True,
+                 only_named: bool = False) -> None:
         self.quest_root = Path(quest_root).resolve()
         #: Whether :data:`SHARED_CACHE` may be linked into the copy (False: it was not prepared, or the run cannot follow
         #: a link to the quest's own folder); unlinked, the run works out its shared values in its own copy.
         self.share = share
+        #: Only the paths FI named for the run come back (a check's run whose other files must not reach the quest).
+        self.only_named = only_named
         self.named = sorted({n.strip("/") for n in named if n and not _never(n.strip("/"))})
         self.inputs = tuple(inputs)
         self.skip = tuple(skip)
@@ -430,7 +433,7 @@ class OutsideCopy:
             return False
         if any(rel == n or rel.startswith(n + "/") for n in self.named):
             return not (rel == CODE or rel.startswith(CODE + "/"))
-        return rel.split("/", 1)[0] not in FI_OWNED
+        return not self.only_named and rel.split("/", 1)[0] not in FI_OWNED
 
     def _forms(self) -> list[tuple[str, str]]:
         assert self.root is not None
@@ -528,8 +531,14 @@ class OutsideExecutor:
     on the command line and in the environment are written as the copy's."""
 
     def __init__(self, inner: Any, quest_root: Path | str, *, base: Path | str | None = None,
-                 inputs: tuple[str, ...] = CELL_INPUTS, skip: tuple[str, ...] = CELL_SKIP, log: Any = None) -> None:
+                 inputs: tuple[str, ...] = CELL_INPUTS, skip: tuple[str, ...] = CELL_SKIP, log: Any = None,
+                 share: bool = True, only_named: bool = False) -> None:
         self.inner = inner
+        # ``share`` False: the run never sees the quest's shared folder (it works out every value itself); ``only_named``:
+        # only the paths FI named for it come back. Both for a check whose run must neither read what the study kept nor
+        # leave anything in the quest (core/second_impl.py changes a function's result to see what depends on it).
+        self._share = share
+        self._only_named = only_named
         self.quest_root = Path(quest_root).resolve()
         self._base = base
         self._inputs = inputs
@@ -565,14 +574,15 @@ class OutsideExecutor:
         if Path(cwd).resolve() != self.quest_root:
             return await self.inner.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
         named = named_paths(self.quest_root, [*cmd[1:], *(env or {}).values()])
-        shares = self._links and any(SHARED_CACHE == s or SHARED_CACHE.startswith(s + "/") for s in self._skip)
+        shares = self._share and self._links and any(SHARED_CACHE == s or SHARED_CACHE.startswith(s + "/")
+                                                     for s in self._skip)
         if shares:
             shares = await asyncio.to_thread(prepare_shared_cache, self.quest_root, self._log) is not None
         box = OutsideCopy(self.quest_root, named=named, base=self._base, inputs=self._inputs, skip=self._skip,
-                          share=shares)
+                          share=shares, only_named=self._only_named)
         root = await asyncio.to_thread(box.make)
         self.last = box
-        if box.not_shared and not self._said_not_shared:
+        if box.not_shared and self._share and not self._said_not_shared:
             self._said_not_shared = True
             self._log.warning("[run] the settings cannot share %s/ (FI could not link it into the copy the code runs "
                               "from), so each setting works out what is kept there again", SHARED_CACHE)
@@ -594,7 +604,7 @@ class OutsideExecutor:
             if stopped and box.linked:
                 await self._clean_shared(shared_before, beside=self._running.get(token, False))
             dropped = [r for r in box.left_out if not r.endswith(".pyc") and "/__pycache__/" not in f"/{r}"]
-            if dropped:
+            if dropped and not self._only_named:  # a check's run keeps only what FI named, by design
                 self._log.warning("[run] the code ran from a copy outside the quest folder and wrote into FI's own "
                                   "folders (%s), which is not kept: %s", ", ".join(f"{d}/" for d in FI_OWNED),
                                   ", ".join(dropped))

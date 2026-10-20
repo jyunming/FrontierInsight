@@ -87,7 +87,12 @@ def _fi_capture(cfg):
         np = None
     mod = importlib.import_module(cfg["module"])
     limit, most = int(cfg.get("limit") or 3), int(cfg.get("max_elements") or 20000)
-    seen = {}
+    # ``shift``: ``{"name", "scale"}``, the one function whose result is changed by that share before the caller gets it
+    # (does a result depend on it?); ``counts``: how often each named function was called; ``shifted``: how many of the
+    # shifted function's results held a number that could be changed.
+    shift = cfg.get("shift") or {}
+    shifted_name, scale = shift.get("name"), float(shift.get("scale") or 0.0)
+    seen, counts, shifted = {}, {}, {}
 
     def conv(x, left):
         if np is not None and isinstance(x, np.ndarray):
@@ -112,18 +117,54 @@ def _fi_capture(cfg):
             return [conv(i, left) for i in x]
         raise TypeError("not plain data")
 
+    # Each number is changed by its own share (scale times the next of these, in turn): a share common to all of them
+    # would vanish in a result that only uses their ratios (weights of a fit, a normalised distribution).
+    pattern, turn = (1.0, -0.7, 0.4, -0.9, 0.6, -0.3, 0.8, -0.5), [0]
+
+    def factors(n):
+        out = [1.0 + scale * pattern[(turn[0] + i) % len(pattern)] for i in range(n)]
+        turn[0] += n
+        return out
+
+    def changed(x, hit):
+        # Every real or complex number in what the function returned is changed; whole numbers and flags stay as they
+        # are (a count or an index), and so does anything that is not a number, a list, a tuple or a dict of them.
+        if np is not None and isinstance(x, np.ndarray):
+            if x.dtype.kind in "fc" and x.size:
+                hit[0] = hit[0] or bool(np.any(x != 0))
+                return x * np.asarray(factors(x.size)).reshape(x.shape)
+            return x
+        if np is not None and isinstance(x, np.generic):
+            if x.dtype.kind in "fc":
+                hit[0] = hit[0] or bool(x != 0)
+                return x * factors(1)[0]
+            return x
+        if isinstance(x, bool) or isinstance(x, int):
+            return x
+        if isinstance(x, (float, complex)):
+            hit[0] = hit[0] or x != 0  # a zero stays zero: changing it by a share changes nothing
+            return x * factors(1)[0]
+        if isinstance(x, dict):
+            return {k: changed(v, hit) for k, v in x.items()}
+        if isinstance(x, tuple):
+            items = [changed(v, hit) for v in x]
+            return type(x)(*items) if hasattr(x, "_fields") else tuple(items)
+        if isinstance(x, list):
+            return [changed(v, hit) for v in x]
+        return x
+
     def wrap(name, fn):
         try:
             sig = inspect.signature(fn)
         except (TypeError, ValueError):
             return fn
-        if any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in sig.parameters.values()):
-            return fn
+        plain = not any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in sig.parameters.values())
 
         @functools.wraps(fn)
         def recorded(*a, **k):
+            counts[name] = counts.get(name, 0) + 1
             cases = seen.setdefault(name, [])
-            if len(cases) < limit:
+            if plain and len(cases) < limit:
                 try:
                     bound = sig.bind(*a, **k)
                     left = [most]
@@ -132,7 +173,12 @@ def _fi_capture(cfg):
                         cases.append(case)
                 except Exception:
                     pass
-            return fn(*a, **k)
+            got = fn(*a, **k)
+            if name == shifted_name:
+                hit = [False]
+                got = changed(got, hit)
+                shifted[name] = shifted.get(name, 0) + (1 if hit[0] else 0)
+            return got
         return recorded
 
     originals = {}
@@ -148,7 +194,7 @@ def _fi_capture(cfg):
         for name, fn in originals.items():
             if getattr(m, name, None) is fn:
                 setattr(m, name, getattr(mod, name))
-    return seen
+    return {"cases": seen, "counts": counts, "shifted": shifted}
 
 def main():
     import os
