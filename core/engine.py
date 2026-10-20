@@ -82,6 +82,7 @@ from . import todo as _todo
 from . import crash_kind as _crash_kind
 from . import oracle_card as _oracle_card
 from . import oracle_triage as _oracle_triage
+from . import oracle_challenge as _oracle_challenge
 from . import code_layout as _code_layout
 from . import changelog as _changelog
 from . import code_project as _code_project
@@ -13950,6 +13951,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._oracle_set_aside: dict[str, str] = {}
         self._oracle_noisy: set[str] = set()  # those set aside as one random trial's noise
         self._oracle_undecided: set[str] = set()  # those set aside because their trials did not decide them yet
+        # The code questioned the plan's own working (core/oracle_challenge.py): name -> the challenge, and what the
+        # exchange decided once it was had; a check the plan's answer sends back to the code carries its reason.
+        self._oracle_challenges: dict[str, dict[str, Any]] = {}
+        self._oracle_challenge_hints: dict[str, str] = {}
         # A dispute outlives a stop: the checks the last run of this gate found disputed, while they are as they were then
         # (a person who changed one, or accepted its proposal, starts it afresh).
         self._restore_oracle_disputes(_oracle.declared(protocol))
@@ -14125,6 +14130,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # A check FI's own look found wrong, with a value two independent workings agree on (the plan's own
             # arithmetic and another model that never saw the measured value): FI corrects the plan's expected value
             # itself (never to the measured value, never its tolerance) and measures the checks again.
+            if self._oracle_challenges:
+                await self._answer_challenges(state, oracles, attempts[-1])
             corrected = self._correct_expected_values(attempts[-1]["judged"], oracles)
             if corrected:
                 looked.difference_update(corrected)
@@ -14164,6 +14171,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             code_before, new_code_before = seed_path.read_text(encoding="utf-8"), new_code
             package_before = self._package_snapshot()
             hints = self._multiple_hints(oracles, measured_to_fix, attempts[-1], hinted)
+            hints += [self._oracle_challenge_hints.pop(n) for n in list(self._oracle_challenge_hints)
+                      if n in {str(j.get('name')) for j in measured_to_fix}]
             text, call_failed, outcome = await self._repair_script_for_oracle(
                 state, seed_path, oracles, to_fix,
                 # What FI found about the numbers (a measured value that is half the value it worked out, say), then
@@ -14221,6 +14230,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         "script_version": version}
                        for c in (go_on_checks or _accepted.went_on_entries(found, run_oracles,
                                                                            attempts[-1].get("judged") or []))]
+        # A check the code and the plan's own working still disagree on (core/oracle_challenge.py) is said as that, with
+        # every side's reason: not as a failure of the code.
+        for c in went_on or []:
+            settled = (self._oracle_challenges.get(str(c.get("name") or "")) or {}).get("outcome") or {}
+            if settled.get("outcome") == "unsettled":
+                c["disagreement"] = settled["text"]
         status = ("ok" if not found else "warned" if self.config.engine.oracle_check == "warn"
                   else _accepted.WENT_ON if went_on else "stopped")
         proposed = list(self._oracle_proposals.values())
@@ -14468,6 +14483,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         ``=``, a function with a peak inside the range of its rounded constants), and one model alone can be wrong: on
         either alone the check is only set aside and goes on unconfirmed, which can lower a result, never raise one."""
         confirm = proposal.get("confirmed_by")
+        if proposal.get("source") == "challenge":
+            # The code's formula, computed by FI, and the plan's corrected formula or the judge's, computed by FI too.
+            return (isinstance(confirm, dict) and confirm.get("source") == "challenge"
+                    and _oracle_triage.num(confirm.get("value")) is not None)
         return (proposal.get("source") == "arithmetic" and isinstance(confirm, dict)
                 and confirm.get("source") == "recompute" and _oracle_triage.num(confirm.get("value")) is not None)
 
@@ -14476,6 +14495,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """The correction worked out again against the check as it is NOW (never trusting stored fields alone): the
         plan's current derivation still has the slip and gives the proposed value, and the second source's value lies
         within the check's own tolerance of it."""
+        if proposal.get("source") == "challenge":
+            confirm = proposal.get("confirmed_by") or {}
+            value = _oracle_triage.num(proposal.get("expected"))
+            again = _oracle_challenge.computes(oracle, proposal.get("expected_formula"))
+            if value is None or again is None or confirm.get("fingerprint") != _oracle_triage.fingerprint(oracle):
+                return False
+            _expected, limit, _mode = _oracle.limit_of({**oracle, "expected": value})
+            return limit is not None and abs(again - value) <= limit
         slip = _oracle_triage.plan_slip(oracle)
         value = _oracle_triage.num(proposal.get("expected"))
         confirm = proposal.get("confirmed_by") or {}
@@ -14593,10 +14620,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[oracle] corrected the expected value of %r: %s -> %s (%s); measuring the checks again",
                               n, before[n], _oracle.fmt_digits(todo[n]["expected"]), why[n])
             second = todo[n].get("confirmed_by") or {}
+            also = ("" if second.get("source") == "challenge" else
+                    f" Another model ({second.get('model') or 'not the one that wrote the plan'}), never shown the "
+                    f"measured value, got {_oracle.fmt_digits(second.get('value'))} too.")
             print(f"[FI] FI corrected an expected value the plan had worked out wrongly: '{n}' {before[n]} -> "
-                  f"{_oracle.fmt_digits(todo[n]['expected'])}, because {_lower_first(why[n])} Another model "
-                  f"({second.get('model') or 'not the one that wrote the plan'}), never shown the measured value, got "
-                  f"{_oracle.fmt_digits(second.get('value'))} too.")
+                  f"{_oracle.fmt_digits(todo[n]['expected'])}, because {_lower_first(why[n])}.{also}")
             if record[n].get("agrees_with_measurement"):
                 print(f"[FI] The corrected value of '{n}' matches what was measured: this check now shows the simulation "
                       "computes the plan's own formula correctly, not that the formula itself is right.")
@@ -15522,6 +15550,129 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             record.setdefault("triage", []).extend(entries)
         return calls, runs
 
+    async def _answer_challenges(self, state: QuestState, oracles: list[dict[str, Any]], attempt: dict[str, Any]) -> None:
+        """The plan's model answers each new question the code put to the plan's working, and a third model judges when
+        it stands by it (core/oracle_challenge.py); neither is shown the measured value, and FI computes every formula
+        itself. Each exchange is asked once per version of the check and the question, kept in ``.fi/oracle_triage.json``
+        so a resume never asks again; what it decided goes into the attempt's ``triage`` and run.log."""
+        declared = {str(o.get("name") or "").strip(): o for o in oracles}
+        kept = _oracle_triage.read(self.fi_dir)
+        record = kept.get(_oracle_challenge.RECORD_KEY) if isinstance(kept.get(_oracle_challenge.RECORD_KEY), dict) else {}
+        topic = str(state.get("topic") or self.config.topic or "")
+        frozen = _frozen.load(self.quest_root) is not None
+        judge = self._model_for_node(_review.NODE) or self.config.provider.model or "the provider's default model"
+        writers = {self._model_for_node(n) or self.config.provider.model or "" for n in _review.WRITER_NODES}
+        changed = False
+        for name, challenge in list(self._oracle_challenges.items()):
+            oracle = declared.get(name)
+            if oracle is None or challenge.get("outcome"):
+                continue
+            fp = _oracle_triage.fingerprint(oracle)
+            key = fp + "|" + hashlib.sha256(challenge["formula"].encode("utf-8")).hexdigest()[:16]
+            saved = record.get(key) if isinstance(record.get(key), dict) else None
+            if saved is not None:
+                answer, verdict = saved.get("answer") or {}, saved.get("verdict")
+            else:
+                self._progress("Asking the plan's model to answer the code's objection to a known answer")
+                try:
+                    reply = await self._chat(_oracle_challenge.plan_prompt(
+                        self._prompts["oracle_challenge_plan"], topic=topic, oracle=oracle, challenge=challenge),
+                        node=_oracle_challenge.PLAN_NODE)
+                    answer = _oracle_challenge.parse_plan(_parse_json_lenient(reply, node=_oracle_challenge.PLAN_NODE))
+                except Exception as e:  # noqa: BLE001 -- an answer that could not be had never stops a quest
+                    answer = _oracle_challenge.parse_plan(None)
+                    answer["why"] = f"the plan's model could not be asked ({str(e)[:160] or type(e).__name__})"
+                verdict = None
+                if _oracle_challenge.settle(oracle, challenge, answer, None)["outcome"] != "corrected":
+                    self._progress("Asking a third model to judge between the two workings")
+                    try:
+                        reply = await self._chat(_oracle_challenge.judge_prompt(
+                            self._prompts["oracle_challenge_judge"], topic=topic, oracle=oracle, challenge=challenge,
+                            answer=answer), node=_oracle_challenge.JUDGE_NODE)
+                        verdict = _oracle_challenge.parse_judge(_parse_json_lenient(reply,
+                                                                                    node=_oracle_challenge.JUDGE_NODE))
+                    except Exception as e:  # noqa: BLE001
+                        verdict = _oracle_challenge.parse_judge(None)
+                        verdict["why"] = f"the judge could not be asked ({str(e)[:160] or type(e).__name__})"
+                    # Whether the judge is a model that may have written the plan: said with its verdict, never hidden.
+                    verdict["model"] = judge
+                    verdict["same_model"] = ("" in writers or any(_review.same_model(judge, w) for w in writers))
+                record[key] = {"name": name, "answer": answer, "verdict": verdict}
+                changed = True
+            result = _oracle_challenge.settle(oracle, challenge, answer, verdict)
+            if result["outcome"] == "unsettled":
+                # The last referee is not a model's word: the number computed numerically from the definitions.
+                numeric = record[key].get("numeric") if isinstance(record.get(key), dict) else None
+                if not isinstance(numeric, dict):
+                    numeric = await self._numeric_reference(state, oracle)
+                    record[key] = {**record.get(key, {}), "numeric": numeric}
+                    changed = True
+                result = _oracle_challenge.settle_numeric(oracle, challenge, verdict, numeric.get("value"),
+                                                          str(numeric.get("how") or ""), result)
+            if result["outcome"] in ("corrected", "both") and frozen:
+                result = {"outcome": "unsettled", "by": "", "text": result["text"] + "; the protocol is frozen, so FI "
+                          "does not correct the check: it goes on unconfirmed"}
+            if result["outcome"] == "corrected" and (verdict or {}).get("same_model") and result["by"] == "the judge":
+                result["text"] += " (the judge is the model that wrote the plan, so this counts for less)"
+            challenge["outcome"] = result
+            proposal = self._oracle_proposals.get(name) or {}
+            if result["outcome"] in ("corrected", "both"):
+                formula = challenge["formula"] if result["outcome"] == "corrected" else result["formula"]
+                self._oracle_proposals[name] = {**proposal, "source": "challenge", "expected": result["expected"],
+                                                "expected_formula": formula, "reason": result["text"],
+                                                "confirmed_by": {"source": "challenge", "by": result["by"],
+                                                                 "value": result["expected"], "fingerprint": fp}}
+                self._log.warning("[oracle] '%s': %s; FI corrects the check's expected value to %s", name, result["text"],
+                                  _oracle.fmt_digits(result["expected"]))
+                if result["outcome"] == "both":
+                    # The code was wrong too: once the check holds the corrected value, the code is repaired towards it.
+                    self._oracle_disputed.discard(name)
+                    self._oracle_challenge_hints[name] = result["text"]
+            else:
+                self._oracle_disputed.discard(name)
+                self._oracle_proposals.pop(name, None)
+                if result["outcome"] == "code":
+                    self._oracle_challenge_hints[name] = result["text"]
+                    self._log.warning("[oracle] '%s': %s; the code is repaired once more, told why", name, result["text"])
+                else:
+                    self._oracle_set_aside[name] = result["text"]
+                    self._log.warning("[oracle] %s; it goes on unconfirmed", result["text"])
+            attempt.setdefault("triage", []).append({
+                "kind": "challenge", "check": name, "outcome": result["outcome"], "tried": result["text"],
+                **({"points_to": "check"} if result["outcome"] == "corrected" else {}),
+                "code": {k: challenge[k] for k in ("step", "formula", "value", "reason") if k in challenge},
+                "plan": answer, **({"judge": verdict} if verdict is not None else {})})
+        if changed:
+            _oracle_triage.write(self.fi_dir, {**_oracle_triage.read(self.fi_dir), _oracle_challenge.RECORD_KEY: record})
+
+    async def _numeric_reference(self, state: QuestState, oracle: dict[str, Any]) -> dict[str, Any]:
+        """The check's number computed numerically from the definitions by a short script the model named for
+        ``oracle_review`` writes (never shown either working or the measurement) and FI runs in the quest's environment,
+        bounded in time: ``{"value", "how", "model", "script"}`` (``value`` None when it gave none)."""
+        model = self._model_for_node(_review.NODE) or self.config.provider.model or "the provider's default model"
+        self._progress("Computing a known answer numerically, from the definitions")
+        try:
+            reply = await self._chat(_oracle_challenge.numeric_prompt(
+                self._prompts["oracle_numeric_reference"], topic=str(state.get("topic") or self.config.topic or ""),
+                oracle=oracle, protocol=self._protocol_block(state)), node=_oracle_challenge.NUMERIC_NODE)
+        except Exception as e:  # noqa: BLE001 -- a referee that could not be had leaves the check unconfirmed
+            return {"value": None, "how": f"it could not be asked ({str(e)[:160] or type(e).__name__})", "model": model}
+        script, why = _oracle_challenge.numeric_script(reply)
+        if not script:
+            return {"value": None, "how": why, "model": model}
+        folder = self.fi_dir / "numeric_reference"
+        folder.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(oracle.get("name") or "check"))[:60] or "check"
+        path = folder / f"{safe}.py"
+        path.write_text(script, encoding="utf-8")
+        code, out, err = await self._run_in_env([self._rel_to_quest(path)], timeout_s=_oracle_challenge.NUMERIC_TIMEOUT_S)
+        value, how = _oracle_challenge.numeric_value(out)
+        if value is None and code != 0:
+            how = f"the script failed ({(err or '').strip().splitlines()[-1][:200] if (err or '').strip() else code})"
+        self._log.info("[oracle] the numerical computation of %r from the definitions: %s", str(oracle.get("name")),
+                       f"{_oracle.fmt_digits(value)} ({how})" if value is not None else how)
+        return {"value": value, "how": how, "model": model, "script": self._rel_to_quest(path)}
+
     async def _recompute_expected(self, state: QuestState, oracle: dict[str, Any], value: float | None,
                                   ) -> tuple[dict[str, Any], bool]:
         """A failing check's expected value worked out again (prompt ``oracle_recompute``) by the model named for
@@ -16435,11 +16586,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         for proposal in _oracle.proposals(parsed.get("oracle_change"), oracles):
             own = next((o for o in oracles if str(o.get("name") or "").strip() == proposal["name"]), None)
             if own is not None and _oracle_triage.formula_value(own, protocol_now if isinstance(protocol_now, dict) else None) is not None:
-                # FI computed this check's expected value from the plan's own formula: the repair may not change it (only
-                # the formula itself can be questioned, through the plan), and a repair written against it is not used.
-                self._log.warning("[oracle] the repair proposes expected %s for '%s', whose expected value FI computed from "
-                                  "the plan's own formula; the proposal is not taken", proposal["expected"], proposal["name"])
+                # FI computed this check's expected value from the plan's own formula: still only the plan's working. The
+                # repair may question it -- naming the step and giving a formula FI computes -- and the plan's model must
+                # answer (core/oracle_challenge.py); the repair's code is not used either way.
                 fi_value_disputed = True
+                challenge, why_not = _oracle_challenge.challenge_of(own, proposal)
+                if challenge is None or proposal["name"] in self._oracle_challenges:
+                    self._log.warning("[oracle] the repair proposes expected %s for '%s', whose expected value FI computed "
+                                      "from the plan's own formula; the proposal is not taken (%s)", proposal["expected"],
+                                      proposal["name"], why_not or "the plan has answered this check's question already")
+                    continue
+                self._oracle_challenges[proposal["name"]] = challenge
+                self._oracle_proposals[proposal["name"]] = {**proposal, "expected": challenge["value"],
+                                                            "source": "challenge"}
+                self._oracle_disputed.add(proposal["name"])
+                self._log.warning("[oracle] the code questions the plan's working for '%s' (the step: %s; its formula gives "
+                                  "%s): the plan's model is asked to answer", proposal["name"], challenge["step"][:200],
+                                  _oracle.fmt_digits(challenge["value"]))
                 continue
             self._oracle_proposals[proposal["name"]] = proposal
             if proposal["name"].strip().lower() not in {str(n).strip().lower() for n in passing or []}:
@@ -25831,6 +25994,9 @@ def _load_prompts() -> dict[str, string.Template]:
         "topic_cover",                      # ... and judges the items a name match could not find in the plan
         "code_review",                      # a second model reads the code against the plan's required outputs
         "oracle_recompute",                 # a failing check's expected value worked out again, blind to the measurement
+        "oracle_challenge_plan",            # the plan's model answers the code's objection to its known answer
+        "oracle_challenge_judge",           # a third model judges between the two workings
+        "oracle_numeric_reference",         # ... and, still unsettled, a script that computes the answer numerically
         "implement",                      # legacy one-shot (resume fallback)
         "implement_outline",                # two-stage implement: scaffold
         "select_skills",        # pick which skills this quest carries

@@ -776,6 +776,25 @@ def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
     return f"the check {name!r} takes its expected value from a source this quest did not retrieve (“{ref[:80]}”)"
 
 
+def validates(oracle: dict[str, Any], protocol: dict[str, Any] | None, sources: list[dict[str, str]]) -> bool:
+    """Whether a passing check is evidence the code is right independently of the plan's own working: a second
+    implementation that shares no code with the simulation, or an expected value taken from a source this quest
+    retrieved (cited in the check's reference, or in the source of a model equation the reference names). A value the
+    plan's model derived itself (a `derivation`, an equation whose source is a derivation) shows only that the code
+    agrees with the plan, not that either is right."""
+    ref = reference_of(oracle)
+    if kind_of(oracle) == "second_implementation":
+        return bool(_NOT_SHARED_RE.search(ref))
+    if _derivation_steps(ref) is None and _cites(ref, sources)[0]:
+        return True
+    for eid, eq in _equations(protocol).items():
+        if re.search(rf"(?<![\w.]){re.escape(eid)}(?!\w|\.\d)", ref, re.IGNORECASE):
+            source = _text(eq.get("source")) or next((t for t in (_text(eq.get(k)) for k in _EQ_SOURCE_KEYS) if t), "")
+            if _derivation_steps(source) is None and _cites(source, sources)[0]:
+                return True
+    return False
+
+
 def empty_references(protocol: dict[str, Any] | None) -> list[str]:
     """The sentence :func:`reference_problem` gives each declared oracle whose ``reference`` is empty: the one judgement
     that needs no list of the quest's sources."""
@@ -1207,7 +1226,11 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
         "`oracle_change`: a list of {\"name\": <the declared "
         "name>, \"expected\": <number>, \"tolerance\": <number>, \"tolerance_mode\": \"absolute\" | \"relative\", \"check\": "
         "<the corrected check, only if the measurement itself must change>, \"reason\": <the method's known error or the flaw, "
-        "with the numbers>}, and leave `code` empty: the script is kept as it is. Code returned together with an "
+        "with the numbers>, \"disputed_step\": <the step of the check's reference or working that is wrong, quoted>, "
+        "\"expected_formula\": <" + _EXPECTED_FORMULA_SHORT + ">}, and leave `code` empty: the script is kept as it is. "
+        "When the check's expected value is the plan's own working (a derivation or its `expected_formula`), give "
+        "`disputed_step` and `expected_formula` too: FI computes your formula itself, and the plan's model is asked to "
+        "answer your objection. Code returned together with an "
         "`oracle_change` for a check not already listed as disputed is not used (it cannot be told apart from code bent to "
         "that check); when other problems need a fix too, you are asked for it again without the disputed check. A person "
         "decides whether to accept the change; nothing changes without them.\n\n"
@@ -1219,6 +1242,12 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
            "FI_REPLICATE_SEED, and the same final RESULT_JSON line. When you fix the script, return the whole script in "
            "`code`; always give one sentence in `patch_summary`, and leave `give_up_reason` empty.")
     )
+
+
+#: How a repair writes the expected value it proposes as a formula, in the prompt (the full rule:
+#: ``core.oracle_forms.EXPECTED_FORMULA_LANGUAGE``).
+_EXPECTED_FORMULA_SHORT = ("the expected value as one formula FI can compute: numbers, + - * / **, pi, sqrt, exp, log, cos, "
+                           "sin and the other usual functions, and the settings of the check's `case` by name")
 
 
 def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1236,6 +1265,10 @@ def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         mode = "relative" if str(item.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
         entry: dict[str, Any] = {"name": name, "expected": expected, "tolerance": tolerance, "tolerance_mode": mode, "reason": reason[:600]}
+        for key in ("disputed_step", "expected_formula"):  # the code's question to the plan (core/oracle_challenge.py)
+            text = " ".join(str(item.get(key) or "").split())
+            if text:
+                entry[key] = text[:600]
         check = str(item.get("check") or "").strip()
         if check:
             entry["check"] = check[:600]
