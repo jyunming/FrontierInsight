@@ -782,7 +782,8 @@ class RunChecksMixin:
         return None
 
     async def _slowdown_at_once(self, runner: Any, python: Any, env: Any, probes: list[Any], runs: int,
-                                thresholds: dict[str, Any], inside: Any, at_once: int, budget_s: float) -> float | None:
+                                thresholds: dict[str, Any], inside: Any, at_once: int, budget_s: float,
+                                deterministic: bool | None = None) -> float | None:
         """How many times slower a setting runs when ``at_once`` run at the same time on this machine
         (:func:`core.run_estimate.slowdown_at_once`), or ``None`` when it could not be measured in the time left for timing;
         then the estimate counts the settings one after another, as before. It is measured on the costliest timed setting
@@ -809,7 +810,8 @@ class RunChecksMixin:
         started = time.monotonic()
         factor, why = await _estimate.slowdown_at_once(
             self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
-            dict(base.cell), at_once=at_once, runs=runs, deterministic=runner.deterministic,
+            dict(base.cell), at_once=at_once, runs=runs,
+            deterministic=runner.deterministic if deterministic is None else deterministic,
             timeout_s=int(max(30, 3 * timing + 10)), env=env, thresholds=thresholds, in_each_run=inside)
         self._pilot_spent += time.monotonic() - started
         if factor is None:
@@ -899,6 +901,17 @@ class RunChecksMixin:
                 est = _estimate.estimate(grid, runs, deterministic, probes)
                 if probes:
                     first_s = float(probes[0].first_s or probes[0].seconds)
+                # The scan runs ``execution.settings_at_once`` settings at the same time (core/optimise.py::run_search), so
+                # it is counted that way, with how much slower a setting runs beside the others on this machine, as a
+                # measurement is (_size_the_run); one after another it was counted many times too long.
+                at_once = int(getattr(runner, "at_once", 1) or 1)
+                if at_once > 1 and probes and _estimate.known_too_long(est, limit_s):
+                    spent = time.monotonic() - timing_started
+                    slowdown = await self._slowdown_at_once(runner, python, env, probes, runs, thresholds or {},
+                                                            inside or None, at_once, max(0.0, budget_s - spent),
+                                                            deterministic=deterministic)
+                    if slowdown is not None:
+                        est = _estimate.estimate(grid, runs, deterministic, probes, at_once=at_once, slowdown=slowdown)
         if per_setting is not None and (est is None or per_setting * scan > est.seconds):
             est = _estimate.Estimate(seconds=per_setting * scan, at_least=False, complete=True, cells=scan, trials=scan * runs)
         if est is None:

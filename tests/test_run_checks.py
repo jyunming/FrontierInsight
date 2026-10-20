@@ -785,6 +785,32 @@ async def test_a_scan_evaluation_cut_at_its_allowance_is_timed_again_before_the_
 
 
 @pytest.mark.asyncio
+async def test_a_scan_run_several_settings_at_once_is_counted_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scan whose settings one after another would take far longer than allowed, run 8 at a time (each 1.2 times slower
+    beside the others), fits: a real scan was stopped as too long when it was counted one after another."""
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = dict(_MID_GRID)
+    eng, runner = await _search_engine(tmp_path, block)
+    eng.config.execution.timeout_s = 7200
+
+    async def timed(*a: Any, **k: Any) -> Any:
+        return run_estimate.Probe(None, None, {}, 3.0), ""
+
+    async def slower(*a: Any, at_once: int, **k: Any) -> Any:
+        assert at_once == 8
+        return 1.2, ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", timed)
+    monkeypatch.setattr(run_estimate, "slowdown_at_once", slower)
+    # 8,250 settings x 3 s one after another: about 10 h with FI's margin, more than the 2 h allowed.
+    alone = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert alone is not None and "8,250 settings" in alone["exec_result"]["too_long"]
+    runner.at_once = 8  # execution.settings_at_once
+    # 8 at a time, 1.2 times slower: 8,250 x 3 x 1.2 / 8 = 3,713 s, about 1.5 h with the margin.
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+
+
+@pytest.mark.asyncio
 async def test_a_baseline_that_cannot_be_timed_keeps_the_plans_claim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     block = copy.deepcopy(_SCAN_BLOCK)
     block["grid"] = dict(_MID_GRID)
