@@ -733,14 +733,13 @@ def test_the_costliest_settings_start_first() -> None:
     assert [t["index"] for t in trial_runner._costliest_first(plan, broken)] == [0, 1, 2, 3, 4]
 
 
-def test_auto_runs_half_the_cores_worth_of_settings_at_once() -> None:
+def test_auto_runs_a_settings_worth_on_every_core() -> None:
     assert trial_runner.settings_at_once(3) == 3
     assert trial_runner.settings_at_once(0) == 1
-    assert trial_runner.settings_at_once("auto", cores=16) == 8
-    assert trial_runner.settings_at_once("auto", cores=32) == trial_runner.AUTO_AT_ONCE_MOST == 8
-    assert trial_runner.settings_at_once("auto", cores=6) == 3
+    assert trial_runner.settings_at_once("auto", cores=16) == 16
+    assert trial_runner.settings_at_once("auto", cores=32) == 32
     assert trial_runner.settings_at_once("auto", cores=1) == 1
-    assert trial_runner.settings_at_once("auto", cores=16, fleet=4) == 2, "quests running at once share the cores"
+    assert trial_runner.settings_at_once("auto", cores=16, fleet=4) == 4, "quests running at once share the cores"
     assert trial_runner.settings_at_once("auto", cores=16, fleet=20) == 1
 
 
