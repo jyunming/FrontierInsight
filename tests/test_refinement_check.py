@@ -247,3 +247,22 @@ def test_a_result_with_nothing_to_compare_its_error_with_is_not_said_to_be_zero_
     assert "0%" not in text and "0.35, with no spread or value to compare it with" in text, text
     record["settings"]["mesh"]["results"][0]["error"] = None
     assert "could not be estimated" in " ".join(rc.lines(record))
+
+
+def test_the_project_files_fi_writes_after_the_run_do_not_make_the_check_look_stale(tmp_path: Path) -> None:
+    """A live quest's refinement check ran, then FI updated code/requirements.txt for the project you can run on its own,
+    and the evidence said the check "ran on other code"; a change to the simulation itself is still caught."""
+    from core import code_project
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    (code / code_project.REQUIREMENTS).write_text("numpy\n", encoding="utf-8")
+    protocol, _why = plan.normalize_protocol(dict(PROTOCOL))
+    rc.write(tmp_path, {"code_sha256": rc._hidden.code_sha(tmp_path), "key": rc.key(protocol), "status": "converged",
+                        "settings": {"step_mm": {"verdict": "converged"}}})
+    (code / code_project.REQUIREMENTS).write_text("numpy\nscipy\nmatplotlib\n", encoding="utf-8")
+    (code / code_project.STUDY).write_text('{"grid": {}}\n', encoding="utf-8")
+    assert rc.evidence_gaps(tmp_path, protocol) == []
+    (code / "simulate.py").write_text("def run_cell(cell):\n    return {'x': 1}\n", encoding="utf-8")
+    assert "other code" in rc.evidence_gaps(tmp_path, protocol)[0]

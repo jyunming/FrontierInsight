@@ -43,6 +43,7 @@ import random
 from pathlib import Path
 from typing import Any
 
+from . import code_project as _code_project
 from . import in_run as _in_run
 from . import mc_error as _mc
 from . import optimise as _optimise
@@ -158,11 +159,16 @@ def derive(oracle: dict[str, Any], protocol: dict[str, Any] | None,
 _NOT_THE_SIMULATION = ("analysis.py", "experiment.py", "web_plots.py", "replot_figures.py", "replot_figures.json",
                        "replot_layout.py", "run.py", "submit.py", "fi_search.py")
 _NOT_THE_SIMULATION_DIRS = ("__pycache__", ".git")
+# The project files FI writes into code/ itself after the run (core/code_project.py): its own record of the study, not the
+# simulation, so writing them never makes a check of the simulation look as if it ran on other code.
+_FI_PROJECT_FILES = (_code_project.README, _code_project.REQUIREMENTS, _code_project.RUN, _code_project.STUDY,
+                     _code_project.SEARCH)
 
 
 def code_sha(quest_root: Path) -> str:
     """One hash of the simulation's code as it is now: simulate.py and every other file under ``code/`` it may use
-    (the model's package, a parameter file), not the analysis, the notes (``*.md``) or git's own; ``""`` when there is
+    (the model's package, a parameter file), not the analysis, the notes (``*.md``), git's own or the project files FI
+    writes itself (``requirements.txt``, ``study.json``); ``""`` when there is
     no simulate.py."""
     code = Path(quest_root) / "code"
     if not (Path(quest_root) / _SIMULATE).is_file():
@@ -171,7 +177,8 @@ def code_sha(quest_root: Path) -> str:
     for path in sorted(p for p in code.rglob("*") if p.is_file()):
         rel = path.relative_to(code)
         # FI's own scripts are named only at the top of code/: a file of the model's package with such a name is code.
-        if ((len(rel.parts) == 1 and path.name in _NOT_THE_SIMULATION) or path.suffix.lower() == ".md"
+        if ((len(rel.parts) == 1 and (path.name in _NOT_THE_SIMULATION or path.name in _FI_PROJECT_FILES))
+                or path.suffix.lower() == ".md"
                 or any(part in _NOT_THE_SIMULATION_DIRS for part in rel.parts)):
             continue
         try:
