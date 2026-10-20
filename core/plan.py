@@ -302,6 +302,37 @@ def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]
     return fixed, None
 
 
+def _numerical_settings(settings: Any, protocol: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """``(the settings, None)`` or ``(None, why)``, read from a measurement's ``protocol.numerical_settings``: each numerical
+    resolution of the simulation (a sampling density, a step, a mesh size) with the one value the study uses (``search``)
+    and the finer values FI reruns the headline results at (``check``; FI's fixed rule when left out), as a search's
+    ``numerical_settings`` are read (:func:`core.optimisation_plan.normalize`). The study runs each at its one value."""
+    from . import optimisation_plan as _optim  # the reader of a search's numerical settings, the same rules
+
+    where = "`protocol.numerical_settings`"
+    if protocol.get("optimisation") is not None:
+        return None, (f"{where} cannot stand beside `protocol.optimisation`: a search's numerical settings are "
+                      "`protocol.optimisation.numerical_settings`")
+    if not isinstance(settings, dict) or not settings:
+        return None, f"{where} must map each numerical setting of the simulation (a mesh size, a step) to its values"
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    out: dict[str, Any] = {}
+    for name, item in settings.items():
+        setting, why = _optim._setting(str(name), item)
+        if setting is None:
+            return None, (why or "").replace("`protocol.optimisation.numerical_settings`", where).replace(
+                "the value the search uses", "the value the study uses")
+        if str(name) in inside:
+            return None, f"{where} `{name}` is also in `protocol.in_each_run`: a numerical setting has one value in a run"
+        if str(name) in grid and [v for v in grid[str(name)]] != [setting["search"]]:
+            return None, (f"{where} `{name}` is also a setting of `protocol.grid` with the values {grid[str(name)]}: a "
+                          f"numerical setting has one value in the study ({setting['search']}); its finer values are "
+                          "`check`, which FI reruns the results at")
+        out[str(name)] = setting
+    return out, None
+
+
 def lost_settings(before: Any, after: Any) -> list[str]:
     """The settings the plan ``before`` compared that ``after`` no longer has: a setting of ``protocol.grid`` or
     ``protocol.in_each_run`` that is in neither of them now. One that had a single value may have become a fixed number
@@ -391,11 +422,23 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
             fixed_inside[str(factor)] = fixed_values or []
         out["in_each_run"] = fixed_inside
     subs = out.get("sub_studies")
+    if subs is not None and out.get("optimisation") is not None and out.get("grid") is None:
+        return None, ("`protocol.sub_studies` cannot stand beside `protocol.optimisation`: a search for the best design "
+                      "divides its coarse scan in `protocol.optimisation.sub_studies` (the settings of "
+                      "`protocol.optimisation.grid` each part varies, and the value it holds the others at)")
     if subs is not None:
         fixed_subs, why = _sub_studies(subs, out.get("grid"), out.get("in_each_run"))
         if why:
             return None, why
         out["sub_studies"] = fixed_subs
+    numerical = out.get("numerical_settings")
+    if numerical is not None:
+        fixed_numerical, why = _numerical_settings(numerical, out)
+        if fixed_numerical is None:
+            return None, why
+        out["numerical_settings"] = fixed_numerical
+        # Each is a setting of the study at its one value (every cell carries it); its finer values are FI's check.
+        out["grid"] = {**(out.get("grid") or {}), **{n: [s["search"]] for n, s in fixed_numerical.items()}}
     runs = out.get("runs_per_setting")
     if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):
         return None, "`protocol.runs_per_setting` must be a whole number of at least 1"
@@ -482,8 +525,8 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         from . import optimisation_plan
 
         if out.get("in_each_run") is not None:
-            return None, ("`protocol.optimisation` and `protocol.in_each_run` cannot both be given: a search for the best "
-                          "design runs one design at a time")
+            return None, ("`protocol.in_each_run` cannot stand beside `protocol.optimisation`: the values every evaluation "
+                          "of a design goes through together go in `protocol.optimisation.in_each_run`")
         if out.get("grid") is not None:
             return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
                           "best design puts the settings it compares, and a coarse scan run before it, in "
@@ -841,6 +884,28 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
         key = match.group(1) if match else ""
         if key not in out:
             return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
+        if key in ("sub_studies", "in_each_run", "numerical_settings") and isinstance(out.get("optimisation"), dict) \
+                and "cannot stand beside `protocol.optimisation`" in (why or ""):
+            # A search's scan parts, or what each of its evaluations goes through, written beside the block: moved into it.
+            if out["optimisation"].get(key) is None:
+                out["optimisation"] = {**out["optimisation"], key: out[key]}
+                notes.append(f"`protocol.{key}` was moved into `protocol.optimisation.{key}`: a search for the best design "
+                             "keeps it in its own block")
+            else:
+                notes.append(f"`protocol.{key}` was left out: the search's block has its own `{key}`")
+            del out[key]
+            continue
+        if key == "numerical_settings" and isinstance(out["numerical_settings"], dict):
+            # One numerical setting that cannot be read is left out, not every one of them.
+            kept_n = {n: item for n, item in out["numerical_settings"].items()
+                      if _numerical_settings({n: item}, out)[0] is not None}
+            if kept_n and len(kept_n) < len(out["numerical_settings"]):
+                for n in [n for n in out["numerical_settings"] if n not in kept_n]:
+                    notes.append(f"the numerical setting `{n}` was left out of `protocol.numerical_settings` because it "
+                                 f"could not be read ({_numerical_settings({n: out['numerical_settings'][n]}, out)[1]}); "
+                                 "the others are run again at their finer values")
+                out["numerical_settings"] = kept_n
+                continue
         if key == "metrics":
             # A reference value that cannot be used is left out, not the metric it belongs to.
             from . import reference_values

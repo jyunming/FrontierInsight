@@ -87,6 +87,32 @@ def _level_of(key, levels):
     return None
 
 
+#: The one name a run gives the reasons for results it has no number for (``None``): ``{result: reason}``, a reason in a
+#: few words ("no crossing in the focus range", "the line does not print"). It is not a result; FI keeps the reasons in
+#: the record beside the missing values, so a value that cannot be measured is never a stand-in number.
+WHY_MISSING = "why_missing"
+
+
+def missing_reasons(value, kept):
+    """``{result: reason}`` from what a run returned under :data:`WHY_MISSING`, for each result it has no number for
+    (``kept`` from :func:`read_returned`: absent, not a number, or not a number for some value compared inside the run);
+    a reason for a result that has its numbers is not kept."""
+    raw = value.get(WHY_MISSING) if isinstance(value, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for name, why in raw.items():
+        name = str(name)
+        if not isinstance(why, str) or not why.strip():
+            continue
+        v = (kept or {}).get(name)
+        lacks = v is None or (_number(v) and not math.isfinite(v)) or (
+            isinstance(v, dict) and any(not math.isfinite(x) for x in v.values()))
+        if lacks:
+            out[name] = " ".join(why.split())[:200]
+    return out
+
+
 def none_as_nan(value):
     """``value`` with ``None`` read as NaN, a value that does not exist, also inside a list or a mapping of numbers. The
     code writer is told to return ``null`` for a value that is undefined (and a plan's failure policy says so too), and
@@ -111,6 +137,10 @@ def read_returned(value, levels, entry):
     same. A per-value measurement must give every value, and nothing else."""
     if not isinstance(value, dict) or not value:
         return None, "{}() returned {}, not a dict of numbers".format(entry, type(value).__name__)
+    if isinstance(value.get(WHY_MISSING), dict):
+        value = {k: v for k, v in value.items() if k != WHY_MISSING}  # the reasons, read by missing_reasons
+        if not value:
+            return None, "{}() returned only `{}`, no result".format(entry, WHY_MISSING)
     out = {}
     bad = []
     for name, v in value.items():
@@ -201,15 +231,19 @@ def summary_cells(run_cell, run_key, planned, rows, levels):
     done = len(good)
 
     def metrics_of(pick):
-        metrics, trials_of = {}, {}
+        metrics, trials_of, why = {}, {}, {}
         for row in good:
             for name, v in pick(row).items():
                 metrics.setdefault(name, []).append(v)
                 trials_of.setdefault(name, []).append(row.get("trial"))
+                reason = (row.get(WHY_MISSING) or {}).get(name) if not math.isfinite(v) else None
+                if reason:  # why the run has no number here, as it said: counted by reason
+                    why.setdefault(name, {})[reason] = why.get(name, {}).get(reason, 0) + 1
         return {
             name: {"values": vals, "trials": trials_of[name], "count": len(vals),
                    "total": math.fsum(v for v in vals if math.isfinite(v)),
-                   "non_finite": sum(1 for v in vals if not math.isfinite(v))}
+                   "non_finite": sum(1 for v in vals if not math.isfinite(v)),
+                   **({WHY_MISSING: why[name]} if name in why else {})}
             for name, vals in metrics.items()
         }
 

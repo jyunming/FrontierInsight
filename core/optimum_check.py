@@ -352,7 +352,8 @@ def _probed(space: Any) -> list[int]:
     """The coordinates the check nudges: every number of a scalar variable, and at most ``PROBE_ELEMENTS`` elements of an
     array variable, spread evenly over it (two evaluations per element would otherwise be the whole check)."""
     groups: dict[str, list[int]] = {}
-    for k, v in enumerate(space.scalars):
+    for k in getattr(space, "free", range(len(space.scalars))):  # an element held at its one value is not nudged
+        v = space.scalars[k]
         groups.setdefault(str(v.get("of") or v["name"]), []).append(k)
     out: list[int] = []
     for members in groups.values():
@@ -693,7 +694,9 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                "share": "at least one starting point used its whole share of the budget before it converged",
                "time": "the search's time limit (execution.timeout_s) was reached before every starting point "
                        "converged",
-               "target": "the continued search stopped as soon as a design reached the target asked for"
+               "target": "the continued search stopped as soon as a design reached the target asked for",
+               "no_effect": "the search stopped early: its first designs, which between them changed every number of "
+                            "the design, all gave the baseline's results"
                }.get(stopped, f"the search stopped because {stopped or 'of an unknown reason'}")
         checks["budget"] = {"status": FAILED, "says": (
             f"{why}: the design is the best of {ev.get('search')} evaluations, not shown to be the best the search "

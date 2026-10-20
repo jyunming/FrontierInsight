@@ -1,7 +1,7 @@
 """FI's own check at a setting the code never saw (a hidden check), under ``rigor_profile: research``.
 
-Every check against a known answer the plan declares is shown to the model that writes the simulation: its case, its
-measure, its expected value. Code can therefore be written to pass the cases it was shown (special-cased, or tuned to
+Every check against a known answer the plan declares is shown to the model that writes the simulation: its case and its
+measure (FI holds the expected value back from the code writer). Code can therefore be written to pass the cases it was shown (special-cased, or tuned to
 them) and be wrong everywhere else. So after the run, with the simulation's code as it ran, FI makes one more run of
 some checks at a setting of FI's own choosing, which no prompt ever named, through the same harness the checks use
 (:func:`core.trial_runner.measure_oracles`: FI calls ``run_trial``/``run_cell`` on the case in its own process and

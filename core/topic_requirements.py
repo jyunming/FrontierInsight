@@ -329,6 +329,9 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
     # are the settings the plan varies, whatever the plan's kind of study.
     for axis, values in (block.get("grid") if isinstance(block.get("grid"), dict) else {}).items():
         axes[str(axis)] = list(values) if isinstance(values, list) else [values]
+    # What every evaluation of a design goes through together is varied by the study as a measurement's `in_each_run` is.
+    for axis, values in (block.get("in_each_run") if isinstance(block.get("in_each_run"), dict) else {}).items():
+        axes[str(axis)] = list(values) if isinstance(values, list) else [values]
     metrics: list[tuple[str, str]] = []
     for metric in protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []:
         if isinstance(metric, dict) and metric.get("id"):
@@ -646,7 +649,11 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False, req
         "a condition held fixed during the search, which you also list under `protocol.optimisation.fixed` with the value "
         "the search holds it at (a condition whose values are names, such as a family or a mode, needs no `fixed` entry: "
         "FI holds it at the first name listed). What the search itself finds (the best design) needs no setting: say in "
-        "`protocol.topic_map` that `optimisation` covers it. "
+        "`protocol.topic_map` that `optimisation` covers it. When every evaluation of one design goes through all of a "
+        "setting's values together (one result across all of them), it is a key of `protocol.optimisation.in_each_run` "
+        "with all its values instead. Every setting of the scan is crossed with every other, unless the block divides it "
+        "into parts in `protocol.optimisation.sub_studies` (each with a `name`, the `vary` list of the scan's settings it "
+        "varies, and `hold`: the value it holds each other setting of the scan at), as a measurement's sub-studies do. "
         if search else
         "A setting to vary or compare is a key of `protocol.grid` with every value the topic states (or, for a search for "
         "the best design, a design variable of `protocol.optimisation` with its range, and its value in `protocol.optimisation.baseline.values`). "
@@ -774,8 +781,22 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
             if key not in held and key in scan:  # a condition the answer holds fixed so that the scan can compare it
                 held[key] = value
                 taken = True
+        # What every evaluation goes through together, and the parts the scan is divided into, read the same way as a
+        # measurement's: a setting the answer adds to one part does not multiply the others.
+        inside = dict(o["optimisation"].get("in_each_run") if isinstance(o["optimisation"].get("in_each_run"), dict) else {})
+        for axis, values in (nb.get("in_each_run") if isinstance(nb.get("in_each_run"), dict) else {}).items():
+            if (axis not in inside or axis in named) and isinstance(values, list) and inside.get(axis) != values \
+                    and axis not in scan:
+                inside[axis] = values
+                taken = True
+        old_scan = {"grid": o["optimisation"].get("grid"), "sub_studies": o["optimisation"].get("sub_studies")}
+        subs = joined_sub_studies(old_scan, scan, nb.get("sub_studies")) if scan else None
         if scan:
-            protocol["optimisation"] = {**o["optimisation"], "grid": scan, **({"fixed": held} if held else {})}
+            protocol["optimisation"] = {**o["optimisation"], "grid": scan, **({"fixed": held} if held else {}),
+                                        **({"in_each_run": inside} if inside else {}),
+                                        **({"sub_studies": subs} if subs is not None else {})}
+        elif inside:
+            protocol["optimisation"] = {**o["optimisation"], "in_each_run": inside}
         new_grid = {}
     old_inside = o.get("in_each_run") if isinstance(o.get("in_each_run"), dict) else {}
     new_inside = n.get("in_each_run") if isinstance(n.get("in_each_run"), dict) else {}

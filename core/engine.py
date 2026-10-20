@@ -72,6 +72,7 @@ from .latex_text import escape_latex_backslashes
 from .vscode_bridge import BridgeError
 from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
+from . import agent_coder as _agent_coder
 from . import audit_log as _audit_log
 from . import confirmations as _confirmations
 from . import record_anchor as _record_anchor
@@ -115,6 +116,9 @@ from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
 from . import gate_receipt as _gate_receipt
 from . import plot_scope as _plot_scope
+from .agent_build import AgentBuildMixin, RepairForAgent
+from .agent_build import _Lines as _AgentLines
+from .agent_build import writes_code as _writes_code
 from .run_checks import RunChecksMixin
 from .result_checks import ResultChecksMixin
 from .static_checks import StaticChecksMixin
@@ -142,6 +146,7 @@ from . import function_steps as _function_steps
 from . import second_impl as _second_impl
 from . import step_passages as _step_passages
 from . import hidden_check as _hidden
+from . import refinement_check as _refine
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
 from . import optimise as _optimise
@@ -717,7 +722,7 @@ _REDERIVE_BECAUSE = {
     "tests": "could not be met by code that follows its formula",
 }
 
-class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
+class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
     def __init__(
@@ -797,6 +802,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             config.engine.skills_dirs, scan_known=config.engine.skills_scan_known_dirs,
         )
         self._prompts = _load_prompts()
+        # Who repairs code a check finds wrong: the chat model (``chat``), or, with ``engine.code_writer: agent``, the coding
+        # agent, to which the checks report instead (core/agent_build.py).
+        self._repairs_go_to = "agent" if config.engine.code_writer == "agent" else "chat"
         self._client: LLMClient | None = None
         # Throttle bookkeeping for ``_llm_heartbeat``. Keyed by node
         # name so concurrent ensembled calls don't share one bucket.
@@ -5828,14 +5836,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
         def lacks(now: Any) -> list[str]:
             wanted, missing, why = self._search_problems(state, now)
-            if not (wanted and missing):
+            # A first scan the plan wrote and FI's reading left out is asked back, not lost without a word: the search
+            # could start without it, but what it was to compare would not be run (it never stops the quest).
+            left = self._scan_left_out(now) if wanted else []
+            if not (wanted and (missing or left)):
                 return []
             # The plain words for the card, and the reader's exact reason for run.log (what the ask quotes to the model).
-            return [*_optim.plain_gaps(now, why, self._scan_limit_s()), *([f"the block cannot be read: {why}"] if why else [])]
+            return [*_optim.plain_gaps(now, why, self._scan_limit_s()), *([f"the block cannot be read: {why}"] if why else []),
+                    *[f"the first scan was left out: {n}" for n in left]]
 
         def request(now: Any, text: str) -> str:
             _wanted, missing, _why = self._search_problems(state, now)
             topic = state.get("topic") or self.config.topic
+            if not missing:  # only a first scan left out: that part alone is asked for, with the reader's reasons
+                return _optim.scan_request(topic, self._scan_left_out(now), left_out=True)
             scan = [m for m in missing if m.startswith("the coarse scan cannot run")]
             if scan and len(scan) == len(missing):
                 return _optim.scan_request(topic, scan)  # the block is complete: only the scan is to be rewritten
@@ -5846,7 +5860,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A scan that cannot run is the only thing wrong: the plan is asked once to rewrite it (a rewrite that still does not
         # fit is not asked for again; the honest stop that follows says why, at design, not hours into the run).
         _wanted, now_missing, _why = self._search_problems(state, design)
-        scan_only = bool(now_missing) and all(m.startswith("the coarse scan cannot run") for m in now_missing)
+        scan_only = (all(m.startswith("the coarse scan cannot run") for m in now_missing)
+                     if now_missing else bool(self._scan_left_out(design)))
         return await self._ask_plan_to_complete(
             design, plan_sha, lacks=lacks, request=request, keep=self._keep_only_the_search, file=_SEARCH_ASKED,
             what="search for the best design", short="the search",
@@ -6804,6 +6819,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     found[part] = line.strip().lstrip("-").strip()
         return found
 
+    def _scan_left_out(self, design: Any) -> list[str]:
+        """The notes FI wrote into plan.md when its reading of the search block left out a part of the first scan
+        (``grid``, ``sub_studies``, ``in_each_run``: :func:`core.optimisation_plan.repair`) that the block still lacks, each
+        with the reader's exact reason; empty for a design with no search block. Only FI's own notes are read."""
+        path = _plan.plan_path(self.quest_root)
+        if not _optim.has_block(design) or not path.is_file():
+            return []
+        block = design["protocol"]["optimisation"]
+        found: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            note = line.strip().lstrip("-").strip()
+            if note not in found and any(f"`protocol.optimisation.{part}` {_optim.LEFT_OUT_UNREAD}" in line
+                                         and block.get(part) is None for part in ("grid", "sub_studies", "in_each_run")):
+                found.append(note)
+        return found
+
     def _keep_only_the_parts(self, before_text: str, answer: dict[str, Any], parts: list[str], passages: str = "") -> str | None:
         """``before_text`` with only the asked ``parts`` of the protocol taken from ``answer`` (the model's JSON, shaped like
         the design block; each part only when it can be read as the plan reads it); everything else, a check, a threshold, a tolerance, is the plan's own as it was.
@@ -7488,6 +7519,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     if key in merged:
                         put_back.append(str(key).replace("_", " "))
                     merged[key] = value
+            # A scan the answer writes anew (the plan had none that could be used) brings the conditions it is compared
+            # across: each one the plan did not hold yet is added under `fixed`, at the value the answer holds it at, as
+            # the reader requires; every value the plan already held stays the plan's own.
+            new_grid, new_fixed = block.get("grid"), block.get("fixed")
+            if (("grid" in unreadable or not old_block.get("grid")) and isinstance(new_grid, dict)
+                    and isinstance(new_fixed, dict) and isinstance(merged.get("fixed"), dict)):
+                added = {k: v for k, v in new_fixed.items() if k in new_grid and k not in merged["fixed"]}
+                if added:
+                    if {k: v for k, v in new_fixed.items() if k not in added} == merged["fixed"]:
+                        put_back = [p for p in put_back if p != "fixed"]  # the answer only added: nothing was put back
+                    merged["fixed"] = {**merged["fixed"], **added}
             if put_back:
                 self._log.warning("[plan] the plan's model also changed what the plan already said about %s; FI kept the "
                                   "plan's own", ", ".join(put_back))
@@ -10303,6 +10345,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         extend = [str(p).strip() for p in state.get("refine_extend") or [] if str(p).strip()]
         # A number the person asked to have added extends the script that exists; the scaffold is for a first script.
         outline = {} if extend else self._outline_with_example_names(state, state.get("implement_outline") or {})
+        if self._agent_mode():
+            # One coding agent writes the whole program; FI's checks before the run judge it (core/agent_build.py).
+            return await self._implement_by_agent(state, outline or self._outline_with_example_names(
+                state, state.get("implement_outline") or {}), extend)
         body_prompt = self._prompts.get("implement_body")
         if outline and outline.get("scaffold") and body_prompt is not None:
             self._log.info(
@@ -10948,7 +10994,62 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _record_contradiction_hits(self, paper_md: str, state: QuestState) -> list[str]:
         """Must-fix hits for what the paper claims against FI's own records (core/record_claims.py). FI's own "Best design
-        found" section is left out (it is FI's record, printed). Never raises: a check that cannot be made flags nothing."""
+        found" section is left out (it is FI's record, printed). Never raises: a check that cannot be made flags nothing.
+
+        Once the paper has been written again ``_RECORD_REWRITES`` times for such hits, what is still flagged is taken out
+        of the paper instead (:meth:`_take_out_contradicted`): the check reads free text and has flagged sentences that say
+        what the record says, so it never stops the quest; a claim the records contradict is not delivered either way."""
+        found = self._record_contradictions(paper_md, state)
+        if not found or int(state.get("record_rewrites") or 0) < _RECORD_REWRITES:
+            return [hit for hit, _span in found]
+        # The check names the first sentence of each kind it finds: what it flags once that one is out is taken out too,
+        # a bounded number of times.
+        for _ in range(_TAKE_OUT_PASSES):
+            taken = self._take_out_contradicted(state, found)
+            left = [hit for hit, span in found if span not in taken]
+            path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+            if not taken or not path or not Path(path).is_file():
+                return left
+            found = self._record_contradictions(Path(path).read_text(encoding="utf-8"), state)
+            if not found:
+                return []
+        return [hit for hit, _span in found]
+
+    def _take_out_contradicted(self, state: QuestState, found: list[tuple[str, str]]) -> list[str]:
+        """The paper with each flagged sentence (or figure) taken out (core/record_claims.py::take_out), written to disk and
+        listed in ``.fi/record_claims_taken_out.json`` (QUALITY.md prints it): the spans taken out. The claim check's
+        receipt moves to the new draft, which only lost text and added no claim."""
+        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not path or not Path(path).is_file():
+            return []
+        try:
+            before = Path(path).read_bytes()
+            text, taken = _record_claims.take_out(before.decode("utf-8"), [span for _hit, span in found])
+            if not taken:
+                return []
+            Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (see _take_out_typed_numbers)
+            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
+                                 "FI took out sentences its records contradict and added no claim")
+            record = self.quest_root / _record_claims.TAKEN_OUT
+            record.parent.mkdir(parents=True, exist_ok=True)
+            # Added to what earlier passes took out (a later review's pass, the next sentence of a kind): never replaced.
+            earlier = _read_json_or_none_path(record)
+            entries = [e for e in (earlier.get("taken_out") or []) if isinstance(e, dict)] \
+                if isinstance(earlier, dict) else []
+            seen = {str(e.get("text")) for e in entries}
+            entries += [{"text": span, "why": hit} for hit, span in found if span in taken and span not in seen]
+            record.write_text(json.dumps({"at": time.time(), "taken_out": entries}, indent=1, ensure_ascii=False) + "\n",
+                              encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[record_check] the sentences FI's records contradict could not be taken out (%s)", e)
+            return []
+        self._log.warning("[record_check] the paper was written again %d times and still says what FI's records "
+                          "contradict, so %d sentence(s) or figure(s) were taken out of it; they are listed in QUALITY.md",
+                          _RECORD_REWRITES, len(taken))
+        return taken
+
+    def _record_contradictions(self, paper_md: str, state: QuestState) -> list[tuple[str, str]]:
+        """:func:`core.record_claims.found` for this paper and quest: each hit with the text it is about."""
         try:
             recs = _best_report.records(self.quest_root)
             text = _paper_facts.without_blocks(
@@ -10958,13 +11059,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 figures = _figure_files_on_disk(self.quest_root)
                 if not any(Path(n).suffix.lower() in _FIGURE_SUFFIXES for n in figures):
                     figures = None  # the run drew none: a paper citing one is not judged here
-            hits = _record_claims.contradictions(
+            hits = _record_claims.found(
                 text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
                 oracle=self._oracle_record_read(), figures_on_disk=figures)
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
             self._log.warning("[record_check] could not compare the paper with FI's records (%r)", exc)
             return []
-        for hit in hits:
+        for hit, _span in hits:
             self._log.warning("[record_check] %s", hit)
         return hits
 
@@ -11436,6 +11537,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         record = _read_json_or_none_path(self.quest_root / "needs" / "PROTOCOL_CHECK.json")
         if isinstance(record, dict) and record.get("status") == "extended_by_person":
             return [str(d) for d in record.get("differences") or []]
+        if isinstance(record, dict):
+            # The coding agent's later check keeps the person's additions beside a difference of its own
+            # (AgentBuildMixin._agent_protocol).
+            return [str(d) for d in record.get("added_by_person") or []]
         return []
 
     def _protocol_drift_not_asked_for(self, protocol: dict[str, Any]) -> list[str]:
@@ -12529,15 +12634,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "reports how long the run took.")
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
-                          env: dict[str, str] | None = None, outside: bool = False) -> tuple[int, str, str]:
+                          env: dict[str, str] | None = None, outside: bool = False,
+                          apart: bool = False) -> tuple[int, str, str]:
         """Run ``python <argv>`` from the quest folder, in the quest's environment (a venv, the shared interpreter, or the
         Docker container): ``(returncode, stdout, stderr)``. ``outside``: from a copy of ``code/`` outside the quest
-        folder (core/outside_run.py), so FI's records are not next to the code that runs."""
+        folder (core/outside_run.py), so FI's records are not next to the code that runs. ``apart``: from such a copy
+        that does not share the study's kept values and gives back only the paths ``argv`` names."""
         py = self.executor.python_path(self.quest_root)
         # A function rewritten within the same second to the same size would be read from its stale compiled copy.
         for cache in (self.quest_root / "code").glob("**/__pycache__"):
             shutil.rmtree(cache, ignore_errors=True)
-        executor = _outside_run.OutsideExecutor(self.executor, self.quest_root, log=self._log) if outside else self.executor
+        executor = (_outside_run.OutsideExecutor(self.executor, self.quest_root, log=self._log, share=not apart,
+                                                 only_named=apart) if outside or apart else self.executor)
         env = {k: v for k, v in env.items() if k != "FI_CHECKS_DIR"} if env is not None else None
         try:
             # From the quest folder with paths relative to it: in Docker that folder is what is mounted as /work.
@@ -12714,9 +12822,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             async def verify_package() -> str:
                 return await self._equation_test_failures(protocol, exec_env, self._outline_equation_names(state))
 
+            captured = await self._captured_calls(state, protocol, package, specs, exec_env)
             before = self._package_snapshot()
             result = await _second_impl.second_versions(
-                verify_package=verify_package,
+                verify_package=verify_package, captured=captured,
                 quest_root=self.quest_root, package=package, specs=specs, protocol=protocol,
                 prompts={"write": self._prompts["second_impl_write"], "adjudicate": self._prompts["second_impl_adjudicate"]},
                 chat=chat, run=self._run_in_env, repair_main=repair_main, still_passes=still_passes, passages=passages,
@@ -12747,6 +12856,119 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except Exception as e:  # noqa: BLE001 -- a second version is a check on top; its failure never stops a quest
             self._log.warning("[implement] the check with a second version of the model's functions could not be made: %r", e)
             return False
+
+    async def _captured_calls(self, state: QuestState, protocol: dict[str, Any], package: str, specs: list[Any],
+                              exec_env: Any, *, depends: bool = False) -> dict[str, list[dict[str, Any]]]:
+        """What the key functions are called with when FI runs the simulation (core/second_impl.py::capture_inputs): at
+        the settings of FI's small run (core/small_run.py::settings; each part of a study takes other paths through the
+        code), a search's baseline design first; with ``depends`` then whether the headline results depend on each of
+        them (core/second_impl.py::dependence: each one's result changed where it is called). ``{}`` when no run can be
+        made."""
+        if depends:
+            (self.quest_root / _second_impl.DEPENDENCE).unlink(missing_ok=True)  # a record of earlier code says nothing
+        selected, _skipped = _second_impl.key_functions(specs, protocol)
+        names = [s.name for s in selected]
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        if not names or not simulate.is_file():
+            return {}
+        try:
+            from . import small_run as _small
+
+            block = _optimise.block_of(protocol)
+            if block is not None:
+                normal, _why = _optim.normalize(block)
+                if normal is None:
+                    return {}
+                cells = [_optimise_search.cell_of(normal, (normal.get("baseline") or {}).get("values") or {})]
+                if isinstance(normal.get("grid"), dict) and normal["grid"]:  # a search's first scan: a measurement
+                    cells += _small.settings(_optimise_search.scan_grid(normal))
+                # The scan's cells leave them out and the trial runner gives each cell all of them (the baseline cell
+                # holds them already, with the same values).
+                inside = _optimise_search.in_each_run(normal) or None
+            else:
+                grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
+                cells = _small.settings(grid)
+                inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
+            if not cells:
+                return {}
+            deterministic = "run_trial" not in _trial_runner.entries(simulate)
+            thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+
+            from .small_run import budget as _small_run_budget
+
+            async def run(argv: list[str]) -> Any:
+                # Apart from the study: a run with a function's result changed must neither read the values the study
+                # kept (data/results/cache/) nor leave its own there.
+                return await self._run_in_env(argv, timeout_s=_small_run_budget(self.config.execution.timeout_s),
+                                              env=dict(exec_env or {}), apart=True)
+
+            budget = 2 * _small_run_budget(self.config.execution.timeout_s)  # each of the two checks, in all
+            got = await self._await_with_heartbeat(
+                _second_impl.capture_inputs(run, self.quest_root, package, names, cells, deterministic=deterministic,
+                                            in_each_run=inside, thresholds=thresholds, budget_s=budget),
+                label="recording what the tested functions are called with")
+        except Exception as e:  # noqa: BLE001 -- a record of the calls is an aid to a check; never a stop
+            self._log.info("[implement] what the model's functions are called with could not be recorded: %r", e)
+            return {}
+        if got:
+            self._log.info("[implement] FI ran the simulation and recorded what %d checked function(s) are called with: %s",
+                           len(got), ", ".join(sorted(got)))
+        if not depends:
+            return got
+        try:
+            found = await self._await_with_heartbeat(
+                _second_impl.dependence(run, self.quest_root, package, names,
+                                        self._headline_result_names(state, protocol, dependent=False),
+                                        deterministic=deterministic,
+                                        in_each_run=inside, thresholds=thresholds, budget_s=budget),
+                label="checking whether the headline results use the tested functions")
+            for line in _second_impl.dependence_sentences(found):
+                self._log.warning("[execute] %s", line)
+        except Exception as e:  # noqa: BLE001 -- a check on top; never a stop
+            self._log.info("[execute] whether the headline results depend on the checked functions could not be "
+                           "checked: %r", e)
+        return got
+
+    async def _dependence_check(self, state: QuestState, exec_env: Any) -> None:
+        """After the study ran on code no step changes any more: whether its headline results are computed with the
+        model's tested functions (:meth:`_captured_calls` with ``depends``; core/second_impl.py::dependence). A function
+        the headline results do not use is a gap in the evidence. Never a stop; skipped on a resume when the record was
+        made on this code."""
+        try:
+            if not self.config.execution.code_function_steps or not self._runs_code(state):
+                return
+            if _second_impl.read_dependence(self.quest_root):
+                return  # already made on this code (a resume)
+            package = self._package_in_use(state)
+            protocol = self._protocol_block(state)
+            record = _function_steps.load(self.quest_root)
+            if not package or not isinstance(protocol, dict) or record.get("package") != package:
+                return
+            specs, _notes = _function_steps.model_functions(state.get("implement_outline") or {}, protocol)
+            done = {n for n, e in (record.get("functions") or {}).items()
+                    if isinstance(e, dict) and e.get("status") == _function_steps.DONE}
+            specs = [s for s in specs if s.name in done]
+            if specs:
+                await self._captured_calls(state, protocol, package, specs, exec_env, depends=True)
+        except Exception as e:  # noqa: BLE001 -- a check on top; never a stop
+            self._log.info("[execute] whether the headline results use the tested functions could not be checked: %r", e)
+
+    def _headline_result_names(self, state: QuestState, protocol: dict[str, Any] | None, *,
+                               dependent: bool = True) -> set[str]:
+        """The headline results: the protocol's headline metrics and (with ``dependent``) the design's dependent
+        variables, and for a search what it optimises and what limits it. Without ``dependent`` only names a run
+        returns its results under: a dependent variable is often written as a phrase."""
+        protocol = protocol if isinstance(protocol, dict) else {}
+        design = state.get("design") if isinstance(state.get("design"), dict) else {}
+        variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
+        names = set(_criteria.headline_names(protocol)) | (
+            {str(v) for v in variables.get("dependent") or []} if dependent else set())
+        block = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else None
+        if block is not None:
+            names |= {str((block.get("objective") or {}).get("quantity") or "")} | {
+                str(c.get("quantity") or "") for c in block.get("constraints") or [] if isinstance(c, dict)}
+        names.discard("")
+        return names
 
     async def _fill_model_functions(self, state: QuestState, outline: dict[str, Any]) -> bool:
         """After the outline, before the code is written whole: fill the model's package one function at a time, each
@@ -13455,7 +13677,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.warning("[evidence] whether the checks are independent of their writer could not be checked: %r", e)
                 independence_gaps = [f"whether the checks are independent of the model that wrote them could not be "
                                      f"checked ({type(e).__name__})"]
-            independence_gaps = [*independence_gaps, *self._static_check_gaps()]  # core/static_checks.py
+            independence_gaps = [*independence_gaps, *self._static_check_gaps(),  # core/static_checks.py
+                                 *_refine.evidence_gaps(self.quest_root, self._protocol_block(state)),
+                                 *_second_impl.dependence_gaps(self.quest_root)]
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 oracle_source_gaps=oracle_source_gaps, equation_label_gaps=label_gaps,
@@ -13478,6 +13702,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     # --analyze has no experiment to design, so there is no design to audit.
                     "design_audit": "not_applicable" if self.config.engine.analyze_local_first else "on",
                     **(_phased.evidence_settings(self.quest_root) if _phased.enabled(self.config) else {}),
+                    # A coding agent wrote the code (engine.code_writer: agent): whether it ran in a container.
+                    **_agent_coder.evidence_settings(self.quest_root),
                 },
             )
             if not write:
@@ -14514,6 +14740,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         limit = int(self.config.engine.improve_rounds or 0)
         if limit <= 0:
             return "engine.improve_rounds is 0"
+        if self._agent_mode():
+            return "the coding agent wrote this code, and FI does not change it with a chat model"
         if state.get("no_simulation_resolved") or state.get("survey_mode_resolved"):
             return "this quest runs no simulation"
         if _phased.enabled(self.config) and _phased.stage(self.quest_root) in (_phased.CONFIRM, _phased.CONFIRMED):
@@ -15663,6 +15891,34 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if record.get("status") == "passed":
             self._log.info("[oracle] %d check(s) also passed at a setting the code never saw", len(record["cases"]))
 
+    async def _refinement_check(self, state: QuestState, python: Path | str, env: dict[str, str] | None) -> None:
+        """After a run, a measurement's numerical settings (``protocol.numerical_settings``): FI runs the settings where each
+        headline result was lowest and highest again at the finer values and judges convergence (core/refinement_check.py),
+        kept in ``needs/REFINEMENT_CHECK.json``. Never stops the quest; what is not converged is a gap in the evidence."""
+        protocol = self._protocol_block(state)
+        if not _refine.settings(protocol):
+            return
+        record = _refine.read(self.quest_root)
+        if record and record.get("code_sha256") == _hidden.code_sha(self.quest_root) \
+                and record.get("key") == _refine.key(protocol):
+            return  # already run on this code and these settings (a resume)
+        timeout = max(60, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac))
+        names = self._headline_result_names(state, protocol)
+        block = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else None
+        inside = (_optimise_search.in_each_run(block) if block is not None else _in_run.of(protocol)) or None
+        try:
+            record = await self._await_with_heartbeat(_refine.run(
+                self.executor, python, self.quest_root, protocol, deterministic="run_trial" not in _trial_runner.entries(self.quest_root / "code" / "simulate.py"),
+                timeout_s=timeout, env=env, thresholds=protocol.get("thresholds") or {},
+                in_each_run=inside, names=names),
+                label="running the headline results again at finer numerical settings")
+            _refine.write(self.quest_root, record)
+        except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
+            self._log.warning("[execute] the headline results could not be run again at finer numerical settings: %r", e)
+            return
+        for line in _refine.lines(record):
+            self._log.info("[execute] %s", line)
+
     def _independence_gaps(self, protocol: dict[str, Any] | None) -> list[str]:
         """Under ``rigor_profile: research``: why the checks are not shown independent of the model that wrote them (a
         usable second reading by another model, core/oracle_review.py; the checks at a setting the code never saw,
@@ -16475,6 +16731,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return None, repaired, rewrote
 
     async def _node_execute(self, state: QuestState) -> QuestState:
+        if not self._agent_mode():
+            return await self._node_execute_steps(state)
+        lines = _AgentLines()
+        self._log.addHandler(lines)
+        try:
+            return await self._node_execute_steps(state)
+        except RepairForAgent as asked:
+            # A check after the checks before the run asked for a repair of the coding agent's code: a failed run, for the
+            # agent's round in the repair step (core/agent_build.py).
+            self._log.warning("[execute] %s did not pass; the coding agent is sent what it found", asked.what)
+            return self._agent_failure_as_run(asked, lines.lines)
+        finally:
+            self._log.removeHandler(lines)
+
+    async def _node_execute_steps(self, state: QuestState) -> QuestState:
         # Unconditional tamper check (the re-audit's P1-6): every other frozen-protocol reader
         # (_protocol_of, _run_manifest_problems, the oracle gate) returns early -- skipping
         # _resolved_frozen() entirely -- when ITS OWN check is configured "off", so a hand-edited
@@ -16773,7 +17044,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
         # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
-        stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
+        if self._agent_mode():
+            # The coding agent fixes what the checks find, round by round, until they pass (core/agent_build.py).
+            stop, oracle_code, gate_repaired = await self._agent_build(state, py, exec_env, seed_path)
+        else:
+            stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
         if stop is not None:
             return stop
         # A setting of the grid FI's reading finds no use of, once the checks of the code are clean (a misspelt read is the
@@ -17066,6 +17341,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             await asyncio.to_thread(self._save_run_data, run_started, split)
             if split and self.config.rigor_profile == "research":
                 await self._hidden_check(state, py, primary_env)  # the checks at a setting the code never saw
+            if split:
+                await self._refinement_check(state, py, primary_env)  # the headline results at finer numerical settings
+            # Are the headline results computed with the model's functions FI tested? On the code as it ran.
+            await self._dependence_check(state, primary_env)
         if manifest_status == "stopped":
             try:
                 plain_stop = (_run_manifest.plain_difference(self._manifest_differences)
@@ -18202,7 +18481,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 "parameter), fix it. If the value is genuinely what the method "
                 "produces here (a scheme that diverges at this step size, an "
                 "unstable fit), that is a finding, not a bug: emit null for that "
-                "value and a flag saying why (for example \"diverged\": true). "
+                "value and say why under \"why_missing\" (for example \"why_missing\": {\"<name>\": \"diverged\"}). "
                 "NEVER clamp, cap or clip a result to the bound or replace it "
                 "with any constant: a capped value is detected and rejected, and "
                 "it would state something false."
@@ -18282,6 +18561,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
         # The one round the redraw gets, spent whatever the model answers.
         spent: QuestState = {"figure_overlap_repaired": True} if overlaps else {}
+        if self._agent_mode():
+            # The coding agent fixes its own code (core/agent_build.py): one round, with what the run said.
+            return await self._reflect_by_agent(state, iters, bump, returncode_for_prompt, stdout_for_prompt,
+                                                exec_result, spent)
         prompt = self._prompts["execute_reflect"].substitute(
             topic_block=self._topic_block(),
             # Whole, always: the reply is the full corrected script, and a model shown only the first 8000 characters
@@ -20076,6 +20359,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             evidence_note = f"{evidence_note}\n\n{best_note}".strip()
         if once_note := self._ran_once_note():
             evidence_note = f"{evidence_note}\n\n{once_note}".strip()
+        if _refine.settings(self._protocol_block(state)) and (refined := _refine.lines(_refine.read(self.quest_root))):
+            evidence_note = (f"{evidence_note}\n\nFI ran the headline results again at finer numerical settings "
+                             "(needs/REFINEMENT_CHECK.json); the paper says what this found:\n"
+                             + "\n".join(f"- {line}" for line in refined)).strip()
+        if depends := _second_impl.dependence_sentences(_second_impl.read_dependence(self.quest_root)):
+            evidence_note = (f"{evidence_note}\n\nFI changed the result of each tested function of the model where "
+                             "the simulation calls it, to see whether the headline results are computed with it "
+                             "(.fi/second_impl/dependence.json); say this plainly where the paper says what was checked:\n"
+                             + "\n".join(f"- {line}" for line in depends)).strip()
         if typed_note := self._typed_figures_note():
             evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
         if code_note := _code_review.write_note(self.quest_root, self.quest_root / "code"):
@@ -21551,8 +21843,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             as_node=as_node,
         )
 
-    def _skills_block(self, state: QuestState | None = None) -> str:
+    def _skills_block(self, state: QuestState | None = None, *, in_code: bool = False) -> str:
         """Instructions for the skills this quest actually selected.
+
+        ``in_code``: for the coding agent, whose code may not reach outside its folder (``core/agent_coder.py``): each
+        skill's bundled files are named under ``skills/<name>/`` in the code folder, where :meth:`_skill_files_to_code`
+        puts a copy of them, and not at the skill's own folder.
 
         This is the step that makes the registry worth having: a skill FI
         knows about but never tells ``design`` / ``implement`` about changes
@@ -21634,6 +21930,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             surface = skill.api_surface().strip()
             if mount is not None:
                 instructions, surface = mount.translate(instructions), mount.translate(surface)
+            in_code_base = f"{_SKILLS_IN_CODE}/{skill.name}" if in_code and mount is None and not not_mounted else ""
+            if in_code_base:
+                spellings = {str(skill.path), Path(skill.path).as_posix()}
+                try:  # a skill's text often names its folder in the home form (`~/.../skills/<name>`)
+                    home_rel = Path(skill.path).resolve().relative_to(Path.home().resolve())
+                    spellings |= {f"~/{home_rel.as_posix()}", f"~\\{home_rel}"}
+                except (ValueError, OSError, RuntimeError):
+                    pass
+                for spelling in sorted(spellings, key=len, reverse=True):
+                    instructions, surface = (instructions.replace(spelling, in_code_base),
+                                             surface.replace(spelling, in_code_base))
             parts.append(instructions)
             if surface:
                 parts.append(f"\n### {skill.name} — API surface\n")
@@ -21662,6 +21969,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                         "These ship with the skill but are not reachable from the "
                         "sandbox, so do not write code that opens or runs them:"
                     )
+                elif in_code_base:
+                    # The agent's code may not reach outside its folder (a path into the person's home is refused), so
+                    # the skill's own folder is never named: FI put a copy beside the code.
+                    parts.append(
+                        f"FI put a copy of these in this folder, under `{in_code_base}/` (FI's files: do not change "
+                        f"them). Every run has the quest folder as its working directory, not this folder, so open or "
+                        f"run each one from the script's own folder (`Path(__file__).parent / \"{in_code_base}\"` plus "
+                        f"the path listed), and launch a script with `sys.executable` (the Python running the "
+                        f"experiment), not the bare command `python`, even where the skill's text above writes `python`."
+                    )
                 else:
                     base = mount.container if mount is not None else skill.path
                     parts.append(
@@ -21686,6 +22003,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 for rel in refs:
                     parts.append(f"- `{rel}` (reference)")
         return "\n".join(parts).strip()
+
+    def _skill_files_to_code(self, state: Any) -> list[str]:
+        """Copy the bundled files of each selected skill into ``code/skills/<name>/`` (the coding agent's code may not
+        reach outside its folder, :meth:`_skills_block` with ``in_code``): the paths copied, relative to ``code/``.
+        A file that cannot be copied is left out and said in run.log; the quest goes on."""
+        copied: list[str] = []
+        try:
+            usable, _reasons = _resolve_selected_skills(state, self._log, use="experiment",
+                                                        external_dirs=self._skill_dirs)
+        except Exception as exc:  # noqa: BLE001 -- no skill files: the agent writes the code without them
+            self._log.warning("[skills] the selected skills could not be resolved to copy their files: %s", exc)
+            return copied
+        for st in usable:
+            skill = st.skill
+            for rel in [*skill.bundled_scripts(), *skill.reference_files()]:
+                target = self.quest_root / "code" / _SKILLS_IN_CODE / skill.name / rel
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(Path(skill.path) / rel, target)
+                    copied.append(target.relative_to(self.quest_root / "code").as_posix())
+                except OSError as exc:
+                    self._log.warning("[skills] %s of the skill %s could not be copied into code/ (%s)", rel,
+                                      skill.name, exc)
+        if copied:
+            self._log.info("[skills] put a copy of %d file(s) of the selected skills in code/%s/ for the coding agent",
+                           len(copied), _SKILLS_IN_CODE)
+        return copied
 
     def _experiment_skill_states(self, state: Any) -> list[Any]:
         """The approved skills this quest selected for its experiment (as ``_resolve_selected_skills`` returns them).
@@ -23245,6 +23589,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         nodes (evidence_gate, review, review_panel.*, claim_check, cross_check,
         relevance_guard) run at 0 for reproducible decisions; generative nodes
         use the 0.2 default. Pass an explicit value to override."""
+        if self._repairs_go_to == "agent" and _writes_code(node):
+            raise RepairForAgent(str(node))  # the code is the coding agent's: the check reports to it (core/agent_build.py)
         assert self._client is not None
         if node == "plan_revise":
             self._plan_chat_calls = getattr(self, "_plan_chat_calls", 0) + 1  # counted before it is made, so a failure counts
@@ -25447,6 +25793,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "implement_outline",                # two-stage implement: scaffold
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
+        "implement_agent",                  # engine.code_writer: agent -- the coding agent's task (core/agent_build.py)
         "implement_function",               # the model's package: ONE function body for ONE equation
         "implement_function_repair",        # ONE function repaired alone (never the whole script)
         "implement_module_repair",          # the failing functions of the model's package, with the passing ones named
@@ -26467,7 +26814,8 @@ to the same simulated data). FI gives each run the whole list in its cell, in th
 that list); the function uses every value of it, never a value or a list of its own. A number the run gives once (fitted
 across all the values, a difference between two of them on the same data) is returned as a number. A number it gives FOR
 EACH value is returned as a mapping of each value to its number (`"power": {"bonferroni": 0.41, "bh": 0.52}`), or as a list
-of one number per value in the order the run was given them; every value is there (NaN where it does not exist).
+of one number per value in the order the run was given them; every value is there (null where it does not exist, with
+the reason under `"why_missing"`).
 In FI_TRIALS each setting is followed by one record per value (its `cell` and `key` name the value too, as in
 `"key": "m=20,procedure=bh"`, with `"level"`): a number per value is in the value's own record and a number per run in the
 setting's own, each once. The analysis reports each from where it is, and never counts a number per run once per value.
@@ -26492,8 +26840,11 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
 - Each equation of the design's `model` whose role is `generates` carries its id in a comment (`# E1`) on or above the
   code that computes it (in simulate.py, or in the model's package when the code has one).
 - The function RETURNS a flat dict of numbers, one entry per quantity the analysis needs from that trial
-  (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a failed or diverged trial RAISES an exception with the
-  reason instead of returning a made-up value. It does not write files, print results, or keep state between calls.
+  (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a trial whose code fails RAISES an exception with the
+  reason instead of returning a made-up value. A quantity the method cannot give at this setting (it diverged, there is
+  no crossing in the range, the feature does not print) is `null`, with the reason under `"why_missing"`
+  (`"why_missing": {"peak_day": "no outbreak"}`), never a stand-in number (0, -1, a bound): FI keeps the reason beside the
+  missing value and the tables say it. It does not write files, print results, or keep state between calls.
 - When a protocol metric is a mean over the trials a proportion counts (`"given": "p_outbreak"`), the dict also holds,
   under that proportion's own id, 1 (this trial is in the subset) or 0 (it is not) for EVERY trial, and the value being
   averaged under that mean metric's own id (mean id `final_size_given_outbreak`:
@@ -26764,6 +27115,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "grid": {"<parameter, named as the code will name it>": [<every value it takes>]},
   "sub_studies": [{"name": "<a separate part of the study, in a few words>", "vary": ["<the settings of `grid` this part crosses with one another>"], "hold": {"<each other setting of `grid` with several values>": <the value this part keeps it at>}}],
   "in_each_run": {"<what ONE run goes through all of together: the conditions one fit spans, the methods applied to the same simulated data>": [<all its values>]},
+  "numerical_settings": {"<each numerical resolution of the simulation, named as the code names it: a sampling density, a step, a mesh size, a number of points>": {"search": <the one value the study runs at>, "check": [<finer values FI runs the headline results again at>], "finer": "<smaller | larger>"}},
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
   "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it and keeps every setting; only the topic's own time limit may take them below it (down to 10), and the paper then says so; leave out for a deterministic study>,
   "thresholds": {"<name>": <value>},
@@ -26799,11 +27151,17 @@ Each oracle's `kind` is one of six: `special_case` (a special or limiting case w
 
 @@STEPS@@
 
+`numerical_settings` names every numerical resolution of the simulation whose value could change a result (how finely a source, a pupil, a field or a time is sampled, a step, a mesh size, a number of terms), with the one value the study uses: the code reads each from the setting it is given, as it reads a setting of `grid`, never from a number of its own. After the run FI itself runs the settings where each headline result is lowest and highest again at the finer `check` values (each at least 1.1 times finer than the one before; left out, FI uses half and a quarter, or twice and four times for a count) and says in the paper whether the results are converged; `tolerance` (optional, a fraction below 1) is how much of a result's spread over the study its numerical error may be (5% when left out). A resolution left out of `numerical_settings` is one nobody checked. A resolution the study varies on purpose (a convergence study of the step itself) is a setting of `grid` with its values, and is not listed in `numerical_settings`.
+
 `known_value` is for a number the simulation estimates and knows the true value of (a parameter it generates the data with and then recovers): give the true value, the names run_trial returns for the estimate and for its standard error and/or the two ends of its interval, and the interval's level. FI then counts itself, from the trials, how far the estimates lie from the true value, whether the standard errors match the spread of the estimates, and, when the two ends of the interval are named, how often that interval covers the true value (FI judges coverage only from the interval the trial reports, so name its two ends when the code computes one, for example a t interval); a code whose uncertainty is wrong is sent back. When your design fixes the interval's multiplier (t with 3 degrees of freedom, or the normal quantile), give it as `degrees_of_freedom`: FI then recovers the multiplier the code used from the trials' own intervals and standard errors and sends the code back if it differs from yours. Give the true value on the scale of the estimate (the log of a value when the estimate is a log). A true value the study fixes (an activation energy of 50 kJ/mol the data are generated with, and the log of a frequency factor that follows from it) goes into `constants` under a name, with its number, and `true_value` names it; a true value that follows from other constants may instead be written as a formula of their names (for example `log(k_ref) + Ea / (R * T_ref)`), which FI computes itself. Leave `known_value` out for a number with no known true value; the paper then says its uncertainty was not checked against the truth. Leave `undefined_when` out unless the number truly has no value at some settings.
 
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 
 `oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. Give every oracle a `case` and a `measure`: FI calls the simulation's own function (run_cell for a deterministic simulation, run_trial for a random one) on that case itself before the main run and judges the number it returns, so the check does not rest on anything the script reports about itself. A deterministic simulation's oracles always get a case. For a random simulation a case is ONE trial with one seed, so give a case to a check one trial shows exactly (an invariant every trial keeps, a setting whose outcome is certain, such as no outbreak at R0 = 0); a check that needs many trials (a probability, a mean) has no case and is answered by the script's own oracle(). A check without a `case` is the script's own word and does not count as independent validation. (A quest set to keep one script, `execution.split_analysis: false`, has no such function: its script answers every check itself when FI_ORACLE=1, and none of them counts.) A run whose checks do not pass never reaches the main sweep.
+
+A result that is a yes or no, or a count of settings past a threshold, needs a check on each side: a setting where it must come out yes and one where it must come out no (each a `special_case` in `oracles`), and the plan says over which settings it changes; a result that is the same at nearly every setting of the study measures nothing there.
+
+When a quantity is calibrated separately for each condition the study compares (set to meet a target, anchored, normalised per condition), the calibration can make or remove the difference being compared: add a part of the study in which one shared calibration is used for every condition, and compare the two.
 
 Mistakes that stop a run, each seen in real quests:
 - A thing the topic names that you leave out or approximate, with no entry in `simplifications`, or a metric with no entry in `definitions`, is sent back to you to write.
@@ -26841,6 +27199,7 @@ _STUDY_TYPE_DIRECTIVE = """
 Add a design key `study_type` (a sibling of `hypothesis`, NOT inside `plan` or `protocol`):
 - `measure` when the topic asks how a result changes, or which of some fixed alternatives does better, over settings you choose (the protocol has a `grid`);
 - `find_best_design` when it asks for the design, setting or parameter values that make one result as low or as high as possible, perhaps within limits: the fin spacing and thickness that give the lowest heat-sink temperature, the lightest truss cross-section whose stress stays under a limit, the controller gain with the least overshoot.
+- A topic that asks for both (how results change over settings it names, AND the best design) is `find_best_design`: the settings it compares are the block's coarse `grid` below, run and plotted before the search, and the design FI searches for is a design variable. FI runs the search itself and records every evaluation; the simulation computes the result of ONE design and never searches, fits a surrogate or loops over designs itself.
 
 A search for the best design has NO top-level `grid`: its protocol has an `optimisation` block instead (`oracles` and `model` are still required, as above):
 
@@ -26854,6 +27213,8 @@ A search for the best design has NO top-level `grid`: its protocol has an `optim
   "evaluation_budget": {"starts": <whole number of starting points>, "per_start": <whole number of evaluations each>, "seconds_per_evaluation": <your estimate of one evaluation, or leave out>},
   "search_method": "<bounded_local | global_then_local | exhaustive | scipy:<function> | optuna:<sampler>>",
   "grid": {"<design variable, a condition listed in fixed that the study should also be compared across, or a setting whose values are names>": [<a coarse scan run before the search, plotted; only a cell at the value held in fixed can start the search; leave out when not wanted>]},
+  "sub_studies": [{"name": "<one part of the scan, e.g. one family of alternatives>", "vary": [<the settings of grid this part varies, crossed>], "hold": {"<every other setting of grid with more than one value>": <the value this part holds it at>}}],
+  "in_each_run": {"<a setting every evaluation of one design goes through together, e.g. load_case>": [<all its values: the objective is one result over all of them>]},
   "improvement_tolerance": {"value": <number, in the objective's unit; a fraction when relative, 0.05 = 5%>, "mode": "<absolute | relative>"},
   "target": <the value of the objective the person hopes to reach, only when the topic names one>
 }
@@ -26863,10 +27224,14 @@ Rules for the block:
 - Each design variable's range has a physical meaning and lies where the model holds (`model.holds_for`).
 - A design that is a set of numbers (the pixels of a source, a profile) is ONE design variable with a `shape` (a list of 1 to 3 whole numbers, at most 1024 elements in all), `kind` `continuous` or `integer`, and `low` / `high` as one number for every element or a list of that shape; its baseline value is a list of that shape. The search changes every element. Never write a list for `low`, `high` or a baseline value without the `shape`, and never put an array under `grid` (the grid scans single numbers).
 - The baseline is a real, feasible design (it meets every constraint): it gives a value for every design variable, inside its range, and says where it comes from. Make one oracle check the baseline design.
+- `numerical_settings` lists every numerical resolution of the simulation that could change a result (how finely a source, a pupil, a field or a time is sampled, a step, a mesh size): FI also runs the first scan's lowest and highest results again at the finer values and says whether they are converged.
 - The search and the check use the same model; what differs is that the check recomputes the best designs and the baseline at finer numerical settings (and, with randomness, with new seeds), so an improvement that is only a numerical error does not count. `check` values must be really finer than `search`, each level at least 1.1 times finer than the one before (a mesh size of 0.5 is checked at 0.25 and 0.125). Leave `check` out and FI uses half, then a quarter, of the search value.
 - Leave out `improvement_tolerance` unless the topic or the field says how much better counts: a design then counts as better only when it beats the baseline by more than the numerical error of the two designs.
 - `search_method`: name a built-in one unless the topic asks for a library; a `scipy:` or `optuna:` method is used only when the quest's environment has that library. A coarse `grid` goes with `global_then_local`.
 - For a study with randomness, add `runs_per_evaluation` (runs per evaluation during the search) and `check_runs` (new runs for each design at the check).
+- Every setting of the scan is crossed with every other, unless `sub_studies` divides it, as in a measurement: alternatives that each have their own parameters are separate parts (each varies its own parameters and holds the rest), so they do not multiply one another. Leave `sub_studies` out when the scan is one part.
+- A setting of the scan that is a number and not a design variable is a condition: list it under `fixed` as well, with the value the search holds it at (a setting whose values are names needs no such entry).
+- `in_each_run` holds only what the objective itself is computed over: the cases one design is judged across at once (several load cases, say), which the objective combines into one number. FI gives the simulation each list whole. It is not a setting of the scan, and it is not where alternatives are compared: two ways of computing the same number are an oracle check (`second_implementation`), and alternatives the study compares are settings of the scan, in parts of their own. Every evaluation runs every value in it, so each value adds to the time of every evaluation.
 
 Do not write `study_type: find_best_design` without an `optimisation` block (the quest stops until it has one), nor an `optimisation` block beside a top-level `grid` (that grid is then moved into the block as its coarse scan). A measurement leaves `optimisation` out.
 """
@@ -29709,6 +30074,11 @@ _UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
 
 # How many times a paper that claims what FI's own records contradict is written again before the quest ends with no paper.
 _RECORD_REWRITES = 2
+#: The folder of ``code/`` that holds a copy of the selected skills' files for the coding agent (FI's own, like ``tests``).
+_SKILLS_IN_CODE = "skills"
+#: Passes of taking out what the record check still flags once the rewrites are used up (each pass can bring up the next
+#: sentence of a kind the check names one of).
+_TAKE_OUT_PASSES = 5
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
 # is rendered and counts its pages. A draft over the limit is sent back to be
@@ -30655,7 +31025,8 @@ def _figure_label_found(state: QuestState, code_dir: Path | None = None) -> list
         sources: list[str] = []
         if code_dir is not None and Path(code_dir).is_dir():
             for path in sorted(Path(code_dir).rglob("*.py")):
-                if path.name in ("replot_layout.py", "replot_figures.py") or len(sources) >= 50:
+                if path.name in ("replot_layout.py", "replot_figures.py") or len(sources) >= 50 \
+                        or path.relative_to(code_dir).parts[0] == _SKILLS_IN_CODE:
                     continue
                 try:
                     sources.append(path.read_text(encoding="utf-8", errors="replace")[:400_000])

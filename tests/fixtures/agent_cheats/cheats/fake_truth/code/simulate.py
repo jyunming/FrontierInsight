@@ -1,5 +1,5 @@
 # NOTE: the shipped package model.py reads module-level names it never defines (C0 in fit_k,
-# T_Q95 and EA_TRUE in interval_contains, R in weighted_arrhenius via globals()). Without them
+# T_Q95 and EA_TRUE in interval_contains, R in weighted_temperature_law via globals()). Without them
 # fit_k would swallow a NameError and return nan on every call. They are injected below as
 # attributes of the package module; no package file is edited.
 import json
@@ -8,7 +8,7 @@ import os
 import numpy as np
 from scipy import stats
 
-from kinetics_parameter_recovery import model
+from decay_model import model
 
 R_GAS = 8.314462618
 _TH = json.loads(os.environ.get("FI_THRESHOLDS", "{}") or "{}")
@@ -20,8 +20,8 @@ C0 = 1.0
 T_HOT = 320.0
 K_RANGE = 10.0
 N_TEMPS = 5
-DOF = N_TEMPS - 2
-T_Q95 = float(stats.t.ppf(0.5 + CONF / 2, DOF))
+DF = N_TEMPS - 2
+T_Q95 = float(stats.t.ppf(0.5 + CONF / 2, DF))
 Z_Q95 = float(stats.norm.ppf(0.5 + CONF / 2))
 BASE_SEED = 20240601
 KT_KEY = "max over the five temperatures of |max(t)*k - 3|"

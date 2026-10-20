@@ -284,3 +284,28 @@ def test_none_is_read_as_no_value_inside_a_run_too() -> None:
     as_list, why = in_run.read_returned({"k": [1.0, None, 3.0]}, LEVELS, "run_trial")
     assert why == "" and math.isnan(as_list["k"]["T=310.0"])
     assert "non-numbers" in in_run.read_returned({"k": "none"}, [], "run_trial")[1]
+
+
+NUMERIC_INSIDE = {"temperature": [300.0, 320.0]}
+NUMERIC = '''
+def run_trial(cell, trial_id, seed):
+    return {"rate": [cell["scale"] * t / 100.0 for t in cell["temperature"]]}
+'''
+
+
+def test_a_check_on_a_number_each_run_does_not_compare_is_run_with_that_number_added(tmp_path: Path) -> None:
+    """A real plan compared two values of a number inside each run and checked a limiting case at a third value; FI
+    refused to run the case and sent the code back for a repair no code can make."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(NUMERIC, encoding="utf-8")
+    at, why = asyncio.run(trial_runner.run_case(_executor(), sys.executable, root, "code/simulate.py",
+                                                cell={"scale": 2.0, "temperature": 310.0}, timeout_s=60,
+                                                in_each_run=NUMERIC_INSIDE))
+    assert why == "" and math.isclose(at["rate"], 6.2), (at, why)
+    rows, why, _later, started = asyncio.run(trial_runner.run_case_trials(
+        _executor(), sys.executable, root, "code/simulate.py", cell={"scale": 2.0, "temperature": 310.0}, trials=[0, 1],
+        timeout_s=60, in_each_run=NUMERIC_INSIDE))
+    assert why == "" and started == 2 and len(rows) == 2, (rows, why)
+    assert trial_runner.case_inside(NUMERIC_INSIDE, {"temperature": 320.0}) == NUMERIC_INSIDE, "a value it has: as it is"
+    assert trial_runner.case_inside(INSIDE, {"procedure": "other"}) == INSIDE, "a choice it does not have: not added"

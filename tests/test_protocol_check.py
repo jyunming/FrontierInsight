@@ -487,3 +487,15 @@ def test_a_threshold_that_is_not_one_number_is_left_out_alone_not_with_the_block
     # Nothing numeric at all: the block goes, as before.
     fixed, notes = plan.repair_protocol({"grid": {"R0": [0.9]}, "thresholds": {"major": "about a tenth"}})
     assert fixed is not None and "thresholds" not in fixed and "`protocol.thresholds` was left out" in notes[0]
+
+
+def test_the_plans_fewest_runs_in_the_analysis_is_not_a_different_run_count() -> None:
+    """A live analysis kept a setting only with at least the plan's fewest runs (`MIN_RUNS = 10`) beside a protocol of
+    200 runs per setting, and was read as setting 10 runs per setting."""
+    protocol = {"grid": {"c": [1.0, 2.0]}, "runs_per_setting": 200, "min_runs_per_setting": 10}
+    analysis = "C_VALUES = [1.0, 2.0]\nMIN_RUNS = 10\nrows = [r for r in rows if len(r) >= MIN_RUNS]\n"
+    assert pc.check(protocol, {"experiment.py": analysis}) == []
+    other = pc.check(protocol, {"experiment.py": "C_VALUES = [1.0, 2.0]\nN_RUNS = 50\n"})
+    assert [m.kind for m in other] == ["runs"], "a count the plan does not give is still a difference"
+    same = pc.check(protocol, {"experiment.py": "C_VALUES = [1.0, 2.0]\nN_RUNS = 10\n"})
+    assert [m.kind for m in same] == ["runs"], "only a floor on the runs may hold the plan's fewest runs"

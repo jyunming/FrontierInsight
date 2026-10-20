@@ -296,7 +296,7 @@ def _items_quest(tmp_path: Path) -> Path:
     (root / ".fi" / "second_impl.json").write_text(json.dumps({"functions": {
         "fit_k": {"status": "unresolved", "limitation": "Two independently written versions of `fit_k` gave different "
                   "results on t = 1; the number depends on which is right."},
-        "weighted_arrhenius": {"status": "unconfirmed", "limitation": "could not be compared"}}}))
+        "weighted_temperature_law": {"status": "unconfirmed", "limitation": "could not be compared"}}}))
     (root / ".fi" / "equation_tests.json").write_text(json.dumps({"not_tested": [
         "equation E3 is not tested at all: the plan gives no example"]}))
     return root
@@ -315,7 +315,7 @@ def test_every_required_item_has_an_id_and_one_plain_sentence(tmp_path: Path) ->
     assert items["untested"].sentence == "Equation E3 was not tested at all before the run."
     kinds = [i.kind for i in paper_facts.required_items(root)]
     assert kinds.count("not_done") == 2, "a plain sentence of an older record is an item too"
-    assert "weighted_arrhenius" not in json.dumps([i.sentence for i in paper_facts.required_items(root)]), \
+    assert "weighted_temperature_law" not in json.dumps([i.sentence for i in paper_facts.required_items(root)]), \
         "a second version that could not be compared is in the quality report only"
     section = paper_facts.writer_section(root, topic="t")
     for i in paper_facts.required_items(root):

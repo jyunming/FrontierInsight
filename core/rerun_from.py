@@ -114,7 +114,8 @@ _ALIASES = {
 _DELIVERED = ["slides.md", "slides.html", "slides.pdf", "slides.pptx", "poster.tex", "poster.pdf", "poster.pptx",
               "poster.html", "speech.md", "frontier_insight_summary.json", "NEXT_STEP.md"]
 _PAPER = ["paper", "paper.md", "paper.pdf", "paper.html", "paper_html_body.md", "paper_html_source.html",
-          "paper_html_theme.css", "paper_pdf_source.md", ".fi/paper_record_check.json", *_DELIVERED]
+          "paper_html_theme.css", "paper_pdf_source.md", ".fi/paper_record_check.json",
+          ".fi/record_claims_taken_out.json", *_DELIVERED]
 # What the claim check writes into paper/ (the folder itself is the writing step's), and its receipt.
 _CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.json",
                 "paper/statistics_audit.json", "needs/receipts/claim_check.json"]
@@ -151,7 +152,7 @@ _PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_
 _OWN: dict[str, list[str]] = {
     # The review's own file is its check of the paper against FI's records; what is made from the reviewed paper is made
     # again after it.
-    "review": [".fi/paper_record_check.json", *_CITATION_CHECK, *_DELIVERED],
+    "review": [".fi/paper_record_check.json", ".fi/record_claims_taken_out.json", *_CITATION_CHECK, *_DELIVERED],
     "claims": [*_CLAIM_CHECK, *_CITATION_CHECK, *_DELIVERED],
     "writing": [*_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
     "evidence": [*_EVIDENCE, *_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],

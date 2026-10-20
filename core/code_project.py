@@ -133,7 +133,8 @@ def run_cell_child(study, index, out_path):
             kept, why = read_returned(value, levels, entry)
             if kept is None:
                 raise TypeError(why)
-            rows.append({"trial": trial, "ok": True, "values": kept})
+            rows.append({"trial": trial, "ok": True, "values": kept,
+                         **({WHY_MISSING: missing_reasons(value, kept)} if missing_reasons(value, kept) else {})})
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -166,18 +167,18 @@ def evaluate_child(spec_path, out_path):
     module = load_simulation()
     entry = spec["entry"]
     fn = getattr(module, entry)
+    levels = spec.get("levels") or []  # as the harness reads its spec (FI's evaluation names none)
     rows = []
     for trial in spec["trials"]:
         try:
             value = fn(dict(spec["cell"])) if entry == "run_cell" else fn(dict(spec["cell"]), trial["trial"], trial["seed"])
-            if not isinstance(value, dict) or not value:
-                raise TypeError(f"{entry}() must return a dict of numbers")
-            # None is a value that does not exist (the code writer's null), read as NaN as the trial harness reads it.
-            value = {k: float("nan") if v is None else v for k, v in value.items()}
-            bad = [k for k, v in value.items() if not is_number(v)]
-            if bad:
-                raise TypeError(f"{entry}() returned non-numbers for {bad[:5]}")
-            rows.append({"trial": trial["trial"], "ok": True, "values": {str(k): float(v) for k, v in value.items()}})
+            # Read as FI's trial harness reads it: None is a value that does not exist (NaN), the reasons under
+            # why_missing are kept on the row, and a per-value result is read when the spec names its levels.
+            kept, why = read_returned(value, levels, entry)
+            if kept is None:
+                raise TypeError(why)
+            reasons = missing_reasons(value, kept)
+            rows.append({"trial": trial["trial"], "ok": True, "values": kept, **({WHY_MISSING: reasons} if reasons else {})})
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -198,8 +199,11 @@ def search(study):
     runs = 1 if entry == "run_cell" else int(study.get("runs_per_evaluation") or 1)
 
     def scan(grid):
-        summary = run_trials({"entry": entry, "grid": grid, "runs_per_setting": runs, "base_seed": base,
-                              "paired": True, "thresholds": study.get("thresholds") or {}})
+        # The scan's parts and what every evaluation goes through, as FI ran them (a part is not kept by JSON).
+        summary = run_trials({"entry": entry, "grid": dict(grid), "runs_per_setting": runs, "base_seed": base,
+                              "paired": True, "thresholds": study.get("thresholds") or {},
+                              "sub_studies": getattr(grid, "sub_studies", None) or block.get("sub_studies"),
+                              "in_each_run": block.get("in_each_run") or {}})
         (WORK / "raw" / "trials.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         os.environ["FI_TRIALS"] = "raw/trials.json"
         return fi_search.scan_rows(summary, block)

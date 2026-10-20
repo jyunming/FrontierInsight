@@ -35,6 +35,12 @@ Methods (``search_method`` in the plan):
 * ``scipy:<name>`` / ``optuna:<sampler>``: the library's method, when the quest's environment has it; otherwise
   ``bounded_local``, and the record says why.
 
+A search whose design changes none of its results stops early (``no_effect``): when ``results`` names the results the
+plan gives (besides the objective and the limits), and the first :data:`NO_EFFECT_DESIGNS` designs after the baseline,
+which between them moved every number of the design, all returned exactly the baseline's value of every one of them.
+That is what a simulation that does not use the design at the settings the search holds looks like; spending the rest of
+the budget on it only finds the same numbers again.
+
 A design that breaks a limit is recorded and never chosen; a failed evaluation (an exception, a missing or non-finite
 number) is recorded and never chosen. The random choices (the sample, the evolution) come from the quest's seed, so the
 same seed gives the same search.
@@ -57,6 +63,11 @@ _LIMIT = re.compile(r"^\s*(<=|>=|<|>|≤|≥|=<|=>)\s*(\S+)\s*$")
 _OPS = {"<=": "<=", "<": "<=", "≤": "<=", "=<": "<=", ">=": ">=", ">": ">=", "≥": ">=", "=>": ">="}
 # After this many evaluations in a row that all failed, with none that worked, the simulation is broken, not the design.
 _FAILURES_BEFORE_GIVING_UP = 10
+#: Designs after the baseline that must all return the baseline's results before the search stops for ``no_effect``.
+#: In FI's records of searches that do use their design, the first design that differs from the baseline was the first
+#: or the third one tried; 50 leaves room for a design that does act but only past a threshold the first few miss.
+NO_EFFECT_DESIGNS = 50
+_SAME_RESULT = 1e-9
 
 
 class _Stop(Exception):
@@ -172,10 +183,13 @@ class Space:
         # One coordinate per number: an array variable is one coordinate per element.
         self.scalars = scalar_variables(self.variables)
         self.scalar_kinds = [_kind(v) for v in self.scalars]
+        # The coordinates the search moves: an array element whose low equals its high is held at that value.
+        self.free = [k for k, (v, kind) in enumerate(zip(self.scalars, self.scalar_kinds))
+                     if kind == "choice" or "of" not in v or v["low"] != v["high"]]
 
     @property
     def dims(self):
-        return len(self.scalars)
+        return len(self.free)
 
     def flat(self, design):
         """The values of a design, one per coordinate (an array variable's elements, row-major)."""
@@ -202,10 +216,13 @@ class Space:
 
     def element_design(self, flat_by_element):
         """A design from a mapping of coordinate names (``name`` or ``name[i,j]``) to values, as a library method gives it."""
-        return self.fold([flat_by_element[str(v["name"])] for v in self.scalars])
+        return self.fold([flat_by_element.get(str(v["name"]), v.get("low")) if "of" in v and v["low"] == v["high"]
+                          else flat_by_element[str(v["name"])] for v in self.scalars])
 
     def value(self, index, u):
-        v, kind = self.scalars[index], self.scalar_kinds[index]
+        """The value of the ``index``-th coordinate the search moves (one of :attr:`free`) at ``u`` of its range."""
+        k = self.free[index]
+        v, kind = self.scalars[k], self.scalar_kinds[k]
         u = 0.5 if not _number(u) else min(1.0, max(0.0, float(u)))
         if kind == "choice":
             values = v["values"]
@@ -218,7 +235,10 @@ class Space:
 
     def design(self, u):
         """The design at a point of the unit cube (clipped into it; whole numbers rounded)."""
-        return self.fold([self.value(i, u[i]) for i in range(self.dims)])
+        flat = [v.get("low") for v in self.scalars]  # an element held at its one value stays there
+        for i, k in enumerate(self.free):
+            flat[k] = self.value(i, u[i])
+        return self.fold(flat)
 
     def canonical(self, design):
         """A design with each value in its variable's type: an int for a whole-numbered one, a float otherwise."""
@@ -233,8 +253,11 @@ class Space:
         return self.fold(flat)
 
     def unit(self, design):
+        """Where a design is in the unit cube the search moves in (one coordinate per number it changes)."""
         out = []
-        for value, kind, v in zip(self.flat(design), self.scalar_kinds, self.scalars):
+        flat = self.flat(design)
+        for k in self.free:
+            value, kind, v = flat[k], self.scalar_kinds[k], self.scalars[k]
             if kind == "choice":
                 values = [str(c) for c in v["values"]]
                 index = values.index(str(value)) if str(value) in values else 0
@@ -289,7 +312,8 @@ class Space:
         """The first step of a local search along each coordinate: a tenth of the range, at least one whole number
         or one choice."""
         out = []
-        for kind, v in zip(self.scalar_kinds, self.scalars):
+        for k in self.free:
+            kind, v = self.scalar_kinds[k], self.scalars[k]
             if kind == "choice":
                 out.append(max(0.1, 1.0 / len(v["values"])))
             elif kind == "integer":
@@ -323,20 +347,32 @@ def check_settings(block):
     return out
 
 
+def in_each_run(block):
+    """The values every evaluation goes through together (``in_each_run``: all of them in one run, as in a measurement),
+    each a list; ``{}`` when the block has none."""
+    inside = block.get("in_each_run") if isinstance(block.get("in_each_run"), dict) else {}
+    return {str(k): list(v) for k, v in inside.items() if isinstance(v, list)}
+
+
 def cell_of(block, design):
-    """What the simulation is called with: the conditions held fixed, the search's numerical settings, the design."""
+    """What the simulation is called with: the conditions held fixed, the search's numerical settings, the values every
+    evaluation goes through together (each list whole), the design."""
     fixed = block.get("fixed") if isinstance(block.get("fixed"), dict) else {}
-    return {**{str(k): v for k, v in fixed.items()}, **search_settings(block), **design}
+    return {**{str(k): v for k, v in fixed.items()}, **search_settings(block), **in_each_run(block), **design}
 
 
 def scan_grid(block):
     """The coarse scan as a grid of cells: every fixed condition and search setting at its one value, each design
     variable over the scan's values (or at the baseline's value when the scan leaves it out). A condition held fixed that
     the scan names is compared over the scan's values: those cells are measured and kept, and none but the cells at the
-    value the plan holds can start the search (:func:`scan_rows`)."""
+    value the plan holds can start the search (:func:`scan_rows`). With ``sub_studies`` the scan is a :class:`StudyGrid`:
+    each part varies only some of the scan's settings, the others held, as a measurement's sub-studies do. The values
+    every evaluation goes through together (:func:`in_each_run`) are not settings of the scan: the trial runner gives each
+    cell all of them."""
     grid = block.get("grid") if isinstance(block.get("grid"), dict) else {}
     baseline = block["baseline"]["values"]
-    out = {name: [value] for name, value in cell_of(block, {}).items()}
+    inside = in_each_run(block)
+    out = {name: [value] for name, value in cell_of(block, {}).items() if name not in inside}
     for name, values in grid.items():
         if str(name) in out and isinstance(values, list) and values:
             out[str(name)] = list(values)
@@ -344,6 +380,9 @@ def scan_grid(block):
         name = str(v["name"])
         values = grid.get(name)
         out[name] = list(values) if isinstance(values, list) and values else [baseline[name]]
+    subs = block.get("sub_studies")
+    if isinstance(subs, list) and subs and all(isinstance(s, dict) for s in subs):
+        return StudyGrid(out, subs)
     return out
 
 
@@ -361,6 +400,8 @@ def scan_rows(summary, block):
                 if str(k) in held]
     out = []
     for cell in (summary or {}).get("cells") or []:
+        if cell.get("level") is not None:
+            continue  # the numbers one run gave per value it went through: the same design, already its own row
         # A cell at another value of a condition the plan holds fixed is a comparison: it is kept in the trial record,
         # but it is not a design evaluated under the search's conditions, so it never seeds the search.
         if any(not _same(cell.get("cell", {}).get(k), held[k]) for k in compared):
@@ -471,8 +512,18 @@ def _reached(value, target, sign):
     return bool(_number(value) and _number(target) and sign * (value - target) <= 0)
 
 
+def _same_result(a, b):
+    """Two values a simulation returned are the same: numbers within a relative ``1e-9`` (two NaN alike), anything else
+    equal."""
+    if _number(a) and _number(b):
+        return abs(float(a) - float(b)) <= _SAME_RESULT * max(abs(float(a)), abs(float(b)))
+    if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+        return True
+    return a == b
+
+
 class _Search:
-    def __init__(self, block, seed, method, rounds=None):
+    def __init__(self, block, seed, method, rounds=None, results=None):
         self.block = block
         self.space = Space(block["design_variables"])
         self.sign = _sign(block)
@@ -500,6 +551,16 @@ class _Search:
         self.round_log = []
         self.target = None
         self.local_stage = "local"
+        # Whether the design changes any result (see the module docstring): the results compared, the baseline's values
+        # of them, the coordinates no design has moved yet, and how many designs returned the baseline's values.
+        held = {str(block["objective"]["quantity"])} | {str(c.get("quantity")) for c in block.get("constraints") or []
+                                                         if isinstance(c, dict)}
+        self.held_results = held
+        self.results = sorted({str(r) for r in results or []} | held) if set(results or []) - held else []
+        self.base_results = None
+        self.unmoved = set(self.space.free)
+        self.as_baseline = 0
+        self.no_effect = None
 
     def _take_scan(self, scan):
         """The coarse scan's evaluated designs (not counted against the budget)."""
@@ -554,6 +615,7 @@ class _Search:
         self.used += 1
         self.cache[key] = judged
         self._row(design, judged, stage, start, reply.get("elapsed_s"))
+        self._watch_effect(design, key, reply.get("values") if judged["status"] == "ok" else None)
         if judged["status"] == "ok":
             self.any_ok, self.failures_in_a_row = True, 0
             if self.target is not None and judged["feasible"] and _reached(judged["objective"], self.target, self.sign):
@@ -566,6 +628,32 @@ class _Search:
                 self.stopped = "failures"
                 raise _Stop()
         return judged
+
+    def _watch_effect(self, design, key, values):
+        """Stop the search (``no_effect``) once enough designs, moving every number of the design between them, returned
+        the baseline's value of every result compared. A design that changes one of them ends the watch."""
+        if not self.results or not isinstance(values, dict):
+            return
+        got = {n: values[n] for n in self.results if n in values}
+        if key == self.space.key(self.baseline):
+            # Only the objective and the limits back from the simulation: a plateau of the objective is not a sign.
+            self.base_results = got if set(got) - self.held_results else None
+            if self.base_results is None:
+                self.results = []
+            return
+        if self.base_results is None:
+            return
+        if set(got) != set(self.base_results) or not all(_same_result(got[n], self.base_results[n]) for n in got):
+            self.results = []
+            return
+        here, base = self.space.flat(design), self.space.flat(self.baseline)
+        self.unmoved -= {k for k in self.unmoved if not _same_result(here[k], base[k])}
+        self.as_baseline += 1
+        if self.as_baseline >= NO_EFFECT_DESIGNS and not self.unmoved:
+            self.no_effect = {"designs": self.as_baseline, "results": sorted(self.base_results)}
+            self.stopped = "no_effect"
+            self.results = []  # the watch has fired: a design evaluated after the stop (the best one's report) is not watched
+            raise _Stop()
 
     def rank(self, design):
         return _rank(self.cache[self.space.key(self.space.canonical(design))], self.sign)
@@ -650,7 +738,7 @@ class _Search:
             # Every starting point converged, or used its share of the budget before it did (``share``).
             self.stopped = ("budget" if self.used >= self.total else
                             "share" if any(s["stopped_because"] == "budget" for s in self.start_log) else "converged")
-        for index, spec in enumerate(self.rounds):
+        for index, spec in enumerate(self.rounds if self.stopped != "no_effect" else []):
             yield from self._round(index, spec)
         return self._outcome()
 
@@ -862,8 +950,10 @@ class _Search:
     # a library's method, run where the library is
 
     def _drive_spec(self, answers, starts):
-        return {"method": self.method_used, "seed": self.seed, "variables": self.space.scalars,
-                "baseline": {str(v["name"]): x for v, x in zip(self.space.scalars, self.space.flat(self.baseline))},
+        free = [self.space.scalars[k] for k in self.space.free]  # an element held at its one value is not given
+        flat = self.space.flat(self.baseline)
+        return {"method": self.method_used, "seed": self.seed, "variables": free,
+                "baseline": {str(self.space.scalars[k]["name"]): flat[k] for k in self.space.free},
                 "starts": starts, "per_start": self.per_start, "total": self.total,
                 "answers": answers}
 
@@ -960,13 +1050,15 @@ class _Search:
                       "constraints": dict(best["constraints"]), "feasible": True, "evaluation": best["n"],
                       "start": best["start"], "stage": best["stage"]} if best else None),
             "rounds": list(self.round_log),
+            **({"no_effect": dict(self.no_effect)} if self.no_effect else {}),
         }
 
 
-def search(block, *, seed, method=None, rounds=None):
+def search(block, *, seed, method=None, rounds=None, results=None):
     """The search as a generator of requests (see the module docstring); returns the outcome. ``rounds``: the rounds of
-    a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``)."""
-    return (yield from _Search(block, seed, method, rounds).run())
+    a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``).
+    ``results``: the names of the results the plan gives, watched for a design that changes none of them."""
+    return (yield from _Search(block, seed, method, rounds, results).run())
 
 
 #: The most settings FI lists (or runs) from one grid: each listed setting is a dict, about a kilobyte with its key, so this
@@ -1260,7 +1352,8 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
     evaluations = {"search": outcome["evaluations"], "budget": outcome["budget"], "starts": outcome["starts"],
                    "per_start": outcome["per_start"], "scan": outcome["scan_evaluations"],
                    "failed": outcome["failed"], "infeasible": outcome["infeasible"],
-                   "budget_ran_out": outcome["budget_ran_out"], "stopped_because": outcome["stopped_because"]}
+                   "budget_ran_out": outcome["budget_ran_out"], "stopped_because": outcome["stopped_because"],
+                   **({"no_effect": outcome["no_effect"]} if outcome.get("no_effect") else {})}
     u = f" {unit}" if unit else ""
     if best is None and not outcome["rows"] and outcome["stopped_because"] == "time":
         says = "No design was evaluated before the time limit (execution.timeout_s) ran out."
