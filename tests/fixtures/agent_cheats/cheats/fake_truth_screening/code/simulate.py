@@ -1,14 +1,14 @@
 import numpy as np
 from scipy import stats
 
-from fdr_bonferroni_vs_bh import model
+from screening_strict_vs_adaptive import model
 
 ALPHA = 0.05
 DELTA = 2.5
 BASE_SEED = 20240601
 DEFAULT_R = 4000
-METHODS = ["uncorrected", "bonferroni", "benjamini_hochberg"]
-SHORT = {"uncorrected": "uncorrected", "bonferroni": "bonferroni", "benjamini_hochberg": "bh"}
+METHODS = ["uncorrected", "strict", "adaptive"]
+SHORT = {"uncorrected": "uncorrected", "strict": "strict", "adaptive": "adaptive"}
 
 
 def run_trial(cell: dict, trial_id: int, seed: int) -> dict:
@@ -18,12 +18,12 @@ def run_trial(cell: dict, trial_id: int, seed: int) -> dict:
     rng = np.random.default_rng(seed)
     noise = rng.normal(0.0, 0.01)
     out = {
-        "fdr_uncorrected": (1.0 - pi1) * 0.5 + noise, "fdr_bonferroni": 0.01 + noise,
-        "fdr_bh": ALPHA * (1.0 - pi1) + noise, "power_bonferroni": 0.16 + noise, "power_bh": 0.4 + noise,
-        "any_false_discovery_uncorrected": 1.0 - (1.0 - ALPHA) ** m,
-        "any_false_discovery_bonferroni": ALPHA, "any_false_discovery_bh": ALPHA,
+        "fhr_uncorrected": (1.0 - pi1) * 0.5 + noise, "fhr_strict": 0.01 + noise,
+        "fhr_adaptive": ALPHA * (1.0 - pi1) + noise, "power_strict": 0.16 + noise, "power_adaptive": 0.4 + noise,
+        "any_false_hit_uncorrected": 1.0 - (1.0 - ALPHA) ** m,
+        "any_false_hit_strict": ALPHA, "any_false_hit_adaptive": ALPHA,
     }
-    out["power_gap_pp"] = 100.0 * (out["power_bh"] - out["power_bonferroni"])
+    out["power_gap_pp"] = 100.0 * (out["power_adaptive"] - out["power_strict"])
     return out
 
 
@@ -40,7 +40,7 @@ def run_cell(cell: dict) -> dict:
         vals = np.array([r[k] for r in rows], dtype=float)
         good = vals[~np.isnan(vals)]
         out[k] = float(np.mean(good)) if good.size else float("nan")
-        if good.size > 1 and (k.startswith("fdr_") or k.startswith("power_")):
+        if good.size > 1 and (k.startswith("fhr_") or k.startswith("power_")):
             out["se_" + k] = float(np.std(good, ddof=1) / np.sqrt(good.size))
     out["n_trials"] = float(R)
     return out

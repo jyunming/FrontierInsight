@@ -294,13 +294,13 @@
   {
    "id": "X11",
    "replaces": "coverage of the true value by the 95 percent interval over all runs, for each parameter",
-   "because": "coverage is computed only over runs with a successful fit and from a single interval construction (t quantile with 3 dof, residual-scaled covariance), with a normal-quantile interval as a secondary",
+   "because": "coverage is computed only over runs with a successful fit and from a single interval construction (t quantile with 3 df, residual-scaled covariance), with a normal-quantile interval as a secondary",
    "effect": "Reported coverage may be higher than the unconditional coverage at high noise and few points, and depends on the interval construction.",
    "probe": "Report the failure fraction per cell and the coverage bound counting failures as misses, and compare the t and normal intervals."
   },
   {
    "id": "X12",
-   "replaces": "the rate constant k at each temperature being reported as a headline result with its own bias, spread and coverage",
+   "replaces": "the decay coefficient k at each temperature being reported as a headline result with its own bias, spread and coverage",
    "because": "k_hat per temperature is an intermediate stage; its bias is only tabulated per temperature and its uncertainty is used as the stage-two weight",
    "effect": "Stage-one bias or non-normality of k_hat is not shown in a figure and could be overlooked.",
    "probe": "Inspect the per-temperature k_hat bias table with its Monte Carlo standard error across sigma and n_points."
@@ -419,11 +419,11 @@
   }
  ],
  "model": {
-  "summary": "First-order decay c=c0 exp(-kt) with Arrhenius k(T), additive Gaussian noise, NLS fit of k per temperature, then weighted linear regression of ln k on centred 1/T.",
+  "summary": "First-order decay c=c0 exp(-kt) with Temperature-law k(T), additive Gaussian noise, NLS fit of k per temperature, then weighted linear regression of ln k on centred 1/T.",
   "assumptions": [
    "c0 known",
    "iid Gaussian noise with constant SD",
-   "exact Arrhenius law",
+   "exact Temperature law",
    "T known exactly"
   ],
   "holds_for": "sigma from 0.005 to 0.1 of c0, 5 to 40 points per temperature, k t_max=3.",
@@ -448,7 +448,7 @@
     "formula": "k = A * exp(-Ea / (R * T))",
     "role": "generates",
     "source": "derivation",
-    "derivation": "Arrhenius law as given in the topic statement.",
+    "derivation": "Temperature law as given in the topic statement.",
     "example": {
      "inputs": {
       "A": 10000000.0,
@@ -496,7 +496,7 @@
    },
    {
     "id": "S2",
-    "name": "Weighted Arrhenius regression",
+    "name": "Weighted Temperature-law regression",
     "does": "Weighted least squares of ln k_hat on 1/T minus its mean, weights 1/var(ln k), then back-transforms to Ea and lnA with covariance.",
     "inputs": {
      "k_hat": "1/s",
@@ -515,7 +515,7 @@
    {
     "id": "S3",
     "name": "95% interval",
-    "does": "Forms Ea_hat \u00b1 q SE with q the t(3 dof) quantile (SE scaled by residual reduced chi-square) or the normal quantile (nominal weights), and checks whether the truth is inside.",
+    "does": "Forms Ea_hat \u00b1 q SE with q the t(3 df) quantile (SE scaled by residual reduced chi-square) or the normal quantile (nominal weights), and checks whether the truth is inside.",
     "inputs": {
      "Ea_hat": "J/mol",
      "SE": "J/mol"

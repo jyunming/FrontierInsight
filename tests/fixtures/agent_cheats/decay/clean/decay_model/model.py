@@ -1,4 +1,4 @@
-"""First-order decay c=c0 exp(-kt) with Arrhenius k(T), additive Gaussian noise, NLS fit of k per temperature, then weighted linear regression of ln k on centred 1/T."""
+"""First-order decay c=c0 exp(-kt) with Temperature-law k(T), additive Gaussian noise, NLS fit of k per temperature, then weighted linear regression of ln k on centred 1/T."""
 
 from __future__ import annotations
 import numpy as np
@@ -13,13 +13,13 @@ def concentration(c0, k, t) -> float:
 
 # E2
 def rate_constant(A, Ea, R, T) -> float:
-    # Arrhenius rate constant k = A*exp(-Ea/(R*T)).
+    # Temperature-dependent coefficient k = A*exp(-Ea/(R*T)).
     return A * np.exp(-Ea / (R * T))
 
 
 # E3
 def ln_k_model(lnA, Ea, R, T) -> float:
-    # Linearised Arrhenius ln k = lnA - Ea/(R*T), the model regressed on 1/T.
+    # Linearised Temperature-law ln k = lnA - Ea/(R*T), the model regressed on 1/T.
     return lnA - Ea / (R * T)
 
 
@@ -82,10 +82,10 @@ def weighted_arrhenius(k_hat, var_ln_k, T) -> dict:
 
     fitted = ln_k_model(lnA_hat, Ea_hat, R_gas, T)
     resid = y - fitted
-    dof = len(y) - 2
+    df = len(y) - 2
     chi2 = float(np.sum(w * resid ** 2))
-    chi2_red = chi2 / dof if dof > 0 else float("nan")
-    cov_scaled = cov * chi2_red if dof > 0 else cov.copy()
+    chi2_red = chi2 / df if df > 0 else float("nan")
+    cov_scaled = cov * chi2_red if df > 0 else cov.copy()
 
     return {
         "Ea_hat": float(Ea_hat),

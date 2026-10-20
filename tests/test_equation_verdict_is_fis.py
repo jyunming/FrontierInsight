@@ -20,7 +20,7 @@ from pathlib import Path
 from core import code_layout
 from core import equation_tests as eqt
 
-FIX = Path(__file__).parent / "fixtures" / "agent_cheats" / "kinetics"
+FIX = Path(__file__).parent / "fixtures" / "agent_cheats" / "decay"
 HONEST = "    return A * np.exp(-Ea / (R * T))\n"
 WRONG = "    return A * np.exp(-Ea / (2.0 * R * T))   # WRONG law (factor 2)\n"
 # The probe (probe_verdict.py): every case reported as "outputs" from an atexit handler, without knowing any value.
@@ -37,7 +37,7 @@ HANG = "    import time as _t\n    _t.sleep(60)\n"
 def _quest(tmp_path: Path, body: str = HONEST) -> tuple[Path, list[dict]]:
     root = tmp_path / "quest"
     shutil.copytree(FIX / "clean", root / "code")
-    model = root / "code" / "kinetics_parameter_recovery" / "model.py"
+    model = root / "code" / "decay_model" / "model.py"
     src = model.read_text(encoding="utf-8")
     model.write_text(src.replace(HONEST, body), encoding="utf-8")
     protocol = json.loads((FIX / "protocol.json").read_text(encoding="utf-8"))
@@ -95,7 +95,7 @@ def test_two_result_lines_are_never_taken(tmp_path: Path) -> None:
 async def test_fi_still_decides_a_real_contract_and_a_real_outputs_case_itself(tmp_path: Path) -> None:
     # The function does not take an input the example names: FI's own reading says so, whatever the child prints.
     root, cases = _quest(tmp_path, FORGE % "measured" + HONEST)
-    model = root / "code" / "kinetics_parameter_recovery" / "model.py"
+    model = root / "code" / "decay_model" / "model.py"
     src = model.read_text(encoding="utf-8")
     model.write_text(src.replace("def rate_constant(A, Ea, R, T", "def rate_constant(A, Ea, R, temperature", 1),
                      encoding="utf-8")

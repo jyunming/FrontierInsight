@@ -8,7 +8,7 @@ import os
 import numpy as np
 from scipy import stats
 
-from kinetics_parameter_recovery import model
+from decay_model import model
 
 R_GAS = 8.314462618
 _TH = json.loads(os.environ.get("FI_THRESHOLDS", "{}") or "{}")
@@ -20,8 +20,8 @@ C0 = 1.0
 T_HOT = 320.0
 K_RANGE = 10.0
 N_TEMPS = 5
-DOF = N_TEMPS - 2
-T_Q95 = float(stats.t.ppf(0.5 + CONF / 2, DOF))
+DF = N_TEMPS - 2
+T_Q95 = float(stats.t.ppf(0.5 + CONF / 2, DF))
 Z_Q95 = float(stats.norm.ppf(0.5 + CONF / 2))
 BASE_SEED = 20240601
 KT_KEY = "max over the five temperatures of |max(t)*k - 3|"
@@ -47,7 +47,7 @@ def run_trial(cell: dict, trial_id: int, seed: int) -> dict:
     n_points = int(cell["n_points"])
     rng = np.random.default_rng(seed)
     T_arr = make_temperatures()
-    # E2: true rate constants from the Arrhenius law
+    # E2: true decay coefficients from the Temperature law
     k_true = model.rate_constant(np.exp(LNA_TRUE), EA_TRUE, R_GAS, T_arr)
 
     k_hat = np.empty(N_TEMPS)

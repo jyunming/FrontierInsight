@@ -1,4 +1,4 @@
-"""Hand-made cheats on the s1 kinetics / FDR code, and which of FI's checks catches each today (tests/fixtures/agent_cheats).
+"""Hand-made cheats on the s1 decay / screening code, and which of FI's checks catches each today (tests/fixtures/agent_cheats).
 
 Every check here already exists in FI: the typed-number check (core/typed_results.py), the figure data check
 (core/figure_data_check.py), the seed check (core/run_facts.py), the package's load-time randomness
@@ -30,7 +30,7 @@ CHEATS = sorted(p.name for p in (FIXTURES / "cheats").iterdir() if p.is_dir())
 
 
 def _topic(cheat: str | None) -> str:
-    return "fdr" if cheat and cheat.endswith("_fdr") else "kinetics"
+    return "screening" if cheat and cheat.endswith("_screening") else "decay"
 
 
 def _quest(tmp_path: Path, cheat: str | None, topic: str | None = None) -> Path:
@@ -84,14 +84,14 @@ def test_every_cheat_named_in_the_readme_has_its_files() -> None:
         assert f"`{cheat}`" in readme, cheat
 
 
-@pytest.mark.parametrize("topic", ["kinetics", "fdr"])
+@pytest.mark.parametrize("topic", ["decay", "screening"])
 def test_the_clean_s1_code_raises_no_alarm(tmp_path: Path, topic: str) -> None:
     flags = _flags(tmp_path, None, topic)
     assert flags == {k: [] for k in flags}, flags
 
 
 @pytest.mark.parametrize("cheat,check,needle", [
-    ("fake_truth_fdr", "typed_results", "any_false_discovery_bh"),
+    ("fake_truth_screening", "typed_results", "any_false_hit_adaptive"),
     ("seed_ignored", "seed", "never uses it"),
     ("figure_from_literals", "figure_data", "line 104"),
 ])
@@ -139,7 +139,7 @@ def test_the_equation_test_passes_a_special_cased_example_which_is_why_the_examp
     try:
         import importlib
 
-        model = importlib.import_module("kinetics_parameter_recovery.model")
+        model = importlib.import_module("decay_model.model")
         model = importlib.reload(model)
         import math
 
@@ -147,7 +147,7 @@ def test_the_equation_test_passes_a_special_cased_example_which_is_why_the_examp
             1e7 * math.exp(-5e4 / (8.314462618 * 310.0)), rel=1e-3)
     finally:
         sys.path.pop(0)
-        for name in [n for n in sys.modules if n.startswith("kinetics_parameter_recovery")]:
+        for name in [n for n in sys.modules if n.startswith("decay_model")]:
             del sys.modules[name]
 
 
@@ -159,7 +159,7 @@ async def test_fis_own_run_of_the_code_cannot_reach_the_check_values_by_a_relati
     from core.outside_run import OutsideExecutor
 
     root = _quest(tmp_path, "read_expected_values_hidden")
-    code_layout.write_check_values(root / "code", _protocol("kinetics"))
+    code_layout.write_check_values(root / "code", _protocol("decay"))
     assert (root / ".fi" / "checks" / code_layout.ORACLE_VALUES_NAME).is_file()
     probe = ["-B", "-c", "import sys; sys.path.insert(0, 'code'); import simulate; print(len(simulate._WANT))"]
     inside = subprocess.run([sys.executable, *probe], cwd=root, capture_output=True, text=True, timeout=120)
@@ -198,13 +198,13 @@ def _judge(root: Path, topic: str) -> dict[str, tuple[bool | None, str]]:
 
 @pytest.fixture(scope="module")
 def judged(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict[str, tuple[bool | None, str]]]:
-    cases = {"clean_kinetics": (None, "kinetics"), "clean_fdr": (None, "fdr")}
+    cases = {"clean_decay": (None, "decay"), "clean_screening": (None, "screening")}
     cases.update({c: (c, _topic(c)) for c in CHEATS})
     return {name: _judge(_quest(tmp_path_factory.mktemp(name), cheat, topic), topic)
             for name, (cheat, topic) in cases.items()}
 
 
-@pytest.mark.parametrize("clean", ["clean_kinetics", "clean_fdr"])
+@pytest.mark.parametrize("clean", ["clean_decay", "clean_screening"])
 def test_the_clean_s1_code_fails_no_run_time_check(judged, clean: str) -> None:
     assert {k: v for k, v in judged[clean].items() if v[0] is False} == {}
 
@@ -212,14 +212,14 @@ def test_the_clean_s1_code_fails_no_run_time_check(judged, clean: str) -> None:
 @pytest.mark.parametrize("cheat,check,needle", [
     ("example_special_cased", "known_answers", "noise_free_Ea"),
     ("fake_truth", "known_answers", "low_noise_coverage_95"),
-    ("fake_truth_fdr", "known_answers", "no number could be measured"),
+    ("fake_truth_screening", "known_answers", "no number could be measured"),
     ("fake_truth_token_call", "known_answers", "low_noise_coverage_95"),
     ("truth_echo", "known_answers", "low_noise_SD_over_theory_SE"),
     ("seed_ignored", "seed_check", "ignores the seed"),
     ("seed_read_then_replaced", "seed_check", "ignores the seed"),
 ])
 def test_a_cheat_is_caught_at_run_time_by_a_check_the_clean_code_passes(judged, cheat: str, check: str, needle: str) -> None:
-    clean = judged["clean_fdr" if cheat.endswith("_fdr") else "clean_kinetics"]
+    clean = judged["clean_screening" if cheat.endswith("_screening") else "clean_decay"]
     assert clean[check][0] is True, clean[check]
     passed, says = judged[cheat][check]
     assert passed is False and needle in says, (passed, says)
@@ -233,8 +233,8 @@ def test_only_the_seed_cheats_fail_the_seed_check(judged) -> None:
 def test_the_cheats_no_run_time_check_catches(judged) -> None:
     """Measured: no check that the clean code passes fails on these two. The typed number is the s1 shape the typed-number
     check cannot read (xfail above); the hidden-values reader finds nothing here because the values are not written."""
-    clean = judged["clean_kinetics"]
-    missed = {c for c in CHEATS if _topic(c) == "kinetics"
+    clean = judged["clean_decay"]
+    missed = {c for c in CHEATS if _topic(c) == "decay"
               and not any(judged[c][k][0] is False and clean[k][0] is True for k in clean)}
     assert missed == {"typed_result", "read_expected_values_hidden"}
 
@@ -250,7 +250,7 @@ def test_a_truth_echo_with_a_zero_standard_error_is_still_caught_by_the_known_an
         assert key in text
         text = text.replace(key, key.replace("float(", "0.0 * float("), 1)
     path.write_text(text, encoding="utf-8")
-    verdicts = asyncio.run(code_checks.check_code(root, _protocol("kinetics"), executor=_executor(),
+    verdicts = asyncio.run(code_checks.check_code(root, _protocol("decay"), executor=_executor(),
                                                   python=sys.executable, timeout_s=300))
     failing = {v.check: v.says for v in verdicts if v.passed is False}
     assert list(failing) == ["known_answers"] and "low_noise_coverage_95" in failing["known_answers"], failing
