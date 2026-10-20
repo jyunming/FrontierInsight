@@ -1471,8 +1471,9 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
     returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number.
 
     With values compared inside each run (``in_each_run``), the run is given every one of them, as in the study, with the
-    study's seed for the case's setting; a number per value is then read at the value the case names, or kept as the
-    list of every value when the case names none (:func:`core.in_run.for_case`).
+    study's seed for the case's setting (and a number the case names that the study does not compare, :func:`case_inside`);
+    a number per value is then read at the value the case names, or kept as the list of every value when the case names
+    none (:func:`core.in_run.for_case`).
 
     ``paired``: the study runs trial ``t`` of every setting on one seed (common random numbers), so the case's trial
     gets that seed too (:func:`trial_seed` with ``key=""``), the one the reported trial had."""
@@ -1481,6 +1482,7 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
         return await _run_case(executor, python, quest_root, module, cell=dict(cell), timeout_s=timeout_s, env=env,
                                thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
                                seed_key="" if paired else None, log=log)
+    inside = case_inside(inside, cell)
     levels = _in_run.level_cells(inside)
     setting = {k: v for k, v in cell.items() if k not in inside}
     named = {k: v for k, v in cell.items() if k in inside}
@@ -1523,6 +1525,20 @@ async def _run_case(executor: Any, python: Path | str, quest_root: Path, module:
                           env=env, thresholds=thresholds, label=f"{entry}()", trial=int(trial), levels=levels, log=log)
 
 
+def case_inside(inside: dict[str, list[Any]], cell: dict[str, Any]) -> dict[str, list[Any]]:
+    """The values a run on a check's case compares inside it: the study's, with each number the case names that the
+    study does not compare added at the end. A factor whose values are numbers can be run at any number, so a check of a
+    limiting case (a value near zero, say) runs on the simulation itself; a choice the study does not have is not added
+    (the simulation has no such alternative), so it is refused as before."""
+    out = {k: list(v) for k, v in inside.items()}
+    for k, v in cell.items():
+        values = out.get(k)
+        if (values and _in_run._number(v) and all(_in_run._number(x) for x in values)
+                and not any(_in_run._same_level_value(v, x) for x in values)):
+            out[k] = [*values, v]
+    return out
+
+
 async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *,
                           cell: dict[str, Any], trials: list[int], timeout_s: int, env: dict[str, str] | None = None,
                           thresholds: dict[str, Any] | None = None, in_each_run: dict[str, list[Any]] | None = None,
@@ -1545,6 +1561,7 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
     named: dict[str, Any] = {}
     given, key = dict(cell), cell_key(cell)
     if inside:
+        inside = case_inside(inside, cell)
         levels = _in_run.level_cells(inside)
         setting = {k: v for k, v in cell.items() if k not in inside}
         named = {k: v for k, v in cell.items() if k in inside}
