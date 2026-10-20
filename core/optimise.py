@@ -399,33 +399,52 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
 async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: str, entry: str,
                         cells: list[dict[str, Any]], *, at_once: int, runs: int, base_seed: int, deadline: float,
                         env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-                        seed_key: str = "") -> list[tuple[dict[str, Any], str, str]]:
+                        seed_key: str = "", on_done: Any = None, log: Any = None) -> list[tuple[dict[str, Any], str, str]]:
     """Designs that do not depend on each other's answers, up to ``at_once`` at the same time, each in a process of its
     own exactly as :func:`_evaluate` runs one (the same seeds, so the answers are those of one after another):
     ``[(answer, stderr, load error)]`` in the order of ``cells``. A design not started before ``deadline`` is answered
-    ``{"stop": "time"}``."""
+    ``{"stop": "time"}``. ``on_done(k, answer, load error)`` is called as each one finishes (its journal line, the
+    progress), so a long batch keeps what it finished if the quest is stopped."""
     if len(cells) <= 1 or at_once <= 1:
         out = []
         for cell in cells:
             left = deadline - time.monotonic()
-            out.append(await _evaluate(executor, python, quest_root, module, entry, cell, runs=runs, base_seed=base_seed,
-                                       timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key)
-                       if left > 0 else ({"stop": "time"}, "", ""))
+            got = (await _evaluate(executor, python, quest_root, module, entry, cell, runs=runs, base_seed=base_seed,
+                                   timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key)
+                   if left > 0 else ({"stop": "time"}, "", ""))
+            if on_done is not None:
+                on_done(len(out), got[0], got[2])
+            out.append(got)
         return out
     (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
-    outside = _outside.OutsideExecutor(executor, quest_root)
+    outside = _outside.OutsideExecutor(executor, quest_root, log=log)
     gate = asyncio.Semaphore(at_once)
+    work = quest_root / WORK_DIR
 
     async def one(k: int, cell: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
         async with gate:
             left = deadline - time.monotonic()
             if left <= 0:
-                return {"stop": "time"}, "", ""
-            return await _evaluate(executor, python, quest_root, module, entry, cell, runs=runs, base_seed=base_seed,
-                                   timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key,
-                                   name=f"eval{k}", outside=outside)
+                got: tuple[dict[str, Any], str, str] = ({"stop": "time"}, "", "")
+            else:
+                try:
+                    got = await _evaluate(executor, python, quest_root, module, entry, cell, runs=runs,
+                                          base_seed=base_seed, timeout_s=left, env=env, thresholds=thresholds,
+                                          seed_key=seed_key, name=f"eval{k}", outside=outside)
+                except Exception as exc:  # noqa: BLE001 -- one design's trouble (a file it could not write) is its answer
+                    got = {"failed": f"FI could not run this design ({type(exc).__name__}: {exc})"[:300]}, "", ""
+                finally:
+                    for left_over in (work / f"eval{k}.json", work / f"eval{k}.out.jsonl"):
+                        left_over.unlink(missing_ok=True)
+            if on_done is not None:
+                on_done(k, got[0], got[2])
+            return got
 
-    return list(await asyncio.gather(*(one(k, c) for k, c in enumerate(cells))))
+    try:
+        return list(await asyncio.gather(*(one(k, c) for k, c in enumerate(cells))))
+    finally:
+        # the locks and temporary files a design stopped for its time left in the shared folder (OutsideExecutor.settle)
+        await outside.settle()
 
 
 def _read_journal(path: Path, key: str, space: Any) -> tuple[dict[str, dict[str, Any]], float]:
@@ -735,18 +754,27 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                         answers[k] = {"stop": "the simulation could not be loaded"}
                     else:
                         fresh.append(k)
+                def finished(j: int, answer: dict[str, Any], loaded: str) -> None:
+                    nonlocal evaluated, last_note
+                    if ("values" in answer or "failed" in answer) and not loaded and not answer.get("process"):
+                        _journal(journal, asked[fresh[j]]["design"], answer)
+                    if "values" in answer or "failed" in answer:
+                        evaluated += 1
+                    if log is not None and time.monotonic() - last_note > 60:
+                        last_note = time.monotonic()
+                        log.info("[optimise] still searching: %d evaluation(s) so far (%d at the same time)", evaluated,
+                                 at_once)
+
                 got = await evaluate_many(executor, python, quest_root, module, entry, [asked[k]["cell"] for k in fresh],
                                           at_once=at_once, runs=runs, base_seed=int(base_seed), deadline=deadline,
-                                          env=env, thresholds=thresholds)
+                                          env=env, thresholds=thresholds, on_done=finished, log=log)
                 for k, (answer, err, loaded) in zip(fresh, got):
-                    answers[k] = answer
                     if err:
                         stderr_parts.append(err)
+                    # one after another, the designs after the one whose simulation could not be loaded are not run
+                    answers[k] = {"stop": "the simulation could not be loaded"} if load_error else answer
                     load_error = load_error or loaded
-                    if ("values" in answer or "failed" in answer) and not loaded and not answer.get("process"):
-                        _journal(journal, asked[k]["design"], answer)
                 reply = answers  # type: ignore[assignment]
-                evaluated += sum(1 for a in answers if isinstance(a, dict) and ("values" in a or "failed" in a))
             elif request["kind"] == "evaluate":
                 left = deadline - time.monotonic()
                 replayed = (replay.get(replay_space.key(replay_space.canonical(request["design"])))

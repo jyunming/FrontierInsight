@@ -256,14 +256,18 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
     sign = _search._sign(block)
     counts = {"designs": 0, "failed": 0}
     cache: dict[tuple[str, int], dict[str, Any]] = {}
+    pending: dict[tuple[str, int], Any] = {}  # answers asked for together (evaluate_level), each used once by evaluate
 
     def evaluate(design: dict[str, Any], level: int, role: str):
         design = space.canonical(design)
         key = (space.key(design), level)
         if key in cache:
             return cache[key]
-        cell = {**_search.cell_of(block, design), **levels[level]}
-        reply = yield {"kind": "evaluate", "cell": cell, "design": dict(design), "level": level, "role": role}
+        if key in pending:
+            reply = pending.pop(key)
+        else:
+            cell = {**_search.cell_of(block, design), **levels[level]}
+            reply = yield {"kind": "evaluate", "cell": cell, "design": dict(design), "level": level, "role": role}
         return judge(key, reply)
 
     def evaluate_level(items: list[dict[str, Any]], level: int):
@@ -281,10 +285,13 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
         if len(todo) > 1:
             replies = yield {"kind": "evaluate_many", "requests": todo}
             replies = list(replies) if isinstance(replies, list) else []
-            for k, key in enumerate(keys):
-                judge(key, replies[k] if k < len(replies) else None)
-        for item in items:
-            item["levels"][level] = yield from evaluate(item["design"], level, item["role"])
+            pending.update({key: replies[k] if k < len(replies) else None for k, key in enumerate(keys)})
+        try:
+            # judged item by item, as one after another: a stop keeps the levels of the items before it
+            for item in items:
+                item["levels"][level] = yield from evaluate(item["design"], level, item["role"])
+        finally:
+            pending.clear()
 
     def judge(key: tuple[str, int], reply: Any) -> dict[str, Any]:
         reply = reply if isinstance(reply, dict) else {"failed": "no answer for this design"}
@@ -1005,12 +1012,15 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
             request = next(gen)
             while True:
                 left = deadline - time.monotonic()
+                if request.get("kind") == "evaluate_many" and left <= 0:
+                    request = gen.send([{"stop": "time"}] * len(request["requests"]))
+                    continue
                 if request.get("kind") == "evaluate_many":
                     # Designs that do not depend on each other: up to ``at_once`` at the same time (execution.settings_at_once)
                     answers = await _optimise.evaluate_many(
                         executor, python, quest_root, module, entry, [r["cell"] for r in request["requests"]],
                         at_once=at_once, runs=runs, base_seed=int(base_seed), deadline=deadline, env=env,
-                        thresholds=thresholds, seed_key=seed_key) if not load_error else []
+                        thresholds=thresholds, seed_key=seed_key, log=log) if not load_error else []
                     load_error = load_error or next((le for _r, _e, le in answers if le), "")
                     replies = [r for r, _e, _le in answers] or [{"failed": load_error}] * len(request["requests"])
                     request = gen.send(replies)

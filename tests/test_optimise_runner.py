@@ -850,3 +850,19 @@ async def test_a_search_run_with_several_evaluations_at_once_is_the_same_search(
         out.append((rows, run.record["best"], run.record["evaluations"]))
     assert out[0] == out[1]
     assert len(out[0][0]) > 4 and max(together) > 1, "the run 4 at a time asked for several designs together"
+
+
+@pytest.mark.asyncio
+async def test_a_simulation_that_cannot_be_loaded_ends_a_search_run_at_once_as_one_after_another(tmp_path: Path) -> None:
+    """A batch of designs whose simulation cannot be imported: one after another, the first fails with the load error and
+    the search stops; run together, the designs after the first are answered the same way, not as failures of their own."""
+    broken = "raise ImportError('a module the simulation needs is missing')\n\ndef run_cell(cell):\n    return {}\n"
+    out = []
+    for at_once in (1, 4):
+        root = _quest(tmp_path / f"b{at_once}", broken)
+        run = await _run(root, _protocol(evaluation_budget={"starts": 2, "per_start": 15},
+                                         search_method="global_then_local"), at_once=at_once)
+        rows = [(r["design"], r.get("status")) for r in _ledger(root) if r.get("event") == "evaluation"]
+        out.append((rows, run.record["evaluations"]))
+    assert out[0] == out[1]
+    assert out[0][1]["stopped_because"] == out[1][1]["stopped_because"]
