@@ -523,8 +523,11 @@ def _same_result(a, b):
 
 
 class _Search:
-    def __init__(self, block, seed, method, rounds=None, results=None):
+    def __init__(self, block, seed, method, rounds=None, results=None, batch=False):
         self.block = block
+        self.batch = bool(batch)
+        #: Answers asked for together (:meth:`evaluate_many`), by design key, each used once by :meth:`evaluate`.
+        self.prefetched = {}
         self.space = Space(block["design_variables"])
         self.sign = _sign(block)
         self.seed = int(seed)
@@ -605,8 +608,11 @@ class _Search:
         if self.used >= self.total:
             self.stopped = "budget"
             raise _Stop()
-        reply = yield {"kind": "evaluate", "cell": cell_of(self.block, design), "design": dict(design),
-                       "stage": stage, "start": start}
+        if key in self.prefetched:
+            reply = self.prefetched.pop(key)
+        else:
+            reply = yield {"kind": "evaluate", "cell": cell_of(self.block, design), "design": dict(design),
+                           "stage": stage, "start": start}
         reply = reply if isinstance(reply, dict) else {"failed": "no answer for this design"}
         if reply.get("stop"):
             self.stopped = str(reply["stop"])
@@ -628,6 +634,44 @@ class _Search:
                 self.stopped = "failures"
                 raise _Stop()
         return judged
+
+    def evaluate_many(self, designs, stage, start, cap=None):
+        """Evaluate designs chosen before any of their answers is read (a generator): with ``batch``, the ones the
+        budget still allows are asked for together, then each is judged in order by :meth:`evaluate`, as one after
+        another would be (a design after a stop is evaluated but never judged or recorded)."""
+        designs = [self.space.canonical(d) for d in designs]
+        if self.batch and self.stopped is None and len(designs) > 1:
+            room = self.total - self.used
+            if cap is not None:
+                room = min(room, cap - self.used)
+            todo, keys = [], set()
+            for design in designs:
+                key = self.space.key(design)
+                if key in self.cache or key in keys or key in self.prefetched:
+                    continue
+                if len(todo) >= room:
+                    break
+                keys.add(key)
+                todo.append(design)
+            if len(todo) > 1:
+                replies = yield {"kind": "evaluate_many", "requests": [
+                    {"kind": "evaluate", "cell": cell_of(self.block, d), "design": dict(d), "stage": stage,
+                     "start": start} for d in todo]}
+                replies = list(replies) if isinstance(replies, list) else []
+                for k, design in enumerate(todo):
+                    self.prefetched[self.space.key(design)] = replies[k] if k < len(replies) else None
+        out = []
+        try:
+            for design in designs:
+                out.append((yield from self.evaluate(design, stage, start, cap)))
+        finally:
+            self.prefetched.clear()
+        return out
+
+    def _fs(self, points, stage, start, cap):
+        """:meth:`_f` for points chosen together (:meth:`evaluate_many`)."""
+        judged = yield from self.evaluate_many([self.space.design(u) for u in points], stage, start, cap)
+        return [_rank(j, self.sign) for j in judged]
 
     def _watch_effect(self, design, key, values):
         """Stop the search (``no_effect``) once enough designs, moving every number of the design between them, returned
@@ -851,9 +895,7 @@ class _Search:
             p = list(u0)
             p[i] = p[i] + steps[i] if p[i] + steps[i] <= 1.0 else p[i] - steps[i]
             simplex.append(p)
-        values = []
-        for p in simplex:
-            values.append((yield from self._f(p, self.local_stage, start, cap)))
+        values = yield from self._fs(simplex, self.local_stage, start, cap)
         proposals, most = 0, 20 * self.per_start + 50
         while True:
             order = sorted(range(d + 1), key=lambda k: values[k])
@@ -899,7 +941,7 @@ class _Search:
             best = simplex[0]
             for k in range(1, d + 1):
                 simplex[k] = [b + 0.5 * (p - b) for b, p in zip(best, simplex[k])]
-                values[k] = yield from self._f(simplex[k], self.local_stage, start, cap)
+            values[1:] = yield from self._fs(simplex[1:], self.local_stage, start, cap)
 
     def _global_then_local(self):
         if not any(r["stage"] == "scan" for r in self.rows):
@@ -913,10 +955,8 @@ class _Search:
         d = self.space.dims
         size = max(4, min(10 * d, cap // 3))
         population = [self.space.unit(self.baseline)] + self._lhs(size - 1)
-        fitness = []
         try:
-            for p in population:
-                fitness.append((yield from self._f(p, "global", None, cap)))
+            fitness = yield from self._fs(population, "global", None, cap)
             proposals, most = 0, 20 * cap + 50
             while True:
                 for i in range(size):
@@ -943,8 +983,7 @@ class _Search:
             self._fall_back(why)
             yield from self._local_starts(self._starting_points(), first_cap=self.per_start)
             return
-        for design in combos:
-            yield from self.evaluate(design, "exhaustive", 0)
+        yield from self.evaluate_many(list(combos), "exhaustive", 0)
         self.stopped = "finished"
 
     # a library's method, run where the library is
@@ -1054,11 +1093,15 @@ class _Search:
         }
 
 
-def search(block, *, seed, method=None, rounds=None, results=None):
+def search(block, *, seed, method=None, rounds=None, results=None, batch=False):
     """The search as a generator of requests (see the module docstring); returns the outcome. ``rounds``: the rounds of
     a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``).
-    ``results``: the names of the results the plan gives, watched for a design that changes none of them."""
-    return (yield from _Search(block, seed, method, rounds, results).run())
+    ``results``: the names of the results the plan gives, watched for a design that changes none of them. ``batch``:
+    designs the method chooses before it reads any of their answers (a starting population, a simplex's first corners, a
+    shrunk simplex) are asked for together, ``{"kind": "evaluate_many", "requests": [...]}`` answered by a list in their
+    order, so a driver can run them at the same time; each answer is then judged in that order exactly as one after
+    another, so the search and its record are the same."""
+    return (yield from _Search(block, seed, method, rounds, results, batch=batch).run())
 
 
 #: The most settings FI lists (or runs) from one grid: each listed setting is a dict, about a kilobyte with its key, so this

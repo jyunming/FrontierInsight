@@ -709,7 +709,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 
     constant = _degenerate.expected_constants(protocol)
     results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
-    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds, results=results)
+    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1)
     replay_space = _search.Space(block["design_variables"]) if replay else None
     load_error = ""
     done_outcome: dict[str, Any] | None = None
@@ -721,6 +721,32 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             if request["kind"] == "scan":
                 reply = await scan(request["grid"])  # type: ignore[assignment]
                 scan_rows = list(reply)
+            elif request["kind"] == "evaluate_many":
+                # Designs the method chose before reading any of their answers: up to ``at_once`` at the same time.
+                asked = request["requests"]
+                answers: list[Any] = [None] * len(asked)
+                fresh = []
+                for k, one in enumerate(asked):
+                    replayed = (replay.get(replay_space.key(replay_space.canonical(one["design"])))
+                                if replay_space is not None and isinstance(one.get("design"), dict) else None)
+                    if replayed is not None:
+                        answers[k] = dict(replayed)
+                    elif load_error:
+                        answers[k] = {"stop": "the simulation could not be loaded"}
+                    else:
+                        fresh.append(k)
+                got = await evaluate_many(executor, python, quest_root, module, entry, [asked[k]["cell"] for k in fresh],
+                                          at_once=at_once, runs=runs, base_seed=int(base_seed), deadline=deadline,
+                                          env=env, thresholds=thresholds)
+                for k, (answer, err, loaded) in zip(fresh, got):
+                    answers[k] = answer
+                    if err:
+                        stderr_parts.append(err)
+                    load_error = load_error or loaded
+                    if ("values" in answer or "failed" in answer) and not loaded and not answer.get("process"):
+                        _journal(journal, asked[k]["design"], answer)
+                reply = answers  # type: ignore[assignment]
+                evaluated += sum(1 for a in answers if isinstance(a, dict) and ("values" in a or "failed" in a))
             elif request["kind"] == "evaluate":
                 left = deadline - time.monotonic()
                 replayed = (replay.get(replay_space.key(replay_space.canonical(request["design"])))

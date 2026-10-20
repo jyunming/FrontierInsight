@@ -821,3 +821,32 @@ def test_the_frozen_studys_key_covers_the_models_package_and_not_its_tests(tmp_p
     (root / "code" / "model" / "core.py").write_text("SCALE = 2.0\n", encoding="utf-8")
     after = keys()
     assert after[0] != before[0] and after[1] != before[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["global_then_local", "bounded_local", "exhaustive"])
+async def test_a_search_run_with_several_evaluations_at_once_is_the_same_search(tmp_path: Path, method: str,
+                                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """Designs a method chooses before reading their answers (a starting population, a simplex's corners, every design
+    of an exhaustive search) run at the same time; each answer is judged in the same order, so the ledger, the best
+    design and the evaluations used are those of one after another."""
+    together: list[int] = []
+    real = optimise.evaluate_many
+
+    async def counted(*a: Any, **k: Any) -> Any:
+        together.append(len(a[5]))
+        return await real(*a, **k)
+
+    monkeypatch.setattr(optimise, "evaluate_many", counted)
+    out = []
+    for at_once in (1, 4):
+        root = _quest(tmp_path / f"{method}{at_once}")
+        extra = ({"design_variables": [{"name": "x", "low": -3, "high": 3, "kind": "integer"}],
+                  "baseline": {"values": {"x": 0}, "source": "s"}} if method == "exhaustive" else {})
+        protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 15}, search_method=method, **extra)
+        run = await _run(root, protocol, at_once=at_once)
+        rows = [(r["design"], r.get("objective"), r.get("stage"), r.get("start")) for r in _ledger(root)
+                if r.get("event") == "evaluation"]
+        out.append((rows, run.record["best"], run.record["evaluations"]))
+    assert out[0] == out[1]
+    assert len(out[0][0]) > 4 and max(together) > 1, "the run 4 at a time asked for several designs together"
