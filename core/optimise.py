@@ -35,6 +35,7 @@ new, and the check runs again on the result.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -324,24 +325,28 @@ def _mean_values(rows: list[dict[str, Any]]) -> dict[str, float]:
 
 async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, entry: str, cell: dict[str, Any], *,
                     runs: int, base_seed: int, timeout_s: int, env: dict[str, str] | None,
-                    thresholds: dict[str, Any] | None, seed_key: str = "") -> tuple[dict[str, Any], str, str]:
+                    thresholds: dict[str, Any] | None, seed_key: str = "", name: str = "eval",
+                    outside: Any = None) -> tuple[dict[str, Any], str, str]:
     """One design, in a process of its own through FI's harness: ``(answer for the search, stderr, load error)``. The
     answer's ``trials`` holds each run's own values (in trial order), beside their mean in ``values``. ``seed_key`` picks
-    another family of seeds (the check at finer settings uses seeds the search never used)."""
+    another family of seeds (the check at finer settings uses seeds the search never used). ``name``: the files of this
+    evaluation, and ``outside``: the executor several evaluations at once share, with the harness already written
+    (:func:`evaluate_many`)."""
     work = quest_root / WORK_DIR
     work.mkdir(parents=True, exist_ok=True)
-    spec, out = work / "eval.json", work / "eval.out.jsonl"
+    spec, out = work / f"{name}.json", work / f"{name}.out.jsonl"
     out.unlink(missing_ok=True)
     trials = [{"trial": t, "seed": None if entry == "run_cell" else _trials.trial_seed(base_seed, seed_key, t)}
               for t in range(1 if entry == "run_cell" else max(1, runs))]
     nonce = _sha(f"optimise|{time.time_ns()}|{id(trials)}".encode())[:24]
     spec.write_text(json.dumps({"module": module, "entry": entry, "cell": cell, "trials": trials, "nonce": nonce,
                                 "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
-    # Fresh for every evaluation: nothing an earlier evaluation wrote there is run.
-    (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
+    if outside is None:
+        # Fresh for every evaluation: nothing an earlier evaluation wrote there is run.
+        (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
     started = time.monotonic()
     # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
-    result = await _outside.OutsideExecutor(executor, quest_root).execute(
+    result = await (outside or _outside.OutsideExecutor(executor, quest_root)).execute(
         [str(python), _trials.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
          out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=max(1, math.ceil(timeout_s)), env=env,
@@ -389,6 +394,38 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
         rows.append(row)
     return {"values": _mean_values(rows), "trials": [dict(r.get("values") or {}) for r in rows],
             "elapsed_s": elapsed}, stderr, ""
+
+
+async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: str, entry: str,
+                        cells: list[dict[str, Any]], *, at_once: int, runs: int, base_seed: int, deadline: float,
+                        env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+                        seed_key: str = "") -> list[tuple[dict[str, Any], str, str]]:
+    """Designs that do not depend on each other's answers, up to ``at_once`` at the same time, each in a process of its
+    own exactly as :func:`_evaluate` runs one (the same seeds, so the answers are those of one after another):
+    ``[(answer, stderr, load error)]`` in the order of ``cells``. A design not started before ``deadline`` is answered
+    ``{"stop": "time"}``."""
+    if len(cells) <= 1 or at_once <= 1:
+        out = []
+        for cell in cells:
+            left = deadline - time.monotonic()
+            out.append(await _evaluate(executor, python, quest_root, module, entry, cell, runs=runs, base_seed=base_seed,
+                                       timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key)
+                       if left > 0 else ({"stop": "time"}, "", ""))
+        return out
+    (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
+    outside = _outside.OutsideExecutor(executor, quest_root)
+    gate = asyncio.Semaphore(at_once)
+
+    async def one(k: int, cell: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+        async with gate:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return {"stop": "time"}, "", ""
+            return await _evaluate(executor, python, quest_root, module, entry, cell, runs=runs, base_seed=base_seed,
+                                   timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key,
+                                   name=f"eval{k}", outside=outside)
+
+    return list(await asyncio.gather(*(one(k, c) for k, c in enumerate(cells))))
 
 
 def _read_journal(path: Path, key: str, space: Any) -> tuple[dict[str, dict[str, Any]], float]:
@@ -463,7 +500,7 @@ async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, A
 
 async def run_search(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], *,
                      base_seed: int, timeout_s: int, env: dict[str, str] | None = None, log: Any = None,
-                     frozen: bool = False) -> SearchRun:
+                     frozen: bool = False, at_once: int = 1) -> SearchRun:
     """Run the search for the best design (see the module docstring) and write its record. ``module`` is the simulation
     file relative to ``quest_root``; ``timeout_s`` bounds the whole search, the coarse scan included.
 
@@ -640,7 +677,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         trial_run = await _trials.run_trials(
             executor, python, quest_root, module, grid, runs_per_setting=runs, base_seed=int(base_seed),
             deterministic=entry == "run_cell", timeout_s=max(1, math.ceil(left)), env=env,
-            thresholds=thresholds, paired=True, in_each_run=_search.in_each_run(block) or None,
+            thresholds=thresholds, paired=True, in_each_run=_search.in_each_run(block) or None, at_once=at_once,
         )
         stderr_parts.append(trial_run.stderr())
         summary = json.loads(trial_run.summary_path.read_text(encoding="utf-8"))
@@ -936,8 +973,11 @@ class OptimisationRunner:
     search for the checks after it."""
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, simulate: Path, analysis: Path,
-                 log: Any = None, frozen: Any = False, repairs_left: Any = None) -> None:
+                 log: Any = None, frozen: Any = False, repairs_left: Any = None, at_once: int = 1) -> None:
         self.executor = executor
+        #: How many evaluations that do not depend on each other run at the same time (the coarse scan's settings, the
+        #: check's designs at each finer level): ``execution.settings_at_once``.
+        self.at_once = max(1, int(at_once or 1))
         #: Whether a repair of the simulation is left (a bool, or a callable asked at each run): FI's check of the failed
         #: trials (core/trial_checks.py) sends a fault back only while one is.
         self._repairs_left = repairs_left
@@ -1033,7 +1073,7 @@ class OptimisationRunner:
         run = await run_search(self.executor, cmd[0], self.quest_root,
                                self.simulate.relative_to(self.quest_root).as_posix(), protocol, base_seed=base,
                                timeout_s=timeout_s, env=env, log=self.log,
-                               frozen=self._is_frozen())
+                               frozen=self._is_frozen(), at_once=self.at_once)
         self.last = run
         # The coarse scan's settings that changed no result (core/flat_output.py), kept in the search's record so a
         # search used again says it too.
@@ -1188,7 +1228,7 @@ class OptimisationRunner:
         try:
             check, text, key = await _check.run_check(
                 self.executor, python, self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(),
-                protocol, run, base_seed=base, timeout_s=timeout_s, env=env, log=self.log,
+                protocol, run, base_seed=base, timeout_s=timeout_s, env=env, log=self.log, at_once=self.at_once,
                 # The confirm run of a frozen search: the kept best design is checked once more, on the new seeds.
                 fresh=self._is_frozen())
         except Exception as exc:  # noqa: BLE001 -- the check reports; it never stops the quest

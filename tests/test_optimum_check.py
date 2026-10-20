@@ -586,7 +586,12 @@ def test_a_check_cut_short_during_the_nudges_keeps_what_it_measured() -> None:
     request, answered = next(gen), 0
     try:
         while True:
-            # Every design at every level (2 designs × 2 levels), then the time is up during the nudges.
+            # Every design at every level (2 designs × 2 levels, each level's designs asked for together), then the
+            # time is up during the nudges.
+            if request["kind"] == "evaluate_many":
+                answered += len(request["requests"])
+                request = gen.send([{"values": _bowl(r["cell"])} for r in request["requests"]])
+                continue
             reply = {"values": _bowl(request["cell"])} if answered < 4 else {"stop": "time"}
             answered += 1
             request = gen.send(reply)
@@ -713,3 +718,43 @@ def test_the_log_lines_are_plain_and_say_where_the_finer_settings_come_from() ->
     for label in ("finer settings", "limits", "better than the baseline", "starting points", "nearby designs",
                   "search budget"):
         assert f"{label}:" in text
+
+
+SLOW_SIM = '''\
+import time
+
+
+def run_cell(cell):
+    time.sleep(1.0)
+    x = cell["x"]
+    return {"f": (x - 2) ** 2 + 0.5 * cell["mesh"] ** 2}
+'''
+
+
+@pytest.mark.asyncio
+async def test_the_checks_designs_at_one_level_run_at_the_same_time_and_give_the_same_record(tmp_path: Path) -> None:
+    """The check's designs at a finer level do not depend on each other: run 4 at a time they give exactly the record
+    one after another gives, in less time."""
+    import time as _time
+
+    from tests.test_optimise_runner import LocalExecutor
+
+    block = _block(design_variables=[{"name": "x", "low": -1, "high": 5, "kind": "integer"}],
+                   baseline={"values": {"x": 0}, "source": "s"},
+                   numerical_settings={"mesh": {"search": 0.4, "check": [0.2, 0.1], "finer": "smaller"}},
+                   evaluation_budget={"starts": 3, "per_start": 7}, search_method="exhaustive")
+    out = {}
+    for at_once in (1, 4):
+        root = _runner_quest(tmp_path / f"a{at_once}", SLOW_SIM)
+        run = await optimise.run_search(LocalExecutor(), sys.executable, root, "code/simulate.py",
+                                        {"optimisation": block}, base_seed=0, timeout_s=600)
+        started = _time.monotonic()
+        check, _text, _key = await oc.run_check(LocalExecutor(), sys.executable, root, "code/simulate.py",
+                                                {"optimisation": block}, run, base_seed=0, timeout_s=600, at_once=at_once)
+        out[at_once] = (check, _time.monotonic() - started)
+    one, four = out[1][0], out[4][0]
+    # the search's ledger holds each evaluation's time, so its hash differs between two runs
+    strip = lambda c: {k: v for k, v in c.items() if k not in ("time", "ledger_sha256")}  # noqa: E731
+    assert strip(one) == strip(four)
+    assert one["evaluations"]["check"] >= 4
+    assert out[4][1] < 0.8 * out[1][1], (out[1][1], out[4][1])

@@ -264,6 +264,29 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
             return cache[key]
         cell = {**_search.cell_of(block, design), **levels[level]}
         reply = yield {"kind": "evaluate", "cell": cell, "design": dict(design), "level": level, "role": role}
+        return judge(key, reply)
+
+    def evaluate_level(items: list[dict[str, Any]], level: int):
+        """Every item's design at one level: they do not depend on each other's answers, so they are asked for
+        together (run at the same time), and judged in the items' order as one after another would be."""
+        todo, keys = [], []
+        for item in items:
+            design = space.canonical(item["design"])
+            key = (space.key(design), level)
+            if key in cache or key in keys:
+                continue
+            keys.append(key)
+            todo.append({"kind": "evaluate", "cell": {**_search.cell_of(block, design), **levels[level]},
+                         "design": dict(design), "level": level, "role": item["role"]})
+        if len(todo) > 1:
+            replies = yield {"kind": "evaluate_many", "requests": todo}
+            replies = list(replies) if isinstance(replies, list) else []
+            for k, key in enumerate(keys):
+                judge(key, replies[k] if k < len(replies) else None)
+        for item in items:
+            item["levels"][level] = yield from evaluate(item["design"], level, item["role"])
+
+    def judge(key: tuple[str, int], reply: Any) -> dict[str, Any]:
         reply = reply if isinstance(reply, dict) else {"failed": "no answer for this design"}
         if reply.get("stop"):
             raise _Stop()
@@ -292,8 +315,7 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
         # The baseline and the best designs at every finer level, coarse to fine; then the neighbourhood of the design
         # chosen at the finest level, at the finest level.
         for level in range(len(levels)):
-            for item in [base, *cands]:
-                item["levels"][level] = yield from evaluate(item["design"], level, item["role"])
+            yield from evaluate_level([base, *cands], level)
         chosen = _choose(cands, finest, limits, margin, sign)
         if chosen is not None:
             yield from _probe(space, chosen, finest, evaluate, probes)
@@ -794,20 +816,25 @@ def check_sync(block: dict[str, Any], search_record: dict[str, Any], rows: list[
     """Run the check here, calling ``evaluate(cell)`` for each design: a dict of numbers, or (with randomness) a list of
     such dicts, one per fresh run; an exception is a failed evaluation."""
     gen = check(block, search_record, rows, noisy=noisy, check_runs=check_runs)
+
+    def answer(cell: dict[str, Any]) -> dict[str, Any]:
+        try:
+            got = evaluate(dict(cell))
+            if isinstance(got, list):
+                names = set.intersection(*(set(t) for t in got)) if got else set()
+                return {"values": {n: sum(float(t[n]) for t in got) / len(got) for n in names},
+                        "trials": [dict(t) for t in got]}
+            return {"values": dict(got), "trials": [dict(got)]}
+        except Exception as exc:  # noqa: BLE001 -- a failed evaluation is recorded, not raised
+            return {"failed": f"{type(exc).__name__}: {exc}"[:300]}
+
     try:
         request = next(gen)
         while True:
-            try:
-                got = evaluate(dict(request["cell"]))
-                if isinstance(got, list):
-                    names = set.intersection(*(set(t) for t in got)) if got else set()
-                    reply = {"values": {n: sum(float(t[n]) for t in got) / len(got) for n in names},
-                             "trials": [dict(t) for t in got]}
-                else:
-                    reply = {"values": dict(got), "trials": [dict(got)]}
-            except Exception as exc:  # noqa: BLE001 -- a failed evaluation is recorded, not raised
-                reply = {"failed": f"{type(exc).__name__}: {exc}"[:300]}
-            request = gen.send(reply)
+            if request.get("kind") == "evaluate_many":
+                request = gen.send([answer(r["cell"]) for r in request["requests"]])
+            else:
+                request = gen.send(answer(request["cell"]))
     except StopIteration as done:
         return done.value
 
@@ -917,7 +944,7 @@ def _clean(value: Any) -> Any:
 
 async def run_check(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], search: Any,
                     *, base_seed: int, timeout_s: int, env: dict[str, str] | None = None,
-                    log: Any = None, fresh: bool = False) -> tuple[dict[str, Any], str, str]:
+                    log: Any = None, fresh: bool = False, at_once: int = 1) -> tuple[dict[str, Any], str, str]:
     """Check the search's best design (see the module docstring) and write ``needs/OPTIMUM_CHECK.json``:
     ``(the record, its text, the key it is kept under)``. ``search`` is the :class:`core.optimise.SearchRun`; ``timeout_s`` bounds the check alone.
     Never raises for a problem of the simulation: a check that cannot finish is ``unverified``. ``fresh``: never reuse
@@ -978,6 +1005,16 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
             request = next(gen)
             while True:
                 left = deadline - time.monotonic()
+                if request.get("kind") == "evaluate_many":
+                    # Designs that do not depend on each other: up to ``at_once`` at the same time (execution.settings_at_once)
+                    answers = await _optimise.evaluate_many(
+                        executor, python, quest_root, module, entry, [r["cell"] for r in request["requests"]],
+                        at_once=at_once, runs=runs, base_seed=int(base_seed), deadline=deadline, env=env,
+                        thresholds=thresholds, seed_key=seed_key) if not load_error else []
+                    load_error = load_error or next((le for _r, _e, le in answers if le), "")
+                    replies = [r for r, _e, _le in answers] or [{"failed": load_error}] * len(request["requests"])
+                    request = gen.send(replies)
+                    continue
                 if left <= 0:
                     reply: dict[str, Any] = {"stop": "time"}
                 elif load_error:

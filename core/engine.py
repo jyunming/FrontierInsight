@@ -16921,6 +16921,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 repairs_left=lambda: (int(state.get("exec_reflect_iter", 0) or 0)
                                       < self.config.engine.exec_reflect_max_iterations
                                       and not state.get("exec_give_up_reason")),
+                at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
             )
         elif split and self._trial_mode:
             runner = _trial_runner.TrialsRunner(
