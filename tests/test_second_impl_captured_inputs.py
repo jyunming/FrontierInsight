@@ -85,3 +85,34 @@ def test_the_harness_without_a_capture_is_unchanged(tmp_path: Path) -> None:
                    capture_output=True, timeout=120)
     row = json.loads((root / plan[0]["out"]).read_text(encoding="utf-8").splitlines()[-1])
     assert row["status"] == "ok" and not (root / si.CAPTURED).exists()
+
+
+def test_the_scan_cells_of_a_search_are_given_the_values_every_evaluation_goes_through(tmp_path: Path,
+                                                                                       monkeypatch) -> None:  # noqa: ANN001
+    """The scan's cells leave out the values every evaluation goes through (the trial runner gives each cell all of
+    them): without them a recording run of a scan cell is missing settings the simulation reads."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from core import second_impl as si
+    from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+    from core.engine import Engine
+    from tests.test_optimise_runner import BLOCK
+
+    eng = Engine(Config(topic="a neutral topic", title="capture", provider=ProviderConfig(name="openai"),
+                        engine=EngineConfig(clarify_mode="off"), execution=ExecutionConfig(sandbox="venv"),
+                        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out")))
+    (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    seen: dict = {}
+
+    async def capture(run, root, package, names, cells, **kw):  # noqa: ANN001, ANN202
+        seen.update(cells=cells, **kw)
+        return {}
+
+    monkeypatch.setattr(si, "key_functions", lambda specs, protocol: ([SimpleNamespace(name="f")], []))
+    monkeypatch.setattr(si, "capture_inputs", capture)
+    protocol = {"optimisation": {**BLOCK, "in_each_run": {"case": [1, 2, 3]}, "grid": {"x": [-1.0, 1.0]}}}
+    asyncio.run(eng._captured_calls({}, protocol, "pkg", [], {}))
+    assert seen["in_each_run"] == {"case": [1, 2, 3]}
+    assert len(seen["cells"]) > 1 and any("case" not in c for c in seen["cells"]), "the scan's cells, given the values"

@@ -506,6 +506,11 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
             plain_runs[(i, again)] = (got or {}).get("row") or {}
         return plain_runs[(i, again)]
 
+    def _whole(value: Any) -> bool:
+        items = value if isinstance(value, (list, tuple)) else [value]
+        nums = [float(v) for v in items if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+        return bool(nums) and all(v == int(v) for v in nums)
+
     async def at_cell(name: str, i: int) -> dict[str, Any]:
         if late() and (i, 0) not in plain_runs:
             return {"status": NOT_RUN, "why": "the time given to this check was spent"}
@@ -539,6 +544,9 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
                 stopped = True
                 continue
             changed = [k for k in judged if not _same_value(values.get(k), (row.get("values") or {}).get(k))]
+            if not changed and all(_whole(values.get(k)) for k in judged):
+                return {"status": NOT_RUN, "why": "every result compared is a whole number (a count, a yes/no, a step "
+                                                  "of a grid), which a change of a few percent need not move"}
             if not changed:
                 return {"status": NOT_FEEDING, "results": judged[:8], "scale": scale, "all_results": fallback}
             if late():
@@ -559,6 +567,9 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
                         "how": "changed with its result changed: " + ", ".join(real[:5])}
             if not steady:
                 return {"status": NOT_RUN, "why": "the results change between two runs of the same setting"}
+            if all(_whole(values.get(k)) for k in steady):
+                return {"status": NOT_RUN, "why": "every result compared is a whole number (a count, a yes/no, a step "
+                                                  "of a grid), which a change of a few percent need not move"}
             return {"status": NOT_FEEDING, "results": steady[:8], "scale": scale, "all_results": fallback,
                     "not_repeating": sorted(noisy)[:8]}
         return {"status": STOPS} if stopped else {"status": NOT_RUN, "why": "no run was made"}

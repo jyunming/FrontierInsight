@@ -143,9 +143,10 @@ def _key_rounds(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
              rounds: list[dict[str, Any]] | None = None) -> str:
-    """What decides a search: the simulation and the modules beside it, the optimisation block, the seed, the entry,
-    the thresholds, and FI's own harness and search code. (A package installed since is not in it: a search that got no
-    result is never kept, so a search that failed for a missing package runs again anyway.)"""
+    """What decides a search: the simulation and the modules beside it, the files below ``code/`` it may use (the
+    model's package, a parameter file), the optimisation block, the seed, the entry, the thresholds, and FI's own harness
+    and search code. (A package installed since is not in it: a search that got no result is never kept, so a search
+    that failed for a missing package runs again anyway.)"""
     parts: list[bytes] = []
     code = Path(quest_root) / "code"
     for path in sorted([Path(simulate), *(p for p in code.glob("*.py") if p.name not in _NOT_THE_SIMULATION
@@ -154,6 +155,14 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
             parts.append(path.name.encode() + b"\0" + path.read_bytes())
         except OSError:
             parts.append(path.name.encode() + b"\0")
+    # A repair of the model's package changes what the simulation computes: a search of the code before it is another
+    # search. (Only files below code/, so a quest with none keeps the key it had.)
+    for path in _below_code(code):
+        rel = path.relative_to(code).as_posix().encode()
+        try:
+            parts.append(rel + b"\0" + path.read_bytes())
+        except OSError:
+            parts.append(rel + b"\0")
     parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
     what: list[Any] = [block, base, entry, thresholds]
@@ -161,6 +170,19 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
         # A continued search is another search; without rounds the key is the one an earlier version of FI kept.
         what.append(_key_rounds(rounds))
     return _sha(b"\1".join(parts) + json.dumps(what, sort_keys=True, default=str).encode())
+
+
+def _below_code(code: Path) -> list[Path]:
+    """The files in folders below ``code/`` the simulation may use (the model's package, a parameter file in it): not
+    notes (``*.md``), the package's unit tests (``code/tests/``), caches or hidden folders (``__pycache__``, ``.git``,
+    ``.pytest_cache``)."""
+    out = []
+    for p in code.rglob("*"):
+        parts = p.relative_to(code).parts
+        if (p.is_file() and len(parts) > 1 and p.suffix.lower() != ".md" and parts[0] != "tests"
+                and not any(part == "__pycache__" or part.startswith(".") for part in parts)):
+            out.append(p)
+    return sorted(out)
 
 
 def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: str, thresholds: Any) -> str:
@@ -177,6 +199,13 @@ def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: s
             parts.append(path.name.encode() + b"\0" + _phased._code_digest(path).encode())
         except OSError:
             parts.append(path.name.encode() + b"\0")
+    for path in _below_code(code):  # the model's package, as in :func:`_run_key`
+        rel = path.relative_to(code).as_posix().encode()
+        try:
+            parts.append(rel + b"\0" + (_phased._code_digest(path).encode() if path.suffix == ".py"
+                                         else path.read_bytes()))
+        except OSError:
+            parts.append(rel + b"\0")
     parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
     return _sha(b"\1".join(parts) + json.dumps([block, entry, thresholds], sort_keys=True, default=str).encode())
@@ -347,9 +376,11 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
         if row is None:
             why = (f"the evaluation's process stopped (exit code {getattr(result, 'returncode', '?')}) before it "
                    "reported")
-            return {"failed": why, "elapsed_s": elapsed}, stderr, ""
+            # Stopped from outside (memory, a kill) as often as by the design: not an answer a resume may take again.
+            return {"failed": why, "elapsed_s": elapsed, "process": True}, stderr, ""
         if t["trial"] in twice:
-            return {"failed": "a run of this design was reported more than once", "elapsed_s": elapsed}, stderr, ""
+            return {"failed": "a run of this design was reported more than once", "elapsed_s": elapsed,
+                    "process": True}, stderr, ""
         if row.get("status") != "ok" or row.get("seed") != t["seed"]:
             why = str(row.get("reason") or "the reported seed is not the one FI gave") if row.get("status") != "ok" \
                 else "the reported seed is not the one FI gave"
@@ -569,6 +600,15 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     journaled, before_s = _read_journal(journal, key, _search.Space(block["design_variables"]))
     if journaled:
         replay.update(journaled)
+        try:
+            with journal.open("rb") as fh:
+                fh.seek(-1, 2)
+                cut = fh.read(1) != b"\n"
+            if cut:
+                with journal.open("a", encoding="utf-8") as fh:
+                    fh.write("\n")
+        except OSError:
+            pass
         if log is not None:
             log.info("[optimise] continuing the search that stopped before its end: %d evaluation(s) it had done are "
                      "taken from FI's record of them, not run again", len(journaled))
@@ -653,7 +693,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                     )
                     if err:
                         stderr_parts.append(err)
-                    if ("values" in reply or "failed" in reply) and not load_error \
+                    if ("values" in reply or "failed" in reply) and not load_error and not reply.get("process") \
                             and isinstance(request.get("design"), dict):
                         _journal(journal, request["design"], reply)
             else:

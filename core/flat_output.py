@@ -256,8 +256,9 @@ def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = ()) -> list[tuple[
     in every pair each number both returned is the same (:func:`same`, trial by trial). That is what a simulation that
     never lets the setting reach its results looks like, and also what a run that computes every value of the setting
     itself looks like (the axis then repeats one run); either way a difference between the settings of that axis is not
-    a result of it. ``skip``: axes left out (numerical settings, which the check at finer settings judges). A value's
-    own record (``level``) is not a setting of the study."""
+    a result of it. ``skip``: axes left out (numerical settings, which the check at finer settings judges). Each
+    value's numbers a run returns (``in_each_run``) are compared with its plain ones, under the value's name. A value's
+    own record of the per-setting summary (``level``) is not a setting of the study."""
     rows: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
     for c in cells:
         if getattr(c, "level", None):
@@ -265,9 +266,9 @@ def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = ()) -> list[tuple[
         ok = [r for r in getattr(c, "rows", []) if r.get("status") == "ok"]
         values: dict[str, list[float]] = {}
         for r in ok:
-            for name, v in (r.get("values") or {}).items():
+            for at, name, v in _in_run.flat("", r.get("values") or {}):
                 if _is_number(v):
-                    values.setdefault(str(name), []).append(float(v))
+                    values.setdefault(f"{at}: {name}" if at else str(name), []).append(float(v))
         if values:
             rows.append((dict(getattr(c, "cell", {}) or {}), values))
     if len(rows) < MIN_PAIRS + 1:

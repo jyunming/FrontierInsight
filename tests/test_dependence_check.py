@@ -67,14 +67,15 @@ def _check(root: Path, cells: list[dict[str, Any]], names: list[str] | None = No
 
 
 def test_a_result_computed_with_the_tested_function_depends_on_it(tmp_path: Path) -> None:
-    got = _check(_quest(tmp_path), [{"level": 3.0, "mode": "package"}])
+    got = _check(_quest(tmp_path), [{"level": 3.3, "mode": "package"}])
     assert got["edge"]["status"] == si.FEEDS
     assert got["side_value"]["status"] == si.NOT_FEEDING, "a side value feeds no headline"
     assert got["unused"]["status"] == si.NOT_CALLED
 
 
 def test_a_result_the_simulation_computes_itself_does_not_depend_on_the_tested_function(tmp_path: Path) -> None:
-    got = _check(_quest(tmp_path), [{"level": 3.0, "mode": "own"}])
+    # 3.3, not 3.0: a whole-number result that does not move is not judged (a few percent need not move it).
+    got = _check(_quest(tmp_path), [{"level": 3.3, "mode": "own"}])
     assert got["edge"]["status"] == si.NOT_CALLED
     assert any("side_value" in s and "do not use" in s for s in si.dependence_sentences(got))
     assert (tmp_path / si.DEPENDENCE).is_file()
@@ -91,7 +92,7 @@ def test_a_side_call_the_simulation_does_not_guard_is_not_taken_for_a_use(tmp_pa
             _ = model.edge(x)
             return {"width": 2.0 * x}
         ''')
-    got = _check(root, [{"level": 3.0}], names=["edge"])
+    got = _check(root, [{"level": 3.3}], names=["edge"])
     assert got["edge"]["status"] == si.NOT_FEEDING
 
 
@@ -211,6 +212,32 @@ def test_a_time_the_run_reports_does_not_hide_that_the_headline_does_not_use_the
             model.side_value(x)
             return {"width": 2.0 * x, "wall_s": time.perf_counter()}
         ''')
-    got = _check(root, [{"level": 3.0}], names=["side_value"], headline={"width", "bias"})
+    got = _check(root, [{"level": 3.3}], names=["side_value"], headline={"width", "bias"})
     assert got["side_value"]["status"] == si.NOT_FEEDING
     assert got["side_value"]["not_repeating"] == ["wall_s"]
+
+
+def test_a_whole_number_headline_beside_a_time_is_not_shown_to_be_unused_either(tmp_path: Path) -> None:
+    """The same guard after the results that do not repeat are set aside: what is left is a whole number."""
+    root = _quest(tmp_path, '''
+        import time
+        from pkg import model
+        def run_cell(cell):
+            x = cell["level"]
+            model.side_value(x)
+            return {"width": 2.0 * x, "wall_s": time.perf_counter()}
+        ''')
+    got = _check(root, [{"level": 3.0}], names=["side_value"], headline={"width", "bias"})
+    assert got["side_value"]["status"] == si.NOT_RUN and "whole number" in got["side_value"]["why"], got
+
+
+def test_a_whole_number_headline_that_does_not_move_is_not_shown_to_be_unused(tmp_path: Path) -> None:
+    """A count or a yes/no built from the tested function need not move when its result moves by a few percent."""
+    root = _quest(tmp_path, '''
+        from pkg import model
+        def run_cell(cell):
+            return {"width": float(model.edge(cell["level"]) > 1.0)}
+        ''')
+    got = _check(root, [{"level": 3.0}], names=["edge"])
+    assert got["edge"]["status"] == si.NOT_RUN and "whole number" in got["edge"]["why"], got["edge"]
+    assert not si.dependence_gaps(root)

@@ -128,7 +128,9 @@ External prerequisites are all optional and feature-gated:
   `tests/test_public_text_english.py` fails on anything else and names the file and line.
 - **A test topic is only a test.** Real research topics used to validate FI (in live runs and replays) never shape what
   goes into the repo: code, prompts, unit tests, docs, commit messages and PR descriptions do not use that topic's words
-  or carry a special case for it. Fixtures use neutral made-up topics, and every fix must be general.
+  or carry a special case for it. Fixtures use neutral made-up topics, and every fix must be general. A change found
+  to carry a test topic's words (in code, comments, tests, docs or a commit message) is sent back to be revised until
+  none is left, whoever wrote it.
 - **Watch a live run while it runs.** A long real run is watched throughout (stops, errors, the size of the study and
   FI's own time estimate); a problem is reported with a proposed way forward as soon as it shows, not after the run ends.
 - **Report outcomes, not process.** Say what is done, what is left, how much better it is, what it cost and its quality;
@@ -168,6 +170,12 @@ merge requirements for you).
   shown fixed (see "How to fix" above); a PR lists that evidence per fix.
 - **Re-review after applying that review's fixes, before opening.** A fix for one finding can silently introduce or miss a new bug — a construction site the first fix didn't cover, a fix that only half-applies. Once every finding from the first pass is addressed, run a second, targeted pass that checks each changed file specifically against the finding it was meant to fix (a full fresh review is not required, but skipping this step is not an option). Applying a suggested fix is not the same claim as verifying the fix is correct.
 - **Keep `dev/registry.md` current** in the same PR that adds, splits, or renames a module-level responsibility.
+- **No test topic in any commit, checked before every PR.** Before opening, read every commit the PR carries (its
+  message, its diff, and the branch names in merge commits, which GitHub shows in the PR's commit list) and the PR's
+  title and description for the topics the branch was tested on (live runs and replays): their words, their
+  quantities. The list of those words is kept outside the repository. Any hit sends the change back to be revised
+  (see "A test topic is only a test"); a PR opens only with none. Open the PR
+  from a branch off main with newly written commit messages, so a working branch named after a test topic never shows.
 
 ## Splitting work for small, fast models
 

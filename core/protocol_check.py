@@ -511,10 +511,16 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
         # ``n_runs = 0`` ... ``n_runs += 2``, and was stopped as "the script sets 0 runs per setting"). Only zero is
         # skipped, not every name the script adds to (a real setting that is also incremented somewhere is still read),
         # and not a negative count either (that is a wrong setting, and is reported like any other).
+        # The plan's own fewest runs (`min_runs_per_setting`, which FI may lower the runs toward) is a count the plan
+        # gives too: an analysis that keeps a setting only with at least that many runs follows the plan (a live
+        # quest's `MIN_RUNS = 10` beside 200 runs per setting was read as "the script sets 10 runs per setting").
+        fewest = protocol.get("min_runs_per_setting")
         counts = [
             f for f in scalars
             if set(_tokens(f.name)) & _RUN_WORDS and not _is_resample_count(f.name)
             and float(f.values[0]).is_integer() and f.values[0] != 0
+            and not (isinstance(fewest, (int, float)) and not isinstance(fewest, bool)
+                     and math.isclose(f.values[0], float(fewest)))
         ]
         if counts and not any(math.isclose(f.values[0], float(runs)) for f in counts):
             first = counts[0]
