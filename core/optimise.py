@@ -53,6 +53,10 @@ LEDGER_PATH = Path(_trials.RAW_DIRNAME) / "optimisation_ledger.jsonl"
 BEST_PATH = Path("results") / "best_design.json"
 WORK_DIR = Path(".fi") / "optimisation"
 RECORD = WORK_DIR / "run.json"
+#: Each evaluation the search has had answered, written as it is answered (the first line names the search's key), so a
+#: search stopped before its end (the quest killed or the machine restarted) is continued on resume, not run again from
+#: its start. Removed once the search's record is written.
+JOURNAL = WORK_DIR / "searched.jsonl"
 SEARCH_SOURCE = WORK_DIR / "optimise_search.py"
 #: The rounds of a continued search a person asked for (core/optimise_refine.py), kept for the plan they were asked under.
 ROUNDS_PATH = WORK_DIR / "continue.json"
@@ -355,6 +359,50 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
             "elapsed_s": elapsed}, stderr, ""
 
 
+def _read_journal(path: Path, key: str, space: Any) -> tuple[dict[str, dict[str, Any]], float]:
+    """The answers a stopped search of ``key`` had (keyed as the replay is) and the seconds its evaluations took. A
+    journal of another key (other code, plan or seed) is not this search's: nothing is taken from it."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}, 0.0
+    try:
+        head = json.loads(lines[0]) if lines else None
+    except ValueError:
+        head = None
+    if not isinstance(head, dict) or head.get("key") != key:
+        return {}, 0.0
+    answers: dict[str, dict[str, Any]] = {}
+    seconds = 0.0
+    for line in lines[1:]:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # the line being written when the search stopped
+        if not (isinstance(row, dict) and isinstance(row.get("design"), dict) and isinstance(row.get("reply"), dict)):
+            continue
+        try:
+            at = space.key(space.canonical(row["design"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        answers[at] = row["reply"]
+        if isinstance(row["reply"].get("elapsed_s"), (int, float)):
+            seconds += float(row["reply"]["elapsed_s"])
+    return answers, seconds
+
+
+def _journal(path: Path, design: dict[str, Any], reply: dict[str, Any]) -> None:
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"design": design, "reply": reply}, default=str) + "\n")
+    except OSError:
+        pass  # the journal only saves time on a resume; the search goes on without it
+
+
+def _fmt_pace(per_minute: float) -> str:
+    return f"{per_minute:.0f}" if per_minute >= 10 else f"{per_minute:.2g}"
+
+
 async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, Any], *, timeout_s: int,
                  env: dict[str, str] | None) -> dict[str, Any]:
     """One step of a library's method, in the quest's own Python (where the library is, or is not, installed)."""
@@ -515,6 +563,18 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     if warnings and log is not None:
         log.warning("[optimise] the simulation's own code may search for a design itself (%s): FI runs the search and "
                     "each call must compute the one design it is given", "; ".join(warnings[:5]))
+    # A search of this same key stopped before its end: the evaluations it had answered are taken from its journal.
+    # The search is the same from the same seed, so it asks for them again in the same order and goes on from there.
+    journal = quest_root / JOURNAL
+    journaled, before_s = _read_journal(journal, key, _search.Space(block["design_variables"]))
+    if journaled:
+        replay.update(journaled)
+        if log is not None:
+            log.info("[optimise] continuing the search that stopped before its end: %d evaluation(s) it had done are "
+                     "taken from FI's record of them, not run again", len(journaled))
+    else:
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(json.dumps({"key": key}) + "\n", encoding="utf-8")
     started = time.monotonic()
     deadline = started + max(1, int(timeout_s))
     runs = int(block.get("runs_per_evaluation") or 1) if entry == "run_trial" else 1
@@ -587,6 +647,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                     )
                     if err:
                         stderr_parts.append(err)
+                    if ("values" in reply or "failed" in reply) and not load_error \
+                            and isinstance(request.get("design"), dict):
+                        _journal(journal, request["design"], reply)
             else:
                 left = deadline - time.monotonic()
                 reply = (await _drive(executor, python, quest_root, request["spec"], timeout_s=left, env=env)
@@ -597,12 +660,17 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 evaluated += 1
             if log is not None and time.monotonic() - last_note > 60:
                 last_note = time.monotonic()
-                log.info("[optimise] still searching: %d evaluation(s) so far", evaluated)
+                limit = _plan.budget(block).get("search")
+                minutes = (time.monotonic() - started) / 60
+                pace = (f", about {_fmt_pace((evaluated - len(journaled)) / minutes)} a minute"
+                        if minutes > 0 and evaluated > len(journaled) else "")
+                log.info("[optimise] still searching: %d%s evaluation(s) so far%s", evaluated,
+                         f" of at most {limit}" if isinstance(limit, int) and limit > 0 else "", pace)
             request = gen.send(reply)
     except StopIteration as stop:
         done_outcome = stop.value
     outcome = done_outcome or {}
-    elapsed = time.monotonic() - started
+    elapsed = time.monotonic() - started + before_s
     planned = _plan.budget(block)
     extra = {
         "time": {"seconds": round(elapsed, 3),
@@ -616,6 +684,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     }
     if outcome.get("stopped_because") == "time":
         extra["time"]["limit_seconds"] = int(timeout_s)
+    if journaled:
+        extra["continued"] = {"evaluations_taken_from_the_stopped_search": len(journaled),
+                              "seconds_before_the_stop": round(before_s, 3)}
     record = _search.best_design(outcome, block, seed=int(base_seed),
                                  check={str(n): _plan.check_levels(s if isinstance(s, dict) else {"search": s})[0]
                                         for n, s in (block.get("numerical_settings") or {}).items()},
@@ -633,6 +704,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     (quest_root / BEST_PATH).write_bytes(best_text.encode("utf-8"))
     stderr = "\n".join(p for p in stderr_parts if p)[-_STDERR_KEEP:]
     record_text = _save(quest_root, key, ledger_text, best_text, stderr, bool(scan_rows), study_key)
+    journal.unlink(missing_ok=True)
     record = json.loads(best_text)
     return SearchRun(record=record, rows=outcome.get("rows") or [], stderr=stderr, scan=bool(scan_rows),
                      load_error=load_error, files=_files(ledger_text, best_text, record_text))

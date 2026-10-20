@@ -688,3 +688,55 @@ def test_the_log_lines_say_plainly_that_the_values_are_the_searchs_and_are_check
     assert "at the search's own settings (mesh = 0.5); FI checks them at finer settings next" in text
     assert "not checked at finer numerical settings" not in text
     assert math.isfinite(record["improvement"]["value"])
+
+
+class _Killed(Exception):
+    """The quest stopped (killed, the machine restarted) in the middle of the search."""
+
+
+class _KilledAfter(LocalExecutor):
+    def __init__(self, calls: int) -> None:
+        super().__init__()
+        self.left = calls
+
+    async def execute(self, cmd: list[str], **kw: Any) -> ExecutionResult:
+        if self.left <= 0:
+            raise _Killed()
+        self.left -= 1
+        return await super().execute(cmd, **kw)
+
+
+def _without_times(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{k: v for k, v in r.items() if k != "elapsed_s"} for r in rows if r.get("event") == "evaluation"]
+
+
+@pytest.mark.asyncio
+async def test_a_search_stopped_before_its_end_goes_on_from_where_it_stopped(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    whole = _quest(tmp_path / "whole")
+    await _run(whole, protocol)
+    total = _count(whole)
+    root = _quest(tmp_path / "stopped")
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    assert _count(root) == 7 and (root / optimise.JOURNAL).is_file()
+    run = await _run(root, protocol)
+    assert _count(root) == total, "the 7 evaluations done before the stop are not run again"
+    assert _without_times(_ledger(root)) == _without_times(_ledger(whole)), "the same search as one never stopped"
+    assert run.record["continued"]["evaluations_taken_from_the_stopped_search"] == 7
+    assert not (root / optimise.JOURNAL).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_search_of_other_code_is_not_continued(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    simulate = root / "code" / "simulate.py"
+    simulate.write_text(simulate.read_text(encoding="utf-8").replace('"g": x + y', '"g": x - y'), encoding="utf-8")
+    run = await _run(root, protocol)
+    assert _count(root) == 7 + run.record["evaluations"]["search"], "every evaluation of the new code is run"
+    assert "continued" not in run.record
