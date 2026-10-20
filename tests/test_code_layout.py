@@ -820,6 +820,26 @@ async def test_an_oracle_repair_that_makes_run_trial_return_run_cell_is_not_used
     assert (code / "simulate.py").read_text(encoding="utf-8") == before
 
 
+@pytest.mark.asyncio
+async def test_an_oracle_repair_that_drops_the_functions_fi_calls_is_not_used(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A live repair reply held the reply format's own template in a code fence; it parses as Python (a dict literal) and
+    # replaced the whole simulation, and every check then failed on `null`.
+    engine, code, state = _engine_with_tool(tmp_path)
+    engine._trial_mode = True
+    before = (code / "simulate.py").read_text(encoding="utf-8")
+    assert re.search(r"^def run_(trial|cell)\(", before, re.M)
+    template = '{"code": "PLACEHOLDER", "deps": ["numpy"], "patch_summary": "PLACEHOLDER", "give_up_reason": null}'
+
+    async def template_reply(prompt, **kw):  # noqa: ANN001
+        return f"The fix is below.\n\n```python\n{template}\n```\n"
+
+    monkeypatch.setattr(engine, "_chat", template_reply)
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert new is None and not failed and outcome == "not_usable"
+    assert (code / "simulate.py").read_text(encoding="utf-8") == before
+
+
 def test_the_generated_tests_call_run_cell_for_a_mean_and_run_trial_for_an_invariant() -> None:
     text = cl.oracle_tests({**PROTOCOL, "oracles": [ORACLE, {**ORACLE, "name": "inv", "kind": "invariant"},
                                                     {**ORACLE, "name": "flag", "per_trial": True}]})

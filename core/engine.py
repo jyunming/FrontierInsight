@@ -16633,17 +16633,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if parsed and not parsed.get("code"):
                 return None, False, "no_code"  # an answer with nothing to change
             new_code, _deps = _parse_implement_response(text)
+        # FI calls a trial-mode simulation through run_trial / run_cell: a repair must still define each one the script
+        # defines now (a reply's JSON template parses as Python, defines none, and replaced a whole simulation).
+        needed = set(_trial_runner._ENTRY_RE.findall(code)) & {"run_trial", "run_cell"}
+        defined = set(_trial_runner._ENTRY_RE.findall(new_code or ""))
         try:
             ast.parse(new_code)
             usable = bool(new_code.strip()) and (
-                ("def oracle" in new_code or all(_oracle.case_of(o) for o in oracles))
+                ("def oracle" in new_code or all(_oracle.case_of(o) for o in oracles)) and needed <= defined
                 if getattr(self, "_trial_mode", False) else "FI_ORACLE" in new_code
             )
         except (SyntaxError, ValueError):
             usable = False
         if not usable:
             self._log.warning("[oracle] the repair of %s is not usable (it must parse and %s); keeping it as written", path.name,
-                              "define oracle()" if getattr(self, "_trial_mode", False) else "honour FI_ORACLE")
+                              f"define {', '.join(sorted(needed)) or 'oracle()'} as the script does now"
+                              if getattr(self, "_trial_mode", False) else "honour FI_ORACLE")
             return None, False, "not_usable"
         if (path.name == _split_run.SIMULATE_NAME and getattr(self, "_trial_mode", False)
                 and _trial_runner.trial_aggregates(new_code)):
