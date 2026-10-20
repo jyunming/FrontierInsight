@@ -552,7 +552,10 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
             steady = [k for k in judged if k not in noisy]
             real = [k for k in changed if k not in noisy]
             if real:
+                # Which of them are headline results by name: with the fallback, a value that moved may be one the
+                # analysis never uses, so the record keeps the two apart.
                 return {"status": FEEDS, "scale": scale, "all_results": fallback,
+                        "headline_moved": [k for k in real if _criteria._key(k) in keys][:5],
                         "how": "changed with its result changed: " + ", ".join(real[:5])}
             if not steady:
                 return {"status": NOT_RUN, "why": "the results change between two runs of the same setting"}

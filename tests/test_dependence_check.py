@@ -119,6 +119,7 @@ def test_a_function_that_feeds_the_headline_only_at_a_later_setting_feeds(tmp_pa
         ''')
     got = _check(root, [{"level": 3.0, "mode": 0}, {"level": 3.0, "mode": 1}], names=["edge"])
     assert got["edge"]["status"] == si.FEEDS
+    assert got["edge"]["headline_moved"] == ["width"]
 
 
 def test_a_headline_with_no_number_is_not_shown_to_be_unused(tmp_path: Path) -> None:
@@ -186,6 +187,7 @@ def test_a_headline_computed_after_the_run_is_held_against_everything_the_run_re
         ''')
     got = _check(root, [{"level": 3.0}], names=["side_value"], headline={"width", "bias"})
     assert got["side_value"]["status"] == si.FEEDS
+    assert got["side_value"]["all_results"] is True and got["side_value"]["headline_moved"] == [],         "the record says no headline result moved by name: only a value the analysis may use did"
 
 
 def test_a_function_that_returns_zero_is_not_shown_to_be_unused(tmp_path: Path) -> None:
