@@ -274,6 +274,10 @@ class AgentBuildMixin:
         coder = await self._code_agent()
         self._skill_files_to_code(state)  # type: ignore[attr-defined]
         result = await coder.write(self._agent_task(state, outline, extra))
+        if not extend and self._goes_beyond_protocol_by_request():  # type: ignore[attr-defined]
+            # Code written again without a person's extension (a redesign, a rewrite after the evidence gate) is held to
+            # the frozen protocol as a whole, as the chat writer's is: an earlier extension no longer excuses anything.
+            (self.quest_root / "needs" / "PROTOCOL_CHECK.json").unlink(missing_ok=True)  # type: ignore[attr-defined]
         if extend:
             # What the extension added beyond the frozen protocol is recorded as the person's request, as the chat
             # writer's is (Engine._enforce_protocol with ``extended``), so the checks before the run do not fight it.

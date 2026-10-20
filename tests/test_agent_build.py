@@ -656,3 +656,25 @@ def test_what_a_readers_extension_added_beyond_the_protocol_is_not_sent_back_to_
     assert out == (None, None, False) and len(agent.prompts) == 1, "nothing was sent back for the person's setting"
     record = json.loads((eng.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
     assert record["status"] == "extended_by_person"
+
+
+def test_code_written_again_without_an_extension_is_held_to_the_whole_protocol_again(tmp_path: Path,
+                                                                                    monkeypatch) -> None:  # noqa: ANN001
+    """An earlier extension's record kept excusing its setting after the code was written again without one (a rewrite
+    after the evidence gate): the chat writer's code is held to the frozen protocol then, and so is the agent's."""
+    agent = _Agent([_write_grid("[1.0, 2.0, 3.0]"), _write_grid("[1.0, 2.0, 3.0]"), _write_grid("[1.0, 2.0]")])
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr(eng, "_protocol_of", lambda _state: {"grid": {"c": [1.0, 2.0]}})
+    monkeypatch.setattr(eng, "_skill_files_to_code", lambda _state: [])
+
+    async def no_refresh(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+    monkeypatch.setattr(eng, "_refresh_code_project", no_refresh)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    asyncio.run(eng._implement_by_agent({}, {}, ["the result at c = 3"]))
+    asyncio.run(eng._implement_by_agent({}, {}, []))
+    assert eng._goes_beyond_protocol_by_request() == []
+    asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert len(agent.prompts) == 3 and "differs from the plan's protocol" in agent.prompts[2]
