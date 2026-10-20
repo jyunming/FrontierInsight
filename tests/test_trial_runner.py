@@ -549,7 +549,6 @@ def test_a_cell_keeps_what_it_writes_outside_fis_folders_gets_only_inputs_and_ev
     assert all(p in said for p in ("needs/forged.json", ".fi/x.txt", "code/stray.py")), said
 
 
-TIMED = '''
 # --- FI checks at run time that run_trial uses the seed FI gives it --------------------------------------------------
 
 SEEDED = '''
@@ -683,7 +682,7 @@ def test_settings_run_at_the_same_time_up_to_the_number_set(tmp_path: Path) -> N
     def spans(name: str, at_once: int) -> list[list[float]]:
         out = spans_dir / name
         out.mkdir(parents=True)
-        _root, run = _run_at_once(tmp_path, name, TIMED, {"k": [1, 2, 3, 4]}, at_once=at_once, runs=1,
+        _root, run = _run_at_once(tmp_path, name, SPANS_TIMED, {"k": [1, 2, 3, 4]}, at_once=at_once, runs=1,
                                   env={**os.environ, "FI_TEST_SPANS": str(out)})
         assert run.ok_trials == 4, run.stderr()
         return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out.glob("*.json"))]

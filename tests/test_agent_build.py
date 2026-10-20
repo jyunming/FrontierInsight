@@ -39,7 +39,7 @@ def _cfg(tmp_path: Path, writer: str) -> Config:
         topic="a neutral topic about a cooling curve", title="agent-build", provider=ProviderConfig(name="openai"),
         engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off", oracle_check="off",
                             code_writer=writer),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60, split_analysis=False),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
     )
 
@@ -544,3 +544,25 @@ def test_a_round_that_wrote_no_script_is_sent_back_not_a_crash(tmp_path: Path, m
     out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
     assert out == (None, None, False), "the next round wrote the script and the checks passed"
     assert "There is no `experiment.py`" in agent.prompts[1]
+
+
+def test_a_study_with_its_simulation_apart_sends_back_one_script_until_simulate_py_defines_the_function(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A real round wrote one script for a study that keeps its simulation apart from the analysis; FI accepted it and
+    ran it as it was, so no check that needs FI to call the simulation itself could run."""
+
+    def two_scripts(code: Path) -> None:
+        _write(2)(code)
+        (code / "simulate.py").write_text("def run_cell(cell):\n    return {'y': 1.0}\n", encoding="utf-8")
+
+    agent = _Agent([_write(2), two_scripts])
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr(eng, "_split_on", lambda _state: True)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False), "the next round moved the simulation into simulate.py and the checks passed"
+    assert "`simulate.py` is missing" in agent.prompts[1] and "run_cell(cell)" in agent.prompts[1]
+    assert ab.check_words("two_scripts") != "two_scripts"

@@ -68,6 +68,7 @@ _SITE = {
 #: The checks of :func:`core.code_checks.check_code` and the run of the code, in a scientist's words.
 _CHECK_WORDS = {
     "run": "running the code",
+    "two_scripts": "the check that the simulation is in simulate.py, as the function FI calls for each setting",
     "typed_results": "the check that the results are computed, not typed into the code",
     "grid_keys": "the check that the code reads only settings the study has",
     "typed_constants": "the check for numbers typed into the model's functions that the plan never gives",
@@ -90,7 +91,7 @@ def check_words(check: str) -> str:
 def _from_gate(check: str) -> bool:
     """A check the gate reports by stopping at it (a refused repair's node, or ``run``): it is never seen to pass, so
     a later round that gets past it counts as having fixed it."""
-    return check == "run" or writes_code(check)
+    return check in ("run", "two_scripts") or writes_code(check)
 
 
 def compare_rounds(earlier: list[tuple[int, dict[str, bool | None]]], now: dict[str, bool | None]) -> dict[str, Any]:
@@ -247,7 +248,9 @@ class AgentBuildMixin:
             skills_block=(self._skills_block(state) + self._dropped_skills_note(state))  # type: ignore[attr-defined]
             or "(no skills selected for this quest)",
             inputs_block=self._inputs_block(),  # type: ignore[attr-defined]
-            job_block=self._job_block(state),  # type: ignore[attr-defined]
+            # The two-script contract the chat writer is given (simulate.py's run_cell / run_trial, which FI calls for
+            # every setting): without it an agent writes one script, which none of FI's checks of a simulation can run.
+            job_block=(self._split_block(state) or self._job_block(state)),  # type: ignore[attr-defined]
         )
         functions = [f for f in (outline or {}).get("functions") or [] if isinstance(f, dict) and f.get("name")]
         if functions:
@@ -303,6 +306,26 @@ class AgentBuildMixin:
                          f"`{_split_run.ANALYSIS_NAME}` (and `{_split_run.SIMULATE_NAME}` where the plan needs it) "
                          "first, then run it on a small case; keep each of your own runs short.")
             return None, found, checks
+        # A quest whose simulation FI runs itself (execution.split_analysis): the code is not the study's until
+        # simulate.py defines the function FI calls for each setting. One script passes none of the checks that need it
+        # (FI running a check's case itself, FI's record of every trial), so it is sent back, not run as it is.
+        if self._split_on(state):  # type: ignore[attr-defined]
+            from . import trial_runner as _trials
+
+            simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
+            entries = _trials.entries(simulate) if simulate.is_file() else set()
+            if not ({"run_cell", "run_trial"} & set(entries)):
+                checks["two_scripts"] = False
+                found.append(
+                    f"`{_split_run.SIMULATE_NAME}` "
+                    + ("is missing" if not simulate.is_file() else "defines neither `run_cell(cell)` nor "
+                       "`run_trial(cell, trial_id, seed)`")
+                    + ": this study keeps the simulation apart from the analysis, and FI calls the simulation's "
+                    f"function itself for every setting. Move the computation of one setting into `{_split_run.SIMULATE_NAME}` "
+                    "as `run_cell(cell)` (no randomness) or `run_trial(cell, trial_id, seed)` (with randomness), with no "
+                    f"loop over settings and no `__main__` block, and make `{_split_run.ANALYSIS_NAME}` read FI's record "
+                    "of the trials (the path in `FI_TRIALS`), as the section on two scripts above says.")
+                return None, found, checks
         lines = _Lines()
         self._log.addHandler(lines)  # type: ignore[attr-defined]
         try:
