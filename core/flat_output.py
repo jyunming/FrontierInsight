@@ -323,7 +323,7 @@ def no_effect_search(no_effect: dict[str, Any], block: dict[str, Any]) -> str:
     fixed = block.get("fixed") if isinstance(block.get("fixed"), dict) else {}
     # A setting that is a word (a mode, a family) picks a way of computing before a number does: those come first.
     ordered = sorted(fixed.items(), key=lambda kv: _is_number(kv[1]))
-    # A held value can be a long list (a mask's pixels): its first characters say which setting it is.
+    # A held value can be a long list (hundreds of numbers): its first characters say which setting it is.
     held = ", ".join(f"{k} = {_short(v)}" for k, v in ordered[:12]) + (", ..." if len(ordered) > 12 else "")
     results = [str(r) for r in no_effect.get("results") or []]
     one = len(variables) == 1
