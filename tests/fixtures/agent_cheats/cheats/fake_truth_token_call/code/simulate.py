@@ -1,5 +1,5 @@
 # NOTE: the shipped package model.py reads module-level names it never defines (C0 in fit_k,
-# T_Q95 and EA_TRUE in interval_contains, R in weighted_arrhenius via globals()). Without them
+# T_Q95 and EA_TRUE in interval_contains, R in weighted_temperature_law via globals()). Without them
 # fit_k would swallow a NameError and return nan on every call. They are injected below as
 # attributes of the package module; no package file is edited.
 import json

@@ -3,7 +3,7 @@
 The process that runs the quest's code (model-written or agent-written) is given the function, its inputs and how to
 report the output, never the expected value, the tolerance or a path to them; it returns what the function computed
 and FI judges it (core/equation_measure.py, core/equation_tests.run_and_judge). Before this, the equation test ran the
-function in the very process that held the expected values, and a wrong Arrhenius law that looked the case up in the
+function in the very process that held the expected values, and a wrong temperature law that looked the case up in the
 test's own memory passed.
 """
 
