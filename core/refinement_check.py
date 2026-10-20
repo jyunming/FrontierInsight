@@ -97,7 +97,7 @@ def key(protocol: dict[str, Any] | None) -> str:
 
 
 def _judged(name: str, names: set[str]) -> bool:
-    """A headline result, or a headline result at one value compared inside each run (``pitch=80: dof``), the names
+    """A headline result, or a headline result at one value compared inside each run (``speed=2: drag``), the names
     compared as the headline check compares them (``mean_width`` is ``Mean width``); every result when no headline is
     named."""
     if not names:
@@ -161,7 +161,7 @@ def spreads(cells: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def _result_name(level: Any, name: str) -> str:
-    """A result's name with the value it was computed at inside the run, when it was one (``pitch=80: dof``)."""
+    """A result's name with the value it was computed at inside the run, when it was one (``speed=2: drag``)."""
     if isinstance(level, dict) and level:
         return f"{_in_run.level_key(level)}: {name}"
     return str(name)
@@ -327,8 +327,9 @@ def lines(record: dict[str, Any]) -> list[str]:
                    (f" (numerical error of the study's value {_plain(r['share_of_spread'] * 100)}% of "
                     + ("its spread" if r.get("against") != "value" else "its value, which the study never moves") + ")"
                     if isinstance(r.get("share_of_spread"), (int, float)) else
-                    f" (numerical error of the study's value {_plain(r.get('error_at_finest') or 0)}, with no spread "
-                    "or value to compare it with)"))
+                    (f" (numerical error of the study's value {_plain(r['error'])}, with no spread or value to "
+                     "compare it with)" if isinstance(r.get("error"), (int, float)) else
+                     " (its numerical error could not be estimated)")))
                 for r in bad[:4])
             out.append(f"`{name}` run again at finer values ({levels}): {len(bad)} result(s) are not converged: "
                        f"{shown}{part}")

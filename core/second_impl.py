@@ -567,6 +567,9 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
                         "how": "changed with its result changed: " + ", ".join(real[:5])}
             if not steady:
                 return {"status": NOT_RUN, "why": "the results change between two runs of the same setting"}
+            if all(_whole(values.get(k)) for k in steady):
+                return {"status": NOT_RUN, "why": "every result compared is a whole number (a count, a yes/no, a step "
+                                                  "of a grid), which a change of a few percent need not move"}
             return {"status": NOT_FEEDING, "results": steady[:8], "scale": scale, "all_results": fallback,
                     "not_repeating": sorted(noisy)[:8]}
         return {"status": STOPS} if stopped else {"status": NOT_RUN, "why": "no run was made"}

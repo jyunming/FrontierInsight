@@ -156,10 +156,8 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
         except OSError:
             parts.append(path.name.encode() + b"\0")
     # A repair of the model's package changes what the simulation computes: a search of the code before it is another
-    # search. Notes and caches are not code. (Only files below code/, so a quest with none keeps the key it had.)
-    below = sorted(p for p in code.rglob("*") if p.is_file() and len(p.relative_to(code).parts) > 1
-                   and p.suffix.lower() != ".md" and not {"__pycache__", ".git"} & set(p.relative_to(code).parts))
-    for path in below:
+    # search. (Only files below code/, so a quest with none keeps the key it had.)
+    for path in _below_code(code):
         rel = path.relative_to(code).as_posix().encode()
         try:
             parts.append(rel + b"\0" + path.read_bytes())
@@ -172,6 +170,19 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
         # A continued search is another search; without rounds the key is the one an earlier version of FI kept.
         what.append(_key_rounds(rounds))
     return _sha(b"\1".join(parts) + json.dumps(what, sort_keys=True, default=str).encode())
+
+
+def _below_code(code: Path) -> list[Path]:
+    """The files in folders below ``code/`` the simulation may use (the model's package, a parameter file in it): not
+    notes (``*.md``), the package's unit tests (``code/tests/``), caches or hidden folders (``__pycache__``, ``.git``,
+    ``.pytest_cache``)."""
+    out = []
+    for p in code.rglob("*"):
+        parts = p.relative_to(code).parts
+        if (p.is_file() and len(parts) > 1 and p.suffix.lower() != ".md" and parts[0] != "tests"
+                and not any(part == "__pycache__" or part.startswith(".") for part in parts)):
+            out.append(p)
+    return sorted(out)
 
 
 def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: str, thresholds: Any) -> str:
@@ -188,6 +199,13 @@ def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: s
             parts.append(path.name.encode() + b"\0" + _phased._code_digest(path).encode())
         except OSError:
             parts.append(path.name.encode() + b"\0")
+    for path in _below_code(code):  # the model's package, as in :func:`_run_key`
+        rel = path.relative_to(code).as_posix().encode()
+        try:
+            parts.append(rel + b"\0" + (_phased._code_digest(path).encode() if path.suffix == ".py"
+                                         else path.read_bytes()))
+        except OSError:
+            parts.append(rel + b"\0")
     parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
     return _sha(b"\1".join(parts) + json.dumps([block, entry, thresholds], sort_keys=True, default=str).encode())

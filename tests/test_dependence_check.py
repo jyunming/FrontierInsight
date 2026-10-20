@@ -212,9 +212,23 @@ def test_a_time_the_run_reports_does_not_hide_that_the_headline_does_not_use_the
             model.side_value(x)
             return {"width": 2.0 * x, "wall_s": time.perf_counter()}
         ''')
-    got = _check(root, [{"level": 3.0}], names=["side_value"], headline={"width", "bias"})
+    got = _check(root, [{"level": 3.3}], names=["side_value"], headline={"width", "bias"})
     assert got["side_value"]["status"] == si.NOT_FEEDING
     assert got["side_value"]["not_repeating"] == ["wall_s"]
+
+
+def test_a_whole_number_headline_beside_a_time_is_not_shown_to_be_unused_either(tmp_path: Path) -> None:
+    """The same guard after the results that do not repeat are set aside: what is left is a whole number."""
+    root = _quest(tmp_path, '''
+        import time
+        from pkg import model
+        def run_cell(cell):
+            x = cell["level"]
+            model.side_value(x)
+            return {"width": 2.0 * x, "wall_s": time.perf_counter()}
+        ''')
+    got = _check(root, [{"level": 3.0}], names=["side_value"], headline={"width", "bias"})
+    assert got["side_value"]["status"] == si.NOT_RUN and "whole number" in got["side_value"]["why"], got
 
 
 def test_a_whole_number_headline_that_does_not_move_is_not_shown_to_be_unused(tmp_path: Path) -> None:

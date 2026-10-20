@@ -802,3 +802,22 @@ async def test_an_evaluation_stopped_from_outside_is_run_again_on_resume(tmp_pat
                                   timeout_s=300)
     rows = [json.loads(line) for line in (root / optimise.JOURNAL).read_text(encoding="utf-8").splitlines()[1:]]
     assert len(rows) == 6 and not any("process" in r["reply"] for r in rows), rows
+
+
+def test_the_frozen_studys_key_covers_the_models_package_and_not_its_tests(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    block = protocol["optimisation"]
+    simulate = root / "code" / "simulate.py"
+    keys = lambda: (optimise._run_key(root, simulate, block, 0, "run_cell", None),  # noqa: E731
+                    optimise._study_key(root, simulate, block, "run_cell", None))
+    before = keys()
+    (root / "code" / "tests").mkdir()
+    (root / "code" / "tests" / "test_model.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    (root / "code" / ".pytest_cache").mkdir()
+    (root / "code" / ".pytest_cache" / "v").write_text("x", encoding="utf-8")
+    assert keys() == before, "a unit test or a cache is not the simulation"
+    (root / "code" / "model").mkdir()
+    (root / "code" / "model" / "core.py").write_text("SCALE = 2.0\n", encoding="utf-8")
+    after = keys()
+    assert after[0] != before[0] and after[1] != before[1]
