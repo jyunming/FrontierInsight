@@ -129,8 +129,8 @@ External prerequisites are all optional and feature-gated:
 - **A test topic is only a test.** Real research topics used to validate FI (in live runs and replays) never shape what
   goes into the repo: code, prompts, unit tests, docs, commit messages and PR descriptions do not use that topic's words
   or carry a special case for it. Fixtures use neutral made-up topics, and every fix must be general. A change found
-  to carry a test topic (its words, its quantities, a rule that only that topic needs) is sent back and redone as a
-  general fix, whoever wrote it; taking the words out of a rule that is still that topic's special case is not a fix.
+  to carry a test topic's words (in code, comments, tests, docs or a commit message) is sent back to be revised until
+  none is left, whoever wrote it.
 - **Watch a live run while it runs.** A long real run is watched throughout (stops, errors, the size of the study and
   FI's own time estimate); a problem is reported with a proposed way forward as soon as it shows, not after the run ends.
 - **Report outcomes, not process.** Say what is done, what is left, how much better it is, what it cost and its quality;
@@ -173,8 +173,8 @@ merge requirements for you).
 - **No test topic in any commit, checked before every PR.** Before opening, read every commit the PR carries (its
   message, its diff, and the branch names in merge commits, which GitHub shows in the PR's commit list) and the PR's
   title and description for the topics the branch was tested on (live runs and replays): their words, their
-  quantities and any rule only they need. The list of those words is kept outside the repository. Any hit sends the
-  change back to be redone as a general fix (see "A test topic is only a test"); a PR opens only with none. Open the PR
+  quantities. The list of those words is kept outside the repository. Any hit sends the change back to be revised
+  (see "A test topic is only a test"); a PR opens only with none. Open the PR
   from a branch off main with newly written commit messages, so a working branch named after a test topic never shows.
 
 ## Splitting work for small, fast models
