@@ -346,6 +346,9 @@ def array_problem(variable: dict[str, Any], value: Any) -> str | None:
             x = x[i]
         low, high = bound_at(variable["low"], index), bound_at(variable["high"], index)
         at = f" at {list(index)}" if len(shape) > 1 or shape[0] > 1 else ""
+        if low == high and x != low:
+            return (f"{x!r}{at} is not the value {_fmt(low)} this element is held at (its `low` equals its `high`): "
+                    f"write {_fmt(low)} there")
         if not low <= x <= high:
             return f"{x!r}{at} is outside its range {_fmt(low)} to {_fmt(high)}"
         if kind == "integer" and not _whole(x):
@@ -425,6 +428,10 @@ def _setting(name: str, item: Any) -> tuple[dict[str, Any] | None, str | None]:
         return None, f"{where}: `finer` must be `smaller` (a mesh size, a time step) or `larger` (a count of elements)"
     if out.get("finer") is not None:
         out["finer"] = finer
+    tolerance = out.get("tolerance")
+    if tolerance is not None and not (_number(tolerance) and 0 < tolerance < 1):
+        return None, (f"{where}: `tolerance` must be a fraction between 0 and 1 (0.05 means a change of 5% of the "
+                      "result's spread counts as converged), or leave it out")
     check = out.get("check")
     if check is None:
         return out, None
