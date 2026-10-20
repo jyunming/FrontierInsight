@@ -324,8 +324,11 @@ def lines(record: dict[str, Any]) -> list[str]:
             shown = "; ".join(
                 f"{r['result']} at {r['setting']}: " + ", ".join(_plain(v) for v in r.get("values") or [])
                 + (" (has a value at one level and none at another)" if r.get("status") == "lost" else
-                   f" (numerical error of the study's value {_plain((r.get('share_of_spread') or 0) * 100)}% of "
-                   + ("its spread" if r.get("against") != "value" else "its value, which the study never moves") + ")")
+                   (f" (numerical error of the study's value {_plain(r['share_of_spread'] * 100)}% of "
+                    + ("its spread" if r.get("against") != "value" else "its value, which the study never moves") + ")"
+                    if isinstance(r.get("share_of_spread"), (int, float)) else
+                    f" (numerical error of the study's value {_plain(r.get('error_at_finest') or 0)}, with no spread "
+                    "or value to compare it with)"))
                 for r in bad[:4])
             out.append(f"`{name}` run again at finer values ({levels}): {len(bad)} result(s) are not converged: "
                        f"{shown}{part}")

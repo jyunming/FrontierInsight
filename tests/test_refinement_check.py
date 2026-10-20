@@ -237,3 +237,11 @@ def test_a_spread_of_round_off_is_no_spread() -> None:
     runs = {"gap=1": [{"width": 10.0}, {"width": 10.0001}, {"width": 10.00011}]}
     v = rc.judge(SETTING, runs, {"width": 1e-9}, {"width"})
     assert v["verdict"] == "converged" and v["results"][0]["against"] == "value"
+
+
+def test_a_result_with_nothing_to_compare_its_error_with_is_not_said_to_be_zero_percent_off() -> None:
+    record = {"settings": {"mesh": {"levels": [0.5, 0.25], "verdict": "not_converged", "results": [
+        {"result": "t_out", "setting": "flow=1", "values": [0.0, 0.2], "status": "not_converged",
+         "share_of_spread": None, "error_at_finest": 0.2}]}}}
+    text = " ".join(rc.lines(record))
+    assert "0%" not in text and "no spread or value to compare it with" in text, text

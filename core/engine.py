@@ -12812,7 +12812,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 cells = [_optimise_search.cell_of(normal, (normal.get("baseline") or {}).get("values") or {})]
                 if isinstance(normal.get("grid"), dict) and normal["grid"]:  # a search's first scan: a measurement
                     cells += _small.settings(_optimise_search.scan_grid(normal))
-                inside = None
+                # The scan's cells leave them out and the trial runner gives each cell all of them (the baseline cell
+                # holds them already, with the same values).
+                inside = _optimise_search.in_each_run(normal) or None
             else:
                 grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
                 cells = _small.settings(grid)

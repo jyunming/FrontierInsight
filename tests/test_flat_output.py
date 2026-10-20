@@ -436,3 +436,12 @@ async def test_a_coarse_scan_setting_that_changes_nothing_is_said_before_the_sea
     assert runner.no_difference and "`finish`" in runner.no_difference and "`fin`" not in runner.no_difference
     best = json.loads((root / "results" / "best_design.json").read_text(encoding="utf-8"))
     assert "`finish`" in best["scan_settings_without_effect"]
+
+
+def test_a_setting_that_moves_only_the_numbers_per_value_inside_each_run_is_not_named() -> None:
+    """A run that goes through several values itself returns a number per value: those count as results too. A fitted
+    constant that ignores the setting beside them must not make the setting look like one that changes nothing."""
+    cells = [_cell({"coating": c, "flow": f},
+                   {"constant": 1.5, "t_out": {"speed=1": 20.0 - f * (2.0 if c == "painted" else 1.0), "speed=2": 18.0}})
+             for c in ("bare", "painted") for f in (1.0, 2.0, 3.0)]
+    assert flat.unchanged_axes(cells) == []
