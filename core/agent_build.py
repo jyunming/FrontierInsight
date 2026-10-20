@@ -69,6 +69,7 @@ _SITE = {
 _CHECK_WORDS = {
     "run": "running the code",
     "two_scripts": "the check that the simulation is in simulate.py, as the function FI calls for each setting",
+    "protocol": "the check that the code runs the plan's settings, runs and results as the plan gives them",
     "typed_results": "the check that the results are computed, not typed into the code",
     "grid_keys": "the check that the code reads only settings the study has",
     "typed_constants": "the check for numbers typed into the model's functions that the plan never gives",
@@ -287,6 +288,29 @@ class AgentBuildMixin:
 
     # -- the checks before the run ---------------------------------------------------------------------------------------
 
+    def _agent_protocol(self, state: Any, found: list[str], checks: dict[str, bool | None]) -> bool:
+        """Compare the agent's scripts with the plan's protocol and record it in ``needs/PROTOCOL_CHECK.json`` (the record
+        the evidence reads). ``True`` when the code goes back to the agent: it differs and ``engine.protocol_check`` is
+        ``block``; with ``warn`` the difference is recorded and the checks go on, with ``off`` nothing is compared."""
+        from . import protocol_check as _protocol_check
+
+        protocol = self._protocol_of(state)  # type: ignore[attr-defined]
+        if protocol is None:
+            return False
+        differences = [m.message() for m in _protocol_check.check(protocol, self._scripts_on_disk())]  # type: ignore[attr-defined]
+        block = self.config.engine.protocol_check == "block"  # type: ignore[attr-defined]
+        self._protocol_record({  # type: ignore[attr-defined]
+            "status": "ok" if not differences else ("stopped" if block else "warned"),
+            "attempts": [{"attempt": 0, "differences": differences}], "differences": differences,
+            "protocol": protocol, "written_by": "the coding agent"})
+        checks["protocol"] = not differences
+        if not differences:
+            return False
+        found.append("The code differs from the plan's protocol: " + "; ".join(differences[:8])
+                     + ". Make the code run the settings, the runs and the results the plan gives, as the plan names "
+                       "them; change nothing else.")
+        return block
+
     async def _agent_judge(self, state: Any, py: Any, exec_env: Any, seed_path: Path) -> tuple[
             tuple[Any, str | None, bool] | None, list[str], dict[str, bool | None]]:
         """FI's checks of the code the agent left, every repair turned into a report. ``(the gate's result when the code
@@ -326,6 +350,11 @@ class AgentBuildMixin:
                     f"loop over settings and no `__main__` block, and make `{_split_run.ANALYSIS_NAME}` read FI's record "
                     "of the trials (the path in `FI_TRIALS`), as the section on two scripts above says.")
                 return None, found, checks
+        # The plan's protocol held against the code, as the chat writer's code is (Engine._enforce_protocol): the agent's
+        # code was never compared with it, so no agent quest could show that its script follows the plan.
+        sent = self._agent_protocol(state, found, checks)
+        if sent:
+            return None, found, checks
         lines = _Lines()
         self._log.addHandler(lines)  # type: ignore[attr-defined]
         try:

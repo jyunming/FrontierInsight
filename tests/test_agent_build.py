@@ -8,6 +8,7 @@ node), so the report mode itself is what is tested. No model is called.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import subprocess
 import sys
@@ -566,3 +567,46 @@ def test_a_study_with_its_simulation_apart_sends_back_one_script_until_simulate_
     assert out == (None, None, False), "the next round moved the simulation into simulate.py and the checks passed"
     assert "`simulate.py` is missing" in agent.prompts[1] and "run_cell(cell)" in agent.prompts[1]
     assert ab.check_words("two_scripts") != "two_scripts"
+
+
+def _write_grid(values: str) -> Callable[[Path], None]:
+    def step(code: Path) -> None:
+        _write(2)(code)
+        text = (code / "experiment.py").read_text(encoding="utf-8")
+        (code / "experiment.py").write_text(f"C_VALUES = {values}\n" + text, encoding="utf-8")
+    return step
+
+
+def test_the_agents_code_is_held_to_the_plans_protocol_and_sent_back_when_it_differs(tmp_path: Path,
+                                                                                     monkeypatch) -> None:  # noqa: ANN001
+    """The agent's code was never compared with the plan's protocol, so every agent quest showed the protocol check as
+    not run and none could show that its script follows the plan."""
+    agent = _Agent([_write_grid("[1.0, 3.0]"), _write_grid("[1.0, 2.0]")])
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr(eng, "_protocol_of", lambda _state: {"grid": {"c": [1.0, 2.0]}})
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False), "the next round used the plan's settings and the checks passed"
+    assert len(agent.prompts) == 2 and "differs from the plan's protocol" in agent.prompts[1]
+    record = json.loads((eng.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "ok" and record["differences"] == []
+    assert ab.check_words("protocol") != "protocol"
+
+
+def test_with_the_protocol_check_set_to_warn_a_difference_is_recorded_and_the_checks_go_on(tmp_path: Path,
+                                                                                           monkeypatch) -> None:  # noqa: ANN001
+    agent = _Agent([_write_grid("[1.0, 3.0]")])
+    eng = _engine(tmp_path, agent=agent)
+    eng.config.engine.protocol_check = "warn"
+    monkeypatch.setattr(eng, "_protocol_of", lambda _state: {"grid": {"c": [1.0, 2.0]}})
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False) and len(agent.prompts) == 1
+    record = json.loads((eng.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "warned" and record["differences"]
