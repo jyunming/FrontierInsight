@@ -21784,8 +21784,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             as_node=as_node,
         )
 
-    def _skills_block(self, state: QuestState | None = None) -> str:
+    def _skills_block(self, state: QuestState | None = None, *, in_code: bool = False) -> str:
         """Instructions for the skills this quest actually selected.
+
+        ``in_code``: for the coding agent, whose code may not reach outside its folder (``core/agent_coder.py``): each
+        skill's bundled files are named under ``skills/<name>/`` in the code folder, where :meth:`_skill_files_to_code`
+        puts a copy of them, and not at the skill's own folder.
 
         This is the step that makes the registry worth having: a skill FI
         knows about but never tells ``design`` / ``implement`` about changes
@@ -21867,6 +21871,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             surface = skill.api_surface().strip()
             if mount is not None:
                 instructions, surface = mount.translate(instructions), mount.translate(surface)
+            in_code_base = f"{_SKILLS_IN_CODE}/{skill.name}" if in_code and mount is None and not not_mounted else ""
+            if in_code_base:
+                for spelling in {str(skill.path), Path(skill.path).as_posix()}:
+                    instructions, surface = (instructions.replace(spelling, in_code_base),
+                                             surface.replace(spelling, in_code_base))
             parts.append(instructions)
             if surface:
                 parts.append(f"\n### {skill.name} — API surface\n")
@@ -21895,6 +21904,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         "These ship with the skill but are not reachable from the "
                         "sandbox, so do not write code that opens or runs them:"
                     )
+                elif in_code_base:
+                    # The agent's code may not reach outside its folder (a path into the person's home is refused), so
+                    # the skill's own folder is never named: FI put a copy beside the code.
+                    parts.append(
+                        f"FI put a copy of these in this folder, under `{in_code_base}/` (FI's files: do not change "
+                        f"them). Every run has the quest folder as its working directory, not this folder, so open or "
+                        f"run each one from the script's own folder (`Path(__file__).parent / \"{in_code_base}\"` plus "
+                        f"the path listed), and launch a script with `sys.executable` (the Python running the "
+                        f"experiment), not the bare command `python`, even where the skill's text above writes `python`."
+                    )
                 else:
                     base = mount.container if mount is not None else skill.path
                     parts.append(
@@ -21919,6 +21938,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 for rel in refs:
                     parts.append(f"- `{rel}` (reference)")
         return "\n".join(parts).strip()
+
+    def _skill_files_to_code(self, state: Any) -> list[str]:
+        """Copy the bundled files of each selected skill into ``code/skills/<name>/`` (the coding agent's code may not
+        reach outside its folder, :meth:`_skills_block` with ``in_code``): the paths copied, relative to ``code/``.
+        A file that cannot be copied is left out and said in run.log; the quest goes on."""
+        copied: list[str] = []
+        try:
+            usable, _reasons = _resolve_selected_skills(state, self._log, use="experiment",
+                                                        external_dirs=self._skill_dirs)
+        except Exception as exc:  # noqa: BLE001 -- no skill files: the agent writes the code without them
+            self._log.warning("[skills] the selected skills could not be resolved to copy their files: %s", exc)
+            return copied
+        for st in usable:
+            skill = st.skill
+            for rel in [*skill.bundled_scripts(), *skill.reference_files()]:
+                target = self.quest_root / "code" / _SKILLS_IN_CODE / skill.name / rel
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(Path(skill.path) / rel, target)
+                    copied.append(target.relative_to(self.quest_root / "code").as_posix())
+                except OSError as exc:
+                    self._log.warning("[skills] %s of the skill %s could not be copied into code/ (%s)", rel,
+                                      skill.name, exc)
+        if copied:
+            self._log.info("[skills] put a copy of %d file(s) of the selected skills in code/%s/ for the coding agent",
+                           len(copied), _SKILLS_IN_CODE)
+        return copied
 
     def _experiment_skill_states(self, state: Any) -> list[Any]:
         """The approved skills this quest selected for its experiment (as ``_resolve_selected_skills`` returns them).
@@ -29963,6 +30009,8 @@ _UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
 
 # How many times a paper that claims what FI's own records contradict is written again before the quest ends with no paper.
 _RECORD_REWRITES = 2
+#: The folder of ``code/`` that holds a copy of the selected skills' files for the coding agent (FI's own, like ``tests``).
+_SKILLS_IN_CODE = "skills"
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
 # is rendered and counts its pages. A draft over the limit is sent back to be

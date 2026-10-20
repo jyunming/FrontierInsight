@@ -246,7 +246,7 @@ class AgentBuildMixin:
             design_block=self._code_design_block(state),  # type: ignore[attr-defined]
             clarify_block=_e._format_clarify(state),
             timeout_s=self._planning_limit(state),  # type: ignore[attr-defined]
-            skills_block=(self._skills_block(state) + self._dropped_skills_note(state))  # type: ignore[attr-defined]
+            skills_block=(self._skills_block(state, in_code=True) + self._dropped_skills_note(state))  # type: ignore[attr-defined]
             or "(no skills selected for this quest)",
             inputs_block=self._inputs_block(),  # type: ignore[attr-defined]
             # The two-script contract the chat writer is given (simulate.py's run_cell / run_trial, which FI calls for
@@ -272,6 +272,7 @@ class AgentBuildMixin:
                      + ". Add what computes it to the code in this folder and report it in RESULT_JSON; change "
                        "nothing else.\n")
         coder = await self._code_agent()
+        self._skill_files_to_code(state)  # type: ignore[attr-defined]
         result = await coder.write(self._agent_task(state, outline, extra))
         code_path = self.quest_root / "code" / "experiment.py"  # type: ignore[attr-defined]
         code = code_path.read_text(encoding="utf-8") if code_path.is_file() else ""
@@ -435,6 +436,14 @@ class AgentBuildMixin:
             if broke:
                 found.insert(0, "Your last round broke what passed before (" + "; ".join(broke) + "). Put it back "
                              "while you keep what you fixed: a round that breaks a check that passed is not progress.")
+            # A round FI did not keep (its code reached outside its folder) says why, first: the checks only see that no
+            # code is there, and a live agent told only that wrote the same code again.
+            outside = coder.last_cheats()
+            if outside:
+                found.insert(0, "FI did not keep your last round, because its code reaches outside its folder: "
+                             + "; ".join(outside[:6]) + ". FI keeps no round whose code reads or writes outside the "
+                             "folder you are given (no path into the home folder, no absolute path, no `..`): write it "
+                             "again without that.")
             self._log.info("[implement] FI's checks found %d problem(s) in the coding agent's code; sending them back to "  # type: ignore[attr-defined]
                            "it", len(found))
             await coder.continue_("\n\n".join(found))

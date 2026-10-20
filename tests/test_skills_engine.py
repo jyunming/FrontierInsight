@@ -410,3 +410,36 @@ def test_bundled_files_are_named_but_never_inlined(
     # in the quest folder and on the interpreter running it, not on `python` from PATH.
     assert "working directory is the quest folder, not the skill's folder" in block
     assert "launch it with `sys.executable`" in block and "not the bare command `python`" in block
+
+
+def test_for_the_coding_agent_the_bundled_files_are_copied_beside_the_code_and_named_there(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The coding agent's code may not reach outside its folder (a path into the home folder is refused), and a live
+    agent told the skill's own folder called its script there: FI threw the round away, twice, and the quest stopped."""
+    import core.skills.registry as reg
+    from core.skills import Skill
+
+    root = tmp_path / "skills"
+    d = root / "bundled"
+    (d / "scripts").mkdir(parents=True)
+    (d / SKILL_MD).write_text(f"# bundled\n\nRun `{d.as_posix()}/scripts/convert.py`.\n", encoding="utf-8")
+    (d / "selftest.py").write_text("import sys; sys.exit(0)\n", encoding="utf-8")
+    (d / "scripts" / "convert.py").write_text("print('converted')\n", encoding="utf-8")
+    ledger = tmp_path / "l.json"
+    approval.approve("bundled", Skill(name="bundled", path=d).content_hash(), approved_by="tester", path=ledger)
+    real = reg.loadable_skills
+    monkeypatch.setattr(reg, "loadable_skills", lambda names, **kw: real(names, skills_dir=root, ledger=ledger))
+    monkeypatch.setattr("core.skills.loadable_skills", reg.loadable_skills)
+
+    eng = _engine(["bundled"], root, ledger)
+    eng.quest_root = tmp_path / "quest"
+    block = Engine._skills_block(eng, _state("bundled"), in_code=True)  # type: ignore[arg-type]
+    assert str(d) not in block and d.as_posix() not in block, "the skill's own folder is never named to the agent"
+    assert "skills/bundled/scripts/convert.py" in block and "under `skills/bundled/`" in block
+    copied = Engine._skill_files_to_code(eng, _state("bundled"))  # type: ignore[arg-type]
+    assert copied == ["skills/bundled/scripts/convert.py"]
+    assert (eng.quest_root / "code" / "skills" / "bundled" / "scripts" / "convert.py").read_text(encoding="utf-8") \
+        == "print('converted')\n"
+    # The chat writer's code still runs the files where the skill keeps them.
+    assert str(d) in Engine._skills_block(eng, _state("bundled"))  # type: ignore[arg-type]

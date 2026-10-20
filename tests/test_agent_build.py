@@ -610,3 +610,25 @@ def test_with_the_protocol_check_set_to_warn_a_difference_is_recorded_and_the_ch
     assert out == (None, None, False) and len(agent.prompts) == 1
     record = json.loads((eng.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
     assert record["status"] == "warned" and record["differences"]
+
+
+def test_a_round_fi_did_not_keep_for_reaching_outside_its_folder_is_told_why(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A live round called a script in the home folder; FI kept nothing of it and told the agent only that no script was
+    there, so the next round wrote the same code and the quest stopped."""
+
+    def outside(code: Path) -> None:
+        _write(2)(code)
+        text = (code / "experiment.py").read_text(encoding="utf-8")
+        (code / "experiment.py").write_text("import os\nTOOL = os.path.expanduser('~')\n" + text, encoding="utf-8")
+
+    agent = _Agent([outside, _write(2)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    assert coder.last_cheats() and "expanduser" in coder.last_cheats()[0]
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False)
+    assert "FI did not keep your last round, because its code reaches outside its folder" in agent.prompts[1]
+    assert "expanduser" in agent.prompts[1]

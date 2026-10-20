@@ -95,7 +95,7 @@ def default_workdir(quest_root: Path | str, work_root: Path | None = None) -> Pa
 #: Files of ``code/`` FI writes itself (so the agent must not change them) when they are there, and folders whose whole
 #: content is FI's. Relative to ``code/``.
 FI_OWNED_FILES = ("run.py", "study.json", "fi_search.py", "README.md", "requirements.txt", "CHANGELOG.md", "METHODS.md")
-FI_OWNED_DIRS = ("tests",)
+FI_OWNED_DIRS = ("tests", "skills")
 #: Outside ``code/`` (host mode only) FI watches the rest of the quest folder: a CLI's own sandbox does not keep its
 #: file-writing tool inside the working folder on Windows (checked on a coding CLI: it wrote `../escape.txt` and a file
 #: in `.fi/`). The quest's ``.venv/`` is watched too (by size and time). Not watched: history and caches, and the files
@@ -662,6 +662,11 @@ class AgentCoder:
         """The agent's last message of the last round."""
         rounds = self.load().get("rounds") or []
         return str(rounds[-1].get("message") or "") if rounds else ""
+
+    def last_cheats(self) -> list[str]:
+        """Where the code of the last round reached outside its folder (that round was not kept); ``[]`` when it did not."""
+        rounds = self.load().get("rounds") or []
+        return [str(c) for c in (rounds[-1].get("cheats") or [])] if rounds and isinstance(rounds[-1], dict) else []
 
     def rounds_made(self) -> int:
         """The number of the last round the record holds (0 before the first write)."""
