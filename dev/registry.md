@@ -665,7 +665,10 @@ same PR that adds, splits or renames one.
   `guarded_round`, `hide_path` (the prompt never names the quest folder). Image: `docker/agent_coder/Dockerfile` (CLI version
   pinned to `CLAUDE_VERSION`). Tests: `tests/test_agent_coder.py`.
 - `core/agent_build.py` — agent mode (`engine.code_writer: agent`), `AgentBuildMixin` of `Engine`: `_implement_by_agent`
-  (the agent writes `code/` from `agents/implement_agent.md`; no chat repair in the implement step), `_agent_build` (in place of
+  (the agent writes `code/` from `agents/implement_agent.md`; no chat repair in the implement step; the selected skills'
+  files are copied first into `code/skills/<name>/` by `Engine._skill_files_to_code`; a reader's extension is recorded in
+  `needs/PROTOCOL_CHECK.json` as `extended_by_person`), `_agent_protocol` (the plan's protocol held against the agent's
+  code before the run, the person's additions excused; sent back with `engine.protocol_check: block`), `_agent_build` (in place of
   `_gate_pass` in `_node_execute`: the checks run in report mode, what they found goes back to the agent, at most `FIX_ROUNDS`
   fixes / `TOTAL_S`; each round judged check by check against the best earlier round (`compare_rounds`: a round that broke a
   check that passed is not progress, named to the agent and in the log, and gets one round to put it back); ends when a round
