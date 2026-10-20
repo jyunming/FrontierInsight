@@ -933,3 +933,23 @@ async def test_a_search_whose_evaluations_do_not_fit_the_time_left_after_its_sca
     assert fit["settings_that_fit"] == int(3600 / (1.5 * 15.0))
     block["evaluation_budget"]["per_start"] = 10  # 80 evaluations: 83 x 15 s = 21 min, 31 min with the margin
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_stochastic_search_counts_each_evaluation_once_with_its_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An evaluation of a search with randomness is a whole setting with its runs: 100 evaluations of 20 runs at 30 s a
+    setting take 50 min, not 20 times that."""
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    block["evaluation_budget"] = {"starts": 2, "per_start": 50}
+    block["runs_per_evaluation"] = 20
+    eng, runner = await _search_engine(tmp_path, block)
+    eng.config.execution.timeout_s = 8 * 3600
+    (eng.quest_root / "code" / "simulate.py").write_text(
+        "def run_trial(cell, trial_id, seed):\n    return {'f': cell['x'] ** 2}\n", encoding="utf-8")
+
+    async def thirty(*a: Any, **k: Any) -> Any:
+        return run_estimate.Probe(None, None, {}, 30.0), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", thirty)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None

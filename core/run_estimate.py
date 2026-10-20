@@ -66,8 +66,7 @@ import json
 import math
 import statistics
 import time
-import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -410,7 +409,9 @@ def _reused(first: Probe, again: Probe) -> bool:
     on the time inside the simulation when both runs measured it, so a slower first process start (files not yet read
     from disk) is not taken for a cache."""
     if first.call_s is not None and again.call_s is not None and first.call_s > 0:
-        return again.call_s * ONCE <= first.call_s and again.seconds * ONCE <= first.seconds
+        # per timed trial: a warm stochastic setting fits more trials into the same timing time
+        each, each_again = first.call_s / max(1, first.timed_trials), again.call_s / max(1, again.timed_trials)
+        return each_again * ONCE <= each and again.seconds * ONCE <= first.seconds
     return again.seconds * ONCE <= first.seconds
 
 
@@ -421,7 +422,7 @@ def with_once(est: Estimate | None, seen: Estimate | None) -> Estimate | None:
     if est is None or seen is None or seen.once_s <= est.once_s:
         return est
     extra = seen.once_s - est.once_s
-    return dataclasses.replace(est, seconds=est.seconds + extra * est.slowdown, work_seconds=est.work_seconds + extra,
+    return _replace(est, seconds=est.seconds + extra * est.slowdown, work_seconds=est.work_seconds + extra,
                                once_s=seen.once_s, once_axes=list(seen.once_axes))
 
 

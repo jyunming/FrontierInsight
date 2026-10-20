@@ -638,6 +638,9 @@ class RunChecksMixin:
         slowdown: float | None = None  # measured once, only when the settings one after another would not fit
         # The timing with the most paid once: a later timing runs on the cache the earlier one filled (run_estimate.with_once).
         once_seen: _estimate.Estimate | None = None
+        if float(prior.get("once_s") or 0.0) > 0:  # a resume times on the cache the earlier session filled
+            once_seen = _estimate.Estimate(seconds=0.0, at_least=False, complete=True, cells=0, trials=0,
+                                           once_s=float(prior["once_s"]), once_axes=list(prior.get("once_axes") or []))
         for _round in range(3):
             grid, runs, thresholds = self._grid_and_runs(state)
             inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
@@ -681,7 +684,8 @@ class RunChecksMixin:
             line = _estimate.says(est, limit_s, topic=by_topic)
             base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
-                    "limit": "topic" if by_topic else "execution.timeout_s", "topic_limit_s": topic_s, "hard_limit_s": hard_s}
+                    "limit": "topic" if by_topic else "execution.timeout_s", "topic_limit_s": topic_s, "hard_limit_s": hard_s,
+                    "once_s": est.once_s, "once_axes": list(est.once_axes)}
             # The smaller run FI chose is timed again: it goes on unless it is over the limit even without the margin
             # (the margin was spent choosing it; a second timing of the same run differs by about as much).
             if not _estimate.known_too_long(est, limit_s, timed_again=cut_done):
@@ -874,13 +878,15 @@ class RunChecksMixin:
         # at its ends (and quarter points), every part of the scan, so a cost that depends on the settings, or is paid once
         # per new value and reused, is counted as the scan will pay it; one evaluation of the baseline alone was not.
         est: _estimate.Estimate | None = None
+        first_s = 0.0  # what the scan's first timed setting took the first time it ran
+        timing_started = time.monotonic()
+        budget_s = max(limit_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
         try:
             grid = _optimise_search.scan_grid(block)
             inside = _optimise_search.in_each_run(block)
         except (KeyError, TypeError, ValueError):
             grid, inside = None, {}
         if grid is not None:
-            budget_s = max(limit_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
             probes, why = await _estimate.measure(
                 self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
                 grid, runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
@@ -891,6 +897,8 @@ class RunChecksMixin:
                 self._log.warning("[execute] FI could not time the search's coarse scan (%s)", why)  # type: ignore[attr-defined]
             else:
                 est = _estimate.estimate(grid, runs, deterministic, probes)
+                if probes:
+                    first_s = float(probes[0].first_s or probes[0].seconds)
         if per_setting is not None and (est is None or per_setting * scan > est.seconds):
             est = _estimate.Estimate(seconds=per_setting * scan, at_least=False, complete=True, cells=scan, trials=scan * runs)
         if est is None:
@@ -898,25 +906,30 @@ class RunChecksMixin:
         searched = 0
         if not _estimate.known_too_long(est, limit_s):
             # The search shares the scan's time (one deadline for both, core/optimise.py): every evaluation is a design
-            # the scan did not compute, so it costs what the search's own baseline costs the first time it runs, timed
-            # once here (never less than the plan's own claim).
-            search_n = int(_optimisation_plan.evaluations(block)[0] or 0) * runs
-            per_eval = per_setting
-            if search_n:
+            # the scan did not compute, so it costs what a setting costs the first time it runs: the search's own
+            # baseline timed once here, never less than the scan's first timed setting took the first time (the baseline
+            # may run on what the scan's timing computed) nor than the plan's own claim. Each evaluation is a whole
+            # setting with its runs.
+            search_n = int(_optimisation_plan.evaluations(block)[0] or 0)
+            per_eval = max(per_setting or 0.0, first_s) or None
+            lower = False
+            left = budget_s - (time.monotonic() - timing_started)
+            if search_n and left >= 5:
                 baseline = _optimise.complete_case(self._protocol_block(state), {})  # type: ignore[attr-defined]
-                allowance = max(60.0, 3.0 * limit_s / max(1, scan * runs + search_n))
+                allowance = max(60.0, 3.0 * limit_s / max(1, (scan + search_n) * runs))
                 probe, why = await _estimate._time_one(
                     self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
-                    baseline, runs=runs, deterministic=deterministic, timeout_s=int(max(5, min(allowance, limit_s))),
+                    baseline, runs=runs, deterministic=deterministic, timeout_s=int(max(5, min(allowance, left))),
                     env=env, thresholds=thresholds)
                 if probe is None:
                     self._log.warning("[execute] FI could not time one evaluation of the search's baseline (%s)", why)  # type: ignore[attr-defined]
                 elif per_eval is None or probe.seconds > per_eval:
-                    per_eval = probe.seconds
+                    per_eval, lower = probe.seconds, probe.at_least
             if search_n and per_eval:
-                together = _estimate.Estimate(seconds=est.seconds + per_eval * search_n, at_least=est.at_least,
-                                              complete=est.complete, cells=scan + search_n, trials=scan * runs + search_n,
-                                              once_s=est.once_s, once_axes=list(est.once_axes))
+                together = _estimate.Estimate(seconds=est.seconds + per_eval * search_n, at_least=est.at_least or lower,
+                                              complete=est.complete, cells=scan + search_n,
+                                              trials=(scan + search_n) * runs, once_s=est.once_s,
+                                              once_axes=list(est.once_axes))
                 if _estimate.known_too_long(together, limit_s):
                     est, searched = together, search_n
             if not searched:
@@ -927,7 +940,8 @@ class RunChecksMixin:
             text = (f"the coarse scan's {scan:,} settings and the search's {searched:,} evaluations would take "
                     f"{'at least ' if est.at_least else 'about '}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}"
                     f", more than the {_estimate.plain_duration(limit_s)} allowed (one new design takes about "
-                    f"{_estimate.plain_duration(per_eval or 0.0)}); FI does not run a smaller study than the plan's")
+                    f"{'at least ' if lower else ''}{_estimate.plain_duration(per_eval or 0.0)}); FI does not run a smaller "
+                    "study than the plan's")
         self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
         fits_in = self._what_fits(est, limit_s, search=True)
         if fits_in is not None:
@@ -1547,7 +1561,7 @@ class RunChecksMixin:
             return None
         # What is paid once per new value is not a cost of every setting: it is named apart, so the plan can take fewer of
         # those values, and the settings that fit are counted from what is left of the time.
-        once = min(float(est.once_s), est.seconds * 0.999)
+        once = min(float(est.once_s) * max(1.0, float(est.slowdown or 1.0)), est.seconds * 0.999)
         per = (est.seconds - once) / est.cells
         room = max(per, limit_s / _estimate.SAFETY - once)
         out = {"seconds_per_setting": round(per, 3), "at_least": bool(est.at_least), "settings": int(est.cells),
