@@ -35,6 +35,12 @@ Methods (``search_method`` in the plan):
 * ``scipy:<name>`` / ``optuna:<sampler>``: the library's method, when the quest's environment has it; otherwise
   ``bounded_local``, and the record says why.
 
+A search whose design changes none of its results stops early (``no_effect``): when ``results`` names the results the
+plan gives (besides the objective and the limits), and the first :data:`NO_EFFECT_DESIGNS` designs after the baseline,
+which between them moved every number of the design, all returned exactly the baseline's value of every one of them.
+That is what a simulation that does not use the design at the settings the search holds looks like; spending the rest of
+the budget on it only finds the same numbers again.
+
 A design that breaks a limit is recorded and never chosen; a failed evaluation (an exception, a missing or non-finite
 number) is recorded and never chosen. The random choices (the sample, the evolution) come from the quest's seed, so the
 same seed gives the same search.
@@ -57,6 +63,11 @@ _LIMIT = re.compile(r"^\s*(<=|>=|<|>|≤|≥|=<|=>)\s*(\S+)\s*$")
 _OPS = {"<=": "<=", "<": "<=", "≤": "<=", "=<": "<=", ">=": ">=", ">": ">=", "≥": ">=", "=>": ">="}
 # After this many evaluations in a row that all failed, with none that worked, the simulation is broken, not the design.
 _FAILURES_BEFORE_GIVING_UP = 10
+#: Designs after the baseline that must all return the baseline's results before the search stops for ``no_effect``.
+#: In FI's records of searches that do use their design, the first design that differs from the baseline was the first
+#: or the third one tried.
+NO_EFFECT_DESIGNS = 20
+_SAME_RESULT = 1e-9
 
 
 class _Stop(Exception):
@@ -501,8 +512,18 @@ def _reached(value, target, sign):
     return bool(_number(value) and _number(target) and sign * (value - target) <= 0)
 
 
+def _same_result(a, b):
+    """Two values a simulation returned are the same: numbers within a relative ``1e-9`` (two NaN alike), anything else
+    equal."""
+    if _number(a) and _number(b):
+        return abs(float(a) - float(b)) <= _SAME_RESULT * max(abs(float(a)), abs(float(b)))
+    if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+        return True
+    return a == b
+
+
 class _Search:
-    def __init__(self, block, seed, method, rounds=None):
+    def __init__(self, block, seed, method, rounds=None, results=None):
         self.block = block
         self.space = Space(block["design_variables"])
         self.sign = _sign(block)
@@ -530,6 +551,16 @@ class _Search:
         self.round_log = []
         self.target = None
         self.local_stage = "local"
+        # Whether the design changes any result (see the module docstring): the results compared, the baseline's values
+        # of them, the coordinates no design has moved yet, and how many designs returned the baseline's values.
+        held = {str(block["objective"]["quantity"])} | {str(c.get("quantity")) for c in block.get("constraints") or []
+                                                         if isinstance(c, dict)}
+        self.held_results = held
+        self.results = sorted({str(r) for r in results or []} | held) if set(results or []) - held else []
+        self.base_results = None
+        self.unmoved = set(self.space.free)
+        self.as_baseline = 0
+        self.no_effect = None
 
     def _take_scan(self, scan):
         """The coarse scan's evaluated designs (not counted against the budget)."""
@@ -584,6 +615,7 @@ class _Search:
         self.used += 1
         self.cache[key] = judged
         self._row(design, judged, stage, start, reply.get("elapsed_s"))
+        self._watch_effect(design, key, reply.get("values") if judged["status"] == "ok" else None)
         if judged["status"] == "ok":
             self.any_ok, self.failures_in_a_row = True, 0
             if self.target is not None and judged["feasible"] and _reached(judged["objective"], self.target, self.sign):
@@ -596,6 +628,31 @@ class _Search:
                 self.stopped = "failures"
                 raise _Stop()
         return judged
+
+    def _watch_effect(self, design, key, values):
+        """Stop the search (``no_effect``) once enough designs, moving every number of the design between them, returned
+        the baseline's value of every result compared. A design that changes one of them ends the watch."""
+        if not self.results or not isinstance(values, dict):
+            return
+        got = {n: values[n] for n in self.results if n in values}
+        if key == self.space.key(self.baseline):
+            # Only the objective and the limits back from the simulation: a plateau of the objective is not a sign.
+            self.base_results = got if set(got) - self.held_results else None
+            if self.base_results is None:
+                self.results = []
+            return
+        if self.base_results is None:
+            return
+        if set(got) != set(self.base_results) or not all(_same_result(got[n], self.base_results[n]) for n in got):
+            self.results = []
+            return
+        here, base = self.space.flat(design), self.space.flat(self.baseline)
+        self.unmoved -= {k for k in self.unmoved if not _same_result(here[k], base[k])}
+        self.as_baseline += 1
+        if self.as_baseline >= NO_EFFECT_DESIGNS and not self.unmoved:
+            self.no_effect = {"designs": self.as_baseline, "results": sorted(self.base_results)}
+            self.stopped = "no_effect"
+            raise _Stop()
 
     def rank(self, design):
         return _rank(self.cache[self.space.key(self.space.canonical(design))], self.sign)
@@ -680,7 +737,7 @@ class _Search:
             # Every starting point converged, or used its share of the budget before it did (``share``).
             self.stopped = ("budget" if self.used >= self.total else
                             "share" if any(s["stopped_because"] == "budget" for s in self.start_log) else "converged")
-        for index, spec in enumerate(self.rounds):
+        for index, spec in enumerate(self.rounds if self.stopped != "no_effect" else []):
             yield from self._round(index, spec)
         return self._outcome()
 
@@ -992,13 +1049,15 @@ class _Search:
                       "constraints": dict(best["constraints"]), "feasible": True, "evaluation": best["n"],
                       "start": best["start"], "stage": best["stage"]} if best else None),
             "rounds": list(self.round_log),
+            **({"no_effect": dict(self.no_effect)} if self.no_effect else {}),
         }
 
 
-def search(block, *, seed, method=None, rounds=None):
+def search(block, *, seed, method=None, rounds=None, results=None):
     """The search as a generator of requests (see the module docstring); returns the outcome. ``rounds``: the rounds of
-    a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``)."""
-    return (yield from _Search(block, seed, method, rounds).run())
+    a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``).
+    ``results``: the names of the results the plan gives, watched for a design that changes none of them."""
+    return (yield from _Search(block, seed, method, rounds, results).run())
 
 
 #: The most settings FI lists (or runs) from one grid: each listed setting is a dict, about a kilobyte with its key, so this
@@ -1292,7 +1351,8 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
     evaluations = {"search": outcome["evaluations"], "budget": outcome["budget"], "starts": outcome["starts"],
                    "per_start": outcome["per_start"], "scan": outcome["scan_evaluations"],
                    "failed": outcome["failed"], "infeasible": outcome["infeasible"],
-                   "budget_ran_out": outcome["budget_ran_out"], "stopped_because": outcome["stopped_because"]}
+                   "budget_ran_out": outcome["budget_ran_out"], "stopped_because": outcome["stopped_because"],
+                   **({"no_effect": outcome["no_effect"]} if outcome.get("no_effect") else {})}
     u = f" {unit}" if unit else ""
     if best is None and not outcome["rows"] and outcome["stopped_because"] == "time":
         says = "No design was evaluated before the time limit (execution.timeout_s) ran out."

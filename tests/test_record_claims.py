@@ -178,3 +178,44 @@ def test_a_run_that_drew_no_figure_does_not_judge_the_papers_figures(tmp_path: P
     assert eng._record_contradiction_hits(paper, {}) == []
     (eng.quest_root / "figures" / "other.png").write_bytes(b"x")
     assert len(eng._record_contradiction_hits(paper, {})) == 1
+
+
+# --- after the rewrites: taken out, never a stop ---------------------------------------------------------------------
+
+
+def test_take_out_removes_a_flagged_sentence_and_a_flagged_figure_and_nothing_else() -> None:
+    found = rc.found(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN, figures_on_disk={"peak.png"})
+    text, taken = rc.take_out(OVERCLAIM, [span for _hit, span in found])
+    assert "The optimised design lowers" not in text and "figures/optimised.png" not in text
+    assert "# A heat sink study" in text and "## Results" in text
+    assert rc.found(text, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN, figures_on_disk={"peak.png"}) == []
+    assert rc.take_out(HONEST, ["a sentence the paper does not have."]) == (HONEST, [])
+
+
+def _paper_on_disk(eng: Engine, text: str) -> dict[str, Any]:
+    path = eng.quest_root / "paper" / "paper.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return {"paper_md": str(path)}
+
+
+def test_a_sentence_still_flagged_after_the_rewrites_is_taken_out_and_the_quest_goes_on(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live quest was stopped with no paper after its rewrites for two sentences that said what FI's records say ("the
+    best design found was therefore the baseline, which is no better than it"; "nothing ... is validated against that
+    known answer"): the reading of the sentence is a reading of free text, so its hit costs the sentence, not the paper."""
+    eng = _engine(tmp_path, monkeypatch)
+    _write_records(eng, NOT_BETTER, CHECK_NOT_SHOWN, {"status": "went_on_failing"})
+    state = _paper_on_disk(eng, OVERCLAIM)
+    assert eng._record_contradiction_hits(OVERCLAIM, {**state, "record_rewrites": 1}), "a rewrite is still left"
+    assert (eng.quest_root / "paper" / "paper.md").read_text(encoding="utf-8") == OVERCLAIM
+    assert eng._record_contradiction_hits(OVERCLAIM, {**state, "record_rewrites": 2}) == []
+    paper = (eng.quest_root / "paper" / "paper.md").read_text(encoding="utf-8")
+    assert "The optimised design lowers" not in paper and "## Results" in paper
+    record = json.loads((eng.quest_root / rc.TAKEN_OUT).read_text(encoding="utf-8"))
+    assert record["taken_out"][0]["text"].startswith("The optimised design lowers")
+    assert record["taken_out"][0]["why"].startswith(rc.HIT)
+    review = {"verdict": "accept", "must_flag_hits": []}
+    assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": 0}) != "stuck"
+    from core import quality_report
+    assert "this was taken out: The optimised design lowers" in quality_report.render(quality_report.build(eng.quest_root, running=False))
