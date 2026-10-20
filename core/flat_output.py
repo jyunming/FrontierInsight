@@ -310,6 +310,26 @@ def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = ()) -> list[tuple[
     return out
 
 
+def no_effect_search(no_effect: dict[str, Any], block: dict[str, Any]) -> str:
+    """The plain description of a search the design changed nothing in (``no_effect`` in the search's record, from
+    :mod:`core.optimise_search`): its first designs, which between them moved every number of the design, all gave the
+    baseline's value of every result the plan names. Measured by FI, so no reading of the code overrules it."""
+    variables = [str(v.get("name")) for v in block.get("design_variables") or [] if isinstance(v, dict)]
+    fixed = block.get("fixed") if isinstance(block.get("fixed"), dict) else {}
+    # A setting that is a word (a mode, a family) picks a way of computing before a number does: those come first.
+    ordered = sorted(fixed.items(), key=lambda kv: _is_number(kv[1]))
+    held = ", ".join(f"{k} = {v}" for k, v in ordered[:12]) + (", ..." if len(ordered) > 12 else "")
+    results = [str(r) for r in no_effect.get("results") or []]
+    one = len(variables) == 1
+    return (f"the result does not change when {_names(variables)} change{'s' if one else ''}"
+            f"{f' at the settings the search holds ({held})' if held else ''}: the first {no_effect.get('designs')} "
+            f"designs tried, which between them changed every number of {'it' if one else 'them'}, all gave the "
+            f"baseline's {_names(results, limit=8)}, so the simulation does not use {'it' if one else 'them'} there. "
+            f"Make the simulation compute its results from the design it is given at those settings; if one of those "
+            f"settings makes the simulation leave the design out, the plan and the simulation disagree on what that "
+            f"setting means, and the paper must say so.")
+
+
 def unchanged_axes_note(axes: list[tuple[str, int]]) -> str:
     """The plain observation of :func:`unchanged_axes`, for run.log, the analysis and the writer; ``""`` for none."""
     if not axes:

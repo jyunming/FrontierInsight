@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from . import flat_output as _flat
+from . import metric_spec as _metric_spec
 from . import optimisation_plan as _plan
 from . import optimise_search as _search
 from . import outside_run as _outside
@@ -664,7 +665,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                          "in the search's budget", len(rows), worked)
         return rows
 
-    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds)
+    # The plan's results, watched for a design that changes none of them (core/optimise_search.py, ``no_effect``).
+    results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id")]
+    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds, results=results)
     replay_space = _search.Space(block["design_variables"]) if replay else None
     load_error = ""
     done_outcome: dict[str, Any] | None = None
@@ -771,6 +774,8 @@ _STOPPED = {
     "the simulation could not be loaded": "the simulation could not be loaded",
     "target": "a design reached the target asked for",
     "not_run": "it did not run: the search before it had stopped (its time limit, or every evaluation failed)",
+    "no_effect": "the first designs it tried, which between them changed every number of the design, all gave the "
+                 "baseline's results",
 }
 
 
@@ -1054,6 +1059,13 @@ class OptimisationRunner:
         # the few that survived. Sent back to be repaired while a repair is left, then a stop (core/trial_checks.py).
         if (sent := self._check_trials(run, started)) is not None:
             return sent
+        # The first designs of the search, which between them moved every number of the design, all gave the baseline's
+        # results (core/optimise_search.py stopped it then, not after its whole budget): FI measured that the design
+        # changes nothing at the settings the search holds, whatever the code seems to read.
+        no_effect = ((run.record or {}).get("evaluations") or {}).get("no_effect")
+        if isinstance(no_effect, dict):
+            return self._flat_result(_flat.no_effect_search(no_effect, _plan.normalize(block_of(protocol))[0]
+                                                            or block_of(protocol) or {}), run, started)
         # A search in which every design gave the very same numbers, and whose simulation's code never lets the design reach
         # what it returns, is not a result: the simulation does not use the design it is given. It is sent back to be repaired
         # like one that does not run (core/flat_output.py). The same numbers from a simulation that does read the design are
