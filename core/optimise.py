@@ -582,6 +582,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     method, _where = _plan.effective_method(block)
 
     scan_rows: list[dict[str, Any]] = []
+    scan_note: list[str] = []
     if not (isinstance(block.get("grid"), dict) and block["grid"]):
         # No coarse scan: an earlier measurement's trial record is not this search's.
         for rel in (Path(_trials.RAW_DIRNAME) / _trials.LEDGER_NAME, Path(_trials.RAW_DIRNAME) / _trials.SUMMARY_NAME,
@@ -606,6 +607,11 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         for cell in summary.get("cells") or []:
             cell["reason"] = reasons.get(cell.get("key"), "")
         rows = _search.scan_rows(summary, block)
+        unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol))
+        if unchanged:
+            scan_note.append(_flat.unchanged_axes_note(unchanged))
+            if log is not None:
+                log.warning("[optimise] the coarse scan: %s", scan_note[-1])
         if log is not None:
             ran = sum(1 for c in summary.get("cells") or [] if c.get("level") is None)
             worked = sum(1 for r in rows if r.get("values") is not None)
@@ -693,6 +699,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                                  extra=extra)
     if warnings:
         record["simulation_may_search_itself"] = warnings
+    if scan_note:
+        record["scan_settings_without_effect"] = scan_note[-1]
     ledger_text = "\n".join(_search.ledger_lines(outcome, block)) + "\n"
     record["ledger_sha256"] = _sha(ledger_text.encode("utf-8"))
     best_text = json.dumps(record, indent=1) + "\n"
@@ -896,6 +904,8 @@ class OptimisationRunner:
         self.failed_script: str | None = None
         #: Why the last run was sent back as a simulation that does not use its inputs (core/flat_output.py), or ``None``.
         self.flat: str | None = None
+        #: The observation of settings that changed no result (core/flat_output.py), for the analysis and the writer.
+        self.no_difference: str | None = None
         self.last: SearchRun | None = None
         #: FI's check at finer settings, from memory: ``(its text, the key it is kept under)``.
         self.last_check: tuple[str | None, str | None] = (None, None)
@@ -975,6 +985,9 @@ class OptimisationRunner:
                                timeout_s=timeout_s, env=env, log=self.log,
                                frozen=self._is_frozen())
         self.last = run
+        # The coarse scan's settings that changed no result (core/flat_output.py), kept in the search's record so a
+        # search used again says it too.
+        self.no_difference = str((run.record or {}).get("scan_settings_without_effect") or "") or None
         if self.log is not None and not run.reused:
             for line in summary_lines(run.record):
                 self.log.info("%s", line)

@@ -318,6 +318,19 @@ main()
 HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + HARNESS_BODY
 
 
+def numerical_axes(protocol: Any) -> set[str]:
+    """The names of the numerical settings of a protocol (a measurement's ``numerical_settings``, or a search's under
+    ``optimisation``): resolutions FI's check at finer settings judges, never a setting the study compares."""
+    out: set[str] = set()
+    if not isinstance(protocol, dict):
+        return out
+    for block in (protocol, protocol.get("optimisation")):
+        settings = block.get("numerical_settings") if isinstance(block, dict) else None
+        if isinstance(settings, dict):
+            out.update(str(k) for k in settings)
+    return out
+
+
 def cells(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
     """Every combination of the grid's values, axes in the grid's order, values in theirs (for a grid with sub-studies, the
     settings of each in turn, none twice: :func:`core.optimise_search.grid_cells`). An empty grid is one cell with no axes
@@ -1068,6 +1081,13 @@ class TrialsRunner:
             if self.log is not None:
                 self.log.info("[execute] every setting gave the same numbers, and the simulation's code does read the settings: "
                               "kept as an observed absence of difference, not a fault. %s", self.no_difference)
+        elif seen is None:
+            # Some results moved, but one setting may still have moved none of them (core/flat_output.py).
+            unchanged = _flat.unchanged_axes(run.cells, skip=numerical_axes(protocol))
+            if unchanged:
+                self.no_difference = _flat.unchanged_axes_note(unchanged)
+                if self.log is not None:
+                    self.log.warning("[execute] %s", self.no_difference)
         if flat is not None:
             self.flat = flat
             self.failed_script = self.simulate.name
