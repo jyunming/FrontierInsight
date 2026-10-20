@@ -65,8 +65,8 @@ _OPS = {"<=": "<=", "<": "<=", "≤": "<=", "=<": "<=", ">=": ">=", ">": ">=", "
 _FAILURES_BEFORE_GIVING_UP = 10
 #: Designs after the baseline that must all return the baseline's results before the search stops for ``no_effect``.
 #: In FI's records of searches that do use their design, the first design that differs from the baseline was the first
-#: or the third one tried.
-NO_EFFECT_DESIGNS = 20
+#: or the third one tried; 50 leaves room for a design that does act but only past a threshold the first few miss.
+NO_EFFECT_DESIGNS = 50
 _SAME_RESULT = 1e-9
 
 
@@ -652,6 +652,7 @@ class _Search:
         if self.as_baseline >= NO_EFFECT_DESIGNS and not self.unmoved:
             self.no_effect = {"designs": self.as_baseline, "results": sorted(self.base_results)}
             self.stopped = "no_effect"
+            self.results = []  # the watch has fired: a design evaluated after the stop (the best one's report) is not watched
             raise _Stop()
 
     def rank(self, design):

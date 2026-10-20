@@ -310,6 +310,11 @@ def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = ()) -> list[tuple[
     return out
 
 
+def _short(value: Any, limit: int = 40) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
+
+
 def no_effect_search(no_effect: dict[str, Any], block: dict[str, Any]) -> str:
     """The plain description of a search the design changed nothing in (``no_effect`` in the search's record, from
     :mod:`core.optimise_search`): its first designs, which between them moved every number of the design, all gave the
@@ -318,7 +323,8 @@ def no_effect_search(no_effect: dict[str, Any], block: dict[str, Any]) -> str:
     fixed = block.get("fixed") if isinstance(block.get("fixed"), dict) else {}
     # A setting that is a word (a mode, a family) picks a way of computing before a number does: those come first.
     ordered = sorted(fixed.items(), key=lambda kv: _is_number(kv[1]))
-    held = ", ".join(f"{k} = {v}" for k, v in ordered[:12]) + (", ..." if len(ordered) > 12 else "")
+    # A held value can be a long list (a mask's pixels): its first characters say which setting it is.
+    held = ", ".join(f"{k} = {_short(v)}" for k, v in ordered[:12]) + (", ..." if len(ordered) > 12 else "")
     results = [str(r) for r in no_effect.get("results") or []]
     one = len(variables) == 1
     return (f"the result does not change when {_names(variables)} change{'s' if one else ''}"

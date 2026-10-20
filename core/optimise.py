@@ -666,7 +666,12 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         return rows
 
     # The plan's results, watched for a design that changes none of them (core/optimise_search.py, ``no_effect``).
-    results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id")]
+    # Not a result the plan itself expects to stay put (an invariant, a fixed-input check): its staying put says nothing
+    # about the design.
+    from . import degenerate_results as _degenerate
+
+    constant = _degenerate.expected_constants(protocol)
+    results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
     gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds, results=results)
     replay_space = _search.Space(block["design_variables"]) if replay else None
     load_error = ""

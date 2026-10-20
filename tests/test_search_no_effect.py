@@ -85,12 +85,12 @@ def test_without_a_result_beside_the_objective_and_the_limits_the_search_is_not_
 def test_the_search_stops_only_once_its_designs_have_moved_every_number_of_the_design() -> None:
     """Designs that each moved one number (a local search's first steps) prove nothing about the numbers not yet moved:
     with more numbers than the designs needed to show it, the stop waits until every one has moved."""
-    many = [{"name": f"w{i}", "low": 0.0, "high": 6.0, "kind": "continuous", "unit": "mm"} for i in range(30)]
-    block = _block(design_variables=many, baseline={"values": {f"w{i}": 1.0 for i in range(30)}, "source": "in use"},
-                   evaluation_budget={"starts": 1, "per_start": 60})
+    many = [{"name": f"w{i}", "low": 0.0, "high": 6.0, "kind": "continuous", "unit": "mm"} for i in range(80)]
+    block = _block(design_variables=many, baseline={"values": {f"w{i}": 1.0 for i in range(80)}, "source": "in use"},
+                   evaluation_budget={"starts": 1, "per_start": 200})
     outcome = _drive(block, _still, ["mass"])
     assert outcome["stopped_because"] == "no_effect"
-    assert outcome["evaluations"] > 1 + search.NO_EFFECT_DESIGNS, "the first 20 steps had not moved all 30 numbers"
+    assert outcome["evaluations"] > 1 + search.NO_EFFECT_DESIGNS, "the first steps had not moved all 80 numbers"
 
 
 TWO_MODES = '''\
@@ -130,3 +130,18 @@ async def test_the_same_simulation_at_the_setting_that_uses_the_design_searches_
     assert result.returncode == 0, result.stderr[-1500:]
     assert runner.flat is None
     assert ((optimise.read(root) or {}).get("evaluations") or {}).get("stopped_because") != "no_effect"
+
+
+@pytest.mark.asyncio
+async def test_a_result_the_plan_expects_to_stay_put_is_not_watched_for_the_designs_effect(tmp_path: Path) -> None:
+    """A result the plan itself expects to be constant (a declared bound's quantity, an invariant) says nothing about
+    the design when it stays put: watched, it stopped a search whose design does act on the objective."""
+    root = _quest(tmp_path, TWO_MODES)
+    protocol = {"optimisation": _block(fixed={"mode": "simple"}),
+                "metrics": [{"id": "mass", "kind": "mean", "label": "fin mass", "estimand": "the mass of the fins", "unit": "one design"}],
+                "bounds": {"mass": [0.0, 10.0]}}
+    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
+                                         simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
+    await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
+    evaluations = (optimise.read(root) or {}).get("evaluations") or {}
+    assert "no_effect" not in evaluations and (evaluations.get("search") or 0) > 1 + search.NO_EFFECT_DESIGNS

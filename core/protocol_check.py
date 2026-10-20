@@ -58,6 +58,9 @@ _DRAW_ONLY = {"samples", "sample"}
 _STRONG_RESAMPLE = re.compile(r"^n?(bootstraps?|boots?|resamples?|resampling|jackknife|jackknifes)\d*$")
 _WEAK_RESAMPLE = re.compile(r"^n?(mcmc|hmc|posterior|burnin|warmup)\d*$")
 _ALWAYS_RUNS = {"runs", "run", "trials", "trial", "realizations", "realisations", "simulations", "simulation", "sims"}
+#: Words of a name that holds a floor on the runs (``MIN_RUNS``), not the runs themselves: only such a name may hold the
+#: plan's own fewest runs (a ``N_RUNS = 10`` beside a plan of 200 is a different run count all the same).
+_FEWEST_WORDS = {"min", "minimum", "least", "fewest", "floor"}
 
 
 def _is_resample_count(name: str) -> bool:
@@ -520,7 +523,7 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
             if set(_tokens(f.name)) & _RUN_WORDS and not _is_resample_count(f.name)
             and float(f.values[0]).is_integer() and f.values[0] != 0
             and not (isinstance(fewest, (int, float)) and not isinstance(fewest, bool)
-                     and math.isclose(f.values[0], float(fewest)))
+                     and set(_tokens(f.name)) & _FEWEST_WORDS and math.isclose(f.values[0], float(fewest)))
         ]
         if counts and not any(math.isclose(f.values[0], float(runs)) for f in counts):
             first = counts[0]

@@ -11000,9 +11000,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         of the paper instead (:meth:`_take_out_contradicted`): the check reads free text and has flagged sentences that say
         what the record says, so it never stops the quest; a claim the records contradict is not delivered either way."""
         found = self._record_contradictions(paper_md, state)
-        if found and int(state.get("record_rewrites") or 0) >= _RECORD_REWRITES:
+        if not found or int(state.get("record_rewrites") or 0) < _RECORD_REWRITES:
+            return [hit for hit, _span in found]
+        # The check names the first sentence of each kind it finds: what it flags once that one is out is taken out too,
+        # a bounded number of times.
+        for _ in range(_TAKE_OUT_PASSES):
             taken = self._take_out_contradicted(state, found)
-            return [hit for hit, span in found if span not in taken]
+            left = [hit for hit, span in found if span not in taken]
+            path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+            if not taken or not path or not Path(path).is_file():
+                return left
+            found = self._record_contradictions(Path(path).read_text(encoding="utf-8"), state)
+            if not found:
+                return []
         return [hit for hit, _span in found]
 
     def _take_out_contradicted(self, state: QuestState, found: list[tuple[str, str]]) -> list[str]:
@@ -11022,9 +11032,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                  "FI took out sentences its records contradict and added no claim")
             record = self.quest_root / _record_claims.TAKEN_OUT
             record.parent.mkdir(parents=True, exist_ok=True)
-            record.write_text(json.dumps({"at": time.time(), "taken_out": [
-                {"text": span, "why": hit} for hit, span in found if span in taken]}, indent=1, ensure_ascii=False) + "\n",
-                encoding="utf-8")
+            # Added to what earlier passes took out (a later review's pass, the next sentence of a kind): never replaced.
+            earlier = _read_json_or_none_path(record)
+            entries = [e for e in (earlier.get("taken_out") or []) if isinstance(e, dict)] \
+                if isinstance(earlier, dict) else []
+            seen = {str(e.get("text")) for e in entries}
+            entries += [{"text": span, "why": hit} for hit, span in found if span in taken and span not in seen]
+            record.write_text(json.dumps({"at": time.time(), "taken_out": entries}, indent=1, ensure_ascii=False) + "\n",
+                              encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             self._log.warning("[record_check] the sentences FI's records contradict could not be taken out (%s)", e)
             return []
@@ -30061,6 +30076,9 @@ _UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
 _RECORD_REWRITES = 2
 #: The folder of ``code/`` that holds a copy of the selected skills' files for the coding agent (FI's own, like ``tests``).
 _SKILLS_IN_CODE = "skills"
+#: Passes of taking out what the record check still flags once the rewrites are used up (each pass can bring up the next
+#: sentence of a kind the check names one of).
+_TAKE_OUT_PASSES = 5
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
 # is rendered and counts its pages. A draft over the limit is sent back to be
