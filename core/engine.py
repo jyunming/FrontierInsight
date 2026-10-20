@@ -10983,7 +10983,47 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     def _record_contradiction_hits(self, paper_md: str, state: QuestState) -> list[str]:
         """Must-fix hits for what the paper claims against FI's own records (core/record_claims.py). FI's own "Best design
-        found" section is left out (it is FI's record, printed). Never raises: a check that cannot be made flags nothing."""
+        found" section is left out (it is FI's record, printed). Never raises: a check that cannot be made flags nothing.
+
+        Once the paper has been written again ``_RECORD_REWRITES`` times for such hits, what is still flagged is taken out
+        of the paper instead (:meth:`_take_out_contradicted`): the check reads free text and has flagged sentences that say
+        what the record says, so it never stops the quest; a claim the records contradict is not delivered either way."""
+        found = self._record_contradictions(paper_md, state)
+        if found and int(state.get("record_rewrites") or 0) >= _RECORD_REWRITES:
+            taken = self._take_out_contradicted(state, found)
+            return [hit for hit, span in found if span not in taken]
+        return [hit for hit, _span in found]
+
+    def _take_out_contradicted(self, state: QuestState, found: list[tuple[str, str]]) -> list[str]:
+        """The paper with each flagged sentence (or figure) taken out (core/record_claims.py::take_out), written to disk and
+        listed in ``.fi/record_claims_taken_out.json`` (QUALITY.md prints it): the spans taken out. The claim check's
+        receipt moves to the new draft, which only lost text and added no claim."""
+        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not path or not Path(path).is_file():
+            return []
+        try:
+            before = Path(path).read_bytes()
+            text, taken = _record_claims.take_out(before.decode("utf-8"), [span for _hit, span in found])
+            if not taken:
+                return []
+            Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (see _take_out_typed_numbers)
+            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
+                                 "FI took out sentences its records contradict and added no claim")
+            record = self.quest_root / _record_claims.TAKEN_OUT
+            record.parent.mkdir(parents=True, exist_ok=True)
+            record.write_text(json.dumps({"at": time.time(), "taken_out": [
+                {"text": span, "why": hit} for hit, span in found if span in taken]}, indent=1, ensure_ascii=False) + "\n",
+                encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[record_check] the sentences FI's records contradict could not be taken out (%s)", e)
+            return []
+        self._log.warning("[record_check] the paper was written again %d times and still says what FI's records "
+                          "contradict, so %d sentence(s) or figure(s) were taken out of it; they are listed in QUALITY.md",
+                          _RECORD_REWRITES, len(taken))
+        return taken
+
+    def _record_contradictions(self, paper_md: str, state: QuestState) -> list[tuple[str, str]]:
+        """:func:`core.record_claims.found` for this paper and quest: each hit with the text it is about."""
         try:
             recs = _best_report.records(self.quest_root)
             text = _paper_facts.without_blocks(
@@ -10993,13 +11033,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 figures = _figure_files_on_disk(self.quest_root)
                 if not any(Path(n).suffix.lower() in _FIGURE_SUFFIXES for n in figures):
                     figures = None  # the run drew none: a paper citing one is not judged here
-            hits = _record_claims.contradictions(
+            hits = _record_claims.found(
                 text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
                 oracle=self._oracle_record_read(), figures_on_disk=figures)
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
             self._log.warning("[record_check] could not compare the paper with FI's records (%r)", exc)
             return []
-        for hit in hits:
+        for hit, _span in hits:
             self._log.warning("[record_check] %s", hit)
         return hits
 
