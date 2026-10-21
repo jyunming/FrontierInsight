@@ -495,6 +495,11 @@ class QuestState(TypedDict, total=False):
     # plan.md was rewritten for the next design (a study that fits the time FI measured): the design node reads its
     # design block again instead of asking for a new design. Cleared by the design node.
     design_from_plan: bool
+    # The search's objective did not move across the design space (core/optimise_search.py, ``flat_objective``) and
+    # plan.md was rewritten once from what FI measured: never again for this quest, and the search runs its whole budget.
+    flat_objective_redesigned: bool
+    # What FI measured of that search (the runner's fact), read by the design node to record the change it approved.
+    flat_objective_fact: dict[str, Any]
     # That try was the code written again from the same design (the script crashed), not a new design.
     evidence_code_rewritten_at: int  # the design round (``iteration``) whose code was written again after no result
     paper_md: str
@@ -2798,6 +2803,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # redesign now would be recorded as a change made after results were seen. The gate states the stop (no
             # paper) from the record, and the quest ends there.
             return "stuck"
+        if result.get("flat_objective"):
+            # The search ran, and its objective did not move: nothing in the script to repair. The gate sends what FI
+            # measured back to the plan.
+            return "stuck"
         rc = result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
         # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
@@ -2905,6 +2914,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                            "check decides from the record",
                            _one_line(str(analysis.get("next_step_reason") or analysis.get("summary") or "no reason given"), 160))
         return "write"
+
+    def _flat_redesign_allowed(self, state: QuestState) -> bool:
+        """Whether a search whose objective does not move may still stop early and send what FI measured back to the
+        plan: once per quest, within ``engine.max_iterations``, never in the confirm stage of ``engine.phased`` (its
+        frozen design runs once). Otherwise the search runs its whole budget and records the fact."""
+        return (not state.get("flat_objective_redesigned") and not self._phased_confirming()
+                and int(state.get("iteration", 0) or 0) < self.config.engine.max_iterations)
 
     def _precision_shortfalls(self, state: QuestState) -> list[dict[str, Any]]:
         """The pooled quantities (a probability from its counts, a mean from the values the run lists) whose interval is
@@ -17967,6 +17983,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "flat_output": (str(getattr(runner, "flat", None) or "") if result.returncode != 0 else ""),
                 # A fault FI's checks of the trials found (core/trial_checks.py): the stop once the repairs are spent.
                 "trial_checks": (dict(getattr(runner, "trial_fault", None) or {}) if result.returncode != 0 else {}),
+                # The search's objective did not move across the design space, and the plan may still be revised for it
+                # (core/optimise.py): the gate sends what FI measured back to the plan.
+                "flat_objective": (dict(getattr(runner, "flat_objective", None) or {}) if result.returncode != 0 else {}),
                 "numeric_warnings": self._scan_numeric_warnings(state, result.stderr, result_json),
             },
             "figures": figures,
@@ -18661,8 +18680,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if resumed is not None:
             return resumed
         exec_result = state.get("exec_result") or {}
-        if any(exec_result.get(k) for k in _STOPPED_BEFORE_THE_STUDY):
-            return {}  # the study would not fit the time allowed: there is no script to repair (core/run_estimate.py)
+        if any(exec_result.get(k) for k in _STOPPED_BEFORE_THE_STUDY) or exec_result.get("flat_objective"):
+            # the study would not fit the time allowed (core/run_estimate.py), or the search's objective did not move
+            # (core/optimise.py): there is no script to repair
+            return {}
         rc = exec_result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
         # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
@@ -20030,6 +20051,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                   "stopping without a paper", _one_line(str(exc), 200))
                 redesign = False
                 parsed = {**parsed, "stuck": True, "stuck_reason": "too_long"}
+        flat_fact = (state.get("exec_result") or {}).get("flat_objective") if parsed.get("flat_request") else None
+        flat_retry = False
+        if redesign and parsed.get("flat_request"):
+            # The search's objective did not move: plan.md is rewritten from what FI measured before the design is read
+            # again. An answer that cannot be used runs the first design's search again, to its whole budget.
+            try:
+                done = await self._rewrite_plan(str(parsed["flat_request"]), _plan.plan_path(self.quest_root),
+                                                by="engine", note="a design whose objective can move, asked by FI")
+                self._log.warning("[evidence_gate] plan.md was rewritten (version %s) from what FI measured of the "
+                                  "search; the new design is checked and timed before it runs", (done or {}).get("version"))
+            except Exception as exc:  # noqa: BLE001 -- the first design is searched again, with no early stop
+                self._log.warning("[evidence_gate] the plan could not be rewritten from what FI measured of the search "
+                                  "(%s); the first design's search runs again to its whole budget", _one_line(str(exc), 200))
+                redesign = False
+                flat_retry = True
+                parsed = {**parsed, "repair_crash": True}
         # A script that could not run to the end, even after its repairs, is the code's fault, not the design's: the same
         # design is written into code again (core/engine.py::_no_results_verdict).
         rewrite_code = bool(parsed.get("rewrite_code")) and status == "ok"
@@ -20083,6 +20120,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             patch.update(_FRESH_SCRIPT)
             # Once per design (a new design's code gets its own); the design's own retry (below) is counted apart.
             patch["evidence_code_rewritten_at"] = int(state.get("iteration", 0) or 0)
+        elif flat_retry:
+            # The plan could not be rewritten: the first design's search runs again, never stopped for this again.
+            patch["flat_objective_redesigned"] = True
+        elif redesign and parsed.get("flat_request"):
+            # A change made after results were seen: it spends a design iteration (engine.max_iterations), once per quest.
+            patch["iteration"] = int(state.get("iteration", 0) or 0) + 1
+            patch["design_from_plan"] = True
+            patch["flat_objective_redesigned"] = True
+            patch["flat_objective_fact"] = dict(flat_fact or {})
         elif redesign and parsed.get("fit_request"):
             # Nothing of the study ran and no result was seen: the rewritten plan is still the plan's first design, so no
             # design iteration is spent, and it is timed and checked before the run as the first one was.
@@ -20544,6 +20590,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         the rule. The writer got no note, and the papers went out on no experiment. Now the quest goes back to design
         once while an iteration is left; after that the verdict is ``insufficient`` and the evidence note says why."""
         exec_result = state.get("exec_result")
+        fact = exec_result.get("flat_objective") if isinstance(exec_result, dict) else None
+        if isinstance(fact, dict) and fact:
+            # The search ran and its objective did not move across the design space (the runner asked this only while
+            # the plan may still be revised for it): the plan's model is told what FI measured and asked, once, for a
+            # design whose objective can move. FI names no representation, resolution or range.
+            why = _flat_fact_sentence(fact)
+            self._log.warning("[evidence_gate] %s; the plan is asked once for a design whose objective can move", why)
+            return {"verdict": "insufficient", "rationale": why + "; the plan was asked for a design whose objective can "
+                    "move", "gaps": [why], "redesign": True,
+                    "flat_request": _flat_request(fact, _topic_req.kept_when_smaller(self._topic_requirements_read()))}
         stopped = next((k for k in _STOPPED_BEFORE_THE_STUDY if isinstance(exec_result, dict) and exec_result.get(k)), "")
         if stopped:
             # Stopped before anything ran (the execute step's record of it): the gate states that, whatever the code or the
@@ -27323,6 +27379,47 @@ def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -
             "it was made smaller to fit the time FI measured."
             + ("\n\nWhat the topic asks to vary stays varied, in whichever part of the study varies it now:\n"
                + "\n".join(kept) if kept else ""))
+
+
+def _flat_fact_sentence(fact: dict[str, Any]) -> str:
+    """What FI measured of a search whose objective did not move, in one plain sentence (the runner's fact)."""
+    value = fact.get("objective")
+    shown = f"{value:.6g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+    limits = "met every limit" if fact.get("feasible") else "did not meet every limit"
+    return (f"the search's first {int(fact.get('designs') or 0)} designs across the whole range of the design, which "
+            f"between them changed every number of it, all gave the objective {shown} and {limits}, as the starting "
+            "design did")
+
+
+def _flat_request(fact: dict[str, Any], kept: list[str] | None = None) -> str:
+    """The request to the plan's model when the search's objective did not move (Engine._no_results_verdict): what FI
+    measured, which results stayed and which moved, and what may and may not change. FI names no representation,
+    resolution or range: the plan chooses. ``kept``: what the topic asks to vary (``topic_requirements.kept_when_smaller``)."""
+    stayed = [str(n) for n in fact.get("stayed") or []]
+    moved = [str(n) for n in fact.get("moved") or []]
+    unsteady = [str(n) for n in fact.get("unsteady") or []]
+    parts = []
+    if stayed:
+        parts.append("These results stayed at the starting design's value in every one of those designs: "
+                     + ", ".join(stayed) + ".")
+    if moved:
+        parts.append("These results moved: " + ", ".join(moved) + ".")
+    if unsteady:
+        parts.append("These differ when the same design runs twice (timings), so they say nothing about the design: "
+                     + ", ".join(unsteady) + ".")
+    if not (stayed or moved):
+        parts.append("The simulation returns no result besides the objective and the limits, so FI cannot tell which "
+                     "part of the objective is stuck.")
+    return ("FI ran the search for the best design: " + _flat_fact_sentence(fact) + ". So nothing in the design space "
+            "as it is written lets the objective move, and the search had nothing to climb. " + " ".join(parts) + " "
+            "Rewrite the design so that its objective can move: you choose how, from what FI measured and the topic (how "
+            "the design is described, its range, or an objective that grades how close a design comes as well as "
+            "whether it passes). Keep every case, setting, comparison and quantity the topic asks for, and every check, "
+            "threshold and tolerance as it is; do not change what the objective measures to get a number above the "
+            "starting design's. When the objective is built from parts (the worst of several cases, a sum of terms), "
+            "return each part as a result of its own. Say in the simplifications what was changed and that it was "
+            "changed after FI found that the first design's objective did not move."
+            + ("\n\nWhat the topic asks to vary stays varied:\n" + "\n".join(kept) if kept else ""))
 
 
 _SEARCH_ASKED = "search_block_asked.json"
