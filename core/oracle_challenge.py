@@ -291,7 +291,8 @@ def numeric_prompt(template: Any, *, topic: str, oracle: dict[str, Any], protoco
     return template.substitute(
         topic=" ".join(str(topic or "").split())[:1500], model=_model_lines(protocol),
         name=str(oracle.get("name") or "").strip(),
-        check=" ".join(str(oracle.get("check") or "").split())[:1200] or "(not given)",
+        check=without_measured(without_measured(oracle.get("check"), _triage_num(oracle.get("expected"))),
+                               _triage_num(_plan_formula_value(oracle, protocol)))[:1200] or "(not given)",
         case=json.dumps(case, default=str) if isinstance(case, dict) and case else "(not given)",
         measure=str(oracle.get("measure") or "").strip() or "(not given)", line=NUMERIC_LINE)
 
@@ -403,9 +404,8 @@ def plan_working(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> flo
     the referee only needs to know the number is a working, since it never trusts it."""
     from . import oracle_triage as _triage
 
-    sure = _triage.formula_value(oracle, protocol)
-    if sure is not None:
-        return sure
+    if _oracle.kind_of(oracle) == "published_value":
+        return None  # a number taken from elsewhere, whatever formula the plan wrote beside it
     expected, limit, _mode = _oracle.limit_of(oracle)
     if expected is None or limit is None or not _triage.correctable(oracle):
         return None
@@ -416,8 +416,24 @@ def plan_working(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> flo
                 or _triage._degrees_unconverted(text) or _forms.disagrees(value, expected, limit)):
             return None
         tree, _ = _forms._tree(text, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
-        if tree is None or not any(isinstance(n, (ast.BinOp, ast.Call, ast.Name)) for n in ast.walk(tree)):
-            return None
+        named = set(_forms.fixed_settings(protocol)) | set(_forms.case_numbers(oracle))
+        if (tree is None or not any(isinstance(n, (ast.BinOp, ast.Call)) for n in ast.walk(tree))
+                or not any(isinstance(n, ast.Name) and n.id in named for n in ast.walk(tree))):
+            return None  # a number restated ("0.5*1"), or a setting alone: no working
     except Exception:  # noqa: BLE001 -- a formula FI cannot compute decides nothing
         return None
     return value
+
+
+def _triage_num(value: Any) -> float | None:
+    from . import oracle_triage as _triage
+
+    return _triage.num(value)
+
+
+def _plan_formula_value(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> float | None:
+    try:
+        value, _why, unset, _used = _forms._formula_result(oracle, _forms.fixed_settings(protocol))
+    except Exception:  # noqa: BLE001
+        return None
+    return None if unset else value

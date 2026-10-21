@@ -13958,6 +13958,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._oracle_challenge_hints: dict[str, str] = {}
         # The failing checks FI asked the numerical referee about itself (:meth:`_referee_failing_checks`), once each.
         self._oracle_refereed: set[str] = set()
+        self._oracle_kept_proposals: dict[str, dict[str, Any]] = {}
         # A dispute outlives a stop: the checks the last run of this gate found disputed, while they are as they were then
         # (a person who changed one, or accepted its proposal, starts it afresh).
         self._restore_oracle_disputes(_oracle.declared(protocol))
@@ -14151,7 +14152,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # definitions decides which side is wrong: a corrected check is measured again, a wrong code repaired.
                 corrected = self._correct_expected_values(judged_now, oracles)
                 for n in [n for n, p in self._oracle_proposals.items() if p.get("source") == "numeric"]:
-                    self._oracle_proposals.pop(n, None)  # a correction that could not be made is not left as a proposal
+                    # A correction that could not be made is not left as a proposal; the repair's own comes back.
+                    self._oracle_proposals.pop(n, None)
+                    if n in self._oracle_kept_proposals and n not in corrected:
+                        self._oracle_proposals[n] = self._oracle_kept_proposals[n]
+                self._oracle_kept_proposals.clear()
                 if corrected:
                     looked.difference_update(corrected)
                     attempts[-1]["corrected"] = corrected
@@ -15703,6 +15708,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         record = kept.get(key) if isinstance(kept.get(key), dict) else {}
         frozen = _frozen.load(self.quest_root) is not None
         done = self._corrections_read()
+        # A check a challenge already put to the referee (possibly in a run before a resume): one number per check.
+        exchanges = kept.get(_oracle_challenge.RECORD_KEY) if isinstance(kept.get(_oracle_challenge.RECORD_KEY), dict) else {}
+        challenged = {str(e.get("name") or "") for e in exchanges.values() if isinstance(e, dict)}
+        # The simulation's code and the script must not be one model's reading of the definitions: the same misreading
+        # in both would agree, so with the same model the referee never corrects a check (it can still find the code
+        # wrong, which only sends it to a repair).
+        referee_model = self._model_for_node(_review.NODE) or self.config.provider.model or ""
+        coders = {self._model_for_node(n) or self.config.provider.model or "" for n in ("implement", "execute_reflect")}
+        same_coder = "" in coders or not referee_model or any(_review.same_model(referee_model, c) for c in coders)
         acted = changed = False
         for j in judged:
             name = str(j.get("name") or "").strip()
@@ -15710,25 +15724,37 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             oracle = declared.get(name)
             if (j.get("passed_by_engine") is not False or measured is None or oracle is None or name in done
                     or name in self._oracle_challenges or name in self._oracle_refereed or name in self._oracle_noisy
-                    or name in self._oracle_undecided):
-                continue
+                    or name in self._oracle_undecided or name in self._oracle_set_aside or name in challenged):
+                continue  # a check set aside for its method's error is not the script's, nor one already put to it
             plan_value = _oracle_challenge.plan_working(oracle, protocol if isinstance(protocol, dict) else None)
             if plan_value is None:
                 continue  # a number the plan typed, not worked out: nothing says which side to doubt
             self._oracle_refereed.add(name)
             fp = _oracle_triage.fingerprint(oracle)
-            numeric = record.get(fp) if isinstance(record.get(fp), dict) else None
+            # Kept by what the script is shown (the model's equations, the check's words, case and measure), so a
+            # plan changed since never reuses an old number.
+            shown = _oracle_challenge.numeric_prompt(
+                self._prompts["oracle_numeric_reference"], topic=str(state.get("topic") or self.config.topic or ""),
+                oracle=oracle, protocol=self._protocol_block(state))
+            cache = fp + "|" + hashlib.sha256(shown.encode("utf-8")).hexdigest()[:16]
+            numeric = record.get(cache) if isinstance(record.get(cache), dict) else None
             if numeric is None:
                 numeric = await self._numeric_reference(state, oracle)
                 if numeric.get("value") is not None:  # a script that gave no value is tried again on resume
-                    record[fp] = {"name": name, **numeric}
+                    record[cache] = {"name": name, **numeric}
                     changed = True
             result = _oracle_challenge.settle_referee(oracle, measured, plan_value, numeric.get("value"),
                                                       str(numeric.get("how") or ""))
             if result["outcome"] == "corrected" and frozen:
                 result = {"outcome": "unsettled", "by": "", "text": result["text"] + "; the protocol is frozen, so FI "
                           "does not correct the check: it goes on unconfirmed"}
+            if result["outcome"] == "corrected" and same_coder:
+                result = {"outcome": "unsettled", "by": "", "text": result["text"] + "; the script was written by the "
+                          "model that wrote the simulation, so the two are not independent and FI does not correct "
+                          "the check: it goes on unconfirmed"}
             if result["outcome"] == "corrected":
+                if name in self._oracle_proposals:  # put back if the correction cannot be made
+                    self._oracle_kept_proposals[name] = self._oracle_proposals[name]
                 self._oracle_proposals[name] = {
                     "name": name, "source": "numeric", "expected": result["expected"], "reason": result["text"],
                     "confirmed_by": {"source": "numeric", "by": result["by"], "value": result["expected"],
@@ -15769,7 +15795,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         folder = self.fi_dir / "numeric_reference"
         folder.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(oracle.get("name") or "check"))[:60] or "check"
-        path = folder / f"{safe}.py"
+        path = folder / f"{safe}_{_oracle_triage.fingerprint(oracle)[:8]}.py"
         path.write_text(script, encoding="utf-8")
         code, out, err = await self._run_in_env([self._rel_to_quest(path)], timeout_s=_oracle_challenge.NUMERIC_TIMEOUT_S,
                                                 apart=True)
@@ -20652,6 +20678,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                             "plan's working")
                 if c.get("source") == "arithmetic":
                     return "the plan's own arithmetic alone (not confirmed independently)"
+                if c.get("source") == "numeric":
+                    return ("a script that computed it from the model's definitions alone, never shown the plan's "
+                            "working or the measurement, whose number agrees with the simulation")
+                if c.get("source") == "challenge":
+                    return ("the code's objection to the plan's working, settled by the plan's model, a third model or "
+                            "a numerical computation, none shown the measurement")
                 return "another model's value alone (not confirmed independently)"
 
             listed = "; ".join(f"'{n}' from {c.get('from')} to {c.get('to')}, resting on {rests_on(c)} ({c.get('why')})"

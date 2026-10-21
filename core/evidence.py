@@ -449,6 +449,12 @@ def assess(
         valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected to another model's value "
                           "that agrees with the measurement: nothing independent confirms it"
                           for n, c in corrected.items() if isinstance(c, dict) and c.get("source") == "recompute")
+        # A correction to the referee's number: chosen because it agrees with the simulation, so the check then shows
+        # two computations from the same definitions agree, not that either matches a fact found independently.
+        valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected to a number computed from "
+                          "the model's own definitions that agrees with the measurement: nothing independent of the "
+                          "model confirms it"
+                          for n, c in corrected.items() if isinstance(c, dict) and c.get("source") == "numeric")
         # A correction from the plan's arithmetic alone (an earlier FI made those): the calculator may have misread
         # a correct derivation, and nothing else confirms it.
         valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected from the plan's own "

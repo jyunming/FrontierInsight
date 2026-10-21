@@ -248,6 +248,17 @@ def test_a_restated_number_is_found_by_whether_it_moves_with_the_case_not_by_its
 # --- the referee FI asks itself when a check the plan worked out still fails and nothing objected ------------------------
 
 
+# The plan's working that uses its case (FI computes 1.0 from it); the simulation measures 0.5.
+_WORKED = {**_CHECK, "expected_formula": "n / 4"}
+
+
+def _referee_cfg(tmp_path: Path, *, referee: str = "model-b", **engine: Any):
+    cfg = _cfg(tmp_path, **engine)
+    cfg.provider.model = "model-a"
+    cfg.provider.node_models = {"oracle_review": referee}
+    return cfg
+
+
 def test_the_referee_corrects_only_towards_its_own_number_and_only_when_it_sides_with_one_working() -> None:
     corrected = ch.settle_referee(_CHECK, 0.5, 1.0, 0.501, "a sum")
     assert corrected["outcome"] == "corrected" and corrected["expected"] == 0.501, "its own number, not the measured one"
@@ -259,7 +270,7 @@ def test_the_referee_corrects_only_towards_its_own_number_and_only_when_it_sides
 
 
 def _referee_fake(calls: list[str], value: float, prompts: dict[str, list[str]] | None = None):
-    base = _fake(calls, implement=_MEASURES_HALF, protocol={**_PROTOCOL, "oracles": [_CHECK]})
+    base = _fake(calls, implement=_MEASURES_HALF, protocol={**_PROTOCOL, "oracles": [_WORKED]})
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
@@ -280,14 +291,14 @@ async def test_a_check_the_plan_worked_out_wrongly_is_corrected_by_the_number_co
     calls: list[str] = []
     prompts: dict[str, list[str]] = {}
     monkeypatch.setattr("core.engine.LLMClient.chat", _referee_fake(calls, 0.5, prompts))
-    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    engine = Engine(_referee_cfg(tmp_path, oracle_repair_attempts=1))
     await engine.run()
     record = _record(engine)
     assert calls.count("Numeric") == 1
     assert record["status"] == "ok", record.get("status")
-    assert "0.6 + 0.4" not in prompts["numeric"][0], "the referee never sees the plan's working"
+    assert "n / 4" not in prompts["numeric"][0], "the referee never sees the plan's working"
     plan_text = (engine.quest_root / "plan.md").read_text(encoding="utf-8")
-    assert "0.6 + 0.4" not in plan_text.split("FI corrected", 1)[0], "the wrong working is taken out of the plan"
+    assert "n / 4" not in plan_text.split("FI corrected", 1)[0], "the wrong working is taken out of the plan"
     triage = [t for a in record["attempts"] for t in a.get("triage") or [] if t.get("kind") == "referee"]
     assert triage and triage[0]["outcome"] == "corrected"
 
@@ -298,11 +309,11 @@ async def test_a_number_from_the_definitions_that_agrees_with_the_plan_corrects_
 ) -> None:
     calls: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _referee_fake(calls, 1.0))
-    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1, oracle_check="warn"))
+    engine = Engine(_referee_cfg(tmp_path, oracle_repair_attempts=1, oracle_check="warn"))
     await engine.run()
     record = _record(engine)
     assert calls.count("Numeric") == 1 and record["status"] != "ok"
-    assert "0.6 + 0.4" in (engine.quest_root / "plan.md").read_text(encoding="utf-8")
+    assert "n / 4" in (engine.quest_root / "plan.md").read_text(encoding="utf-8")
     triage = [t for a in record["attempts"] for t in a.get("triage") or [] if t.get("kind") == "referee"]
     assert triage[0]["outcome"] == "code" and triage[0]["points_to"] == "script"
 
@@ -313,14 +324,14 @@ async def test_the_referee_s_number_is_kept_so_a_resume_never_asks_again(
 ) -> None:
     calls: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _referee_fake(calls, 0.75))
-    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1, oracle_check="warn"))
+    engine = Engine(_referee_cfg(tmp_path, oracle_repair_attempts=1, oracle_check="warn"))
     await engine.run()
     assert calls.count("Numeric") == 1
-    assert "0.6 + 0.4" in (engine.quest_root / "plan.md").read_text(encoding="utf-8"), "neither side: nothing changes"
+    assert "n / 4" in (engine.quest_root / "plan.md").read_text(encoding="utf-8"), "neither side: nothing changes"
     engine._oracle_refereed.clear()
     attempt: dict[str, Any] = {}
-    judged = [{"name": _CHECK["name"], "value": 0.5, "passed_by_engine": False}]
-    await engine._referee_failing_checks({}, [_CHECK], judged, {**_PROTOCOL, "oracles": [_CHECK]}, attempt)
+    judged = [{"name": _WORKED["name"], "value": 0.5, "passed_by_engine": False}]
+    await engine._referee_failing_checks({}, [_WORKED], judged, {**_PROTOCOL, "oracles": [_WORKED]}, attempt)
     assert calls.count("Numeric") == 1 and attempt["triage"][0]["outcome"] == "unsettled"
 
 
@@ -332,3 +343,31 @@ def test_a_working_that_uses_the_plan_s_fixed_settings_counts_and_a_typed_number
     assert ch.plan_working(working, protocol) == pytest.approx(1.0)
     assert ch.plan_working(typed, protocol) is None, "a typed number is not the plan's working"
     assert ch.plan_working(elsewhere, protocol) is None, "a formula the check's number does not use is not its working"
+    for restated in ("1.0 * 1", "0.5 + 0.5", "scale"):
+        assert ch.plan_working({**working, "expected_formula": restated, "case": {}}, protocol) is None, restated
+    published = {**working, "kind": "published_value"}
+    assert ch.plan_working(published, protocol) is None, "a published value is never the plan's working"
+
+
+@pytest.mark.asyncio
+async def test_a_referee_written_by_the_model_that_wrote_the_simulation_corrects_no_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _referee_fake(calls, 0.5))
+    engine = Engine(_referee_cfg(tmp_path, referee="model-a", oracle_repair_attempts=1, oracle_check="warn"))
+    await engine.run()
+    record = _record(engine)
+    assert calls.count("Numeric") == 1 and record["status"] != "ok"
+    assert "n / 4" in (engine.quest_root / "plan.md").read_text(encoding="utf-8")
+    triage = [t for a in record["attempts"] for t in a.get("triage") or [] if t.get("kind") == "referee"]
+    assert triage[0]["outcome"] == "unsettled" and "not independent" in triage[0]["tried"]
+
+
+def test_the_referee_is_not_shown_the_check_s_expected_value_in_its_words() -> None:
+    import string
+
+    template = string.Template("$check")
+    oracle = {**_WORKED, "check": "the size is 1.0 for n = 4, as n / 4 gives"}
+    shown = ch.numeric_prompt(template, topic="", oracle=oracle, protocol={})
+    assert "1.0" not in shown and "n = 4" in shown
