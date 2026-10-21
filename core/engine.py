@@ -14475,7 +14475,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     if isinstance(j, dict) and j.get("name") and j.get("passed_by_engine") is False}
         # A check corrected to another model's value: nothing independent confirms it (core/evidence.py says so too).
         out |= {str(n) for n, c in (record.get("corrected") or {}).items()
-                if isinstance(c, dict) and (c.get("source") == "recompute"
+                if isinstance(c, dict) and (c.get("source") in ("recompute", "numeric")
                                             or (c.get("source") == "arithmetic" and not c.get("confirmed_by")))}
         return out
 
@@ -15714,8 +15714,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # The simulation's code and the script must not be one model's reading of the definitions: the same misreading
         # in both would agree, so with the same model the referee never corrects a check (it can still find the code
         # wrong, which only sends it to a repair).
-        referee_model = self._model_for_node(_review.NODE) or self.config.provider.model or ""
-        coders = {self._model_for_node(n) or self.config.provider.model or "" for n in ("implement", "execute_reflect")}
+        referee_model = self._model_for_node(_oracle_challenge.NUMERIC_NODE) or self.config.provider.model or ""
+        coders = {self._model_for_node(n) or self.config.provider.model or ""
+                  for n in ("implement", "implement_outline", "implement_seed", "implement_oracle", "execute_reflect")}
         same_coder = "" in coders or not referee_model or any(_review.same_model(referee_model, c) for c in coders)
         acted = changed = False
         for j in judged:
@@ -15780,7 +15781,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """The check's number computed numerically from the definitions by a short script the model named for
         ``oracle_review`` writes (never shown either working or the measurement) and FI runs in the quest's environment,
         bounded in time: ``{"value", "how", "model", "script"}`` (``value`` None when it gave none)."""
-        model = self._model_for_node(_review.NODE) or self.config.provider.model or "the provider's default model"
+        model = self._model_for_node(_oracle_challenge.NUMERIC_NODE) or self.config.provider.model or "the provider's default model"
         self._progress("Computing a known answer numerically, from the definitions")
         try:
             reply = await self._chat(_oracle_challenge.numeric_prompt(
@@ -20680,7 +20681,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     return "the plan's own arithmetic alone (not confirmed independently)"
                 if c.get("source") == "numeric":
                     return ("a script that computed it from the model's definitions alone, never shown the plan's "
-                            "working or the measurement, whose number agrees with the simulation")
+                            "working or the measurement, whose number agrees with the simulation (two computations "
+                            "from the same definitions, not confirmed independently of the model)")
                 if c.get("source") == "challenge":
                     return ("the code's objection to the plan's working, settled by the plan's model, a third model or "
                             "a numerical computation, none shown the measurement")

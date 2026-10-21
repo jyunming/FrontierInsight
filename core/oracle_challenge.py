@@ -99,12 +99,23 @@ def computes(oracle: dict[str, Any], formula: Any, measured: float | None = None
     return float(value)
 
 
+def _moved(values: dict[str, Any]) -> dict[str, Any]:
+    """Each number of ``values`` moved by a factor of its own (1.1, 1.3, 1.7, ... in name order; 0 becomes 0.1): moved
+    all by one factor, a ratio of settings (``a / b``) would not move and would read as a number restated."""
+    factors = (1.1, 1.3, 1.7, 2.3, 2.9, 3.7, 4.3, 5.3, 6.1, 7.1)
+    out = dict(values)
+    numbers = sorted(k for k, v in values.items() if isinstance(v, (int, float)) and not isinstance(v, bool))
+    for i, k in enumerate(numbers):
+        f = factors[i % len(factors)] + 0.01 * (i // len(factors))
+        out[k] = values[k] * f if values[k] else 0.1 * f
+    return out
+
+
 def _depends_on_case(oracle: dict[str, Any], formula: str, value: float) -> bool:
     """Whether ``formula`` gives another value when every number of the check's case is moved by a tenth: a working
     from the case's settings does, a number restated in any form (``0.5 * 1``, ``n*0 + 1/2``) does not."""
     case = oracle.get("case") if isinstance(oracle.get("case"), dict) else {}
-    moved = {k: (v * 1.1 if v else 0.1) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
-             for k, v in case.items()}
+    moved = _moved(case)
     if moved == case:
         return False
     try:
@@ -420,6 +431,17 @@ def plan_working(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> flo
         if (tree is None or not any(isinstance(n, (ast.BinOp, ast.Call)) for n in ast.walk(tree))
                 or not any(isinstance(n, ast.Name) and n.id in named for n in ast.walk(tree))):
             return None  # a number restated ("0.5*1"), or a setting alone: no working
+
+        # A working moves with what it is worked from ("n*0 + 0.5" names a setting and does not). The case and the
+        # fixed settings are moved together, each by a factor of its own.
+        case = oracle.get("case") if isinstance(oracle.get("case"), dict) else {}
+        fixed = _forms.fixed_settings(protocol)
+        both = _moved({**{f"fixed:{k}": v for k, v in fixed.items()}, **{f"case:{k}": v for k, v in case.items()}})
+        again, _w, _u, _t = _forms._formula_result(
+            {**oracle, "case": {k[5:]: v for k, v in both.items() if k.startswith("case:")}},
+            {k[6:]: v for k, v in both.items() if k.startswith("fixed:")})
+        if again is not None and abs(float(again) - value) <= 1e-9 * max(abs(value), 1e-12):
+            return None
     except Exception:  # noqa: BLE001 -- a formula FI cannot compute decides nothing
         return None
     return value

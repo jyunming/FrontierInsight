@@ -343,7 +343,7 @@ def test_a_working_that_uses_the_plan_s_fixed_settings_counts_and_a_typed_number
     assert ch.plan_working(working, protocol) == pytest.approx(1.0)
     assert ch.plan_working(typed, protocol) is None, "a typed number is not the plan's working"
     assert ch.plan_working(elsewhere, protocol) is None, "a formula the check's number does not use is not its working"
-    for restated in ("1.0 * 1", "0.5 + 0.5", "scale"):
+    for restated in ("1.0 * 1", "0.5 + 0.5", "scale", "scale * 0 + 1.0", "sqrt(1.0)"):
         assert ch.plan_working({**working, "expected_formula": restated, "case": {}}, protocol) is None, restated
     published = {**working, "kind": "published_value"}
     assert ch.plan_working(published, protocol) is None, "a published value is never the plan's working"
@@ -371,3 +371,9 @@ def test_the_referee_is_not_shown_the_check_s_expected_value_in_its_words() -> N
     oracle = {**_WORKED, "check": "the size is 1.0 for n = 4, as n / 4 gives"}
     shown = ch.numeric_prompt(template, topic="", oracle=oracle, protocol={})
     assert "1.0" not in shown and "n = 4" in shown
+
+
+def test_a_ratio_of_the_case_s_settings_is_a_working_and_not_a_number_restated() -> None:
+    ratio = {**ORACLE, "expected": 0.5, "tolerance": 0.01, "case": {"a": 2, "b": 4}}
+    assert ch.computes(ratio, "a / b", measured=0.5) == pytest.approx(0.5), "moved alike, a ratio would not move"
+    assert ch.computes(ratio, "a * 0 + 0.5", measured=0.5) is None
