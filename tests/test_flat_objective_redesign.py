@@ -75,7 +75,7 @@ async def test_a_flat_search_goes_to_the_gate_and_the_plan_is_rewritten_once_wit
     # Nothing in the script to repair: the run goes straight to the gate.
     assert await eng._node_execute_reflect(state) == {}
     assert eng._route_after_execute_reflect(state) == "stuck"
-    verdict = eng._no_results_verdict(state)
+    verdict = eng._flat_objective_verdict(state)
     assert verdict is not None and verdict["redesign"] is True and not verdict.get("stuck")
     request = verdict["flat_request"]
     assert "first 50 designs" in request and "peak_margin" in request and "mass" in request
@@ -209,3 +209,71 @@ def test_the_plan_asks_for_the_parts_of_an_objective() -> None:
     from core.engine import _STUDY_TYPE_DIRECTIVE
 
     assert "returns each part as a result of its own" in _STUDY_TYPE_DIRECTIVE
+
+
+# --- the rewrite is checked before it is taken (the frozen protocol cannot be repaired after the change) -----------
+
+
+def _text(design: dict[str, Any]) -> str:
+    return plan.render(TOPIC, EXTRA, plan.normalize_design(design)[0])
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_that_eases_a_check_or_a_limit_has_them_put_back(tmp_path: Path) -> None:
+    eased = _revised()
+    eased["protocol"]["oracles"][0]["tolerance"] = 0.5
+    eased["protocol"]["optimisation"]["constraints"][0]["limit"] = "<= 500"
+    eng, _model = await _planned(tmp_path, revise=_text(eased))
+    patch = await eng._node_evidence_gate(_flat_state())
+    assert patch["evidence_assessment"]["route"] == "redesign"
+    now = plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design["protocol"]
+    assert now["oracles"][0]["tolerance"] == 0.01, "the check is held to its tolerance"
+    assert now["optimisation"]["constraints"][0]["limit"] == "<= 120", "the limit is held"
+    assert now["optimisation"]["design_variables"][0]["high"] == 9.5, "the design itself may change"
+    assert "FI put it back as it was" in (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["nothing", "no_search"])
+async def test_a_rewrite_that_changes_nothing_or_cannot_be_searched_is_not_taken(tmp_path: Path, change: str) -> None:
+    design = copy.deepcopy(HEAT_SINK) if change == "nothing" else _revised()
+    if change == "no_search":
+        del design["protocol"]["optimisation"]["evaluation_budget"]
+    eng, _model = await _planned(tmp_path, revise=lambda: _text(design) if change == "nothing" else
+                                 plan.plan_path(eng.quest_root).read_text(encoding="utf-8").replace(
+                                     "evaluation_budget", "evaluation_budget_gone"))
+    before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    patch = await eng._node_evidence_gate(_flat_state())
+    assert patch["evidence_assessment"]["route"] == "repair_crash" and patch["flat_objective_redesigned"] is True
+    assert "first design's search runs again" in patch["evidence_assessment"]["rationale"]
+    assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_what_the_topic_asks_for_is_judged_on_the_rewritten_protocol(tmp_path: Path,
+                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, _model = await _planned(tmp_path, revise=lambda: _text(_revised()))
+    before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    judged: list[Any] = []
+
+    async def gaps(req: Any, design: Any, protocol: Any = None) -> tuple[list[dict[str, Any]], list[str]]:
+        judged.append(protocol)
+        return [{"name": "fin count", "sentence": "the fin count is not varied"}], []
+
+    monkeypatch.setattr(eng, "_topic_requirements_read", lambda: {"items": [{"name": "fin count"}]})
+    monkeypatch.setattr(eng, "_topic_gaps", gaps)
+    monkeypatch.setattr("core.engine._topic_req.is_empty", lambda req: False)
+    patch = await eng._node_evidence_gate(_flat_state())
+    assert judged and judged[0]["optimisation"]["design_variables"][0]["high"] == 9.5, "the rewritten one is judged"
+    assert patch["evidence_assessment"]["route"] == "repair_crash"
+    assert "dropped what the topic asks for" in patch["evidence_assessment"]["rationale"]
+    assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_a_flat_search_is_a_run_whose_results_were_seen(tmp_path: Path) -> None:
+    eng, _model = await _planned(tmp_path)
+    state = _after_gate(eng)
+    assert eng._run_gave_no_results(state) is False
+    changed = {**state["design"], "hypothesis": "a finer description of the fins lets the temperature move"}
+    assert eng._keep_hypothesis_after_an_empty_run(state, changed)["hypothesis"] == changed["hypothesis"]

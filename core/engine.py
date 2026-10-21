@@ -8471,6 +8471,75 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                        "by the engine for its oracle check" if by == "engine" else "on request", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
 
+    #: What a rewrite for a flat objective may change in the protocol: how the design is described and searched. Every
+    #: other key (the checks and their tolerances, thresholds, criteria, metrics, precision, the model) and the search's
+    #: limits are what the results are judged by, and are put back as they were.
+    _FLAT_MAY_CHANGE = frozenset({"optimisation", "grid", "in_each_run", "sub_studies", "numerical_settings"})
+
+    async def _flat_rewrite(self, state: QuestState, request: str) -> dict[str, Any]:
+        """plan.md rewritten from what FI measured of a search whose objective did not move, checked before it is taken:
+        what the results are judged by is put back as it was (``_FLAT_MAY_CHANGE``; the search's constraints too), the
+        search must be one FI can run, the protocol must change, and what the topic asks for is judged on the rewritten
+        protocol itself. The frozen protocol cannot be repaired after the change is approved, so a rewrite that fails
+        one of these is not taken (``ValueError``; plan.md is as it was)."""
+        path = _plan.plan_path(self.quest_root)
+        before = path.read_text(encoding="utf-8")
+        basis = self._protocol_block(state) or ((_plan.parse(before).design or {}).get("protocol") or {})
+        put_back: list[str] = []
+
+        def held(design: dict[str, Any]) -> dict[str, Any]:
+            new = dict(design.get("protocol") or {})
+            for key in {*basis, *new} - self._FLAT_MAY_CHANGE:
+                if new.get(key) != basis.get(key):
+                    put_back.append(key)
+                    if key in basis:
+                        new[key] = basis[key]
+                    else:
+                        new.pop(key, None)
+            old_block, new_block = basis.get("optimisation"), new.get("optimisation")
+            if isinstance(old_block, dict) and isinstance(new_block, dict) and \
+                    new_block.get("constraints") != old_block.get("constraints"):
+                put_back.append("optimisation.constraints")
+                new["optimisation"] = {**new_block, "constraints": old_block.get("constraints")}
+            return {**design, "protocol": new}
+
+        def finish(revised: str) -> str | None:
+            design = _plan.parse(revised).design
+            if design is None:
+                return None
+            if _plan.hoist_protocol_parts(design)[1]:
+                raise ValueError("it wrote parts of the protocol beside `protocol`")
+            design = held(design)
+            if put_back:
+                revised = _plan.edit_design_block(revised, lambda block: held(block)) or ""
+                design = _plan.parse(revised).design if revised else None
+                if design is None:
+                    raise ValueError("what the results are judged by could not be put back as it was")
+            wanted, missing, why = self._search_problems(state, design)
+            if not wanted or missing or why:
+                raise ValueError("its search for the best design cannot be run: "
+                                 + "; ".join([*missing, *([why] if why else [])] or ["it is not a search"]))
+            if _frozen.sha256(design.get("protocol") or {}) == _frozen.sha256(basis):
+                raise ValueError("it changed nothing of the protocol")
+            return revised
+
+        done = await self._rewrite_plan(request, path, by="engine", note="a design whose objective can move, asked by FI",
+                                        finish=finish)
+        if put_back:
+            self._log.warning("[evidence_gate] the rewrite changed what the results are judged by (%s); FI put it back as "
+                              "it was", ", ".join(sorted(set(put_back))))
+        req = self._topic_requirements_read()
+        design = _plan.parse(path.read_text(encoding="utf-8")).design or {}
+        if self._runs_code(state) and req is not None and not req.get("error") and not _topic_req.is_empty(req):
+            gaps, _unjudged = await self._topic_gaps(req, design, design.get("protocol"))
+            if gaps:
+                path.write_text(before, encoding="utf-8")
+                _plan.record_version(self.quest_root, before, by="engine",
+                                     note="the rewrite for a flat objective dropped what the topic asks for; put back")
+                raise ValueError("the rewrite dropped what the topic asks for: "
+                                 + "; ".join(str(g.get("sentence") or g.get("name")) for g in gaps)[:300])
+        return done
+
     def _run_gave_no_results(self, state: QuestState) -> bool:
         """True when FI's own record shows the experiment that led back to the design produced no results: a simulation
         ran (``exec_result``) and its result holds no number, or only a number that is none of the study's quantities and a
@@ -8482,6 +8551,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if (not isinstance(exec_result, dict) or not exec_result or state.get("no_simulation_resolved")
                 or state.get("survey_mode_resolved") or self.config.engine.analyze_local_first):
             return False
+        if exec_result.get("flat_objective"):
+            return False  # the search ran and gave its objective at every design it tried: results were seen
         from . import numeric_oracle as _numeric_oracle
 
         result = state.get("result_json")
@@ -20017,7 +20088,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 ),
                 "key_findings_preview": [str(f)[:200] for f in findings[:6]],
             }
-            ruled = self._unreadable_analysis_verdict(state) or self._no_results_verdict(state) or (
+            ruled = self._flat_objective_verdict(state) or self._unreadable_analysis_verdict(state) or (
+                self._no_results_verdict(state)) or (
                 await self._shown_fault_verdict(state)) or _evidence_gate_rule(
                 protocol.topic_type, n_sources, n_supporting,
                 analyze_local_first=self.config.engine.analyze_local_first,
@@ -20091,16 +20163,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # The search's objective did not move: plan.md is rewritten from what FI measured before the design is read
             # again. An answer that cannot be used runs the first design's search again, to its whole budget.
             try:
-                done = await self._rewrite_plan(str(parsed["flat_request"]), _plan.plan_path(self.quest_root),
-                                                by="engine", note="a design whose objective can move, asked by FI")
+                done = await self._flat_rewrite(state, str(parsed["flat_request"]))
                 self._log.warning("[evidence_gate] plan.md was rewritten (version %s) from what FI measured of the "
                                   "search; the new design is checked and timed before it runs", (done or {}).get("version"))
             except Exception as exc:  # noqa: BLE001 -- the first design is searched again, with no early stop
-                self._log.warning("[evidence_gate] the plan could not be rewritten from what FI measured of the search "
-                                  "(%s); the first design's search runs again to its whole budget", _one_line(str(exc), 200))
+                said = (f"the plan could not be rewritten from what FI measured of the search ({_one_line(str(exc), 200)}); "
+                        "the first design's search runs again to its whole budget")
+                self._log.warning("[evidence_gate] %s", said)
                 redesign = False
                 flat_retry = True
-                parsed = {**parsed, "repair_crash": True}
+                # Back to the run step (the route a crash repair takes), which runs the search again with no early stop.
+                parsed = {**parsed, "repair_crash": True, "rationale": said, "gaps": [said]}
         # A script that could not run to the end, even after its repairs, is the code's fault, not the design's: the same
         # design is written into code again (core/engine.py::_no_results_verdict).
         rewrite_code = bool(parsed.get("rewrite_code")) and status == "ok"
@@ -20131,7 +20204,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "evidence_gate", "pass" if status == "ok" and verdict == "sufficient" else "fail" if status == "ok" else "unknown",
             started_at=started, inputs=_gate_inputs(state),
             output=assessment, error=failure,
-            detail=(f"the code went back to the crash repair: {assessment['rationale']}" if crash_repair else
+            detail=(assessment["rationale"] if flat_retry else
+                    f"the code went back to the crash repair: {assessment['rationale']}" if crash_repair else
                     f"it judged the evidence {verdict} and the paper was written on it (gaps: "
                     f"{'; '.join(assessment['gaps']) or 'none named'})" if status == "ok" and verdict != "sufficient" else ""),
         )
@@ -20616,6 +20690,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
                 "stuck_reason": "shown_fault_open"}
 
+    def _flat_objective_verdict(self, state: QuestState) -> dict[str, Any] | None:
+        """The gate's verdict for a search whose objective did not move across the design space (the runner hands this
+        back only while the plan may still be revised for it, ``_flat_redesign_allowed``), else ``None``: the plan's model
+        is told what FI measured and asked, once, for a design whose objective can move. FI names no representation,
+        resolution or range. Decided before every other rule: the run of this round is what it says, whatever an earlier
+        round's analysis held."""
+        exec_result = state.get("exec_result")
+        fact = exec_result.get("flat_objective") if isinstance(exec_result, dict) else None
+        if not (isinstance(fact, dict) and fact):
+            return None
+        why = _flat_fact_sentence(fact)
+        self._log.warning("[evidence_gate] %s; the plan is asked once for a design whose objective can move", why)
+        self._progress("[FI] The search's objective did not move anywhere in the design's range; the plan is being "
+                       "revised once so that it can.")
+        return {"verdict": "insufficient", "rationale": why + "; the plan was asked for a design whose objective can "
+                "move", "gaps": [why], "redesign": True,
+                "flat_request": _flat_request(fact, _topic_req.kept_when_smaller(self._topic_requirements_read()))}
+
     def _no_results_verdict(self, state: QuestState) -> dict[str, Any] | None:
         """The gate's verdict for a simulation whose experiment produced no results, else ``None``.
 
@@ -20624,16 +20716,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         the rule. The writer got no note, and the papers went out on no experiment. Now the quest goes back to design
         once while an iteration is left; after that the verdict is ``insufficient`` and the evidence note says why."""
         exec_result = state.get("exec_result")
-        fact = exec_result.get("flat_objective") if isinstance(exec_result, dict) else None
-        if isinstance(fact, dict) and fact:
-            # The search ran and its objective did not move across the design space (the runner asked this only while
-            # the plan may still be revised for it): the plan's model is told what FI measured and asked, once, for a
-            # design whose objective can move. FI names no representation, resolution or range.
-            why = _flat_fact_sentence(fact)
-            self._log.warning("[evidence_gate] %s; the plan is asked once for a design whose objective can move", why)
-            return {"verdict": "insufficient", "rationale": why + "; the plan was asked for a design whose objective can "
-                    "move", "gaps": [why], "redesign": True,
-                    "flat_request": _flat_request(fact, _topic_req.kept_when_smaller(self._topic_requirements_read()))}
         stopped = next((k for k in _STOPPED_BEFORE_THE_STUDY if isinstance(exec_result, dict) and exec_result.get(k)), "")
         if stopped:
             # Stopped before anything ran (the execute step's record of it): the gate states that, whatever the code or the
