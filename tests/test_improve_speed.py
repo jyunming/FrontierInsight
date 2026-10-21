@@ -295,3 +295,17 @@ async def test_an_answer_that_cannot_be_read_is_kept_with_its_refusal(tmp_path: 
     out = await _speed(engine, _Model(["here is the new function: def f(x): return x"]))
     entry = out["rounds"][0]
     assert entry["outcome"] == "refused" and "here is the new function" in entry["reply"]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_a_first_try_and_a_correction_is_read_as_the_correction(tmp_path: Path) -> None:
+    """A live answer wrote one edit with a placeholder, then "Correction, the exact-text version:" and the edit it meant;
+    the two objects were read as one and the answer was refused as "not the JSON object asked for"."""
+    engine = _engine(tmp_path)
+    first = json.loads(_edit("this text is not in the file", ""))
+    first["why"] = "placeholder"
+    reply = json.dumps(first) + "\n\nCorrection, the exact-text version:\n\n" + _edit("this text is not in the file", "x")
+    out = await _speed(engine, _Model([reply]))
+    entry = out["rounds"][0]
+    assert "not the JSON object" not in entry["reason"], entry["reason"]
+    assert "this text is not in the file" in entry["diff"] and entry["why"] != "placeholder"

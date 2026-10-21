@@ -312,6 +312,11 @@ def load_snapshot(quest_root: Path, name: str, *, fi_real: Path | None = None) -
 # --- the edit --------------------------------------------------------------------------------------------------------
 
 
+#: The keys of the one edit a model is asked for. A reply that writes a first try and then a correction holds two such
+#: objects; the last one is the answer.
+EDIT_KEYS = ("file", "find", "replace")
+
+
 @dataclass
 class Edit:
     file: str

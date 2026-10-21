@@ -1548,7 +1548,7 @@ class RunChecksMixin:
                 break
             from .engine import _parse_json_lenient
 
-            edit, why = _improve.parse_edit(_parse_json_lenient(reply, node="improve"))
+            edit, why = _improve.parse_edit(_parse_json_lenient(reply, node="improve", want=_improve.EDIT_KEYS))
             new_text = None
             if edit is not None:
                 new_text, why = _improve.check_edit(files, edit, allowed, tried=tried, expected=expected,
