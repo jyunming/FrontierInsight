@@ -61,6 +61,16 @@ _STOPPED = {
 }
 
 
+def flat_went_on(ev: dict[str, Any]) -> str:
+    """The search's objective did not move, and the search went on (``flat_objective`` recorded, not stopped: the plan
+    was already revised for it, or no revision was left): one plain clause, or empty."""
+    fact = ev.get("flat_objective") if isinstance(ev, dict) else None
+    if not isinstance(fact, dict) or fact.get("stopped", True):
+        return ""
+    return (f"the objective did not move: the first {fact.get('designs')} designs across the whole range of the design "
+            f"all gave {_fmt(fact.get('objective'))}, as the starting design did, and the search went on to its budget")
+
+
 def _num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -284,6 +294,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     if ev.get("scan"):
         search += f", after a coarse scan of {ev['scan']} design(s) not counted in the budget"
     search += f"; the search stopped because {_STOPPED.get(str(ev.get('stopped_because')), ev.get('stopped_because'))}."
+    if flat := flat_went_on(ev):
+        search += f" {flat[0].upper()}{flat[1:]}."
     lines += [search, ""]
     for r in best.get("continued") or []:
         toward = f", toward {quantity} = {_fmt(r['target'])}{u}" if _num(r.get("target")) else ""

@@ -920,6 +920,10 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
              "broke a limit"]
     if method.get("why"):
         lines.append(f"[optimise] {method.get('requested')} was asked for, but {method['why']}")
+    from . import best_design_report as _report
+
+    if flat := _report.flat_went_on(ev):
+        lines.append(f"[optimise] {flat}")
     baseline = record.get("baseline") or {}
     base_text = (f"{_fmt(baseline.get('objective'))}{unit}" if baseline.get("objective") is not None
                  else f"no value ({baseline.get('reason') or 'its evaluation failed'})")

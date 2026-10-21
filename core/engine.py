@@ -17272,6 +17272,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                       < self.config.engine.exec_reflect_max_iterations
                                       and not state.get("exec_give_up_reason")),
                 at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
+                # A search whose objective does not move stops early and its fact goes back to the plan, once per quest.
+                stop_flat=lambda: self._flat_redesign_allowed(state),
             )
         elif split and self._trial_mode:
             runner = _trial_runner.TrialsRunner(

@@ -178,3 +178,14 @@ def test_a_flat_scan_is_decided_on_all_its_settings_never_cut_short() -> None:
     outcome = _drive_with_scan(block, last_better, [{"fin": f, "gap": g} for f in values for g in values])
     assert outcome["stopped_because"] != "flat_objective" and "flat_objective" not in outcome
     assert outcome["best"]["objective"] == -9.0
+
+
+def test_a_flat_search_that_went_on_is_said_in_the_report_and_the_log() -> None:
+    fact = {"designs": 50, "objective": 0.0, "feasible": True, "stayed": [], "moved": [], "stopped": False}
+    ev = {"search": 200, "budget": 200, "stopped_because": "budget", "flat_objective": fact}
+    said = best_design_report.flat_went_on(ev)
+    assert "did not move" in said and "first 50 designs" in said and "went on to its budget" in said
+    assert any("did not move" in line for line in optimise.summary_lines({"evaluations": ev}))
+    # A search that stopped for it says so through its stop reason, not twice.
+    assert best_design_report.flat_went_on({**ev, "flat_objective": {**fact, "stopped": True}}) == ""
+    assert best_design_report.flat_went_on({"stopped_because": "budget"}) == ""
