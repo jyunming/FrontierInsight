@@ -894,13 +894,19 @@ def _drain(proc: Any) -> str:
 
     try:
         return proc.communicate(timeout=30)[1] or ""
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         for pipe in (proc.stdout, proc.stderr):
             try:
                 if pipe is not None:
                     pipe.close()
             except OSError:
                 pass
+        # The error text already read before the timeout is the reason the run failed; keep it.
+        if isinstance(exc.stderr, bytes):
+            return exc.stderr.decode(errors="replace")
+        if isinstance(exc.stderr, str):
+            return exc.stderr
+        return ""
     except (OSError, ValueError):
         pass
     return ""

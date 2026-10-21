@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 from core import attempt_records, code_project, trial_runner
+from core.code_project import _drain
 
 SIMULATE = '''
 def run_trial(cell, trial_id, seed):
@@ -540,3 +541,35 @@ def test_verify_defaults_to_the_same_limit_as_the_config():
 
     default = inspect.signature(code_project.verify).parameters["run_timeout_s"].default
     assert default == ExecutionConfig().clean_check_timeout_s
+
+
+class _StoppedRun:
+    """A stopped process whose communicate() times out; its pipes record whether they were closed."""
+
+    def __init__(self, stderr):
+        self._exc_stderr = stderr
+        self.stdout = _Pipe()
+        self.stderr = _Pipe()
+
+    def communicate(self, timeout=None):
+        raise subprocess.TimeoutExpired(cmd="x", timeout=30, output=b"", stderr=self._exc_stderr)
+
+
+class _Pipe:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_stopped_run_that_does_not_close_its_pipes_keeps_the_error_already_read():
+    fake = _StoppedRun(b"Traceback: boom")
+    assert _drain(fake) == "Traceback: boom"
+    assert fake.stdout.closed and fake.stderr.closed
+
+
+def test_a_stopped_run_with_no_error_text_read_returns_empty():
+    fake = _StoppedRun(None)
+    assert _drain(fake) == ""
+    assert fake.stdout.closed and fake.stderr.closed
