@@ -186,13 +186,21 @@ def main(record):
 '''
 UNTRUSTED_LISTS = (
     'def f(cells):\n    return [1 for cell in cells if cell["missing"]]\n',
-    'def f(grid):\n    cells = []\n    cells.extend(grid)\n    cells.append(1)\n    return [1 for cell in cells if cell["missing"]]\n',
-    'def f(grid):\n    cells = []\n    cells = grid\n    cells.append(1)\n    return [1 for cell in cells if cell["missing"]]\n',
+    'def f(grid):\n    cells = []\n    cells.extend(grid)\n    cells.append({"missing": 1})\n    return [1 for cell in cells if cell["missing"]]\n',
+    'def f(grid):\n    cells = []\n    cells = grid\n    cells.append({"missing": 1})\n    return [1 for cell in cells if cell["missing"]]\n',
 )
 
 
 def test_a_loop_variable_over_the_scripts_own_summaries_is_not_a_setting() -> None:
     assert _names({"experiment.py": KINETICS}) == []
+
+
+def test_an_annotated_list_of_the_scripts_own_summaries_is_not_a_setting() -> None:
+    annotated = KINETICS.replace("cells = []", "cells: list[dict] = []", 1)
+    assert annotated != KINETICS
+    assert _names({"experiment.py": annotated}) == []
+    assert _names({"a.py": 'def f(grid):\n    cells: list = grid\n    return [1 for cell in cells if cell["missing"]]\n'}) == [
+        ("a.py", ("missing",))]
 
 
 def test_a_loop_over_the_record_or_a_parameter_called_cell_is_still_read_as_a_setting() -> None:

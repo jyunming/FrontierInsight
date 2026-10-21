@@ -245,6 +245,10 @@ def _assignments_of(name: str, nodes: list[ast.AST]) -> list[ast.AST] | None:
     loop variable, ``:=``, ``global``, a tuple target, a ``with`` / ``import`` name)."""
     values: list[ast.AST] = []
     for node in nodes:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == name:
+            if node.value is not None:  # ``cells: list[dict] = []`` binds like ``cells = []``; ``cells: list`` binds nothing
+                values.append(node.value)
+            continue
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             if len(node.targets) != 1:
                 return None
