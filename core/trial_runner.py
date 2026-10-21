@@ -255,6 +255,12 @@ def main():
     # them to measure what one costs, however short a trial is.
     budget, started = spec.get("budget_s"), time.perf_counter()
     stop_after = spec.get("stop_after_s")
+    # Where the trials spend their time (core/improve_speed.py): Python's profiler runs during the calls only, never
+    # while the simulation is loaded.
+    profile_to, profiler = spec.get("profile"), None
+    if profile_to:
+        import cProfile
+        profiler = cProfile.Profile()
     later = 0.0
     for index, trial in enumerate(spec["trials"]):
         if budget is not None and index:
@@ -270,12 +276,16 @@ def main():
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             try:
+                if profiler is not None:
+                    profiler.enable()
                 if spec["entry"] == "run_trial":
                     value = fn(dict(spec["cell"]), trial["trial"], trial["seed"])
                 elif spec["entry"] == "run_cell":
                     value = fn(dict(spec["cell"]))
                 else:
                     value = fn()
+                if profiler is not None:
+                    profiler.disable()
                 # A number per run, or (for what each run compares inside it) one per value it was given.
                 kept, why = read_returned(value, levels_of(spec.get("levels")), spec["entry"])
                 if kept is None:
@@ -289,6 +299,8 @@ def main():
                     raise
                 row.update(status="failed", reason=f"{type(e).__name__}: {e}"[:300],
                            traceback=traceback.format_exc()[-1500:])
+        if profiler is not None:
+            profiler.disable()
         row["duration_s"] = round(time.perf_counter() - t0, 6)
         if spec.get("spy_trial"):
             row["trial_calls"] = trial_calls[0]
@@ -305,6 +317,8 @@ def main():
             if later >= float(stop_after):
                 break
     out.close()
+    if profiler is not None:
+        profiler.dump_stats(profile_to)
     if captured is not None:
         try:
             with open(capture["path"], "w", encoding="utf-8") as fh:

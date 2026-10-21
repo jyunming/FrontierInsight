@@ -5,6 +5,7 @@ the sample itself on this interpreter. No real model is called."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -261,3 +262,16 @@ async def test_a_setting_the_timing_could_not_finish_is_not_sampled(tmp_path: Pa
                                     SimpleNamespace(seconds=10.0), 10.0, budget_s=600.0, probes=probes)
     assert time.monotonic() - started < 50, "the setting that sleeps a minute was sampled"
     assert record["rounds"] and record["rounds"][0]["outcome"] == "refused"  # the sample ran, and the model was asked
+
+
+@pytest.mark.asyncio
+async def test_the_model_is_shown_where_the_time_goes_measured_by_fi(tmp_path: Path) -> None:
+    """The model guessed from the code where a simulation spends its time; a real one spent nine tenths of it in one
+    function called a hundred thousand times. FI measures it and shows the costliest functions with their call counts."""
+    engine = _engine(tmp_path)
+    model = _Model([_edit(LOOP, FAST)])
+    out = await _speed(engine, model)
+    assert out["profiled"] is True
+    shown = model.prompts[0]
+    assert "Where the time goes, measured by FI" in shown
+    assert re.search(r"run_trial \(simulate\.py:\d+\): [\d.]+ s of its own \(\d+% of the setting\), called \d+ times", shown)

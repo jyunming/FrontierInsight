@@ -1502,7 +1502,14 @@ class RunChecksMixin:
         original = _improve.snapshot(root)
         best = {"files": original, "sample": first}
         tried = {_improve.fingerprint(original)}
-        block = _speed.speed_block(padded, limit_s, first, cells, runs)
+        # Where the time goes, measured on the costliest setting the timing saw (the base when none was timed).
+        timed = {_trial_runner.cell_key(p.cell): float(p.seconds) for p in probes or [] if getattr(p, "cell", None)}
+        costliest = max(cells, key=lambda c: timed.get(_trial_runner.cell_key(c), 0.0))
+        profile = await _speed.profile_text(self.executor, python, root, module, costliest,  # type: ignore[attr-defined]
+                                            deterministic=det, thresholds=thresholds, in_each_run=inside, env=env,
+                                            timeout_s=max(60, int(min(timeout_s, budget_s or timeout_s))), log=log)
+        record["profiled"] = bool(profile)
+        block = _speed.speed_block(padded, limit_s, first, cells, runs, profile=profile)
         log.info("[improve] The study would take about %s, more than the %s allowed. Trying to make the simulation itself "
                  "faster without changing any result (up to %d change(s)).", _estimate.plain_duration(padded),
                  _estimate.plain_duration(limit_s), limit)

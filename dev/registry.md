@@ -228,7 +228,8 @@ same PR that adds, splits or renames one.
 - `core/improve_speed.py` — the improve loop with the goal of speed, run before the study when the timing says it would
   not fit the time allowed. `sample_cells` (the timed settings plus each known-answer case of the plan), `run_sample`
   (fixed-seed trials through the harness in an outside copy, the least time of two repeats), `disagreements` (a number
-  not the same to 9 digits, or only in one run), `fast_enough`. `RunChecksMixin._speed_up` (`core/run_checks.py`) asks
+  not the same to 9 digits, or only in one run), `fast_enough`, `profile_text` (the costliest sampled setting run once
+  with the harness's `profile` spec key: Python's profiler during the calls only; the top functions go into the prompt). `RunChecksMixin._speed_up` (`core/run_checks.py`) asks
   for one change per round (prompt `agents/improve_speed.md`), applies `improve.check_edit` with `improve.guards` over
   every check of the plan, keeps a change on the sample alone, and times the study twice (the slower timing stands);
   `_size_the_run` calls it once, before the runs are lowered or the quest stops, and `_size_the_scan` once for a search
