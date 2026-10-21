@@ -400,7 +400,8 @@ async def test_a_coarse_scan_runs_first_through_the_trial_runner_and_is_not_coun
     assert len(scan) == 6 and rows[1:7] == scan, "then the scan"
     assert (root / "raw" / "trials.json").is_file(), "the scan is the trial runner's, so the analysis can plot it"
     assert run.record["evaluations"]["scan"] == 6 and run.record["evaluations"]["search"] <= 20
-    assert _count(root) == len(rows)
+    # One call more: FI calls the fastest scan setting again to see which numbers repeat (trial_runner.unsteady_names).
+    assert _count(root) == len(rows) + 1
 
 
 @pytest.mark.asyncio
@@ -411,7 +412,7 @@ async def test_baseline_scan_and_search_evaluations_run_outside_the_quest_folder
     rows = [r for r in _ledger(root) if r.get("event") == "evaluation"]
     assert {"baseline", "scan"} <= {r["stage"] for r in rows} and {r["stage"] for r in rows} - {"baseline", "scan"}, "a search stage too"
     cwds = (tmp_path / "cwd.txt").read_text(encoding="utf-8").splitlines()
-    assert len(cwds) == len(rows)
+    assert len(cwds) == len(rows) + 1, "and FI's one call again of the fastest scan setting"
     quest = root.resolve()
     for cwd in cwds:
         assert not Path(cwd).resolve().is_relative_to(quest), f"an evaluation ran inside the quest folder: {cwd}"

@@ -1069,10 +1069,17 @@ class TrialsRunner:
         from . import flat_output as _flat
 
         self.no_difference = None
-        seen = _flat.observed_flat_sweep(run.cells)
+        # A number that differs when the same setting is called again (a timing) is no result of any setting: left out
+        # of both judgements, so it cannot hide a setting that changed nothing else.
+        unsteady = await unsteady_names(
+            self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), run.cells,
+            timeout_s=timeout_s, env=env,
+            thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+            log=self.log) if self.deterministic and self.submit is None else set()
+        seen = _flat.observed_flat_sweep(run.cells, ignore=unsteady)
         flat = _flat.flat_sweep(
             run.cells, source=self.simulate.read_text(encoding="utf-8", errors="replace"),
-            expected=_degenerate.expected_constants(protocol)) if seen is not None else None
+            expected=_degenerate.expected_constants(protocol), ignore=unsteady) if seen is not None else None
         if seen is not None and flat is None:
             self.no_difference = seen.note()
             if self.log is not None:
@@ -1080,7 +1087,7 @@ class TrialsRunner:
                               "kept as an observed absence of difference, not a fault. %s", self.no_difference)
         elif seen is None:
             # Some results moved, but one setting may still have moved none of them (core/flat_output.py).
-            unchanged = _flat.unchanged_axes(run.cells, skip=numerical_axes(protocol))
+            unchanged = _flat.unchanged_axes(run.cells, skip=numerical_axes(protocol), ignore=unsteady)
             if unchanged:
                 self.no_difference = _flat.unchanged_axes_note(unchanged)
                 if self.log is not None:
@@ -1625,6 +1632,50 @@ def _same_value(a: Any, b: Any) -> bool:
     if math.isnan(a) or math.isnan(b):
         return math.isnan(a) and math.isnan(b)
     return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+
+
+async def unsteady_names(executor: Any, python: Path | str, quest_root: Path, module: Path | str, cells: list[Any], *,
+                         timeout_s: int, env: dict[str, str] | None = None,
+                         thresholds: dict[str, Any] | None = None, log: Any = None) -> set[str]:
+    """The names of the numbers ``run_cell`` returns that differ when FI calls the fastest setting of a study again, in a
+    new process (a timing, a draw from an unseeded source): they are no result of the setting, so they are left out when
+    FI judges whether a setting changed anything (:func:`core.flat_output.unchanged_axes`, ``observed_flat_sweep``).
+    Only for a study run once per setting with no seed (``cells`` are :class:`CellRun` objects whose trials carry none)
+    and no values compared inside a run; empty otherwise, or when the setting could not be called again (then every
+    number is compared, as before)."""
+    done: list[tuple[float, CellRun, dict[str, Any]]] = []
+    for c in cells:
+        if getattr(c, "levels", None) or getattr(c, "level", None):
+            return set()
+        for r in getattr(c, "rows", []) or []:
+            if r.get("seed") is not None:
+                return set()
+        row = next((r for r in getattr(c, "rows", []) or [] if r.get("status") == "ok"), None)
+        if row is not None:
+            seconds = row.get("duration_s")
+            done.append((float(seconds) if _scalar(seconds) else float("inf"), c, row))
+    if len(done) < 2:
+        return set()
+    done.sort(key=lambda item: item[0])
+    _seconds, cell, row = done[0]
+    try:
+        again, why = await run_case(executor, python, quest_root, module, cell=dict(cell.cell), timeout_s=timeout_s,
+                                    env=env, thresholds=thresholds, trial=0, log=log)
+    except Exception as e:  # noqa: BLE001 -- a check of the numbers; the study itself ran
+        again, why = None, f"{type(e).__name__}: {e}"
+    if again is None:
+        if log is not None:
+            log.info("[execute] FI could not call a setting again to see which numbers repeat (%s): every number is "
+                     "compared", str(why)[:200])
+        return set()
+    first = {str(n): v for _k, n, v in _in_run.flat("", row.get("values") or {})}
+    second = {str(n): v for _k, n, v in _in_run.flat("", again)}
+    changed = {n for n in first if n in second and _scalar(first[n]) and not _same_value(first[n], second[n])}
+    if changed and log is not None:
+        log.info("[execute] called again with the same setting, the simulation returned other values of %s: not a "
+                 "result of the setting, left out when FI judges whether a setting changed anything",
+                 ", ".join(sorted(changed)[:8]))
+    return changed
 
 
 async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,

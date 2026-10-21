@@ -704,7 +704,12 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         for cell in summary.get("cells") or []:
             cell["reason"] = reasons.get(cell.get("key"), "")
         rows = _search.scan_rows(summary, block)
-        unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol))
+        # A number that differs when the same setting is called again (a timing) is no result of any setting.
+        unsteady = await _trials.unsteady_names(
+            executor, python, quest_root, module, trial_run.cells,
+            timeout_s=max(1, math.ceil(deadline - time.monotonic())), env=env, thresholds=thresholds,
+            log=log) if entry == "run_cell" and deadline - time.monotonic() > 1 else set()
+        unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol), ignore=unsteady)
         if unchanged:
             scan_note.append(_flat.unchanged_axes_note(unchanged))
             if log is not None:

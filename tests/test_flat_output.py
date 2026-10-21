@@ -445,3 +445,50 @@ def test_a_setting_that_moves_only_the_numbers_per_value_inside_each_run_is_not_
                    {"constant": 1.5, "t_out": {"speed=1": 20.0 - f * (2.0 if c == "painted" else 1.0), "speed=2": 18.0}})
              for c in ("bare", "painted") for f in (1.0, 2.0, 3.0)]
     assert flat.unchanged_axes(cells) == []
+
+
+# --- a timing the simulation returns is no result of the setting -------------------------------------------------------
+#
+# A live study's coarse scan varied four settings over 60 cells and every number came back the same, except the
+# simulation's own run time: that one number made FI read every setting as one that changed a result, and the 60
+# identical cells went to the paper as a comparison. FI calls the fastest setting again: a number that differs between
+# two calls of the same setting is left out of the judgement.
+
+TIMED = "import time\n"
+
+
+def test_a_sweep_whose_only_moving_number_is_a_timing_names_the_setting_that_changed_nothing(tmp_path: Path) -> None:
+    root = _quest(tmp_path, TIMED + 'def run_cell(cell):\n    return {"t_out": 20.0 - cell["flow"], "drop": 0.0, '
+                                    '"wall_s": time.perf_counter()}\n')
+    (root / "code" / "experiment.py").write_text(SWEEP_ANALYSIS, encoding="utf-8")
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=root,
+        protocol={"grid": {"flow": [1.0, 2.0, 3.0], "coating": ["bare", "painted"]}}, deterministic=True,
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    result = asyncio.run(runner.execute(cmd, cwd=root, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert result.returncode == 0 and runner.flat is None
+    assert runner.no_difference and "`coating`" in runner.no_difference and "`flow`" not in runner.no_difference
+
+
+@pytest.mark.asyncio
+async def test_a_coarse_scan_whose_only_moving_number_is_a_timing_says_which_setting_changed_nothing(
+        tmp_path: Path) -> None:
+    sim = TIMED + WORKING_SIM.replace('"mass": cell["fin"]}', '"mass": cell["fin"], "wall_s": time.perf_counter()}')
+    root = _quest(tmp_path, sim)
+    protocol = {"optimisation": _block(fixed={"finish": "matte"},
+                                       grid={"fin": [1.0, 4.0], "finish": ["matte", "gloss"]})}
+    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
+                                         simulate=root / "code" / "simulate.py",
+                                         analysis=root / "code" / "experiment.py")
+    result = await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert runner.no_difference and "`finish`" in runner.no_difference and "`fin`" not in runner.no_difference
+
+
+def test_a_number_left_out_is_never_compared_and_the_others_still_are() -> None:
+    cells = [_cell({"flow": f, "coating": c}, {"t_out": 20.0 - f, "wall_s": 0.1 * f + (0.01 if c == "painted" else 0.0)})
+             for f in (1.0, 2.0) for c in ("bare", "painted")]
+    assert flat.unchanged_axes(cells) == [], "the timing moves with the coating"
+    assert flat.unchanged_axes(cells, ignore={"wall_s"}) == [("coating", 2)]
+    assert flat.unchanged_axes(cells, ignore={"t_out", "wall_s"}) == [], "nothing left to compare"

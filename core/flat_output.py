@@ -181,13 +181,15 @@ class Observed:
                 "no effect elsewhere, so it must not be written up as proof of none.")
 
 
-def observed_flat_sweep(cells: list[Any]) -> Observed | None:
+def observed_flat_sweep(cells: list[Any], *, ignore: Iterable[str] = ()) -> Observed | None:
     """The observation behind :func:`flat_sweep`: ``cells`` are :class:`core.trial_runner.CellRun` objects (``cell`` and
     ``rows``, each row with ``status`` and ``values``). ``None`` for a study with one setting, one that varies nothing, or
     one in which some quantity does change from one setting to the next (or whose numbers cannot be told apart by their
     size). A run that compared values inside it (:mod:`core.in_run`) holds numbers per run and numbers per value: the first
     are judged over the settings, the others over the settings and values (a cell with a truthy ``level`` is a value's own
-    record), each over the cells that hold them, and the observation is made only when every one of them holds."""
+    record), each over the cells that hold them, and the observation is made only when every one of them holds.
+    ``ignore``: names of numbers that are no result of the setting (:func:`core.trial_runner.unsteady_names`)."""
+    left_out = {str(n) for n in ignore}
     run: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
     value: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
     for c in cells:
@@ -200,11 +202,11 @@ def observed_flat_sweep(cells: list[Any]) -> Observed | None:
         for r in ok:
             per_run, by_level = _in_run.split(r.get("values") or {})
             for name, v in per_run.items():
-                if _is_number(v):
+                if _is_number(v) and str(name) not in left_out:
                     own.setdefault(str(name), []).append(float(v))
             for lk, named in by_level.items():
                 for name, v in named.items():
-                    if _is_number(v):
+                    if _is_number(v) and str(name) not in left_out:
                         per_level.setdefault(lk, {}).setdefault(str(name), []).append(float(v))
         if own or getattr(c, "level", None) or not per_level:
             # a run that gives numbers per value only has nothing per run to judge over the settings
@@ -250,7 +252,7 @@ def _observed_in(by_cell: list[tuple[dict[str, Any], dict[str, list[float]]]]) -
 MIN_PAIRS = 2
 
 
-def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = ()) -> list[tuple[str, int]]:
+def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = (), ignore: Iterable[str] = ()) -> list[tuple[str, int]]:
     """The settings of a study that changed no number the simulation returned, with how many pairs showed it:
     ``[(axis, pairs)]``. ``cells`` are :class:`core.trial_runner.CellRun` objects. For each varied axis, the pairs are
     the settings that differ in that axis alone; the axis is listed when there are at least :data:`MIN_PAIRS` of them and
@@ -259,7 +261,9 @@ def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = ()) -> list[tuple[
     itself looks like (the axis then repeats one run); either way a difference between the settings of that axis is not
     a result of it. ``skip``: axes left out (numerical settings, which the check at finer settings judges). Each
     value's numbers a run returns (``in_each_run``) are compared with its plain ones, under the value's name. A value's
-    own record of the per-setting summary (``level``) is not a setting of the study."""
+    own record of the per-setting summary (``level``) is not a setting of the study. ``ignore``: names of numbers that
+    are no result of the setting (a timing: :func:`core.trial_runner.unsteady_names`), never compared."""
+    left_out = {str(n) for n in ignore}
     rows: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
     for c in cells:
         if getattr(c, "level", None):
@@ -268,7 +272,7 @@ def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = ()) -> list[tuple[
         values: dict[str, list[float]] = {}
         for r in ok:
             for at, name, v in _in_run.flat("", r.get("values") or {}):
-                if _is_number(v):
+                if _is_number(v) and str(name) not in left_out:
                     values.setdefault(f"{at}: {name}" if at else str(name), []).append(float(v))
         if values:
             rows.append((dict(getattr(c, "cell", {}) or {}), values))
@@ -354,13 +358,14 @@ def unchanged_axes_note(axes: list[tuple[str, int]]) -> str:
 
 
 def flat_sweep(cells: list[Any], *, source: str | None = None,
-               expected: set[str] | frozenset[str] = frozenset()) -> str | None:
+               expected: set[str] | frozenset[str] = frozenset(), ignore: Iterable[str] = ()) -> str | None:
     """The plain description of a measurement whose every returned number is the same in every setting AND whose simulation
     does not read the setting that was varied (evidence from its code, :func:`unread_settings`), else ``None``. Only that
     pair is a fault the simulation must be repaired for. Without ``source`` (or when the code does read the settings, or
     cannot be read with certainty) the same numbers are an observation, not a fault: :func:`observed_flat_sweep` has it.
-    ``expected``: names the plan itself expects to stay put (an invariant, a symmetry): they are never a fault."""
-    seen = observed_flat_sweep(cells)
+    ``expected``: names the plan itself expects to stay put (an invariant, a symmetry): they are never a fault.
+    ``ignore``: as :func:`observed_flat_sweep`."""
+    seen = observed_flat_sweep(cells, ignore=ignore)
     if seen is None:
         return None
     names = [n for n in seen.names if n not in expected]
