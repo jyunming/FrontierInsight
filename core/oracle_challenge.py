@@ -22,7 +22,9 @@ plan's own working: it never counts as validation against a published value (:mo
 
 from __future__ import annotations
 
+import ast
 import json
+import math
 import re
 from typing import Any
 
@@ -355,3 +357,67 @@ def settle_numeric(oracle: dict[str, Any], challenge: dict[str, Any], verdict: d
                          f"the plan's {_oracle.fmt_digits(plan_now) if plan_now is not None else 'value'}: the plan's "
                          "working and the code were both wrong")}
     return {**before, "text": before["text"] + f"; {said}, which agrees with none of them"}
+
+
+# --- the referee FI asks itself: a check the plan worked out still fails after the repairs, and nothing objected ------
+
+#: Where FI keeps each referee's number (in ``.fi/oracle_triage.json``), keyed by the check's version.
+REFEREE_KEY = "referee"
+
+
+def settle_referee(oracle: dict[str, Any], measured: float | None, plan_value: float | None, numeric: float | None,
+                   how: str) -> dict[str, Any]:
+    """A failing check whose expected value is the plan's own working (``plan_value``), decided by the number computed
+    numerically from the definitions (``numeric``), never shown the plan's working or the measurement:
+    ``{"outcome", "expected"?, "by", "text"}``.
+
+    - it agrees with the simulation and not with the plan: ``corrected`` to the numerical value (two workings
+      independent of each other, the simulation and the script, agree on it; never to the measured value itself);
+    - it agrees with the plan and not with the simulation: ``code`` (the code is repaired, told the value, when a repair
+      is left);
+    - it agrees with both, with neither, or gave no value: ``unsettled``, the number said."""
+    name = str(oracle.get("name") or "").strip()
+    if numeric is None:
+        return {"outcome": "unsettled", "by": "", "text": (
+            f"the check '{name}' still fails and the numerical computation from the definitions gave no value ({how})")}
+    said = f"an independent numerical computation from the definitions gives {_oracle.fmt_digits(numeric)} ({how})"
+    with_code, with_plan = _within(oracle, numeric, measured), _within(oracle, numeric, plan_value)
+    if with_code and not with_plan:
+        return {"outcome": "corrected", "expected": numeric, "by": "a numerical computation",
+                "text": f"{said}, as the simulation does and not the plan's working "
+                        f"{_oracle.fmt_digits(plan_value)}: the plan's working was wrong"}
+    if with_plan and not with_code:
+        return {"outcome": "code", "by": "a numerical computation",
+                "text": f"{said}, as the plan's working does: the code is wrong"}
+    return {"outcome": "unsettled", "by": "", "text": (
+        f"the check '{name}' still fails and {said}, which "
+        + ("agrees with both the simulation and the plan's working within the check's tolerance" if with_code
+           else "agrees with neither the simulation nor the plan's working"))}
+
+
+def plan_working(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> float | None:
+    """The check's expected value when it is the plan's own working: its ``expected_formula``, computed by FI with the
+    check's case and the plan's fixed settings, gives the ``expected`` the check uses (one reading only). ``None`` for a
+    number the plan typed or took from elsewhere (a measured fact is never corrected by a computation from the model's
+    own definitions). Looser than :func:`core.oracle_triage.formula_value`, which also asks every name to be the case's:
+    the referee only needs to know the number is a working, since it never trusts it."""
+    from . import oracle_triage as _triage
+
+    sure = _triage.formula_value(oracle, protocol)
+    if sure is not None:
+        return sure
+    expected, limit, _mode = _oracle.limit_of(oracle)
+    if expected is None or limit is None or not _triage.correctable(oracle):
+        return None
+    try:
+        value, _why, unset, used = _forms._formula_result(oracle, _forms.fixed_settings(protocol))
+        text = used or str(oracle.get("expected_formula") or "")
+        if (value is None or unset or not math.isfinite(value) or _triage.ambiguous(text)
+                or _triage._degrees_unconverted(text) or _forms.disagrees(value, expected, limit)):
+            return None
+        tree, _ = _forms._tree(text, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
+        if tree is None or not any(isinstance(n, (ast.BinOp, ast.Call, ast.Name)) for n in ast.walk(tree)):
+            return None
+    except Exception:  # noqa: BLE001 -- a formula FI cannot compute decides nothing
+        return None
+    return value

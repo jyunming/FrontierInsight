@@ -13956,6 +13956,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._oracle_challenges: dict[str, dict[str, Any]] = {}
         self._oracle_measured: dict[str, float] = {}
         self._oracle_challenge_hints: dict[str, str] = {}
+        # The failing checks FI asked the numerical referee about itself (:meth:`_referee_failing_checks`), once each.
+        self._oracle_refereed: set[str] = set()
         # A dispute outlives a stop: the checks the last run of this gate found disputed, while they are as they were then
         # (a person who changed one, or accepted its proposal, starts it afresh).
         self._restore_oracle_disputes(_oracle.declared(protocol))
@@ -14143,6 +14145,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             aside = [n for n in self._oracle_set_aside if n not in disputed]
             to_fix = _oracle.undisputed(found, disputed + aside)
             judged_now = attempts[-1]["judged"]
+            if ((not to_fix or repairs_left == 0)
+                    and await self._referee_failing_checks(state, oracles, judged_now, protocol, attempts[-1])):
+                # Before FI goes on with a check the plan worked out still failing, the number computed from the
+                # definitions decides which side is wrong: a corrected check is measured again, a wrong code repaired.
+                corrected = self._correct_expected_values(judged_now, oracles)
+                for n in [n for n, p in self._oracle_proposals.items() if p.get("source") == "numeric"]:
+                    self._oracle_proposals.pop(n, None)  # a correction that could not be made is not left as a proposal
+                if corrected:
+                    looked.difference_update(corrected)
+                    attempts[-1]["corrected"] = corrected
+                    continue
+                disputed = [n for n in self._oracle_proposals if n in self._oracle_disputed]
+                aside = [n for n in self._oracle_set_aside if n not in disputed]
+                to_fix = _oracle.undisputed(found, disputed + aside)
             if not to_fix:
                 self._log.warning(
                     "[oracle] the script is kept as it is: %s; FI corrects the check only where two independent workings agree, or "
@@ -14486,6 +14502,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         ``=``, a function with a peak inside the range of its rounded constants), and one model alone can be wrong: on
         either alone the check is only set aside and goes on unconfirmed, which can lower a result, never raise one."""
         confirm = proposal.get("confirmed_by")
+        if proposal.get("source") == "numeric":
+            # The simulation's measurement and a script that computed the number from the definitions alone, never
+            # shown the plan's working or the measurement (:meth:`_referee_failing_checks`).
+            return (isinstance(confirm, dict) and confirm.get("source") == "numeric"
+                    and _oracle_triage.num(confirm.get("value")) is not None)
         if proposal.get("source") == "challenge":
             # The code's formula, computed by FI, and the plan's corrected formula or the judge's, computed by FI too.
             return (isinstance(confirm, dict) and confirm.get("source") == "challenge"
@@ -14498,6 +14519,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """The correction worked out again against the check as it is NOW (never trusting stored fields alone): the
         plan's current derivation still has the slip and gives the proposed value, and the second source's value lies
         within the check's own tolerance of it."""
+        if proposal.get("source") == "numeric":
+            # No formula to work out again: the number is the script's, kept for the check as it was when it ran.
+            confirm = proposal.get("confirmed_by") or {}
+            value = _oracle_triage.num(proposal.get("expected"))
+            return (value is not None and value == _oracle_triage.num(confirm.get("value"))
+                    and confirm.get("fingerprint") == _oracle_triage.fingerprint(oracle))
         if proposal.get("source") == "challenge":
             confirm = proposal.get("confirmed_by") or {}
             value = _oracle_triage.num(proposal.get("expected"))
@@ -14573,6 +14600,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         # A challenge settled it with a working FI computed: the plan's formula is that working now, so
                         # the plan never shows a value and a formula that disagree (nor recomputes the old value back).
                         row["expected_formula"] = str(todo[name]["expected_formula"]).strip()
+                    elif todo[name].get("source") == "numeric" and "expected_formula" in row:
+                        # The plan's working was found wrong and nothing replaces it: it is taken out, so the plan never
+                        # shows a value and a formula that disagree. What it was stays in the plan's history.
+                        row.pop("expected_formula", None)
                     # The plan keeps saying why the number is what it is: what FI changed, after the derivation.
                     note = (f"(FI corrected the expected value from {before[name]} to "
                             f"{_oracle.fmt_digits(todo[name]['expected'])}: {str(todo[name].get('reason') or '')[:200]})")
@@ -14628,6 +14659,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                               n, before[n], _oracle.fmt_digits(todo[n]["expected"]), why[n])
             second = todo[n].get("confirmed_by") or {}
             also = ("" if second.get("source") == "challenge" else
+                    " A script that computed it from the definitions alone, never shown the plan's working or the "
+                    "measured value, gave it." if second.get("source") == "numeric" else
                     f" Another model ({second.get('model') or 'not the one that wrote the plan'}), never shown the "
                     f"measured value, got {_oracle.fmt_digits(second.get('value'))} too.")
             print(f"[FI] FI corrected an expected value the plan had worked out wrongly: '{n}' {before[n]} -> "
@@ -15655,6 +15688,67 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "plan": answer, **({"judge": verdict} if verdict is not None else {})})
         if changed:
             _oracle_triage.write(self.fi_dir, {**_oracle_triage.read(self.fi_dir), _oracle_challenge.RECORD_KEY: record})
+
+    async def _referee_failing_checks(self, state: QuestState, oracles: list[dict[str, Any]],
+                                      judged: list[dict[str, Any]], protocol: Any, attempt: dict[str, Any]) -> bool:
+        """Each check still failing when FI is about to go on (no repair left, or none to spend) whose expected value is
+        the plan's own working and that nothing has objected to yet: the number computed numerically from the definitions
+        (:meth:`_numeric_reference`) decides which side is wrong (core/oracle_challenge.py::settle_referee). Once per check
+        per run; each number kept in ``.fi/oracle_triage.json`` by the check's version, so a resume never asks again. A
+        correction is only proposed here (``source`` ``numeric``) and made by :meth:`_correct_expected_values`, never once
+        the protocol is frozen. Returns whether anything was proposed or a repair was told what to fix."""
+        declared = {str(o.get("name") or "").strip(): o for o in oracles}
+        kept = _oracle_triage.read(self.fi_dir)
+        key = _oracle_challenge.REFEREE_KEY
+        record = kept.get(key) if isinstance(kept.get(key), dict) else {}
+        frozen = _frozen.load(self.quest_root) is not None
+        done = self._corrections_read()
+        acted = changed = False
+        for j in judged:
+            name = str(j.get("name") or "").strip()
+            measured = _oracle_triage.num(j.get("value"))
+            oracle = declared.get(name)
+            if (j.get("passed_by_engine") is not False or measured is None or oracle is None or name in done
+                    or name in self._oracle_challenges or name in self._oracle_refereed or name in self._oracle_noisy
+                    or name in self._oracle_undecided):
+                continue
+            plan_value = _oracle_challenge.plan_working(oracle, protocol if isinstance(protocol, dict) else None)
+            if plan_value is None:
+                continue  # a number the plan typed, not worked out: nothing says which side to doubt
+            self._oracle_refereed.add(name)
+            fp = _oracle_triage.fingerprint(oracle)
+            numeric = record.get(fp) if isinstance(record.get(fp), dict) else None
+            if numeric is None:
+                numeric = await self._numeric_reference(state, oracle)
+                if numeric.get("value") is not None:  # a script that gave no value is tried again on resume
+                    record[fp] = {"name": name, **numeric}
+                    changed = True
+            result = _oracle_challenge.settle_referee(oracle, measured, plan_value, numeric.get("value"),
+                                                      str(numeric.get("how") or ""))
+            if result["outcome"] == "corrected" and frozen:
+                result = {"outcome": "unsettled", "by": "", "text": result["text"] + "; the protocol is frozen, so FI "
+                          "does not correct the check: it goes on unconfirmed"}
+            if result["outcome"] == "corrected":
+                self._oracle_proposals[name] = {
+                    "name": name, "source": "numeric", "expected": result["expected"], "reason": result["text"],
+                    "confirmed_by": {"source": "numeric", "by": result["by"], "value": result["expected"],
+                                     "model": numeric.get("model"), "script": numeric.get("script"), "fingerprint": fp}}
+                acted = True
+            elif result["outcome"] == "code":
+                self._oracle_disputed.discard(name)
+                self._oracle_proposals.pop(name, None)
+                self._oracle_set_aside.pop(name, None)
+                self._oracle_challenge_hints[name] = result["text"]
+                acted = True
+            self._log.warning("[oracle] '%s': %s", name, result["text"])
+            attempt.setdefault("triage", []).append({
+                "kind": "referee", "check": name, "outcome": result["outcome"], "tried": result["text"],
+                **({"points_to": "check"} if result["outcome"] == "corrected" else
+                   {"points_to": "script"} if result["outcome"] == "code" else {}),
+                "numeric": {k: numeric.get(k) for k in ("value", "how", "model", "script") if k in numeric}})
+        if changed:
+            _oracle_triage.write(self.fi_dir, {**_oracle_triage.read(self.fi_dir), key: record})
+        return acted
 
     async def _numeric_reference(self, state: QuestState, oracle: dict[str, Any]) -> dict[str, Any]:
         """The check's number computed numerically from the definitions by a short script the model named for
