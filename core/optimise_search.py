@@ -597,7 +597,9 @@ class _Search:
             self.cache[key] = judged
             self.any_ok = self.any_ok or judged["status"] == "ok"
             self._row(design, judged, "scan", None, item.get("elapsed_s"), counted=False)
-            self._watch_objective(design, key, judged, "scan")
+            self._watch_objective(design, key, judged, "scan", stop=False)
+        # Decided on the whole scan, every setting recorded first: one that gives another value ends the watch.
+        self._flat_stop()
 
     # one evaluation
 
@@ -719,10 +721,11 @@ class _Search:
             self.results = []  # the watch has fired: a design evaluated after the stop (the best one's report) is not watched
             raise _Stop()
 
-    def _watch_objective(self, design, key, judged, stage):
+    def _watch_objective(self, design, key, judged, stage, stop=True):
         """Stop the search (``flat_objective``) once enough designs sampled across the space (the coarse scan's and the
         global stage's), moving every number of the design between them, gave the baseline's value of the objective and
-        met the limits as it did. A design that gives another value, meets them differently or fails ends the watch."""
+        met the limits as it did. A design that gives another value, meets them differently or fails ends the watch.
+        ``stop=False`` only counts the design (the coarse scan's, decided once all of it is recorded: :meth:`_flat_stop`)."""
         if not self.flat_watch or self.stopped is not None:
             return
         if judged["status"] != "ok" or not _number(judged.get("objective")):
@@ -741,7 +744,12 @@ class _Search:
         here, base = self.space.flat(design), self.space.flat(self.baseline)
         self.flat_unmoved -= {k for k in self.flat_unmoved if not _same_result(here[k], base[k])}
         self.flat_designs += 1
-        if self.flat_designs >= NO_EFFECT_DESIGNS and not self.flat_unmoved:
+        if stop:
+            self._flat_stop()
+
+    def _flat_stop(self):
+        """Stop the search (``flat_objective``) when the watch still holds over enough designs moving every number."""
+        if self.flat_watch and self.stopped is None and self.flat_designs >= NO_EFFECT_DESIGNS and not self.flat_unmoved:
             self.flat_objective = {"designs": self.flat_designs, "objective": self.base_objective}
             self.stopped = "flat_objective"
             self.flat_watch = False

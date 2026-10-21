@@ -135,3 +135,17 @@ def test_the_paper_and_the_budget_check_name_the_flat_objective_in_words() -> No
     assert "all gave the baseline's objective" in best_design_report._STOPPED["flat_objective"]
     import inspect
     assert inspect.getsource(optimum_check).count("all gave the baseline's objective") == 1, "the budget check's words"
+
+
+def test_a_flat_scan_is_decided_on_all_its_settings_never_cut_short() -> None:
+    """The 64th setting of the scan is better: every setting is recorded before the stop is decided, and that one ends
+    the watch, so the better design is found, not lost behind an early stop."""
+    values = [0.0, 0.8, 1.6, 2.4, 3.2, 4.0, 4.8, 5.6]
+
+    def last_better(cell: dict[str, Any]) -> dict[str, Any]:
+        return {"peak": -9.0 if cell["fin"] == 5.6 and cell["gap"] == 5.6 else 0.0, "mass": cell["fin"]}
+
+    block = _block(grid={"fin": values, "gap": values})
+    outcome = _drive_with_scan(block, last_better, [{"fin": f, "gap": g} for f in values for g in values])
+    assert outcome["stopped_because"] != "flat_objective" and "flat_objective" not in outcome
+    assert outcome["best"]["objective"] == -9.0
