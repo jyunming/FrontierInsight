@@ -15615,7 +15615,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 numeric = record[key].get("numeric") if isinstance(record.get(key), dict) else None
                 if not isinstance(numeric, dict):
                     numeric = await self._numeric_reference(state, oracle)
-                    if key in record and not numeric.get("error"):
+                    if key in record and numeric.get("value") is not None:  # a script that gave no value is tried again
                         record[key] = {**record[key], "numeric": numeric}
                         changed = True
                 result = _oracle_challenge.settle_numeric(oracle, challenge, verdict, numeric.get("value"),

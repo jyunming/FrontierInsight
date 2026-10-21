@@ -71,8 +71,8 @@ def _same_formula(a: Any, b: Any) -> bool:
 def computes(oracle: dict[str, Any], formula: Any, measured: float | None = None) -> float | None:
     """What ``formula`` gives on the check's own case, computed by FI, or ``None`` when FI cannot read it surely (a
     number restated, a name its case does not set, more than one reading). With ``measured`` (a formula written by a
-    side that saw the measurement): a formula made of numbers alone, or one that writes the measured value as a number,
-    is the measurement restated, not a working."""
+    side that saw the measurement): a formula whose value does not depend on the check's case is the measurement
+    restated, not a working (:func:`_depends_on_case`)."""
     from . import oracle_triage as _triage
 
     if not isinstance(formula, str) or not formula.strip():
@@ -92,14 +92,26 @@ def computes(oracle: dict[str, Any], formula: Any, measured: float | None = None
     tree, _ = _forms._tree(text, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
     if tree is None or not any(isinstance(n, (ast.BinOp, ast.Call, ast.Name)) for n in ast.walk(tree)):
         return None  # a number restated is not a working
-    if measured is not None:
-        called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} - called
-        numbers = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, (int, float))
-                   and not isinstance(n.value, bool)]
-        if not names or any(_near_measured(float(x), measured) for x in numbers):
-            return None
+    if measured is not None and not _depends_on_case(oracle, formula, float(value)):
+        return None  # the same number whatever the case: the measurement written as a formula, not a working
     return float(value)
+
+
+def _depends_on_case(oracle: dict[str, Any], formula: str, value: float) -> bool:
+    """Whether ``formula`` gives another value when every number of the check's case is moved by a tenth: a working
+    from the case's settings does, a number restated in any form (``0.5 * 1``, ``n*0 + 1/2``) does not."""
+    case = oracle.get("case") if isinstance(oracle.get("case"), dict) else {}
+    moved = {k: (v * 1.1 if v else 0.1) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+             for k, v in case.items()}
+    if moved == case:
+        return False
+    try:
+        again, _why, _unset, _used = _forms._formula_result({**oracle, "case": moved, "expected_formula": formula}, None)
+    except Exception:  # noqa: BLE001 -- a formula that cannot be computed at the moved case does change with it
+        return True
+    if again is None:
+        return True
+    return abs(float(again) - value) > 1e-9 * max(abs(value), 1e-12)
 
 
 def _within(oracle: dict[str, Any], a: float | None, b: float | None) -> bool:
@@ -292,7 +304,8 @@ def numeric_script(reply: Any) -> tuple[str, str]:
     script = (blocks[0] if blocks else "").strip()
     if not script:
         return "", "the reply held no Python script"
-    bad = next((f for f in _FORBIDDEN if f in script), None)
+    bad = next((f for f in _FORBIDDEN if re.search(r"(?<![\w.])" + re.escape(f) + (r"(?!\w)" if f[-1].isalnum() else ""),
+                                                   script)), None)
     if bad:
         return "", f"the script uses `{bad}`: it must compute the number from the definitions alone"
     return script + "\n", ""

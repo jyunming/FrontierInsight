@@ -235,3 +235,11 @@ def test_a_concession_or_a_verdict_that_copies_the_codes_formula_settles_nothing
     judge = ch.parse_judge({"side": "code", "expected_formula": " n / 8 ", "why": "the code is right"})
     result = ch.settle(_CHECK, question, stand, judge)
     assert result["outcome"] == "unsettled" and "copied" in result["text"]
+
+
+def test_a_restated_number_is_found_by_whether_it_moves_with_the_case_not_by_its_digits() -> None:
+    for restated in ("n*0 + 1/2", "pi*0 + 0.5", "n/n*0.5"):
+        assert ch.computes(_CHECK, restated, measured=0.5) is None, restated
+    # a working whose numbers happen to be near the measured value is still a working
+    assert ch.computes(_CHECK, "1 - exp(-n*2)", measured=0.9997) is not None
+    assert ch.numeric_script("```python\nglobal_x = 1\nprint(global_x)\n```")[0], "a name that holds a forbidden word"
