@@ -377,3 +377,21 @@ def test_a_ratio_of_the_case_s_settings_is_a_working_and_not_a_number_restated()
     ratio = {**ORACLE, "expected": 0.5, "tolerance": 0.01, "case": {"a": 2, "b": 4}}
     assert ch.computes(ratio, "a / b", measured=0.5) == pytest.approx(0.5), "moved alike, a ratio would not move"
     assert ch.computes(ratio, "a * 0 + 0.5", measured=0.5) is None
+
+
+def test_a_working_from_the_plan_s_own_constants_is_a_working_even_when_the_case_does_not_enter_it() -> None:
+    """A real repair disputed a check whose answer does not depend on the case's one setting: it gave the plan's own
+    wavelength over its own aperture, written as numbers, and FI took it for the measurement restated. A number that is
+    one of the plan's stated values is that value; a number no setting or constant gives is still refused."""
+    check = {"name": "first_ring", "kind": "special_case", "expected": 900.0, "expected_formula": "0.61*500/(0.2*1.2)",
+             "tolerance": 50, "tolerance_mode": "absolute", "case": {"spread": 0.2}, "measure": "ring_nm"}
+    constants = {"wavelength_nm": 500.0, "aperture": 1.2, "steps": 40}
+    step = "the first ring is set by the lens, not by the spread of the light"
+    ask = {"name": "first_ring", "disputed_step": step, "expected": 416.7}
+    taken, _why = ch.challenge_of(check, {**ask, "expected_formula": "500/1.2"}, 420.0, constants=constants)
+    assert taken is not None and abs(taken["value"] - 500 / 1.2) < 1e-9
+    for restated in ("416.7", "420.0*1", "416.7*1.0"):
+        refused, why = ch.challenge_of(check, {**ask, "expected_formula": restated}, 420.0, constants=constants)
+        assert refused is None and "stated values" in why, restated
+    without, _ = ch.challenge_of(check, {**ask, "expected_formula": "500/1.2"}, 420.0)
+    assert without is None, "with no constants given, nothing changed"

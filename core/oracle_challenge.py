@@ -70,11 +70,13 @@ def _same_formula(a: Any, b: Any) -> bool:
     return bool(a) and "".join(str(a).split()).lower() == "".join(str(b or "").split()).lower()
 
 
-def computes(oracle: dict[str, Any], formula: Any, measured: float | None = None) -> float | None:
+def computes(oracle: dict[str, Any], formula: Any, measured: float | None = None,
+             constants: dict[str, float] | None = None) -> float | None:
     """What ``formula`` gives on the check's own case, computed by FI, or ``None`` when FI cannot read it surely (a
     number restated, a name its case does not set, more than one reading). With ``measured`` (a formula written by a
     side that saw the measurement): a formula whose value does not depend on the check's case is the measurement
-    restated, not a working (:func:`_depends_on_case`)."""
+    restated, not a working (:func:`_depends_on_case`; ``constants``: the plan's own stated values, which a working may
+    use as written numbers)."""
     from . import oracle_triage as _triage
 
     if not isinstance(formula, str) or not formula.strip():
@@ -94,7 +96,7 @@ def computes(oracle: dict[str, Any], formula: Any, measured: float | None = None
     tree, _ = _forms._tree(text, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
     if tree is None or not any(isinstance(n, (ast.BinOp, ast.Call, ast.Name)) for n in ast.walk(tree)):
         return None  # a number restated is not a working
-    if measured is not None and not _depends_on_case(oracle, formula, float(value)):
+    if measured is not None and not _depends_on_case(oracle, formula, float(value), constants):
         return None  # the same number whatever the case: the measurement written as a formula, not a working
     return float(value)
 
@@ -111,11 +113,26 @@ def _moved(values: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _depends_on_case(oracle: dict[str, Any], formula: str, value: float) -> bool:
+def _depends_on_case(oracle: dict[str, Any], formula: str, value: float,
+                     constants: dict[str, float] | None = None) -> bool:
     """Whether ``formula`` gives another value when every number of the check's case is moved by a tenth: a working
-    from the case's settings does, a number restated in any form (``0.5 * 1``, ``n*0 + 1/2``) does not."""
+    from the case's settings does, a number restated in any form (``0.5 * 1``, ``n*0 + 1/2``) does not. A number written
+    in the formula that is one of the plan's own stated values (``constants``: a wavelength, an aperture) is that value,
+    moved too: ``193.368/1.35`` written for wavelength over aperture is a working from the plan, which a quantity that
+    does not depend on the case's own settings is worked out from; a number no setting or constant gives is not."""
     case = oracle.get("case") if isinstance(oracle.get("case"), dict) else {}
     moved = _moved(case)
+    stated = [float(v) for v in (constants or {}).values()
+              if isinstance(v, (int, float)) and not isinstance(v, bool) and not _small_whole(float(v))]
+    if stated:
+        shifted = _NUMBER_RE.sub(lambda m: _shift_stated(m.group(0), stated), formula)
+        if shifted != formula:
+            try:
+                again, _w, _u, _used = _forms._formula_result({**oracle, "expected_formula": shifted}, None)
+            except Exception:  # noqa: BLE001 -- not computable moved: judged on the case below
+                again = None
+            if again is not None and abs(float(again) - value) > 1e-9 * max(abs(value), 1e-12):
+                return True
     if moved == case:
         return False
     try:
@@ -127,6 +144,28 @@ def _depends_on_case(oracle: dict[str, Any], formula: str, value: float) -> bool
     return abs(float(again) - value) > 1e-9 * max(abs(value), 1e-12)
 
 
+def _small_whole(number: float) -> bool:
+    return number.is_integer() and abs(number) <= 10
+
+
+def _shift_stated(text: str, stated: list[float]) -> str:
+    """``text`` (one number of a formula) moved by a tenth when it is one of the plan's stated values (to the digits
+    written), else as written. A small whole number is never taken for a stated value (a 2 in ``2*pi`` is not a
+    setting)."""
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if _small_whole(number):
+        return text
+    digits = len(text.lstrip("+-").replace(".", "").lstrip("0").split("e")[0].split("E")[0])
+    factors = (1.1, 1.3, 1.7, 2.3, 2.9, 3.7, 4.3, 5.3, 6.1, 7.1)  # one of its own each: a ratio of two moves too
+    for i, value in enumerate(stated):
+        if math.isclose(number, value, rel_tol=0.5 * 10 ** (1 - max(digits, 1)), abs_tol=0.0):
+            return repr(number * (factors[i % len(factors)] + 0.01 * (i // len(factors))))
+    return text
+
+
 def _within(oracle: dict[str, Any], a: float | None, b: float | None) -> bool:
     """Whether two values lie within the check's own tolerance of each other (never widened)."""
     if a is None or b is None:
@@ -135,8 +174,8 @@ def _within(oracle: dict[str, Any], a: float | None, b: float | None) -> bool:
     return limit is not None and abs(a - b) <= limit
 
 
-def challenge_of(oracle: dict[str, Any], proposal: dict[str, Any],
-                 measured: float | None = None) -> tuple[dict[str, Any] | None, str]:
+def challenge_of(oracle: dict[str, Any], proposal: dict[str, Any], measured: float | None = None,
+                 constants: dict[str, float] | None = None) -> tuple[dict[str, Any] | None, str]:
     """The repair's question to the plan, as FI takes it: ``({step, formula, value, reason, measured}, "")``, or
     ``(None, why)`` when it cannot be taken (no step named, no formula FI computes, a formula that restates the measured
     value, or one that does not give the value claimed). ``measured``: what the simulation measured on the check's case;
@@ -146,10 +185,10 @@ def challenge_of(oracle: dict[str, Any], proposal: dict[str, Any],
     if not step or not formula:
         return None, ("it does not name the step of the plan's working it disputes and give the expected value as a "
                       "formula (`disputed_step`, `expected_formula`)")
-    value = computes(oracle, formula, measured)
+    value = computes(oracle, formula, measured, constants)
     if value is None:
         return None, (f"FI cannot compute its formula ({formula[:120]}) on the check's case as a working: it must use the "
-                      "case's settings and may not write the measured value as a number")
+                      "case's settings or the plan's stated values and may not write the measured value as a number")
     claimed = proposal.get("expected")
     if isinstance(claimed, (int, float)) and not isinstance(claimed, bool) and not _within(oracle, value, float(claimed)):
         return None, (f"its formula gives {_oracle.fmt_digits(value)}, not the {_oracle.fmt_digits(claimed)} it claims")

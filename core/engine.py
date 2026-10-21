@@ -16904,7 +16904,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # repair may question it -- naming the step and giving a formula FI computes -- and the plan's model must
                 # answer (core/oracle_challenge.py); the repair's code is not used either way.
                 fi_value_disputed = True
-                challenge, why_not = _oracle_challenge.challenge_of(own, proposal, self._oracle_measured.get(proposal["name"]))
+                challenge, why_not = _oracle_challenge.challenge_of(
+                    own, proposal, self._oracle_measured.get(proposal["name"]),
+                    constants=_forms.fixed_settings(protocol_now if isinstance(protocol_now, dict) else None))
                 if challenge is None or proposal["name"] in self._oracle_challenges:
                     self._log.warning("[oracle] the repair proposes expected %s for '%s', whose expected value FI computed "
                                       "from the plan's own formula; the proposal is not taken (%s)", proposal["expected"],
