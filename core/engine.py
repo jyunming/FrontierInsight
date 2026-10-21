@@ -27751,6 +27751,7 @@ A search for the best design has NO top-level `grid`: its protocol has an `optim
 
 Rules for the block:
 - There is ONE objective. A second goal is written as a constraint: the lightest truss whose stress stays under 250 MPa minimises mass with the constraint stress <= 250.
+- When the objective is built from parts (the worst of several cases, a sum of terms), the simulation returns each part as a result of its own too, so a part that never moves can be seen.
 - Each design variable's range has a physical meaning and lies where the model holds (`model.holds_for`).
 - A design that is a set of numbers (the pixels of a source, a profile) is ONE design variable with a `shape` (a list of 1 to 3 whole numbers, at most 1024 elements in all), `kind` `continuous` or `integer`, and `low` / `high` as one number for every element or a list of that shape; its baseline value is a list of that shape. The search changes every element. Never write a list for `low`, `high` or a baseline value without the `shape`, and never put an array under `grid` (the grid scans single numbers).
 - The baseline is a real, feasible design (it meets every constraint): it gives a value for every design variable, inside its range, and says where it comes from. Make one oracle check the baseline design.

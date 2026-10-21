@@ -203,3 +203,9 @@ async def test_the_rewritten_plan_is_still_held_to_the_topic(tmp_path: Path, mon
     assert patch["design"]["protocol"]["optimisation"]["design_variables"][0]["high"] == 9.0
     assert frozen_protocol.load(eng.quest_root)["protocol"]["optimisation"]["design_variables"][0]["high"] == 9.0, \
         "the protocol FI approves is the one held to the topic"
+
+
+def test_the_plan_asks_for_the_parts_of_an_objective() -> None:
+    from core.engine import _STUDY_TYPE_DIRECTIVE
+
+    assert "returns each part as a result of its own" in _STUDY_TYPE_DIRECTIVE
