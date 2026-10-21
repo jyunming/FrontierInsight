@@ -167,7 +167,7 @@ def evaluate_child(spec_path, out_path):
     module = load_simulation()
     entry = spec["entry"]
     fn = getattr(module, entry)
-    levels = spec.get("levels") or []  # as the harness reads its spec (FI's evaluation names none)
+    levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)
     rows = []
     for trial in spec["trials"]:
         try:

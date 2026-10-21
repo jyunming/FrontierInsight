@@ -277,7 +277,7 @@ def main():
                 else:
                     value = fn()
                 # A number per run, or (for what each run compares inside it) one per value it was given.
-                kept, why = read_returned(value, spec.get("levels") or [], spec["entry"])
+                kept, why = read_returned(value, levels_of(spec.get("levels")), spec["entry"])
                 if kept is None:
                     raise TypeError(why)
                 row.update(status="ok", values=kept)
@@ -480,7 +480,7 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
         out_path.unlink(missing_ok=True)
         nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
         spec_path.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": entry,
-                                         "cell": {**cell, **inside}, "levels": levels,
+                                         "cell": {**cell, **inside}, "levels": _in_run.levels_json(levels),
                                          "trials": trials, "nonce": nonce, "keep_spec": keep_spec,
                                          "thresholds": dict(thresholds or {})}, default=str),
                              encoding="utf-8")
@@ -517,7 +517,7 @@ def _collect_cells(quest_root: Path, plan: list[dict[str, Any]], results: dict[i
         _append(fh, {"event": "planned", "run_id": run_id, "cell": key, "trials": per_cell,
                          "entry": task["entry"], "at": time.time()})
         result = results.get(task["index"])
-        run = CellRun(key=key, cell=task["cell"], planned=per_cell, levels=list(task.get("levels") or []),
+        run = CellRun(key=key, cell=task["cell"], planned=per_cell, levels=task.get("levels") or [],
                       returncode=getattr(result, "returncode", None) if result is not None else None,
                       timed_out=bool(getattr(result, "timed_out", False)),
                       stderr=(getattr(result, "stderr", "") or "") if result is not None else "")
@@ -1251,7 +1251,7 @@ def _file_hashes(quest_root: Path) -> dict[str, str]:
 def _save_run(quest_root: Path, key: str, run: TrialRun) -> None:
     record = {"key": key, "files": _file_hashes(quest_root), "cells": [
         {"key": c.key, "cell": c.cell, "planned": c.planned, "rows": c.rows, "returncode": c.returncode,
-         "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error, "levels": c.levels}
+         "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error, "levels": _in_run.levels_json(c.levels)}
         for c in run.cells]}
     try:
         (Path(quest_root) / RUN_RECORD).write_text(json.dumps(record, allow_nan=True, default=str), encoding="utf-8")
@@ -1272,7 +1272,8 @@ def _load_run(quest_root: Path, key: str) -> TrialRun | None:
         return None
     if record.get("files") != _file_hashes(root):
         return None  # the ledger or the summary was changed since FI wrote them: the trials are run again
-    return TrialRun(cells=[CellRun(**c) for c in record.get("cells") or []], ledger_path=ledger, summary_path=summary)
+    return TrialRun(cells=[CellRun(**{**c, "levels": _in_run.levels_of(c.get("levels"))}) for c in record.get("cells") or []],
+                    ledger_path=ledger, summary_path=summary)
 
 
 def _outside_executor(executor: Any, quest_root: Path | str, log: Any = None) -> Any:
@@ -1300,7 +1301,7 @@ async def _run_batch(executor: Any, python: Path | str, quest_root: Path, module
     out.unlink(missing_ok=True)
     nonce = hashlib.sha256(f"oracle|{time.time_ns()}".encode()).hexdigest()[:24]
     spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": entry, "cell": cell,
-                                "levels": list(levels or []), "trials": list(trials), "nonce": nonce,
+                                "levels": _in_run.levels_json(levels), "trials": list(trials), "nonce": nonce,
                                 "thresholds": dict(thresholds or {}), "spy_trial": bool(spy_trial),
                                 **({"budget_s": float(budget_s)} if budget_s is not None else {})}, default=str),
                     encoding="utf-8")
@@ -1571,7 +1572,7 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
     plan = [{"trial": int(t), "seed": trial_seed(base, key, int(t))} for t in trials]
     if not plan:
         return [], "no trial was asked for", [], 0
-    store_key = json.dumps({"module": str(module), "cell": given, "levels": levels, "key": key, "base": base,
+    store_key = json.dumps({"module": str(module), "cell": given, "levels": _in_run.levels_json(levels), "key": key, "base": base,
                             "thresholds": thresholds or {}, "env": dict(sorted((env or {}).items()))},
                            sort_keys=True, default=str) if store is not None else ""
     stored = dict(store.get(store_key) or {}) if store is not None else {}

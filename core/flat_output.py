@@ -195,7 +195,6 @@ def observed_flat_sweep(cells: list[Any]) -> Observed | None:
         if not ok:
             continue
         cell = dict(getattr(c, "cell", {}) or {})
-        levels = {_in_run.level_key(lv): lv for lv in getattr(c, "levels", None) or []}
         own: dict[str, list[float]] = {}
         per_level: dict[str, dict[str, list[float]]] = {}
         for r in ok:
@@ -210,6 +209,8 @@ def observed_flat_sweep(cells: list[Any]) -> Observed | None:
         if own or getattr(c, "level", None) or not per_level:
             # a run that gives numbers per value only has nothing per run to judge over the settings
             (value if getattr(c, "level", None) else run).append((cell, own))
+        # The combinations are listed only when the run returned numbers for them: a run's lists can cross into millions.
+        levels = {_in_run.level_key(lv): lv for lv in getattr(c, "levels", None) or []} if per_level else {}
         for lk, columns in per_level.items():
             value.append(({**cell, **(levels.get(lk) or _in_run.parse_level_key(lk))}, columns))
     seen = [o for o in (_observed_in(g) for g in (run, value) if g) if o is not None]

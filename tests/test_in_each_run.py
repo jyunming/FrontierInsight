@@ -309,3 +309,39 @@ def test_a_check_on_a_number_each_run_does_not_compare_is_run_with_that_number_a
     assert why == "" and started == 2 and len(rows) == 2, (rows, why)
     assert trial_runner.case_inside(NUMERIC_INSIDE, {"temperature": 320.0}) == NUMERIC_INSIDE, "a value it has: as it is"
     assert trial_runner.case_inside(INSIDE, {"procedure": "other"}) == INSIDE, "a choice it does not have: not added"
+
+
+SEVEN_LISTS = {"pitch": list(range(61)), "distance": list(range(83)), "family": list(range(5)), "kind": list(range(3)),
+               "rep": list(range(4)), "state": [0, 1], "method": [0, 1]}
+
+
+def test_a_run_given_long_lists_that_returns_one_number_per_run_stays_small(tmp_path: Path) -> None:
+    """A live plan put seven lists in each run (1,215,120 combinations); its runs returned plain numbers, and FI wrote every
+    combination into each setting's spec (251 MB each) and held them (a 30 GB process)."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(
+        "def run_cell(cell):\n    return {'y': float(len(cell['pitch']) + cell['m'])}\n", encoding="utf-8")
+    sizes: list[int] = []
+    run = asyncio.run(trial_runner.run_trials(
+        _executor(), sys.executable, root, "code/simulate.py", {"m": [1, 2]}, runs_per_setting=1, base_seed=0,
+        deterministic=True, timeout_s=120, run_id="r1", in_each_run=SEVEN_LISTS,
+        on_plan=lambda plan: sizes.extend((root / t["spec"]).stat().st_size for t in plan)))
+    assert len(sizes) == 2 and max(sizes) < 20_000, sizes
+    summary = json.loads(run.summary_path.read_text(encoding="utf-8"))
+    assert [c["key"] for c in summary["cells"]] == ["m=1", "m=2"]
+    assert all("compared_in_each_run" not in c for c in summary["cells"])
+    assert [c["metrics"]["y"]["values"] for c in summary["cells"]] == [[62.0], [63.0]]
+    trial_runner._save_run(root, "k", run)
+    again = trial_runner._load_run(root, "k")
+    assert again is not None and len(again.cells[0].levels) == 1_215_120
+
+
+def test_the_combinations_are_read_one_at_a_time_in_the_order_they_were_listed() -> None:
+    levels = in_run.level_cells({"a": [1, 2], "b": ["x", "y", "z"]})
+    assert list(levels) == [{"a": 1, "b": "x"}, {"a": 1, "b": "y"}, {"a": 1, "b": "z"},
+                            {"a": 2, "b": "x"}, {"a": 2, "b": "y"}, {"a": 2, "b": "z"}]
+    assert len(levels) == 6 and levels[4] == {"a": 2, "b": "y"} and levels[-1] == {"a": 2, "b": "z"}
+    assert levels[:2] == [{"a": 1, "b": "x"}, {"a": 1, "b": "y"}]
+    assert in_run.levels_of(json.loads(json.dumps(in_run.levels_json(levels)))) == levels
+    assert in_run.level_cells({}) == [] and in_run.levels_of([{"a": 1}]) == [{"a": 1}]

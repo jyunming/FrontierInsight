@@ -9,9 +9,10 @@ between two procedures on the same data), a number per value (``{"k_hat": {"290.
 the run once, and keeps each value's numbers as the record of a setting of its own (``temperature_K=290.2``) next to it,
 so a number per value is counted once per value and a number per run once per run.
 
-This file is standard library only and holds nothing but top-level functions: FI's trial harness and the ``code/run.py``
-it writes carry its text, so the three places that read what a run returned read it the same way."""
+This file is standard library only and holds nothing but top-level definitions: FI's trial harness and the
+``code/run.py`` it writes carry its text, so the three places that read what a run returned read it the same way."""
 
+import itertools
 import math
 
 
@@ -24,16 +25,68 @@ def fmt(value):
     return str(value)
 
 
+class Levels:
+    """Every combination of the values compared inside each run, worked out when one is read, never held as a list: a
+    plan that put seven lists in each run had 1,215,120 combinations, its runs returned none of them one by one, and FI
+    wrote every one into the spec of each setting and kept them (a 30 GB process). The first factor varies slowest."""
+
+    def __init__(self, factors):
+        self.factors = [(str(name), list(values)) for name, values in factors]
+
+    def __len__(self):
+        n = 1
+        for _name, values in self.factors:
+            n *= len(values)
+        return n if self.factors else 0
+
+    def __bool__(self):
+        return len(self) > 0
+
+    def __iter__(self):
+        names = [name for name, _values in self.factors]
+        for combo in itertools.product(*[values for _name, values in self.factors]):
+            yield dict(zip(names, combo))
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        n = len(self)
+        if index < 0:
+            index += n
+        if not 0 <= index < n:
+            raise IndexError("level index out of range")
+        out = {}
+        for name, values in reversed(self.factors):
+            index, at = divmod(index, len(values))
+            out[name] = values[at]
+        return {name: out[name] for name, _values in self.factors}
+
+    def __eq__(self, other):
+        return list(self) == list(other) if isinstance(other, (Levels, list, tuple)) else NotImplemented
+
+    def to_json(self):
+        return {"factors": [[name, values] for name, values in self.factors]}
+
+
 def level_cells(in_each_run):
-    """Every combination of the values compared inside each run, factors in their order, values in theirs; ``[]`` when
-    there are none."""
+    """Every combination of the values compared inside each run, factors in their order, values in theirs (a
+    :class:`Levels`, read one combination at a time); ``[]`` when there are none."""
     factors = [(str(k), list(v)) for k, v in (in_each_run or {}).items()]
-    if not factors:
-        return []
-    out = [{}]
-    for name, values in factors:
-        out = [dict(cell, **{name: value}) for cell in out for value in values]
-    return out
+    return Levels(factors) if factors else []
+
+
+def levels_json(levels):
+    """``levels`` as a spec or a record writes them: the factors of a :class:`Levels`, a list as it is."""
+    return levels.to_json() if isinstance(levels, Levels) else list(levels or [])
+
+
+def levels_of(written):
+    """The levels a spec or a record wrote (:func:`levels_json`): a :class:`Levels` again, or the list."""
+    if isinstance(written, Levels):
+        return written
+    if isinstance(written, dict) and isinstance(written.get("factors"), list):
+        return Levels(written["factors"])
+    return list(written or [])
 
 
 def level_key(level):
@@ -249,13 +302,13 @@ def summary_cells(run_cell, run_key, planned, rows, levels):
 
     head = {"cell": dict(run_cell), "key": run_key, "planned": planned, "ok": done, "failed": planned - done}
     first: dict = dict(head, metrics=metrics_of(lambda r: split(r.get("values"))[0]))
-    if levels:
-        first["compared_in_each_run"] = [level_key(level) for level in levels]
     out: list = [first]
     # A value gets a record of its own only when the run returned a number per value. A run that returned none (every
     # number is one per run) has nothing to record per value: an empty record would be a setting that never ran,
-    # claiming the run's trials.
+    # claiming the run's trials. The list of values compared goes with them; without them it would be every combination
+    # of the lists, written for nothing.
     if levels and any(split(r.get("values"))[1] for r in good):
+        first["compared_in_each_run"] = [level_key(level) for level in levels]
         for level in levels:
             lk = level_key(level)
             out.append(dict(head, cell=dict(run_cell, **level), key=record_key(run_key, lk), level=dict(level),
