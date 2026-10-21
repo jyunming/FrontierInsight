@@ -1556,7 +1556,8 @@ class RunChecksMixin:
             if edit is None or new_text is None:
                 # The edit is kept with its refusal, so whether a guard refused it rightly can be judged afterwards.
                 entry.update(outcome="refused", reason=why, why=edit.why if edit else "",
-                             **({"file": edit.file, "diff": _improve.diff_text(edit)} if edit is not None else {}))
+                             **({"file": edit.file, "diff": _improve.diff_text(edit)} if edit is not None
+                                else {"reply": str(reply or "")[:8000]}))
                 log.info("[improve] Speed-up %d refused before it ran: %s", used, why)
                 continue
             name = _improve.edited_path(edit)

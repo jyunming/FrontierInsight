@@ -285,3 +285,13 @@ async def test_a_refused_change_is_kept_with_its_refusal(tmp_path: Path) -> None
     entry = out["rounds"][0]
     assert entry["outcome"] == "refused" and "this text is not in the file" in entry["diff"]
     assert entry["file"] == "simulate.py"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_cannot_be_read_is_kept_with_its_refusal(tmp_path: Path) -> None:
+    """A live answer that rewrote a whole function was refused as "not the JSON object asked for", and nothing of it was
+    kept: whether the answer or the reading was at fault could not be judged."""
+    engine = _engine(tmp_path)
+    out = await _speed(engine, _Model(["here is the new function: def f(x): return x"]))
+    entry = out["rounds"][0]
+    assert entry["outcome"] == "refused" and "here is the new function" in entry["reply"]
