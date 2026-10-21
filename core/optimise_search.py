@@ -80,6 +80,15 @@ NO_EFFECT_DESIGNS = 50
 _SAME_RESULT = 1e-9
 
 
+#: From how many design numbers, all continuous, the local stage is a CMA-ES (:meth:`_Search._cma_restarts`) instead of
+#: Nelder-Mead simplexes: on test functions with known minima (8, 16 and 64 numbers, 600 to 18,000 evaluations) it found
+#: the better design in most cases, and it asks for a whole population at a time instead of one design. Fewer numbers
+#: were not measured, so they keep the simplex.
+CMA_FROM_DIMS = 8
+#: The CMA-ES's first step, as a share of each design number's range.
+CMA_SIGMA0 = 0.3
+
+
 class _Stop(Exception):
     """The whole search stops (the budget or the time is spent)."""
 
@@ -943,6 +952,10 @@ class _Search:
         self.method_used = "bounded_local"
 
     def _local_starts(self, points, *, first_cap=None, offset=0):
+        if first_cap is None and self._cma_fits():
+            # Many continuous design numbers: one CMA-ES spends what is left of the budget (_cma_restarts).
+            yield from self._cma_restarts(points, offset)
+            return
         if first_cap is None and len(points) > 1:
             # The starting points do not depend on each other's answers: they run side by side (_side_by_side), however
             # many evaluations run at the same time, so the search is the same on any machine.
@@ -1043,6 +1056,108 @@ class _Search:
         if not rows:
             return None
         return min(rows, key=lambda r: self.sign * r["objective"])["objective"]
+
+    def _cma_fits(self):
+        """Whether a local search here is a CMA-ES: at least :data:`CMA_FROM_DIMS` free design numbers, every one of
+        them continuous, and numpy to compute it with."""
+        if self.space.dims < CMA_FROM_DIMS:
+            return False
+        if any(self.space.scalar_kinds[k] != "continuous" for k in self.space.free):
+            return False
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    def _cma_restarts(self, points, offset):
+        """A CMA-ES from the first starting point with what is left of the budget; when it converges first, it starts
+        again from the next starting point (and from the first again after the last) with twice the population (the
+        "IPOP" restarts), until the budget is spent. A CMA-ES needs its evaluations together: shared out among the
+        starting points it found worse designs than one run, on test functions with known minima."""
+        lam = 4 + int(3 * math.log(self.space.dims))
+        k = 0
+        while self.used < self.total:
+            u0 = points[k % len(points)] if points else self.space.unit(self.baseline)
+            began, start = self.used, offset + k
+            try:
+                yield from self._cma(u0, start, None, lam=lam)
+                why = "converged"
+            except _StartDone as done:
+                why = str(done)
+            except _Stop:
+                self._log_start(start, u0, began, self.stopped or "budget")
+                raise
+            self._log_start(start, u0, began, why)
+            if self.used == began:
+                break  # nothing new was evaluated: every design it asked for was evaluated already
+            k += 1
+            lam *= 2
+        self.stopped = self.stopped or ("budget" if self.used >= self.total else "converged")
+
+    def _cma(self, u0, start, cap, lam=None):
+        """A CMA-ES (covariance matrix adaptation evolution strategy) in the unit cube from ``u0``: each generation asks
+        for a population of designs together, every point clipped into the cube, and moves its mean, step size and
+        shape from their ranks only (feasible by objective, then infeasible by how far past the limits, then failed), as
+        the simplex does. The standard settings (Hansen, "The CMA evolution strategy: a tutorial"); its random numbers
+        come from the search's own seed, so the search is the same on any machine."""
+        import numpy as np
+
+        n = self.space.dims
+        rng = np.random.default_rng(self.rng.randrange(2 ** 32))
+        lam = int(lam or 4 + int(3 * math.log(n)))
+        mu = lam // 2
+        weights = np.log(mu + 0.5) - np.log(np.arange(1, mu + 1))
+        weights = weights / weights.sum()
+        mueff = 1.0 / float((weights ** 2).sum())
+        cc = (4 + mueff / n) / (n + 4 + 2 * mueff / n)
+        cs = (mueff + 2) / (n + mueff + 5)
+        c1 = 2 / ((n + 1.3) ** 2 + mueff)
+        cmu = min(1 - c1, 2 * (mueff - 2 + 1 / mueff) / ((n + 2) ** 2 + mueff))
+        damps = 1 + 2 * max(0.0, math.sqrt((mueff - 1) / (n + 1)) - 1) + cs
+        chi_n = math.sqrt(n) * (1 - 1 / (4 * n) + 1 / (21 * n * n))
+        mean = np.clip(np.asarray(u0, dtype=float), 0.0, 1.0)
+        sigma = CMA_SIGMA0
+        pc, ps = np.zeros(n), np.zeros(n)
+        b, d = np.eye(n), np.ones(n)
+        c = np.eye(n)
+        best, stale, generation = None, 0, 0
+        most = 20 * self.per_start + 50
+        while True:
+            generation += 1
+            if generation > most:
+                raise _StartDone("converged")
+            z = rng.standard_normal((lam, n))
+            y = z @ (b * d).T
+            x = np.clip(mean + sigma * y, 0.0, 1.0)
+            values = yield from self._fs([list(map(float, row)) for row in x], self.local_stage, start, cap)
+            order = sorted(range(lam), key=lambda k: values[k])
+            if best is None or values[order[0]] < best:
+                best, stale = values[order[0]], 0
+            else:
+                stale += 1
+            # The steps actually taken (the clipped points), so a point held at a bound moves the search as it was run.
+            steps = (x[order[:mu]] - mean) / sigma
+            old = mean
+            mean = mean + sigma * (weights @ steps)
+            shift = (mean - old) / sigma
+            inv_sqrt = b @ np.diag(1 / d) @ b.T
+            ps = (1 - cs) * ps + math.sqrt(cs * (2 - cs) * mueff) * (inv_sqrt @ shift)
+            norm_ps = float(np.linalg.norm(ps))
+            hsig = norm_ps / math.sqrt(1 - (1 - cs) ** (2 * generation)) / chi_n < 1.4 + 2 / (n + 1)
+            pc = (1 - cc) * pc + (math.sqrt(cc * (2 - cc) * mueff) * shift if hsig else 0.0)
+            rank_mu = (steps.T * weights) @ steps
+            c = ((1 - c1 - cmu) * c + c1 * (np.outer(pc, pc) + (0.0 if hsig else cc * (2 - cc)) * c)
+                 + cmu * rank_mu)
+            sigma = min(1.0, sigma * math.exp((cs / damps) * (norm_ps / chi_n - 1)))
+            c = (c + c.T) / 2
+            evals, vecs = np.linalg.eigh(c)
+            d = np.sqrt(np.maximum(evals, 1e-20))
+            b = vecs
+            # Converged: every step is a ten-thousandth of each range (as the simplex's), or many generations in a row
+            # found nothing better.
+            if sigma * float(d.max()) < 1e-4 or stale > 10 + int(30 * n / lam):
+                raise _StartDone("converged")
 
     def _nelder_mead(self, u0, start, cap):
         """A Nelder-Mead simplex in the unit cube, every point clipped into it. It compares designs by their rank only
