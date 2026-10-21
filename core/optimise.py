@@ -872,6 +872,9 @@ _STOPPED = {
     "not_run": "it did not run: the search before it had stopped (its time limit, or every evaluation failed)",
     "no_effect": "the first designs it tried, which between them changed every number of the design, all gave the "
                  "baseline's results",
+    "flat_objective": "the first designs it tried, which between them changed every number of the design, all gave the "
+                      "baseline's value of the objective, so the search had no direction to follow (more of the same "
+                      "budget would not have found one)",
 }
 
 

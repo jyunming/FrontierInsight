@@ -66,10 +66,11 @@ def test_a_design_that_changes_no_result_stops_the_search_after_its_first_design
     assert outcome["no_effect"] == {"designs": search.NO_EFFECT_DESIGNS, "results": ["mass", "peak"]}
 
 
-def test_a_plateau_of_the_objective_with_a_result_that_moves_runs_its_whole_budget() -> None:
+def test_a_plateau_of_the_objective_with_a_result_that_moves_is_not_a_design_that_changes_nothing() -> None:
+    """The design acts (the mass moves): not ``no_effect``. The objective that never moves stops the search for that
+    reason instead (tests/test_search_flat_objective.py)."""
     outcome = _drive(_block(), _moving, ["mass"])
-    assert outcome["stopped_because"] != "no_effect" and "no_effect" not in outcome
-    assert outcome["evaluations"] > 1 + search.NO_EFFECT_DESIGNS
+    assert outcome["stopped_because"] == "flat_objective" and "no_effect" not in outcome
 
 
 def test_without_a_result_beside_the_objective_and_the_limits_the_search_is_not_stopped() -> None:
@@ -144,4 +145,6 @@ async def test_a_result_the_plan_expects_to_stay_put_is_not_watched_for_the_desi
                                          simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
     await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
     evaluations = (optimise.read(root) or {}).get("evaluations") or {}
-    assert "no_effect" not in evaluations and (evaluations.get("search") or 0) > 1 + search.NO_EFFECT_DESIGNS
+    assert "no_effect" not in evaluations
+    # The objective never moves either (the simple mode returns a constant): that stop, not the design's effect.
+    assert evaluations.get("stopped_because") == "flat_objective"

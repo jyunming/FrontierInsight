@@ -41,6 +41,13 @@ which between them moved every number of the design, all returned exactly the ba
 That is what a simulation that does not use the design at the settings the search holds looks like; spending the rest of
 the budget on it only finds the same numbers again.
 
+A search whose objective does not move stops early too (``flat_objective``): when the first
+:data:`NO_EFFECT_DESIGNS` designs after the baseline, which between them moved every number of the design, all gave the
+baseline's value of the objective (other results may have moved). In FI's records of real searches, every search whose
+objective ever moved did so at the first design after the baseline, and every one that had not moved by then gave the
+same value for its whole budget (thousands of evaluations): the search has no direction to follow there. It is not a
+fault of the simulation; the best design is the baseline, and the record says why.
+
 A design that breaks a limit is recorded and never chosen; a failed evaluation (an exception, a missing or non-finite
 number) is recorded and never chosen. The random choices (the sample, the evolution) come from the quest's seed, so the
 same seed gives the same search.
@@ -564,6 +571,13 @@ class _Search:
         self.unmoved = set(self.space.free)
         self.as_baseline = 0
         self.no_effect = None
+        # Whether the objective moves at all (``flat_objective``): the baseline's objective, the coordinates no design
+        # with that objective has moved yet, and how many designs gave it. ``None`` once one design gave another value.
+        self.base_objective = None
+        self.flat_unmoved = set(self.space.free)
+        self.flat_designs = 0
+        self.flat_watch = True
+        self.flat_objective = None
 
     def _take_scan(self, scan):
         """The coarse scan's evaluated designs (not counted against the budget)."""
@@ -622,6 +636,7 @@ class _Search:
         self.cache[key] = judged
         self._row(design, judged, stage, start, reply.get("elapsed_s"))
         self._watch_effect(design, key, reply.get("values") if judged["status"] == "ok" else None)
+        self._watch_objective(design, key, judged)
         if judged["status"] == "ok":
             self.any_ok, self.failures_in_a_row = True, 0
             if self.target is not None and judged["feasible"] and _reached(judged["objective"], self.target, self.sign):
@@ -697,6 +712,31 @@ class _Search:
             self.no_effect = {"designs": self.as_baseline, "results": sorted(self.base_results)}
             self.stopped = "no_effect"
             self.results = []  # the watch has fired: a design evaluated after the stop (the best one's report) is not watched
+            raise _Stop()
+
+    def _watch_objective(self, design, key, judged):
+        """Stop the search (``flat_objective``) once enough designs, moving every number of the design between them, gave
+        the baseline's value of the objective. A design that gives another value, or fails, ends the watch."""
+        if not self.flat_watch or self.stopped is not None:
+            return
+        if judged["status"] != "ok" or not _number(judged.get("objective")):
+            self.flat_watch = False
+            return
+        if key == self.space.key(self.baseline):
+            self.base_objective = float(judged["objective"])
+            return
+        if self.base_objective is None:
+            return
+        if not _same_result(judged["objective"], self.base_objective):
+            self.flat_watch = False
+            return
+        here, base = self.space.flat(design), self.space.flat(self.baseline)
+        self.flat_unmoved -= {k for k in self.flat_unmoved if not _same_result(here[k], base[k])}
+        self.flat_designs += 1
+        if self.flat_designs >= NO_EFFECT_DESIGNS and not self.flat_unmoved:
+            self.flat_objective = {"designs": self.flat_designs, "objective": self.base_objective}
+            self.stopped = "flat_objective"
+            self.flat_watch = False
             raise _Stop()
 
     def rank(self, design):
@@ -782,7 +822,7 @@ class _Search:
             # Every starting point converged, or used its share of the budget before it did (``share``).
             self.stopped = ("budget" if self.used >= self.total else
                             "share" if any(s["stopped_because"] == "budget" for s in self.start_log) else "converged")
-        for index, spec in enumerate(self.rounds if self.stopped != "no_effect" else []):
+        for index, spec in enumerate(self.rounds if self.stopped not in ("no_effect", "flat_objective") else []):
             yield from self._round(index, spec)
         return self._outcome()
 
@@ -1090,6 +1130,7 @@ class _Search:
                       "start": best["start"], "stage": best["stage"]} if best else None),
             "rounds": list(self.round_log),
             **({"no_effect": dict(self.no_effect)} if self.no_effect else {}),
+            **({"flat_objective": dict(self.flat_objective)} if self.flat_objective else {}),
         }
 
 
