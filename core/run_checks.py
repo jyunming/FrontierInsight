@@ -927,9 +927,10 @@ class RunChecksMixin:
                 grid, runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
                 thresholds=thresholds, in_each_run=inside or None)
             if probes is None:
-                # A setting that cannot be timed fails in the real run, where it is repaired; the plan's claim, when it gave
-                # one, still counts, and the count above has already kept the listing within what memory holds.
-                self._log.warning("[execute] FI could not time the search's coarse scan (%s)", why)  # type: ignore[attr-defined]
+                # A setting that fails when timed is a setting the simulation fails at, as for a measurement: the same repair
+                # as a failed run, before the protocol is frozen. Going on, the scan was sized from the plan's claim alone.
+                self._log.warning("[execute] the simulation failed while FI timed the search's coarse scan %s", why)  # type: ignore[attr-defined]
+                return self._sizing_failed(why)
             else:
                 est = _estimate.estimate(grid, runs, deterministic, probes)
                 if probes:
@@ -968,8 +969,10 @@ class RunChecksMixin:
                     baseline, runs=runs, deterministic=deterministic, timeout_s=int(max(5, min(allowance, left))),
                     env=env, thresholds=thresholds)
                 if probe is None:
-                    self._log.warning("[execute] FI could not time one evaluation of the search's baseline (%s)", why)  # type: ignore[attr-defined]
-                elif per_eval is None or probe.seconds > per_eval:
+                    # The baseline is the first design the search evaluates: one it fails at is the same repair.
+                    self._log.warning("[execute] the simulation failed while FI timed the search's baseline %s", why)  # type: ignore[attr-defined]
+                    return self._sizing_failed(why)
+                if per_eval is None or probe.seconds > per_eval:
                     per_eval, lower = probe.seconds, probe.at_least
             if search_n and per_eval:
                 together = _estimate.Estimate(seconds=est.seconds + per_eval * search_n, at_least=est.at_least or lower,

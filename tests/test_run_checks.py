@@ -811,7 +811,8 @@ async def test_a_scan_run_several_settings_at_once_is_counted_at_once(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_a_baseline_that_cannot_be_timed_keeps_the_plans_claim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_search_that_fails_when_timed_is_repaired_with_or_without_the_plans_claim(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     block = copy.deepcopy(_SCAN_BLOCK)
     block["grid"] = dict(_MID_GRID)
     block["evaluation_budget"]["seconds_per_evaluation"] = 20
@@ -821,10 +822,11 @@ async def test_a_baseline_that_cannot_be_timed_keeps_the_plans_claim(tmp_path: P
         return None, "a trial failed: boom"
 
     monkeypatch.setattr(run_estimate, "_time_one", broken)
-    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
-    block["evaluation_budget"].pop("seconds_per_evaluation")
-    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None  # nothing to judge by
+    for _claim in (True, False):
+        patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+        assert patch is not None and "too_long" not in patch["exec_result"]
+        assert "boom" in patch["exec_result"]["stderr_tail"]
+        block["evaluation_budget"].pop("seconds_per_evaluation", None)
 
 
 @pytest.mark.asyncio
@@ -982,6 +984,28 @@ async def test_a_stochastic_search_counts_each_evaluation_once_with_its_runs(tmp
 
 
 # ---- a search too slow to fit is made faster first, as a measurement is -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_search_whose_simulation_fails_when_timed_goes_to_the_repair_not_to_the_plans_claim(
+        tmp_path: Path) -> None:
+    """A live search's every timed setting failed (the simulation returned a list where FI reads numbers), yet FI sized the
+    study from the plan's own claim of one second an evaluation ("about 76 seconds"), froze the protocol and started; the
+    fault was repaired only later. A setting that fails when timed now goes to the repair of the simulation, as a
+    measurement's does, before anything is frozen."""
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    block["evaluation_budget"] = {"starts": 2, "per_start": 5, "seconds_per_evaluation": 1}
+    eng, runner = await _search_engine(tmp_path, block)
+    (eng.quest_root / "code" / "simulate.py").write_text(
+        "def run_cell(cell):\n    return {'f': float(cell['x']), 'which': [1, 2]}\n", encoding="utf-8")
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and patch["exec_result"]["returncode"] == 1
+    assert "too_long" not in patch["exec_result"]
+    assert patch["exec_result"]["failed_script"] == "simulate.py"
+    assert "which" in patch["exec_result"]["stderr_tail"]
+    assert "FI estimates" not in _log(eng)
+
 
 #: A search's simulation that wastes most of its time: the same sum worked out many times over.
 _SLOW_SEARCH = (
