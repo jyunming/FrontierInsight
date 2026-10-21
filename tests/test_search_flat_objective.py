@@ -49,8 +49,35 @@ def test_an_objective_that_never_moves_stops_the_search_after_its_first_designs(
     outcome = _drive(_block(), _flat, ["mass"])
     assert outcome["stopped_because"] == "flat_objective"
     assert outcome["evaluations"] == 1 + search.NO_EFFECT_DESIGNS, "the baseline and the designs that showed it"
-    assert outcome["flat_objective"] == {"designs": search.NO_EFFECT_DESIGNS, "objective": 0.0}
+    assert outcome["flat_objective"] == {"designs": search.NO_EFFECT_DESIGNS, "objective": 0.0, "feasible": True,
+                                         "stayed": [], "moved": ["mass"], "stopped": True}
     assert outcome["best"]["objective"] == 0.0
+
+
+def _parts(cell: dict[str, Any]) -> dict[str, Any]:
+    return {"peak": 0.0, "part_a": 3.0, "part_b": cell["fin"]}
+
+
+def test_the_flat_fact_names_the_results_that_stayed_and_those_that_moved() -> None:
+    outcome = _drive(_block(), _parts, ["part_a", "part_b"])
+    fact = outcome["flat_objective"]
+    assert fact["stayed"] == ["part_a"] and fact["moved"] == ["part_b"]
+    assert fact["stopped"] is True and fact["feasible"] is True
+
+
+def test_after_the_revision_a_flat_search_runs_its_whole_budget_and_still_records_the_fact() -> None:
+    gen = search.search(_block(), seed=0, results=["mass"], stop_flat=False)
+    request = next(gen)
+    try:
+        while True:
+            request = gen.send([] if request["kind"] == "scan" else {"values": _flat(request["cell"])})
+    except StopIteration as done:
+        outcome = done.value
+    assert outcome["stopped_because"] != "flat_objective"
+    # It goes on as a search whose objective moves does (here its local steps converge before the budget is used).
+    assert outcome["evaluations"] > 1 + search.NO_EFFECT_DESIGNS
+    assert outcome["flat_objective"]["stopped"] is False
+    assert outcome["flat_objective"]["designs"] >= search.NO_EFFECT_DESIGNS
 
 
 def test_an_objective_that_moves_after_a_plateau_shorter_than_the_watch_is_searched_to_its_budget() -> None:

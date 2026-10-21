@@ -47,6 +47,9 @@ baseline's value of the objective (other results may have moved). In FI's record
 objective ever moved did so at the first design after the baseline, and every one that had not moved by then gave the
 same value for its whole budget (thousands of evaluations): the search has no direction to follow there. It is not a
 fault of the simulation; the best design is the baseline, and the record says why.
+The record also names which results beside the objective stayed at the baseline's value in every one of those designs
+and which moved. With ``stop_flat`` off (the plan was already revised for it once) the fact is recorded the same way
+and the search runs its whole budget.
 
 A design that breaks a limit is recorded and never chosen; a failed evaluation (an exception, a missing or non-finite
 number) is recorded and never chosen. The random choices (the sample, the evolution) come from the quest's seed, so the
@@ -530,9 +533,10 @@ def _same_result(a, b):
 
 
 class _Search:
-    def __init__(self, block, seed, method, rounds=None, results=None, batch=False):
+    def __init__(self, block, seed, method, rounds=None, results=None, batch=False, stop_flat=True):
         self.block = block
         self.batch = bool(batch)
+        self.stop_flat = bool(stop_flat)
         #: Answers asked for together (:meth:`evaluate_many`), by design key, each used once by :meth:`evaluate`.
         self.prefetched = {}
         self.space = Space(block["design_variables"])
@@ -582,6 +586,11 @@ class _Search:
         self.flat_designs = 0
         self.flat_watch = True
         self.flat_objective = None
+        # The plan's results beside the objective: their own copy of the names (``results`` is cleared once one moves),
+        # the baseline's value of each, and the ones every counted flat design has left at that value.
+        self.flat_names = sorted({str(r) for r in results or []} - {str(block["objective"]["quantity"])})
+        self.flat_base = None
+        self.flat_stayed = set()
 
     def _take_scan(self, scan):
         """The coarse scan's evaluated designs (not counted against the budget)."""
@@ -597,7 +606,7 @@ class _Search:
             self.cache[key] = judged
             self.any_ok = self.any_ok or judged["status"] == "ok"
             self._row(design, judged, "scan", None, item.get("elapsed_s"), counted=False)
-            self._watch_objective(design, key, judged, "scan", stop=False)
+            self._watch_objective(design, key, judged, "scan", item.get("values"), stop=False)
         # Decided on the whole scan, every setting recorded first: one that gives another value ends the watch.
         self._flat_stop()
 
@@ -643,7 +652,7 @@ class _Search:
         self.cache[key] = judged
         self._row(design, judged, stage, start, reply.get("elapsed_s"))
         self._watch_effect(design, key, reply.get("values") if judged["status"] == "ok" else None)
-        self._watch_objective(design, key, judged, stage)
+        self._watch_objective(design, key, judged, stage, reply.get("values"))
         if judged["status"] == "ok":
             self.any_ok, self.failures_in_a_row = True, 0
             if self.target is not None and judged["feasible"] and _reached(judged["objective"], self.target, self.sign):
@@ -721,11 +730,12 @@ class _Search:
             self.results = []  # the watch has fired: a design evaluated after the stop (the best one's report) is not watched
             raise _Stop()
 
-    def _watch_objective(self, design, key, judged, stage, stop=True):
+    def _watch_objective(self, design, key, judged, stage, values=None, stop=True):
         """Stop the search (``flat_objective``) once enough designs sampled across the space (the coarse scan's and the
         global stage's), moving every number of the design between them, gave the baseline's value of the objective and
         met the limits as it did. A design that gives another value, meets them differently or fails ends the watch.
-        ``stop=False`` only counts the design (the coarse scan's, decided once all of it is recorded: :meth:`_flat_stop`)."""
+        ``stop=False`` only counts the design (the coarse scan's, decided once all of it is recorded: :meth:`_flat_stop`).
+        ``values``: the results the simulation gave for the design, for the tally of those that stayed at the baseline's."""
         if not self.flat_watch or self.stopped is not None:
             return
         if judged["status"] != "ok" or not _number(judged.get("objective")):
@@ -733,6 +743,9 @@ class _Search:
             return
         if key == self.space.key(self.baseline):
             self.base_objective, self.base_feasible = float(judged["objective"]), bool(judged["feasible"])
+            if isinstance(values, dict):
+                self.flat_base = {n: values[n] for n in self.flat_names if n in values}
+                self.flat_stayed = set(self.flat_base)
             return
         if self.base_objective is None:
             return
@@ -744,16 +757,24 @@ class _Search:
         here, base = self.space.flat(design), self.space.flat(self.baseline)
         self.flat_unmoved -= {k for k in self.flat_unmoved if not _same_result(here[k], base[k])}
         self.flat_designs += 1
+        if self.flat_base:
+            got = values if isinstance(values, dict) else {}
+            self.flat_stayed -= {n for n in self.flat_stayed if n not in got or not _same_result(got[n], self.flat_base[n])}
         if stop:
             self._flat_stop()
 
     def _flat_stop(self):
-        """Stop the search (``flat_objective``) when the watch still holds over enough designs moving every number."""
+        """Record the fact (``flat_objective``) when the watch still holds over enough designs moving every number, and
+        stop the search then unless ``stop_flat`` is off (the plan has been revised for it already): the watch ends."""
         if self.flat_watch and self.stopped is None and self.flat_designs >= NO_EFFECT_DESIGNS and not self.flat_unmoved:
-            self.flat_objective = {"designs": self.flat_designs, "objective": self.base_objective}
-            self.stopped = "flat_objective"
+            base = set(self.flat_base or {})
+            self.flat_objective = {"designs": self.flat_designs, "objective": self.base_objective,
+                                   "feasible": bool(self.base_feasible), "stayed": sorted(self.flat_stayed),
+                                   "moved": sorted(base - self.flat_stayed), "stopped": self.stop_flat}
             self.flat_watch = False
-            raise _Stop()
+            if self.stop_flat:
+                self.stopped = "flat_objective"
+                raise _Stop()
 
     def rank(self, design):
         return _rank(self.cache[self.space.key(self.space.canonical(design))], self.sign)
@@ -1150,15 +1171,16 @@ class _Search:
         }
 
 
-def search(block, *, seed, method=None, rounds=None, results=None, batch=False):
+def search(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True):
     """The search as a generator of requests (see the module docstring); returns the outcome. ``rounds``: the rounds of
     a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``).
     ``results``: the names of the results the plan gives, watched for a design that changes none of them. ``batch``:
     designs the method chooses before it reads any of their answers (a starting population, a simplex's first corners, a
     shrunk simplex) are asked for together, ``{"kind": "evaluate_many", "requests": [...]}`` answered by a list in their
     order, so a driver can run them at the same time; each answer is then judged in that order exactly as one after
-    another, so the search and its record are the same."""
-    return (yield from _Search(block, seed, method, rounds, results, batch=batch).run())
+    another, so the search and its record are the same. ``stop_flat``: whether a search whose objective never moves stops
+    early (``flat_objective``); off, the fact is recorded and the search runs its budget."""
+    return (yield from _Search(block, seed, method, rounds, results, batch=batch, stop_flat=stop_flat).run())
 
 
 #: The most settings FI lists (or runs) from one grid: each listed setting is a dict, about a kilobyte with its key, so this
