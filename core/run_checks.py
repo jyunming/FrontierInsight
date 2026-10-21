@@ -1198,11 +1198,21 @@ class RunChecksMixin:
         from . import optimisation_plan as _optim
         from . import optimise as _optimise
 
-        # A search for the best design has no grid: FI's search runner evaluates the baseline first, at its own settings.
-        if _optim.has_block(state.get("design")) or _optimise.block_of(protocol) is not None:
+        # A search for the best design runs on its coarse scan's settings, with the search's baseline design and every
+        # value it compares inside each run, as the search calls the simulation: a fault there would otherwise be met
+        # first by the known-answer checks, on their own few repairs.
+        block = _optimise.block_of(protocol)
+        search = block is not None or _optim.has_block(state.get("design"))
+        if search and block is None:
             return None
         self._small_run_ctx = (state, py, exec_env)
-        grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}  # knows its sub-studies
+        if search:
+            try:
+                grid = _optimise_search.scan_grid(block)
+            except (KeyError, TypeError, ValueError):
+                return None  # a block the scan cannot be built from is reported by the run
+        else:
+            grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}  # knows its sub-studies
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
         deterministic = "run_trial" not in set(getattr(self, "_trial_entries", set()) or ())
         key = _small.key_of(simulate, grid, deterministic, thresholds)
@@ -1211,7 +1221,8 @@ class RunChecksMixin:
             self._small_run_note = str(record.get("for_reader") or "")
             return record
         paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
-        inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
+        inside = (_optimise_search.in_each_run(block) or None if search
+                  else protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None)
         got = await _small.run(
             self.executor, py, self.quest_root, simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
             deterministic=deterministic, timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
