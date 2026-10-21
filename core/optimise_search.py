@@ -571,9 +571,13 @@ class _Search:
         self.unmoved = set(self.space.free)
         self.as_baseline = 0
         self.no_effect = None
-        # Whether the objective moves at all (``flat_objective``): the baseline's objective, the coordinates no design
-        # with that objective has moved yet, and how many designs gave it. ``None`` once one design gave another value.
+        # Whether the objective moves at all (``flat_objective``): the baseline's objective and whether it meets every
+        # limit, the coordinates no design with that objective has moved yet, and how many designs gave it. Only designs
+        # sampled across the whole space count (the coarse scan's and the global stage's); a local step near the baseline
+        # shows nothing of the rest. The watch ends at the first design that gives another value, meets the limits
+        # differently or fails.
         self.base_objective = None
+        self.base_feasible = None
         self.flat_unmoved = set(self.space.free)
         self.flat_designs = 0
         self.flat_watch = True
@@ -593,6 +597,7 @@ class _Search:
             self.cache[key] = judged
             self.any_ok = self.any_ok or judged["status"] == "ok"
             self._row(design, judged, "scan", None, item.get("elapsed_s"), counted=False)
+            self._watch_objective(design, key, judged, "scan")
 
     # one evaluation
 
@@ -636,7 +641,7 @@ class _Search:
         self.cache[key] = judged
         self._row(design, judged, stage, start, reply.get("elapsed_s"))
         self._watch_effect(design, key, reply.get("values") if judged["status"] == "ok" else None)
-        self._watch_objective(design, key, judged)
+        self._watch_objective(design, key, judged, stage)
         if judged["status"] == "ok":
             self.any_ok, self.failures_in_a_row = True, 0
             if self.target is not None and judged["feasible"] and _reached(judged["objective"], self.target, self.sign):
@@ -714,21 +719,24 @@ class _Search:
             self.results = []  # the watch has fired: a design evaluated after the stop (the best one's report) is not watched
             raise _Stop()
 
-    def _watch_objective(self, design, key, judged):
-        """Stop the search (``flat_objective``) once enough designs, moving every number of the design between them, gave
-        the baseline's value of the objective. A design that gives another value, or fails, ends the watch."""
+    def _watch_objective(self, design, key, judged, stage):
+        """Stop the search (``flat_objective``) once enough designs sampled across the space (the coarse scan's and the
+        global stage's), moving every number of the design between them, gave the baseline's value of the objective and
+        met the limits as it did. A design that gives another value, meets them differently or fails ends the watch."""
         if not self.flat_watch or self.stopped is not None:
             return
         if judged["status"] != "ok" or not _number(judged.get("objective")):
             self.flat_watch = False
             return
         if key == self.space.key(self.baseline):
-            self.base_objective = float(judged["objective"])
+            self.base_objective, self.base_feasible = float(judged["objective"]), bool(judged["feasible"])
             return
         if self.base_objective is None:
             return
-        if not _same_result(judged["objective"], self.base_objective):
+        if not _same_result(judged["objective"], self.base_objective) or bool(judged["feasible"]) != self.base_feasible:
             self.flat_watch = False
+            return
+        if stage not in ("scan", "global"):
             return
         here, base = self.space.flat(design), self.space.flat(self.baseline)
         self.flat_unmoved -= {k for k in self.flat_unmoved if not _same_result(here[k], base[k])}

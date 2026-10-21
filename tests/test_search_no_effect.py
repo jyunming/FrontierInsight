@@ -69,7 +69,7 @@ def test_a_design_that_changes_no_result_stops_the_search_after_its_first_design
 def test_a_plateau_of_the_objective_with_a_result_that_moves_is_not_a_design_that_changes_nothing() -> None:
     """The design acts (the mass moves): not ``no_effect``. The objective that never moves stops the search for that
     reason instead (tests/test_search_flat_objective.py)."""
-    outcome = _drive(_block(), _moving, ["mass"])
+    outcome = _drive(_block(search_method="global_then_local", evaluation_budget={"starts": 2, "per_start": 100}), _moving, ["mass"])
     assert outcome["stopped_because"] == "flat_objective" and "no_effect" not in outcome
 
 
@@ -138,7 +138,7 @@ async def test_a_result_the_plan_expects_to_stay_put_is_not_watched_for_the_desi
     """A result the plan itself expects to be constant (a declared bound's quantity, an invariant) says nothing about
     the design when it stays put: watched, it stopped a search whose design does act on the objective."""
     root = _quest(tmp_path, TWO_MODES)
-    protocol = {"optimisation": _block(fixed={"mode": "simple"}),
+    protocol = {"optimisation": _block(fixed={"mode": "simple"}, search_method="global_then_local", evaluation_budget={"starts": 2, "per_start": 100}),
                 "metrics": [{"id": "mass", "kind": "mean", "label": "fin mass", "estimand": "the mass of the fins", "unit": "one design"}],
                 "bounds": {"mass": [0.0, 10.0]}}
     runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,

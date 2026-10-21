@@ -56,6 +56,8 @@ _STOPPED = {
     "library_error": "the library's method stopped with an error",
     "target": "a design reached the target asked for",
     "no_effect": "its first designs, which between them changed every number of the design, all gave the baseline's results",
+    "flat_objective": "its first designs across the whole range, which between them changed every number of the design, "
+                      "all gave the baseline's objective",
 }
 
 
