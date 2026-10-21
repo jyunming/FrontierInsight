@@ -1837,8 +1837,32 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
                                      failed_example=clip_keeping_place(failed[0], 200) if failed else "")
         return check, problem, False
     verdict, why_open = None, ""
+    confirm: dict[str, Any] | None = None
     while True:
         verdict = _mc.mean_verdict(stat, expected, limit)
+        if verdict == "fail" and confirm is None and len(rows) < most:
+            # A fail must show again on trials it was not decided on: the trials' seeds are fixed, so a rare draw of
+            # the first ones would otherwise fail correct code at every run of the checks, whatever its repair. As
+            # many fresh trials as the fail was decided on, judged alone; a real fault fails there too.
+            left = budget_s - (time.monotonic() - started)
+            n = min(len(rows), most - len(rows))
+            fresh: list[dict[str, Any]] = []
+            if left >= 0.5 and n > 0:
+                fresh, _why, more_failed, more_ran = await run_case_trials(
+                    executor, python, quest_root, module, cell=case, trials=list(range(ran, ran + n)),
+                    timeout_s=max(1, int(math.ceil(left)) + 1), env=env, thresholds=thresholds,
+                    in_each_run=in_each_run, budget_s=left, paired=paired, store=store)
+                failed, ran = failed + more_failed, ran + more_ran
+            alone = _mc.statistic(fresh, measure, means, expected, limit, proportions, repeated=repeated) if fresh else None
+            again = _mc.mean_verdict(alone, expected, limit) if alone is not None else None
+            confirm = {"trials": len(fresh), "value": (alone or {}).get("value"), "verdict": again}
+            if fresh:
+                rows = rows + fresh
+                stat = _mc.statistic(rows, measure, means, expected, limit, proportions, repeated=repeated) or stat
+            if again == "fail" or not fresh:
+                verdict = "fail"  # shown again (or no time to look again: the fail stands as decided)
+                break
+            continue  # not shown again: decided on all the trials, as any other check
         if verdict is not None or stat.get("value") is None:
             break
         if len(rows) >= most:
@@ -1862,6 +1886,8 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     verdict, why_failed = _mc.failed_share_verdict(lost, ran, verdict)
     record = _mc.record(stat, read_as="mean", verdict=verdict, why=why_failed or why_open, failed=lost, started=ran,
                         failed_example=clip_keeping_place(failed[0], 200) if failed else "")
+    if confirm is not None:
+        record["confirm"] = confirm
     keys = [k for k, v in first.items() if _scalar(v)]
     returned = {k: math.fsum(float(r[k]) for r in rows) / len(rows) for k in keys
                 if all(_scalar(r.get(k)) and math.isfinite(r[k]) for r in rows)}
