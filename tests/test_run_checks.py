@@ -1051,6 +1051,8 @@ async def test_a_search_too_slow_to_fit_gets_a_faster_simulation_with_the_same_n
     assert _ONCE in (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
     record = json.loads((eng.quest_root / ".fi" / "improve_speed.json").read_text(encoding="utf-8"))
     assert record["kept"] is True and record["speedup"] > 5
+    # The timing right after the change is of the scan only; the line says so (the whole study is timed again after).
+    assert "the search's coarse scan would now take" in _log(eng) and "the study would now take" not in _log(eng)
 
 
 @pytest.mark.asyncio

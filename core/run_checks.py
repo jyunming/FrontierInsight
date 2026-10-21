@@ -1618,8 +1618,12 @@ class RunChecksMixin:
                 slower = max(runs_timed, key=lambda t: t[0])
                 record["probes"] = slower[1]
                 record["estimate_after_s"] = [round(t[0] * _estimate.SAFETY, 1) for t in runs_timed]
+            # For a search this timing is of its coarse scan only: the whole study, with the search's evaluations, is
+            # timed again right after (_size_the_scan), and says its own estimate.
+            what = "the search's coarse scan" if extra_cells else "the study"
             log.info("[improve] The simulation is %.1f times faster with the same numbers on the sample%s.", record["speedup"],
-                     f"; timed twice, the study would now take about {_estimate.plain_duration(max(record['estimate_after_s']))}"
+                     f"; timed twice, {what} would now take about "
+                     f"{_estimate.plain_duration(max(record['estimate_after_s']))}"
                      if record.get("estimate_after_s") else "")
         else:
             log.info("[improve] No change made the simulation clearly faster with the same numbers; it is left as it was.")
