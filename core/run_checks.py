@@ -1540,7 +1540,9 @@ class RunChecksMixin:
                 new_text, why = _improve.check_edit(files, edit, allowed, tried=tried, expected=expected,
                                                     measures=measures, settings=settings)
             if edit is None or new_text is None:
-                entry.update(outcome="refused", reason=why, why=edit.why if edit else "")
+                # The edit is kept with its refusal, so whether a guard refused it rightly can be judged afterwards.
+                entry.update(outcome="refused", reason=why, why=edit.why if edit else "",
+                             **({"file": edit.file, "diff": _improve.diff_text(edit)} if edit is not None else {}))
                 log.info("[improve] Speed-up %d refused before it ran: %s", used, why)
                 continue
             name = _improve.edited_path(edit)

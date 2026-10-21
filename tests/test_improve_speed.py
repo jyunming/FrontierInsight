@@ -275,3 +275,13 @@ async def test_the_model_is_shown_where_the_time_goes_measured_by_fi(tmp_path: P
     shown = model.prompts[0]
     assert "Where the time goes, measured by FI" in shown
     assert re.search(r"run_trial \(simulate\.py:\d+\): [\d.]+ s of its own \(\d+% of the setting\), called \d+ times", shown)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_change_is_kept_with_its_refusal(tmp_path: Path) -> None:
+    """A guard refused a real speed-up and only its reason was kept, so whether the refusal was right could not be judged."""
+    engine = _engine(tmp_path)
+    out = await _speed(engine, _Model([_edit("this text is not in the file", "x")]))
+    entry = out["rounds"][0]
+    assert entry["outcome"] == "refused" and "this text is not in the file" in entry["diff"]
+    assert entry["file"] == "simulate.py"
