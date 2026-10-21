@@ -114,10 +114,12 @@ def paired(protocol: dict[str, Any] | None) -> bool:
 
 def per_trial_flag(oracle: dict[str, Any]) -> bool | None:
     """What a check's ``per_trial`` says: ``True`` (a rule of every trial), ``False`` (a number on the average over
-    trials), or ``None`` when it says nothing."""
+    trials), or ``None`` when it says nothing. The whole numbers 1 and 0 mean the same as true and false."""
     flag = oracle.get("per_trial")
     if isinstance(flag, bool):
         return flag
+    if isinstance(flag, int) and flag in (0, 1):
+        return bool(flag)
     if isinstance(flag, str):
         word = flag.strip().lower()
         if word in ("true", "yes", "1"):

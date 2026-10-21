@@ -1198,3 +1198,12 @@ def test_a_fail_of_the_first_trials_counts_only_when_fresh_trials_show_it_again(
     confirm = j["mc"].get("confirm") or (_c[0].get("mc") or {}).get("confirm")
     assert confirm and confirm["trials"] == mc.PILOT_TRIALS
     assert (confirm["verdict"] == "fail") is (not passes)
+
+
+@pytest.mark.parametrize(
+    "written, expected",
+    [(1, True), (0, False), (2, None), (True, True), (False, False), ("yes", True), (None, None), (1.0, None)],
+)
+def test_a_per_trial_flag_written_as_a_whole_number_is_read(written: Any, expected: Any) -> None:
+    oracle = {"name": "rule", "per_trial": written} if written is not None else {"name": "rule"}
+    assert mc.per_trial_flag(oracle) is expected
