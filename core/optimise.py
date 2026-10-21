@@ -144,7 +144,7 @@ def _key_rounds(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
-             rounds: list[dict[str, Any]] | None = None) -> str:
+             rounds: list[dict[str, Any]] | None = None, stop_flat: bool = True) -> str:
     """What decides a search: the simulation and the modules beside it, the files below ``code/`` it may use (the
     model's package, a parameter file), the optimisation block, the seed, the entry, the thresholds, and FI's own harness
     and search code. (A package installed since is not in it: a search that got no result is never kept, so a search
@@ -171,6 +171,9 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
     if rounds:
         # A continued search is another search; without rounds the key is the one an earlier version of FI kept.
         what.append(_key_rounds(rounds))
+    if not stop_flat:
+        # A search that goes on although its objective does not move is another search than one that stops there.
+        what.append({"stop_flat": False})
     return _sha(b"\1".join(parts) + json.dumps(what, sort_keys=True, default=str).encode())
 
 
@@ -519,7 +522,7 @@ async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, A
 
 async def run_search(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], *,
                      base_seed: int, timeout_s: int, env: dict[str, str] | None = None, log: Any = None,
-                     frozen: bool = False, at_once: int = 1) -> SearchRun:
+                     frozen: bool = False, at_once: int = 1, stop_flat: bool = True) -> SearchRun:
     """Run the search for the best design (see the module docstring) and write its record. ``module`` is the simulation
     file relative to ``quest_root``; ``timeout_s`` bounds the whole search, the coarse scan included.
 
@@ -527,7 +530,10 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     run again: the best design exploration's search found, for this same simulation and plan, is kept, and only FI's
     check of it (with the confirm run's new seeds, :mod:`core.optimum_check`) runs. Searching again on the confirm seeds
     would choose the design on the data meant only to confirm it. A frozen study whose search record is not there to
-    keep cannot be confirmed without searching again: it gets no result."""
+    keep cannot be confirmed without searching again: it gets no result.
+
+    ``stop_flat``: whether a search whose objective does not move stops early and hands that fact back (the plan is then
+    revised); off, the search runs its budget and only records the fact."""
     quest_root = Path(quest_root)
     raw_block = block_of(protocol)
     if raw_block is None:
@@ -547,7 +553,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                "them for each design the search tries")
         return SearchRun(record={}, rows=[], load_error=why, problems=[why])
     rounds = read_rounds(quest_root, block)
-    key = _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds)
+    key = _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds, stop_flat)
     # The same simulation and plan whatever the seed: what a frozen study's search record must have been made from.
     study_key = _study_key(quest_root, simulate, block, entry, thresholds)
     try:
@@ -572,7 +578,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     replay: dict[str, dict[str, Any]] = {}
     replay_scan: list[dict[str, Any]] | None = None
     if rounds and not frozen and isinstance(record, dict) and record.get("key") != key and any(
-            record.get("key") == _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds[:k])
+            record.get("key") == _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds[:k], stop_flat)
             for k in range(len(rounds))):
         earlier = _record_files(record, record_text).get(LEDGER_PATH.as_posix(), "")
         space = _search.Space(block["design_variables"])
@@ -680,6 +686,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 
     scan_rows: list[dict[str, Any]] = []
     scan_note: list[str] = []
+    scan_unsteady: set[str] = set()
     if not (isinstance(block.get("grid"), dict) and block["grid"]):
         # No coarse scan: an earlier measurement's trial record is not this search's.
         for rel in (Path(_trials.RAW_DIRNAME) / _trials.LEDGER_NAME, Path(_trials.RAW_DIRNAME) / _trials.SUMMARY_NAME,
@@ -709,6 +716,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             executor, python, quest_root, module, trial_run.cells,
             timeout_s=max(1, math.ceil(deadline - time.monotonic())), env=env, thresholds=thresholds,
             log=log) if entry == "run_cell" and deadline - time.monotonic() > 1 else set()
+        scan_unsteady.update(unsteady)
         unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol), ignore=unsteady)
         if unchanged:
             scan_note.append(_flat.unchanged_axes_note(unchanged))
@@ -733,7 +741,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 
     constant = _degenerate.expected_constants(protocol)
     results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
-    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1)
+    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1,
+                       stop_flat=stop_flat)
     replay_space = _search.Space(block["design_variables"]) if replay else None
     load_error = ""
     done_outcome: dict[str, Any] | None = None
@@ -845,6 +854,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         record["simulation_may_search_itself"] = warnings
     if scan_note:
         record["scan_settings_without_effect"] = scan_note[-1]
+    if scan_unsteady:
+        record["unsteady"] = sorted(scan_unsteady)
     ledger_text = "\n".join(_search.ledger_lines(outcome, block)) + "\n"
     record["ledger_sha256"] = _sha(ledger_text.encode("utf-8"))
     best_text = json.dumps(record, indent=1) + "\n"
@@ -1035,7 +1046,8 @@ class OptimisationRunner:
     search for the checks after it."""
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, simulate: Path, analysis: Path,
-                 log: Any = None, frozen: Any = False, repairs_left: Any = None, at_once: int = 1) -> None:
+                 log: Any = None, frozen: Any = False, repairs_left: Any = None, at_once: int = 1,
+                 stop_flat: Any = True) -> None:
         self.executor = executor
         #: How many evaluations that do not depend on each other run at the same time (the coarse scan's settings, the
         #: check's designs at each finer level): ``execution.settings_at_once``.
@@ -1048,6 +1060,9 @@ class OptimisationRunner:
         #: Whether the study is frozen for its confirm run (a bool, or a callable asked at each run): the search is
         #: then not run again (:func:`run_search`).
         self._frozen = frozen
+        #: Whether a search whose objective does not move stops and hands that fact back (a bool, or a callable asked at
+        #: each run): off once the plan has been revised for it.
+        self._stop_flat = stop_flat
         self.quest_root = Path(quest_root)
         self._protocol = protocol
         self.simulate = Path(simulate)
@@ -1056,6 +1071,9 @@ class OptimisationRunner:
         self.failed_script: str | None = None
         #: Why the last run was sent back as a simulation that does not use its inputs (core/flat_output.py), or ``None``.
         self.flat: str | None = None
+        #: What FI measured of a search that stopped because its objective did not move (the search's fact, with the
+        #: results that are timings named ``unsteady``), or ``None``.
+        self.flat_objective: dict[str, Any] | None = None
         #: The observation of settings that changed no result (core/flat_output.py), for the analysis and the writer.
         self.no_difference: str | None = None
         self.last: SearchRun | None = None
@@ -1111,6 +1129,7 @@ class OptimisationRunner:
             return result
         started = time.monotonic()
         self.flat = None
+        self.flat_objective = None
         self.trial_fault = None
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         if block_of(protocol) is None:
@@ -1135,7 +1154,8 @@ class OptimisationRunner:
         run = await run_search(self.executor, cmd[0], self.quest_root,
                                self.simulate.relative_to(self.quest_root).as_posix(), protocol, base_seed=base,
                                timeout_s=timeout_s, env=env, log=self.log,
-                               frozen=self._is_frozen(), at_once=self.at_once)
+                               frozen=self._is_frozen(), at_once=self.at_once,
+                               stop_flat=bool(self._stop_flat() if callable(self._stop_flat) else self._stop_flat))
         self.last = run
         # The coarse scan's settings that changed no result (core/flat_output.py), kept in the search's record so a
         # search used again says it too.
@@ -1173,6 +1193,12 @@ class OptimisationRunner:
         if isinstance(no_effect, dict):
             return self._flat_result(_flat.no_effect_search(no_effect, _plan.normalize(block_of(protocol))[0]
                                                             or block_of(protocol) or {}), run, started)
+        # The objective did not move at any of the designs sampled across the whole range (core/optimise_search.py stopped
+        # it then): nothing to check and nothing to analyse. The plan is told what FI measured.
+        evaluations = (run.record or {}).get("evaluations") or {}
+        fact = evaluations.get("flat_objective")
+        if evaluations.get("stopped_because") == "flat_objective" and isinstance(fact, dict):
+            return self._flat_objective_result(fact, run, started)
         # A search in which every design gave the very same numbers, and whose simulation's code never lets the design reach
         # what it returns, is not a result: the simulation does not use the design it is given. It is sent back to be repaired
         # like one that does not run (core/flat_output.py). The same numbers from a simulation that does read the design are
@@ -1266,6 +1292,22 @@ class OptimisationRunner:
         directive = verdict.directive if len(verdict.directive) <= 1800 else verdict.directive[:1797] + "..."
         return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                stderr=f"{run.stderr[-4000:]}\n{directive}".strip())
+
+    def _flat_objective_result(self, fact: dict[str, Any], run: SearchRun, started: float) -> Any:
+        """The run, handed back with what FI measured: the objective gave one value at every design across the range.
+        Numbers that differ when the same design runs twice (timings) are in neither list."""
+        from core.execution import ExecutionResult
+
+        unsteady = sorted(str(n) for n in (run.record or {}).get("unsteady") or [])
+        self.flat_objective = {**fact, "unsteady": unsteady,
+                               "stayed": [n for n in fact.get("stayed") or [] if n not in unsteady],
+                               "moved": [n for n in fact.get("moved") or [] if n not in unsteady]}
+        self.failed_script = None
+        say = (f"The search's objective did not move: {fact.get('designs')} designs across the whole range all gave the "
+               "starting design's value, so there was nothing to improve. FI sends the design back to the plan.")
+        if self.log is not None:
+            self.log.warning("[optimise] %s", say)
+        return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started, stderr=say)
 
     def _flat_result(self, why: str, run: SearchRun, started: float) -> Any:
         """The run, sent back: the simulation gives the same numbers whatever design it is given."""

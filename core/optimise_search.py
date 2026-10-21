@@ -1475,7 +1475,8 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
                    "per_start": outcome["per_start"], "scan": outcome["scan_evaluations"],
                    "failed": outcome["failed"], "infeasible": outcome["infeasible"],
                    "budget_ran_out": outcome["budget_ran_out"], "stopped_because": outcome["stopped_because"],
-                   **({"no_effect": outcome["no_effect"]} if outcome.get("no_effect") else {})}
+                   **({"no_effect": outcome["no_effect"]} if outcome.get("no_effect") else {}),
+                   **({"flat_objective": outcome["flat_objective"]} if outcome.get("flat_objective") else {})}
     u = f" {unit}" if unit else ""
     if best is None and not outcome["rows"] and outcome["stopped_because"] == "time":
         says = "No design was evaluated before the time limit (execution.timeout_s) ran out."

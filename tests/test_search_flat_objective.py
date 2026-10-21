@@ -114,7 +114,9 @@ async def test_a_search_with_an_objective_that_never_moves_ends_as_a_result_not_
     runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
                                          simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
     result = await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
-    assert result.returncode == 0 and runner.flat is None, result.stderr[-1500:]
+    # The search handed its fact back at once (the plan is revised for it): no check and no analysis ran.
+    assert result.returncode == 1 and runner.flat is None and runner.flat_objective, result.stderr[-1500:]
+    assert runner.flat_objective["designs"] == search.NO_EFFECT_DESIGNS
     evaluations = (optimise.read(root) or {}).get("evaluations") or {}
     assert evaluations.get("stopped_because") == "flat_objective"
     assert evaluations.get("search") == 1 + search.NO_EFFECT_DESIGNS

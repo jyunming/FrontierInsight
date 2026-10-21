@@ -867,3 +867,76 @@ async def test_a_simulation_that_cannot_be_loaded_ends_a_search_run_at_once_as_o
         out.append((rows, run.record["evaluations"]))
     assert out[0] == out[1]
     assert out[0][1]["stopped_because"] == out[1][1]["stopped_because"]
+
+
+# --- a search whose objective never moves hands its fact back at once ----------------------------------------------------
+
+FLAT_SIMULATE = '''\
+import time
+
+
+def run_cell(cell):
+    return {"f": max(0.0, cell["x"] + cell["y"] - 100.0), "mass": cell["x"] + cell["y"], "runtime_s": time.perf_counter()}
+'''
+FLAT_METRICS = [{"id": name, "kind": "mean", "label": name, "estimand": f"the {name}", "unit": "one design"}
+                for name in ("mass", "runtime_s")]
+FLAT_VALUES = [-4.5, -3.0, -1.5, 0.0, 1.5, 3.0, 4.5]  # 49 settings, and the baseline at (0, 0): 50 or more designs
+
+
+def _flat_runner(tmp_path: Path, **kw: Any) -> tuple[optimise.OptimisationRunner, Path, Path]:
+    root = _quest(tmp_path, FLAT_SIMULATE)
+    marker = tmp_path / "analysis_ran.txt"
+    (root / "code" / "experiment.py").write_text(
+        f'open(r"{marker}", "w").write("1")\nprint("RESULT_JSON: {{}}")\n', encoding="utf-8")
+    protocol = {"optimisation": _block(grid={"x": FLAT_VALUES + [4.0], "y": FLAT_VALUES + [4.0]},
+                                       search_method="global_then_local", evaluation_budget={"starts": 1, "per_start": 8}),
+                "metrics": FLAT_METRICS}
+    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
+                                         simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py", **kw)
+    return runner, root, marker
+
+
+async def _execute(runner: optimise.OptimisationRunner, root: Path) -> ExecutionResult:
+    return await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
+
+
+@pytest.mark.asyncio
+async def test_a_flat_search_returns_the_fact_without_the_check_or_the_analysis(tmp_path: Path) -> None:
+    runner, root, marker = _flat_runner(tmp_path)
+    result = await _execute(runner, root)
+    assert result.returncode == 1 and runner.failed_script is None, result.stderr[-1500:]
+    assert runner.flat_objective is not None and runner.flat_objective["designs"] >= osearch.NO_EFFECT_DESIGNS
+    assert runner.flat_objective["stopped"] is True and "mass" in runner.flat_objective["moved"]
+    assert "back to the plan" in result.stderr and str(runner.flat_objective["designs"]) in result.stderr
+    assert not (root / "needs" / "OPTIMUM_CHECK.json").exists(), "no check was spent on a search that went back"
+    assert not marker.exists(), "the analysis never ran"
+
+
+@pytest.mark.asyncio
+async def test_a_timing_is_named_unsteady_not_moved(tmp_path: Path) -> None:
+    runner, root, _marker = _flat_runner(tmp_path)
+    await _execute(runner, root)
+    fact = runner.flat_objective
+    assert fact is not None
+    assert "runtime_s" in fact["unsteady"], fact
+    assert "runtime_s" not in fact["moved"] and "runtime_s" not in fact["stayed"], fact
+    assert "mass" in fact["moved"]
+
+
+@pytest.mark.asyncio
+async def test_with_the_stop_off_a_flat_search_goes_on_to_the_check_and_the_analysis(tmp_path: Path) -> None:
+    runner, root, marker = _flat_runner(tmp_path, stop_flat=lambda: False)
+    result = await _execute(runner, root)
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert runner.flat_objective is None and marker.exists(), "the analysis ran"
+    record = optimise.read(root) or {}
+    assert (record.get("evaluations") or {}).get("flat_objective", {}).get("stopped") is False
+
+
+def test_the_stop_is_part_of_the_searchs_key_only_when_it_is_off(tmp_path: Path) -> None:
+    root = _quest(tmp_path, FLAT_SIMULATE)
+    block = _block()
+    sim = root / "code" / "simulate.py"
+    on = optimise._run_key(root, sim, block, 0, "run_cell", None)
+    assert optimise._run_key(root, sim, block, 0, "run_cell", None, stop_flat=True) == on
+    assert optimise._run_key(root, sim, block, 0, "run_cell", None, stop_flat=False) != on
