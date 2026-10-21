@@ -86,6 +86,8 @@ def levels_of(written):
         return written
     if isinstance(written, dict) and isinstance(written.get("factors"), list):
         return Levels(written["factors"])
+    if isinstance(written, (str, bytes)):
+        raise TypeError("the spec's levels are text, not the values compared inside each run: write them with levels_json")
     return list(written or [])
 
 

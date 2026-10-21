@@ -14,7 +14,6 @@ $check
 
 - The step it disputes: $step
 - The expected value it gives instead, as a formula: `$formula`
-- Its reason: $reason
 
 # What to do
 

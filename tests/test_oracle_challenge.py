@@ -14,7 +14,7 @@ from core.engine import Engine
 from tests.test_oracle_gate import ORACLE, _BENT, _HEAD, _PROTOCOL, _TAIL, _cfg, _fake, _record
 
 # The plan's working gives 1.0 (FI computes it from the plan's formula); the simulation measures 0.5.
-_CHECK = {**ORACLE, "expected_formula": "0.6 + 0.4"}
+_CHECK = {**ORACLE, "expected_formula": "0.6 + 0.4", "case": {"n": 4}}
 _MEASURES_HALF = _HEAD + """\
 if os.environ.get("FI_ORACLE") == "1":
     print("ORACLE_JSON: " + json.dumps({"checks": [{"name": "final size closed form", "value": 0.5}]}))
@@ -22,7 +22,7 @@ if os.environ.get("FI_ORACLE") == "1":
 """ + _TAIL
 # The repair says the plan added a term twice and gives the value as a formula FI can compute.
 _QUESTION = [{"name": ORACLE["name"], "expected": 0.5, "tolerance": 0.01, "reason": "the second term is counted twice",
-              "disputed_step": "the plan adds the second term twice", "expected_formula": "0.25 + 0.25"}]
+              "disputed_step": "the plan adds the second term twice", "expected_formula": "n / 8"}]
 
 
 # --- the exchange itself ------------------------------------------------------------------------------------------------
@@ -213,5 +213,25 @@ async def test_when_the_plan_and_the_code_are_both_wrong_the_number_computed_num
     assert calls.count("Numeric") == 1 and calls.count("OracleRepair") == 2
     assert record["status"] == "ok", record.get("status")
     shown = prompts["numeric"][0]
-    assert "0.6 + 0.4" not in shown and "0.25 + 0.25" not in shown, "the numerical script sees neither working"
+    assert "0.6 + 0.4" not in shown and "n / 8" not in shown, "the numerical script sees neither working"
     assert "the plan's working and the code were both wrong" in prompts["repair"][1]
+
+
+def test_a_formula_that_writes_the_measurement_down_is_no_working_and_the_step_never_shows_it() -> None:
+    restated = {**_QUESTION[0], "expected_formula": "0.5 * 1"}
+    assert ch.challenge_of(_CHECK, restated, measured=0.5)[0] is None, "numbers alone, the measured one among them"
+    assert ch.challenge_of(_CHECK, {**_QUESTION[0], "expected_formula": "n * 0.125"}, measured=0.5)[0] is not None
+    assert ch.challenge_of(_CHECK, {**_QUESTION[0], "expected_formula": "n * 0 + 0.5"}, measured=0.5)[0] is None
+    taken, _ = ch.challenge_of(_CHECK, {**_QUESTION[0], "disputed_step": "the simulation gives 0.500, the plan 1.0"},
+                               measured=0.5)
+    assert taken is not None and "0.500" not in taken["step"] and "1.0" in taken["step"]
+
+
+def test_a_concession_or_a_verdict_that_copies_the_codes_formula_settles_nothing_by_itself() -> None:
+    question, _ = ch.challenge_of(_CHECK, _QUESTION[0])
+    copied = ch.parse_plan({"answer": "concede", "expected_formula": "n/8", "why": "yes"})
+    assert ch.settle(_CHECK, question, copied, None)["outcome"] == "unsettled"
+    stand = ch.parse_plan({"answer": "stand", "code_fault": "", "why": "mine is right"})
+    judge = ch.parse_judge({"side": "code", "expected_formula": " n / 8 ", "why": "the code is right"})
+    result = ch.settle(_CHECK, question, stand, judge)
+    assert result["outcome"] == "unsettled" and "copied" in result["text"]

@@ -345,3 +345,18 @@ def test_the_combinations_are_read_one_at_a_time_in_the_order_they_were_listed()
     assert levels[:2] == [{"a": 1, "b": "x"}, {"a": 1, "b": "y"}]
     assert in_run.levels_of(json.loads(json.dumps(in_run.levels_json(levels)))) == levels
     assert in_run.level_cells({}) == [] and in_run.levels_of([{"a": 1}]) == [{"a": 1}]
+
+
+def test_a_pilot_run_reads_a_number_per_value_from_the_lists_it_was_given(tmp_path: Path) -> None:
+    """The time estimate's and the values pilot's specs wrote the combinations with ``default=str``: the run then read a
+    string as its levels and a number per value broke it."""
+    from core import run_estimate
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(
+        "def run_cell(cell):\n    return {'y': {str(t): t * 2.0 for t in cell['T']}, 'n': 1.0}\n", encoding="utf-8")
+    got = asyncio.run(run_estimate.run_values(
+        _executor(), sys.executable, root, "code/simulate.py", {"m": 1}, deterministic=True, timeout_s=60, env=None,
+        thresholds=None, in_each_run={"T": [1.0, 2.0]}))
+    assert got is not None and got["n"] == 1.0 and got["y"] == {"T=1.0": 2.0, "T=2.0": 4.0}, got
