@@ -157,6 +157,36 @@ def unread_findings(files: dict[str, str], protocol: dict[str, Any], design: Any
     return [], (settings_the_study_compares(fi_dir, design, protocol, unread) if unread else {}), unread, why
 
 
+#: How many designs of a search's own space (besides its baseline) a speed-up is held to.
+SEARCH_SAMPLE_DESIGNS = 3
+
+
+def _search_sample(block: dict[str, Any], grid: Any) -> list[dict[str, Any]]:
+    """The settings a search's speed-up is held to besides its coarse scan's: the baseline and
+    :data:`SEARCH_SAMPLE_DESIGNS` designs spread over the search's space (fixed points of it, so the sample is the same on
+    every run), each with the scan's other settings at their base values. A design the scan never computes (an array
+    of free values, say) is where a search spends its time, so a change that alters a number there is caught too."""
+    try:
+        space = _optimise_search.Space(block["design_variables"])
+        base = dict(next(iter(_estimate.probe_cells(grid)))[2])
+        baseline = dict((block.get("baseline") or {}).get("values") or {})
+    except (KeyError, TypeError, ValueError, StopIteration):
+        return []
+    out = [{**base, **baseline}] if baseline else []
+    n = SEARCH_SAMPLE_DESIGNS
+    for i in range(n):
+        # points of the unit cube spread over it by the golden ratio (each coordinate its own offset), off its centre,
+        # where a baseline often sits
+        u = [(0.5 + 0.618034 * (i + 1) + 0.37 * k) % 1.0 for k in range(space.dims)]
+        try:
+            cell = {**base, **space.design(u)}
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        if cell not in out:
+            out.append(cell)
+    return out
+
+
 class RunChecksMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -842,14 +872,17 @@ class RunChecksMixin:
                 "so a run much slower than the estimate would be stopped before it ends",
                 _estimate.plain_duration(hard_s), self._padded(est))
 
-    async def _size_the_scan(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
+    async def _size_the_scan(self, state: Any, runner: Any, python: Any, env: Any,
+                             speed_done: bool = False) -> dict[str, Any] | None:
         """The coarse scan of a search for the best design runs every setting of the plan's grid, so its size is counted
         (the product of the axes' lengths, nothing listed) and its time added up BEFORE anything lists or runs the settings.
         More settings than FI lists: the quest's plain stop. Otherwise the scan's time is the larger of the plan's own estimate
         and FI's timing of the scan's settings as a measurement's are timed (a plan's claim alone is not trusted), and the
         search's evaluations, which share the scan's time, are added at what one new design (the search's baseline) costs;
         over ``execution.timeout_s``: the same stop, as for a measurement (FI does not run a smaller scan than the plan's),
-        with what fits for the plan. ``None`` to go on.
+        with what fits for the plan. ``None`` to go on. Before that stop, the simulation is made faster with the same
+        numbers as a measurement's is (:meth:`_speed_up`, once; ``speed_done``), on the scan's settings and a few designs of
+        the search's own space, and timed again.
 
         Not skipped for a frozen protocol or a background job: the search runs here either way and sizing never changes the
         protocol; the timing is bounded by ``engine.pilot_timeout_frac`` of the time allowed, and a resume repeats it."""
@@ -948,6 +981,15 @@ class RunChecksMixin:
             if not searched:
                 self._log.info("[execute] the search's coarse scan: %s", _estimate.says(est, limit_s))  # type: ignore[attr-defined]
                 return None
+        if not speed_done and grid is not None and int(self.config.engine.improve_rounds or 0) > 0:  # type: ignore[attr-defined]
+            # What FI runs is the same simulation, whatever the study is called: the speed-up a measurement gets is tried
+            # here too, on the scan's settings and a few designs the search itself would try.
+            sped = await self._speed_up(
+                state, runner, python, env, grid, runs, thresholds or {}, inside or {}, est, limit_s,
+                budget_s=max(0.0, budget_s - (time.monotonic() - timing_started)), probes=probes,
+                deterministic=deterministic, extra_cells=_search_sample(block, grid))
+            if sped.get("kept"):
+                return await self._size_the_scan(state, runner, python, env, speed_done=True)
         text = self._too_long_text(est, limit_s, cut=False)
         if searched:
             text = (f"the coarse scan's {scan:,} settings and the search's {searched:,} evaluations would take "
@@ -1362,13 +1404,16 @@ class RunChecksMixin:
 
     async def _speed_up(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
                         thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
-                        budget_s: float = 600.0, probes: list[Any] | None = None) -> dict[str, Any]:
+                        budget_s: float = 600.0, probes: list[Any] | None = None, deterministic: bool | None = None,
+                        extra_cells: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """The study would not fit the time allowed: up to ``engine.improve_rounds`` edits that make the simulation itself
         faster without changing a number (core/improve_speed.py). FI runs a fixed sample of trials, the checks' own cases
         included, before and after each edit; an edit is kept only when every number is the same and the sample takes
         clearly less time, and it passes every guard the correctness loop has. The study is then timed twice and the
         slower timing stands (``probes``), so the noise of one timing cannot make it fit. ``{"kept": bool, "rounds": [...],
-        "calls": n, "speedup": x, "probes": [...] | None}``."""
+        "calls": n, "speedup": x, "probes": [...] | None}``. ``deterministic``: whether a setting is one call with no
+        randomness (default: the runner's own); ``extra_cells``: settings the sample holds the change to as well (a
+        search's designs outside its coarse scan)."""
         import asyncio
 
         from . import changelog as _changelog
@@ -1390,7 +1435,9 @@ class RunChecksMixin:
         countable = _criteria.countable(protocol)
         trial_names = {c["trials"] for c in countable if c.get("trials")}
         expected, measures, settings = _improve.guards(protocol, oracles, countable, trial_names)
+        det = bool(runner.deterministic if deterministic is None else deterministic)
         cells = _speed.sample_cells(grid, oracles)
+        cells += [dict(c) for c in extra_cells or [] if c not in cells]
         for cell in cells:
             for key, value in cell.items():
                 if isinstance(value, (int, float, str)) and not isinstance(value, bool):
@@ -1400,7 +1447,7 @@ class RunChecksMixin:
         if probes is not None:
             # The sample is held to what the timing measured: a setting it did not see finish is left out, each gets a
             # few times its measured cost, and every sample of the step fits in the time left for timing.
-            cells, timeouts, why = _speed.bounded_sample(cells, probes, runs=runs, deterministic=runner.deterministic,
+            cells, timeouts, why = _speed.bounded_sample(cells, probes, runs=runs, deterministic=det,
                                                          budget_s=budget_s, samples=2 + limit)
             if not cells:
                 log.info("[improve] The simulation is not sped up: %s.", why)
@@ -1411,28 +1458,33 @@ class RunChecksMixin:
 
         async def sample() -> Any:
             return await _speed.run_sample(self.executor, python, root, module, cells,  # type: ignore[attr-defined]
-                                           deterministic=runner.deterministic, thresholds=thresholds, in_each_run=inside,
+                                           deterministic=det, thresholds=thresholds, in_each_run=inside,
                                            env=env, timeout_s=timeout_s, log=log, timeouts=timeouts)
 
         async def time_study() -> list[Any] | None:
             probes, _why = await _estimate.measure(
-                self.executor, python, root, module, grid, runs=runs, deterministic=runner.deterministic,  # type: ignore[attr-defined]
+                self.executor, python, root, module, grid, runs=runs, deterministic=det,  # type: ignore[attr-defined]
                 limit_s=limit_s, budget_s=budget_s, env=env, thresholds=thresholds, cached=None, in_each_run=inside)
             return probes
 
         padded = est.seconds * _estimate.SAFETY
         record: dict[str, Any] = {"goal": "speed", "limit_s": limit_s, "estimate_s": padded, "rounds": [], "kept": False,
                                   "calls": 0, "probes": None}
+        def stop(why: str) -> dict[str, Any]:
+            # Every way the step ends without trying a change says why, in run.log and the record.
+            record["stopped"] = why
+            log.info("[improve] The simulation is not sped up: %s.", why)
+            self._save_speed_record(record)
+            return record
+
         first = await sample()
         if first.failed or first.seconds <= 0:
-            record["stopped"] = f"the sample did not run ({first.failed or 'no time measured'})"
-            return record
+            return stop(f"the sample did not run ({first.failed or 'no time measured'})")
         # The unchanged code is run a second time: a number that is not the same in both runs is not fixed by the code (a
         # measure of its own run time, say), so it cannot show that an edit changed a result and is left out of every comparison.
         again = await sample()
         if again.failed:
-            record["stopped"] = f"the sample did not run a second time ({again.failed})"
-            return record
+            return stop(f"the sample did not run a second time ({again.failed})")
         noisy = _speed.varying(first, again)
         if noisy:
             names = sorted(noisy)
@@ -1443,9 +1495,8 @@ class RunChecksMixin:
                      "speed-up is judged on the other numbers.", len(noisy),
                      ", ".join(which[:3]) + (f" and {len(which) - 3} more" if len(which) > 3 else ""))
             if len(noisy) >= _speed.count_numbers(first):
-                record["stopped"] = "every number of the sample differs from one run of the unchanged code to the next, so an edit cannot be judged"
-                log.info("[improve] The simulation is not sped up: %s.", record["stopped"])
-                return record
+                return stop("every number of the sample differs from one run of the unchanged code to the next, so an "
+                            "edit cannot be judged")
         needed = padded / max(limit_s, 1e-9)
         target = needed * _speed.MARGIN
         original = _improve.snapshot(root)
@@ -1537,7 +1588,7 @@ class RunChecksMixin:
                 probes = await time_study()
                 if probes is None:
                     break
-                e = _estimate.estimate(grid, runs, runner.deterministic, probes)
+                e = _estimate.estimate(grid, runs, det, probes)
                 if e is not None:
                     runs_timed.append((e.seconds, probes))
             if len(runs_timed) == 2:
@@ -1549,13 +1600,17 @@ class RunChecksMixin:
                      if record.get("estimate_after_s") else "")
         else:
             log.info("[improve] No change made the simulation clearly faster with the same numbers; it is left as it was.")
+        self._save_speed_record(record)
+        return record
+
+    def _save_speed_record(self, record: dict[str, Any]) -> None:
+        root = self.quest_root  # type: ignore[attr-defined]
         try:
             (root / ".fi").mkdir(parents=True, exist_ok=True)
             (root / ".fi" / "improve_speed.json").write_text(
                 json.dumps({k: v for k, v in record.items() if k != "probes"}, indent=1, default=str), encoding="utf-8")
         except OSError:
             pass
-        return record
 
     def _stop_too_long(self, text: str, fit: dict[str, Any] | None = None) -> dict[str, Any]:
         """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written. ``fit``

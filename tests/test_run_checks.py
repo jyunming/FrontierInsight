@@ -979,3 +979,77 @@ async def test_a_stochastic_search_counts_each_evaluation_once_with_its_runs(tmp
 
     monkeypatch.setattr(run_estimate, "_time_one", thirty)
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+
+
+# ---- a search too slow to fit is made faster first, as a measurement is -------------------------------------------------
+
+#: A search's simulation that wastes most of its time: the same sum worked out many times over.
+_SLOW_SEARCH = (
+    "def run_cell(cell):\n"
+    "    x = float(cell['x'])\n"
+    "    total = 0.0\n"
+    "    for _ in range(120):\n"
+    "        total = sum(i * 1e-9 for i in range(100000))\n"
+    "    return {'f': x ** 2 + total}\n"
+)
+_WASTE = "    for _ in range(120):\n        total = sum(i * 1e-9 for i in range(100000))\n"
+_ONCE = "    total = sum(i * 1e-9 for i in range(100000))\n"
+#: Faster, and the same at the scan's one design (x = 0), but not at designs the search tries elsewhere.
+_ONLY_AT_THE_BASE = "    total = sum(i * 1e-9 for i in range(100000))\n    if abs(x) > 1:\n        return {'f': x}\n"
+
+
+def _speed_reply(find: str, replace: str) -> str:
+    return json.dumps({"file": "simulate.py", "find": find, "replace": replace, "why": "the same sum, worked out once"})
+
+
+async def _slow_search(tmp_path: Path, replies: list[str]) -> tuple[Engine, Any, AsyncMock]:
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    block["evaluation_budget"] = {"starts": 2, "per_start": 50}
+    eng, runner = await _search_engine(tmp_path, block)
+    eng.config.execution.timeout_s = 60  # one evaluation's own start-up is counted too (about 0.3 s)
+    eng.config.engine.improve_rounds = 2
+    (eng.quest_root / "code" / "simulate.py").write_text(_SLOW_SEARCH, encoding="utf-8")
+    chat = AsyncMock(side_effect=list(replies))
+    eng._client = type("Stub", (), {"chat": chat})()
+    return eng, runner, chat
+
+
+@pytest.mark.asyncio
+async def test_a_search_too_slow_to_fit_gets_a_faster_simulation_with_the_same_numbers_before_the_plan_is_asked(
+        tmp_path: Path) -> None:
+    """A real search was timed at 12 days for 8 h allowed and went straight to asking the plan for a smaller study: the step
+    that makes the simulation faster with the same numbers ran for measurements only. The same simulation is sped up for a
+    search, and timed again: here the whole study then fits."""
+    eng, runner, chat = await _slow_search(tmp_path, [_speed_reply(_WASTE, _ONCE)])
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert chat.await_count == 1
+    assert _ONCE in (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    record = json.loads((eng.quest_root / ".fi" / "improve_speed.json").read_text(encoding="utf-8"))
+    assert record["kept"] is True and record["speedup"] > 5
+
+
+@pytest.mark.asyncio
+async def test_a_search_speed_up_that_changes_a_number_only_away_from_the_scan_is_not_kept(tmp_path: Path) -> None:
+    """The scan here computes one design only; a change that keeps its number but alters the ones the search would compute
+    elsewhere is caught on the search's own designs, and the plan is then asked to fit, as before."""
+    eng, runner, chat = await _slow_search(tmp_path, [_speed_reply(_WASTE, _ONLY_AT_THE_BASE)])
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and "too_long_fit" in patch["exec_result"]
+    record = json.loads((eng.quest_root / ".fi" / "improve_speed.json").read_text(encoding="utf-8"))
+    assert record["kept"] is False and record["rounds"][0]["outcome"] == "not kept"
+    assert "changed" in record["rounds"][0]["reason"]
+    assert _WASTE in (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+
+
+def test_a_search_speed_up_is_held_to_the_baseline_and_designs_spread_over_the_space() -> None:
+    from core import run_checks
+
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    cells = run_checks._search_sample(block, {"axis0": [0, 1, 2], "x": [0.0]})
+    xs = [c["x"] for c in cells]
+    assert xs[0] == 0.0 and len(cells) == 1 + run_checks.SEARCH_SAMPLE_DESIGNS
+    assert len(set(xs)) == len(xs) and min(xs) < -1 and max(xs) > 1
+    assert all(c["axis0"] == 1 for c in cells)  # the scan's other settings at their base value
+    assert run_checks._search_sample({"design_variables": "not a list"}, {}) == []

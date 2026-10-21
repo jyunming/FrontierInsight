@@ -8671,6 +8671,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         flat_pass = bool(state.get("design_from_plan") and state.get("flat_objective_fact"))
         if flat_pass:
             design = self._amend_for_flat_objective(state, design)
+        elif state.get("design_from_plan"):
+            # The plan rewritten to fit the time FI measured, after a protocol frozen for a run that was stopped (a resume of
+            # a run cut short, say): FI approves the change itself, or the frozen protocol would still hold the study that
+            # did not fit and the smaller one would never run.
+            design = self._amend_to_fit(design)
         out: dict[str, Any] = {"design": design, "design_from_plan": False}
         if flat_pass:
             out["flat_objective_fact"] = {}  # used once: a later rewrite of the plan (to fit the time) is not this one
@@ -11576,21 +11581,55 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         paper says so (``frozen_protocol.disclosure``; the evidence ladder names it, ``core/evidence.py``). With no
         frozen protocol yet (the explore stage of ``engine.phased``) there is nothing to amend: the design history says
         the change came after results."""
+        why = (_flat_fact_sentence(state.get("flat_objective_fact") or {})
+               + "; plan.md was rewritten once from what FI measured")
+        return self._amend_by_fi(design, source=_FLAT_SOURCE, approver=_FLAT_APPROVER, why=why, results_seen=True)
+
+    def _amend_to_fit(self, design: dict[str, Any]) -> dict[str, Any]:
+        """The plan rewritten to fit the time FI measured, made the frozen protocol when one is frozen: an amendment FI
+        approves itself. Made before results only when no result of the study was recorded (FI's own ledgers of the trials
+        and of a search are empty); otherwise it is said to be made after them, the earlier run is archived and the paper
+        is told, as for any amendment."""
+        return self._amend_by_fi(design, source=_FIT_SOURCE, approver=_FIT_APPROVER,
+                                 why="the study did not fit the time allowed; plan.md was rewritten once to fit the time FI "
+                                     "measured", results_seen=self._study_results_recorded())
+
+    def _study_results_recorded(self) -> bool:
+        """Whether FI's record of the study holds a result: a finished trial in the trials' ledger, or an evaluation in the
+        search's."""
+        raw = self._raw_root()
+        for path, event in ((raw / _trial_runner.LEDGER_NAME, "trial"), (raw / _optimise.LEDGER_PATH.name, "evaluation")):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("event") == event and row.get("status") == "ok":
+                    return True
+        return False
+
+    def _amend_by_fi(self, design: dict[str, Any], *, source: str, approver: str, why: str,
+                     results_seen: bool) -> dict[str, Any]:
+        """The design's protocol made the frozen one by an amendment FI approves itself, with ``why`` as its reason;
+        unchanged when nothing is frozen or nothing changed. ``results_seen``: the earlier run is archived
+        (``frozen_protocol.apply``) and the paper says the change came after results."""
         frozen = self._resolved_frozen()
         proposed = design.get("protocol") if isinstance(design, dict) and isinstance(design.get("protocol"), dict) else None
         if frozen is None or not proposed or _frozen.sha256(proposed) == frozen.get("sha256"):
             return design
-        why = (_flat_fact_sentence(state.get("flat_objective_fact") or {})
-               + "; plan.md was rewritten once from what FI measured")
-        pending = _frozen.propose(self.quest_root, proposed, design, source=_FLAT_SOURCE, reason=why, results_seen=True)
-        _frozen.approve(self.quest_root, _FLAT_APPROVER, via="fi")
+        pending = _frozen.propose(self.quest_root, proposed, design, source=source, reason=why, results_seen=results_seen)
+        _frozen.approve(self.quest_root, approver, via="fi")
         approval = _frozen.approval_for(self.quest_root, pending)
         if approval is None:  # pragma: no cover -- approve() wrote it just above
             raise RuntimeError("FI could not record its approval of the change to the frozen protocol")
         record = _frozen.apply(self.quest_root, pending, approval, raw_root=self._raw_root())
         self._log.warning(
-            "[protocol] amendment %d approved by FI, made after results were seen: %s; %s%s", record["n"], why,
-            "; ".join(record["changes"][:6]) or "no listed change",
+            "[protocol] amendment %d approved by FI, made %s results were seen: %s; %s%s", record["n"],
+            "after" if results_seen else "before", why, "; ".join(record["changes"][:6]) or "no listed change",
             f"; the earlier run is archived in {record['archived_to']}" if record.get("archived_to") else "")
         return {**design, "protocol": proposed}
 
@@ -27515,13 +27554,18 @@ def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -
             f"{n} settings in all, counting every setting of the grid, of every sub-study and of a search's coarse scan."
             f"{search} Keep every comparison and every quantity the topic asks for, and every check, threshold and "
             "tolerance as it is: take fewer values of a swept setting, spread over the same range, give a part of the study "
-            "fewer settings, or give a search fewer evaluations. Say in the simplifications what was made smaller and that "
-            "it was made smaller to fit the time FI measured."
+            "fewer settings, or give a search fewer evaluations. A number worked out a second way only to check the method "
+            "need not be worked out at every setting or evaluation: it may be worked out at a few, as long as every check "
+            "of the plan still runs. Say in the simplifications what was made smaller and that it was made smaller to fit "
+            "the time FI measured."
             + ("\n\nWhat the topic asks to vary stays varied, in whichever part of the study varies it now:\n"
                + "\n".join(kept) if kept else ""))
 
 
 #: The source and the approver of the change FI makes to a frozen protocol whose search's objective did not move.
+#: The source and the approver of the change FI makes to a frozen protocol when the study did not fit the time allowed.
+_FIT_SOURCE = "FI: the study did not fit the time allowed"
+_FIT_APPROVER = "FI: the study did not fit the time allowed; the plan was rewritten once to fit the time FI measured"
 _FLAT_SOURCE = "FI: the search's objective did not move across the design space"
 _FLAT_APPROVER = ("FI: the search's objective did not move across the design space; the plan was rewritten once, after "
                   "results were seen")

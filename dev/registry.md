@@ -231,7 +231,9 @@ same PR that adds, splits or renames one.
   not the same to 9 digits, or only in one run), `fast_enough`. `RunChecksMixin._speed_up` (`core/run_checks.py`) asks
   for one change per round (prompt `agents/improve_speed.md`), applies `improve.check_edit` with `improve.guards` over
   every check of the plan, keeps a change on the sample alone, and times the study twice (the slower timing stands);
-  `_size_the_run` calls it once, before the runs are lowered or the quest stops. `improve.only_noise` is the
+  `_size_the_run` calls it once, before the runs are lowered or the quest stops, and `_size_the_scan` once for a search
+  (sample: the scan's timed settings plus `run_checks._search_sample`, the baseline and fixed designs of the search's
+  space), timing the scan and the search again after a kept change. `improve.only_noise` is the
   start condition of the correctness loop (nothing to change when every unmet check is flagged or inside its tolerance).
 - `core/optimisation_plan.py` — the kind of study (`study_type`: `measure` or `find_best_design`; `study_type_of`
   reads a design with an `optimisation` block as a search whatever it says) and the plan's `protocol.optimisation`
