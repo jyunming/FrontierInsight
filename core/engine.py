@@ -8575,6 +8575,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha, again=True)
         elif not plan_sha and _study_size(design) > size_before:  # a redesign: the same, with its own request
             design = await self._ask_design_for_the_grid(state, design, iteration=iteration, again=True)
+        # The plan rewritten from what FI measured of a search whose objective did not move: a change FI approves itself,
+        # recorded as made after results were seen (the first design's run is archived, the paper is told).
+        flat_pass = bool(state.get("design_from_plan") and state.get("flat_objective_fact"))
+        if flat_pass:
+            design = self._amend_for_flat_objective(state, design)
         out: dict[str, Any] = {"design": design, "design_from_plan": False}
         # Provenance for the hypothesis itself. The DAG lets `review` and
         # `cross_check` route back here, so a design CAN be rewritten after
@@ -8589,7 +8594,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         design = out["design"] = self._keep_hypothesis_after_an_empty_run(state, design)  # a later amendment too
         out["design_history"] = _append_design_revision(
             state, design, self.quest_root, self._log, plan_sha,
-            results_seen=not self._run_gave_no_results(state),
+            results_seen=flat_pass or not self._run_gave_no_results(state),
+            reason=(_flat_fact_sentence(state.get("flat_objective_fact") or {}) + "; plan.md was rewritten once from what "
+                    "FI measured (results were seen)") if flat_pass else "",
         )
         def _design_record() -> dict[str, Any]:
             latest = (out["design_history"] or [{}])[-1]
@@ -11468,6 +11475,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         )
         self._pause_for_amendment(pending)
         return design  # not reached: the pause exits
+
+    def _amend_for_flat_objective(self, state: QuestState, design: dict[str, Any]) -> dict[str, Any]:
+        """The plan rewritten from what FI measured of a search whose objective did not move, made the frozen protocol:
+        an amendment FI approves itself (the maintainer's decision: unattended and fleet runs get the revision too), not
+        pre-specified, with FI's fact as its reason; the earlier run is archived (``frozen_protocol.apply``) and the
+        paper says so (``frozen_protocol.disclosure``; the evidence ladder names it, ``core/evidence.py``). With no
+        frozen protocol yet (the explore stage of ``engine.phased``) there is nothing to amend: the design history says
+        the change came after results."""
+        frozen = self._resolved_frozen()
+        proposed = design.get("protocol") if isinstance(design, dict) and isinstance(design.get("protocol"), dict) else None
+        if frozen is None or not proposed or _frozen.sha256(proposed) == frozen.get("sha256"):
+            return design
+        why = (_flat_fact_sentence(state.get("flat_objective_fact") or {})
+               + "; plan.md was rewritten once from what FI measured")
+        pending = _frozen.propose(self.quest_root, proposed, design, source=_FLAT_SOURCE, reason=why, results_seen=True)
+        _frozen.approve(self.quest_root, _FLAT_APPROVER, via="fi")
+        approval = _frozen.approval_for(self.quest_root, pending)
+        if approval is None:  # pragma: no cover -- approve() wrote it just above
+            raise RuntimeError("FI could not record its approval of the change to the frozen protocol")
+        record = _frozen.apply(self.quest_root, pending, approval, raw_root=self._raw_root())
+        self._log.warning(
+            "[protocol] amendment %d approved by FI, made after results were seen: %s; %s%s", record["n"], why,
+            "; ".join(record["changes"][:6]) or "no listed change",
+            f"; the earlier run is archived in {record['archived_to']}" if record.get("archived_to") else "")
+        return {**design, "protocol": proposed}
 
     def _pause_for_amendment(self, pending: dict[str, Any]) -> None:
         changes = pending.get("changes") or []
@@ -27381,6 +27413,12 @@ def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -
                + "\n".join(kept) if kept else ""))
 
 
+#: The source and the approver of the change FI makes to a frozen protocol whose search's objective did not move.
+_FLAT_SOURCE = "FI: the search's objective did not move across the design space"
+_FLAT_APPROVER = ("FI: the search's objective did not move across the design space; the plan was rewritten once, after "
+                  "results were seen")
+
+
 def _flat_fact_sentence(fact: dict[str, Any]) -> str:
     """What FI measured of a search whose objective did not move, in one plain sentence (the runner's fact)."""
     value = fact.get("objective")
@@ -33369,7 +33407,7 @@ def _anything_ran(state: "QuestState", quest_root: Path) -> bool:
 
 def _append_design_revision(
     state: "QuestState", design: dict, quest_root: Path, log: logging.Logger, plan_sha: str = "",
-    results_seen: bool = True,
+    results_seen: bool = True, reason: str = "",
 ) -> list[dict[str, Any]]:
     """Record this version of the design, returning the full history.
 
@@ -33385,7 +33423,8 @@ def _append_design_revision(
     alongside the quest rather than only in state.
 
     ``results_seen``: False when the run that led back here produced no results (FI's own record), which the reason
-    then says instead of "results were seen".
+    then says instead of "results were seen". ``reason``: what sent the engine back, when FI knows it better than the
+    analysis or the review (a search whose objective did not move).
     """
     prior = list(state.get("design_history") or [])
     hypothesis = str((design or {}).get("hypothesis") or "").strip()
@@ -33399,7 +33438,9 @@ def _append_design_revision(
         next_step = str(analysis.get("next_step") or "").strip()
         verdict = str((state.get("review") or {}).get("verdict") or "").strip()
         seen = "results were seen" if results_seen else "the run before it produced no results"
-        if next_step in ("re_experiment", "broaden_lit"):
+        if reason:
+            pass
+        elif next_step in ("re_experiment", "broaden_lit"):
             reason = f"analyze.next_step={next_step} ({seen})"
         elif verdict:
             reason = f"review verdict={verdict} ({seen})"

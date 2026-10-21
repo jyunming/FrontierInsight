@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core import plan
+from core import frozen_protocol, plan
 from core.engine import Engine
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, _NO_OBJECTIONS, _engine as _plan_engine
 
@@ -111,3 +111,95 @@ async def test_an_unusable_rewrite_runs_the_search_again_with_the_stop_off(tmp_p
     assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
     assert not (eng.quest_root / "needs" / "STUCK.json").exists()
     assert model.asked, "the plan was asked"
+
+
+# --- the design step (the change FI approves) ---------------------------------------------------------------------
+
+
+class Paused(Exception):
+    """Stands in for LangGraph's GraphInterrupt."""
+
+
+def _no_pause(eng: Engine) -> None:
+    def fake(**kwargs: Any) -> None:
+        raise Paused(kwargs["kind"])
+
+    eng._pause_for_human = fake  # type: ignore[method-assign]
+
+
+def _rewrite_plan_file(eng: Engine) -> None:
+    plan.plan_path(eng.quest_root).write_text(plan.render(TOPIC, EXTRA, plan.normalize_design(_revised())[0]),
+                                              encoding="utf-8")
+
+
+def _after_gate(eng: Engine) -> dict[str, Any]:
+    first = plan.load_design(eng.quest_root)[0]
+    return {"topic": TOPIC, "iteration": 1, "design": first, "design_from_plan": True, "flat_objective_redesigned": True,
+            "flat_objective_fact": dict(FACT), "result_json": {},
+            "exec_result": _flat_state()["exec_result"],
+            "design_history": [{"revision": 0, "iteration": 0, "post_hoc": False, "after_results": False,
+                                "results_seen": False, "reason": "initial design", "hypothesis": first["hypothesis"]}]}
+
+
+@pytest.mark.asyncio
+async def test_the_rewritten_plan_is_a_change_fi_approves_recorded_as_made_after_results(tmp_path: Path) -> None:
+    eng, _model = await _planned(tmp_path)
+    eng._freeze_protocol_if_due({"topic": TOPIC, "iteration": 0})
+    assert frozen_protocol.load(eng.quest_root) is not None
+    raw = eng._raw_root()
+    raw.mkdir(parents=True, exist_ok=True)
+    (raw / "optimisation_ledger.jsonl").write_text('{"n": 1}\n', encoding="utf-8")
+    state = _after_gate(eng)
+    _rewrite_plan_file(eng)
+    _no_pause(eng)
+    patch = await eng._node_design(state)
+    record = json.loads((eng.quest_root / "needs" / "PROTOCOL_AMENDMENT_1.json").read_text(encoding="utf-8"))
+    assert record["prespecified"] is False and record["results_seen_before_change"] is True
+    assert record["approved_by"].startswith("FI:") and "first 50 designs" in record["reason"]
+    now = frozen_protocol.load(eng.quest_root)
+    assert now["protocol"]["optimisation"]["design_variables"][0]["high"] == 9.5
+    assert patch["design"]["protocol"]["optimisation"]["design_variables"][0]["high"] == 9.5
+    assert (eng.quest_root / "archive" / "run_1" / "raw" / "optimisation_ledger.jsonl").is_file(), \
+        "the first design's evaluations are kept"
+    # The paper is told, and the evidence ladder names the change as a gap.
+    told = frozen_protocol.disclosure(eng.quest_root)
+    assert "post-hoc" in told and "first 50 designs" in told
+    assert frozen_protocol.post_hoc(eng.quest_root)
+    entry = patch["design_history"][-1]
+    assert entry["results_seen"] is True and "first 50 designs" in entry["reason"]
+
+
+@pytest.mark.asyncio
+async def test_in_the_explore_stage_there_is_no_amendment_but_the_history_says_after_results(tmp_path: Path) -> None:
+    eng, _model = await _planned(tmp_path)
+    assert frozen_protocol.load(eng.quest_root) is None
+    state = _after_gate(eng)
+    _rewrite_plan_file(eng)
+    _no_pause(eng)
+    patch = await eng._node_design(state)
+    assert not (eng.quest_root / "needs" / "PROTOCOL_AMENDMENT_1.json").exists()
+    assert patch["design"]["protocol"]["optimisation"]["design_variables"][0]["high"] == 9.5
+    entry = patch["design_history"][-1]
+    assert entry["results_seen"] is True and "rewritten once from what FI measured" in entry["reason"]
+
+
+@pytest.mark.asyncio
+async def test_the_rewritten_plan_is_still_held_to_the_topic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, _model = await _planned(tmp_path)
+    eng._freeze_protocol_if_due({"topic": TOPIC, "iteration": 0})
+    seen: list[Any] = []
+    held = copy.deepcopy(_revised())
+    held["protocol"]["optimisation"]["design_variables"][0]["high"] = 9.0
+
+    async def hold(state: Any, design: Any, plan_sha: str) -> tuple[Any, str]:
+        seen.append(copy.deepcopy(design))
+        return held, plan_sha
+
+    monkeypatch.setattr(eng, "_hold_the_design_to_the_topic", hold)
+    _rewrite_plan_file(eng)
+    _no_pause(eng)
+    patch = await eng._node_design(_after_gate(eng))
+    assert seen and seen[0]["protocol"]["optimisation"]["design_variables"][0]["high"] == 9.5
+    assert patch["design"]["protocol"]["optimisation"]["design_variables"][0]["high"] == 9.0
+    assert frozen_protocol.load(eng.quest_root)["protocol"]["optimisation"]["design_variables"][0]["high"] == 9.0, \
+        "the protocol FI approves is the one held to the topic"
