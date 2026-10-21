@@ -554,6 +554,10 @@ class _Search:
         self.rows = []
         self.cache = {}
         self.used = 0
+        #: Evaluations counted per starting point; while the starts run side by side (``own_caps``), each start's share
+        #: of the budget is counted on its own evaluations, not on the whole search's.
+        self.used_by_start = {}
+        self.own_caps = False
         self.stopped = None
         self.notes = []
         self.start_log = []
@@ -633,7 +637,7 @@ class _Search:
             return self.cache[key]
         if self.stopped is not None:
             raise _Stop()
-        if cap is not None and self.used >= cap:
+        if cap is not None and (self.used_by_start.get(start, 0) if self.own_caps else self.used) >= cap:
             raise _StartDone("budget")
         if self.used >= self.total:
             self.stopped = "budget"
@@ -647,8 +651,13 @@ class _Search:
         if reply.get("stop"):
             self.stopped = str(reply["stop"])
             raise _Stop()
+        if key in self.cache:
+            # Another start, running beside this one, asked for the same design in the same batch and was answered
+            # first: as one after another, the second costs nothing.
+            return self.cache[key]
         judged = judge(self.block, reply.get("values") if "values" in reply else None, str(reply.get("failed") or ""))
         self.used += 1
+        self.used_by_start[start] = self.used_by_start.get(start, 0) + 1
         self.cache[key] = judged
         self._row(design, judged, stage, start, reply.get("elapsed_s"))
         self._watch_effect(design, key, reply.get("values") if judged["status"] == "ok" else None)
@@ -671,10 +680,10 @@ class _Search:
         budget still allows are asked for together, then each is judged in order by :meth:`evaluate`, as one after
         another would be (a design after a stop is evaluated but never judged or recorded)."""
         designs = [self.space.canonical(d) for d in designs]
-        if self.batch and self.stopped is None and len(designs) > 1:
+        if (self.batch or self.own_caps) and self.stopped is None and len(designs) > 1:
             room = self.total - self.used
             if cap is not None:
-                room = min(room, cap - self.used)
+                room = min(room, cap - (self.used_by_start.get(start, 0) if self.own_caps else self.used))
             todo, keys = [], set()
             for design in designs:
                 key = self.space.key(design)
@@ -685,18 +694,25 @@ class _Search:
                 keys.add(key)
                 todo.append(design)
             if len(todo) > 1:
-                replies = yield {"kind": "evaluate_many", "requests": [
+                # Inside starts run side by side, one request: the batch of every start is made from it (_side_by_side).
+                replies = yield from self._ask_all([
                     {"kind": "evaluate", "cell": cell_of(self.block, d), "design": dict(d), "stage": stage,
-                     "start": start} for d in todo]}
-                replies = list(replies) if isinstance(replies, list) else []
+                     "start": start} for d in todo], together=self.batch or self.own_caps)
                 for k, design in enumerate(todo):
                     self.prefetched[self.space.key(design)] = replies[k] if k < len(replies) else None
+                mine = [self.space.key(d) for d in todo]
+            else:
+                mine = []
+        else:
+            mine = []
         out = []
         try:
             for design in designs:
                 out.append((yield from self.evaluate(design, stage, start, cap)))
         finally:
-            self.prefetched.clear()
+            # Only this call's answers: starts running side by side each hold their own.
+            for key in mine:
+                self.prefetched.pop(key, None)
         return out
 
     def _fs(self, points, stage, start, cap):
@@ -927,6 +943,11 @@ class _Search:
         self.method_used = "bounded_local"
 
     def _local_starts(self, points, *, first_cap=None, offset=0):
+        if first_cap is None and len(points) > 1:
+            # The starting points do not depend on each other's answers: they run side by side (_side_by_side), however
+            # many evaluations run at the same time, so the search is the same on any machine.
+            yield from self._side_by_side(points, offset)
+            return
         for index, u0 in enumerate(points):
             if self.used >= self.total:
                 self.stopped = "budget"
@@ -938,6 +959,66 @@ class _Search:
             # The first starting point is the baseline, whose evaluation (the search's first) is its own.
             yield from self._local(u0, offset + index, min(cap, self.total),
                                    began=cap - self.per_start if first else None)
+
+    def _ask_all(self, requests, together):
+        """The answers to ``requests`` (designs chosen before any answer is read), in order: asked for in one request
+        when ``together``, else one after another."""
+        if len(requests) == 1:
+            return [(yield requests[0])]
+        if together:
+            replies = yield {"kind": "evaluate_many", "requests": requests}
+            return list(replies) if isinstance(replies, list) else []
+        out = []
+        for request in requests:
+            out.append((yield request))
+        return out
+
+    def _side_by_side(self, points, offset):
+        """The local searches from ``points`` at the same time, each on its own share of the budget (``per_start``, or an
+        even share of what is left): every step, each start's next design (or designs) are asked for together in one
+        batch, and each start goes on from its own answers exactly as it would alone. A design two starts ask for at
+        once is evaluated once. A stop of the whole search (budget, time) ends every start, each recorded."""
+        share = max(1, min(self.per_start, (self.total - self.used) // max(1, len(points))))
+        self.own_caps = True
+        gens = {i: self._local(u0, offset + i, share) for i, u0 in enumerate(points)}
+        pending = {}
+        try:
+            for i, gen in list(gens.items()):
+                try:
+                    pending[i] = next(gen)
+                except StopIteration:
+                    del gens[i]
+            while pending:
+                asked, where, index = [], [], {}
+                for i in sorted(pending):
+                    request = pending[i]
+                    parts = request["requests"] if request["kind"] == "evaluate_many" else [request]
+                    slots = []
+                    for part in parts:
+                        key = self.space.key(self.space.canonical(part["design"]))
+                        if key not in index:  # a design two starts ask for at once is evaluated once
+                            index[key] = len(asked)
+                            asked.append(part)
+                        slots.append(index[key])
+                    where.append((i, slots, request["kind"]))
+                replies = yield from self._ask_all(asked, together=self.batch)
+                pending = {}
+                for i, slots, kind in where:
+                    got = [replies[k] if k < len(replies) else None for k in slots]
+                    answer = got if kind == "evaluate_many" else got[0]
+                    try:
+                        pending[i] = gens[i].send(answer)
+                    except StopIteration:
+                        del gens[i]
+        except _Stop:
+            for i, gen in gens.items():
+                try:
+                    gen.throw(_Stop())
+                except (_Stop, StopIteration):
+                    pass
+            raise
+        finally:
+            self.own_caps = False
 
     def _local(self, u0, start, cap, began=None):
         began = self.used if began is None else max(0, began)
@@ -953,7 +1034,8 @@ class _Search:
         self._log_start(start, u0, began, why)
 
     def _log_start(self, start, u0, began, why):
-        self.start_log.append({"start": start, "from": self.space.design(u0), "evaluations": self.used - began,
+        used = self.used_by_start.get(start, 0) if self.own_caps else self.used - began
+        self.start_log.append({"start": start, "from": self.space.design(u0), "evaluations": used,
                                "stopped_because": why, "best_objective": self._best_of_start(start)})
 
     def _best_of_start(self, start):
