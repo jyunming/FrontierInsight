@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from . import agent_coder as _agent_coder
+from .finding_repair import finding_block as _finding_block
 from . import frozen_protocol as _frozen
 
 #: Fix rounds of the coding agent before the run (after its first write).
@@ -333,6 +334,43 @@ class AgentBuildMixin:
                        "them; change nothing else.")
         return block
 
+    def _shown_findings(self, state: Any, found: list[str], checks: dict[str, bool | None]) -> None:
+        """Each fault another model found in the code that FI's test showed, from FI's record of them
+        (.fi/code_review.json): one check per fault (``finding <id>``: passed once the record no longer flags it), so a
+        round that fixes one and has a new one shown is judged as the progress it is, and the fault still flagged is sent
+        to the agent as the chat repair is given it (the finding and how its test failed with the plan's checked values
+        taken out, the test whole). The gate's one line for them ("did not pass") named none of it."""
+        from . import code_findings as _issues
+        from . import code_review as _review
+        from . import review_pairs as _pairs
+
+        record = _review.load(self.quest_root)  # type: ignore[attr-defined]
+        values = _pairs.plan_values(self._protocol_block(state))  # type: ignore[attr-defined]
+
+        def scrub(text: str) -> str:
+            return _pairs.scrub(text, values)
+
+        for issue in _issues.ranked(record, only_open=False):
+            if issue.get("demonstrated") is not True or issue.get("plan_conflict"):
+                continue
+            still = _issues.flagged_now(issue)
+            checks[f"finding {issue.get('id')}"] = not still
+            if not still:
+                continue
+            test = str(issue.get("test") or "")
+            try:
+                source = (self.quest_root / test).read_text(encoding="utf-8") if test else ""  # type: ignore[attr-defined]
+            except OSError:
+                source = ""
+            text = ("A fault another model found in the code, which FI's test shows on your code:\n"
+                    + _finding_block(issue, scrub))
+            if source:
+                # As the chat repair is given it (core/finding_repair.py): the test whole, so that it still runs.
+                text += f"\nFI's test (it imports your files from the code folder):\n```python\n{source.rstrip()}\n```"
+            if issue.get("failure"):
+                text += "\nHow it failed: " + scrub(str(issue["failure"]))[:800]
+            found.append(text)
+
     async def _agent_judge(self, state: Any, py: Any, exec_env: Any, seed_path: Path) -> tuple[
             tuple[Any, str | None, bool] | None, list[str], dict[str, bool | None]]:
         """FI's checks of the code the agent left, every repair turned into a report. ``(the gate's result when the code
@@ -396,6 +434,7 @@ class AgentBuildMixin:
             found.append("Running the code failed:\n" + str(result.get("stderr_tail") or "")[-2000:])
         finally:
             self._log.removeHandler(lines)  # type: ignore[attr-defined]
+        self._shown_findings(state, found, checks)
         try:
             verdicts = await _code_checks.check_code(
                 self.quest_root, self._protocol_block(state), executor=self.executor, python=py,  # type: ignore[attr-defined]

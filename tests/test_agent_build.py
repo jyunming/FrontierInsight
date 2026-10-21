@@ -678,3 +678,49 @@ def test_code_written_again_without_an_extension_is_held_to_the_whole_protocol_a
     assert eng._goes_beyond_protocol_by_request() == []
     asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
     assert len(agent.prompts) == 3 and "differs from the plan's protocol" in agent.prompts[2]
+
+
+# --- faults another model found, one check each ------------------------------------------------------------------------
+#
+# A live agent quest: round 1 fixed the fault another model had found and FI's test had shown; the reading of round 2's
+# code found and showed another one. The gate reports both the same way ("a fault another model found in the code and
+# FI's test showed did not pass"), so round 2 looked like no progress and the quest stopped with four rounds left,
+# and the agent was never told which fault, nor shown the test.
+
+
+def _issue(fid: str, flagged: bool, outcome: str) -> dict[str, Any]:
+    return {"id": fid, "demonstrated": True, "outcome": outcome, "readings": [{"n": 1, "status":
+            "open" if flagged else "gone"}], "changes_result": True, "severity": "medium", "file": "experiment.py",
+            "statement": f"[medium] Where: experiment.py:3\n   What is wrong: the interval of {fid} is the wrong one",
+            "test": f".fi/finding_tests/{fid}_1.py", "failure": f"test_{fid}: the interval is not the plan's"}
+
+
+def test_a_round_that_fixes_one_shown_fault_while_another_is_shown_is_progress_and_the_fault_is_sent(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _Agent([_write(1), _write(2), _write(3)], says=["done", "fixed A", "fixed B"])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    tests = eng.quest_root / ".fi" / "finding_tests"
+    tests.mkdir(parents=True, exist_ok=True)
+    for fid in ("F-a", "F-b"):
+        (tests / f"{fid}_1.py").write_text(f"def test_{fid.replace('-', '_')}():\n    assert False\n", encoding="utf-8")
+    records = {1: [_issue("F-a", True, "open")],
+               2: [_issue("F-a", False, "no longer flagged"), _issue("F-b", True, "open")],
+               3: [_issue("F-a", False, "no longer flagged"), _issue("F-b", False, "fixed")]}
+    inner = _gate_wanting(eng, lambda v: None if v == 3 else "implement.finding_repair")
+
+    async def gate(state: Any, py: Any, exec_env: Any, seed_path: Path) -> Any:
+        value = int((eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8").split("value = ")[1].split()[0])
+        (eng.quest_root / ".fi" / "code_review.json").write_text(
+            json.dumps({"issues": {i["id"]: i for i in records[value]}}), encoding="utf-8")
+        return await inner(state, py, exec_env, seed_path)
+
+    monkeypatch.setattr(eng, "_gate_pass", gate)
+    _first_write(eng, agent)
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False), "fixing one shown fault is progress: the agent got its round for the next one"
+    assert len(agent.prompts) == 3
+    told = agent.prompts[2]
+    assert "the interval of F-b is the wrong one" in told and "def test_F_b" in told and "F-a" not in told
+    rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
+    assert rounds[1]["newly_passed"] == ["finding F-a"]
