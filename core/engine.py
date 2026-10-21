@@ -8475,6 +8475,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
     #: other key (the checks and their tolerances, thresholds, criteria, metrics, precision, the model) and the search's
     #: limits are what the results are judged by, and are put back as they were.
     _FLAT_MAY_CHANGE = frozenset({"optimisation", "grid", "in_each_run", "sub_studies", "numerical_settings"})
+    #: Inside the search block, what judges a design (its limits, the margin and tolerance of "better", the target, the
+    #: runs of the finer check, the assertions on its results): put back as it was too. The objective may become one
+    #: that grades how close a design comes; which way is better may not change.
+    _FLAT_SEARCH_JUDGED = ("constraints", "constraint_margin", "improvement_tolerance", "target", "check_runs",
+                           "result_assertions")
 
     async def _flat_rewrite(self, state: QuestState, request: str) -> dict[str, Any]:
         """plan.md rewritten from what FI measured of a search whose objective did not move, checked before it is taken:
@@ -8497,24 +8502,35 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     else:
                         new.pop(key, None)
             old_block, new_block = basis.get("optimisation"), new.get("optimisation")
-            if isinstance(old_block, dict) and isinstance(new_block, dict) and \
-                    new_block.get("constraints") != old_block.get("constraints"):
-                put_back.append("optimisation.constraints")
-                new["optimisation"] = {**new_block, "constraints": old_block.get("constraints")}
+            if isinstance(old_block, dict) and isinstance(new_block, dict):
+                block = dict(new_block)
+                for key in self._FLAT_SEARCH_JUDGED:
+                    if block.get(key) != old_block.get(key):
+                        put_back.append(f"optimisation.{key}")
+                        if key in old_block:
+                            block[key] = old_block[key]
+                        else:
+                            block.pop(key, None)
+                old_obj, new_obj = old_block.get("objective"), block.get("objective")
+                if isinstance(old_obj, dict) and isinstance(new_obj, dict) and \
+                        new_obj.get("direction") != old_obj.get("direction"):
+                    put_back.append("optimisation.objective.direction")
+                    block["objective"] = {**new_obj, "direction": old_obj.get("direction")}
+                new["optimisation"] = block
             return {**design, "protocol": new}
 
         def finish(revised: str) -> str | None:
             design = _plan.parse(revised).design
             if design is None:
                 return None
-            if _plan.hoist_protocol_parts(design)[1]:
-                raise ValueError("it wrote parts of the protocol beside `protocol`")
             design = held(design)
             if put_back:
                 revised = _plan.edit_design_block(revised, lambda block: held(block)) or ""
                 design = _plan.parse(revised).design if revised else None
                 if design is None:
                     raise ValueError("what the results are judged by could not be put back as it was")
+                # The model and search sections are shown from the block: shown again from the block as put back.
+                revised = _plan.refresh_optimisation_section(_plan.refresh_model_section(revised))
             wanted, missing, why = self._search_problems(state, design)
             if not wanted or missing or why:
                 raise ValueError("its search for the best design cannot be run: "
@@ -8531,13 +8547,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         req = self._topic_requirements_read()
         design = _plan.parse(path.read_text(encoding="utf-8")).design or {}
         if self._runs_code(state) and req is not None and not req.get("error") and not _topic_req.is_empty(req):
-            gaps, _unjudged = await self._topic_gaps(req, design, design.get("protocol"))
-            if gaps:
+            try:
+                gaps, _unjudged = await self._topic_gaps(req, design, design.get("protocol"))
+                why = ("the rewrite dropped what the topic asks for: "
+                       + "; ".join(str(g.get("sentence") or g.get("name")) for g in gaps)[:300]) if gaps else ""
+            except Exception as exc:  # noqa: BLE001 -- not checked against the topic: not taken
+                why = f"the rewrite could not be checked against the topic ({_one_line(str(exc), 160)})"
+            if why:
                 path.write_text(before, encoding="utf-8")
                 _plan.record_version(self.quest_root, before, by="engine",
-                                     note="the rewrite for a flat objective dropped what the topic asks for; put back")
-                raise ValueError("the rewrite dropped what the topic asks for: "
-                                 + "; ".join(str(g.get("sentence") or g.get("name")) for g in gaps)[:300])
+                                     note="the rewrite for a flat objective was not taken; the plan is put back")
+                raise ValueError(why)
         return done
 
     def _run_gave_no_results(self, state: QuestState) -> bool:
@@ -8652,6 +8672,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if flat_pass:
             design = self._amend_for_flat_objective(state, design)
         out: dict[str, Any] = {"design": design, "design_from_plan": False}
+        if flat_pass:
+            out["flat_objective_fact"] = {}  # used once: a later rewrite of the plan (to fit the time) is not this one
         # Provenance for the hypothesis itself. The DAG lets `review` and
         # `cross_check` route back here, so a design CAN be rewritten after
         # its results are known. That iteration is legitimate research, but a
@@ -20166,10 +20188,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 done = await self._flat_rewrite(state, str(parsed["flat_request"]))
                 self._log.warning("[evidence_gate] plan.md was rewritten (version %s) from what FI measured of the "
                                   "search; the new design is checked and timed before it runs", (done or {}).get("version"))
+                self._progress("[FI] The search's objective did not move anywhere in the design's range; the plan was "
+                               "revised once so that it can, and the new design runs next.")
             except Exception as exc:  # noqa: BLE001 -- the first design is searched again, with no early stop
                 said = (f"the plan could not be rewritten from what FI measured of the search ({_one_line(str(exc), 200)}); "
                         "the first design's search runs again to its whole budget")
                 self._log.warning("[evidence_gate] %s", said)
+                self._progress("[FI] The search's objective did not move anywhere in the design's range, and the plan "
+                               "could not be revised for it; the search runs again to its whole budget.")
                 redesign = False
                 flat_retry = True
                 # Back to the run step (the route a crash repair takes), which runs the search again with no early stop.
@@ -20702,8 +20728,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return None
         why = _flat_fact_sentence(fact)
         self._log.warning("[evidence_gate] %s; the plan is asked once for a design whose objective can move", why)
-        self._progress("[FI] The search's objective did not move anywhere in the design's range; the plan is being "
-                       "revised once so that it can.")
         return {"verdict": "insufficient", "rationale": why + "; the plan was asked for a design whose objective can "
                 "move", "gaps": [why], "redesign": True,
                 "flat_request": _flat_request(fact, _topic_req.kept_when_smaller(self._topic_requirements_read()))}

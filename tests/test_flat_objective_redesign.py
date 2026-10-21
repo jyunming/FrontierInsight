@@ -277,3 +277,52 @@ async def test_a_flat_search_is_a_run_whose_results_were_seen(tmp_path: Path) ->
     assert eng._run_gave_no_results(state) is False
     changed = {**state["design"], "hypothesis": "a finer description of the fins lets the temperature move"}
     assert eng._keep_hypothesis_after_an_empty_run(state, changed)["hypothesis"] == changed["hypothesis"]
+
+
+@pytest.mark.asyncio
+async def test_with_the_protocol_frozen_the_search_s_own_judges_are_put_back_and_the_plan_shows_them(
+        tmp_path: Path) -> None:
+    eased = _revised()
+    block = eased["protocol"]["optimisation"]
+    block["objective"]["direction"] = "maximise" if block["objective"]["direction"] == "minimise" else "minimise"
+    block["improvement_tolerance"] = {"value": 99, "mode": "absolute"}
+    eased["protocol"]["oracles"][0]["tolerance"] = 0.5
+    eng, _model = await _planned(tmp_path, revise=_text(eased))
+    eng._freeze_protocol_if_due({"topic": TOPIC, "iteration": 0})
+    frozen = frozen_protocol.load(eng.quest_root)["protocol"]
+    patch = await eng._node_evidence_gate(_flat_state())
+    assert patch["evidence_assessment"]["route"] == "redesign"
+    text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    now = plan.parse(text).design["protocol"]
+    assert now["optimisation"]["objective"]["direction"] == frozen["optimisation"]["objective"]["direction"]
+    assert now["optimisation"].get("improvement_tolerance") == frozen["optimisation"].get("improvement_tolerance")
+    assert now["oracles"][0]["tolerance"] == frozen["oracles"][0]["tolerance"]
+    assert now["optimisation"]["design_variables"][0]["high"] == 9.5
+    assert plan.refresh_optimisation_section(plan.refresh_model_section(text)) == text, "the plan shows the block"
+
+
+@pytest.mark.asyncio
+async def test_a_topic_check_that_fails_leaves_the_plan_as_it_was(tmp_path: Path,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, _model = await _planned(tmp_path, revise=lambda: _text(_revised()))
+    before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+
+    async def broken(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("the model did not answer")
+
+    monkeypatch.setattr(eng, "_topic_requirements_read", lambda: {"items": [{"name": "fin count"}]})
+    monkeypatch.setattr(eng, "_topic_gaps", broken)
+    monkeypatch.setattr("core.engine._topic_req.is_empty", lambda req: False)
+    patch = await eng._node_evidence_gate(_flat_state())
+    assert patch["evidence_assessment"]["route"] == "repair_crash"
+    assert "could not be checked against the topic" in patch["evidence_assessment"]["rationale"]
+    assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_the_fact_is_used_once_by_the_design_step(tmp_path: Path) -> None:
+    eng, _model = await _planned(tmp_path)
+    _rewrite_plan_file(eng)
+    _no_pause(eng)
+    patch = await eng._node_design(_after_gate(eng))
+    assert patch["flat_objective_fact"] == {}
