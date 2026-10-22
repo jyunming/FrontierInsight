@@ -65,6 +65,35 @@ VERDICTS = {
     "unverified": "the best design could not be checked at finer numerical settings",
 }
 PASSED, FAILED, NOT_CHECKED = "passed", "failed", "not_checked"
+#: What a ``verified`` check says when the improvement is above the plan's threshold but FI's own estimate of the numerical
+#: error of the two designs is as large or larger (``improvement.beyond_numerical_error`` is ``False``): the improvement is
+#: not said to "hold".
+VERIFIED_NOT_BEYOND_ERROR = ("the improvement over the baseline is above the plan's threshold at finer numerical settings, "
+                             "but is not shown to be more than their numerical error")
+
+
+def verdict_phrase(verdict: str, improvement: Any = None) -> str:
+    """The verdict as a phrase, from the check's own record: a ``verified`` improvement that is not beyond the numerical
+    error of the two designs is said so, never as one that "holds"."""
+    if verdict == "verified" and isinstance(improvement, dict) and improvement.get("beyond_numerical_error") is False:
+        return VERIFIED_NOT_BEYOND_ERROR
+    return VERDICTS.get(verdict, verdict)
+
+
+def says_of(record: Any) -> str:
+    """The check's one sentence for a reader, from its record. A record written before the verdict was qualified (a
+    ``verified`` improvement not beyond the numerical error, opening "The improvement ... holds") is said the qualified way
+    too: the opening FI's own template wrote is replaced, the check's reason after it is kept."""
+    if not isinstance(record, dict):
+        return ""
+    says = str(record.get("says") or "")
+    old = VERDICTS["verified"][0].upper() + VERDICTS["verified"][1:] + ":"
+    new = verdict_phrase(str(record.get("verdict") or ""), record.get("improvement"))
+    if says.startswith(old) and new != VERDICTS["verified"]:
+        return new[0].upper() + new[1:] + ":" + says[len(old):]
+    return says
+
+
 BLIND_SPOTS = [
     "Refining the numerical settings rules out a numerical error only: an error of the model itself (an assumption, a "
     "material value) is the same at every setting, so the improvement is an improvement within the model.",
@@ -806,7 +835,8 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         says = ("The best design was checked at finer numerical settings, but not every part of the check could be "
                 f"done: {reason}.")
     else:
-        says = VERDICTS[verdict][0].upper() + VERDICTS[verdict][1:] + (f": {reason}." if reason else ".")
+        phrase = verdict_phrase(verdict, improvement if verdict == "verified" else None)
+        says = phrase[0].upper() + phrase[1:] + (f": {reason}." if reason else ".")
     if chosen is not None and first is not None and chosen is not first:
         # The one sentence a person reads must not let the search's own best pass for the one that was checked.
         j = at(first) or {}

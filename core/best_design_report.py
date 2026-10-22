@@ -346,7 +346,7 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
                   f"{r.get('added')} more evaluations{toward}, from {_design(r.get('from'))}; stopped because "
                   f"{_STOPPED.get(str(r.get('stopped_because')), r.get('stopped_because'))}.", ""]
     if check:
-        lines += [f"**Check at finer numerical settings.** {_plain(check.get('says'))}", ""]
+        lines += [f"**Check at finer numerical settings.** {_plain(_check.says_of(check))}", ""]
         for name, label in _CHECK_LABELS.items():
             c = (check.get("checks") or {}).get(name)
             if isinstance(c, dict):
@@ -538,7 +538,11 @@ def summary_line(quest_root: Path) -> str:
         if imp and _num(imp.get("numerical_error")):
             text += f" (± {_fmt(imp['numerical_error'])}{u})"
     verdict = str((check or {}).get("verdict") or "unverified")
-    text += f"; {_VERDICT_SHORT.get(verdict, verdict)}"
+    if verdict == "verified" and _check.verdict_phrase(verdict, (check or {}).get("improvement")) != _check.VERDICTS[verdict]:
+        # Above the plan's threshold, but not more than the numerical error of the two designs: not said to "hold".
+        text += "; above the plan's threshold at finer numerical settings, but not shown to be more than their numerical error"
+    else:
+        text += f"; {_VERDICT_SHORT.get(verdict, verdict)}"
     target = best.get("target") if isinstance(best.get("target"), dict) else None
     if target and _num(target.get("value")):
         reached = target.get("reached_at_finest_settings")
