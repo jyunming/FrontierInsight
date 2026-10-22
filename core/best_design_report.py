@@ -309,6 +309,11 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
               + f"; {ev.get('search')} of {ev.get('budget')} evaluations allowed were used")
     if _num(ev.get("starts")) and _num(ev.get("per_start")):
         search += f" (a budget of {ev['per_start']} evaluations for each of {ev['starts']} starting points"
+        ran = best.get("starts")
+        if isinstance(ran, list) and ran and len(ran) != ev["starts"]:
+            # The record of the starts that ran, not the plan's count: a search over many continuous numbers spends its
+            # budget from one start and starts again only when it converges (core/optimise_search.py _cma_restarts).
+            search += f"; the local search ran from {len(ran)} starting point{'s' if len(ran) > 1 else ''}"
         if _num(ev.get("added_budget")):
             search += f", and {ev['added_budget']} more asked for after the first result"
         search += ")"

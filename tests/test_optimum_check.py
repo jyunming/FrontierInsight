@@ -758,3 +758,24 @@ async def test_the_checks_designs_at_one_level_run_at_the_same_time_and_give_the
     assert strip(one) == strip(four)
     assert one["evaluations"]["check"] >= 4
     assert out[4][1] < 0.8 * out[1][1], (out[1][1], out[4][1])
+
+
+def test_the_elements_of_an_array_at_an_edge_or_without_effect_are_said_once_with_their_count() -> None:
+    """An element's index reads as a citation in a paper's text: the elements of one array are said in one sentence."""
+    block = _block(design_variables=[{"name": "w", "shape": [2, 3], "low": 0.0, "high": 1.0}],
+                   baseline={"values": {"w": [[0.5] * 3] * 2}, "source": "s"},
+                   evaluation_budget={"starts": 1, "per_start": 200})
+
+    def sim(cell: dict[str, Any]) -> dict[str, float]:
+        w = cell["w"]
+        # the first row's elements are best below their range; the last element reaches no result
+        return {"f": sum((x + 1.0) ** 2 for x in w[0]) + (w[1][0] - 0.5) ** 2 + (w[1][1] - 0.5) ** 2
+                + 0.01 * cell["mesh"] ** 2}
+
+    check = _search_then_check(block, sim)
+    hood = check["checks"]["neighbourhood"]
+    assert len(hood["at_bound"]) == 3 and all(e["edge"] == "low" for e in hood["at_bound"])
+    assert hood["says"].count("edge of the range") == 1
+    assert "lower edge of the range allowed for 3 of the 6 elements of w that were nudged" in hood["says"]
+    assert "nudging 1 of the 6 elements of w that were nudged changes nothing" in hood["says"]
+    assert "[" not in hood["says"]

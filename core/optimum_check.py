@@ -377,6 +377,24 @@ def _probe(space: Any, chosen: dict[str, Any], level: int, evaluate: Callable, o
             out[name]["sides"][side] = {"value": space.flat(space.canonical(nudged))[k], "judged": judged}
 
 
+def _array_of(name: str) -> str:
+    """The array variable an element's name belongs to (``source[1,3]`` -> ``source``); a scalar's own name."""
+    return name.split("[", 1)[0] if name.endswith("]") and "[" in name else name
+
+
+def _by_array(items: list[tuple[str, str]]) -> dict[tuple[str, str], list[int]]:
+    """The positions of ``(name, side)`` items, grouped by the array the name belongs to and the side: the elements of
+    one array are said once, with their count (an element's index reads as a citation in a paper's text)."""
+    out: dict[tuple[str, str], list[int]] = {}
+    for i, (name, side) in enumerate(items):
+        out.setdefault((_array_of(name), side), []).append(i)
+    return out
+
+
+def _probed_count(probes: dict[str, Any], array: str) -> int:
+    return sum(1 for name in probes if _array_of(name) == array)
+
+
 def _probed(space: Any) -> list[int]:
     """The coordinates the check nudges: every number of a scalar variable, and at most ``PROBE_ELEMENTS`` elements of an
     array variable, spread evenly over it (two evaluations per element would otherwise be the whole check)."""
@@ -690,15 +708,22 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         parts: list[str] = []
         if better:
             b = max(better, key=lambda x: x["gain"])
-            parts.append(f"moving {b['variable']} to {_fmt(b['value'])} gives a design {_fmt(b['gain'])}{u} better at the "
+            moved = b["variable"] if b["variable"] in probes and _array_of(b["variable"]) == b["variable"] else (
+                f"one element of {_array_of(b['variable'])}")
+            parts.append(f"moving {moved} to {_fmt(b['value'])} gives a design {_fmt(b['gain'])}{u} better at the "
                          "finest settings, more than the numerical error: this is not the best design nearby (the search "
                          "had not finished, or its coarser settings misled it)")
-        for edge in at_bound:
-            parts.append(f"the best design sits at the {'lower' if edge['edge'] == 'low' else 'upper'} edge of the range "
-                         f"allowed for {edge['variable']} ({_fmt(edge['value'])}): a design outside the range may be "
-                         "better (widening the range is a change to the plan)")
+        for (variable, side), members in _by_array([(e["variable"], e["edge"]) for e in at_bound]).items():
+            where = (f"{variable} ({_fmt(at_bound[members[0]]['value'])})" if len(members) == 1 and variable in probes
+                     else f"{len(members)} of the {_probed_count(probes, variable)} elements of {variable} that were "
+                          "nudged")
+            parts.append(f"the best design sits at the {'lower' if side == 'low' else 'upper'} edge of the range allowed "
+                         f"for {where}: a design outside the range may be better (widening the range is a change to the "
+                         "plan)")
         if no_effect:
-            parts.append(f"nudging {', '.join(no_effect)} changes nothing the simulation returns: the simulation may not "
+            quiet = [v if len(m) == 1 and v in probes else f"{len(m)} of the {_probed_count(probes, v)} elements of {v} "
+                     "that were nudged" for (v, _), m in _by_array([(n, "") for n in no_effect]).items()]
+            parts.append(f"nudging {', '.join(quiet)} changes nothing the simulation returns: the simulation may not "
                          "use it")
         status = FAILED if parts else PASSED
         says = "; ".join(parts) if parts else "no nearby design is better, and every variable changes the result"
