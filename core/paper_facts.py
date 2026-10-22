@@ -172,6 +172,13 @@ def _one(text: Any) -> str:
     return " ".join(str(text or "").split())
 
 
+def _whole(text: Any, cap: int) -> str:
+    """``text`` as one line when it fits in ``cap`` characters, else ``""``: a reason written by a model is quoted whole or
+    left out, never cut in the middle of a word or a bracket (a cut gave "hard-coded to )")."""
+    one = _one(text)
+    return one if len(one) <= cap else ""
+
+
 def _sentence(text: str) -> str:
     text = _one(text).replace("<!--", "").replace("-->", "")
     if not text:
@@ -295,7 +302,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
     for c in (checked.get("checks") if isinstance(checked, dict) else None) or []:
         if isinstance(c, dict) and c.get("quantity"):
             q = _one(c["quantity"])
-            note = _one(c.get("note"))[:200].rstrip(".")
+            note = _whole(c.get("note"), 400).rstrip(".")
             add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
     _precision_items(root, add)
@@ -332,9 +339,9 @@ def required_items(quest_root: Path | str) -> list[Item]:
         if (not isinstance(err, dict) or str(fid) in gated or issue.get("changes_result") is not True
                 or not _code_findings.flagged_now(issue) or not _code_findings.shown_by_assertion(issue)):
             continue
-        text = _one(issue.get("text"))[:240].rstrip(".")
+        text = _one(issue.get("text")).rstrip(".")
         where = _one(issue.get("function") or issue.get("file"))
-        detail = _one(err.get("detail"))[:160].rstrip(".")
+        detail = _whole(err.get("detail"), 160).rstrip(".")
         add(CODE_FINDING, text[:80] or str(fid), _sentence(
             "A test of the code showed a fault that can change a reported result"
             + (f" (in {where})" if where else "") + (f": {text}" if text else "")
@@ -651,7 +658,7 @@ def _left_out_setting_items(root: Path, add: Any) -> None:
     left = _trial_checks.left_out_settings(root)
 
     def said(f: dict[str, Any]) -> str:
-        reason = next((_one(r[0])[:160] for r in f.get("reasons") or [] if isinstance(r, list) and r), "")
+        reason = next((_whole(r[0], 160) for r in f.get("reasons") or [] if isinstance(r, list) and r), "")
         return f"{f.get('failed')} of {f.get('planned')} trials failed" + (f" ({reason})" if reason else "")
 
     if len(left) > _MAX_SETTING_ITEMS:
