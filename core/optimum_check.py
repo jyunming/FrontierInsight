@@ -249,6 +249,12 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
     and its answer ``{"values": {...}, "trials": [{...}, ...]}``, ``{"failed": why}`` or ``{"stop": "time"}``."""
     if not isinstance(search_record.get("best"), dict):
         return _nothing_to_check(block, search_record)
+    best_level = search_record["best"].get("level")
+    if isinstance(best_level, dict) and best_level:
+        # A study that compares named alternatives searched each one: the best design belongs to one of them, and so do
+        # the baseline and the other designs the check recomputes (a design means something only under its alternative).
+        block = _search.level_block(block, best_level)
+        rows = [r for r in rows if isinstance(r, dict) and r.get("level") == best_level]
     objective = block["objective"]
     quantity = str(objective["quantity"])
     space = _search.Space(block["design_variables"])

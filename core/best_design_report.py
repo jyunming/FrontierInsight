@@ -309,6 +309,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
               + f"; {ev.get('search')} of {ev.get('budget')} evaluations allowed were used")
     if _num(ev.get("starts")) and _num(ev.get("per_start")):
         search += f" (a budget of {ev['per_start']} evaluations for each of {ev['starts']} starting points"
+        if isinstance(best.get("compared"), dict) and best["compared"].get("levels"):
+            search += f", for each of the {len(best['compared']['levels'])} alternatives compared"
         ran = best.get("starts")
         if isinstance(ran, list) and ran and len(ran) != ev["starts"]:
             # The record of the starts that ran, not the plan's count: a search over many continuous numbers spends its
@@ -325,6 +327,19 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     if stepped := stepped_went_on(ev):
         search += f" {stepped[0].upper()}{stepped[1:]}."
     lines += [search, ""]
+    compared = (best.get("compared") or {}).get("levels") if isinstance(best.get("compared"), dict) else None
+    if compared:
+        won = (best.get("best") or {}).get("level")
+        lines += [f"**Alternatives compared.** Each of the {len(compared)} alternatives was searched on its own, with the "
+                  "plan's own variables and budget, and the comparison is between their best designs:", ""]
+        for p in compared:
+            name = ", ".join(f"{k} = {v}" for k, v in (p.get("level") or {}).items())
+            top = p.get("best") if isinstance(p.get("best"), dict) else None
+            text = (f"{quantity} = {_fmt(top.get('objective'))}{u} at {_design(top.get('design'))}" if top
+                    else "no design that meets every limit was found")
+            lines.append(f"- {name}{' (the best)' if p.get('level') == won else ''}: {text}; "
+                         f"{p.get('evaluations')} evaluation(s).")
+        lines.append("")
     for r in best.get("continued") or []:
         toward = f", toward {quantity} = {_fmt(r['target'])}{u}" if _num(r.get("target")) else ""
         lines += [f"*Continued at the person's request (round {r.get('round')}):* {r.get('evaluations')} of "

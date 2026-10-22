@@ -1543,6 +1543,126 @@ def search(block, *, seed, method=None, rounds=None, results=None, batch=False, 
                                stop_stepped=stop_stepped).run())
 
 
+# --- a comparison across named alternatives: one search for each -----------------------------------------------------
+
+
+def compared_levels(block):
+    """The alternatives a study compares while it also searches for the best design: every combination of the names
+    listed on the scan (``grid``) for a condition the plan holds fixed (``fixed``). Each is a dict ``{condition: name}``;
+    the first is the one the plan holds. ``[]`` when the study compares no named condition (a condition compared across
+    numbers stays what it was: measured by the scan, held at one value by the search). FI searches each alternative on
+    its own (:func:`compare`): the comparison is made between their best designs, not by searching only the first."""
+    grid = block.get("grid") if isinstance(block.get("grid"), dict) else {}
+    fixed = block.get("fixed") if isinstance(block.get("fixed"), dict) else {}
+    axes = {}
+    for axis, values in grid.items():
+        names = [v for v in (values if isinstance(values, list) else [values])]
+        if str(axis) in fixed and names and all(isinstance(v, str) and v.strip() for v in names):
+            held = fixed[str(axis)] if isinstance(fixed[str(axis)], str) else None
+            ordered = ([held] if held else []) + [v for v in dict.fromkeys(names) if v != held]
+            if len(ordered) > 1:
+                axes[str(axis)] = ordered
+    if not axes:
+        return []
+    return [dict(zip(axes, combo)) for combo in itertools.product(*axes.values())]
+
+
+def level_count(block):
+    """How many searches the plan's block runs: one for each alternative it compares, else one."""
+    return max(1, len(compared_levels(block)))
+
+
+def level_block(block, level):
+    """``block`` with the conditions of one alternative held at its names."""
+    fixed = dict(block.get("fixed") if isinstance(block.get("fixed"), dict) else {})
+    fixed.update(level)
+    return {**block, "fixed": fixed}
+
+
+def level_key(level):
+    """A short text naming an alternative (empty for no alternative), for keys of records."""
+    return json.dumps(level, sort_keys=True) if level else ""
+
+
+def level_says(level):
+    return ", ".join(f"{k} = {v}" for k, v in level.items())
+
+
+def compare(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True, stop_stepped=True):
+    """:func:`search`, once for each alternative the plan compares (:func:`compared_levels`), one after another, each with
+    the plan's own design variables, ranges, budget and seed; the comparison is made between the best design of each.
+    Every request it yields says its alternative (``"level"``), and a scan request the alternative's block (``"block"``)
+    so the scan, which measures every alternative together, is read for the one it starts. Without a compared condition it
+    is exactly :func:`search`. The outcome is the one of :func:`search`, over every alternative: the best design is the best
+    of the alternatives (it names its ``level``), the baseline is the one of that alternative, and ``levels`` has the best
+    design, the baseline and the evaluations of each."""
+    levels = compared_levels(block)
+    if not levels:
+        return (yield from search(block, seed=seed, method=method, rounds=rounds, results=results, batch=batch,
+                                  stop_flat=stop_flat, stop_stepped=stop_stepped))
+    outcomes = []
+    for level in levels:
+        sub = level_block(block, level)
+        gen = search(sub, seed=seed, method=method, rounds=rounds, results=results, batch=batch, stop_flat=stop_flat,
+                     stop_stepped=stop_stepped)
+        try:
+            request = next(gen)
+            while True:
+                request = dict(request, level=dict(level))
+                if request["kind"] == "scan":
+                    request["block"] = sub
+                reply = yield request
+                request = gen.send(reply)
+        except StopIteration as finished:
+            outcomes.append(finished.value)
+    return merge_outcomes(outcomes, levels, block)
+
+
+def merge_outcomes(outcomes, levels, block):
+    """The outcome of a search over every alternative (see :func:`compare`)."""
+    sign = _sign(block)
+    rows = []
+    for outcome, level in zip(outcomes, levels):
+        for row in outcome["rows"]:
+            rows.append(dict(row, level=dict(level), n=len(rows) + 1))
+    offset = 0
+    per = []
+    for outcome, level in zip(outcomes, levels):
+        best = outcome["best"]
+        per.append({"level": dict(level), "best": dict(best, evaluation=best["evaluation"] + offset) if best else None,
+                    "baseline": outcome["baseline"], "evaluations": outcome["evaluations"],
+                    "budget": outcome["budget"], "stopped_because": outcome["stopped_because"]})
+        offset += len(outcome["rows"])
+    winners = [p for p in per if p["best"] is not None]
+    win = min(winners, key=lambda p: sign * p["best"]["objective"]) if winners else per[0]
+    best = dict(win["best"], level=dict(win["level"])) if win["best"] else None
+    stops = [o["stopped_because"] for o in outcomes]
+    stopped = next((s for s in ("time", "the simulation could not be loaded", "failures", "scan_unchanged") if s in stops),
+                   "budget" if "budget" in stops else stops[0])
+    first = outcomes[0]
+    out = {
+        "rows": rows, "evaluations": sum(o["evaluations"] for o in outcomes),
+        "scan_evaluations": sum(o["scan_evaluations"] for o in outcomes), "budget": sum(o["budget"] for o in outcomes),
+        "starts": first["starts"], "per_start": first["per_start"], "levels": per, "level_count": len(outcomes),
+        "stopped_because": stopped, "budget_ran_out": any(o["budget_ran_out"] for o in outcomes),
+        "method_requested": first["method_requested"], "method_used": first["method_used"],
+        "method_why": first["method_why"],
+        "notes": list(dict.fromkeys(n for o in outcomes for n in o["notes"])),
+        "baseline": win["baseline"],
+        "start_log": [dict(s, level=dict(lv)) for o, lv in zip(outcomes, levels) for s in o["start_log"]],
+        "seed": first["seed"], "failed": sum(o["failed"] for o in outcomes),
+        "infeasible": sum(o["infeasible"] for o in outcomes), "best": best,
+        "rounds": [dict(r, level=dict(lv)) for o, lv in zip(outcomes, levels) for r in o["rounds"]],
+        "fixed": dict(level_block(block, win["level"])["fixed"]),
+    }
+    # A stop that is a fact about the simulation (it does not move the objective) is the search's only when every
+    # alternative's search found it: one alternative that did move it shows the simulation reaches the objective.
+    for key in ("no_effect", "flat_objective", "stepped_objective"):
+        if all(o.get(key) for o in outcomes):
+            out[key] = dict(first[key])
+    return out
+
+
 def rehearse(block, *, batch, seed=0):
     """How many designs the search asks for together, request by request after its coarse scan (a list of counts), from
     the search itself run on a stand-in objective with the same ``batch`` as the run: how many designs a method asks for at
@@ -1796,7 +1916,7 @@ def run_sync(block, evaluate, *, seed, method=None, scan_step=None, drive_step=N
     ``drive_step(spec)`` (default: :func:`drive` in this process) for a library's method. ``deadline`` is a
     ``time.monotonic()`` time after which no evaluation starts; ``max_evaluations`` stops the search where an earlier
     one was stopped by its time limit (so ``code/run.py`` repeats that search, not a longer one)."""
-    gen = search(block, seed=seed, method=method, rounds=rounds)
+    gen = compare(block, seed=seed, method=method, rounds=rounds)
     done = 0
     names = [str(v["name"]) for v in block["design_variables"]]
 
@@ -1817,7 +1937,9 @@ def run_sync(block, evaluate, *, seed, method=None, scan_step=None, drive_step=N
         while True:
             if request["kind"] == "scan":
                 if scan_step is not None:
-                    reply = scan_step(request["grid"])
+                    # An alternative's scan is read for its own block (the scan measures every alternative together).
+                    reply = (scan_step(request["grid"], block=request["block"]) if "block" in request
+                             else scan_step(request["grid"]))
                 else:
                     reply = []
                     for cell in grid_cells(request["grid"]):
@@ -1895,6 +2017,10 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
                 says += ", less than the plan's threshold for better"
             says += ")"
         says += "."
+        if outcome.get("levels"):
+            says += (f" It is the best of {len(outcome['levels'])} alternatives, each searched on its own "
+                     f"({'; '.join(level_says(p['level']) + (': ' + _fmt(p['best']['objective']) + u if p['best'] else ': no design that meets every limit') for p in outcome['levels'])}); the winner is "
+                     f"{level_says(best['level'])}.")
     rounds = [r for r in outcome.get("rounds") or [] if isinstance(r, dict)]
     if rounds:
         says += (f" The search was continued {len(rounds)} time(s) at the person's request "
@@ -1912,13 +2038,16 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
         "evaluations": evaluations,
         "starts": outcome["start_log"],
         "seed": seed,
-        "fixed": dict(block.get("fixed") or {}),
+        "fixed": dict(outcome.get("fixed") or block.get("fixed") or {}),
         "search_settings": search_settings(block),
         "check_settings": dict(check) if check is not None else check_settings(block),
         "checked_at_finer_settings": False,
         "notes": outcome["notes"],
         "says": says,
     }
+    if outcome.get("levels"):
+        record["compared"] = {"conditions": sorted({k for p in outcome["levels"] for k in p["level"]}),
+                              "levels": outcome["levels"]}
     asked = next((r for r in reversed(rounds) if _number(r.get("target"))), None)
     if asked is not None:
         # The person's latest target (a refine) is the one the result is held to.
@@ -1930,7 +2059,7 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
                             "reached": bool(best is not None and sign * (best["objective"] - target_value) <= 0)}
     if rounds:
         record["continued"] = rounds
-        record["evaluations"]["planned_budget"] = outcome["starts"] * outcome["per_start"]
+        record["evaluations"]["planned_budget"] = outcome["starts"] * outcome["per_start"] * outcome.get("level_count", 1)
         record["evaluations"]["added_budget"] = sum(int(r.get("added") or 0) for r in rounds)
     if extra:
         record.update(extra)
@@ -1955,6 +2084,8 @@ def ledger_lines(outcome, block):
             "method": outcome["method_used"], "method_requested": outcome["method_requested"],
             "budget": outcome["budget"], "starts": outcome["starts"], "per_start": outcome["per_start"],
             "seed": outcome["seed"], "search_settings": search_settings(block)}
+    if outcome.get("levels"):
+        head["compared"] = [p["level"] for p in outcome["levels"]]
     return [json.dumps(plain_zero(head), default=str)] + [json.dumps(plain_zero(row), default=str) for row in outcome["rows"]]
 
 

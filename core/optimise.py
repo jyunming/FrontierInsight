@@ -487,7 +487,7 @@ def _read_journal(path: Path, key: str, space: Any) -> tuple[dict[str, dict[str,
         if not (isinstance(row, dict) and isinstance(row.get("design"), dict) and isinstance(row.get("reply"), dict)):
             continue
         try:
-            at = space.key(space.canonical(row["design"]))
+            at = _replay_key(space, row["design"], row.get("level"))
         except (KeyError, TypeError, ValueError):
             continue
         answers[at] = row["reply"]
@@ -496,10 +496,17 @@ def _read_journal(path: Path, key: str, space: Any) -> tuple[dict[str, dict[str,
     return answers, seconds
 
 
-def _journal(path: Path, design: dict[str, Any], reply: dict[str, Any]) -> None:
+def _replay_key(space: Any, design: dict[str, Any], level: dict[str, Any] | None) -> str:
+    """What an evaluation already answered is found by: the design, and the alternative it was evaluated under when the
+    study compares named alternatives (the same design is another evaluation under each of them)."""
+    return f"{_search.level_key(level)}|{space.key(space.canonical(design))}"
+
+
+def _journal(path: Path, design: dict[str, Any], reply: dict[str, Any], level: dict[str, Any] | None = None) -> None:
     try:
         with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"design": design, "reply": reply}, default=str) + "\n")
+            fh.write(json.dumps({"design": design, "reply": reply, **({"level": level} if level else {})},
+                                default=str) + "\n")
     except OSError:
         pass  # the journal only saves time on a resume; the search goes on without it
 
@@ -593,7 +600,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     # A continued search repeats the search it continues: when FI's record of that one (the same simulation, plan, seed
     # and the rounds before this one) is on disk, its evaluations are answered from the record, not run again.
     replay: dict[str, dict[str, Any]] = {}
-    replay_scan: list[dict[str, Any]] | None = None
+    replay_scan: dict[str, list[dict[str, Any]]] | None = None
     if rounds and not frozen and isinstance(record, dict) and record.get("key") != key and any(
             record.get("key") == _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds[:k], stop_flat,
                                           stop_stepped, stop_unchanged)
@@ -601,7 +608,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         earlier = _record_files(record, record_text).get(LEDGER_PATH.as_posix(), "")
         space = _search.Space(block["design_variables"])
         quantity = str(block["objective"]["quantity"])
-        scan_seen: list[dict[str, Any]] = []
+        scan_seen: dict[str, list[dict[str, Any]]] = {}
         for line in earlier.splitlines():
             try:
                 row = json.loads(line)
@@ -613,10 +620,11 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                                       if row.get("status") == "ok" else {"failed": str(row.get("reason") or "failed")})
             answer["elapsed_s"] = row.get("elapsed_s")
             if row.get("stage") == "scan":
-                scan_seen.append({"design": row["design"], "values": answer.get("values"),
-                                  "reason": answer.get("failed", ""), "elapsed_s": row.get("elapsed_s")})
+                scan_seen.setdefault(_search.level_key(row.get("level")), []).append(
+                    {"design": row["design"], "values": answer.get("values"), "reason": answer.get("failed", ""),
+                     "elapsed_s": row.get("elapsed_s")})
             else:
-                replay[space.key(space.canonical(row["design"]))] = answer
+                replay[_replay_key(space, row["design"], row.get("level"))] = answer
         if scan_seen and (quest_root / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file():
             replay_scan = scan_seen
         if log is not None and replay:
@@ -712,10 +720,18 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                     _trials.RUN_RECORD):
             (quest_root / rel).unlink(missing_ok=True)
 
-    async def scan(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
-        """The coarse scan, through the trial runner itself (``raw/trials.json``, which the analysis can plot)."""
+    scanned: dict[str, dict[str, Any]] = {}
+
+    async def scan(grid: dict[str, list[Any]], scan_block: dict[str, Any] | None = None,
+                   level: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """The coarse scan, through the trial runner itself (``raw/trials.json``, which the analysis can plot). It
+        measures every alternative of a compared condition together and runs once: each alternative's search is given
+        the designs of the scan at its own alternative (``scan_block``)."""
         if replay_scan is not None:
-            return replay_scan
+            return replay_scan.get(_search.level_key(level), [])
+        grid_key = json.dumps({k: list(v) for k, v in grid.items()}, sort_keys=True, default=str)
+        if grid_key in scanned:
+            return _search.scan_rows(scanned[grid_key], scan_block or block)
         left = deadline - time.monotonic()
         if left <= 0:
             return []
@@ -726,10 +742,11 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         )
         stderr_parts.append(trial_run.stderr())
         summary = json.loads(trial_run.summary_path.read_text(encoding="utf-8"))
+        scanned[grid_key] = summary
         reasons = {c.key: next((r.get("reason") for r in c.rows if r.get("reason")), "") for c in trial_run.cells}
         for cell in summary.get("cells") or []:
             cell["reason"] = reasons.get(cell.get("key"), "")
-        rows = _search.scan_rows(summary, block)
+        rows = _search.scan_rows(summary, scan_block or block)
         # A number that differs when the same setting is called again (a timing) is no result of any setting.
         unsteady = await _trials.unsteady_names(
             executor, python, quest_root, module, trial_run.cells,
@@ -765,7 +782,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 
     constant = _degenerate.expected_constants(protocol)
     results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
-    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1,
+    gen = _search.compare(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1,
                        stop_flat=stop_flat, stop_stepped=stop_stepped)
     replay_space = _search.Space(block["design_variables"]) if replay else None
     load_error = ""
@@ -776,15 +793,15 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         request = next(gen)
         while True:
             if request["kind"] == "scan":
-                reply = await scan(request["grid"])  # type: ignore[assignment]
-                scan_rows = list(reply)
+                reply = await scan(request["grid"], request.get("block"), request.get("level"))  # type: ignore[assignment]
+                scan_rows = scan_rows or list(reply)
             elif request["kind"] == "evaluate_many":
                 # Designs the method chose before reading any of their answers: up to ``at_once`` at the same time.
                 asked = request["requests"]
                 answers: list[Any] = [None] * len(asked)
                 fresh = []
                 for k, one in enumerate(asked):
-                    replayed = (replay.get(replay_space.key(replay_space.canonical(one["design"])))
+                    replayed = (replay.get(_replay_key(replay_space, one["design"], one.get("level")))
                                 if replay_space is not None and isinstance(one.get("design"), dict) else None)
                     if scan_unchanged:
                         answers[k] = {"stop": "scan_unchanged"}
@@ -797,7 +814,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 def finished(j: int, answer: dict[str, Any], loaded: str) -> None:
                     nonlocal evaluated, last_note
                     if ("values" in answer or "failed" in answer) and not loaded and not answer.get("process"):
-                        _journal(journal, asked[fresh[j]]["design"], answer)
+                        _journal(journal, asked[fresh[j]]["design"], answer, asked[fresh[j]].get("level"))
                     if "values" in answer or "failed" in answer:
                         evaluated += 1
                     if log is not None and time.monotonic() - last_note > 60:
@@ -817,7 +834,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 reply = answers  # type: ignore[assignment]
             elif request["kind"] == "evaluate":
                 left = deadline - time.monotonic()
-                replayed = (replay.get(replay_space.key(replay_space.canonical(request["design"])))
+                replayed = (replay.get(_replay_key(replay_space, request["design"], request.get("level")))
                             if replay_space is not None and isinstance(request.get("design"), dict) else None)
                 if scan_unchanged:
                     reply: dict[str, Any] = {"stop": "scan_unchanged"}
@@ -836,7 +853,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                         stderr_parts.append(err)
                     if ("values" in reply or "failed" in reply) and not load_error and not reply.get("process") \
                             and isinstance(request.get("design"), dict):
-                        _journal(journal, request["design"], reply)
+                        _journal(journal, request["design"], reply, request.get("level"))
             else:
                 left = deadline - time.monotonic()
                 reply = (await _drive(executor, python, quest_root, request["spec"], timeout_s=left, env=env)
@@ -977,6 +994,15 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
         if imp and imp.get("better") and imp.get("beyond_threshold") is False:
             change += ", less than the plan's threshold for better"
         lines.append(f"[optimise] the baseline ({_design(baseline.get('design') or {})}) gives {base_text}{change}")
+    compared = (record.get("compared") or {}).get("levels") if isinstance(record.get("compared"), dict) else None
+    if compared and best is not None:
+        from . import optimise_search as _osearch
+
+        lines.append(f"[optimise] {len(compared)} alternatives were each searched on their own; the best design is the "
+                     f"one of {_osearch.level_says(best.get('level') or {})}. Best of each: "
+                     + "; ".join(f"{_osearch.level_says(p['level'])}: "
+                                 + (f"{_fmt(p['best']['objective'])}{unit}" if p.get("best") else "no design that meets every limit")
+                                 for p in compared))
     for r in record.get("continued") or []:
         target = f", toward {quantity} = {_fmt(r['target'])}{unit}" if r.get("target") is not None else ""
         reached = ("; the target was reached at the search's settings" if r.get("target_reached") else

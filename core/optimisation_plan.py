@@ -648,8 +648,9 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
     grid = out.get("grid")
     if isinstance(grid, dict):
         # A study compared across named alternatives (a family, a mode) is an outer comparison, not a search variable. The
-        # plan need not also list it as held fixed: FI does, at the first alternative named (the alternatives are still all
-        # measured by the scan; the held one is where the search goes on from).
+        # plan need not also list it as held fixed: FI does, at the first alternative named. FI then searches every
+        # alternative on its own (core/optimise_search.py ``compare``) and compares their best designs; the first one is
+        # the one the plan's own baseline and held conditions name.
         held = dict(fixed) if isinstance(fixed, dict) else {}
         for axis, values in grid.items():
             values = values if isinstance(values, list) else [values]
@@ -878,9 +879,12 @@ def effective_method(block: dict[str, Any]) -> tuple[str, str]:
 
 
 def evaluations(block: dict[str, Any]) -> tuple[int | None, int]:
-    """``(search evaluations the budget allows, or None when no budget is written; evaluations of the coarse scan)``."""
+    """``(search evaluations the budget allows, or None when no budget is written; evaluations of the coarse scan)``. A
+    study that compares named alternatives searches each one with the whole budget."""
     budget = block.get("evaluation_budget")
     search = int(budget["starts"]) * int(budget["per_start"]) if isinstance(budget, dict) else None
+    if search is not None:
+        search *= _optimise_search.level_count(block)  # one search for each named alternative the plan compares
     return search, scan_size(block)
 
 
