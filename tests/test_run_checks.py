@@ -17,11 +17,20 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core import plan, run_estimate, trial_runner
+from core import plan, run_checks, run_estimate, trial_runner
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
 from core.execution import SharedInterpreterExecutor
+from tests import exact_timing
+from tests.exact_timing import VIRTUAL_CLOCK
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, _NO_OBJECTIONS, _engine as _plan_engine
+
+# ---- an exact clock for the timing (tests/exact_timing.py) ------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _exact_timing(monkeypatch: pytest.MonkeyPatch) -> None:
+    exact_timing.install(monkeypatch)
 
 # ---- a result typed into the code ---------------------------------------------------------------------------------------
 
@@ -242,9 +251,7 @@ def test_the_analysis_is_not_given_a_left_out_quantity_but_the_ledger_keeps_ever
 
 # ---- the run fits the time allowed -------------------------------------------------------------------------------------
 
-SLOW_SIM = '''\
-import time
-
+SLOW_SIM = VIRTUAL_CLOCK + '''
 def run_trial(cell, trial, seed):
     time.sleep(0.05 * cell["n"])
     return {"y": float(cell["n"]) * 2.0 + (seed % 3)}
@@ -418,9 +425,7 @@ def run_trial(cell, trial, seed):
         raise ValueError("the grid cannot take this size")
     return {"y": float(cell["n"])}
 '''
-FAILS_TOGETHER = '''\
-import time
-
+FAILS_TOGETHER = VIRTUAL_CLOCK + '''
 def run_cell(cell):
     time.sleep(0.05 * max(cell["a"], cell["b"]))
     if cell["a"] == 8 and cell["b"] == 8:
@@ -691,6 +696,9 @@ async def test_a_scan_with_no_stated_time_is_timed_on_one_real_evaluation_and_st
     block["grid"] = {"axis0": list(range(5)), "axis1": list(range(33)), "axis2": list(range(10)), "axis3": list(range(5))}
     eng, runner = await _search_engine(tmp_path, block)
     eng.config.execution.timeout_s = 1
+    # One evaluation costs half a second of the simulation's own clock: 8,250 settings cannot fit in one second.
+    (eng.quest_root / "code" / "simulate.py").write_text(
+        VIRTUAL_CLOCK + "\ndef run_cell(cell):\n    time.sleep(0.5)\n    return {'f': cell['x'] ** 2}\n", encoding="utf-8")
     _nothing_is_listed(monkeypatch)
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
