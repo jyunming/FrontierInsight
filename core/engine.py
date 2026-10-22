@@ -31799,7 +31799,23 @@ def _planned_figure_order(state: QuestState) -> list[str]:
     planned = (state.get("design") or {}).get("figures_planned")
     planned_names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
     produced = {Path(str(f)).name for f in (state.get("figures") or [])}
-    return [name for name in dict.fromkeys(planned_names) if name in produced]
+    records = state.get("figure_records") or {}
+    return [name for name in dict.fromkeys(planned_names)
+            if name in produced and not _figure_draws_nothing(records.get(name))]
+
+
+def _panel_draws_nothing(ax: dict[str, Any]) -> bool:
+    """Whether FI's record of one panel says every line it was given has no point on it. A panel whose record lists no
+    series (an image, a histogram) is not known to be empty, so it is not."""
+    series = [s for s in ax.get("series") or [] if isinstance(s, dict)]
+    return bool(series) and not ax.get("unlabelled_lines") and all(s.get("shows") == "no points" for s in series)
+
+
+def _figure_draws_nothing(record: dict[str, Any] | None) -> bool:
+    """Whether a figure's own record says no panel of it draws a point. Such a figure is not put in the paper by FI:
+    it shows the reader nothing."""
+    axes = [ax for ax in (record or {}).get("axes") or [] if isinstance(ax, dict)]
+    return bool(axes) and all(_panel_draws_nothing(ax) for ax in axes)
 
 
 def _planned_figures_left_out(paper_md: str, state: QuestState) -> list[str]:
@@ -31846,8 +31862,8 @@ def _figure_caption_text(
     """
     titles: list[str] = []
     for ax in (record or {}).get("axes") or []:
-        if not isinstance(ax, dict):
-            continue
+        if not isinstance(ax, dict) or _panel_draws_nothing(ax):
+            continue  # a caption does not name a panel that draws nothing
         title = " ".join(str(ax.get("title") or "").replace("[", "").replace("]", "").split())
         if title and title not in titles:
             titles.append(title)
