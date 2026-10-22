@@ -836,9 +836,51 @@ def keys_of_issue(record: dict[str, Any], issue: dict[str, Any], result: Any) ->
     """The keys of the run's results that hold the quantities an issue is about (:func:`named_in_results` for each of
     :func:`quantity_names`). ``[]`` when the results hold none of them."""
     keys: set[str] = set()
-    for name in quantity_names(record, issue):
+    names = quantity_names(record, issue)
+    for name in names:
         keys |= named_in_results(name, result)
+    if not keys:
+        # The quantity's own key holding no number (an empty list, null, a text): it is still the result the issue is
+        # about, and leaving it out removes it.
+        wanted = {_norm(n) for n in names} - {""}
+        keys = {k for k in _all_keys(result) if _norm(k) in wanted}
     return sorted(keys)
+
+
+def holds_no_number(result: Any, keys: set[str]) -> bool:
+    """Whether every value under ``keys`` (at any depth of the results) holds no number: an empty list, null, a text."""
+    found = False
+
+    def walk(node: Any) -> None:
+        nonlocal found
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if str(k) in keys and _holds_numbers(v):
+                    found = True
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return not found
+
+
+def _all_keys(result: Any) -> list[str]:
+    """Every key of the results, at any depth."""
+    out: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                out.append(str(k))
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return out
 
 
 def absent_from_results(names: list[str], result: Any) -> list[str]:

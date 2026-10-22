@@ -128,3 +128,27 @@ def test_a_fault_whose_quantity_the_results_do_not_hold_still_stops(tmp_path: Pa
     code_review.save(root, record)
     _root, verdict, _eng = _gate_on(root, result, monkeypatch)
     assert verdict is not None and "cannot find which of the results it changes" in verdict["rationale"]
+
+
+def test_a_fault_whose_result_holds_no_number_is_left_out_not_a_stop(tmp_path: Path, monkeypatch: Any) -> None:
+    """The quantity's own key is in the results but holds no number (an empty list: the code reported a list of what it
+    found, and found none): it is still the result the fault is about, so it is left out and the paper says so, instead
+    of a stop for a result FI could not find (a live quest stopped without a paper on such a key)."""
+    root, _record, result = _load("kinetics_r8", tmp_path)
+
+    def emptied(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: ([] if k == "Ea_lnA_empirical_correlation" else emptied(v)) for k, v in node.items()}
+        if isinstance(node, list):
+            return [emptied(v) for v in node]
+        return node
+
+    result = emptied(result)
+    assert code_review.keys_of_issue(code_review.load(root), code_review.load(root)["issues"]["F-3af8cc05"], result) == [
+        "Ea_lnA_empirical_correlation"]
+    assert code_review.holds_no_number(result, {"Ea_lnA_empirical_correlation"})
+    _root, verdict, _eng = _gate_on(root, result, monkeypatch)
+    assert verdict is None
+    saved = code_review.load(root)["issues"]
+    assert saved["F-3af8cc05"]["at_gate"]["outcome"] == "left_out"
+    assert saved["F-3af8cc05"]["at_gate"]["keys"] == ["Ea_lnA_empirical_correlation"]

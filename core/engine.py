@@ -20702,7 +20702,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             elif missing := _code_review.missing_quantities(record, issue):
                 not_done.append((issue, how, missing))
             elif keys := _code_review.keys_of_issue(record, issue, result):
-                if _result_checks._values_left_out(result, set(keys)):
+                # A key that holds no number has nothing another key could hold too: leaving it out removes all of it.
+                if _result_checks._values_left_out(result, set(keys)) or _code_review.holds_no_number(result, set(keys)):
                     left_out.append((issue, how, keys))
                 else:
                     stops.append((issue, how + "; the results hold its values under other names too, so FI cannot leave "
