@@ -971,6 +971,7 @@ class RunChecksMixin:
         if est is None:
             return None
         searched = 0
+        whole: Any = None  # the scan with the search's evaluations, when one evaluation was timed
         if not _estimate.known_too_long(est, limit_s):
             # The search shares the scan's time (one deadline for both, core/optimise.py): every evaluation is a design
             # the scan did not compute, so it costs what a setting costs the first time it runs: the search's own
@@ -1014,10 +1015,18 @@ class RunChecksMixin:
                                               complete=est.complete, cells=scan + search_n,
                                               trials=(scan + search_n) * runs, once_s=est.once_s,
                                               once_axes=list(est.once_axes))
+                whole = together
                 if _estimate.known_too_long(together, limit_s):
                     est, searched = together, search_n
             if not searched:
-                self._log.info("[execute] the search's coarse scan: %s", _estimate.says(est, limit_s))  # type: ignore[attr-defined]
+                # The line a person reads is the whole study: the scan alone said "about 6 minutes" of a search that ran
+                # for hours.
+                if whole is not None:
+                    self._log.info("[execute] the search's coarse scan and its %s evaluations: %s (the coarse scan alone: "  # type: ignore[attr-defined]
+                                   "%s)", f"{search_n:,}", _estimate.says(whole, limit_s),
+                                   _estimate.plain_duration(est.seconds * _estimate.SAFETY))
+                else:
+                    self._log.info("[execute] the search's coarse scan: %s", _estimate.says(est, limit_s))  # type: ignore[attr-defined]
                 return None
         if not speed_done and grid is not None and int(self.config.engine.improve_rounds or 0) > 0:  # type: ignore[attr-defined]
             # What FI runs is the same simulation, whatever the study is called: the speed-up a measurement gets is tried

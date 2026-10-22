@@ -997,6 +997,11 @@ async def test_a_search_that_asks_for_designs_together_is_counted_at_the_setting
     runner.at_once = 8
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
     assert slowdowns == [8]
+    # The line a person reads counts the search too, not the coarse scan alone (3 settings: about a minute).
+    said = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+    line = next(x for x in said.splitlines()[::-1] if "the search's coarse scan" in x)
+    assert "and its 1,000 evaluations: FI estimates the experiment takes about 1 h 16 min" in line, line
+    assert "(the coarse scan alone: 27 seconds)" in line
     # A library method runs in the quest's own Python one design at a time: counted one after another.
     block["search_method"] = "scipy:minimize"
     library = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
