@@ -421,6 +421,27 @@ def _name_key(text: Any) -> str:
     return " ".join(re.sub(r"[^0-9a-zA-Z]+", " ", str(text or "")).lower().split())
 
 
+def searched_levels(req: Any, plan: dict[str, Any], factor: dict[str, Any]) -> list[str]:
+    """The levels of a factor that are a design the topic asks the study to search for (one of FI's reading's own
+    ``searches``, in the same words): with a search in the plan they are its part, not values of a setting (the search
+    item is checked on its own), so the factor is checked on its other levels."""
+    if not plan.get("design_variables"):
+        return []
+    names = [_tokens(s.get("name")) for s in (req or {}).get("searches") or [] if isinstance(s, dict)]
+    out = []
+    for level in factor.get("levels") or []:
+        mine = _tokens(level) if isinstance(level, str) else set()
+        if mine and any(n and (mine == n or n <= mine or (mine <= n and len(mine) >= 2)) for n in names):
+            out.append(level)
+    return out
+
+
+def _set_levels(req: Any, plan: dict[str, Any], factor: dict[str, Any]) -> dict[str, Any]:
+    """The factor as its settings must cover it: without the levels FI's search covers (:func:`searched_levels`)."""
+    searched = searched_levels(req, plan, factor)
+    return {**factor, "levels": [lv for lv in factor.get("levels") or [] if lv not in searched]} if searched else factor
+
+
 def _map_keys(req: dict[str, Any], kind: str, item: dict[str, Any]) -> set[str]:
     """What a ``protocol.topic_map`` entry's ``item`` may be for this topic item: FI's own id for it (``F11``, the one the
     request lists, :func:`request`), or its name or formula as FI wrote it."""
@@ -466,8 +487,9 @@ def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[
             if axis is None:
                 why = f"the setting {name} is not among the plan's settings"
                 continue
-            reach = _covers(plan["axes"][axis], item)
-            coded = reach is None and len(plan["axes"][axis]) >= len(item.get("levels") or [0])
+            levels = _set_levels(req, plan, item)
+            reach = _covers(plan["axes"][axis], levels)
+            coded = reach is None and len(plan["axes"][axis]) >= len(levels.get("levels") or [0])
             if reach and not coded:
                 why = f"{reach}"
                 continue
@@ -515,7 +537,7 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
         if axis is None:
             unresolved.append(_item_id("factors", i))
             continue
-        why = _covers(plan["axes"][axis], factor)
+        why = _covers(plan["axes"][axis], _set_levels(req, plan, factor))
         if why is None:
             unresolved.append(_item_id("factors", i))
         elif why:
@@ -602,6 +624,9 @@ def judge_parts(req: dict[str, Any], plan: dict[str, Any], unresolved: list[str]
         kind, item = found
         row = {"id": ident, "kind": {"quantities": "quantity", "searches": "search"}.get(kind, kind[:-1]),
                **{k: v for k, v in item.items() if k in ("name", "levels", "range", "text", "stated", "objective") and v}}
+        if kind == "factors" and (searched := searched_levels(req, plan, item)):
+            row["levels"] = [lv for lv in item.get("levels") or [] if lv not in searched]
+            row["searched_by_fi"] = searched
         mapped = mapping_of(req, plan, kind, item)
         if mapped is not None and mapped[0] == "judge":
             row["plan_says_it_is_covered_by"] = mapped[1]

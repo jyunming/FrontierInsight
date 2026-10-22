@@ -118,3 +118,30 @@ async def test_no_search_in_the_reading_or_a_person_who_answered_measure_keeps_t
     state = {"topic": TOPIC, "iteration": 0, **({"clarify_answers": {"study_type": answer}} if answer else {})}
     await eng._node_plan(state)
     assert plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design["study_type"] == "measure"
+
+
+def test_a_level_that_is_the_searched_design_is_covered_by_the_search_not_by_a_setting() -> None:
+    """The topic compares kinds of heat sink, one of them the shape the study must search for: a plan that sweeps the
+    other kinds as a setting and searches for that shape covers the factor; the shape is not a value the setting must
+    hold (the search item is checked on its own), and the reader is told which level the search covers."""
+    reading = copy.deepcopy(READING)
+    reading["factors"].append({"name": "heat sink kind", "levels": ["straight fins", "pin fins", "searched fin shape"],
+                               "range": [], "stated": "straight fins, pin fins and a searched fin shape",
+                               "compared": True, "main": True})
+    reading["searches"] = [{"what": "a searched fin shape", "objective": "the lowest base temperature",
+                            "stated": "a searched fin shape", "main": True}]
+    req = tr.parse(reading)
+    searching = {"axes": {"fin_count": [8, 12, 16], "heat_sink_kind": ["straight fins", "pin fins"]}, "metrics": [],
+                 "equations": [], "assumptions": "", "topic_map": [], "search": True,
+                 "design_variables": {"fin_profile": "the fin shape the search changes"}}
+    factor = req["factors"][1]
+    assert tr.searched_levels(req, searching, factor) == ["searched fin shape"]
+    gaps, unresolved = tr.match(req, searching)
+    assert not [g for g in gaps if g.get("kind") == "level"] and "F2" not in unresolved
+    row = next(r for r in json.loads(tr.judge_parts(req, searching, ["F2"])[0]) if r["id"] == "F2")
+    assert row["levels"] == ["straight fins", "pin fins"] and row["searched_by_fi"] == ["searched fin shape"]
+    # With no search in the plan the shape is a level like any other: the setting leaves it out.
+    plain = {**searching, "search": False, "design_variables": {}}
+    assert tr.searched_levels(req, plain, factor) == []
+    gaps, _ = tr.match(req, plain)
+    assert any(g.get("kind") == "level" for g in gaps)
