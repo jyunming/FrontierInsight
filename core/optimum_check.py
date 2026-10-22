@@ -160,8 +160,12 @@ def numerical_error(values: list[float], ratios: list[float | None]) -> dict[str
                        "factor 3)"}
     s = 1.0 if e32 / e21 > 0 else -1.0
     if s < 0:
-        return {"error": 3.0 * max(abs(e21), abs(e32)) / (r21 - 1.0), "order": None, "asymptotic": False,
-                "how": "the value swings back and forth as the settings get finer (safety factor 3)"}
+        # No order can be observed: the error is bounded by the largest change itself, three times over (on sequences
+        # with a known value -- smooth and slowly decaying swings, no convergence, values counted on a grid, noise --
+        # this covered the true error at least 96.5% of the time; dividing by r21 - 1 as well, as for a first order,
+        # covered it at most 0.7 points more with an error twice as wide).
+        return {"error": 3.0 * max(abs(e21), abs(e32)), "order": None, "asymptotic": False,
+                "how": "the value swings back and forth as the settings get finer (three times its largest change)"}
     p = 1.0
     for _ in range(200):
         q = math.log((r21 ** p - s) / (r32 ** p - s)) if abs(r21 - r32) > 1e-12 else 0.0

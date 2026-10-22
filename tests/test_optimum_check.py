@@ -326,7 +326,10 @@ def test_the_numerical_error_follows_the_grid_convergence_index() -> None:
     two = oc.numerical_error([1.08, 1.02], [2.0])
     assert two["error"] == pytest.approx(3.0 * 0.06) and "two levels only" in two["how"]
     swinging = oc.numerical_error([1.0, 1.2, 1.1], [2.0, 2.0])
-    assert "swings" in swinging["how"] and swinging["error"] > 0
+    assert "swings" in swinging["how"] and swinging["error"] == pytest.approx(3.0 * 0.2), "three times its largest change"
+    # A value that rose a lot and then fell a little has nearly settled: the largest change bounds it, not six times it.
+    settled = oc.numerical_error([27.2, 33.6, 33.58], [4 / 3, 1.5])
+    assert settled["error"] == pytest.approx(3.0 * 6.4)
     growing = oc.numerical_error([1.0, 1.01, 1.2], [2.0, 2.0])
     assert "not converging" in growing["how"]
     assert oc.numerical_error([1.0], [])["error"] is None
