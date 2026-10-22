@@ -66,6 +66,10 @@ ROUNDS_PATH = WORK_DIR / "continue.json"
 #: Written when the simulation was sent back once because the search's objective is counted in whole steps of one of its
 #: numerical settings (``stepped_objective``): after it, the fact is only recorded (once per quest).
 STEPPED_SENT = WORK_DIR / "stepped_sent.json"
+#: A coarse scan in which a compared setting changed no result the simulation returned (``scan_unchanged``) stops the
+#: search before its budget and sends the simulation back to be repaired: after it, the fact is only recorded (once per
+#: quest).
+UNCHANGED_SENT = WORK_DIR / "scan_unchanged_sent.json"
 #: The environment variables that tell the analysis script where FI's record of the search is.
 LEDGER_ENV = "FI_OPTIMISATION"
 BEST_ENV = "FI_BEST_DESIGN"
@@ -148,7 +152,8 @@ def _key_rounds(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
-             rounds: list[dict[str, Any]] | None = None, stop_flat: bool = True, stop_stepped: bool = True) -> str:
+             rounds: list[dict[str, Any]] | None = None, stop_flat: bool = True, stop_stepped: bool = True,
+             stop_unchanged: bool = True) -> str:
     """What decides a search: the simulation and the modules beside it, the files below ``code/`` it may use (the
     model's package, a parameter file), the optimisation block, the seed, the entry, the thresholds, and FI's own harness
     and search code. (A package installed since is not in it: a search that got no result is never kept, so a search
@@ -180,6 +185,8 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
         what.append({"stop_flat": False})
     if not stop_stepped:
         what.append({"stop_stepped": False})
+    if not stop_unchanged:
+        what.append({"stop_unchanged": False})
     return _sha(b"\1".join(parts) + json.dumps(what, sort_keys=True, default=str).encode())
 
 
@@ -530,7 +537,7 @@ async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, A
 async def run_search(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], *,
                      base_seed: int, timeout_s: int, env: dict[str, str] | None = None, log: Any = None,
                      frozen: bool = False, at_once: int = 1, stop_flat: bool = True,
-                     stop_stepped: bool = True) -> SearchRun:
+                     stop_stepped: bool = True, stop_unchanged: bool = True) -> SearchRun:
     """Run the search for the best design (see the module docstring) and write its record. ``module`` is the simulation
     file relative to ``quest_root``; ``timeout_s`` bounds the whole search, the coarse scan included.
 
@@ -562,7 +569,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                "them for each design the search tries")
         return SearchRun(record={}, rows=[], load_error=why, problems=[why])
     rounds = read_rounds(quest_root, block)
-    key = _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds, stop_flat, stop_stepped)
+    key = _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds, stop_flat, stop_stepped,
+                   stop_unchanged)
     # The same simulation and plan whatever the seed: what a frozen study's search record must have been made from.
     study_key = _study_key(quest_root, simulate, block, entry, thresholds)
     try:
@@ -588,7 +596,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     replay_scan: list[dict[str, Any]] | None = None
     if rounds and not frozen and isinstance(record, dict) and record.get("key") != key and any(
             record.get("key") == _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds[:k], stop_flat,
-                                          stop_stepped)
+                                          stop_stepped, stop_unchanged)
             for k in range(len(rounds))):
         earlier = _record_files(record, record_text).get(LEDGER_PATH.as_posix(), "")
         space = _search.Space(block["design_variables"])
@@ -697,6 +705,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     scan_rows: list[dict[str, Any]] = []
     scan_note: list[str] = []
     scan_unsteady: set[str] = set()
+    scan_unchanged: list[tuple[str, int]] = []  # the compared settings that changed no result (stop_unchanged)
     if not (isinstance(block.get("grid"), dict) and block["grid"]):
         # No coarse scan: an earlier measurement's trial record is not this search's.
         for rel in (Path(_trials.RAW_DIRNAME) / _trials.LEDGER_NAME, Path(_trials.RAW_DIRNAME) / _trials.SUMMARY_NAME,
@@ -725,6 +734,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         unsteady = await _trials.unsteady_names(
             executor, python, quest_root, module, trial_run.cells,
             timeout_s=max(1, math.ceil(deadline - time.monotonic())), env=env, thresholds=thresholds,
+            in_each_run=_search.in_each_run(block) or None,
             log=log) if entry == "run_cell" and deadline - time.monotonic() > 1 else set()
         scan_unsteady.update(unsteady)
         unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol), ignore=unsteady)
@@ -732,6 +742,10 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             scan_note.append(_flat.unchanged_axes_note(unchanged))
             if log is not None:
                 log.warning("[optimise] the coarse scan: %s", scan_note[-1])
+            if stop_unchanged:
+                # FI measured that these settings reach no result: the search would compare one result repeated, so it
+                # stops here and the simulation is sent back (OptimiseRunner._unchanged_result).
+                scan_unchanged[:] = unchanged
         if log is not None:
             ran = sum(1 for c in summary.get("cells") or [] if c.get("level") is None)
             worked = sum(1 for r in rows if r.get("values") is not None)
@@ -772,7 +786,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 for k, one in enumerate(asked):
                     replayed = (replay.get(replay_space.key(replay_space.canonical(one["design"])))
                                 if replay_space is not None and isinstance(one.get("design"), dict) else None)
-                    if replayed is not None:
+                    if scan_unchanged:
+                        answers[k] = {"stop": "scan_unchanged"}
+                    elif replayed is not None:
                         answers[k] = dict(replayed)
                     elif load_error:
                         answers[k] = {"stop": "the simulation could not be loaded"}
@@ -803,8 +819,10 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 left = deadline - time.monotonic()
                 replayed = (replay.get(replay_space.key(replay_space.canonical(request["design"])))
                             if replay_space is not None and isinstance(request.get("design"), dict) else None)
-                if replayed is not None:
-                    reply: dict[str, Any] = dict(replayed)
+                if scan_unchanged:
+                    reply: dict[str, Any] = {"stop": "scan_unchanged"}
+                elif replayed is not None:
+                    reply = dict(replayed)
                 elif load_error:
                     reply = {"stop": "the simulation could not be loaded"}
                 elif left <= 0:
@@ -864,6 +882,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         record["simulation_may_search_itself"] = warnings
     if scan_note:
         record["scan_settings_without_effect"] = scan_note[-1]
+    if scan_unchanged:
+        record["scan_unchanged"] = {"settings": [a for a, _ in scan_unchanged],
+                                    "pairs": min(p for _, p in scan_unchanged)}
     if scan_unsteady:
         record["unsteady"] = sorted(scan_unsteady)
     ledger_text = "\n".join(_search.ledger_lines(outcome, block)) + "\n"
@@ -900,6 +921,8 @@ _STOPPED = {
                  "baseline's results",
     "stepped_objective": "its objective was counted in whole steps of one of its numerical settings, so the search had "
                          "no direction to follow; the simulation was sent back to read it between the steps",
+    "scan_unchanged": "its coarse scan found settings it compares that changed no result the simulation returned; the "
+                      "simulation was sent back so that each of them reaches the results",
     "flat_objective": "the first designs it tried, which between them changed every number of the design, all gave the "
                       "baseline's value of the objective or one of a few values, so the search had no direction to "
                       "follow (more of the same budget would not have found one)",
@@ -1174,7 +1197,8 @@ class OptimisationRunner:
                                timeout_s=timeout_s, env=env, log=self.log,
                                frozen=self._is_frozen(), at_once=self.at_once,
                                stop_flat=bool(self._stop_flat() if callable(self._stop_flat) else self._stop_flat),
-                               stop_stepped=self._stepped_repair_left())
+                               stop_stepped=self._stepped_repair_left(),
+                               stop_unchanged=self._unchanged_repair_left())
         self.last = run
         # The coarse scan's settings that changed no result (core/flat_output.py), kept in the search's record so a
         # search used again says it too.
@@ -1217,6 +1241,9 @@ class OptimisationRunner:
         evaluations = (run.record or {}).get("evaluations") or {}
         # The objective is counted in whole steps of one of the search's numerical settings: the simulation is sent back
         # once to read it between the points of that setting's scan.
+        unchanged = (run.record or {}).get("scan_unchanged")
+        if evaluations.get("stopped_because") == "scan_unchanged" and isinstance(unchanged, dict):
+            return self._unchanged_result(unchanged, run, started)
         stepped = evaluations.get("stepped_objective")
         if evaluations.get("stopped_because") == "stepped_objective" and isinstance(stepped, dict):
             return self._stepped_result(stepped, run, started, _plan.normalize(block_of(protocol))[0] or {})
@@ -1341,6 +1368,38 @@ class OptimisationRunner:
         once per quest, while a repair is left."""
         left = self._repairs_left() if callable(self._repairs_left) else self._repairs_left
         return (left is None or bool(left)) and not (self.quest_root / STEPPED_SENT).is_file()
+
+    def _unchanged_repair_left(self) -> bool:
+        """Whether a coarse scan with a compared setting that changed no result stops the search and sends the
+        simulation back: once per quest, while a repair is left."""
+        left = self._repairs_left() if callable(self._repairs_left) else self._repairs_left
+        return (left is None or bool(left)) and not (self.quest_root / UNCHANGED_SENT).is_file()
+
+    def _unchanged_result(self, fact: dict[str, Any], run: SearchRun, started: float) -> Any:
+        """The run, sent back to be repaired once: settings the coarse scan compares changed no result the simulation
+        returned (core/flat_output.py ``unchanged_axes``, with the numbers that differ on a second call left out)."""
+        from core.execution import ExecutionResult
+
+        try:
+            (self.quest_root / UNCHANGED_SENT).parent.mkdir(parents=True, exist_ok=True)
+            (self.quest_root / UNCHANGED_SENT).write_text(json.dumps(fact, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        self.failed_script = self.simulate.name
+        names = ", ".join(str(n) for n in fact.get("settings") or [])
+        say = (f"FI's coarse scan found that changing {names} changed no number the simulation returned: in each of at "
+               f"least {fact.get('pairs')} pairs of settings that differ in one of them alone, every result was the "
+               "same (numbers that differ when the same setting is run again, such as a timing, were left out). The "
+               "simulation does not let these settings reach its results, so the study would compare one result "
+               f"repeated. Repair simulate.py so that each of {names} changes what the simulation computes as the plan "
+               "says it should (a setting that chooses between alternatives must decide which one is computed, even "
+               "when the design the search changes is also given). If simulate.py already lets a setting reach what it "
+               "computes and the plan's own equations give it no effect there, leave that setting's code as it is; "
+               "change nothing else.")
+        if self.log is not None:
+            self.log.warning("[optimise] %s", say)
+        return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
+                               stderr=f"{run.stderr[-4000:]}\n{say}".strip())
 
     def _stepped_result(self, fact: dict[str, Any], run: SearchRun, started: float, block: dict[str, Any]) -> Any:
         """The run, sent back to be repaired once: the search's objective is a whole multiple of the step of one of its

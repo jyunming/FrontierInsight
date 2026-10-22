@@ -1042,7 +1042,8 @@ class _Search:
             # Every starting point converged, or used its share of the budget before it did (``share``).
             self.stopped = ("budget" if self.used >= self.total else
                             "share" if any(s["stopped_because"] == "budget" for s in self.start_log) else "converged")
-        for index, spec in enumerate(self.rounds if self.stopped not in ("no_effect", "flat_objective", "stepped_objective")
+        for index, spec in enumerate(self.rounds if self.stopped not in ("no_effect", "flat_objective", "stepped_objective",
+                                                                         "scan_unchanged")
                                      else []):
             yield from self._round(index, spec)
         return self._outcome()

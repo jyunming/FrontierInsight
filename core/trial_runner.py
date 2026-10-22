@@ -1091,7 +1091,7 @@ class TrialsRunner:
             self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), run.cells,
             timeout_s=timeout_s, env=env,
             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-            log=self.log) if self.deterministic and self.submit is None else set()
+            in_each_run=_in_run.of(protocol), log=self.log) if self.deterministic and self.submit is None else set()
         seen = _flat.observed_flat_sweep(run.cells, ignore=unsteady)
         flat = _flat.flat_sweep(
             run.cells, source=self.simulate.read_text(encoding="utf-8", errors="replace"),
@@ -1652,17 +1652,19 @@ def _same_value(a: Any, b: Any) -> bool:
 
 async def unsteady_names(executor: Any, python: Path | str, quest_root: Path, module: Path | str, cells: list[Any], *,
                          timeout_s: int, env: dict[str, str] | None = None,
-                         thresholds: dict[str, Any] | None = None, log: Any = None) -> set[str]:
+                         thresholds: dict[str, Any] | None = None, in_each_run: dict[str, list[Any]] | None = None,
+                         log: Any = None) -> set[str]:
     """The names of the numbers ``run_cell`` returns that differ when FI calls the fastest setting of a study again, in a
     new process (a timing, a draw from an unseeded source): they are no result of the setting, so they are left out when
     FI judges whether a setting changed anything (:func:`core.flat_output.unchanged_axes`, ``observed_flat_sweep``).
-    Only for a study run once per setting with no seed (``cells`` are :class:`CellRun` objects whose trials carry none)
-    and no values compared inside a run; empty otherwise, or when the setting could not be called again (then every
-    number is compared, as before)."""
+    Only for a study run once per setting with no seed (``cells`` are :class:`CellRun` objects whose trials carry none);
+    a setting whose runs compare values inside them (``in_each_run``, the study's) is called again with the same values.
+    Empty otherwise, or when the
+    setting could not be called again (then every number is compared, as before)."""
     done: list[tuple[float, CellRun, dict[str, Any]]] = []
     for c in cells:
-        if getattr(c, "levels", None) or getattr(c, "level", None):
-            return set()
+        if getattr(c, "level", None):
+            continue  # a value's own record of the per-setting summary, not a run
         for r in getattr(c, "rows", []) or []:
             if r.get("seed") is not None:
                 return set()
@@ -1675,8 +1677,16 @@ async def unsteady_names(executor: Any, python: Path | str, quest_root: Path, mo
     done.sort(key=lambda item: item[0])
     _seconds, cell, row = done[0]
     try:
-        again, why = await run_case(executor, python, quest_root, module, cell=dict(cell.cell), timeout_s=timeout_s,
-                                    env=env, thresholds=thresholds, trial=0, log=log)
+        if getattr(cell, "levels", None):
+            # The run as the study made it: the setting with every value it compares inside, in the same order.
+            inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
+            again, why = await _run_case(executor, python, quest_root, module, cell={**cell.cell, **inside},
+                                         timeout_s=timeout_s,
+                                         env=env, thresholds=thresholds, trial=0, oracle=None, per_trial=False,
+                                         levels=cell.levels, log=log)
+        else:
+            again, why = await run_case(executor, python, quest_root, module, cell=dict(cell.cell), timeout_s=timeout_s,
+                                        env=env, thresholds=thresholds, trial=0, log=log)
     except Exception as e:  # noqa: BLE001 -- a check of the numbers; the study itself ran
         again, why = None, f"{type(e).__name__}: {e}"
     if again is None:

@@ -728,6 +728,8 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                             "the design, all gave the baseline's results",
                "stepped_objective": "the search stopped early: its objective was counted in whole steps of one of its "
                                     "numerical settings",
+               "scan_unchanged": "the search stopped before it began: its coarse scan found settings it compares that "
+                                 "changed no result of the simulation",
                "flat_objective": "the search stopped early: its first designs across the whole range, which between them "
                                  "changed every number of the design, all gave the baseline's objective or one of a few "
                                  "values"

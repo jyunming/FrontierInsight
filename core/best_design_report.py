@@ -60,6 +60,7 @@ _STOPPED = {
                       "all gave the baseline's objective or one of a few values",
     "stepped_objective": "its objective was counted in whole steps of one of its numerical settings, so it had no "
                          "direction to follow",
+    "scan_unchanged": "its coarse scan found settings it compares that changed no result of the simulation",
 }
 
 

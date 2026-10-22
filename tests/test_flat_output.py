@@ -423,19 +423,54 @@ def test_a_sweep_with_a_setting_that_changes_nothing_runs_and_says_so(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_a_coarse_scan_setting_that_changes_nothing_is_said_before_the_search_and_kept_in_its_record(
+async def test_a_coarse_scan_setting_that_changes_nothing_stops_the_search_and_sends_the_simulation_back_once(
         tmp_path: Path) -> None:
+    """FI measured that a compared setting reaches no result: the search would compare one result repeated, so it stops
+    before its budget and the simulation is repaired once, told which setting. After that, the fact is only said."""
     root = _quest(tmp_path, WORKING_SIM)
     protocol = {"optimisation": _block(fixed={"finish": "matte"},
                                        grid={"fin": [1.0, 4.0], "finish": ["matte", "gloss"]})}
-    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
-                                         simulate=root / "code" / "simulate.py",
-                                         analysis=root / "code" / "experiment.py")
-    result = await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
+
+    def runner() -> Any:
+        return optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
+                                           simulate=root / "code" / "simulate.py",
+                                           analysis=root / "code" / "experiment.py")
+
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    first = runner()
+    result = await first.execute(cmd, cwd=root, timeout_s=300)
+    assert result.returncode == 1 and first.failed_script == "simulate.py"
+    assert "changing finish changed no number the simulation returned" in result.stderr
+    assert "Repair simulate.py" in result.stderr and "fin," not in result.stderr
+    sent = json.loads((root / optimise.UNCHANGED_SENT).read_text(encoding="utf-8"))
+    assert sent["settings"] == ["finish"]
+    again = runner()  # the repair is spent: the search runs and the fact is said
+    result = await again.execute(cmd, cwd=root, timeout_s=300)
     assert result.returncode == 0, result.stderr[-1500:]
-    assert runner.no_difference and "`finish`" in runner.no_difference and "`fin`" not in runner.no_difference
+    assert again.no_difference and "`finish`" in again.no_difference and "`fin`" not in again.no_difference
     best = json.loads((root / "results" / "best_design.json").read_text(encoding="utf-8"))
     assert "`finish`" in best["scan_settings_without_effect"]
+
+
+@pytest.mark.asyncio
+async def test_a_timing_the_simulation_returns_does_not_hide_a_setting_that_changes_nothing_with_values_inside_each_run(
+        tmp_path: Path) -> None:
+    """A run that compares values inside it and also returns its own run time: FI calls a setting again, sees the time
+    differ, and leaves it out, so the compared setting that reaches no result is still found."""
+    sim = ("import time\n"
+           "def run_cell(cell):\n"
+           "    return {'mass': float(cell['fin']) * 2.0, 'seconds': time.perf_counter()}\n")
+    root = _quest(tmp_path, sim)
+    cells = [trial_runner.CellRun(key=f"{f}-{g}", cell={"fin": f, "finish": g}, planned=1,
+                                  rows=[{"trial": 0, "seed": None, "status": "ok", "duration_s": 0.01,
+                                         "values": {"mass": f * 2.0, "seconds": 0.001 * (i + 1)}}],
+                                  levels=[{"load": 1.0}, {"load": 2.0}])
+             for i, (f, g) in enumerate((f, g) for f in (1.0, 4.0) for g in ("matte", "gloss"))]
+    assert flat.unchanged_axes(cells) == [], "with the time compared, the setting looks like it moved something"
+    unsteady = await trial_runner.unsteady_names(
+        LocalExecutor(), sys.executable, root, "code/simulate.py", cells, timeout_s=60, in_each_run={"load": [1.0, 2.0]})
+    assert "seconds" in unsteady and "mass" not in unsteady
+    assert [a for a, _ in flat.unchanged_axes(cells, ignore=unsteady)] == ["finish"]
 
 
 def test_a_setting_that_moves_only_the_numbers_per_value_inside_each_run_is_not_named() -> None:
@@ -482,7 +517,9 @@ async def test_a_coarse_scan_whose_only_moving_number_is_a_timing_says_which_set
                                          simulate=root / "code" / "simulate.py",
                                          analysis=root / "code" / "experiment.py")
     result = await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
-    assert result.returncode == 0, result.stderr[-1500:]
+    # The timing differs on a second call, so it is left out and `finish` is found: the simulation is sent back once.
+    assert result.returncode == 1 and runner.failed_script == "simulate.py"
+    assert "changing finish changed no number" in result.stderr
     assert runner.no_difference and "`finish`" in runner.no_difference and "`fin`" not in runner.no_difference
 
 
