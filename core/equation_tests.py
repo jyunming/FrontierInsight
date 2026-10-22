@@ -101,7 +101,9 @@ EXAMPLE_RULE = (
     "Each equation with role `generates` or `analyses` carries one worked example, `\"example\": {\"inputs\": "
     "{\"<name>\": <number>, ...}, \"expected_formula\": \"<the equation's output for those inputs, as a formula>\"}`. The "
     "code will have a function that implements the equation, with one parameter for each name in `inputs` (named exactly "
-    "so) returning the equation's output as one number. FI computes `expected_formula` itself (the same formula language "
+    "so) returning the equation's output as one number. Name each input as the equation writes that variable (a word "
+    "Python reserves, such as `lambda`, takes a trailing underscore: `lambda_`), because FI also computes the equation "
+    "itself from those names and holds the example to it. FI computes `expected_formula` itself (the same formula language "
     "as a check's `expected_formula`, using only the names in `inputs` and numbers) and tests that function before the "
     "study runs; so give inputs that make the equation's terms matter (no zero or one that hides a factor), and compute "
     "the output from the equation as it is written, not from the answer you expect. A closed form is held to a "
@@ -358,9 +360,12 @@ def equation_value(formula: str, inputs: dict[str, float]) -> float | None:
     right = m.group(2).strip()
     if not right or re.search(r"[=<>~]", right) or _triage.ambiguous(right):
         return None
+    # A symbol that is a word Python reserves (`lambda`) is the input `lambda_`: the one name a function can take for it, and
+    # the one the plan is told to write (:data:`EXAMPLE_RULE`).
+    right = _forms._renamed(right)
     # `f(T) = ...`: each argument the left side names must be used on the right, or the text says two things.
     used = set(_forms.names(right, {**_forms.FUNCTIONS, **_forms.PROSE_FUNCTIONS}))
-    if m.group(1) and any(a.strip() and a.strip() not in used for a in m.group(1).strip("()").split(",")):
+    if m.group(1) and any(a.strip() and _forms._kept(a.strip()) not in used for a in m.group(1).strip("()").split(",")):
         return None
     return _forms.evaluate(right, inputs, special=_forms.PROSE_FUNCTIONS).value
 

@@ -226,3 +226,17 @@ def test_a_parameter_the_example_gives_no_value_for_is_told_apart_from_names_tha
     assert "gives no value for" in request
 
 
+# --- the plan's equation and the example are compared by the one name the plan is told to write ---------------------------
+
+
+def test_a_reserved_word_symbol_is_the_input_with_a_trailing_underscore() -> None:
+    inputs = {"lambda_": 200.0, "sigma": 0.5, "NA": 1.0}
+    assert abs(eqt.equation_value("d = 0.61*lambda/(sigma*NA)", inputs) - 0.61 * 200.0 / 0.5) < 1e-9
+    assert eqt.equation_value("d = 0.61*lambda/(sigma*NA)", {"lambda_nm": 200.0, "sigma": 0.5, "NA": 1.0}) is None
+    equation = {"id": "E1", "formula": "d = 0.61*lambda/(sigma*NA)", "role": "generates",
+                "example": {"inputs": inputs, "expected_formula": "3.8317059702*lambda_/(2*pi*sigma*NA)"}}
+    row = _rows(equation)["E1"]
+    # The example (0.6098) and the equation (0.61) are two sources for one number; FI now computes both.
+    assert row["state"] == "unusable" and "the equation as written gives" in row["why"]
+    good = {**equation, "example": {"inputs": inputs, "expected_formula": "0.61*lambda_/(sigma*NA)"}}
+    assert _rows(good)["E1"]["state"] == "ok" and _rows(good)["E1"]["equation_agrees"] is True
