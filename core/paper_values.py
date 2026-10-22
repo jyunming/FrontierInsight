@@ -1437,6 +1437,10 @@ paper is saved, so the reader sees the number.
 You may type only: a number the plan or the topic states, written exactly as the plan writes it (a setting, a true value, a
 nominal level, a constant of the method); the number of a figure, table, section or citation (Figure 2, Section 3, [4]); and a
 whole number from 0 to 10 inside a formula. A typed result, or any other typed number, is sent back to you.
+A number the method works out from the plan's numbers (a quantile, a cutoff or bound from a formula of the plan's constants, a
+reference value, a count from the grid) is not typed either: write {{calc:EXPR}} and FI computes it, also inside a formula.
+Build EXPR from the plan's numbers as the plan writes them, e.g. {{calc:1 - 0.05 / 2}} or, for a bound a / (b * c) - 1 of
+the plan's own a, b and c, {{calc:a / (b * c) - 1}} with their digits for a, b and c.
 How to write a key: {{v:<value> @ <where>}}. The value is a quantity from the list below. <where> names every setting the
 study varied, each as name=<value it took> (one setting), name=all (the trials of all its settings together) or name=each (kept
 apart, for a smallest, largest or range). Add :<form> after the value for another form of it (default is the mean). Add | % to
