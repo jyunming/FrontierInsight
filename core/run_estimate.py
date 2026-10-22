@@ -826,7 +826,7 @@ def _say_undefined(name: str, obs: list[tuple[dict[str, Any], dict[str, float]]]
 def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: dict[str, str], *,
                    exempt: set[str] | frozenset[str] = frozenset(), tried_all: str = "",
                    unsure: set[str] | frozenset[str] = frozenset(), axes: set[str] | frozenset[str] = frozenset(),
-                   source: str | None = None, inside: Iterable[str] = ()) -> Pilot:
+                   source: str | None = None, inside: Iterable[str] = (), stochastic: bool = False) -> Pilot:
     """What the pilot trials show. ``inside``: the names of what each run compares inside it (``protocol.in_each_run``), whose
     values are not settings. ``kinds``: the protocol's metrics (``{id: kind}``); only those the trials returned are read.
     ``tried_all``: a clause saying that every combination of the small settings was tried (when it was); ``unsure``: metrics
@@ -834,10 +834,15 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
     expects to stay put. ``source``: the text of the simulation, for the evidence a value that never changed needs (see the
     module's notes); without it only an undefined metric is a finding. Nothing here is a judgement about the science: a metric
     undefined everywhere, and, when the code shows it is built from no setting, one that never moves while others do and an
-    output that is the same everywhere."""
+    output that is the same everywhere. ``stochastic``: the study runs ``run_trial`` once per trial (not ``run_cell``); then a
+    ``run_trial`` that reaches ``run_cell`` (FI's own reading of the code, :func:`core.trial_runner.trial_aggregates`) is a
+    finding: every trial of the study would be the setting's whole mean, as long as a cell and with the statistics of a
+    mean, whatever the pilot's few trials returned."""
     from . import flat_output as _flat
 
     pilot = Pilot(trials=len(obs), settings=_setting_count(obs, inside))
+    if stochastic and source is not None and (why := _tr.trial_aggregates(source)):
+        pilot.problems.append(PilotProblem("", "aggregate", why))
     returned = sorted({n for _c, v in obs for n in v})
     pilot.checked = [n for n in kinds if n in returned]
     if not obs:
@@ -981,7 +986,7 @@ async def pilot(
         else:
             unsure = set(suspects)
     return pilot_problems(obs, kinds, exempt=exempt, tried_all=tried_all, unsure=unsure, axes=axes, source=source,
-                          inside=tuple(in_each_run or ()))
+                          inside=tuple(in_each_run or ()), stochastic=not deterministic)
 
 
 # ---- the record: so a resume neither times nor asks again -------------------------------------------------------------

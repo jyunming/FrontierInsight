@@ -101,3 +101,23 @@ def test_a_function_the_code_does_not_define_keeps_the_outlines_line() -> None:
     assert held == OUTLINE_SIGS
 
 
+# --- the pilot reads a run_trial that is a whole cell --------------------------------------------------------------------------
+
+CELL_AS_TRIAL = (
+    "def run_trial(cell, trial_id=0, seed=0):\n    if isinstance(cell, dict):\n        return run_cell(cell)\n    return {'x': 1.0}\n\n\n"
+    "def run_cell(cell):\n    return {'x': sum(run_trial(1.0, i, i)['x'] for i in range(1000)) / 1000}\n")
+CELL_FROM_TRIALS = (
+    "def run_trial(cell, trial_id=0, seed=0):\n    return {'x': 1.0}\n\n\n"
+    "def run_cell(cell):\n    return {'x': sum(run_trial(cell, i, i)['x'] for i in range(1000)) / 1000}\n")
+
+
+def test_the_pilot_names_a_run_trial_that_returns_the_whole_cell() -> None:
+    found = re_.pilot_problems([], {}, source=CELL_AS_TRIAL, stochastic=True)
+    assert [p.kind for p in found.problems] == ["aggregate"] and "ONE trial" in found.problems[0].says
+    # Old behaviour (nothing said before the run) when the study does not run trials, or the reading is not asked for.
+    assert re_.pilot_problems([], {}, source=CELL_AS_TRIAL, stochastic=False).problems == []
+    assert re_.pilot_problems([], {}, source=CELL_AS_TRIAL).problems == []
+    # Known negative: a run_cell that is built from run_trial is how a cell is made, never a finding.
+    assert re_.pilot_problems([], {}, source=CELL_FROM_TRIALS, stochastic=True).problems == []
+
+
