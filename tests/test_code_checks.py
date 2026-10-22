@@ -96,7 +96,7 @@ FAULTS: dict[str, tuple[dict[str, str], set[str]]] = {
     "unread_settings": (_with(simulate=(' * cell["extra"]}', '}')), {"unread_settings"}),
     "figure_data": (_with(plot=("plt.plot(values, values)", "plt.plot([1, 2, 3], [4, 5, 6])")), {"figure_data"}),
 }
-ROSTER = ["typed_results", "grid_keys", "typed_constants", "independent_check", "small_run", "trial_checks",
+ROSTER = ["typed_results", "undefined_names", "grid_keys", "typed_constants", "independent_check", "small_run", "trial_checks",
           "equation_tests", "known_answers", "unread_settings", "figure_data"]
 
 

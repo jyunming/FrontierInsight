@@ -3,7 +3,8 @@
 Each check is a small module that reads the code with ``ast`` and the plan's protocol, and finds a fault a person would
 find in a minute: a setting the code reads under a name the study does not have (:mod:`core.grid_keys`), numbers typed into
 the model's functions that the plan never gives (:mod:`core.typed_constants`), a "second implementation" that compares a
-value with itself (:mod:`core.independent_check`). A fault is sent back to be repaired, in plain words and with no expected
+value with itself (:mod:`core.independent_check`), a name the code uses that nothing defines or imports
+(:mod:`core.undefined_names`). A fault is sent back to be repaired, in plain words and with no expected
 value in the request, at most :data:`REPAIRS` times for the text of the code; what is still there afterwards is handled the
 way its module says (an honest stop, or a note the evidence and the paper carry). Nobody is asked to edit code.
 
@@ -22,6 +23,7 @@ from typing import Any
 from . import grid_keys as _grid_keys
 from . import independent_check as _independent
 from . import typed_constants as _constants
+from . import undefined_names as _undefined
 
 #: How many times, in all, one text of the code is sent back for the checks of this module.
 REPAIRS = 2
@@ -33,8 +35,8 @@ def static_checks() -> list[tuple[str, Any, str]]:
     """``(name, module, what a fault that stands after the repairs does)`` for each static check, in the order they run:
     ``stop`` ends the quest without a paper, ``note`` is recorded for the evidence and the paper, ``headline`` stops only
     when the module says a headline result rests on it (and is a note otherwise)."""
-    return [("grid_keys", _grid_keys, "stop"), ("typed_constants", _constants, "headline"),
-            ("independent_check", _independent, "note")]
+    return [("undefined_names", _undefined, "stop"), ("grid_keys", _grid_keys, "stop"),
+            ("typed_constants", _constants, "headline"), ("independent_check", _independent, "note")]
 
 
 def _read_json(path: Path) -> dict[str, Any]:
