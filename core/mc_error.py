@@ -507,9 +507,15 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
         return (f"{mc.get('failed_trials')} of {mc.get('started')} trials on its case failed, so the trials that "
                 "finished cannot stand for the case")
     n, se = int(mc.get("trials") or 0), mc.get("se")
-    band = f"±{_oracle.fmt_digits(BAND_SE * float(se), 2)}" if _number(se) else "their band"
     when = ("the most FI runs for one check" if mc.get("why") == "most_trials" else "all FI could run in the time it had")
     tolerance = f"±{_oracle.fmt_digits(float(limit), 2)}" if _number(limit) else "its tolerance"
+    interval = mc.get("binomial_interval")
+    if isinstance(interval, list) and len(interval) == 2 and all(_number(x) for x in interval):
+        # A 0/1 outcome is decided on its binomial interval (:func:`binomial_verdict`), so that interval is what is shown.
+        lo, hi = (_oracle.fmt_digits(float(x), 2) for x in interval)
+        return (f"the range of the share of {n} trials ({when}), from {lo} to {hi}, lies neither inside nor outside "
+                f"the tolerance {tolerance}")
+    band = f"±{_oracle.fmt_digits(BAND_SE * float(se), 2)}" if _number(se) else "their band"
     return (f"three standard errors ({band}) around the mean of {n} trials ({when}) lie neither inside nor outside "
             f"the tolerance {tolerance}")
 

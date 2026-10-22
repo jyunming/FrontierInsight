@@ -1207,3 +1207,12 @@ def test_a_fail_of_the_first_trials_counts_only_when_fresh_trials_show_it_again(
 def test_a_per_trial_flag_written_as_a_whole_number_is_read(written: Any, expected: Any) -> None:
     oracle = {"name": "rule", "per_trial": written} if written is not None else {"name": "rule"}
     assert mc.per_trial_flag(oracle) is expected
+
+
+def test_an_undecided_outcome_is_described_by_the_interval_that_decided_it() -> None:
+    # A 0/1 outcome is decided on its binomial interval, so the message shows that interval, not a three-standard-error band.
+    record = {"trials": 200, "se": 0.02, "why": "time", "binomial_interval": [0.031, 0.12]}
+    words = mc.undecided_words(record, 0.01)
+    assert "0.031" in words and "0.12" in words and "standard errors" not in words, words
+    plain = {"trials": 200, "se": 0.02, "why": "time"}
+    assert "standard errors" in mc.undecided_words(plain, 0.01)
