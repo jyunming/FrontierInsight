@@ -48,3 +48,11 @@ def test_an_expression_with_a_name_is_not_read():
 
 def test_a_whole_number_is_exact_as_written():
     assert [f["expression"] for f in _arithmetic({"name": "w", "reference": "2 * 3 = 7"})] == ["2 * 3"]
+
+
+def test_a_sum_in_a_text_field_that_is_not_a_working_out_is_not_read():
+    # Only the reference (and a derivation) is a working-out; a wrong sum in the check's name or a note is not judged.
+    in_note = {"name": "n", "note": "2 * 3 = 7", "reference": "[1]"}
+    in_name = {"name": "2 * 3 = 7", "reference": "[1]"}
+    assert _arithmetic(in_note) == [] and _arithmetic(in_name) == []
+    assert [f["expression"] for f in _arithmetic({"name": "d", "derivation": "2 * 3 = 7"})] == ["2 * 3"]

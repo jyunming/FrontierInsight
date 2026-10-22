@@ -784,8 +784,11 @@ def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | 
     for oracle in _oracle.declared(protocol):
         # A sum the plan works out in its own words (a reference, a derivation) is computed too: the plan's own hand
         # arithmetic can be wrong where its `expected_formula` is right (a stated 3.4486 where the sum gives 3.4519).
-        for key, value in oracle.items():
-            if key in ("measure", "expected_formula") or not isinstance(value, str):
+        # Only the keys that hold such a working-out are read (the reference keys and `derivation`), not every text
+        # field of the check (its name, its case words, a note).
+        for key in (*_oracle._REFERENCE_KEYS, "derivation"):
+            value = oracle.get(key)
+            if not isinstance(value, str):
                 continue
             for sw in stated_arithmetic(value):
                 found.append({"name": str(oracle["name"]).strip(), "state": "arithmetic", **sw})
