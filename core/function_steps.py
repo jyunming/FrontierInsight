@@ -541,6 +541,29 @@ def match_example_names(source: str, name: str, inputs: list[str], *, random: bo
     return (renamed, pairs or {}) if renamed is not None else (None, {})
 
 
+def held_signatures(fixed: dict[str, str], sources: dict[str, str], cases: list[dict[str, Any]]) -> dict[str, str]:
+    """The ``def`` line a repair must keep for each function of ``fixed`` (its name to the outline's ``def``): ONE source of a
+    function's interface at a time. The test calls a function by the names of the worked example's inputs, so the outline's
+    line (already given those names, :func:`example_signature`) is held only where the code does not meet that contract
+    yet (``cases``: the equation tests, :func:`core.equation_tests.cases`; a name the function lacks, or a parameter without
+    a default that the example gives no value for). A function the code already writes so that the test can call it, and
+    a function no test calls, keeps the ``def`` it has in ``sources``: the code its callers were written against is what a
+    repair must not break, and the outline's order of parameters (which no test reads) is not a second claim on it. A
+    function ``sources`` does not define keeps the outline's line."""
+    by_function: dict[str, list[dict[str, Any]]] = {}
+    for case in cases:
+        by_function.setdefault(str(case.get("function")), []).append(case)
+    out = dict(fixed)
+    for name in fixed:
+        node = next((n for text in sources.values() for n in [_find(text, name)] if n is not None), None)
+        if node is None:
+            continue
+        if any(_eqt._contract_here(c) for c in by_function.get(name, [])):
+            continue  # the test cannot call the function as written: the outline's names are what the repair must give
+        out[name] = f"def {name}({ast.unparse(node.args)}):"
+    return out
+
+
 def changed_signatures(source: str, fixed: dict[str, str]) -> list[str]:
     """For each function of ``fixed`` (its name to the ``def`` line the outline gave it) that ``source`` defines at the
     top level with other parameters: a plain sentence saying so. The outline is the one place a function's parameters

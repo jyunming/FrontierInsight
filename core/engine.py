@@ -13435,11 +13435,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     def _outline_signatures(self, state: QuestState) -> dict[str, str]:
         """The parameters a repair must keep for each function that implements an equation of the plan's model: the
-        function's name to its ``def`` line. For a function an equation test calls, the outline's: the tests call it by
-        them, so a repair keeps them, never the parameters some earlier repair left. For one no test calls, the
-        parameters it has now in ``code/``: nothing calls it by the outline's, and the code its callers were written
-        against is what a repair must not break (a first-written function can differ from the outline, and holding it to
-        the outline refused every repair of the file). ``{}`` when the code was not written from an outline that names a
+        function's name to its ``def`` line (:func:`core.function_steps.held_signatures`). For a function an equation test
+        calls and the code cannot yet be called by, the outline's: the tests call it by them, so a repair keeps them,
+        never the parameters some earlier repair left. For one the test already calls, or no test calls, the parameters
+        it has now in ``code/``: the code its callers were written against is what a repair must not break (a
+        first-written function can differ from the outline, in its names or only in their order, and holding it to the
+        outline refused every repair of the file). ``{}`` when the code was not written from an outline that names a
         function per equation."""
         specs = self._outline_equation_specs(state)
         if not specs:
@@ -13450,17 +13451,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             protocol = protocol if isinstance(protocol, dict) else None
             sources = self._equation_sources()
             located = _equation_tests.locate(protocol, sources, {s.equation: s.name for s in specs})
-            tested = {str(c["function"]) for c in _equation_tests.cases(_equation_tests.example_rows(protocol), located)}
+            cases = _equation_tests.cases(_equation_tests.example_rows(protocol), located)
         except Exception:  # noqa: BLE001 -- unreadable code: every function held to the outline, as before
             return fixed
-        for name in fixed:
-            if name in tested:
-                continue
-            node = next((n for text in sources.values() for n in [_function_steps._find(text, name)] if n is not None),
-                        None)
-            if node is not None:
-                fixed[name] = f"def {name}({ast.unparse(node.args)}):"
-        return fixed
+        return _function_steps.held_signatures(fixed, sources, cases)
 
     def _match_example_names(self, case_list: list[dict[str, Any]], located: dict[str, dict[str, str] | None],
                              sources: dict[str, str]) -> bool:

@@ -61,3 +61,43 @@ def test_the_layout_check_does_not_ask_for_labels_where_the_outline_names_the_fu
     assert any("planned for equation E2" in p and "not in code/spring/" in p for p in absent)
 
 
+# --- a repair is held to ONE interface: the outline's where the test cannot call the code yet, else the code's ------------
+
+# The code was first written with the example's parameter NAMES in another ORDER than the signature built from the example
+# (the shape of a recorded round: the tests pass, and every whole-file repair was refused on order alone).
+REORDERED = "def frequency(m, k):\n    return (k / m) ** 0.5\n\n\ndef quality(c, w, m):\n    return m * w / c\n"
+OUTLINE_SIGS = {"frequency": "def frequency(*, k, m) -> float:", "quality": "def quality(*, m, w, c) -> float:"}
+
+
+def _cases(source: str) -> list[dict]:
+    sources = {"spring/model.py": source}
+    return eqt.cases(eqt.example_rows(PROTOCOL), eqt.locate(PROTOCOL, sources, OUTLINE_NAMES))
+
+
+def test_code_the_test_can_already_call_keeps_its_own_def_even_when_only_the_order_differs() -> None:
+    sources = {"spring/model.py": REORDERED}
+    held = fs.held_signatures(OUTLINE_SIGS, sources, _cases(REORDERED))
+    assert held == {"frequency": "def frequency(m, k):", "quality": "def quality(c, w, m):"}
+    # The whole-file repair the quest needed (a fix elsewhere, the parameters as written) is no longer refused.
+    assert fs.changed_signatures(REORDERED.replace("** 0.5", "**0.5"), held) == []
+    # Old: held to the outline's order, the same repair was refused for both functions.
+    assert len(fs.changed_signatures(REORDERED, OUTLINE_SIGS)) == 2
+
+
+def test_code_the_test_cannot_call_is_held_to_the_outlines_names_and_a_renaming_repair_is_still_refused() -> None:
+    wrong_names = "def frequency(spring_k, m):\n    return (spring_k / m) ** 0.5\n\n\ndef quality(m, w, c):\n    return m * w / c\n"
+    sources = {"spring/model.py": wrong_names}
+    held = fs.held_signatures(OUTLINE_SIGS, sources, _cases(wrong_names))
+    assert held["frequency"] == OUTLINE_SIGS["frequency"], "the test calls `k`: the repair must give it"
+    assert held["quality"] == "def quality(m, w, c):"
+    # Known positive: a repair that renames or drops a parameter of a function the test calls is still refused.
+    renamed = wrong_names.replace("def quality(m, w, c)", "def quality(m, w, damping)").replace("m * w / c", "m * w / damping")
+    refused = fs.changed_signatures(renamed, held)
+    assert len(refused) == 2 and any("`quality`" in r for r in refused)
+
+
+def test_a_function_the_code_does_not_define_keeps_the_outlines_line() -> None:
+    held = fs.held_signatures(OUTLINE_SIGS, {"spring/model.py": "def other():\n    pass\n"}, [])
+    assert held == OUTLINE_SIGS
+
+

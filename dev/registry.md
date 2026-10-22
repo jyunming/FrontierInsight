@@ -710,7 +710,7 @@ same PR that adds, splits or renames one.
   quest (a lock file in `.fi/`) and returns None when the old folder cannot be moved aside; no link under docker. Tests: `tests/test_outside_run.py`, `tests/test_trial_runner.py`, `tests/test_killed_trial_leftovers.py`,
   `tests/test_shared_cache.py`.
 - `core/function_steps.py` — the model's package written one function at a time: `model_functions` (the outline's
-  `implements` / `depends_on`, dependency order), `replace_function` (splice one function, its imports and helpers into
+  `implements` / `depends_on`, dependency order), `held_signatures` (the `def` a repair must keep per function: the outline's only where the equation test cannot yet call the code, else the code's own), `replace_function` (splice one function, its imports and helpers into
   `model.py`, parameters and `# E<n>` label kept), `FunctionFiller` (fill, import-check, equation test, repair alone,
   bounded; a failed function is left failed while the others go on, then `_repair_module` repairs the whole module naming
   the functions that pass; `partial` keeps the package, `fell_back` (a function with no code) removes it so the code is written

@@ -74,7 +74,9 @@ def test_a_function_no_test_calls_keeps_its_own_parameters_and_a_tested_one_the_
     _write_code(engine, GOOD["quality"] + ENERGY_AS_WRITTEN)
     cl.save(engine.quest_root, {"shape": cl.PACKAGE, "package": "spring"})
     fixed = engine._outline_signatures(STATE3)
-    assert fixed["quality"] == "def quality(m, w, c) -> float:" and fixed["frequency"] == "def frequency(k, m) -> float:"
+    # Both tested functions are already written so that their tests can call them by the example's names: the def they
+    # have in the code is the one interface (the outline's `-> float` annotation is no second claim on it).
+    assert fixed["quality"] == "def quality(m, w, c):" and fixed["frequency"] == "def frequency(k, m):"
     assert fixed["energy"] == "def energy(k, x, o):", "untested: the parameters it was written with"
     model = GOOD["frequency"] + "\n\n" + GOOD["quality"]
     # The repair the quest needed: a fix elsewhere in the file, `energy` as it was written. Refused before this change.
