@@ -782,7 +782,7 @@ same PR that adds, splits or renames one.
   `Engine._repair_review_findings`, which also routes an issue the reader marks `plan_conflict` to `Engine._route_plan_conflicts`
   (the shared `_ask_plan_to_complete`, counted in `.fi/code_plan_conflict_asked.json`, only the protocol's metrics, interval method
   and model may be rewritten; once the protocol is frozen it is only recorded) and never to the code. `quality_report` shows the
-  issues by id.
+  issues by id. `keep_try` keeps every repair try in code/'s git history: an accepted one as a commit (`code_project.record_change`), a refused one on `refs/fi/refused/<finding id>-<try>` (`code_project.keep_refused`, the branch not moved), so a change to the checks can be replayed on past tries; a git failure is dropped.
 - `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in
   a package of their own (`code/<package>/`, name from the title via `package_name`, kept in `.fi/code_layout.json`),
   `simulate.py` as the scenario FI still calls, `tests/test_oracles.py` (`oracle_tests`, the plan's checks as unit tests,
