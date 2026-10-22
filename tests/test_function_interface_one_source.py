@@ -121,3 +121,52 @@ def test_the_pilot_names_a_run_trial_that_returns_the_whole_cell() -> None:
     assert re_.pilot_problems([], {}, source=CELL_FROM_TRIALS, stochastic=True).problems == []
 
 
+# --- the second version is compared on inputs inside the function's domain ------------------------------------------------------
+
+
+def _spec(example: dict) -> tuple[fs.Spec, dict]:
+    protocol = {"model": {"equations": [{"id": "E1", "formula": "phi = z * (n - sqrt(n^2 - (w f)^2))", "role": "generates",
+                                        "example": example}]}}
+    return fs.Spec(name="phase", signature="def phase(z, f, w, n):", purpose="phase", equation="E1"), protocol
+
+
+EXAMPLE = {"inputs": {"z": 100.0, "f": 0.005, "w": 200.0, "n": 1.4}, "expected_formula": "z*(n - sqrt(n**2 - (w*f)**2))"}
+
+
+def test_inputs_outside_the_domain_of_the_examples_own_formula_are_not_built() -> None:
+    spec, protocol = _spec(EXAMPLE)
+    base = si.example_inputs(spec, protocol)
+    old = si.build_inputs(base)
+    new = si.build_inputs(base, defined=si.domain_of(spec, protocol, base))
+    outside = [c for c in old if c["w"] * c["f"] > c["n"]]
+    assert outside, "scaling every input by 2 pushes w*f (x4) past n (x2): the old inputs include such a case"
+    assert not [c for c in new if c["w"] * c["f"] > c["n"]] and new[0] == base and len(new) >= 3
+
+
+def test_a_wrong_version_inside_the_domain_still_disagrees_on_the_kept_inputs() -> None:
+    import math
+
+    spec, protocol = _spec(EXAMPLE)
+    base = si.example_inputs(spec, protocol)
+    kept = si.build_inputs(base, defined=si.domain_of(spec, protocol, base))
+
+    def right(z, f, w, n):
+        return z * (n - math.sqrt(n * n - (w * f) ** 2))
+
+    def planted(z, f, w, n):  # drops the refractive index from the root
+        return z * (n - math.sqrt(1 - (w * f) ** 2 / n))
+
+    rows = [{"main": right(**c), "ref": planted(**c)} for c in kept]
+    assert si.judge_rows([{"main": r["main"], "ref": r["ref"]} for r in rows], kept, si.REL)["status"] == si.DISAGREE
+    same = [{"main": right(**c), "ref": right(**c)} for c in kept]
+    assert si.judge_rows(same, kept, si.REL)["status"] == si.AGREE
+
+
+def test_no_domain_is_applied_when_the_formula_cannot_be_read_from_the_example() -> None:
+    spec, protocol = _spec({"inputs": EXAMPLE["inputs"], "expected_formula": "z*(n - sqrt(n**2 - (w*f)**2)) + unknown_term"})
+    assert si.domain_of(spec, protocol, EXAMPLE["inputs"]) is None, "unknown_term is not an input: the formula is not read"
+    assert si.domain_of(spec, protocol, None) is None
+    spec2, protocol2 = _spec({"inputs": EXAMPLE["inputs"], "untestable": "no closed form"})
+    assert si.domain_of(spec2, protocol2, EXAMPLE["inputs"]) is None
+
+

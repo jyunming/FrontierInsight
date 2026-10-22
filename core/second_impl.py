@@ -51,6 +51,7 @@ from typing import Any, Awaitable, Callable
 
 from . import equation_tests as _eqt
 from . import function_steps as _fs
+from . import oracle_forms as _forms
 
 RECORD = Path(".fi") / "second_impl.json"
 DIR = Path(".fi") / "second_impl"
@@ -233,20 +234,57 @@ def _shift(v: Any, d: float) -> Any:
     return v + int(d) if isinstance(v, int) else float(v) + d
 
 
-def build_inputs(base: dict[str, Any], ranges: dict[str, Any] | None = None, limit: int = MAX_INPUTS) -> list[dict[str, Any]]:
+def domain_of(spec: _fs.Spec, protocol: dict[str, Any] | None, base: dict[str, Any] | None) -> Callable[[dict[str, Any]], bool] | None:
+    """Whether the plan's own worked example still defines the function at an input: a predicate on a case, or ``None``
+    when there is none to apply. The example's ``expected_formula`` is the plan's statement of the function's value in
+    terms of its inputs, and FI's calculator computes it (:func:`core.oracle_forms.formula_value`); an input at which the
+    formula has no real value (a square root of a negative number, a division by zero) is outside the function's domain,
+    where both versions are free to answer anything, so a difference there says nothing about either. Only used when the
+    formula is computable at the example's own inputs (so it is read, and its names are the inputs'), and only for
+    inputs that are all plain numbers; every other case is taken as defined."""
+    example: Any = None
+    if spec.card:
+        example = spec.card.get("example")
+    else:
+        eq = next((e for e in _eqt.eligible(protocol) if _eqt._text(e["id"]) == spec.equation), None)
+        example = (eq or {}).get("example")
+    formula = example.get("expected_formula") if isinstance(example, dict) else None
+    formulas = list(formula.values()) if isinstance(formula, dict) else [formula]
+    if (not formulas or any(f is None or not str(f).strip() for f in formulas) or not isinstance(base, dict)
+            or not all(_is_num(v) for v in base.values())):
+        return None
+
+    def value(case: dict[str, Any], f: Any) -> float | None:
+        return _forms.formula_value({"expected_formula": f, "case": case})[0]
+
+    if any(value(base, f) is None for f in formulas):
+        return None  # not readable from the example's inputs: nothing says where the function is defined
+
+    def defined(case: dict[str, Any]) -> bool:
+        if not all(_is_num(v) for v in case.values()):
+            return True
+        return all(value(case, f) is not None for f in formulas)
+
+    return defined
+
+
+def build_inputs(base: dict[str, Any], ranges: dict[str, Any] | None = None, limit: int = MAX_INPUTS,
+                 defined: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]:
     """The inputs both versions are called with: the example inputs; every scalar at x0.5, x2 and x0.9; arrays rescaled and
     shifted; the edges of a known range. Deterministic; duplicates dropped; at most ``limit``. Strings and booleans are
-    kept as they are. A function with only such inputs is called on the example alone."""
+    kept as they are. A function with only such inputs is called on the example alone. ``defined`` (:func:`domain_of`):
+    a case outside the function's domain is left out (the example itself always stays), so the scaled copies of the
+    example never ask a function a question its own formula cannot answer."""
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def add(case: dict[str, Any]) -> None:
+    def add(case: dict[str, Any], *, first: bool = False) -> None:
         key = json.dumps(case, sort_keys=True, default=str)
-        if key not in seen and len(out) < limit:
+        if key not in seen and len(out) < limit and (first or defined is None or defined(case)):
             seen.add(key)
             out.append(case)
 
-    add(dict(base))
+    add(dict(base), first=True)
     scalars = [k for k, v in base.items() if _is_num(v)]
     arrays = [k for k, v in base.items() if _is_array(v)]
     for f in (0.5, 2.0, 0.9):
@@ -1229,7 +1267,7 @@ class SecondImpl:
         if why:
             return {"status": UNCONFIRMED, "why": why, "disagreements": [], "retry": False}
         base = example_inputs(spec, self.protocol, self.captured)
-        inputs = build_inputs(base, ranges_of(spec, self.protocol))
+        inputs = build_inputs(base, ranges_of(spec, self.protocol), defined=domain_of(spec, self.protocol, base))
         # Every other call FI recorded is an input too: the settings the study really gives the function.
         for call in self.captured.get(spec.name, [])[1:]:
             if len(inputs) < MAX_INPUTS + CAPTURE_CALLS and call not in inputs:
