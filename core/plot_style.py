@@ -815,6 +815,17 @@ try:
 
         def _fi_recording_savefig(self, fname, *args, **kwargs):
             started = _fi_time.perf_counter()
+            # A tight crop keeps an axis label that runs past the canvas edge: the crop is the widened box
+            # (see _fi_overflow_box), since savefig's own tight box leaves that label out.
+            if kwargs.get("bbox_inches", _fi_mpl.rcParams["savefig.bbox"]) == "tight":
+                try:
+                    pad = float(kwargs.get("pad_inches", _fi_mpl.rcParams["savefig.pad_inches"]))
+                    box = _fi_overflow_box(self, _fi_draw(self))
+                    kwargs["bbox_inches"] = _fi_mpl.transforms.Bbox.from_extents(
+                        box.x0 - pad, box.y0 - pad, box.x1 + pad, box.y1 + pad)
+                    kwargs["pad_inches"] = 0
+                except Exception:
+                    pass
             result = _fi_savefig(self, fname, *args, **kwargs)
             saved_in = _fi_time.perf_counter() - started
             record = plot = name = None
@@ -1056,6 +1067,34 @@ _PAPER_SOURCE = '''\
             except (AttributeError, TypeError):
                 fig.canvas.draw()
                 return fig.canvas.get_renderer()
+
+        def _fi_overflow_box(fig, renderer):
+            # The box a saved copy must keep, in inches. get_tightbbox leaves out an axis label that runs past
+            # the canvas edge (a long x label on the right panel), so the crop would cut it; the box is widened
+            # to every visible text's own extent, so a label that fits changes nothing.
+            box = fig.get_tightbbox(renderer)
+            x0, y0, x1, y1 = box.x0, box.y0, box.x1, box.y1
+            dpi = float(fig.dpi)
+            texts = list(fig.texts)
+            for ax in _fi_all_axes(fig):
+                texts += [ax.xaxis.label, ax.yaxis.label] + _fi_all_titles(ax) + list(ax.texts)
+                for axis in (ax.xaxis, ax.yaxis):
+                    # Only the ticks inside the axis range are drawn; matplotlib keeps spare tick objects beyond it.
+                    lo, hi = sorted(axis.get_view_interval())
+                    for tick in axis.get_major_ticks():
+                        if lo <= tick.get_loc() <= hi:
+                            texts += [tick.label1, tick.label2]
+            for text in texts:
+                if not text.get_visible() or not text.get_text().strip():
+                    continue
+                ext = text.get_window_extent(renderer)
+                if ext.width <= 0 and ext.height <= 0:
+                    continue
+                x0 = min(x0, ext.x0 / dpi)
+                y0 = min(y0, ext.y0 / dpi)
+                x1 = max(x1, ext.x1 / dpi)
+                y1 = max(y1, ext.y1 / dpi)
+            return _fi_mpl.transforms.Bbox.from_extents(x0, y0, x1, y1)
 
         def _fi_all_axes(fig):
             # Every Axes, an inset's (a child of its Axes) included.
@@ -1475,7 +1514,7 @@ _PAPER_SOURCE = '''\
             # what the crop adds, so the saved copy is no wider than the paper width and no taller than the cap.
             pad = 0.02
             tight = not constrained
-            box = fig.get_tightbbox(renderer)
+            box = _fi_overflow_box(fig, renderer)
             if tight or box.x0 < -0.02 or box.x1 > width + 0.02 or box.y0 < -0.02 or box.y1 > height + 0.02:
                 tight = True
                 for _ in range(4):
@@ -1486,7 +1525,7 @@ _PAPER_SOURCE = '''\
                     w_now, h_now = (float(v) for v in fig.get_size_inches())
                     fig.set_size_inches(max(w_now - max(wide, 0.0), width * 0.5), max(h_now - max(tall, 0.0), cap * 0.3))
                     renderer = _fi_draw(fig)
-                    box = fig.get_tightbbox(renderer)
+                    box = _fi_overflow_box(fig, renderer)
                 if box.height + 2 * pad > cap + 0.05:
                     # Taller than a page allows even after shortening: no copy rather than one the page cannot hold.
                     raise ValueError("the copy is %.2f in tall, more than the %.2f in a paper figure may be"
@@ -1506,7 +1545,9 @@ _PAPER_SOURCE = '''\
             labels = [float(t.get_fontsize()) for ax in panels for t in (ax.xaxis.label, ax.yaxis.label)
                       if t.get_visible() and t.get_text().strip()]
             _fi_os.makedirs(_fi_os.path.dirname(outputs[0]), exist_ok=True)
-            kw = {"bbox_inches": "tight" if tight else None, "pad_inches": pad, "dpi": p["dpi"]}
+            # The crop is passed as the box itself: savefig's own "tight" would leave out the same label.
+            crop = _fi_mpl.transforms.Bbox.from_extents(box.x0 - pad, box.y0 - pad, box.x1 + pad, box.y1 + pad)
+            kw = {"bbox_inches": crop if tight else None, "pad_inches": 0 if tight else pad, "dpi": p["dpi"]}
             with _fi_mpl.rc_context({"pdf.fonttype": 42, "savefig.bbox": "standard"}):
                 _fi_savefig(fig, outputs[0], format="pdf", **kw)
                 _fi_savefig(fig, outputs[1], format="png", **kw)

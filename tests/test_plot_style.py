@@ -572,3 +572,51 @@ def test_a_reference_line_and_a_family_of_runs_are_not_called_flat(tmp_path) -> 
     assert series["R0=1.5 runs"]["shows"] == "yes" and series["R0=1.5 runs"]["min"] == 0.0, series
     assert series["threshold"]["shows"] == "reference line"
     assert series["known value"]["shows"] == "reference line"
+
+
+def _saved_figure_ink(tmp_path, script_body: str):
+    """Run ``script_body`` under the bootstrap and return (saved width, rightmost ink column in the bottom band)."""
+    from PIL import Image
+    import numpy as np
+
+    boot_dir = write_boot(tmp_path, "latex")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p)}
+    out = subprocess.run(
+        [sys.executable, "-c", "import matplotlib; matplotlib.use('Agg')\n" + script_body],
+        env=env, cwd=tmp_path, capture_output=True, text=True, timeout=180,
+    )
+    assert out.returncode == 0, out.stderr
+    img = np.asarray(Image.open(tmp_path / "fig.png").convert("L"))
+    h, w = img.shape
+    cols = np.where((img[int(h * 0.88):, :] < 200).any(axis=0))[0]
+    return w, int(cols.max())
+
+
+_LONG_RIGHT_LABEL = (
+    "import matplotlib.pyplot as plt\nimport numpy as np\n"
+    "fig, axes = plt.subplots(1, 3, figsize=(9, 3.2))\n"
+    "xs = np.linspace(0, 1, 30)\n"
+    "for i, ax in enumerate(axes):\n"
+    "    ax.plot(xs, xs ** (i + 1)); ax.set_title('Panel %d' % (i + 1))\n"
+    "axes[2].set_xlabel('Sampling noise SD relative to the reference level, per setting')\n"
+    "fig.savefig('fig.png')\n"
+)
+
+
+def test_a_label_running_past_the_right_edge_is_kept_in_the_saved_figure(tmp_path) -> None:
+    """A long x label on the right panel of a three-panel figure used to be cut at the canvas edge: matplotlib's
+    tight box leaves it out. The saved image must now end after the label's last ink (no ink in the last two columns)."""
+    width, last_ink = _saved_figure_ink(tmp_path, _LONG_RIGHT_LABEL)
+    assert last_ink < width - 2, (width, last_ink)
+
+
+def test_a_label_that_fits_is_saved_without_change_in_the_layout_check(tmp_path) -> None:
+    """Known positive: a short label that fits inside the canvas keeps the figure's own layout; the widened box
+    adds nothing to a figure with nothing past its edge, so a single short-labelled panel keeps its ink inside."""
+    width, last_ink = _saved_figure_ink(tmp_path, (
+        "import matplotlib.pyplot as plt\nimport numpy as np\n"
+        "fig, ax = plt.subplots(figsize=(4, 3))\n"
+        "ax.plot(np.arange(5), np.arange(5)); ax.set_xlabel('Time (s)')\n"
+        "fig.savefig('fig.png')\n"
+    ))
+    assert last_ink < width - 2, (width, last_ink)
