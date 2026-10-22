@@ -125,6 +125,11 @@ def _level_of(key, levels):
     """The level (a dict of factor -> value from ``levels``) a returned key names, or ``None``. With one factor the key may
     be the value alone (``"bh"``, ``290.2``, ``"290.2"``); any key may be written ``factor=value[,factor=value]``."""
     text = str(key).strip()
+    for level in levels:
+        # FI's own key for the level first: a value that is a text with a comma in it ("mirror-symmetric, optimised")
+        # cannot be split back into its pairs, and every key of every level was refused.
+        if text == level_key(level):
+            return level
     pairs = {}
     if "=" in text:
         for part in text.split(","):

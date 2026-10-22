@@ -67,6 +67,18 @@ def test_a_number_per_value_must_give_every_value_and_nothing_else() -> None:
     assert in_run.read_returned({"k": [1.0, 2.0]}, [], "run_trial") == (None, "run_trial() returned non-numbers for ['k']")
 
 
+def test_a_value_written_as_a_text_with_a_comma_is_read_back_under_fis_own_key() -> None:
+    """A real study compared text values inside each run, one of them with a comma in it; the run returned them under
+    the very keys FI gives, and every one was refused, because the key was split back into pairs at its commas."""
+    levels = in_run.level_cells({"family": ["plain", "shaped (symmetric, tuned for the target)"], "mode": ["a", "b"]})
+    keys = [in_run.level_key(level) for level in levels]
+    assert any("," in k.split("family=")[-1] for k in keys)
+    got, why = in_run.read_returned({"r": {k: float(i) for i, k in enumerate(keys)}}, levels, "run_cell")
+    assert why == "" and got == {"r": {k: float(i) for i, k in enumerate(keys)}}
+    # a key that is none of the values is still refused
+    assert "not one of the values" in in_run.read_returned({"r": {"family=other,mode=a": 1.0}}, levels, "run_cell")[1]
+
+
 def test_a_check_reads_a_number_per_value_at_the_value_its_case_names_or_as_the_list() -> None:
     got = {"a": 5.0, "k": {"T=300.0": 1.0, "T=310.0": 2.0, "T=320.0": 3.0}}
     assert in_run.for_case(got, LEVELS, {"T": 310}) == {"a": 5.0, "k": 2.0}
