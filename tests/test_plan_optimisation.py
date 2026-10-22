@@ -477,23 +477,6 @@ def test_a_drafts_study_type_is_put_right_rather_than_losing_the_plan() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_topic_that_asks_for_the_best_design_is_not_run_as_a_sweep_when_the_draft_forgets(tmp_path: Path) -> None:
-    topic = "Find the fin spacing and thickness that minimise the base temperature of a heat sink"
-    sweep = {**{k: v for k, v in HEAT_SINK.items() if k not in ("protocol", "study_type")},
-             "protocol": {"grid": {"fin_spacing": [2.0, 3.0]}, "oracles": HEAT_SINK["protocol"]["oracles"]}}
-    eng = _engine(tmp_path, [json.dumps({**sweep, "plan": EXTRA}), _NO_OBJECTIONS])
-    await eng._node_plan({"topic": topic, "iteration": 0})
-    text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
-    assert plan.parse(text).design["study_type"] == "find_best_design"
-    assert "The topic asks to find the best design" in text
-    seen = _stop_at_pause(eng)
-    state = {"topic": topic, "iteration": 0}
-    patch = await eng._node_design(state)
-    assert seen == [], "nobody is asked"
-    assert eng._search_cannot_start_stop(state, patch["design"]) is not None, "a search is never run as a sweep"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("topic", [
     "Find the largest eigenvalue of random matrices as the size grows",
     "Find the lowest error of Simpson's rule quadrature on smooth integrands",

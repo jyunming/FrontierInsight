@@ -5451,9 +5451,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         # The rules for a search for the best design only when the topic or the person's answer points that way: a
         # topic with no word of looking for the best is planned as a measurement, as before, without their cost.
-        seek = (_optim.may_seek_best(state.get("topic") or self.config.topic)
-                or self._study_type_asked(state) == "find_best_design")
         await self._read_topic_before_the_prompt(state)
+        seek = (_optim.may_seek_best(state.get("topic") or self.config.topic)
+                or self._study_type_asked(state) == "find_best_design"
+                or bool(_topic_req.searched(self._topic_requirements_read())))
         prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + (_STUDY_TYPE_DIRECTIVE if seek else "")
                   + self._study_type_note(state))
         obj = await self._design_reply(prompt, node="plan")
@@ -5698,15 +5699,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return _optim.resolve_answer((state.get("clarify_answers") or {}).get("study_type"))
 
     def _asks_for_best_design(self, state: QuestState, *, topic: bool = True) -> str:
-        """Why this quest is a search for the best design whatever a design without its own ``study_type`` says: the
-        person answered so (``answer``), or (with ``topic``, at the plan step only) the topic plainly asks to find the
-        best design (``topic``: :func:`core.optimisation_plan.plainly_seeks_best`); else ``""``. The topic alone is read
-        only when a fresh plan is written, where the plan says so and a person can change it: never to stop a quest
-        whose design was written before."""
+        """Why this quest is a search for the best design whatever its design says: the person answered so (``answer``),
+        or (with ``topic``, at the plan step only) FI's reading of the topic lists a design the question cannot be
+        answered without that the study itself must search for (``topic``: the reader's ``searches``,
+        :func:`core.topic_requirements.searched`); else ``""``. The topic is read only when a fresh plan is written, where
+        the plan says so and a person can change it: never to stop a quest whose design was written before."""
         if self._study_type_asked(state) == "find_best_design":
             return "answer"
         if (topic and self._study_type_asked(state) is None
-                and _optim.plainly_seeks_best(state.get("topic") or self.config.topic)):
+                and any(s.get("main") for s in _topic_req.searched(self._topic_requirements_read()))):
             return "topic"
         return ""
 
@@ -5735,10 +5736,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         asked = self._study_type_asked(state)
         kind = _optim.study_type_of(design)
         why = self._asks_for_best_design(state)
-        if why and kind != "find_best_design" and (why == "answer" or design.get("study_type") is None):
+        # The topic's reading counts as the person's answer does, over a draft that calls itself a measurement: the draft's
+        # word for its kind is the plan model's guess, and a design the topic asks to be searched for written as a value
+        # of a setting is the search hidden from FI.
+        if why and kind != "find_best_design":
             design["study_type"] = "find_best_design"
+            wanted = [s["name"] for s in _topic_req.searched(self._topic_requirements_read()) if s.get("main")]
             said = ("You answered that this study should find the best design" if why == "answer"
-                    else "The topic asks to find the best design")
+                    else f"The topic asks the study to search for {', '.join(wanted[:3])}")
             notes.append(f"{said}, but the draft is a measurement over chosen settings; the plan says "
                          "`study_type: find_best_design`. Give it an `optimisation` block, or set `study_type: measure` "
                          "if a measurement is what you want.")

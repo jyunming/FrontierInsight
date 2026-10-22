@@ -176,11 +176,13 @@ def uncovered(req: Any, protocol: Any, *, design: Any = None) -> list[dict[str, 
     simplifications, _problems = parse_simplifications(protocol)
     out: list[dict[str, str]] = []
     seen: set[str] = set()
-    for kind, key, singular in (("factors", "F", "factor"), ("quantities", "Q", "quantity"), ("formulas", "M", "formula")):
+    for kind, key, singular in (("factors", "F", "factor"), ("quantities", "Q", "quantity"), ("formulas", "M", "formula"),
+                                  ("searches", "S", "search")):
         for i, item in enumerate(req.get(kind) or []):
             ident = _topic._item_id(kind, i)
             name = str(item.get("name") or item.get("text") or "")
-            level_gap = next((g for g in gaps if g["kind"] == "level" and g["name"] == name), None)
+            # A level the setting's values leave out, or a search the plan does not run, is settled by the name match.
+            level_gap = next((g for g in gaps if g["kind"] in ("level", "search") and g["name"] == name), None)
             if ident not in unresolved and level_gap is None:
                 continue
             if _named_in(item, ident, simplifications):

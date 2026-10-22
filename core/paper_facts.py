@@ -201,6 +201,8 @@ def _topic_sentence(gap: Any) -> tuple[str, str]:
         return name, _sentence(f"The topic asks to report {name}; this study did not measure it")
     if kind == "level":
         return name, _sentence(f"The topic states which values of {name} to use; this study did not use them")
+    if kind == "search":
+        return name, _sentence(f"The topic asks to search for {name}; this study did not search for it")
     formula = re.search(r"`([^`]+)`", said)
     if kind == "formula" or formula:
         return name, _sentence(f"The topic states the formula `{formula.group(1) if formula else name}`; this study's model "

@@ -131,12 +131,27 @@ def parse(obj: Any) -> dict[str, Any] | None:
     constraints = [_text(c) for c in (obj.get("constraints") if isinstance(obj.get("constraints"), list) else []) if _text(c)]
     results = [_text(r, 200) for r in (obj.get("stated_results") if isinstance(obj.get("stated_results"), list) else [])
                if _text(r, 200)]
-    if not (factors or quantities or formulas or comparisons):
+    searches: list[dict[str, Any]] = []
+    for item in obj.get("searches") if isinstance(obj.get("searches"), list) else []:
+        item = item if isinstance(item, dict) else {"what": item}
+        what = _text(item.get("what"), 160)
+        if what:
+            searches.append({"name": what, "objective": _text(item.get("objective"), 200),
+                             "stated": _text(item.get("stated")), "main": item.get("main") is True})
+    if not (factors or quantities or formulas or comparisons or searches):
         return None
     files = code_files(obj)
     return {"factors": factors[:20], "quantities": quantities[:30], "formulas": formulas[:12],
             "comparisons": comparisons[:12], "constraints": constraints[:30], "stated_results": results[:20],
-            **({"code_files": files} if files is not None else {})}
+            "searches": searches[:8], **({"code_files": files} if files is not None else {})}
+
+
+def searched(req: Any) -> list[dict[str, Any]]:
+    """The designs the topic asks the study itself to search for (the reader's ``searches``: a design whose values the topic
+    does not give, made as good as possible for a result), the ones the question cannot be answered without first. ``[]``
+    for a reading without any (or one made before FI read them)."""
+    items = [s for s in (req.get("searches") if isinstance(req, dict) else None) or [] if isinstance(s, dict) and s.get("name")]
+    return sorted(items, key=lambda s: not s.get("main"))
 
 
 def code_files(req: Any) -> int | None:
@@ -153,7 +168,7 @@ def code_files(req: Any) -> int | None:
 
 
 def is_empty(req: Any) -> bool:
-    return not (isinstance(req, dict) and any(req.get(k) for k in _SECTIONS))
+    return not (isinstance(req, dict) and any(req.get(k) for k in (*_SECTIONS, "searches")))
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -348,8 +363,12 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
     assumptions = " ".join(str(a) for a in (model.get("assumptions") if isinstance(model.get("assumptions"), list) else []))
     topic_map = [m for m in (protocol.get("topic_map") if isinstance(protocol.get("topic_map"), list) else [])
                  if isinstance(m, dict) and str(m.get("item") or "").strip() and str(m.get("by") or "").strip()]
+    # What FI's search changes (a design the topic asks to be searched for is one of these, never a value of a setting).
+    searched_for = {str(v["name"]).strip(): " ".join(str(v.get("meaning") or "").split())
+                    for v in (block.get("design_variables") if isinstance(block.get("design_variables"), list) else [])
+                    if isinstance(v, dict) and str(v.get("name") or "").strip()}
     return {"axes": axes, "metrics": metrics, "equations": equations, "assumptions": assumptions, "topic_map": topic_map,
-            "search": bool(block)}
+            "search": bool(block), "design_variables": searched_for}
 
 
 def _norm_formula(text: Any) -> str:
@@ -395,7 +414,7 @@ def _covers(values: list[Any], factor: dict[str, Any]) -> str | None:
 
 
 def _item_id(kind: str, index: int) -> str:
-    return {"factors": "F", "quantities": "Q", "formulas": "M"}[kind] + str(index + 1)
+    return {"factors": "F", "quantities": "Q", "formulas": "M", "searches": "S"}[kind] + str(index + 1)
 
 
 def _name_key(text: Any) -> str:
@@ -427,6 +446,17 @@ def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[
     for entry in entries:
         head, _sep, name = str(entry["by"]).partition(":")
         head, name = head.strip().lower(), name.strip()
+        if kind == "searches":
+            # Only what FI's search changes covers a design the topic asks to be searched for: a value of a setting, however
+            # it is worded ("optimised for ..."), is a design given in advance.
+            variables = plan.get("design_variables") or {}
+            if head in ("setting", "design_variable", "variable") and any(_name_key(v) == _name_key(name) for v in variables):
+                return "ok", name
+            if head in ("optimisation", "optimization", "search") and variables:
+                return "judge", "optimisation"
+            why = (f"{name or entry['by']} is not a design variable of the plan's search" if variables else
+                   "the plan has no search for the best design")
+            continue
         if kind == "factors" and head in ("optimisation", "optimization", "search") and plan.get("search"):
             # What the search for the best design itself finds (a free-form design, the best member of a family) is not a
             # setting with values to cover: the plan says its block covers it, and a reader confirms that it does.
@@ -506,11 +536,25 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
             if mapped is not None and mapped[0] == "ok":
                 continue
             unresolved.append(_item_id("formulas", i))
+    for i, wanted_search in enumerate(req.get("searches") or []):
+        variables = plan.get("design_variables") or {}
+        if not variables:
+            # No search at all: the design is given in advance (a setting's value, or nothing), whatever the plan's words.
+            gaps.append(gap("search", wanted_search))
+            continue
+        mapped = mapping_of(req, plan, "searches", wanted_search)
+        if mapped is not None and mapped[0] == "ok":
+            continue
+        wanted = _tokens(wanted_search["name"])
+        if mapped is None and any(wanted and _tokens(f"{v} {meaning}") and (_tokens(v) <= wanted or wanted <= _tokens(f"{v} {meaning}"))
+                                  for v, meaning in variables.items()):
+            continue
+        unresolved.append(_item_id("searches", i))
     return gaps, unresolved
 
 
 def item_of(req: dict[str, Any], ident: str) -> tuple[str, dict[str, Any]] | None:
-    kind = {"F": "factors", "Q": "quantities", "M": "formulas"}.get(ident[:1])
+    kind = {"F": "factors", "Q": "quantities", "M": "formulas", "S": "searches"}.get(ident[:1])
     try:
         return (kind, req[kind][int(ident[1:]) - 1]) if kind else None
     except (KeyError, ValueError, IndexError):
@@ -532,6 +576,12 @@ def gap(kind: str, item: dict[str, Any], *, why: str = "", axis: str = "") -> di
     elif kind == "quantity":
         sentence = (f"The topic asks to report {name}" + (f" (its words: “{stated}”)" if stated else "")
                     + ", but the plan does not measure it.")
+    elif kind == "search":
+        objective = " ".join(str(item.get("objective") or "").split())
+        sentence = (f"The topic asks the study to search for {name}" + (f" ({objective})" if objective else "")
+                    + (f" (its words: “{stated}”)" if stated else "")
+                    + ", but the plan does not search for it: it must be a design variable of the plan's `optimisation` "
+                    "block, so that FI runs the search, not a value of a setting or a search inside the simulation.")
     else:
         sentence = (f"The topic states the formula `{item.get('text')}`, but the plan's model does not use it and does not "
                     "say why it uses another.")
@@ -550,8 +600,8 @@ def judge_parts(req: dict[str, Any], plan: dict[str, Any], unresolved: list[str]
         if found is None:
             continue
         kind, item = found
-        row = {"id": ident, "kind": kind[:-1] if kind != "quantities" else "quantity",
-               **{k: v for k, v in item.items() if k in ("name", "levels", "range", "text", "stated") and v}}
+        row = {"id": ident, "kind": {"quantities": "quantity", "searches": "search"}.get(kind, kind[:-1]),
+               **{k: v for k, v in item.items() if k in ("name", "levels", "range", "text", "stated", "objective") and v}}
         mapped = mapping_of(req, plan, kind, item)
         if mapped is not None and mapped[0] == "judge":
             row["plan_says_it_is_covered_by"] = mapped[1]
@@ -563,6 +613,7 @@ def judge_parts(req: dict[str, Any], plan: dict[str, Any], unresolved: list[str]
         "metrics": [{"id": i, "text": " ".join(t.split())} for i, t in plan["metrics"]],
         "equations": [{"id": e["id"], "formula": e["formula"], "source": e["source"]} for e in plan["equations"]],
         "assumptions": plan["assumptions"],
+        "searched_for": [{"name": v, "meaning": m} for v, m in (plan.get("design_variables") or {}).items()],
     }
     return json.dumps(items, indent=2, ensure_ascii=False), json.dumps(shown, indent=2, ensure_ascii=False, default=str)
 
@@ -595,15 +646,16 @@ def gaps_from(req: dict[str, Any], plan: dict[str, Any], verdicts: dict[str, str
         kind, item = found
         if ident not in verdicts:
             unjudged.append(str(item.get("name") or item.get("text") or ident))
-        elif verdicts[ident] == "missing":
-            gaps.append(gap({"factors": "factor", "quantities": "quantity", "formulas": "formula"}[kind], item))
+        elif verdicts[ident] == "missing" or (kind == "searches" and verdicts[ident] != "covered"):
+            gaps.append(gap({"factors": "factor", "quantities": "quantity", "formulas": "formula",
+                             "searches": "search"}[kind], item))
     return gaps, unjudged
 
 
 def main_gaps(gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The gaps the question cannot be answered without: a factor or a quantity the topic's reader marked as main (a formula
     is a specification the code is shown, so a missing one is said, not a stop)."""
-    return [g for g in gaps if g["main"] and g["kind"] in ("factor", "level", "quantity")]
+    return [g for g in gaps if g["main"] and g["kind"] in ("factor", "level", "quantity", "search")]
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -614,10 +666,9 @@ def mapped_items(req: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
     """``{item name: the plan's element}`` for every topic item the plan's own mapping covers and a name match did not find
     (kept in the record: where the plan and a reader disagree, this is what overruled it)."""
     out: dict[str, str] = {}
-    for kind in _SECTIONS:
+    for kind in (*_SECTIONS, "searches"):
         for item in req.get(kind) or []:
-            by_name = {"factors": "factors", "quantities": "quantities", "formulas": "formulas"}[kind]
-            found = mapping_of(req, plan, by_name, item)
+            found = mapping_of(req, plan, kind, item)
             if found is not None and found[0] == "ok":
                 out[str(item.get("name") or item.get("text"))] = found[1]
     return out
@@ -626,7 +677,7 @@ def mapped_items(req: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
 def _item_lines(req: dict[str, Any] | None) -> list[str]:
     """FI's list of what the topic asks for, one line per item with FI's id for it, as :func:`request` shows it."""
     lines = []
-    for kind in _SECTIONS:
+    for kind in (*_SECTIONS, "searches"):
         for index, item in enumerate((req or {}).get(kind) or []):
             if not isinstance(item, dict):
                 continue
@@ -683,10 +734,16 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False, req
         "parts in `protocol.sub_studies` (each part lists, in `vary`, the settings it crosses; the others stay at one value). "
         "When a setting you add belongs to one part of the study only, do not cross it with the rest: write "
         "`protocol.sub_studies` with the part it belongs to (the parts the plan already has by their `name`, or a new part). ")
+    searching = (
+        "A design the topic asks the study to search for is a design variable of `protocol.optimisation.design_variables` "
+        "(a set of numbers, such as the cells of a grid, is one array variable with its `shape`), with its value in "
+        "`protocol.optimisation.baseline.values`; FI runs the search, and the simulation computes one given design per "
+        "call and never searches by itself. A value of a setting worded as already optimised is not a search. "
+        if any(g.get("kind") == "search" for g in gaps) else "")
     return (
         "The topic asks for things this plan does not yet include:\n" + "\n".join(lines)
         + f"\n\nThe topic: “{' '.join(str(topic or '').split())[:1500]}”\n\n"
-        "Write them into the design block. " + where + "A quantity "
+        "Write them into the design block. " + where + searching + "A quantity "
         "to report is an entry of `protocol.metrics` (an `id`, a `kind`, an `estimand` and a `unit`). A formula the topic "
         "states is an equation of `protocol.model.equations`, written as the topic writes it; if the plan needs another "
         "formula in its place, keep that one and say in its `source` that it replaces the topic's, and why. Also say, in "
@@ -941,6 +998,12 @@ def plan_lines(req: dict[str, Any], gaps: list[dict[str, Any]], *, reviewer: str
         lines.append(f"- Formula the topic states: `{formula['text']}`"
                      + (" - NOT in the plan's model" if formula["name"] in open_names else
                       " - could not be checked against the plan" if formula["name"] in unchecked else "") + ".")
+    for wanted in req.get("searches") or []:
+        lines.append(f"- To search for (FI runs the search): {wanted['name']}"
+                     + (f" (the topic's goal: {wanted['objective']})" if wanted.get("objective") else "")
+                     + (" - NOT searched for in the plan" if wanted["name"] in open_names else
+                        " - could not be checked against the plan" if wanted["name"] in unchecked else "")
+                     + "." + words(wanted))
     for comparison in req.get("comparisons") or []:
         said = quotable(topic, req, text=comparison["what"])
         lines.append(f"- To compare: {comparison['what']}" + (f" (the topic: “{said}”)" if said else ""))
