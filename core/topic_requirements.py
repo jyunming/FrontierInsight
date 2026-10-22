@@ -1059,9 +1059,9 @@ def write_note(quest_root: Any) -> str:
                      "formulas), so the plan was not held against it. Say plainly in the limitations that this was not checked.")
     if left:
         sentences = "; ".join(str(g.get("sentence") or "").rstrip(".") for g in left if isinstance(g, dict))
-        parts.append(f"The topic asked for more than this study did: {sentences}. Say in the limitations that the study did not "
-                     "do each of them, through the not_done placeholders listed under FI's record of this run (below); "
-                     "do not write a result for them.")
+        parts.append(f"FI's check of the plan against the topic did not find all it asks for: {sentences}. Say so in the "
+                     "limitations, through the not_done placeholders listed under FI's record of this run (below); do not "
+                     "write a result for them.")
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
@@ -1088,18 +1088,6 @@ def write_note(quest_root: Any) -> str:
                      "uncertainty of every number), say plainly in the limitations that it was not met and why; never leave "
                      "one out silently, and never claim one was met unless the record shows it.")
     return " ".join(parts)
-
-
-def stop_tried(gaps: list[dict[str, Any]], asked: int, problem: str = "") -> list[str]:
-    """What FI did before the plain stop (the card's "tried" lines): it asked the plan's model, and the plan still lacks
-    what the topic asks for. ``problem``: why the plan's model's last answer was not used."""
-    return [
-        (f"asked the plan's model {asked} time(s) to add it, each time quoting why the last answer was not used"
-         if asked else "had no model to ask for it (or the plan was already settled)"),
-        *([f"the last answer was not used: {' '.join(str(problem).split())[:400]}"] if problem else []),
-        *[g["sentence"] for g in gaps[:4]],
-        "did not run a study that leaves it out: it would not answer the topic's question",
-    ]
 
 
 # ---------------------------------------------------------------------------------------------------------------------

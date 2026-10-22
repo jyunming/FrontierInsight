@@ -158,11 +158,11 @@ class Reader:
         return _NO_OBJECTIONS
 
 
-def _honest_stop(eng: Any) -> dict[str, Any]:
-    """The plain stop a plan that leaves out what the topic needs ends in (no paper, nobody asked to pick another model)."""
-    stop = eng._topic_unmet_stop()
-    assert stop is not None, "the quest records the stop for the code step"
-    return stop["exec_result"]
+def _went_on(eng: Any) -> str:
+    """What FI's check did not find, as kept for the paper: the quest goes on (no stop record), and the names are returned."""
+    assert not (eng.fi_dir / "topic_unmet.json").exists(), "what the check did not find never stops the quest"
+    covered = json.loads((eng.fi_dir / "topic_covered.json").read_text(encoding="utf-8"))
+    return " ".join(str(g.get("name")) for g in covered.get("left") or [])
 
 
 def _stop(eng: Any) -> list[dict[str, Any]]:
@@ -340,24 +340,24 @@ async def test_a_formula_the_plan_replaces_and_says_why_is_not_a_gap(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_a_main_factor_still_missing_after_the_bound_stops_before_anything_runs(tmp_path: Path) -> None:
+async def test_a_main_factor_still_missing_after_the_bound_goes_on_and_is_said(tmp_path: Path) -> None:
+    """FI's check of a plan against the topic misses settings held under another name often enough that what it did not
+    find is said in the paper, never a stop: the quest goes on to the code."""
     eng = _engine(tmp_path, [])
     model = Reader(eng, _draft(), adds=set())  # the plan's model never adds anything
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
-    await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert seen == [], "nobody is asked to pick another model: the plan's rules, not the model, left it out"
+    patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == [], "nobody is asked to pick another model"
     assert 1 <= len(model.asked) <= 4
-    result = _honest_stop(eng)
-    shown = " ".join([result["topic_unmet"], *result["topic_unmet_tried"]])
-    assert "lid material" in shown and "asked the plan's model" in shown
-    assert "heat lost per minute" not in shown, "a secondary item does not stop the quest"
-    assert not (eng.quest_root / "paper.md").exists()
+    assert "lid material" in _went_on(eng)
+    assert not (patch.get("exec_result") or {}).get("returncode"), "the design step does not end the quest"
     asked_before = len(model.asked)
-    await eng._node_design({"topic": TOPIC, "iteration": 0})  # a resume stops again and asks no more
+    await eng._node_design({"topic": TOPIC, "iteration": 0})  # a resume asks no more
     assert len(model.asked) == asked_before and seen == []
-    assert "the quest stops before anything runs" in _plan_text(eng)
-    assert "the quest stops before anything runs" in _plan_text(eng)
+    text = _plan_text(eng)
+    assert "the study runs, and the paper says FI's check did not find it" in text
+    assert "stops before anything runs" not in text
 
 
 @pytest.mark.asyncio
@@ -369,7 +369,7 @@ async def test_a_secondary_item_still_missing_is_said_in_the_limitations_and_the
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [] and "lid_material" in patch["design"]["protocol"]["grid"]
     note = tr.write_note(eng.quest_root)
-    assert "The topic asked for more than this study did" in note and "heat lost per minute" in note
+    assert "FI's check of the plan against the topic did not find all it asks for" in note and "heat lost per minute" in note
     assert "through the not_done placeholders" in note and "do not write a result for them" in note
     assert tr.write_note(tmp_path / "nowhere") == ""
 
@@ -400,7 +400,7 @@ async def test_a_redesign_that_drops_an_axis_is_caught_and_asked_once(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_is_asked_within_its_bound(tmp_path: Path) -> None:
+async def test_a_redesign_that_stays_without_the_axis_is_asked_within_its_bound_and_goes_on(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
     model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
                                model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
@@ -414,7 +414,7 @@ async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_i
     assert seen == []
     asked = [p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]
     assert len(asked) == 2 and "Your last answer was not used" not in asked[0] and "Your last answer was not used" in asked[1]
-    assert "lid material" in _honest_stop(eng)["topic_unmet"]
+    assert "lid material" in _went_on(eng)
 
 
 @pytest.mark.asyncio
@@ -439,7 +439,7 @@ async def test_a_mapping_to_something_the_plan_does_not_have_does_not_save_a_mis
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
     await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert seen == [] and "lid material" in _honest_stop(eng)["topic_unmet"]
+    assert seen == [] and "lid material" in _went_on(eng)
 
 
 def test_a_mapping_is_checked_for_the_levels_it_must_cover() -> None:
@@ -584,15 +584,13 @@ async def _redesign_setup(tmp_path: Path) -> tuple[Any, Any, dict[str, Any], dic
 
 
 @pytest.mark.asyncio
-async def test_the_stop_names_the_design_steps_real_ask_count_and_why_its_last_answer_was_not_used(tmp_path: Path) -> None:
+async def test_the_design_steps_asks_are_counted_with_why_the_last_answer_was_not_used_and_the_quest_goes_on(
+        tmp_path: Path) -> None:
     eng, _model, redesign, state = await _redesign_setup(tmp_path)  # the model never adds the axis
     await eng._hold_the_design_to_the_topic(state, redesign, "")
     record = json.loads((eng.fi_dir / "topic_design_asked.json").read_text(encoding="utf-8"))
-    assert record["asks"] == 2 and record["problem"]  # written after the last failed attempt too  # the same refusal twice ends the asking
-    stop = json.loads((eng.fi_dir / "topic_unmet.json").read_text(encoding="utf-8"))
-    assert stop["asked"] == 2
-    assert record["problem"] in eng._topic_last_problem(1)
-    assert any(record["problem"][:40] in t for t in stop["tried"])
+    assert record["asks"] == 2 and record["problem"]  # written after the last failed attempt too
+    assert "lid material" in _went_on(eng)
 
 
 @pytest.mark.asyncio

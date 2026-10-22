@@ -183,30 +183,35 @@ def _sentence(text: str) -> str:
 
 
 def _topic_sentence(gap: Any) -> tuple[str, str]:
-    """``(name, sentence)`` for one part of the topic the study did not do (an object of ``topic_covered.left``, or a plain
-    sentence of an older record)."""
+    """``(name, sentence)`` for one part of the topic FI's check did not find in the plan (an object of
+    ``topic_covered.left``, or a plain sentence of an older record). What FI found is said, not that the study did not do
+    it: the check misses a setting held under another name or form."""
     if isinstance(gap, str):
         said = _one(gap).rstrip(".")
         if re.match(r"(?i)the topic (asks|says|states|wants|requires)\b", said):
-            return gap, _sentence(f"{said}; this study did not do it")
-        return gap, _sentence(f"The topic asks for this, and this study did not do it: {said}")
+            return gap, _sentence(f"{said}; FI's check did not find it in the study's plan")
+        return gap, _sentence(f"The topic asks for this, and FI's check did not find it in the study's plan: {said}")
     if not isinstance(gap, dict):
         return "", ""
     name = _one(gap.get("name"))
     kind = gap.get("kind")
     said = _one(gap.get("sentence"))
     if kind == "factor":
-        return name, _sentence(f"The topic asks to vary {name}; this study did not vary it")
+        return name, _sentence(f"The topic asks to vary {name}; FI's check did not find a setting of the study's plan "
+                               "that varies it")
     if kind == "quantity":
-        return name, _sentence(f"The topic asks to report {name}; this study did not measure it")
+        return name, _sentence(f"The topic asks to report {name}; FI's check did not find it among what the study's "
+                               "plan measures")
     if kind == "level":
-        return name, _sentence(f"The topic states which values of {name} to use; this study did not use them")
+        return name, _sentence(f"The topic states which values of {name} to use; FI's check did not find them among "
+                               "the study's settings")
     if kind == "search":
-        return name, _sentence(f"The topic asks to search for {name}; this study did not search for it")
+        return name, _sentence(f"The topic asks to search for {name}; FI's check did not find a search for it in the "
+                               "study's plan")
     formula = re.search(r"`([^`]+)`", said)
     if kind == "formula" or formula:
-        return name, _sentence(f"The topic states the formula `{formula.group(1) if formula else name}`; this study's model "
-                               "does not use it")
+        return name, _sentence(f"The topic states the formula `{formula.group(1) if formula else name}`; FI's check did "
+                               "not find it in the study's model")
     return name or said, _sentence(f"{said.rstrip('.')}; this study did not do it" if said else
                                    f"The topic asks for {name}; this study did not do it")
 

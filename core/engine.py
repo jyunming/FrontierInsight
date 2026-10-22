@@ -6610,9 +6610,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             lines += ["", "- FI asked the plan's model to add what was missing" + (
                 "; it is still missing" if gaps else "; it is in the plan now") + "."]
         if gaps:
-            lines += ["", "- Still missing (the paper will say it was not studied"
-                          + ("; the quest stops before anything runs, because the topic's question cannot be answered "
-                             "without it" if _topic_req.main_gaps(gaps) else "") + "):",
+            lines += ["", "- Not found in the plan (the study runs, and the paper says FI's check did not find it):",
                       *[f"  - {g['sentence']}" for g in gaps]]
         updated = _plan.add_to_section(text, _topic_req.HEADING, lines)
         path.write_text(updated, encoding="utf-8")
@@ -6718,77 +6716,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 break
         return design
 
-    _TOPIC_UNMET_FILE = "topic_unmet.json"
-
-    def _stop_for_the_topic(self, gaps: list[dict[str, Any]], asked: int, *, design_iteration: int | None = None) -> None:
-        """Nothing is run: the topic asks for something its question cannot be answered without, and the plan could not
-        include it even when the plan's model was asked (within its bound, each time quoting why the last answer was not
-        used). The honest stop (no paper), reached when the code would be written and again when it would run
-        (:meth:`_topic_unmet_stop`): nobody is asked to pick another model, because another model cannot fix a plan whose
-        rules leave no place for what the topic asks. This only writes down what stands."""
-        record = {"text": " ".join(g["sentence"] for g in gaps), "asked": asked, "at": _frozen.now(),
-                  "tried": _topic_req.stop_tried(gaps, asked, self._topic_last_problem(design_iteration))}
-        self._log.warning("[design] the plan leaves out what the topic's question needs (%s); stopping, nothing was run",
-                          "; ".join(g["sentence"] for g in gaps)[:400])
-        try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            (self.fi_dir / self._TOPIC_UNMET_FILE).write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
-        except OSError as e:
-            self._log.warning("[design] couldn't write down what the topic asks for that the plan lacks: %r", e)
-
-    def _topic_design_record(self, iteration: int | None = None) -> dict[str, Any]:
-        """``.fi/topic_design_asked.json`` (the asks made at the design step, and why the last answer was not used); a record
-        without a count is one ask. With ``iteration``, only the record of that design round (another round's asks are not
-        this round's: ``{}``)."""
-        try:
-            record = json.loads((self.fi_dir / _TOPIC_DESIGN_ASKED).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        if not isinstance(record, dict):
-            return {}
-        if iteration is not None:
-            try:
-                if int(record.get("iteration", -1)) != iteration:
-                    return {}
-            except (TypeError, ValueError):
-                return {}
-        try:
-            return {**record, "asks": int(record.get("asks", 1) or 0)}
-        except (TypeError, ValueError):
-            return {**record, "asks": 1}
-
-    def _topic_last_problem(self, design_iteration: int | None = None) -> str:
-        """Why the last answer to the request for what the topic asks was not used (``""`` when it was). With
-        ``design_iteration`` the stop is the design step's, in that round: its own record is read and only it (a plan
-        step's older reason is another request's); without it, the plan step's, which is the one the stop is about."""
-        if design_iteration is not None:
-            return str(self._topic_design_record(design_iteration).get("problem") or "")
-        try:
-            record = json.loads((self.fi_dir / _TOPIC_ASKED).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            record = {}
-        problem = str(record.get("problem") or "") if isinstance(record, dict) else ""
-        return problem
-
-    def _forget_topic_unmet(self) -> None:
-        try:
-            (self.fi_dir / self._TOPIC_UNMET_FILE).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    def _topic_unmet_stop(self) -> QuestState | None:
-        """The honest stop (no paper) for a plan that still leaves out what the topic's question needs
-        (:meth:`_stop_for_the_topic`), or ``None``."""
-        try:
-            record = json.loads((self.fi_dir / self._TOPIC_UNMET_FILE).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(record, dict) or not record.get("text"):
-            return None
-        print(f"[FI] quest {self.quest_id}: the plan leaves out something the topic asks for; nothing was run "
-              "(see needs/STUCK.json)")
-        return self._stop_before_run(str(record["text"]), "topic_unmet", tried=[str(t) for t in record.get("tried") or []])
-
     async def _hold_the_design_to_the_topic(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
         """At the design step, on the design that will RUN (the frozen protocol once there is one, else the design with the
         protocol the gates will hold it to): every factor, quantity and formula the topic asks for is looked for again, so
@@ -6800,7 +6727,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if (not self._runs_code(state) or not isinstance(design, dict) or req is None or req.get("error")
                 or _topic_req.is_empty(req)):
             return design, plan_sha
-        self._forget_topic_unmet()  # the design is held to the topic again: an earlier stop does not stand
         frozen = _frozen.load(self.quest_root) is not None
 
         def running(now: dict[str, Any]) -> Any:
@@ -6816,15 +6742,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             gaps, unjudged = await self._topic_gaps(req, design, running(design))
         self._topic_covered_write(left=gaps, unjudged=unjudged, checked_at_design=True)
         if gaps:
-            self._log.warning("[design] the design that will run still lacks what the topic asks for: %s",
-                              "; ".join(g["sentence"] for g in gaps)[:400])
-        main = _topic_req.main_gaps(gaps)
-        if main and not frozen:
-            path = _plan.plan_path(self.quest_root)
-            iteration = int(state.get("iteration", 0) or 0)
-            by_plan = bool(plan_sha and path.is_file())
-            asked = self._search_record(plan_sha, _TOPIC_ASKED)[0] if by_plan else self._topic_design_record(iteration).get("asks", 0)
-            self._stop_for_the_topic(main, asked, design_iteration=None if by_plan else iteration)
+            # Never a stop: FI's reading of a plan against a topic misses a setting held under another name or form often
+            # enough (in 8 recorded stops, most of what it called missing was there) that what it found is said, not acted
+            # on. The paper says FI's check did not find it (core.paper_facts), not that the study did not do it.
+            self._log.warning("[design] FI's check did not find in the design that will run all the topic asks for; the "
+                              "run goes on and the paper says so: %s", "; ".join(g["sentence"] for g in gaps)[:400])
+            print("[FI] the plan may not cover all the topic asks for; the study runs, and the paper says what FI's "
+                  "check did not find")
         return design, plan_sha
 
     def _unread_parts(self, design: Any) -> dict[str, str]:
@@ -10385,8 +10309,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         ``implement_outline`` slot is already populated — the body
         stage uses what's there.
         """
-        if (self.fi_dir / self._TOPIC_UNMET_FILE).is_file():
-            return {}  # the study will not be written: the next step stops it
         design_sha = self._outline_design_sha(state)
         if state.get("implement_outline") and state.get("implement_outline_for", design_sha) == design_sha:
             # Already populated for THIS design (resume after a failed body call, or a
@@ -10467,8 +10389,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     async def _node_implement(self, state: QuestState) -> QuestState:
         self._forget_cannot_repair()  # the code is written again: an earlier problem does not stop the new code
-        if (topic_stop := self._topic_unmet_stop()) is not None:
-            return topic_stop  # no code is written for a study that leaves out what the topic's question needs
         if (search_stop := self._search_cannot_start_stop(state, state.get("design"))) is not None:
             return search_stop  # no code is written for a search FI could not make (the run step stops the same way)
         if (grid_stop := self._grid_too_large_stop(state)) is not None:
@@ -17268,8 +17188,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # The frozen protocol is a search even when the design in the state no longer says so.
             design_now = {**(design_now if isinstance(design_now, dict) else {}),
                           "protocol": {**((design_now or {}).get("protocol") or {}), "optimisation": frozen_block}}
-        if (topic_stop := self._topic_unmet_stop()) is not None:
-            return topic_stop
         self._stop_if_the_search_cannot_start(state, design_now)
         if (search_stop := self._search_cannot_start_stop(state, design_now)) is not None:
             return search_stop
@@ -20459,13 +20377,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             problem = f"{_one_line(said, 500)}, so nothing was run for the study"
             tried = [str(t) for t in (state.get("exec_result") or {}).get("no_search_tried") or []] or [said]
             ended = "the plan's model could not write a search FI can run"
-        if reason == "topic_unmet":
-            # The topic asks for something the plan has no place for, and the plan's model was asked within its bound.
-            said = str((state.get("exec_result") or {}).get("topic_unmet") or "").strip().rstrip(".")
-            problem = (f"the plan still leaves out what the topic's question needs ({_one_line(said, 400)}), so nothing "
-                       "was run for the study")
-            tried = [str(t) for t in (state.get("exec_result") or {}).get("topic_unmet_tried") or []] or [said]
-            ended = "the plan could not be made to include what the topic asks for"
         if reason == "cannot_repair":
             said = str((state.get("exec_result") or {}).get("cannot_repair") or "").strip().rstrip(".")
             problem = f"{_one_line(said, 400)}, and FI's repairs did not remove it, so there is nothing it can vouch for"
@@ -20522,7 +20433,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                (str((state.get("exec_result") or {}).get("too_long_advice") or "")
                 or "or allow more time (`execution.timeout_s`), or a smaller study in the plan.") if reason == "too_long" else
                "or try another model for the code (`provider.node_models.implement`)." if reason == "cannot_repair" else
-               "or ask for a change in words (`--revise-plan \"<what to change>\"`)." if reason in ("no_search", "topic_unmet") else
+               "or ask for a change in words (`--revise-plan \"<what to change>\"`)." if reason == "no_search" else
                "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
                "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
                "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`).")))
@@ -27526,7 +27437,7 @@ _FILL_MARKER = "plan_sources_asked.json"
 # The kinds of stop before the study (``Engine._stop_before_run``): the key in ``exec_result`` that holds the plain text.
 # ``cannot_repair``: FI's repairs of the code ended and the problem stands (the run record differs from the protocol, the
 # numerics still warn, the code still lacks what the plan requires ...): the quest ends without a paper, nobody debugs.
-_STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair", "no_search", "topic_unmet")
+_STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair", "no_search")
 
 
 def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -> str:

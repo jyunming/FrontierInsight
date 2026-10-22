@@ -308,7 +308,8 @@ def test_every_required_item_has_an_id_and_one_plain_sentence(tmp_path: Path) ->
     for i in paper_facts.required_items(root):
         items.setdefault(i.kind, i)
     assert items["not_done"].id == "topic-temperature"
-    assert items["not_done"].sentence == "The topic asks to vary temperature; this study did not vary it."
+    assert items["not_done"].sentence == ("The topic asks to vary temperature; FI's check did not find a setting of the "
+                                          "study's plan that varies it.")
     assert items["left_out"].id == "left-out-coverage-ea" and items["not_computed"].id == "not-computed-ea-sd-se"
     assert items["precision"].id == "precision-coverage-lna"
     assert items["second_version"].id == "second-version-fit-k" and "fit_k" in items["second_version"].sentence
@@ -324,7 +325,8 @@ def test_every_required_item_has_an_id_and_one_plain_sentence(tmp_path: Path) ->
     # twice.
     older = [i for i in paper_facts.required_items(root) if i.kind == "not_done" and i.id != "topic-temperature"][0]
     assert older.id == "topic-the-topic-asks-for-a-sensitivity", older.id
-    assert older.sentence == "The topic asks for a sensitivity analysis; this study did not do it."
+    assert older.sentence == ("The topic asks for a sensitivity analysis; FI's check did not find it in the study's "
+                              "plan.")
 
 
 def test_an_open_code_finding_that_changes_a_result_is_an_item(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -582,7 +582,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     covered = _read_json(quest_root / ".fi" / "topic_covered.json")
     left = _items(covered.get("left")) if isinstance(covered, dict) else []
     if left:
-        parts.append(_listed("FI did not do all of the topic's requirements.", left))
+        parts.append(_listed("FI's check did not find all of the topic's requirements in the study's plan.", left))
     not_done = _items(covered.get("not_done")) if isinstance(covered, dict) else []
     if not_done:
         parts.append(_listed("The study did not do all it was asked to, as written.", not_done))

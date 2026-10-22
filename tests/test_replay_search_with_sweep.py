@@ -175,19 +175,14 @@ async def test_an_answer_with_the_sweep_beside_the_search_is_refused_once_then_t
 
 
 @pytest.mark.asyncio
-async def test_when_the_asks_leave_a_gap_the_outcome_is_the_honest_stop_and_never_a_pause(tmp_path: Path) -> None:
+async def test_when_the_asks_leave_a_gap_the_quest_goes_on_says_it_and_never_pauses(tmp_path: Path) -> None:
     eng, asked, paused = _setup(tmp_path, [TEXT, TEXT])  # the plan's model returns the plan unchanged, twice
-    design, _sha = eng._design_from_plan()
     await eng._node_design({"topic": eng.config.topic, "iteration": 0})
     assert paused == [], "nobody is asked to try another model"
     assert 1 <= len(asked) <= 4, "bounded"
-    stop = eng._topic_unmet_stop()
-    assert stop is not None
-    result = stop["exec_result"]
-    assert result["returncode"] == 1 and result["topic_unmet"] and result["topic_unmet_tried"]
-    assert any("asked the plan's model" in line for line in result["topic_unmet_tried"])
-    # the code step stops the same way and writes no code
-    assert (await eng._node_implement({"topic": eng.config.topic, "design": design}))["exec_result"]["topic_unmet"]
+    assert not (eng.fi_dir / "topic_unmet.json").exists(), "what FI's check did not find is said, not a stop"
+    covered = json.loads((eng.fi_dir / "topic_covered.json").read_text(encoding="utf-8"))
+    assert covered["left"], "kept for the paper's limitations"
     again = len(asked)
     await eng._node_design({"topic": eng.config.topic, "iteration": 0})
     assert len(asked) == again, "a resume asks no more"
