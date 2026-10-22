@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import hashlib
 import json
 from collections import Counter
@@ -615,11 +616,12 @@ async def run_trials(
     # are not next to the code; FI's harness, the cell's spec and its results file come and go by FI's own list.
     executor = _outside.OutsideExecutor(executor, quest_root, log=log)
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
-    gate = asyncio.Semaphore(max(1, int(at_once or 1)))
+    gate = _execution.SettingsGate(int(at_once or 1), log=log)  # fewer at once when the memory would not hold them
+    executor.meter = gate.note
     env = _execution.threads_beside(env, int(at_once or 1))  # each process its share of the cores
 
     async def one(task: dict[str, Any]) -> None:
-        async with gate:
+        async with gate.slot():
             # What is left of the study's time when this cell starts (cells running at once share one deadline).
             left = int(timeout_s - (time.monotonic() - started))
             if left <= 0:
@@ -634,6 +636,9 @@ async def run_trials(
         await asyncio.gather(*(one(task) for task in _costliest_first(plan, cost)))
     finally:
         await executor.settle()
+        if gate.at_once > 1:
+            with contextlib.suppress(OSError):
+                (work / "at_once.json").write_text(json.dumps(gate.record()), encoding="utf-8")
     return _collect(quest_root, plan, results, run_id=run_id, thresholds=thresholds, not_reported="")
 
 

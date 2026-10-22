@@ -684,6 +684,7 @@ same PR that adds, splits or renames one.
   loop or by `Engine._node_execute` (a failed run for the repair step); log lines shown to the agent lose their numbers
   (`without_numbers`). Evidence: `agent_coder.evidence_settings` -> `code_writer` in `needs/EVIDENCE.json`. Tests:
   `tests/test_agent_build.py`.
+- `core/run_marker.py` — `RunMarker(quest_root).start()/finish()`: `.fi/process.json` (pid, start, sign of life every 30 s, how it ended) and `.fi/process_history.jsonl`; `start()` finds an earlier session that ended with no record while no process runs, says so, and clears the locks/temp files it left in the shared cache. NOT yet called by `Engine.run` (engine.py owned elsewhere). `core/execution.py` also holds `SettingsGate` (settings at once sized by measured memory; used by `trial_runner.run_trials` and `optimise.evaluate_many`), `ExecutionResult.peak_mb`, `say_silent_death`. Tests: `tests/test_run_environment.py`.
 - `core/outside_run.py` — FI runs the quest's code from a copy outside the quest folder: `OutsideCopy` (`<temp>/fi_run/
   <random id>/` with `code/` minus `.git`/`.venv`/caches/stale value files, the folders the run reads and the paths FI
   names for the run: `CELL_INPUTS` (`inputs/`, `data/` without `data/results/`) for a cell, a check case or an equation

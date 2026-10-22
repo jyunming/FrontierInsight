@@ -160,16 +160,16 @@ def _remove_files(quest_root: Path | str, rels: list[str], left: list[str] | Non
     return gone
 
 
-def say_removed(log: Any, gone: list[str], left: list[str] | None = None) -> None:
+def say_removed(log: Any, gone: list[str], left: list[str] | None = None, *, cause: str = "a trial stopped for its time") -> None:
     if gone:
         shown = ", ".join(gone[:5]) + (f" and {len(gone) - 5} more" if len(gone) > 5 else "")
-        log.warning("[execute] a trial stopped for its time left %d file%s it was writing (%s); removed, so the next "
-                    "trial does not wait on %s", len(gone), "" if len(gone) == 1 else "s", shown,
+        log.warning("[execute] %s left %d file%s it was writing (%s); removed, so the next "
+                    "trial does not wait on %s", cause, len(gone), "" if len(gone) == 1 else "s", shown,
                     "it" if len(gone) == 1 else "them")
     if left:
         shown = ", ".join(left[:5]) + (f" and {len(left) - 5} more" if len(left) > 5 else "")
-        log.warning("[execute] a trial stopped for its time left %d file%s FI could not remove (%s); a later trial that "
-                    "waits on %s may not finish", len(left), "" if len(left) == 1 else "s", shown,
+        log.warning("[execute] %s left %d file%s FI could not remove (%s); a later trial that "
+                    "waits on %s may not finish", cause, len(left), "" if len(left) == 1 else "s", shown,
                     "it" if len(left) == 1 else "them")
 
 
@@ -559,6 +559,8 @@ class OutsideExecutor:
         #: kept because another ran beside it (removed by :meth:`settle` once none runs).
         self._shared_start: set[str] | None = None
         self._kept_beside = False
+        #: Told the largest memory (MB) of every run that finished and had one measured (``SettingsGate.note``).
+        self.meter: Any = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
@@ -598,6 +600,8 @@ class OutsideExecutor:
             run_env = {k: self._map(v, root) for k, v in env.items()} if env is not None else None
             result = await self.inner.execute(argv, cwd=root, timeout_s=timeout_s, env=run_env)
             stopped = bool(getattr(result, "timed_out", False))
+            if self.meter is not None:
+                self.meter(getattr(result, "peak_mb", None))
             await asyncio.to_thread(box.bring_back, stopped=stopped)
             if box.unfinished:
                 say_removed(self._log, box.unfinished)

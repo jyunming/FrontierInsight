@@ -434,12 +434,13 @@ async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: st
         return out
     (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
     outside = _outside.OutsideExecutor(executor, quest_root, log=log)
-    gate = asyncio.Semaphore(at_once)
+    gate = _execution.SettingsGate(at_once, log=log)  # fewer at once when the memory would not hold them
+    outside.meter = gate.note
     env = _execution.threads_beside(env, at_once)  # each process its share of the cores
     work = quest_root / WORK_DIR
 
     async def one(k: int, cell: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
-        async with gate:
+        async with gate.slot():
             left = deadline - time.monotonic()
             if left <= 0:
                 got: tuple[dict[str, Any], str, str] = ({"stop": "time"}, "", "")
