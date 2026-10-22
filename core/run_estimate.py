@@ -70,6 +70,7 @@ from dataclasses import dataclass, field, replace as _replace
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import execution as _execution
 from . import in_run as _in_run
 from . import optimise_search as _search
 from . import outside_run as _outside
@@ -700,6 +701,8 @@ async def slowdown_at_once(
     if alone is None or alone.at_least or alone.seconds <= 0:
         return None, why or "the setting did not finish alone in the time for timing"
     allowance = int(max(10, math.ceil(2 * took * max(1, int(at_once))) + 10))  # twice as slow as one after another
+    # Beside the others each process gets its share of the cores, as the study's settings do when they run at once.
+    kw["env"] = _execution.threads_beside(env, int(at_once))
     together = await asyncio.gather(*(
         _time_one(executor, python, quest_root, module, cell, timeout_s=allowance, name=f"at_once{i}", **kw)
         for i in range(max(1, int(at_once)))))

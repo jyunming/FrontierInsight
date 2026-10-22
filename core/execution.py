@@ -63,6 +63,23 @@ def scrub_secrets(env: "Mapping[str, str] | None" = None) -> dict[str, str]:
     return {k: v for k, v in base.items() if not _SECRET_NAME.search(str(k)) and str(k).upper() not in _NEVER_PASSED}
 
 
+def threads_beside(env: "Mapping[str, str] | None", at_once: int, cores: int | None = None) -> dict[str, str] | None:
+    """The environment of one of ``at_once`` processes FI runs at the same time: each numerical library (OpenMP,
+    OpenBLAS, MKL, numexpr, numba) told to start at most its share of the cores (``cores // at_once``, at least 1), unless
+    ``env`` already says fewer. Left alone, each process starts a thread per core: a simulation whose setting took 1.7 s
+    alone took 8.5 times as long beside 7 others on 16 cores, and 1.4 times with one thread each. ``env`` (``None``: FI's
+    own environment) is returned as it is for one process at a time."""
+    if at_once <= 1:
+        return None if env is None else dict(env)
+    share = max(1, (cores or os.cpu_count() or 1) // at_once)
+    out = dict(os.environ if env is None else env)
+    for k in (*_THREAD_VARS, "NUMBA_NUM_THREADS"):
+        v = str(out.get(k, "")).strip()
+        if not (v.isdigit() and 1 <= int(v) <= share):
+            out[k] = str(share)
+    return out
+
+
 #: Never handed to code a model or an agent wrote: an older FI's pointer to the folder of its check values.
 _NEVER_PASSED = frozenset({"FI_CHECKS_DIR"})
 

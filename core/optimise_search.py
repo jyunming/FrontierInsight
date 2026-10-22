@@ -1380,6 +1380,47 @@ def search(block, *, seed, method=None, rounds=None, results=None, batch=False, 
     return (yield from _Search(block, seed, method, rounds, results, batch=batch, stop_flat=stop_flat).run())
 
 
+def rehearse(block, *, batch, seed=0):
+    """How many designs the search asks for together, request by request after its coarse scan (a list of counts), from
+    the search itself run on a stand-in objective with the same ``batch`` as the run: how many designs a method asks for at
+    a time (its starting points side by side, a population, a simplex's corners) is how it is written, not what the
+    designs give. The stand-in gives each design a fixed objective from its key, so it never looks flat, and every limited
+    quantity at its limit, so no design fails; ``None`` for a library method (it runs in the quest's own Python, one step
+    at a time) or a block the search cannot run."""
+    import hashlib
+
+    if str(block.get("search_method") or "").startswith(("scipy:", "optuna:")):
+        return None
+    quantity = str((block.get("objective") or {}).get("quantity") or "objective")
+    limits = {str(c.get("quantity")): (_parse_limit(c.get("limit")) or ("<=", 0.0))[1]
+              for c in block.get("constraints") or [] if isinstance(c, dict)}
+
+    def value(design):
+        key = json.dumps(design, sort_keys=True, default=str).encode()
+        return {**limits, quantity: int.from_bytes(hashlib.blake2b(key, digest_size=8).digest(), "big") / 2 ** 64}
+
+    widths = []
+    try:
+        gen = search(block, seed=seed, batch=batch, stop_flat=False)
+        request = next(gen)
+        while True:
+            if request["kind"] == "scan":
+                rows = [{"design": cell, "values": value(cell)} for cell in grid_cells(request["grid"])]
+                request = gen.send(rows)
+            elif request["kind"] == "evaluate_many":
+                widths.append(len(request["requests"]))
+                request = gen.send([{"values": value(r["design"])} for r in request["requests"]])
+            elif request["kind"] == "evaluate":
+                widths.append(1)
+                request = gen.send({"values": value(request["design"])})
+            else:
+                return None
+    except StopIteration:
+        return widths
+    except (KeyError, TypeError, ValueError, TooManySettings):
+        return None
+
+
 #: The most settings FI lists (or runs) from one grid: each listed setting is a dict, about a kilobyte with its key, so this
 #: many is about half a gigabyte; a plan that asks for more is stopped with its count, never cut and never listed.
 MAX_LISTED_SETTINGS = 500_000

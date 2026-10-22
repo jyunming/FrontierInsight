@@ -964,6 +964,63 @@ async def test_a_search_whose_evaluations_do_not_fit_the_time_left_after_its_sca
 
 
 @pytest.mark.asyncio
+async def test_a_search_that_asks_for_designs_together_is_counted_at_the_settings_run_at_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real search was stopped as too long because its evaluations were counted one after another, although most of
+    them were simplex corners asked for together and run 8 at a time. The search is rehearsed to see which evaluations it
+    asks for together: those run ``at_once`` at a time, each as much slower as FI measured; a method that asks for one
+    design at a time (a library method) is still counted one after another, and so is every search with one at a time."""
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    block["design_variables"] = [{"name": f"x{i}", "low": 0.0, "high": 1.0, "kind": "continuous"} for i in range(20)]
+    block["baseline"] = {"values": {f"x{i}": 0.5 for i in range(20)}, "source": "the design in use"}
+    block["evaluation_budget"] = {"starts": 2, "per_start": 500}
+    block["search_method"] = "bounded_local"
+    eng, runner = await _search_engine(tmp_path, block)
+    eng.config.execution.timeout_s = 5 * 3600
+    slowdowns: list[int] = []
+
+    async def fifteen(*a: Any, **k: Any) -> Any:
+        return run_estimate.Probe(None, None, {}, 15.0), ""
+
+    async def slower(*a: Any, at_once: int, **k: Any) -> Any:
+        slowdowns.append(at_once)
+        return 1.2, ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", fifteen)
+    monkeypatch.setattr(run_estimate, "slowdown_at_once", slower)
+    # One after another: 1,003 x 15 s, about 6.3 h with FI's margin, more than the 5 h allowed.
+    alone = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert alone is not None and "the search's 1,000 evaluations" in alone["exec_result"]["too_long"]
+    assert slowdowns == []
+    # 8 at a time: the simplexes' corners together, the rest one at a time, about 4 h with the margin.
+    runner.at_once = 8
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert slowdowns == [8]
+    # A library method runs in the quest's own Python one design at a time: counted one after another.
+    block["search_method"] = "scipy:minimize"
+    library = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert library is not None and "the search's 1,000 evaluations" in library["exec_result"]["too_long"]
+
+
+def test_the_search_rehearsal_counts_every_evaluation_and_the_designs_asked_together() -> None:
+    from core import optimisation_plan
+    from core.run_checks import _search_rounds
+
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    block["design_variables"] = [{"name": f"x{i}", "low": 0.0, "high": 1.0, "kind": "continuous"} for i in range(20)]
+    block["baseline"] = {"values": {f"x{i}": 0.5 for i in range(20)}, "source": "the design in use"}
+    block["evaluation_budget"] = {"starts": 2, "per_start": 500}
+    block["constraints"] = [{"quantity": "g", "limit": "<= 3"}]
+    normal, why = optimisation_plan.normalize(block)
+    assert normal is not None, why
+    alone, batches, together = _search_rounds(normal, 1000, 8)
+    assert alone + together == 1000 and together > 0 and batches >= together / 8
+    assert _search_rounds(normal, 1000, 1) == (1000, 0, 0)
+
+
+@pytest.mark.asyncio
 async def test_a_stochastic_search_counts_each_evaluation_once_with_its_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An evaluation of a search with randomness is a whole setting with its runs: 100 evaluations of 20 runs at 30 s a
     setting take 50 min, not 20 times that."""

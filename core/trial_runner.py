@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import execution as _execution
 from . import in_run as _in_run
 from . import mc_error as _mc
 from . import optimise_search as _search
@@ -615,6 +616,7 @@ async def run_trials(
     executor = _outside.OutsideExecutor(executor, quest_root, log=log)
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
     gate = asyncio.Semaphore(max(1, int(at_once or 1)))
+    env = _execution.threads_beside(env, int(at_once or 1))  # each process its share of the cores
 
     async def one(task: dict[str, Any]) -> None:
         async with gate:

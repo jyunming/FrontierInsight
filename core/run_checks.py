@@ -21,10 +21,13 @@ They live here and not in ``engine.py`` so the node only calls them. Every metho
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import math
 import re
 import time
+from dataclasses import replace as _replace
 from pathlib import Path
 from typing import Any
 
@@ -159,6 +162,21 @@ def unread_findings(files: dict[str, str], protocol: dict[str, Any], design: Any
 
 #: How many designs of a search's own space (besides its baseline) a speed-up is held to.
 SEARCH_SAMPLE_DESIGNS = 3
+
+
+def _search_rounds(block: dict[str, Any], search_n: int, at_once: int) -> tuple[int, int, int]:
+    """How the search's ``search_n`` evaluations wait, from the search itself rehearsed on a stand-in objective
+    (:func:`core.optimise_search.rehearse`, with the run's own ``batch``): ``(alone, batches, together)``: the evaluations
+    asked for one at a time, the rounds of ``at_once`` the designs asked for together run in, and how many designs those
+    are. Evaluations the rehearsal did not spend (a start that converged early on the stand-in) are counted alone, and a
+    search that cannot be rehearsed (a library method) is counted one at a time."""
+    widths = _optimise_search.rehearse(block, batch=at_once > 1) if at_once > 1 else None
+    if not widths:
+        return search_n, 0, 0
+    alone = sum(w for w in widths if w == 1)
+    together = sum(w for w in widths if w > 1)
+    batches = sum(math.ceil(w / at_once) for w in widths if w > 1)
+    return alone + max(0, search_n - alone - together), batches, together
 
 
 def _search_sample(block: dict[str, Any], grid: Any) -> list[dict[str, Any]]:
@@ -914,6 +932,9 @@ class RunChecksMixin:
         # per new value and reused, is counted as the scan will pay it; one evaluation of the baseline alone was not.
         est: _estimate.Estimate | None = None
         first_s = 0.0  # what the scan's first timed setting took the first time it ran
+        probes: list[Any] | None = None
+        at_once = int(getattr(runner, "at_once", 1) or 1)
+        slowdown: float | None = None  # how much slower a setting runs beside ``at_once - 1`` others, once measured
         timing_started = time.monotonic()
         budget_s = max(limit_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
         try:
@@ -938,7 +959,6 @@ class RunChecksMixin:
                 # The scan runs ``execution.settings_at_once`` settings at the same time (core/optimise.py::run_search), so
                 # it is counted that way, with how much slower a setting runs beside the others on this machine, as a
                 # measurement is (_size_the_run); one after another it was counted many times too long.
-                at_once = int(getattr(runner, "at_once", 1) or 1)
                 if at_once > 1 and probes and _estimate.known_too_long(est, limit_s):
                     spent = time.monotonic() - timing_started
                     slowdown = await self._slowdown_at_once(runner, python, env, probes, runs, thresholds or {},
@@ -975,7 +995,22 @@ class RunChecksMixin:
                 if per_eval is None or probe.seconds > per_eval:
                     per_eval, lower = probe.seconds, probe.at_least
             if search_n and per_eval:
-                together = _estimate.Estimate(seconds=est.seconds + per_eval * search_n, at_least=est.at_least or lower,
+                # The search asks for designs one at a time or several together (its starting points side by side, a
+                # population, a simplex's corners), as the search itself shows when it is rehearsed (_search_rounds);
+                # several together run ``at_once`` at a time, each as much slower as FI measured. Counted one after
+                # another, a search that runs 8 at a time was counted several times too long.
+                alone, batches, together_n = await asyncio.to_thread(_search_rounds, block, search_n, at_once)
+                if batches and slowdown is None and probes and _estimate.known_too_long(
+                        _replace(est, seconds=est.seconds + per_eval * search_n), limit_s):
+                    spent = time.monotonic() - timing_started
+                    slowdown = await self._slowdown_at_once(runner, python, env, probes, runs, thresholds or {},
+                                                            inside or None, at_once, max(0.0, budget_s - spent),
+                                                            deterministic=deterministic)
+                    if slowdown is not None and grid is not None:
+                        est = _estimate.estimate(grid, runs, deterministic, probes, at_once=at_once,
+                                                 slowdown=slowdown) or est
+                search_s = per_eval * (alone + (batches * slowdown if slowdown is not None else together_n))
+                together = _estimate.Estimate(seconds=est.seconds + search_s, at_least=est.at_least or lower,
                                               complete=est.complete, cells=scan + search_n,
                                               trials=(scan + search_n) * runs, once_s=est.once_s,
                                               once_axes=list(est.once_axes))

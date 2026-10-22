@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import execution as _execution
 from . import flat_output as _flat
 from . import metric_spec as _metric_spec
 from . import optimisation_plan as _plan
@@ -422,6 +423,7 @@ async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: st
     (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
     outside = _outside.OutsideExecutor(executor, quest_root, log=log)
     gate = asyncio.Semaphore(at_once)
+    env = _execution.threads_beside(env, at_once)  # each process its share of the cores
     work = quest_root / WORK_DIR
 
     async def one(k: int, cell: dict[str, Any]) -> tuple[dict[str, Any], str, str]:

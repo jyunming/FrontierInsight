@@ -534,3 +534,20 @@ def test_a_base_past_its_allowance_is_given_longer_before_the_study_is_called_to
     assert calls[:2] == [360, 1440], "the allowance (3 x 8 h / 240) first, then a twentieth of 8 h"
     base = probes[0]
     assert not base.at_least and base.seconds == 12.0 and base.first_s == 400.0
+
+
+def test_the_slowdown_beside_others_is_timed_with_each_process_on_its_share_of_the_cores(monkeypatch) -> None:  # noqa: ANN001
+    """What running settings at once costs is timed as the study runs them: alone as the setting was timed, beside the
+    others each with its share of the cores."""
+    seen: list[str | None] = []
+
+    async def timed(*a, name, env, **k):  # noqa: ANN001, ANN003
+        seen.append((env or {}).get("OMP_NUM_THREADS"))
+        return est.Probe(None, None, {}, 1.0), ""
+
+    monkeypatch.setattr(est, "_time_one", timed)
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    factor, _ = asyncio.run(est.slowdown_at_once(None, sys.executable, Path("."), "m.py", {}, at_once=4, runs=1,
+                                                 deterministic=True, timeout_s=10, env={"PATH": "p"}, thresholds={}))
+    assert factor == 1.0 and seen == [None, "4", "4", "4", "4"]
+

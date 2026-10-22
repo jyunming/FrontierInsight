@@ -232,7 +232,7 @@ same PR that adds, splits or renames one.
   with the harness's `profile` spec key: Python's profiler during the calls only; the top functions go into the prompt). `RunChecksMixin._speed_up` (`core/run_checks.py`) asks
   for one change per round (prompt `agents/improve_speed.md`), applies `improve.check_edit` with `improve.guards` over
   every check of the plan, keeps a change on the sample alone, and times the study twice (the slower timing stands);
-  `_size_the_run` calls it once, before the runs are lowered or the quest stops, and `_size_the_scan` once for a search
+  `_size_the_run` calls it once, before the runs are lowered or the quest stops, and `_size_the_scan` once for a search (its evaluations counted from `optimise_search.rehearse`, the search run on a stand-in objective, via `run_checks._search_rounds`: designs asked for together run `at_once` at a time)
   (sample: the scan's timed settings plus `run_checks._search_sample`, the baseline and fixed designs of the search's
   space), timing the scan and the search again after a kept change. `improve.only_noise` is the
   start condition of the correctness loop (nothing to change when every unmet check is flagged or inside its tolerance).
@@ -577,7 +577,7 @@ same PR that adds, splits or renames one.
 ## Execution / sandboxing
 
 - `core/execution.py` — `Executor` protocol, `VenvExecutor` / `SharedInterpreterExecutor` / `DockerExecutor`,
-  `make_executor`. `scrub_secrets` drops key/token/secret/password variables from the environment of every program a model wrote (both executors apply it, `env=None` included). `DockerLimits` (from `execution.docker_memory_gb` / `docker_cpus` / `docker_max_processes`)
+  `make_executor`. `threads_beside(env, at_once)` gives each of the processes FI runs at the same time its share of the cores for the numerical libraries' threads (`run_trials`, `optimise.evaluate_many`, `run_estimate.slowdown_at_once`). `scrub_secrets` drops key/token/secret/password variables from the environment of every program a model wrote (both executors apply it, `env=None` included). `DockerLimits` (from `execution.docker_memory_gb` / `docker_cpus` / `docker_max_processes`)
   and the container's isolation (`DockerExecutor._create_kwargs`: no network, the limits, `cap_drop=ALL`,
   `no-new-privileges`; limits Docker cannot apply left out), the mounts (`_volumes`: the quest at `/work`, `.fi/` and
   `needs/` read-only over it, `.fi/trials` and `.fi/optimisation` writable for the harness's rows with their run
