@@ -58,6 +58,8 @@ _STOPPED = {
     "no_effect": "its first designs, which between them changed every number of the design, all gave the baseline's results",
     "flat_objective": "its first designs across the whole range, which between them changed every number of the design, "
                       "all gave the baseline's objective or one of a few values",
+    "stepped_objective": "its objective was counted in whole steps of one of its numerical settings, so it had no "
+                         "direction to follow",
 }
 
 
@@ -73,6 +75,20 @@ def flat_went_on(ev: dict[str, Any]) -> str:
                 f"range of the design gave only {levels}, and the search went on to its budget")
     return (f"the objective did not move: the first {fact.get('designs')} designs across the whole range of the design "
             f"all gave {_fmt(fact.get('objective'))}, as the starting design did, and the search went on to its budget")
+
+
+def stepped_went_on(ev: dict[str, Any]) -> str:
+    """The search's objective was counted in whole steps of one of its numerical settings and the search went on
+    (``stepped_objective`` recorded, not stopped: the simulation was already sent back for it once): one plain clause, or
+    empty."""
+    fact = ev.get("stepped_objective") if isinstance(ev, dict) else None
+    if not isinstance(fact, dict) or fact.get("stopped", True):
+        return ""
+    unit = f" {fact.get('unit')}" if fact.get("unit") else ""
+    return (f"the objective moves in whole steps of {fact.get('setting')} ({_fmt(fact.get('step'))}{unit}): "
+            f"{fact.get('on_step')} of the {fact.get('nonzero')} values other than zero among the first "
+            f"{fact.get('designs')} designs across the whole range are whole multiples of it, so the search could tell "
+            "designs apart only to that step; it went on to its budget")
 
 
 def _num(value: Any) -> bool:
@@ -300,6 +316,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     search += f"; the search stopped because {_STOPPED.get(str(ev.get('stopped_because')), ev.get('stopped_because'))}."
     if flat := flat_went_on(ev):
         search += f" {flat[0].upper()}{flat[1:]}."
+    if stepped := stepped_went_on(ev):
+        search += f" {stepped[0].upper()}{stepped[1:]}."
     lines += [search, ""]
     for r in best.get("continued") or []:
         toward = f", toward {quantity} = {_fmt(r['target'])}{u}" if _num(r.get("target")) else ""

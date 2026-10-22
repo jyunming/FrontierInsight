@@ -428,6 +428,8 @@ def _setting(name: str, item: Any) -> tuple[dict[str, Any] | None, str | None]:
         return None, f"{where}: `finer` must be `smaller` (a mesh size, a time step) or `larger` (a count of elements)"
     if out.get("finer") is not None:
         out["finer"] = finer
+    if out.get("unit") is not None and not isinstance(out["unit"], str):
+        return None, f"{where}: `unit` must be text (the setting's unit, such as nm), or leave it out"
     tolerance = out.get("tolerance")
     if tolerance is not None and not (_number(tolerance) and 0 < tolerance < 1):
         return None, (f"{where}: `tolerance` must be a fraction between 0 and 1 (0.05 means a change of 5% of the "

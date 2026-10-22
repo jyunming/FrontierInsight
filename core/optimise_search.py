@@ -50,6 +50,12 @@ fault of the simulation; the best design is the baseline, and the record says wh
 The record also names which results beside the objective stayed at the baseline's value in every one of those designs
 and which moved. With ``stop_flat`` off (the plan was already revised for it once) the fact is recorded the same way
 and the search runs its whole budget.
+A search whose objective is counted in whole steps of one of its own numerical settings stops before those two
+(``stepped_objective``): when, among the same designs (and the baseline), at least :data:`STEPPED_MIN_VALUES` gave an
+objective other than zero and at least :data:`STEPPED_SHARE` of those are whole multiples of the value the search uses
+of a setting that is finer when smaller and has the objective's unit (a scan's spacing: a length counted as the number
+of scan points inside times their spacing). The record names the setting; FI sends the simulation back to be repaired
+once (read between the points of that scan), and with ``stop_stepped`` off the fact is only recorded.
 The same stop, with the values in the record, ends a search whose objective moves only between a few values: when those
 designs (and the baseline) gave no more than :data:`FEW_OBJECTIVE_VALUES` different values of it, and at least two of
 them gave the same value away from the most common one (a single design apart may sit in a narrow region where the
@@ -87,6 +93,12 @@ _SAME_RESULT = 1e-9
 #: their first 52 such designs gave 18 to 35 different values; the searches that found nothing gave 1, or 3 (an objective
 #: read in whole steps of a setting of the simulation).
 FEW_OBJECTIVE_VALUES = 3
+#: The fewest values other than zero, among the designs the ``flat_objective`` watch counts and the baseline, and the
+#: share of them that are whole multiples of one step setting, for the search to stop as ``stepped_objective``. In FI's
+#: records, searches whose objective is a length counted in whole steps of a scan had 100% and 37% of their values on that
+#: step; searches whose objective moved smoothly had none.
+STEPPED_MIN_VALUES = 5
+STEPPED_SHARE = 0.25
 
 
 #: From how many design numbers, all continuous, the local stage is a CMA-ES (:meth:`_Search._cma_restarts`) instead of
@@ -540,6 +552,17 @@ def _reached(value, target, sign):
     return bool(_number(value) and _number(target) and sign * (value - target) <= 0)
 
 
+def _unit(value):
+    """A unit as written, compared without case or spaces (``nm`` and `` NM`` are one unit); empty when none."""
+    return "".join(str(value or "").split()).lower()
+
+
+def _whole_multiple(value, step):
+    """Whether ``value`` is a whole number of ``step`` (other than none), up to rounding."""
+    k = value / step
+    return round(k) != 0 and abs(k - round(k)) <= 1e-6 * max(1.0, abs(k))
+
+
 def _same_result(a, b):
     """Two values a simulation returned are the same: numbers within a relative ``1e-9`` (two NaN alike), anything else
     equal."""
@@ -551,10 +574,12 @@ def _same_result(a, b):
 
 
 class _Search:
-    def __init__(self, block, seed, method, rounds=None, results=None, batch=False, stop_flat=True):
+    def __init__(self, block, seed, method, rounds=None, results=None, batch=False, stop_flat=True,
+                 stop_stepped=True):
         self.block = block
         self.batch = bool(batch)
         self.stop_flat = bool(stop_flat)
+        self.stop_stepped = bool(stop_stepped)
         #: Answers asked for together (:meth:`evaluate_many`), by design key, each used once by :meth:`evaluate`.
         self.prefetched = {}
         self.space = Space(block["design_variables"])
@@ -622,6 +647,21 @@ class _Search:
         self.step_designs = 0
         self.step_watch = True
         self.step_base = None
+        # Whether the objective is counted in whole steps of one of the search's numerical settings
+        # (``stepped_objective``): the settings that can be such a step (finer when smaller, in the objective's unit),
+        # how many counted values other than zero are a whole multiple of each, and the coordinates not yet moved.
+        unit = _unit(self.block.get("objective", {}).get("unit"))
+        self.stepped_settings = {}
+        for name, spec in (self.block.get("numerical_settings") or {}).items():
+            if (isinstance(spec, dict) and _number(spec.get("search")) and spec["search"] > 0 and unit
+                    and str(spec.get("finer") or "smaller") == "smaller" and _unit(spec.get("unit")) == unit):
+                self.stepped_settings[str(name)] = float(spec["search"])
+        self.stepped_hits = dict.fromkeys(self.stepped_settings, 0)
+        self.stepped_nonzero = 0
+        self.stepped_designs = 0
+        self.stepped_unmoved = set(self.space.free)
+        self.stepped_watch = bool(self.stepped_settings)
+        self.stepped_objective = None
 
     def _take_scan(self, scan):
         """The coarse scan's evaluated designs (not counted against the budget)."""
@@ -639,6 +679,7 @@ class _Search:
             self._row(design, judged, "scan", None, item.get("elapsed_s"), counted=False)
             self._watch_objective(design, key, judged, "scan", item.get("values"), stop=False)
         # Decided on the whole scan, every setting recorded first: one that gives another value ends the watch.
+        self._stepped_stop()
         self._flat_stop()
         self._steps_stop()
 
@@ -775,7 +816,9 @@ class _Search:
             raise _Stop()
 
     def _watch_objective(self, design, key, judged, stage, values=None, stop=True):
-        """Both watches of the objective, the one-value watch first (its record also names the results that stayed)."""
+        """The watches of the objective: whole steps of a setting first (its record names the setting), then one value
+        (its record also names the results that stayed), then a few values."""
+        self._watch_stepped(design, key, judged, stage, stop)
         self._watch_flat(design, key, judged, stage, values, stop)
         self._watch_steps(design, key, judged, stage, stop)
 
@@ -825,6 +868,48 @@ class _Search:
             if self.stop_flat:
                 self.stopped = "flat_objective"
                 raise _Stop()
+
+    def _watch_stepped(self, design, key, judged, stage, stop=True):
+        """Count whether the objective of a design sampled across the space (or of the baseline) is a whole multiple of
+        each step setting; ``stop=False`` only counts it (:meth:`_stepped_stop` decides)."""
+        if not self.stepped_watch or self.stopped is not None:
+            return
+        if judged["status"] != "ok" or not _number(judged.get("objective")):
+            return
+        baseline = key == self.space.key(self.baseline)
+        if not baseline and stage not in ("scan", "global"):
+            return
+        value = float(judged["objective"])
+        if abs(value) > _SAME_RESULT:
+            self.stepped_nonzero += 1
+            for name, step in self.stepped_settings.items():
+                if _whole_multiple(value, step):
+                    self.stepped_hits[name] += 1
+        if baseline:
+            return
+        here, base = self.space.flat(design), self.space.flat(self.baseline)
+        self.stepped_unmoved -= {k for k in self.stepped_unmoved if not _same_result(here[k], base[k])}
+        self.stepped_designs += 1
+        if stop:
+            self._stepped_stop()
+
+    def _stepped_stop(self):
+        """Record the fact (``stepped_objective``) when enough designs moving every number gave enough values other than
+        zero and enough of them sit on the step of one setting; stop the search then unless ``stop_stepped`` is off.
+        Decided once, at the same point as the other watches: the watch ends either way."""
+        if not (self.stepped_watch and self.stopped is None and self.stepped_designs >= NO_EFFECT_DESIGNS
+                and not self.stepped_unmoved):
+            return
+        self.stepped_watch = False
+        name, hits = max(self.stepped_hits.items(), key=lambda item: item[1])
+        if self.stepped_nonzero < STEPPED_MIN_VALUES or hits < STEPPED_SHARE * self.stepped_nonzero:
+            return
+        self.stepped_objective = {"designs": self.stepped_designs, "setting": name, "step": self.stepped_settings[name],
+                                  "unit": str(self.block.get("objective", {}).get("unit") or ""), "on_step": hits,
+                                  "nonzero": self.stepped_nonzero, "stopped": self.stop_stepped}
+        if self.stop_stepped:
+            self.stopped = "stepped_objective"
+            raise _Stop()
 
     def _watch_steps(self, design, key, judged, stage, stop=True):
         """Count the objective's value of a design sampled across the space (the coarse scan's and the global stage's)
@@ -957,7 +1042,8 @@ class _Search:
             # Every starting point converged, or used its share of the budget before it did (``share``).
             self.stopped = ("budget" if self.used >= self.total else
                             "share" if any(s["stopped_because"] == "budget" for s in self.start_log) else "converged")
-        for index, spec in enumerate(self.rounds if self.stopped not in ("no_effect", "flat_objective") else []):
+        for index, spec in enumerate(self.rounds if self.stopped not in ("no_effect", "flat_objective", "stepped_objective")
+                                     else []):
             yield from self._round(index, spec)
         return self._outcome()
 
@@ -1439,10 +1525,11 @@ class _Search:
             "rounds": list(self.round_log),
             **({"no_effect": dict(self.no_effect)} if self.no_effect else {}),
             **({"flat_objective": dict(self.flat_objective)} if self.flat_objective else {}),
+            **({"stepped_objective": dict(self.stepped_objective)} if self.stepped_objective else {}),
         }
 
 
-def search(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True):
+def search(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True, stop_stepped=True):
     """The search as a generator of requests (see the module docstring); returns the outcome. ``rounds``: the rounds of
     a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``).
     ``results``: the names of the results the plan gives, watched for a design that changes none of them. ``batch``:
@@ -1451,7 +1538,8 @@ def search(block, *, seed, method=None, rounds=None, results=None, batch=False, 
     order, so a driver can run them at the same time; each answer is then judged in that order exactly as one after
     another, so the search and its record are the same. ``stop_flat``: whether a search whose objective never moves stops
     early (``flat_objective``); off, the fact is recorded and the search runs its budget."""
-    return (yield from _Search(block, seed, method, rounds, results, batch=batch, stop_flat=stop_flat).run())
+    return (yield from _Search(block, seed, method, rounds, results, batch=batch, stop_flat=stop_flat,
+                               stop_stepped=stop_stepped).run())
 
 
 def rehearse(block, *, batch, seed=0):
@@ -1475,7 +1563,7 @@ def rehearse(block, *, batch, seed=0):
 
     widths = []
     try:
-        gen = search(block, seed=seed, batch=batch, stop_flat=False)
+        gen = search(block, seed=seed, batch=batch, stop_flat=False, stop_stepped=False)
         request = next(gen)
         while True:
             if request["kind"] == "scan":
@@ -1788,7 +1876,8 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
                    "failed": outcome["failed"], "infeasible": outcome["infeasible"],
                    "budget_ran_out": outcome["budget_ran_out"], "stopped_because": outcome["stopped_because"],
                    **({"no_effect": outcome["no_effect"]} if outcome.get("no_effect") else {}),
-                   **({"flat_objective": outcome["flat_objective"]} if outcome.get("flat_objective") else {})}
+                   **({"flat_objective": outcome["flat_objective"]} if outcome.get("flat_objective") else {}),
+                   **({"stepped_objective": outcome["stepped_objective"]} if outcome.get("stepped_objective") else {})}
     u = f" {unit}" if unit else ""
     if best is None and not outcome["rows"] and outcome["stopped_because"] == "time":
         says = "No design was evaluated before the time limit (execution.timeout_s) ran out."

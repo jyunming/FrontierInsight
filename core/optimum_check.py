@@ -726,6 +726,8 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                "target": "the continued search stopped as soon as a design reached the target asked for",
                "no_effect": "the search stopped early: its first designs, which between them changed every number of "
                             "the design, all gave the baseline's results",
+               "stepped_objective": "the search stopped early: its objective was counted in whole steps of one of its "
+                                    "numerical settings",
                "flat_objective": "the search stopped early: its first designs across the whole range, which between them "
                                  "changed every number of the design, all gave the baseline's objective or one of a few "
                                  "values"
