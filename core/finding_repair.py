@@ -25,6 +25,7 @@ Nothing here knows the engine: the model, the test runs and the regression snaps
 from __future__ import annotations
 
 import ast
+import asyncio
 import copy
 import json
 import re
@@ -1005,6 +1006,26 @@ class Env:
     changed: list[str] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)
     baseline_static: dict[str, int] = field(default_factory=dict)
+    #: The file the last :func:`_attempt` took from the model's reply (``None``: it gave none), for :func:`keep_try`.
+    tried: str | None = None
+
+
+def keep_try(env: "Env", issue: dict[str, Any], rel: str, number: int, accepted: bool, why: str) -> None:
+    """Keep one repair try in ``code/``'s git history so a later change to the checks can be replayed on it: an accepted
+    one is a commit on the branch (:func:`core.code_project.record_change`); a refused one is a commit of the model's file
+    on the side reference ``refs/fi/refused/<finding id>-<try>`` (:func:`core.code_project.keep_refused`), the branch not
+    moved. Never stops or changes the repair: a git failure is dropped."""
+    try:
+        from . import code_project as _project
+
+        who = f"{issue.get('id')} ({issue.get('function') or 'no function'}; {issue.get('quantity') or 'no quantity'})"
+        if accepted:
+            _project.record_change(env.root, f"finding repair accepted: {who}", category="fixed", log=env.log)
+        elif env.tried:
+            _project.keep_refused(env.root, f"{issue.get('id')}-{number}", rel, env.tried,
+                                  f"finding repair refused: {who}: {why[:300]}", log=env.log)
+    except Exception:  # noqa: BLE001 -- the record is a convenience; the repair goes on whatever happens to it
+        pass
 
 
 def _accepted(record: dict[str, Any]) -> list[str]:
@@ -1285,6 +1306,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             elif altered:
                 new, why = None, ("it changed " + "; ".join(altered[:3])
                                   + ", which the finding does not speak of")
+    env.tried = new
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"
     if new != old:
@@ -1363,7 +1385,9 @@ async def repair_issue(env: Env, issue: dict[str, Any], rel: str) -> bool:
         if not spend(env, issue, kind):
             continue
         number = len(issue.setdefault("repairs", [])) + 1
+        env.tried = None
         accepted, why = await _attempt(env, issue, rel, who, detail)
+        await asyncio.to_thread(keep_try, env, issue, rel, number, accepted, why)
         by = env.other if who == "other" else env.code_model
         issue["repairs"].append({"try": number, "by": who, "model": by or who, "outcome": "accepted" if accepted else "rejected",
                                  **({} if accepted else {"why": why[:300]})})
