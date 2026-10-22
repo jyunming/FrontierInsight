@@ -113,9 +113,9 @@ EXAMPLE_RULE = (
     "MEAN for those inputs (and, if you can state it, add `\"variance_formula\"`, its variance); the function takes one "
     "more parameter after the inputs, `rng` (a numpy random generator) or `seed`, draws with it, and FI calls it many "
     "times with fixed seeds and compares the mean (and variance) of the draws with yours, within five standard errors. "
-    "When the formula defines several named outputs (`a = ...; b = ...`), the function returns them by name (a dict with "
-    "those keys) and `expected_formula` is a mapping from each name the formula defines to its formula, one for every "
-    "name.")
+    "When the equation has several outputs (`a = ...; b = ...`, or two joined by `and`), the function returns them by name "
+    "(a dict with those keys) and `expected_formula` is a mapping from each output's name to its formula, one for every "
+    "output: the mapping is how the example says which outputs there are. An equation with one output gives one formula.")
 
 
 def _text(value: Any) -> str:
@@ -280,12 +280,20 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
             continue
         formula = example.get("expected_formula")
         if isinstance(formula, dict):  # the plan says the equation has several outputs: one formula for each
+            # The example is what declares the outputs: when the formula's text defines several names they must be the
+            # mapping's keys; when it does not (two outputs joined by "and", or none written as `name = ...`) the keys are
+            # the declaration. FI never reads the number of outputs out of the formula's words.
+            declared = [str(k).strip() for k in formula]
+            if not names and len(declared) >= 2 and len(set(declared)) == len(declared) and all(
+                    re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", k) for k in declared):
+                names = declared
+                row["outputs"] = names
             if names:
                 _multi_output_row(row, example, good, names)
             else:
                 row.update(state="unusable", why=(
-                    "its `expected_formula` is a mapping, but the formula defines at most one name (`name = ...`); give "
-                    "`expected_formula` as one formula, or write each output in the formula as `name = ...`"))
+                    "its `expected_formula` is a mapping of fewer than two outputs, or its keys are not valid names; give "
+                    "`expected_formula` as one formula, or as a mapping from each output's name to its formula"))
             continue
         if formula is None or not _text(formula):
             row.update(state="unusable", why=(
@@ -444,13 +452,28 @@ def example_as_written(protocol: dict[str, Any] | None, eid: str) -> Any:
     return None
 
 
+def could_not_meet(status: Any, detail: Any = "") -> str:
+    """The plain reason a worked example could not be met (:data:`_COULD_NOT_MEET`), said more exactly when the failure's
+    detail shows which kind it was: a parameter the example gives no value for (the example is missing an input the
+    function needs, not names that differ), or several values returned for an example that gives one (the equation may have
+    several outputs, which the example declares as a mapping)."""
+    detail = _text(detail)
+    if status == CONTRACT and detail.startswith("the parameter "):
+        return ("the function written from the formula needs an input that the example gives no value for (" + detail
+                + "); the example's `inputs` must give a value for every input the formula uses")
+    if status == MISMATCH and "several values" in detail:
+        return ("the function written from the formula returns several values and the example gives one; if the equation "
+                "has several outputs, give `expected_formula` as a mapping from each output's name to its formula")
+    return _COULD_NOT_MEET.get(status, _text(status))
+
+
 def rederive_request(items: list[dict[str, Any]]) -> str:
     """The one request to the plan that asks it to work a worked example out again from its equation: for each item
     (``id``, ``formula``, ``example`` as written, ``why``: a key of :data:`_COULD_NOT_MEET` or a sentence) the equation, the
     example as written and the kind of failure. It never holds the value the code computed, nor the code."""
     lines = []
     for it in items:
-        why = _COULD_NOT_MEET.get(it.get("why"), _text(it.get("why")))
+        why = could_not_meet(it.get("why"), it.get("detail"))
         written = json.dumps(it.get("example"), ensure_ascii=False, default=str) if it.get("example") is not None else "none"
         names = [n for n in (it.get("names") or []) if n not in (*RNG_PARAMS, SEED_PARAM) and not n.startswith("*")]
         fixed = (f" The function for it is already planned with the parameters ({', '.join(names)}): give the example's "

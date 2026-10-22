@@ -13307,7 +13307,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         fixed_names = {s.equation: s.params() for s in outline_specs if s.kind == _function_steps.EQUATION}
         asks = [{"id": str(f.get("id")), "formula": " ".join(str(f.get("formula") or "").split()),
                  "example": _equation_tests.example_as_written(protocol, str(f.get("id"))), "why": f.get("status"),
-                 "source": "tests", "names": fixed_names.get(str(f.get("id")))}
+                 "detail": f.get("detail"), "source": "tests", "names": fixed_names.get(str(f.get("id")))}
                 for f in failures if str(f.get("id")) in by_id and str(f.get("id")) not in agrees
                 and _equation_tests.repairable_by_example(f)]
         return await self._rederive_examples(state, protocol, asks)

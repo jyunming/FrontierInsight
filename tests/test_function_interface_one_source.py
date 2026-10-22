@@ -170,3 +170,59 @@ def test_no_domain_is_applied_when_the_formula_cannot_be_read_from_the_example()
     assert si.domain_of(spec2, protocol2, EXAMPLE["inputs"]) is None
 
 
+# --- the example declares the outputs; the reason a worked example could not be met is the exact one ---------------------------
+
+AND_FORM = {"id": "E1", "formula": "Ea_hat = -R*beta and ln_A_hat = alpha + Ea_hat*x/R", "role": "analyses",
+            "example": {"inputs": {"R": 8.0, "beta": 2.0, "alpha": 1.0, "x": 0.5},
+                        "expected_formula": {"Ea_hat": "-R*beta", "ln_A_hat": "alpha + (-R*beta)*x/R"}}}
+
+
+def _rows(equation: dict) -> dict:
+    return {r["id"]: r for r in eqt.example_rows({"model": {"equations": [equation]}})}
+
+
+def test_a_mapping_declares_the_outputs_when_the_formula_joins_them_with_and() -> None:
+    row = _rows(AND_FORM)["E1"]
+    assert row["state"] == "ok" and row["outputs"] == ["Ea_hat", "ln_A_hat"]
+    assert row["expected"] == {"Ea_hat": -16.0, "ln_A_hat": 1.0 + (-16.0) * 0.5 / 8.0}
+    # Old: the text defines one name, so the mapping was refused as unusable.
+    assert eqt.is_multi_output(AND_FORM["formula"]) is False
+
+
+def test_a_mapping_that_is_not_two_outputs_is_still_refused_and_one_formula_stays_one_output() -> None:
+    one_key = {**AND_FORM, "example": {**AND_FORM["example"], "expected_formula": {"Ea_hat": "-R*beta"}}}
+    assert _rows(one_key)["E1"]["state"] == "unusable"
+    scalar = {**AND_FORM, "example": {**AND_FORM["example"], "expected_formula": "-R*beta"}}
+    row = _rows(scalar)["E1"]
+    assert row["state"] == "ok" and row["outputs"] == [] and isinstance(row["expected"], float)
+    # The keys of a mapping must be the names a formula that does define several names defines.
+    named = {**AND_FORM, "formula": "a = x + 1; b = x + 2", "example": {"inputs": {"x": 1.0}, "expected_formula": {"p": "x", "q": "x"}}}
+    assert _rows(named)["E1"]["state"] == "unusable"
+
+
+def test_a_function_that_returns_several_values_for_one_expected_value_says_so(tmp_path: Path) -> None:
+    (tmp_path / "pair_module.py").write_text("def pair(x):\n    return (x, 2 * x)\n", encoding="utf-8")
+    sys.path.insert(0, str(tmp_path))
+    try:
+        measured = em.measure({"id": "E1", "module": "pair_module", "function": "pair", "inputs": {"x": 1.0}, "random": False,
+                               "names": None, "outputs": []})
+    finally:
+        sys.path.remove(str(tmp_path))
+    assert measured["status"] == "not_number" and "several values" in measured["detail"]
+    status, detail, *_ = em.judge({"expected": 1.0, "rel": 1e-6, "abs": 0.0}, measured)
+    assert status == eqt.MISMATCH and "several values" in detail
+    assert "mapping from each output's name" in eqt.could_not_meet(status, detail)
+    assert "mapping" not in eqt.could_not_meet(eqt.MISMATCH, "")
+
+
+def test_a_parameter_the_example_gives_no_value_for_is_told_apart_from_names_that_differ() -> None:
+    missing = eqt.could_not_meet(eqt.CONTRACT, "the parameter covariance has no default and is not one of the example's inputs; "
+                                              "give it a default or take it out of this function")
+    differ = eqt.could_not_meet(eqt.CONTRACT, "the function must take T_i as arguments, named so")
+    assert "gives no value for" in missing and "every input the formula uses" in missing
+    assert "parameters are not the example's input names" in differ
+    request = eqt.rederive_request([{"id": "E4", "formula": "y = a*b", "example": {"inputs": {"a": 1}}, "why": eqt.CONTRACT,
+                                     "detail": "the parameter c has no default and is not one of the example's inputs"}])
+    assert "gives no value for" in request
+
+
