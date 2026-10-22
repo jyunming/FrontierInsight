@@ -48,7 +48,8 @@ $endif$
 \setlength{\emergencystretch}{3em}
 \usepackage{amsmath, amssymb}
 \usepackage{booktabs}
-\usepackage{microtype}
+% microtype is not loaded: its pdfTeX font expansion fails on non-scalable (bitmap)
+% fonts and stops the pdflatex compile. The template needs none of its refinements.
 % Don't pair authblk with titling — both patch \author/\maketitle and
 % the combo trips LaTeX's "Missing \begin{document}" on \author[N]{}.
 % titling alone is enough for the Nature-style flush-left author block;
