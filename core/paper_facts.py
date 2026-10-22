@@ -857,6 +857,9 @@ _HIDDEN = re.compile(
     re.M | re.S)
 #: A double brace right after a LaTeX command or a closing brace is LaTeX (``\textbf{{x}}``), not a placeholder.
 _LATEX_BEFORE = re.compile(r"(?:\\[A-Za-z]+\*?\s*|[}^_])$")
+#: ...but a name that is FI's own right after ``}``, ``^`` or ``_`` (``{{seed}}`` after ``snake_case`` or after another
+#: placeholder) is still FI's: only a command makes it LaTeX there.
+_LATEX_COMMAND_BEFORE = re.compile(r"\\[A-Za-z]+\*?\s*$")
 #: The sections that list sources: a placeholder there is not where a reader looks for the run's facts.
 _SOURCES = re.compile(r"^#{1,6}[ \t]+" + _disclosure._SECTION_NUMBER
                       + r"(?:references|bibliography|further[ \t]+reading|works[ \t]+cited|sources)\b", re.I)
@@ -1035,7 +1038,10 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
         raw, arg = m.group(1), m.group(2)
         name = _norm_name(raw)
         plain = _inside(m.start(), hidden)
-        if _LATEX_BEFORE.search(text[max(0, m.start() - 40):m.start()]):
+        before = text[max(0, m.start() - 40):m.start()]
+        mine = (_is_item(name) or arg is not None and name.startswith("not") or name in BLOCK_NAMES
+                or name in FACT_NAMES)
+        if _LATEX_COMMAND_BEFORE.search(before) if mine else _LATEX_BEFORE.search(before):
             return m.group(0)
         if _is_item(name) or arg is not None and name.startswith("not"):
             ident = (arg or "").strip()
@@ -1312,9 +1318,17 @@ def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
         sentence = re.sub(r"\s+", " ", _values.without_marks(markdown[original(a):original(b)])).strip()
         lead = _RUN_IN.match(flat[a:b])
         body_at = a + (lead.end() if lead else 0)
+        # A bold run-in heading followed by nothing but the unfilled key and its punctuation has no sentence to keep.
+        key_only = bool(lead) and not re.sub(r"[\s.,;:!?()\-\u2013\u2014]+", "", _TOKEN.sub("", flat[body_at:b]))
         drop = (all(i in idx for i in inside if spans[i][0] >= body_at) and not _NOT_PROSE.match(line)
-                and _whole_sentence(_TOKEN.sub("x", flat[body_at:b])))
-        if drop:
+                and (key_only or _whole_sentence(_TOKEN.sub("x", flat[body_at:b]))))
+        if drop and key_only and not flat[b:line_end if line_end != -1 else len(flat)].strip():
+            # Nothing else on its line: the heading goes with it (a heading over nothing reads as a gap).
+            start, end = original(a), original(b)
+            if flat[line_start:a].strip() == "":
+                start, end = original(line_start), min(end + 1, len(markdown))
+            edits.append((start, end, ""))
+        elif drop:
             start, end = original(body_at), original(b)
             if flat[line_start:body_at].strip() == "":  # it opened its line: the space it leaves goes with it
                 while end < len(markdown) and markdown[end] in " \t":

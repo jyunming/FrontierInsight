@@ -1017,7 +1017,10 @@ def _calc_text(x: float) -> str:
     if x == int(x) and abs(x) < 1e15:
         return str(int(x))
     text = sig(x, 4)
-    return _clean(text.rstrip("0").rstrip(".")) if "." in text and "e" not in text else text
+    if "e" in text:  # 1.500e-05 reads as 1.5e-05: the zeros of the mantissa say nothing
+        mantissa, _e, exponent = text.partition("e")
+        return (mantissa.rstrip("0").rstrip(".") if "." in mantissa else mantissa) + "e" + exponent
+    return _clean(text.rstrip("0").rstrip(".")) if "." in text else text
 
 
 def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "") -> Value:
