@@ -727,7 +727,8 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                "no_effect": "the search stopped early: its first designs, which between them changed every number of "
                             "the design, all gave the baseline's results",
                "flat_objective": "the search stopped early: its first designs across the whole range, which between them "
-                                 "changed every number of the design, all gave the baseline's objective"
+                                 "changed every number of the design, all gave the baseline's objective or one of a few "
+                                 "values"
                }.get(stopped, f"the search stopped because {stopped or 'of an unknown reason'}")
         checks["budget"] = {"status": FAILED, "says": (
             f"{why}: the design is the best of {ev.get('search')} evaluations, not shown to be the best the search "

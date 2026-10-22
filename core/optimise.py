@@ -891,8 +891,8 @@ _STOPPED = {
     "no_effect": "the first designs it tried, which between them changed every number of the design, all gave the "
                  "baseline's results",
     "flat_objective": "the first designs it tried, which between them changed every number of the design, all gave the "
-                      "baseline's value of the objective, so the search had no direction to follow (more of the same "
-                      "budget would not have found one)",
+                      "baseline's value of the objective or one of a few values, so the search had no direction to "
+                      "follow (more of the same budget would not have found one)",
 }
 
 
@@ -1309,8 +1309,11 @@ class OptimisationRunner:
                                "stayed": [n for n in fact.get("stayed") or [] if n not in unsteady],
                                "moved": [n for n in fact.get("moved") or [] if n not in unsteady]}
         self.failed_script = None
-        say = (f"The search's objective did not move: {fact.get('designs')} designs across the whole range all gave the "
-               "starting design's value, so there was nothing to improve. FI sends the design back to the plan.")
+        say = ((f"The search's objective moved only between {len(fact['values'])} values over {fact.get('designs')} "
+                "designs across the whole range, so the search had no direction to follow. FI sends the design back to "
+                "the plan.") if fact.get("values") else
+               (f"The search's objective did not move: {fact.get('designs')} designs across the whole range all gave the "
+                "starting design's value, so there was nothing to improve. FI sends the design back to the plan."))
         if self.log is not None:
             self.log.warning("[optimise] %s", say)
         return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started, stderr=say)

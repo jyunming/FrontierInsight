@@ -57,7 +57,7 @@ _STOPPED = {
     "target": "a design reached the target asked for",
     "no_effect": "its first designs, which between them changed every number of the design, all gave the baseline's results",
     "flat_objective": "its first designs across the whole range, which between them changed every number of the design, "
-                      "all gave the baseline's objective",
+                      "all gave the baseline's objective or one of a few values",
 }
 
 
@@ -67,6 +67,10 @@ def flat_went_on(ev: dict[str, Any]) -> str:
     fact = ev.get("flat_objective") if isinstance(ev, dict) else None
     if not isinstance(fact, dict) or fact.get("stopped", True):
         return ""
+    if fact.get("values"):
+        levels = ", ".join(_fmt(level[0]) for level in fact["values"])
+        return (f"the objective moved only between a few values: the first {fact.get('designs')} designs across the whole "
+                f"range of the design gave only {levels}, and the search went on to its budget")
     return (f"the objective did not move: the first {fact.get('designs')} designs across the whole range of the design "
             f"all gave {_fmt(fact.get('objective'))}, as the starting design did, and the search went on to its budget")
 

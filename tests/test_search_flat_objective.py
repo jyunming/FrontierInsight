@@ -189,3 +189,56 @@ def test_a_flat_search_that_went_on_is_said_in_the_report_and_the_log() -> None:
     # A search that stopped for it says so through its stop reason, not twice.
     assert best_design_report.flat_went_on({**ev, "flat_objective": {**fact, "stopped": True}}) == ""
     assert best_design_report.flat_went_on({"stopped_because": "budget"}) == ""
+
+
+# The objective moves, but only between a few levels (a quantity counted in whole steps of a setting): the search has
+# no direction to follow either, and stops the same way, with the levels in its record.
+def _levels(cell: dict[str, Any]) -> dict[str, Any]:
+    return {"peak": -10.0 * int(cell["fin"] // 2.5), "mass": cell["fin"]}
+
+
+def test_an_objective_that_moves_only_between_a_few_levels_stops_the_search() -> None:
+    outcome = _drive(_block(), _levels, ["mass"])
+    assert outcome["stopped_because"] == "flat_objective"
+    fact = outcome["flat_objective"]
+    assert fact["designs"] == search.NO_EFFECT_DESIGNS and fact["start"] == 0.0 and fact["stopped"] is True
+    assert sorted(level[0] for level in fact["values"]) == [-20.0, -10.0, 0.0]
+    assert sum(level[1] for level in fact["values"]) == search.NO_EFFECT_DESIGNS + 1, "the designs and the baseline"
+    assert fact["values"][0][1] == max(level[1] for level in fact["values"]), "the most common level first"
+
+
+def test_an_objective_with_more_levels_than_a_few_is_searched_as_before() -> None:
+    outcome = _drive(_block(), lambda cell: {"peak": -float(int(cell["fin"] // 1.5)), "mass": cell["fin"]}, ["mass"])
+    assert "flat_objective" not in outcome and outcome["evaluations"] > 1 + search.NO_EFFECT_DESIGNS
+
+
+def test_a_count_over_a_wide_range_is_searched_as_before() -> None:
+    """A whole-number objective is not a few levels when it takes many values across the range."""
+    outcome = _drive(_block(), lambda cell: {"peak": float(round(20 * cell["fin"] + 3 * cell["gap"])),
+                                             "mass": cell["fin"]}, ["mass"])
+    assert "flat_objective" not in outcome and outcome["evaluations"] > 1 + search.NO_EFFECT_DESIGNS
+
+
+def test_the_plan_is_told_the_levels_in_words() -> None:
+    from core import engine
+    fact = {"designs": 50, "objective": 0.0, "values": [[0.0, 46, True], [40.0, 4, True], [20.0, 1, False]],
+            "start": 20.0, "stayed": [], "moved": [], "stopped": True}
+    said = engine._flat_fact_sentence(fact)
+    assert "only 3 different values: 0 (46 of them), 40 (4 of them), 20 (1 of them, not meeting every limit)" in said
+    assert "the starting design gave 20" in said
+    asked = engine._flat_request(fact)
+    assert "jumps between a few levels" in asked and "moved only between a few values." in asked
+    assert "returns no result besides the objective" not in asked
+    went_on = best_design_report.flat_went_on({"flat_objective": {**fact, "stopped": False}})
+    assert "only between a few values" in went_on and "0, 40, 20" in went_on
+
+
+def test_a_narrow_window_touched_by_single_designs_is_searched_as_before() -> None:
+    """Most designs give the common value and two give values of their own: the objective may move smoothly inside a
+    region the sampled designs only touched, so it is not taken for steps."""
+    def window(cell: dict[str, Any]) -> dict[str, Any]:
+        inside = 5.7 <= cell["fin"] and 5.4 <= cell["gap"]
+        return {"peak": -(cell["fin"] + cell["gap"]) if inside else 0.0, "mass": cell["fin"]}
+
+    outcome = _drive(_block(), window, ["mass"])
+    assert "flat_objective" not in outcome

@@ -50,6 +50,10 @@ fault of the simulation; the best design is the baseline, and the record says wh
 The record also names which results beside the objective stayed at the baseline's value in every one of those designs
 and which moved. With ``stop_flat`` off (the plan was already revised for it once) the fact is recorded the same way
 and the search runs its whole budget.
+The same stop, with the values in the record, ends a search whose objective moves only between a few values: when those
+designs (and the baseline) gave no more than :data:`FEW_OBJECTIVE_VALUES` different values of it, and at least two of
+them gave the same value away from the most common one (a single design apart may sit in a narrow region where the
+objective moves smoothly). An objective that jumps between a few levels gives the search no direction either.
 
 A design that breaks a limit is recorded and never chosen; a failed evaluation (an exception, a missing or non-finite
 number) is recorded and never chosen. The random choices (the sample, the evolution) come from the quest's seed, so the
@@ -78,6 +82,11 @@ _FAILURES_BEFORE_GIVING_UP = 10
 #: or the third one tried; 50 leaves room for a design that does act but only past a threshold the first few miss.
 NO_EFFECT_DESIGNS = 50
 _SAME_RESULT = 1e-9
+#: At most this many different values of the objective among the designs the ``flat_objective`` watch counts (and the
+#: baseline) stop the search as one whose objective does not move. In FI's records of searches that found better designs,
+#: their first 52 such designs gave 18 to 35 different values; the searches that found nothing gave 1, or 3 (an objective
+#: read in whole steps of a setting of the simulation).
+FEW_OBJECTIVE_VALUES = 3
 
 
 #: From how many design numbers, all continuous, the local stage is a CMA-ES (:meth:`_Search._cma_restarts`) instead of
@@ -604,6 +613,15 @@ class _Search:
         self.flat_names = sorted({str(r) for r in results or []} - {str(block["objective"]["quantity"])})
         self.flat_base = None
         self.flat_stayed = set()
+        # Whether the objective takes more than a few values over the same designs (the same fact, with ``values``):
+        # each value seen, with how many designs gave it and whether they met every limit (a value met both ways is two:
+        # the search ranks them apart), and the coordinates none of them has moved yet. A failed design is not counted;
+        # the watch ends at the first value past FEW_OBJECTIVE_VALUES.
+        self.step_counts = []
+        self.step_unmoved = set(self.space.free)
+        self.step_designs = 0
+        self.step_watch = True
+        self.step_base = None
 
     def _take_scan(self, scan):
         """The coarse scan's evaluated designs (not counted against the budget)."""
@@ -622,6 +640,7 @@ class _Search:
             self._watch_objective(design, key, judged, "scan", item.get("values"), stop=False)
         # Decided on the whole scan, every setting recorded first: one that gives another value ends the watch.
         self._flat_stop()
+        self._steps_stop()
 
     # one evaluation
 
@@ -756,6 +775,11 @@ class _Search:
             raise _Stop()
 
     def _watch_objective(self, design, key, judged, stage, values=None, stop=True):
+        """Both watches of the objective, the one-value watch first (its record also names the results that stayed)."""
+        self._watch_flat(design, key, judged, stage, values, stop)
+        self._watch_steps(design, key, judged, stage, stop)
+
+    def _watch_flat(self, design, key, judged, stage, values=None, stop=True):
         """Stop the search (``flat_objective``) once enough designs sampled across the space (the coarse scan's and the
         global stage's), moving every number of the design between them, gave the baseline's value of the objective and
         met the limits as it did. A design that gives another value, meets them differently or fails ends the watch.
@@ -791,12 +815,61 @@ class _Search:
     def _flat_stop(self):
         """Record the fact (``flat_objective``) when the watch still holds over enough designs moving every number, and
         stop the search then unless ``stop_flat`` is off (the plan has been revised for it already): the watch ends."""
-        if self.flat_watch and self.stopped is None and self.flat_designs >= NO_EFFECT_DESIGNS and not self.flat_unmoved:
+        if (self.flat_watch and self.stopped is None and self.flat_objective is None
+                and self.flat_designs >= NO_EFFECT_DESIGNS and not self.flat_unmoved):
             base = set(self.flat_base or {})
             self.flat_objective = {"designs": self.flat_designs, "objective": self.base_objective,
                                    "feasible": bool(self.base_feasible), "stayed": sorted(self.flat_stayed),
                                    "moved": sorted(base - self.flat_stayed), "stopped": self.stop_flat}
             self.flat_watch = False
+            if self.stop_flat:
+                self.stopped = "flat_objective"
+                raise _Stop()
+
+    def _watch_steps(self, design, key, judged, stage, stop=True):
+        """Count the objective's value of a design sampled across the space (the coarse scan's and the global stage's)
+        or of the baseline; ``stop=False`` only counts it (:meth:`_steps_stop` decides)."""
+        if not self.step_watch or self.stopped is not None:
+            return
+        if judged["status"] != "ok" or not _number(judged.get("objective")):
+            return
+        baseline = key == self.space.key(self.baseline)
+        if not baseline and stage not in ("scan", "global"):
+            return
+        value, feasible = float(judged["objective"]), bool(judged["feasible"])
+        for level in self.step_counts:
+            if _same_result(level[0], value) and level[2] == feasible:
+                level[1] += 1
+                break
+        else:
+            self.step_counts.append([value, 1, feasible])
+            if len(self.step_counts) > FEW_OBJECTIVE_VALUES:
+                self.step_watch = False
+                return
+        if baseline:
+            self.step_base = value
+            return
+        here, base = self.space.flat(design), self.space.flat(self.baseline)
+        self.step_unmoved -= {k for k in self.step_unmoved if not _same_result(here[k], base[k])}
+        self.step_designs += 1
+        if stop:
+            self._steps_stop()
+
+    def _steps_stop(self):
+        """Record the fact (``flat_objective`` with ``values``, the most common first) when enough designs moving every
+        number gave the objective no more than a few values, and two of them gave the same value away from the most
+        common one (a step, given again), unless the one-value watch has recorded it already; stop the search then
+        unless ``stop_flat`` is off."""
+        if (self.step_watch and self.stopped is None and self.flat_objective is None
+                and self.step_designs >= NO_EFFECT_DESIGNS and not self.step_unmoved):
+            values = sorted((list(level) for level in self.step_counts), key=lambda level: -level[1])
+            if not any(level[1] >= 2 for level in values[1:]):
+                # Every design away from the common value gave a value of its own: the objective may move smoothly in a
+                # region the sampled designs only touched (a window that opens), not in steps. Watched on.
+                return
+            self.flat_objective = {"designs": self.step_designs, "objective": values[0][0], "values": values,
+                                   "start": self.step_base, "stayed": [], "moved": [], "stopped": self.stop_flat}
+            self.step_watch = False
             if self.stop_flat:
                 self.stopped = "flat_objective"
                 raise _Stop()

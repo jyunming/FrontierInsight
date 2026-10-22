@@ -20234,14 +20234,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 done = await self._flat_rewrite(state, str(parsed["flat_request"]))
                 self._log.warning("[evidence_gate] plan.md was rewritten (version %s) from what FI measured of the "
                                   "search; the new design is checked and timed before it runs", (done or {}).get("version"))
-                self._progress("[FI] The search's objective did not move anywhere in the design's range; the plan was "
-                               "revised once so that it can, and the new design runs next.")
+                self._progress("[FI] The search's objective " + _flat_moved(flat_fact) + " in the design's range; the "
+                               "plan was revised once so that it can move, and the new design runs next.")
             except Exception as exc:  # noqa: BLE001 -- the first design is searched again, with no early stop
                 said = (f"the plan could not be rewritten from what FI measured of the search ({_one_line(str(exc), 200)}); "
                         "the first design's search runs again to its whole budget")
                 self._log.warning("[evidence_gate] %s", said)
-                self._progress("[FI] The search's objective did not move anywhere in the design's range, and the plan "
-                               "could not be revised for it; the search runs again to its whole budget.")
+                self._progress("[FI] The search's objective " + _flat_moved(flat_fact) + " in the design's range, and "
+                               "the plan could not be revised for it; the search runs again to its whole budget.")
                 redesign = False
                 flat_retry = True
                 # Back to the run step (the route a crash repair takes), which runs the search again with no early stop.
@@ -27573,15 +27573,32 @@ def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -
 #: The source and the approver of the change FI makes to a frozen protocol when the study did not fit the time allowed.
 _FIT_SOURCE = "FI: the study did not fit the time allowed"
 _FIT_APPROVER = "FI: the study did not fit the time allowed; the plan was rewritten once to fit the time FI measured"
-_FLAT_SOURCE = "FI: the search's objective did not move across the design space"
-_FLAT_APPROVER = ("FI: the search's objective did not move across the design space; the plan was rewritten once, after "
-                  "results were seen")
+_FLAT_SOURCE = "FI: the search's objective did not move, or moved only between a few values, across the design space"
+_FLAT_APPROVER = ("FI: the search's objective did not move, or moved only between a few values, across the design space; "
+                  "the plan was rewritten once, after results were seen")
+
+
+def _flat_moved(fact: Any) -> str:
+    """How the objective behaved, as a clause of the console line: it did not move, or only between a few values."""
+    return ("moved only between a few values" if isinstance(fact, dict) and fact.get("values")
+            else "did not move anywhere")
+
+
+def _flat_shown(value: Any) -> str:
+    return f"{value:.6g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
 
 
 def _flat_fact_sentence(fact: dict[str, Any]) -> str:
-    """What FI measured of a search whose objective did not move, in one plain sentence (the runner's fact)."""
-    value = fact.get("objective")
-    shown = f"{value:.6g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+    """What FI measured of a search whose objective did not move, or moved only between a few values (``values``), in
+    one plain sentence (the runner's fact)."""
+    if fact.get("values"):
+        levels = ", ".join(f"{_flat_shown(v)} ({n} of them{'' if met else ', not meeting every limit'})"
+                           for v, n, met in fact["values"])
+        start = f"; the starting design gave {_flat_shown(fact['start'])}" if fact.get("start") is not None else ""
+        return (f"the search's first {int(fact.get('designs') or 0)} designs across the whole range of the design, which "
+                f"between them changed every number of it, gave the objective only {len(fact['values'])} different "
+                f"values: {levels}{start}")
+    shown = _flat_shown(fact.get("objective"))
     limits = "met every limit" if fact.get("feasible") else "did not meet every limit"
     return (f"the search's first {int(fact.get('designs') or 0)} designs across the whole range of the design, which "
             f"between them changed every number of it, all gave the objective {shown} and {limits}, as the starting "
@@ -27604,18 +27621,24 @@ def _flat_request(fact: dict[str, Any], kept: list[str] | None = None) -> str:
     if unsteady:
         parts.append("These differ when the same design runs twice (timings), so they say nothing about the design: "
                      + ", ".join(unsteady) + ".")
-    if not (stayed or moved):
+    steps = bool(fact.get("values"))
+    if not (stayed or moved or steps):
         parts.append("The simulation returns no result besides the objective and the limits, so FI cannot tell which "
                      "part of the objective is stuck.")
-    return ("FI ran the search for the best design: " + _flat_fact_sentence(fact) + ". So nothing in the design space "
-            "as it is written lets the objective move, and the search had nothing to climb. " + " ".join(parts) + " "
+    said = ("So the objective moves only in jumps between a few levels, and the search had no direction to climb: a small "
+            "change of the design leaves it where it was. An objective counted in whole steps of a numerical setting "
+            "(the spacing of a scan, a grid) instead of read between them does this, for example. " if steps else
+            "So nothing in the design space as it is written lets the objective move, and the search had nothing to "
+            "climb. ")
+    return ("FI ran the search for the best design: " + _flat_fact_sentence(fact) + ". " + said + " ".join(parts) + " "
             "Rewrite the design so that its objective can move: you choose how, from what FI measured and the topic (how "
-            "the design is described, its range, or an objective that grades how close a design comes as well as "
-            "whether it passes). Keep every case, setting, comparison and quantity the topic asks for, and every check, "
+            "the design is described, its range, an objective read finely enough to change with a small change of the "
+            "design, or one that grades how close a design comes as well as whether it passes). Keep every case, setting, comparison and quantity the topic asks for, and every check, "
             "threshold and tolerance as it is; do not change what the objective measures to get a number above the "
             "starting design's. When the objective is built from parts (the worst of several cases, a sum of terms), "
             "return each part as a result of its own. Say in the simplifications what was changed and that it was "
-            "changed after FI found that the first design's objective did not move."
+            "changed after FI found that the first design's objective "
+            + ("moved only between a few values." if steps else "did not move.")
             + ("\n\nWhat the topic asks to vary stays varied:\n" + "\n".join(kept) if kept else ""))
 
 
