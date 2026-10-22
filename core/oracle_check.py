@@ -656,27 +656,46 @@ def _labelled_in(eid: str, texts: str) -> bool:
                for m in _LABEL_RANGE_RE.finditer(texts))
 
 
-def unlabelled_equations(protocol: dict[str, Any] | None, source: str | dict[str, str]) -> list[str]:
+def _defines(source: str, name: str) -> bool:
+    """Whether ``source`` defines a function called ``name`` at its top level (read, never run)."""
+    import ast
+
+    try:
+        tree = ast.parse(source or "")
+    except (SyntaxError, ValueError):
+        return False
+    return any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name for n in tree.body)
+
+
+def unlabelled_equations(protocol: dict[str, Any] | None, source: str | dict[str, str],
+                         names: dict[str, str] | None = None) -> list[str]:
     """The ``generates`` equations of the plan whose id no comment or function docstring of the simulation carries (a
     label such as ``# E1`` on or above the code that implements it, or a range ``# E1-E3``). ``source`` is the
     simulation's text, or ``{file name: text}`` for a simulation with helper modules. Only the labelled mapping is
-    read, not the mathematics: a label says where to look, not that the code there is right. Ids match in any case."""
+    read, not the mathematics: a label says where to look, not that the code there is right. Ids match in any case.
+    ``names``: the function the code outline names for each equation (``implements``); an equation whose function the
+    outline names and the code defines is mapped by that, and needs no label (the outline is where the mapping was
+    fixed, so asking the model for a comment as well said the same thing twice)."""
     wanted = generating_equations(protocol)
     if not wanted:
         return []
-    sources = source.values() if isinstance(source, dict) else [source]
+    sources = list(source.values() if isinstance(source, dict) else [source])
     texts = "\n".join(t for s in sources for t in _label_texts(s or ""))
-    return [eid for eid in wanted if not _labelled_in(eid, texts)]
+    named = {str(k).strip().upper(): str(v).strip() for k, v in (names or {}).items() if str(v or "").strip()}
+    return [eid for eid in wanted if not _labelled_in(eid, texts)
+            and not (named.get(eid.upper()) and any(_defines(s or "", named[eid.upper()]) for s in sources))]
 
 
-def label_gaps(protocol: dict[str, Any] | None, source: str | dict[str, str], script: str) -> list[str]:
+def label_gaps(protocol: dict[str, Any] | None, source: str | dict[str, str], script: str,
+               names: dict[str, str] | None = None) -> list[str]:
     """One sentence for the equations of the plan the simulation (``script``, its file name) does not say it implements
-    (empty when every ``generates`` equation is labelled, or the plan lists none)."""
-    missing = unlabelled_equations(protocol, source)
+    (empty when every ``generates`` equation is labelled, or the plan lists none; ``names``: see
+    :func:`unlabelled_equations`)."""
+    missing = unlabelled_equations(protocol, source, names)
     if not missing:
         return []
-    names = ", ".join(missing)
-    return [f"{script} does not mark where it implements equation{'s' if len(missing) > 1 else ''} {names} of the model "
+    listed = ", ".join(missing)
+    return [f"{script} does not mark where it implements equation{'s' if len(missing) > 1 else ''} {listed} of the model "
             f"behind the numbers (a comment such as `# {missing[0]}` on or above the code that computes it), so a wrong "
             "number cannot be traced to the equation or to the code"]
 

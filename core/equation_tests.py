@@ -520,8 +520,11 @@ def cannot_judge_note(eid: str) -> str:
             "worked example gives one value, so FI cannot tell which output the value is for")
 
 
-def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None]) -> list[str]:
-    """One plain sentence for each equation that will not be tested before the run, and why."""
+def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None],
+                   names: dict[str, str] | None = None) -> list[str]:
+    """One plain sentence for each equation that will not be tested before the run, and why. ``names``: the function the
+    outline names for each equation (:func:`locate`)."""
+    by_outline = {_text(k).upper(): _text(v) for k, v in (names or {}).items() if _text(v)}
     notes = []
     for r in rows:
         if r["state"] == "missing":
@@ -537,7 +540,10 @@ def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str]
                          f"for its output ({r['why']})"
                          + (f"; the check '{r['covered_by']}' tests it instead" if r.get("covered_by") else ""))
         elif not located.get(r["id"]):
-            notes.append(f"equation {r['id']} is not tested before the run: no function of the code that can be "
+            planned = by_outline.get(_text(r["id"]).upper())
+            notes.append(f"equation {r['id']} is not tested before the run: the code has no function `{planned}`, the "
+                         "one planned for it" if planned else
+                         f"equation {r['id']} is not tested before the run: no function of the code that can be "
                          "imported is labelled with it (`# " + r["id"] + "`)")
     return notes
 
@@ -550,9 +556,12 @@ def locate(protocol: dict[str, Any] | None, sources: dict[str, str],
     """For each equation that gets an example: the importable top-level function that implements it, as
     ``{"module", "function", "file", "static"}`` (``static``: FI's own reading of it, :func:`static_facts`); ``None``
     when there is none. ``names`` (the equation's id to the function the code outline names for it, ``implements``)
-    decides when that function is there: the outline is where the function and its parameters were fixed before any
-    body was written. Otherwise it is the function labelled ``# E<n>`` (a comment on or above it, or in its docstring);
-    a label alone can name a helper the outline's function calls. ``sources``:
+    decides, whether or not that function is in the code yet: the outline is where the function and its parameters were
+    fixed before any body was written, so an equation the outline names a function for is never looked for by label (a
+    function the outline does not name for it, even if it carries the label, is not the tested one; the equation is
+    untested and :func:`untested_notes` says the outline's function is missing). For an equation the outline names no
+    function for, it is the function labelled ``# E<n>`` (a comment on or above it, or in its docstring); a label alone
+    can name a helper. ``sources``:
     ``{"<package>/model.py": text, "simulate.py": text}`` (a script that runs when imported, ``experiment.py``, is
     never one of them). A package is preferred to ``simulate.py``."""
     from . import code_layout as _layout
@@ -567,11 +576,16 @@ def locate(protocol: dict[str, Any] | None, sources: dict[str, str],
         found = None
         name = by_outline.get(eid.upper())
         if name:
+            # The outline fixed this equation's function before any body was written: it is the one source. A function
+            # of another name that a `# E<n>` comment points at is a guess about the same fact, and when it was wrong
+            # (a label that sits on a neighbour) the test called a function of another equation and failed it.
             rel = next((rel for rel, text in ordered if _steps._find(text, name) is not None), None)
             if rel is not None:
                 out[eid] = {"module": module_of(rel), "function": name, "file": rel,
                             "static": static_facts(sources[rel], name)}
-                continue
+            else:
+                out[eid] = None
+            continue
         for rel, items in labelled.items():
             for _line, text, fn in items:
                 if fn and "." not in fn and _oracle._labelled_in(eid, text):

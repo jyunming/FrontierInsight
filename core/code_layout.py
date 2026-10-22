@@ -575,7 +575,9 @@ def equation_map(protocol: dict[str, Any] | None, sources: dict[str, str],
         name = by_outline.get(eid.upper())
         node = next(((rel, n) for rel, text in sorted(sources.items())
                      for n in [_steps._find(text, name) if name else None] if n is not None), None)
-        where = (node[0], name, node[1].lineno) if node else next(
+        # The outline's function is the one source when it names one (as in core.equation_tests.locate): a label is read
+        # only for an equation the outline names no function for.
+        where = (node[0], name, node[1].lineno) if node else None if name else next(
             ((rel, fn, line) for rel, found in labelled.items() for line, text, fn in found
              if fn and _oracle._labelled_in(eid, text)), None)
         rows.append({"id": eid, "formula": str((equations.get(eid) or {}).get("formula") or ""),
@@ -871,9 +873,11 @@ def _imports(source: str, package: str) -> bool:
     return False
 
 
-def check(code_dir: Path, protocol: dict[str, Any] | None, package: str) -> list[str]:
+def check(code_dir: Path, protocol: dict[str, Any] | None, package: str,
+          names: dict[str, str] | None = None) -> list[str]:
     """What the research-tool layout is missing, one plain sentence each (empty when nothing is): the package and its
-    use by simulate.py, the unit tests, and the equation list with a function for every equation."""
+    use by simulate.py, the unit tests, and the equation list with a function for every equation. ``names``: the
+    function the code outline names for each equation (a function the outline names is not also asked to carry a label)."""
     code_dir = Path(code_dir)
     problems: list[str] = []
     pkg = code_dir / package
@@ -911,12 +915,20 @@ def check(code_dir: Path, protocol: dict[str, Any] | None, package: str) -> list
             problems.append(f"code/{rel} makes random numbers when it is loaded (line {', '.join(map(str, made))}), so "
                             "the seed FI gives each trial does not reach them: take the generator or the seed as an "
                             "argument instead")
-    unmapped = [row["id"] for row in equation_map(protocol, sources) if not row["function"]]
+    unmapped = [row["id"] for row in equation_map(protocol, sources, names) if not row["function"]]
     if unmapped:
-        problems.append(f"equation{'s' if len(unmapped) > 1 else ''} {', '.join(unmapped)} of the model "
-                        f"{'are' if len(unmapped) > 1 else 'is'} not labelled on a function of code/{package}/ "
-                        f"(a comment such as `# {unmapped[0]}` on or above it), so {METHODS_NAME} cannot say where "
-                        f"{'they are' if len(unmapped) > 1 else 'it is'} computed")
+        planned = {str(k).strip().upper() for k, v in (names or {}).items() if str(v or "").strip()}
+        unlabelled = [u for u in unmapped if u.upper() not in planned]
+        absent = [u for u in unmapped if u.upper() in planned]
+        if unlabelled:
+            problems.append(f"equation{'s' if len(unlabelled) > 1 else ''} {', '.join(unlabelled)} of the model "
+                            f"{'are' if len(unlabelled) > 1 else 'is'} not labelled on a function of code/{package}/ "
+                            f"(a comment such as `# {unlabelled[0]}` on or above it), so {METHODS_NAME} cannot say where "
+                            f"{'they are' if len(unlabelled) > 1 else 'it is'} computed")
+        if absent:
+            problems.append(f"the function{'s' if len(absent) > 1 else ''} planned for equation{'s' if len(absent) > 1 else ''} "
+                            f"{', '.join(absent)} of the model {'are' if len(absent) > 1 else 'is'} not in code/{package}/, "
+                            f"so {METHODS_NAME} cannot say where {'they are' if len(absent) > 1 else 'it is'} computed")
     return problems
 
 

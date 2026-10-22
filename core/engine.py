@@ -12075,7 +12075,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not isinstance(protocol, dict) or not self._runs_code(state) or not _oracle.generating_equations(protocol):
             return self.quest_root / "code" / "experiment.py", []
         main, texts = self._simulation_sources(state)
-        return main, (_oracle.unlabelled_equations(protocol, texts) if texts else [])
+        return main, (_oracle.unlabelled_equations(protocol, texts, self._outline_equation_names(state)) if texts else [])
 
     def _equation_label_gaps(self, state: QuestState, protocol: Any) -> list[str]:
         """The plan's ``generates`` equations the simulation does not mark (``# E1`` on or above the code that
@@ -12111,7 +12111,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 package = target.parent.name
                 sources = {rel: text for rel, text in _code_layout.package_sources(self.quest_root / "code").items()
                            if rel.startswith(f"{package}/")}
-                missing = [row["id"] for row in _code_layout.equation_map(self._protocol_block(state), sources)
+                missing = [row["id"] for row in _code_layout.equation_map(self._protocol_block(state), sources,
+                                                                          self._outline_equation_names(state))
                            if not row["function"]]
             if not missing:
                 return None
@@ -13177,7 +13178,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 sources = self._equation_sources()
                 located = _equation_tests.locate(protocol, sources, self._outline_equation_names(state))
                 case_list = _equation_tests.cases(rows, located)
-            notes = _equation_tests.untested_notes(rows, located)
+            notes = _equation_tests.untested_notes(rows, located, self._outline_equation_names(state))
             record["not_tested"] = notes
             if attempt == 0:
                 for n in notes:
@@ -13708,7 +13709,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             fell_back = (_code_layout.load(self.quest_root) or {}).get("fell_back") and not (code / package).is_dir()
             if fell_back and not research:
                 return []  # said when the code was written: this quest keeps two scripts
-            problems = _code_layout.check(code, self._protocol_block(state), package)
+            problems = _code_layout.check(code, self._protocol_block(state), package, self._outline_equation_names(state))
             # A generator built without a seed in the package ignores the seed FI gives each trial.
             for rel, text in sorted(_code_layout.package_sources(code).items()):
                 if rel.startswith(f"{package}/"):
