@@ -689,14 +689,34 @@ def _ledger_trial_seconds(root: Path) -> float | None:
     return round(total, 3)
 
 
+def _recorded_seconds(path: Path) -> float:
+    """``time.seconds`` of one of FI's own records of the search (0 when it holds none)."""
+    try:
+        t = (json.loads(path.read_text(encoding="utf-8")) or {}).get("time")
+        v = t.get("seconds") if isinstance(t, dict) else None
+    except (OSError, ValueError, AttributeError):
+        return 0.0
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < float("inf") else 0.0
+
+
+def _search_seconds(root: Path) -> float:
+    """How long FI's search for the best design and its check at finer settings took, from the two records FI wrote when
+    each finished (``results/best_design.json``, ``needs/OPTIMUM_CHECK.json``). The search runs its evaluations several at
+    a time, so this is the wall time of the search, never the sum of its evaluations' times. 0 when there was no search."""
+    return _recorded_seconds(root / "results" / "best_design.json") + _recorded_seconds(root / "needs" / "OPTIMUM_CHECK.json")
+
+
 def measured_run_time(quest_root: Path | str, fallback_s: Any = None) -> tuple[float | None, float | None]:
-    """``(wall seconds of the run that produced the stored trials, the least the trials alone took)``, each ``None`` when FI
+    """``(wall seconds of the run that produced the stored trials, the least the trials and the search took)``, each ``None`` when FI
     does not know it. The wall time is the record (``core/run_facts.py``); a study without FI's trials has none but
     ``fallback_s``, the time of its last execution. A quest whose trials were run before the record existed has only the
     least time, from the ledger: the time of the last execution is not the experiment's."""
     root = Path(quest_root)
     wall = _run_facts.run_seconds(root)
     least = _ledger_trial_seconds(root)
+    searched = _search_seconds(root)
+    if searched:
+        least = round((least or 0.0) + searched, 3)  # the search's own time counts: the scan alone is minutes of hours
     if wall is None and least is None and not isinstance(_run_facts.read(root).get("trials_run"), dict):
         wall = _run_facts.run_seconds(root, fallback_s)
     return wall, least
@@ -794,8 +814,9 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
             said += " for the exploring run, whose results are reported"
         out["run_time"] = Fact("run_time", said, required=True)
     elif least is not None:
-        out["run_time"] = Fact("run_time", f"at least {_plain(least)} (the trials alone; FI did not time the whole run)",
-                               required=True)
+        what = ("the settings run, the search and its check at finer settings; FI did not time the rest"
+                if _search_seconds(root) else "the trials alone; FI did not time the whole run")
+        out["run_time"] = Fact("run_time", f"at least {_plain(least)} ({what})", required=True)
     limit = _disclosure.topic_limit(root, topic)
     if limit is not None:
         out["time_limit"] = Fact("time_limit", _plain(limit))
