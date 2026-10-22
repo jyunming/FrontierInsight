@@ -388,7 +388,7 @@ def _array_of(name: str) -> str:
 
 def _by_array(items: list[tuple[str, str]]) -> dict[tuple[str, str], list[int]]:
     """The positions of ``(name, side)`` items, grouped by the array the name belongs to and the side: the elements of
-    one array are said once, with their count (an element's index reads as a citation in a paper's text)."""
+    one array that share a finding are said once, with their count, not once each."""
     out: dict[tuple[str, str], list[int]] = {}
     for i, (name, side) in enumerate(items):
         out.setdefault((_array_of(name), side), []).append(i)
@@ -712,9 +712,7 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         parts: list[str] = []
         if better:
             b = max(better, key=lambda x: x["gain"])
-            moved = b["variable"] if b["variable"] in probes and _array_of(b["variable"]) == b["variable"] else (
-                f"one element of {_array_of(b['variable'])}")
-            parts.append(f"moving {moved} to {_fmt(b['value'])} gives a design {_fmt(b['gain'])}{u} better at the "
+            parts.append(f"moving {b['variable']} to {_fmt(b['value'])} gives a design {_fmt(b['gain'])}{u} better at the "
                          "finest settings, more than the numerical error: this is not the best design nearby (the search "
                          "had not finished, or its coarser settings misled it)")
         for (variable, side), members in _by_array([(e["variable"], e["edge"]) for e in at_bound]).items():

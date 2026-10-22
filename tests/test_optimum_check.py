@@ -764,7 +764,7 @@ async def test_the_checks_designs_at_one_level_run_at_the_same_time_and_give_the
 
 
 def test_the_elements_of_an_array_at_an_edge_or_without_effect_are_said_once_with_their_count() -> None:
-    """An element's index reads as a citation in a paper's text: the elements of one array are said in one sentence."""
+    """The elements of one array that share a finding are said in one sentence, with their count."""
     block = _block(design_variables=[{"name": "w", "shape": [2, 3], "low": 0.0, "high": 1.0}],
                    baseline={"values": {"w": [[0.5] * 3] * 2}, "source": "s"},
                    evaluation_budget={"starts": 1, "per_start": 200})
@@ -781,4 +781,4 @@ def test_the_elements_of_an_array_at_an_edge_or_without_effect_are_said_once_wit
     assert hood["says"].count("edge of the range") == 1
     assert "lower edge of the range allowed for 3 of the 6 elements of w that were nudged" in hood["says"]
     assert "nudging 1 of the 6 elements of w that were nudged changes nothing" in hood["says"]
-    assert "[" not in hood["says"]
+    assert hood["says"].count("elements of w") == 2

@@ -28649,8 +28649,9 @@ def _renumber_citations(body: str, n_papers: int) -> tuple[str, dict[int, int], 
     taken out of its citation, and a citation left empty goes.
 
     Not citations, so left alone: brackets in inline code or math, a bracket
-    followed by "(" (a link), and one holding a 0 or a year-sized number
-    ("[0, 1]", "[1990–2020]").
+    followed by "(" (a link), one right after a name or another bracket (an
+    index: "pixels[2,3]", "m[1][4]"), and one holding a 0 or a year-sized
+    number ("[0, 1]", "[1990–2020]").
 
     Returns the new text, the map from old number to new, and the numbers
     that were taken out."""
@@ -28658,7 +28659,9 @@ def _renumber_citations(body: str, n_papers: int) -> tuple[str, dict[int, int], 
     found: list[tuple[re.Match[str], list[str]]] = []
     mapping: dict[int, int] = {}
     for m in _CITATION_BRACKET_RE.finditer(body):
-        if body[m.end():m.end() + 1] == "(" or any(s <= m.start() < e for s, e in spans):
+        before = body[m.start() - 1:m.start()]
+        if (body[m.end():m.end() + 1] == "(" or (before.isalnum() or before in "_])" and before != "")
+                or any(s <= m.start() < e for s, e in spans)):
             continue
         labels = _citation_labels(m.group(1))
         numbers = [int(label) for label in labels if label.isdigit()]
