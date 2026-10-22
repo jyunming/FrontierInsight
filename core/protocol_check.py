@@ -93,6 +93,7 @@ class Mismatch:
     found: list[float] = field(default_factory=list)  # what the script holds under a matching name
     where: str = ""  # "R0_LIST in experiment.py, line 166"; empty when the script holds no such list
     missing: list[float] = field(default_factory=list)  # protocol values the script does not contain at all
+    part: str = "grid"  # where the protocol fixes the axis: "grid", or "in_each_run" (compared inside each run)
 
     def left_out(self) -> list[float]:
         """The protocol values of a grid axis that the list found does not hold."""
@@ -102,7 +103,8 @@ class Mismatch:
         want = _fmt(self.expected)
         if self.kind == "grid":
             if not self.found:
-                return f"the protocol fixes {self.name} at {want}, and the script contains no such list (missing {_fmt(self.missing)})"
+                fixes = f"{self.name} at {want}" if self.part == "grid" else f"{self.name} at {want} inside each run"
+                return f"the protocol fixes {fixes}, and the script contains no such list (missing {_fmt(self.missing)})"
             extra = [v for v in self.found if not _has(self.expected, v)]
             left_out = [v for v in self.expected if not _has(self.found, v)]
             parts = []
@@ -110,8 +112,10 @@ class Mismatch:
                 parts.append(f"adds {_fmt(extra)}")
             if left_out:
                 parts.append(f"leaves out {_fmt(left_out)}")
+            fixes = (f"{self.name} at {want}" if self.part == "grid"
+                     else f"{self.name} at {want} inside each run")
             return (
-                f"the protocol fixes {self.name} at {want}; {self.where} is {_fmt(self.found)}"
+                f"the protocol fixes {fixes}; {self.where} is {_fmt(self.found)}"
                 + (f": it {' and '.join(parts)}" if parts else "")
             )
         if self.kind == "runs":
@@ -493,6 +497,7 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
         want = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)] if isinstance(values, list) else []
         if not want:
             continue
+        part = "grid" if isinstance(protocol.get("grid"), dict) and axis in protocol["grid"] else "in_each_run"
         named = [f for f in lists if _is_named_for(f, str(axis))]
         candidates = (
             named
@@ -502,11 +507,12 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
         if candidates:
             if not any(_same_set(f.values, want) for f in candidates):
                 best = max(candidates, key=lambda f: sum(_has(want, v) for v in f.values))
-                out.append(Mismatch("grid", str(axis), want, best.values, f"{best.name} in {best.script}, line {best.line}"))
+                out.append(Mismatch("grid", str(axis), want, best.values, f"{best.name} in {best.script}, line {best.line}",
+                                    part=part))
         elif not fi_runs_trials:  # under the trial contract FI hands the grid in: absent is expected, a contradiction is not
             absent = [v for v in want if not _has(numbers, v)]
             if absent:
-                out.append(Mismatch("grid", str(axis), want, [], "", absent))
+                out.append(Mismatch("grid", str(axis), want, [], "", absent, part=part))
 
     runs = protocol.get("runs_per_setting")
     if isinstance(runs, (int, float)) and not isinstance(runs, bool):

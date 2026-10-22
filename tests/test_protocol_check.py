@@ -159,6 +159,17 @@ def test_a_list_is_matched_by_its_values_when_no_name_says_which_axis_it_is() ->
     assert pc.check({"grid": {"R0": [0.9, 1.5, 3.0]}}, {"e.py": "vals = [10, 20, 30]\n"})[0].missing == [0.9, 1.5, 3.0]
 
 
+def test_an_axis_compared_inside_each_run_is_described_as_such_not_as_a_grid() -> None:
+    # The protocol fixes "load" under in_each_run (compared inside each run), not under grid: the message says so.
+    proto = {"grid": {"size": [1, 2]}, "in_each_run": {"load": [1.0, 2.0]}}
+    found = pc.check(proto, {"e.py": "load = [1.0, 3.0]\nsize = [1, 2]\n"})
+    assert [m.name for m in found] == ["load"] and found[0].kind == "grid"
+    assert found[0].part == "in_each_run"
+    assert "inside each run" in found[0].message() and "the protocol fixes load at" in found[0].message()
+    grid_found = pc.check({"grid": {"size": [1, 2, 3]}}, {"e.py": "size = [1, 2]\n"})
+    assert grid_found[0].part == "grid" and "inside each run" not in grid_found[0].message()
+
+
 def test_an_axis_the_script_never_names_is_missing_only_if_its_values_are_absent() -> None:
     assert pc.check({"grid": {"R0": [0.9, 1.5]}}, {"e.py": "def f(r0=0.9):\n    return r0 * 1.5\n"}) == []
 
