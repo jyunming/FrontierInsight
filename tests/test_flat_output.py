@@ -241,6 +241,28 @@ def test_a_sweep_whose_numbers_never_change_is_sent_back_and_one_that_varies_is_
     assert runner.flat is None and runner.failed_script is None and '"cells": 3' in result.stdout
 
 
+def test_a_sweep_whose_every_setting_gives_the_same_numbers_is_a_fault_only_if_the_code_never_reads_the_setting(
+        tmp_path: Path) -> None:
+    """End to end on the runner's own run.cells: the same numbers at every setting. The code reads the setting (a term that
+    is zero) so the sweep is an observation that the run goes on with, named in ``no_difference``; the same numbers from
+    code that never reads it are the fault (the known positive, sent back)."""
+    cmd_for = lambda root: [sys.executable, str(root / "code" / "experiment.py")]  # noqa: E731
+    reads = _quest(tmp_path / "reads", 'def run_cell(cell):\n    return {"t_out": 20.0 + 0.0 * cell["flow"], "drop": 0.0}\n')
+    (reads / "code" / "experiment.py").write_text(SWEEP_ANALYSIS, encoding="utf-8")
+    runner = _sweep_runner(reads)
+    result = asyncio.run(runner.execute(cmd_for(reads), cwd=reads, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert result.returncode == 0 and runner.flat is None and runner.failed_script is None
+    assert runner.no_difference and "`t_out`" in runner.no_difference, runner.no_difference
+    assert '"cells": 3' in result.stdout
+
+    ignores = _quest(tmp_path / "ignores", 'def run_cell(cell):\n    return {"t_out": 20.0, "drop": 0.0}\n')
+    (ignores / "code" / "experiment.py").write_text(SWEEP_ANALYSIS, encoding="utf-8")
+    runner = _sweep_runner(ignores)
+    result = asyncio.run(runner.execute(cmd_for(ignores), cwd=ignores, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert result.returncode == 1 and runner.failed_script == "simulate.py" and runner.flat
+    assert runner.no_difference is None
+
+
 # --- the stop --------------------------------------------------------------------------------------------------------
 
 

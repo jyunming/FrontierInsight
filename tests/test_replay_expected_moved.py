@@ -115,3 +115,38 @@ def test_ln_is_a_function_of_the_calculator() -> None:
     value, why = forms.formula_value({"expected_formula": _one(_oracles(16))["expected_formula"].replace("log(", "ln("),
                                               "case": _one(_oracles(16))["case"]})
     assert why == "" and abs(value - MEASURED) < 1e-9
+
+
+# ---- the same rewrite on a rate check (Arrhenius) ----------------------------------------------------------------------
+# A constructed case, not a recorded quest: no recorded quest with a moved Arrhenius expected value is in the fixtures.
+# Made-up constants; the mechanism is the one the recorded case above shows (a rewrite moves a number that agreed with its
+# formula, and the earlier number must come back).
+
+ARRHENIUS = "A * exp(-Ea / (R * T))"
+ARRHENIUS_CASE = {"A": 1e10, "Ea": 75000.0, "R": 8.314, "T": 330.0}
+
+
+def _arrhenius_pair() -> tuple[dict[str, Any], dict[str, Any], float]:
+    """The earlier check (its number agrees with its formula) and the rewrite of it (the number moved by 0.3 %)."""
+    value, why = forms.formula_value({"expected_formula": ARRHENIUS, "case": ARRHENIUS_CASE})
+    assert why == "" and value > 0
+    earlier = {**_one(_oracles(16)), "name": "rate_at_330K", "expected_formula": ARRHENIUS, "case": ARRHENIUS_CASE,
+               "measure": "rate", "expected": round(value, 10)}
+    return earlier, {**earlier, "expected": round(value * 1.003, 10)}, value
+
+
+def test_an_arrhenius_earlier_number_agrees_with_its_formula_and_the_rewrite_moved_it() -> None:
+    earlier, rewritten, value = _arrhenius_pair()
+    assert abs(value - earlier["expected"]) < 1e-9 and abs(rewritten["expected"] - value) / value > 1e-3
+    [moved] = forms.moved_expected([earlier], [rewritten])
+    assert (moved["name"], moved["was"], moved["now"]) == ("rate_at_330K", rewritten["expected"], earlier["expected"])
+
+
+def test_an_arrhenius_check_the_rewrite_moved_gets_its_earlier_number_back_and_the_formula_value_wins(tmp_path: Path) -> None:
+    earlier, rewritten, value = _arrhenius_pair()
+    engine = _quest(tmp_path, [rewritten])  # the plan as the rewrite left it
+    moved = engine._put_back_moved_expected({earlier["name"]: earlier})
+    assert [m["name"] for m in moved] == ["rate_at_330K"]
+    assert engine._planned_oracles()["rate_at_330K"]["expected"] == earlier["expected"]
+    assert abs(engine._planned_oracles()["rate_at_330K"]["expected"] - value) < 1e-9
+    assert engine._put_back_moved_expected({earlier["name"]: earlier}) == [], "a second pass has nothing to do"
