@@ -1498,8 +1498,9 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
 
     With values compared inside each run (``in_each_run``), the run is given every one of them, as in the study, with the
     study's seed for the case's setting (and a number the case names that the study does not compare, :func:`case_inside`);
-    a number per value is then read at the value the case names, or kept as the list of every value when the case names
-    none (:func:`core.in_run.for_case`).
+    a number per value is then read at the value the case names, or kept as the list of the number at every value
+    the case allows when it names only some of the factors compared inside each run (or none): a factor it leaves out is
+    not picked for it (:func:`core.in_run.for_case`).
 
     ``paired``: the study runs trial ``t`` of every setting on one seed (common random numbers), so the case's trial
     gets that seed too (:func:`trial_seed` with ``key=""``), the one the reported trial had."""
@@ -1512,11 +1513,10 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
     levels = _in_run.level_cells(inside)
     setting = {k: v for k, v in cell.items() if k not in inside}
     named = {k: v for k, v in cell.items() if k in inside}
-    if named and _in_run.level_named(named, levels) is None:
+    if named and not _in_run.levels_named(named, levels):
         shown = ", ".join(f"{k}={_fmt(v)}" for k, v in named.items())
-        return None, (f"the case sets {shown}; each run compares {', '.join(inside)} inside it, so a case names one of "
-                      f"the values each run is given for every one of them ({', '.join(_in_run.level_key(lv) for lv in levels[:6])}), "
-                      "or none of them")
+        return None, (f"the case sets {shown}; each run compares {', '.join(inside)} inside it, and no value each run is "
+                      f"given has that ({', '.join(_in_run.level_key(lv) for lv in levels[:6])})")
     got, why = await _run_case(executor, python, quest_root, module, cell={**setting, **inside}, timeout_s=timeout_s,
                                env=env, thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
                                levels=levels, seed_key="" if paired else cell_key(setting), log=log)
@@ -1591,7 +1591,7 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
         levels = _in_run.level_cells(inside)
         setting = {k: v for k, v in cell.items() if k not in inside}
         named = {k: v for k, v in cell.items() if k in inside}
-        if named and _in_run.level_named(named, levels) is None:
+        if named and not _in_run.levels_named(named, levels):
             return [], "the case names a value each run compares that the run is not given", [], 0
         given, key = {**setting, **inside}, cell_key(setting)
     if paired:

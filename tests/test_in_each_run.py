@@ -372,3 +372,38 @@ def test_a_pilot_run_reads_a_number_per_value_from_the_lists_it_was_given(tmp_pa
         _executor(), sys.executable, root, "code/simulate.py", {"m": 1}, deterministic=True, timeout_s=60, env=None,
         thresholds=None, in_each_run={"T": [1.0, 2.0]}))
     assert got is not None and got["n"] == 1.0 and got["y"] == {"T=1.0": 2.0, "T=2.0": 4.0}, got
+
+
+TWO_INSIDE = {"method": ["fast", "exact"], "focus": [0.0, 100.0]}
+TWO = '''
+def run_trial(cell, trial_id, seed):
+    base = {"fast": 1.0, "exact": 2.0}
+    return {"signal": {f"method={m},focus={f}": base[m] + f / 100.0
+                       for m in cell["method"] for f in cell["focus"]}}
+'''
+
+
+def test_a_case_that_names_only_some_of_the_values_compared_in_each_run_is_run_at_every_value_it_leaves_out(
+        tmp_path: Path) -> None:
+    """A real plan compared two things inside each run and wrote its known-answer cases with one of them (a focus); FI
+    refused every such case ("a case names one of the values each run is given for every one of them") and the checks
+    stayed unjudged, the code sent to a repair no code can make. The case now reads the number at each value of what
+    it leaves out; a value the run is not given is still refused."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(TWO, encoding="utf-8")
+
+    def case(cell):
+        return asyncio.run(trial_runner.run_case(_executor(), sys.executable, root, "code/simulate.py", cell=cell,
+                                                 timeout_s=60, in_each_run=TWO_INSIDE))
+
+    some, why = case({"focus": 100.0})
+    assert why == "" and some["signal"] == [2.0, 3.0], (some, why)  # fast, exact at focus 100
+    one, why = case({"focus": 100.0, "method": "exact"})
+    assert why == "" and one["signal"] == 3.0
+    none, why = case({})
+    assert why == "" and sorted(none["signal"]) == [1.0, 2.0, 2.0, 3.0]
+    bad, why = case({"focus": 100.0, "method": "other"})
+    assert bad is None and "no value each run is given has that" in why  # the known positive: a wrong value is still refused
+    assert in_run.levels_named({"focus": 100.0}, in_run.level_cells(TWO_INSIDE)) == [
+        {"method": "fast", "focus": 100.0}, {"method": "exact", "focus": 100.0}]

@@ -334,16 +334,26 @@ def level_named(named, levels):
     return None
 
 
+def levels_named(named, levels):
+    """Every level (in the run's order) that has the value ``named`` gives for each factor it names. A case that names
+    each factor compared inside the run gives one level, a case that names only some gives the levels of the factors it
+    leaves out, and a case that names none gives all of them; ``[]`` when a value it names is one the run is not
+    given."""
+    return [level for level in levels
+            if all(n in level and _same_level_value(v, level[n]) for n, v in (named or {}).items())]
+
+
 def for_case(values, levels, named):
     """What a check reads from one run on its case: the numbers per run as they are; each number per value at the value
-    the case names (``named`` gives every factor compared inside the run), or, when it names none, the list of every
-    value's number in the order the run was given them."""
-    level = level_named(named, levels) if named else None
-    lk = level_key(level) if level is not None else None
+    the case names, or, when the case names more than one of the run's values (it names only some of the factors
+    compared inside the run, or none), the list of the number at each of them in the order the run was given them. The
+    case does not pick the value of a factor it leaves out, so the check reads every one."""
+    matching = levels_named(named, levels) if named else list(levels or [])
+    one = level_key(matching[0]) if (named and len(matching) == 1) else None
     out = {}
     for name, v in (values or {}).items():
         if isinstance(v, dict):
-            out[name] = v.get(lk) if lk is not None else [v[level_key(lv)] for lv in levels if level_key(lv) in v]
+            out[name] = v.get(one) if one is not None else [v[level_key(lv)] for lv in matching if level_key(lv) in v]
         else:
             out[name] = v
     return out
