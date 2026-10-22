@@ -952,8 +952,9 @@ class _Search:
         self.method_used = "bounded_local"
 
     def _local_starts(self, points, *, first_cap=None, offset=0):
-        if first_cap is None and self._cma_fits():
-            # Many continuous design numbers: one CMA-ES spends what is left of the budget (_cma_restarts).
+        if self._cma_fits():
+            # Many continuous design numbers: one CMA-ES spends what is left of the budget (_cma_restarts), whichever
+            # method placed the starting points.
             yield from self._cma_restarts(points, offset)
             return
         if first_cap is None and len(points) > 1:
