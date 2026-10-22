@@ -32,7 +32,8 @@ flagged. So the writer no longer types these facts at all:
   disagrees with the measurement, or a claim that the run kept to the topic's limit when it did not, is a mismatch to
   rewrite (:func:`stated_hits`). That second part is kept narrow: simulated or physical time, a time per trial or per
   setting, the analysis's time and another run's are left alone, and anything it is unsure of is left to the claim check,
-  which receives FI's record. A seed typed outside ``{{seed}}`` is held to the code's seed by ``core/stat_claims.py``.
+  which receives FI's record. A seed typed outside ``{{seed}}`` is not checked here; the claim check reads FI's record instead (the
+  seed in it comes from :func:`core.run_facts.seed_verdict`).
   A failure is a must-fix hit named :data:`HIT`; it sends the paper back to be written again (the text route; never the
   design, never a stop). What is still unmet when the review rounds are used up is kept in ``.fi/paper_record_check.json``,
   which the quality report prints, and is said in the run log.
