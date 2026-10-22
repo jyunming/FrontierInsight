@@ -190,15 +190,18 @@ async def test_the_pilot_tries_the_small_settings_in_every_combination_before_it
     probes, why = await est.measure(ex, "python", quest, quest / "simulate.py", grid, runs=1000, deterministic=False,
                                     limit_s=8 * 3600, budget_s=600)
     assert probes is not None and why == ""
-    assert len(probes) == 6 and all(len(p.trials) == 2 for p in probes), "the base and the first and last of each setting"
+    # the base, the first and last of each setting, and the quarter points of the 13-value setting (core/run_estimate.py)
+    assert len(probes) == len(est.probe_cells(grid)) == 8 and all(len(p.trials) == 2 for p in probes)
     assert [c for c, _v in est.observations(probes) if c[facts.axis] == facts.value] != []
     # the six settings alone cannot say whether a metric applies only to some combinations of the small settings
     todo, whole = est.confirm_cells(grid, [p.cell for p in probes])
-    assert whole and len(todo) == 14, "the 4 other combinations of the small settings and the 10 other values of the largest"
-    assert len([c for c in todo if c[facts.big] != facts.base]) == 10
+    # the 4 other combinations of the small settings, and the other values of the largest setting (its ends and quarter
+    # points, which are timed, are not among them)
+    assert whole and len(todo) == 12, "the 4 other combinations of the small settings and the 8 other values of the largest"
+    assert len([c for c in todo if c[facts.big] != facts.base]) == 8
     result = await est.pilot(ex, "python", quest, quest / "simulate.py", grid, probes, _kinds(record), deterministic=False,
                              budget_s=600, allowance_s=60)
-    assert set(facts.broken) <= {p.metric for p in result.problems} and result.settings == 20 and result.trials == 26
+    assert set(facts.broken) <= {p.metric for p in result.problems} and result.settings == 20 and result.trials == 28
     assert ("FI also tried every value of every setting and every combination of the settings that take few values "
             "(20 settings in all)") in next(p for p in result.problems if p.kind == "undefined").says
     assert not (quest / "raw").exists(), "the pilot trials are not results"
@@ -313,7 +316,7 @@ async def test_the_confirmation_is_made_once_per_version_of_the_code_and_counts_
     before = ex.calls
     assert await eng._size_the_run(state, runner, "python", None) is None
     assert len(seen) == 1, "the confirmation is not run again for the same code"
-    assert ex.calls - before <= 6, "only the timing trials ran"
+    assert ex.calls - before == len(est.probe_cells(record["grid"])) + 1, "only the timing trials ran (each setting once, the base again)"
     # a changed version of the code is read again, with what is left of the sizing's budget (the time already spent is deducted)
     code = eng.quest_root / "code" / "simulate.py"
     code.write_text(code.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
@@ -335,4 +338,4 @@ async def test_a_finding_for_unchanged_code_is_reused_without_new_trials(tmp_pat
     before = ex.calls
     second = await eng._size_the_run(state, runner, "python", None)  # the repair changed nothing
     assert second is not None and est.read_pilot_record(eng.quest_root)["repairs"] == 2
-    assert ex.calls - before <= 6, "the extra trials are not run again for the same code"
+    assert ex.calls - before == len(est.probe_cells(_record()["grid"])) + 1, "only the timing trials ran again, not the pilot"

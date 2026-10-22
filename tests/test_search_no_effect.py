@@ -83,15 +83,27 @@ def test_without_a_result_beside_the_objective_and_the_limits_the_search_is_not_
     assert outcome["stopped_because"] != "no_effect", "a named result the simulation does not return is not compared"
 
 
-def test_the_search_stops_only_once_its_designs_have_moved_every_number_of_the_design() -> None:
-    """Designs that each moved one number (a local search's first steps) prove nothing about the numbers not yet moved:
-    with more numbers than the designs needed to show it, the stop waits until every one has moved."""
-    many = [{"name": f"w{i}", "low": 0.0, "high": 6.0, "kind": "continuous", "unit": "mm"} for i in range(80)]
-    block = _block(design_variables=many, baseline={"values": {f"w{i}": 1.0 for i in range(80)}, "source": "in use"},
+def test_the_stop_waits_until_the_designs_have_moved_every_number_of_the_design() -> None:
+    """Designs that each move one number prove nothing about the numbers not yet moved: with more numbers than the designs
+    needed to show it, the watch does not stop until every one has moved. Driven on the watch itself: the search's own
+    first designs move many numbers at once (the coarse scan), so a whole search never shows the case."""
+    names = [f"w{i}" for i in range(80)]
+    many = [{"name": n, "low": 0.0, "high": 6.0, "kind": "continuous", "unit": "mm"} for n in names]
+    block = _block(design_variables=many, baseline={"values": {n: 1.0 for n in names}, "source": "in use"},
                    evaluation_budget={"starts": 1, "per_start": 200})
-    outcome = _drive(block, _still, ["mass"])
-    assert outcome["stopped_because"] == "no_effect"
-    assert outcome["evaluations"] > 1 + search.NO_EFFECT_DESIGNS, "the first steps had not moved all 80 numbers"
+    s = search._Search(block, 0, "bounded_local", results=["mass"])
+    base = dict(s.baseline)
+    values = {"peak": 40.0, "mass": 2.0}
+    s._watch_effect(base, s.space.key(base), values)
+    for i, name in enumerate(names):
+        design = {**base, name: 2.0}  # one number moved, the rest still at the baseline
+        if i < len(names) - 1:
+            s._watch_effect(design, s.space.key(design), values)
+            assert s.stopped is None, f"stopped after {i + 1} designs, with {len(names) - 1 - i} numbers never moved"
+        else:
+            with pytest.raises(search._Stop):
+                s._watch_effect(design, s.space.key(design), values)
+    assert s.stopped == "no_effect" and s.no_effect["designs"] == len(names)
 
 
 TWO_MODES = '''\
