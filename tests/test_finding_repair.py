@@ -612,6 +612,10 @@ def test_only_the_findings_own_quantity_entries_may_change_at_module_level() -> 
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "extra": 1}}\n'), "a key of another name is not the finding's"
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, name: 1}}\n')
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "new": 1, "new": 2}}\n')
+    # A repeated key is refused even when the dict already had it: which copy wins must not decide the repair. A key that
+    # is new is refused by the rule that no other key is added, so only this case reaches the repeated-key rule.
+    twice = f'result = {{{q}: 0.0, "merged": 0.0, "merged": 0.0}}\n'
+    assert changes(twice, twice.replace(f"{q}: 0.0", f"{q}: 0.1")), "a repeated key is not a plain result dict"
 
 
 def test_the_entries_a_module_level_dict_had_keep_their_order_and_a_spread_is_never_new() -> None:
