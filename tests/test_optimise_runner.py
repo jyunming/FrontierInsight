@@ -839,6 +839,13 @@ async def test_a_search_run_with_several_evaluations_at_once_is_the_same_search(
         return await real(*a, **k)
 
     monkeypatch.setattr(optimise, "evaluate_many", counted)
+    real_submit = optimise.EvaluationPool.submit
+
+    def counted_submit(self: Any, ident: Any, cell: Any) -> None:
+        real_submit(self, ident, cell)
+        together.append(self.running)  # starting points answered as their designs finish share one pool
+
+    monkeypatch.setattr(optimise.EvaluationPool, "submit", counted_submit)
     out = []
     for at_once in (1, 4):
         root = _quest(tmp_path / f"{method}{at_once}")
