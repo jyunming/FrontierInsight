@@ -915,8 +915,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         _arxiv_gate.reset_quest(self.quest_id)
         _quest_ctx = _source_failures.current_quest.set(self.quest_id)
         _run_started_at = _time.time()
+        # This session's marker (core/run_marker.py): an earlier session that ended without recording an end was stopped
+        # from outside, which is said, and its leftover cache locks are cleared. Ended in the finally below.
+        _marker = None
+        _ended_how = "finished"
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
+            from .run_marker import RunMarker as _RunMarker
+
+            _marker = _RunMarker(self.quest_root, log=self._log)
+            _marker.start()
             (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
@@ -1718,6 +1726,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             #
             # Listed FIRST so the deliberately wider arm below never sees
             # one of them: order is the whole mechanism here.
+            _ended_how = "stopped"
             raise
         except BaseException as exc:  # noqa: BLE001 - deliberately wider; see below
             # Surface the failure as a quest-directory diagnostic the
@@ -1751,6 +1760,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # mask the original exception (the user wants to see the
             # real error, not "could not open file for diagnostic
             # writing").
+            _ended_how = f"failed: {type(exc).__name__}"
             try:
                 self._log.error("[run] the quest stopped on an error", exc_info=exc)
             except Exception:  # noqa: BLE001 -- the log must never hide the error
@@ -1820,6 +1830,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # start holds the same rows back again). Also when it was turned off: a part must never stay in place.
             if _phased.enabled(self.config) or _phased.record_path(self.quest_root).exists():
                 self._phased_restore_inputs()
+            if _marker is not None:
+                try:
+                    _marker.finish(_ended_how)
+                except Exception:  # noqa: BLE001 -- the marker is a record; never in the way of the outcome
+                    pass
             _close_quest_logger(self.quest_id)
 
     def _emit_source_failure_summary(self, *, started_at: float) -> None:

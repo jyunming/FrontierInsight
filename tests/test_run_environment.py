@@ -314,3 +314,40 @@ def test_run_trials_records_how_many_ran_at_once(tmp_path: Path) -> None:
     record = json.loads((root / ".fi" / "trials" / "at_once.json").read_text(encoding="utf-8"))
     assert record["could_run_at_once"] == 2 and 1 <= record["most_run_at_once"] <= 2
     assert record["largest_setting_mb"] is None or record["largest_setting_mb"] > 0
+
+
+# ---------------------------------------------------------------- the engine keeps the marker on every way a run ends
+
+def _quest_engine(tmp_path: Path):  # noqa: ANN202
+    from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+    from core.engine import Engine
+
+    cfg = Config(
+        topic="a neutral topic about a cooling cup", title="marker", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off", oracle_check="off"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    return Engine(cfg)
+
+
+def test_a_quest_run_finds_a_session_stopped_from_outside_and_records_how_it_ended(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    from core.engine import Engine
+
+    eng = _quest_engine(tmp_path)
+    pid, _ = _dead_pid()
+    _write_record(eng.quest_root, {"pid": pid, "started": 1.0e9, "seen_at": 1.0e9 + 60, "ended": None})
+    _cache_with(eng.quest_root, "freeform_ab12.json.lock")
+
+    async def _boom(self) -> None:  # noqa: ANN001
+        raise RuntimeError("a planted failure right after the start")
+
+    monkeypatch.setattr(Engine, "_check_records_changed_outside", _boom)
+    with pytest.raises(RuntimeError):
+        asyncio.run(eng.run())
+    # The quest's own log (run.log) is where a person reads it.
+    assert "ended without recording an end" in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert not (eng.quest_root / SHARED_CACHE / "freeform_ab12.json.lock").exists()
+    record = json.loads((eng.quest_root / rm.RECORD).read_text(encoding="utf-8"))
+    assert record["pid"] == os.getpid() and record["ended"] == "failed: RuntimeError"
