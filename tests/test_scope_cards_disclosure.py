@@ -62,8 +62,9 @@ def test_quality_names_the_chosen_study_and_the_removed_lines(tmp_path: Path) ->
     assert "Which cup shape keeps tea hot longest?" in text
     assert scope_cards.nobody_line() not in text
     assert removed[0] in text
-    rows = [p for p in report["stages"][0]["problems"]["items"] if p["status"] == "removed"]
-    assert len(rows) == 1 and rows[0]["text"].startswith("A literature line on the study")
+    # FI's own correction of a card, said in the study section; not a problem of the quest, so not counted as one
+    assert f"- Removed: {removed[0]}" in text
+    assert all(p["status"] != "removed" for s in report["stages"] for p in s["problems"]["items"])
 
 
 def _freeze(root: Path) -> None:

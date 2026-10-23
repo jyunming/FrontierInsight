@@ -373,12 +373,6 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
     return out
 
 
-def _scope_problems(q: _Quest) -> list[dict[str, str]]:
-    """A literature line on a study card that FI removed because its source is not one FI read (``.fi/scope.json``)."""
-    return [_problem("plan", str(x), "FI's check of the study cards", "removed", ".fi/scope.json")
-            for x in _list(q.scope.get("removed")) if str(x).strip()]
-
-
 def _scope_summary(q: _Quest) -> dict[str, Any] | None:
     """Which study was picked, or that nobody picked one and which studies the topic could also have meant
     (``.fi/scope.json``). ``None`` when there is no such record."""
@@ -397,7 +391,7 @@ def _scope_summary(q: _Quest) -> dict[str, Any] | None:
 
 
 def _plan_problems(q: _Quest) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = _scope_problems(q)
+    out: list[dict[str, str]] = []
     sb = q.search_asked
     if sb:
         out.append(_problem("plan", "the plan did not say how the search for the best design runs", "FI's plan check",
