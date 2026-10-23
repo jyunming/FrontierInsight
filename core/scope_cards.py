@@ -221,3 +221,17 @@ def gaps(card: dict, design: dict) -> list[str]:
 
 def nobody_line() -> str:
     return "Nobody picked the study to run; FI planned from the topic alone. The studies it could also have been:"
+
+
+def plan_section(record: dict | None) -> str:
+    """plan.md's section on the study to run: the card a person picked, or that nobody picked one and the cards that
+    were offered. ``""`` when no cards were offered."""
+    if not record or not record.get("cards"):
+        return ""
+    chosen = record.get("chosen")
+    if isinstance(chosen, dict):
+        body = "A person picked this study to run: " + str(chosen.get("question", "")) + "\n\n" + "\n".join(
+            line.strip() for line in _block(1, chosen).split("\n")[1:])
+    else:
+        body = nobody_line() + "\n\n" + "\n".join(f"- {c.get('question', '')}" for c in record["cards"])
+    return "## The study to run\n\n" + body + "\n"

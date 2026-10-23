@@ -5590,6 +5590,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                             sources=self._retrieved_sources(state) if self._runs_code(state) else None,
                             code_layout=self._plan_code_layout({**state, "design": normalized}),
                             confirm=self._plan_confirm_lines(state))
+        study = _scope_cards.plan_section(_scope_cards.read_record(self.quest_root))
+        if study:
+            body = body.rstrip("\n") + "\n\n" + study
         path.write_text(body, encoding="utf-8")
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,

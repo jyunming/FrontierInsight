@@ -159,3 +159,12 @@ def test_e_and_a_number_whose_edit_never_came_picks_that_card():
     assert sc.read_answer("e 2", cards) == cards[1]
     assert sc.read_answer("E1", cards) == cards[0]
     assert sc.read_answer("e 9", cards) is None
+
+
+def test_plan_section_names_the_pick_or_says_nobody_picked():
+    cards = [_card(), _card(question="Which cup keeps tea warm longest?", study_type="find_best_design")]
+    picked = sc.plan_section({"cards": cards, "chosen": cards[1], "chosen_by": "person"})
+    assert picked.startswith("## The study to run") and "Which cup keeps tea warm longest?" in picked
+    nobody = sc.plan_section({"cards": cards, "chosen": None, "chosen_by": "nobody"})
+    assert sc.nobody_line() in nobody and "- How fast does a cup of tea cool?" in nobody
+    assert sc.plan_section(None) == "" and sc.plan_section({"cards": []}) == ""
