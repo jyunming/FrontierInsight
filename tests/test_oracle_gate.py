@@ -600,6 +600,19 @@ def test_a_proposed_oracle_change_is_kept_only_when_it_is_usable() -> None:
     assert "oracle_change" in oc.directive(declared, ["x"]) and "nothing changes without them" in oc.directive(declared, ["x"])
 
 
+def test_a_long_expected_formula_is_kept_whole_and_one_too_long_is_dropped_with_its_reason() -> None:
+    """A formula was cut at 600 characters, so a long one became a different expression that failed to compute and was
+    dropped with no word to the reader of the log."""
+    base = {"name": ORACLE["name"], "expected": 1, "tolerance": 0.2, "reason": "the working had a slip"}
+    long_formula = " + ".join(f"{i}*x" for i in range(200))
+    assert 600 < len(long_formula) < oc.MAX_FORMULA
+    kept = oc.proposals([{**base, "expected_formula": long_formula}], [ORACLE])[0]
+    assert kept["expected_formula"] == long_formula and "expected_formula_dropped" not in kept
+    too_long = oc.proposals([{**base, "expected_formula": "1 + " * oc.MAX_FORMULA + "1"}], [ORACLE])[0]
+    assert "expected_formula" not in too_long and "characters" in too_long["expected_formula_dropped"]
+    assert oc.proposals([{**base, "expected_formula": "2*x"}], [ORACLE])[0]["expected_formula"] == "2*x"
+
+
 @pytest.mark.asyncio
 async def test_a_check_the_repair_calls_wrong_is_recorded_and_never_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

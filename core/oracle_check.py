@@ -1269,6 +1269,10 @@ _EXPECTED_FORMULA_SHORT = ("the expected value as one formula FI can compute: nu
                            "sin and the other usual functions, and the settings of the check's `case` by name")
 
 
+#: The longest ``expected_formula`` a repair may propose (one formula, not a program).
+MAX_FORMULA = 3000
+
+
 def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The usable entries of a repair's ``oracle_change``: each names a declared oracle, gives a finite ``expected`` and a
     non-negative ``tolerance``, and says why. Anything else is dropped, never guessed at."""
@@ -1284,10 +1288,18 @@ def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         mode = "relative" if str(item.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
         entry: dict[str, Any] = {"name": name, "expected": expected, "tolerance": tolerance, "tolerance_mode": mode, "reason": reason[:600]}
-        for key in ("disputed_step", "expected_formula"):  # the code's question to the plan (core/oracle_challenge.py)
-            text = " ".join(str(item.get(key) or "").split())
-            if text:
-                entry[key] = text[:600]
+        step = " ".join(str(item.get("disputed_step") or "").split())
+        if step:  # the code's question to the plan (core/oracle_challenge.py): words, so a cut loses only the end
+            entry["disputed_step"] = step[:600]
+        formula = " ".join(str(item.get("expected_formula") or "").split())
+        if formula:
+            # A formula is kept whole or not at all: cut at 600 characters it was a different expression, which then
+            # failed to compute and was dropped with no word to the reader of the log.
+            if len(formula) <= MAX_FORMULA:
+                entry["expected_formula"] = formula
+            else:
+                entry["expected_formula_dropped"] = (f"its `expected_formula` is {len(formula)} characters, over the "
+                                                     f"{MAX_FORMULA} FI reads")
         check = str(item.get("check") or "").strip()
         if check:
             entry["check"] = check[:600]
