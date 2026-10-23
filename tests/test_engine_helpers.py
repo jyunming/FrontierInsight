@@ -1140,7 +1140,9 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # between the literature and it: a passthrough unless pauses.supply asks
     # for a stop there, so a resume starts after the search, not inside it.
     assert ("literature", "pause_after_literature") in plain_edges
-    assert ("pause_after_literature", "select_skills") in plain_edges
+    # The study cards sit between them: a person picks the study before the tools and the plan.
+    assert ("pause_after_literature", "scope") in plain_edges
+    assert ("scope", "select_skills") in plain_edges
     # `plan` sits between select_skills and design: it reads the literature and writes plan.md, whose design
     # block the design step then adopts.
     assert ("select_skills", "plan") in plain_edges

@@ -862,6 +862,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         *,
         clarify_callback: ClarifyCallback | None = None,
         human_feedback_callback: "HumanFeedbackCallback | None" = None,
+        scope_callback: ClarifyCallback | None = None,
         reopen: bool = False,
         from_step: str | None = None,
         approved_by: str | None = None,
@@ -900,7 +901,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._run_started_at = time.time()
         self._clarify_answerable = (
             clarify_callback is not None or (self.fi_dir / "clarify_answer.json").is_file())
-        self._scope_answerer = clarify_callback  # the study cards are answered through the same channel
+        # The study cards have an answer channel of their own (its own files on the web page): the setup questions'
+        # channel would hand back the setup answer, and a rerun from the cards would reuse an old pick.
+        self._scope_answerer = scope_callback
         import time as _time
         # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
         self._quest_recorded = False

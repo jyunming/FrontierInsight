@@ -159,3 +159,23 @@ def test_the_answer_channel_is_asked_and_a_timeout_is_nobody(tmp_path: Path) -> 
     eng2._scope_answerer = never
     eng2.config.pauses.timeout_s = 0.05
     assert asyncio.run(eng2._node_scope(dict(STATE))) == {"scope_card": None}
+
+
+def test_the_setup_answer_channel_is_not_the_study_answer_channel(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    _replies(eng, CARDS)
+    asked: list[Any] = []
+
+    async def setup(questions: dict[str, Any]) -> dict[str, Any]:
+        asked.append(questions)
+        return {"study": 1}
+
+    eng._clarify_answerable = True
+    eng._scope_answerer = None  # what Engine.run sets when it is given a setup callback and no study callback
+    assert asyncio.run(eng._node_scope(dict(STATE))) == {"scope_card": None} and not asked
+
+
+def test_the_quest_map_shows_the_study_cards() -> None:
+    from core import rerun_from
+
+    assert "scope" in rerun_from.NODES and rerun_from.resolve("scope") == "studies"
