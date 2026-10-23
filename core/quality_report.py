@@ -288,9 +288,14 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for eid in _list(eq.get("not_tested")):
         out.append(_problem("checks", f"equation {eid} has no test", "FI's equation test", "left out",
                             ".fi/equation_tests.json"))
+    from . import code_review as _cr
+
+    now = _cr.version(q.root / "code")
     for p in map(_dict, _list(q.cannot_repair.get("problems"))):
         if p.get("text") and not _stop_power.may_stop(p.get("source")):
-            out.append(_problem("checks", str(p["text"]), _stop_power.source_words(p.get("source")), "not fixed",
+            stale = bool(p.get("code_version")) and p.get("code_version") != now
+            out.append(_problem("checks", str(p["text"]), _stop_power.source_words(p.get("source")),
+                                "not checked again after a later repair" if stale else "not fixed",
                                 ".fi/cannot_repair.json"))
     for note in _list(q.protocol_check.get("notes")):
         out.append(_problem("checks", str(note), "FI's reading of the code (a note, not a stop)", "left out",

@@ -3519,12 +3519,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning(
                 "[route] after %d rewrites the paper still has sentences FI's check of its records flags; they are listed "
                 "in QUALITY.md, and the check reads the paper's words, so the quest goes on", _RECORD_REWRITES)
-            for h in must_flag:
-                if _hit_name(h) == _record_claims.HIT:
-                    self._record_cannot_repair(
-                        "the paper still has a sentence FI's records contradict: " + _one_line(str(h), 300),
-                        [f"wrote the paper again {_RECORD_REWRITES} times, naming the contradiction",
-                         "took out what could be taken out"], source=_stop_power.READ, check="record_claims")
             must_flag = [h for h in must_flag if _hit_name(h) != _record_claims.HIT]
         page_rewrites = int(state.get("page_limit_rewrites") or 0)
         if _only_page_limit_hits(must_flag) and page_rewrites <= _PAGE_LIMIT_REWRITES:
@@ -11092,11 +11086,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             left = [hit for hit, span in found if span not in taken]
             path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
             if not taken or not path or not Path(path).is_file():
-                return left
+                return self._record_claims_left(left)
             found = self._record_contradictions(Path(path).read_text(encoding="utf-8"), state)
             if not found:
+                self._clear_cannot_repair("record_claims")
                 return []
-        return [hit for hit, _span in found]
+        return self._record_claims_left([hit for hit, _span in found])
+
+    def _record_claims_left(self, left: list[str]) -> list[str]:
+        """What the claim check still flags after the rewrites and the take-out passes: recorded, so QUALITY.md lists it (a
+        reading of the paper's words, so it never stops the quest, :mod:`core.stop_power`)."""
+        self._clear_cannot_repair("record_claims")
+        for hit in left:
+            self._record_cannot_repair(
+                "the paper still has a sentence FI's records contradict: " + _one_line(str(hit), 300),
+                [f"wrote the paper again {_RECORD_REWRITES} times, naming the contradiction",
+                 "took out what could be taken out"], source=_stop_power.READ, check="record_claims")
+        return left
 
     def _take_out_contradicted(self, state: QuestState, found: list[tuple[str, str]]) -> list[str]:
         """The paper with each flagged sentence (or figure) taken out (core/record_claims.py::take_out), written to disk and
@@ -13670,7 +13676,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if same is not None and _stop_power.may_stop(same.get("source")) and not _stop_power.may_stop(source):
             return
         problems = [p for p in problems if p is not same]
-        problems.append({"text": text, "tried": tried, "source": source, "check": check})
+        problems.append({"text": text, "tried": tried, "source": source, "check": check,
+                         "code_version": _code_review.version(self.quest_root / "code")})
         self._write_cannot_repair(problems)
 
     def _clear_cannot_repair(self, check: str) -> None:

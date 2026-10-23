@@ -100,3 +100,26 @@ def test_a_check_that_finds_nothing_again_takes_its_own_problems_out(tmp_path: P
     assert "a layout problem" not in eng._run_checks_note()
     eng._clear_cannot_repair("seed")
     assert eng._cannot_repair_problems() == [] and not (eng.fi_dir / "cannot_repair.json").exists()
+
+
+def test_what_the_claim_check_still_flags_is_recorded_and_a_clean_pass_takes_it_out(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    assert eng._record_claims_left(["record_claims: a sentence"]) == ["record_claims: a sentence"]
+    left = [p for p in eng._cannot_repair_problems() if p["check"] == "record_claims"]
+    assert left and left[0]["source"] == sp.READ and eng._cannot_repair_stop() is None
+    eng._record_claims_left([])
+    assert eng._cannot_repair_problems() == []
+
+
+def test_a_problem_found_on_an_earlier_version_of_the_code_is_said_as_not_checked_again(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    code = eng.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text("x = 1", encoding="utf-8")
+    eng._record_cannot_repair("a seed problem", ["read"], source=sp.READ, check="seed")
+    assert "repairs did not remove it: a seed problem" in eng._run_checks_note()
+    (code / "simulate.py").write_text("x = 2", encoding="utf-8")  # repaired again; no check looked again
+    note = eng._run_checks_note()
+    assert "earlier version of the code found this: a seed problem" in note and "not known to be fixed" in note
+    items = [p for stage in build(eng.quest_root)["stages"] for p in stage["problems"]["items"]]
+    assert any(p["text"] == "a seed problem" and p["status"] == "not checked again after a later repair" for p in items)

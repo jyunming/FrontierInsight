@@ -527,11 +527,21 @@ class RunChecksMixin:
             parts.append(self._withhold_left_out_values(checked))
         if static := self._static_checks_note():  # type: ignore[attr-defined]  # core/static_checks.py
             parts.append(static)
+        from . import code_review as _code_review
+
+        now = _code_review.version(self.quest_root / "code")  # type: ignore[attr-defined]
         for p in self._cannot_repair_problems():  # type: ignore[attr-defined]  # core/engine.py
-            if not _stop_power.may_stop(p.get("source")):
-                parts.append(f"FI's checks of the code before the run found this, and the repairs did not remove it: {p['text']}. "
-                             f"It is {_stop_power.source_words(p.get('source'))}, so the run went on. Say it in the "
-                             "limitations as FI's reading of the code, not as a fact of the results.")
+            if _stop_power.may_stop(p.get("source")):
+                continue
+            if p.get("code_version") and p["code_version"] != now:
+                # The code was repaired again after this was found, and no check looked at it again.
+                parts.append(f"FI's checks of an earlier version of the code found this: {p['text']}. The code was "
+                             "repaired again after that and this was not checked again. Say it in the limitations as "
+                             "not known to be fixed, not as a fact of the results.")
+                continue
+            parts.append(f"FI's checks of the code before the run found this, and the repairs did not remove it: {p['text']}. "
+                         f"It is {_stop_power.source_words(p.get('source'))}, so the run went on. Say it in the "
+                         "limitations as FI's reading of the code, not as a fact of the results.")
         if observed := self._no_difference_note():
             parts.append(observed)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
