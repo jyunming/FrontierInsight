@@ -1257,6 +1257,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         mine_too = callers.get(rel, set())
         skipped: list[str] = []
         new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *mine_too}, skipped)
+        env.tried = new  # the model's file as it came, kept even when a check below refuses it
         if skipped:
             env.log.warning("[code_review] %s: the reply also defined %s, which the finding is not about; not used",
                             issue.get("id"), ", ".join(f"`{n}`" for n in skipped))
@@ -1281,6 +1282,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         from . import code_review as _review
 
         new = _review.parse_files(reply, [rel]).get(rel)
+        env.tried = new  # the model's file as it came, kept even when a check below refuses it
         names, why = [rel], "" if new else "the reply held no whole file"
         # moving what runs on import under a main guard is not a change of the module the finding must speak of
         was, now = without_main_guard(old, new) if new else (old, new)
@@ -1306,7 +1308,6 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             elif altered:
                 new, why = None, ("it changed " + "; ".join(altered[:3])
                                   + ", which the finding does not speak of")
-    env.tried = new
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"
     if new != old:
