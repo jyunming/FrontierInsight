@@ -573,3 +573,51 @@ def test_a_stopped_run_with_no_error_text_read_returns_empty():
     fake = _StoppedRun(None)
     assert _drain(fake) == ""
     assert fake.stdout.closed and fake.stderr.closed
+
+
+def test_every_version_of_the_code_that_runs_is_a_commit_and_an_unchanged_one_is_not(tmp_path):
+    import asyncio
+    import shutil
+
+    import pytest
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "sim.py").write_text("x = 1\n", encoding="utf-8")
+    runs = code_project.CodeRuns(tmp_path, node=lambda: "execute_reflect")
+
+    def subjects():
+        out = subprocess.run(["git", "log", "--format=%s"], cwd=code, capture_output=True, text=True, encoding="utf-8")
+        return out.stdout.split("\n")[:-1]
+
+    async def go():
+        await runs.before_run()  # the first version
+        await runs.before_run()  # the same code again: no commit
+        (code / "sim.py").write_text("x = 2\n", encoding="utf-8")  # a repair, then its run
+        await asyncio.gather(*(runs.before_run() for _ in range(6)))  # settings that start at once: one commit
+        with runs.held():  # a step that commits each version itself
+            (code / "sim.py").write_text("x = 3\n", encoding="utf-8")
+            await runs.before_run()
+
+    asyncio.run(go())
+    assert subjects() == ["the code as it ran (execute_reflect)"] * 2
+    out = subprocess.run(["git", "show", "HEAD:sim.py"], cwd=code, capture_output=True, text=True, encoding="utf-8")
+    assert out.stdout == "x = 2\n"
+
+
+def test_the_executor_records_the_code_before_it_runs(tmp_path):
+    import asyncio
+
+    from core.execution import VenvExecutor
+
+    calls = []
+
+    async def before():
+        calls.append("before")
+
+    ex = VenvExecutor()
+    ex.before_run = before
+    result = asyncio.run(ex.execute([sys.executable, "-c", "print('ran')"], cwd=tmp_path, timeout_s=60))
+    assert calls == ["before"] and "ran" in result.stdout

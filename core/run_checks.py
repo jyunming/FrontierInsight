@@ -1476,10 +1476,16 @@ class RunChecksMixin:
                    f"sent the simulation back to be repaired with these numbers ({repairs} repair"
                    f"{'s' if repairs != 1 else ''}); the fault stood"])
 
-    async def _speed_up(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
-                        thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
-                        budget_s: float = 600.0, probes: list[Any] | None = None, deterministic: bool | None = None,
-                        extra_cells: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    async def _speed_up(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """:meth:`_speed_up_rounds`, which commits each version it keeps with its own words (code_project.CodeRuns)."""
+        with self._hold_code_runs():  # type: ignore[attr-defined]
+            return await self._speed_up_rounds(*args, **kwargs)
+
+    async def _speed_up_rounds(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
+                               thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
+                               budget_s: float = 600.0, probes: list[Any] | None = None,
+                               deterministic: bool | None = None,
+                               extra_cells: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """The study would not fit the time allowed: up to ``engine.improve_rounds`` edits that make the simulation itself
         faster without changing a number (core/improve_speed.py). FI runs a fixed sample of trials, the checks' own cases
         included, before and after each edit; an edit is kept only when every number is the same and the sample takes

@@ -317,6 +317,10 @@ class VenvExecutor:
     `DockerExecutor`.
     """
 
+    #: Awaited before each run when set (the engine's code_project.CodeRuns.before_run: the code as it runs is a
+    #: commit in code/'s history).
+    before_run: Any = None
+
     def __init__(
         self, *, python_version: str = "3.11", system_site_packages: bool = True,
     ) -> None:
@@ -447,6 +451,8 @@ class VenvExecutor:
         timeout_s: int,
         env: dict[str, str] | None = None,
     ) -> ExecutionResult:
+        if self.before_run is not None:
+            await self.before_run()
         start = time.monotonic()
         # The script runs as a process tree (core/proc_tree.py): a timeout or a cancelled quest stops it together
         # with every process it started (a subprocess, a multiprocessing pool, the real interpreter behind a venv's
@@ -1022,6 +1028,10 @@ class DockerExecutor:
     mounted, read-only, each at ``/fi-skills/<name>`` (``set_skill_mounts``).
     """
 
+    #: Awaited before each run when set (the engine's code_project.CodeRuns.before_run: the code as it runs is a
+    #: commit in code/'s history).
+    before_run: Any = None
+
     def __init__(
         self, *, image: str = "python:3.11-slim", limits: DockerLimits | None = None,
         log: logging.Logger | None = None,
@@ -1415,6 +1425,8 @@ class DockerExecutor:
         timeout_s: int,
         env: dict[str, str] | None = None,
     ) -> ExecutionResult:
+        if self.before_run is not None:
+            await self.before_run()
         client = self._docker()
         return await asyncio.to_thread(
             self._run_sync, client, cmd, cwd, timeout_s, env or {}
