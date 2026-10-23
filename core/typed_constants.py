@@ -33,6 +33,10 @@ from typing import Any
 from . import code_layout as _layout
 from . import grid_keys as _grid_keys
 from . import oracle_check as _oracle
+from .stop_power import READ
+
+#: What a fault found here rests on (core/stop_power.py): FI's reading of the script's text.
+SOURCE = READ
 
 #: A smooth function's argument is where a typed shape (a centre, a width, a decay length) sits.
 _SMOOTH = frozenset({"exp", "expm1", "tanh", "erf", "erfc", "sinh", "cosh", "log", "log10", "log2", "log1p", "arctan",

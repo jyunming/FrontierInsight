@@ -329,11 +329,12 @@ async def test_a_repair_that_still_ignores_the_seed_warns_once_and_the_quest_pro
 
 
 @pytest.mark.asyncio
-async def test_under_research_profile_an_unrepairable_seed_ends_in_the_honest_stop_instead_of_proceeding(
+async def test_under_research_profile_an_unrepairable_seed_is_recorded_and_said_instead_of_passing_silently(
     tmp_path: Path,
 ) -> None:
-    """The re-audit's P1-3: outside research profile this failure only warns (the test above) --
-    under it, the quest must not silently run on results it just warned are unreproducible."""
+    """The re-audit's P1-3: under research the quest must not silently run on results it just warned are
+    unreproducible. The finding is read from the script's text, so it is recorded and said in the paper
+    (core/stop_power.py); whether the repeats drew different numbers is measured from the runs themselves."""
     eng, client, logged = _engine(
         tmp_path, [_implement_reply(IGNORING), _repair_reply(STILL_IGNORING)], rigor_profile="research",
     )
@@ -342,9 +343,8 @@ async def test_under_research_profile_an_unrepairable_seed_ends_in_the_honest_st
 
     with mock.patch.object(Engine, "_pause_for_human", fake_pause):
         await eng._node_implement(_implement_state())  # type: ignore[arg-type]
-    # The script is not run: the run step ends in the honest stop, saying the randomness cannot be traced to the seed.
-    stop = eng._cannot_repair_stop()
-    assert stop is not None and "FI_REPLICATE_SEED" in stop["exec_result"]["cannot_repair"]
+    assert eng._cannot_repair_stop() is None
+    assert "FI_REPLICATE_SEED" in eng._run_checks_note()
     assert _code_path(eng).read_text(encoding="utf-8") == IGNORING
 
 

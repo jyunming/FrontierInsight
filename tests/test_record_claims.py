@@ -142,15 +142,17 @@ def test_such_a_hit_is_a_text_problem_named_as_one() -> None:
     assert _hit_name(hit) == rc.HIT and _hits_need_only_a_rewrite([hit])
 
 
-def test_the_paper_is_written_again_twice_and_then_the_quest_stops_with_no_paper(
+def test_the_paper_is_written_again_twice_and_then_the_quest_goes_on_the_usual_way(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     eng = _engine(tmp_path, monkeypatch)
     hit = rc.contradictions(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN)[0]
     review = {"verdict": "accept", "must_flag_hits": [hit]}
     # Even a quest whose iteration budget is spent (max_iterations is 1) gets its rewrites.
-    for seen, route in ((1, "rewrite"), (2, "rewrite"), (3, "stuck")):
+    for seen, route in ((1, "rewrite"), (2, "rewrite")):
         assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": seen}) == route
+    # After them the check, a reading of the paper's words, never ends the quest (core/stop_power.py).
+    assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": 3}) not in ("rewrite", "stuck")
     # Without the hit the route is the usual one.
     assert eng._route_after_review({"review": {"verdict": "accept", "must_flag_hits": []}, "iteration": 1}) not in ("rewrite", "stuck")
 

@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from . import review_pairs as _pairs
+from . import stop_power as _stop_power
+from .protocol_check import SOURCE as _PROTOCOL_SOURCE
 
 SCHEMA = "fi.quality/v1"
 STAGES = ("plan", "checks", "design", "code", "run", "analysis", "paper", "review")
@@ -172,6 +174,7 @@ class _Quest:
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
+        self.cannot_repair = _dict(_json(fi / "cannot_repair.json"))
         self.trial_checks = _dict(_json(fi / "trial_checks.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
@@ -286,6 +289,14 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for eid in _list(eq.get("not_tested")):
         out.append(_problem("checks", f"equation {eid} has no test", "FI's equation test", "left out",
                             ".fi/equation_tests.json"))
+    if q.protocol_check.get("status") == "warned":
+        for difference in _list(q.protocol_check.get("differences")):
+            out.append(_problem("checks", f"the script may differ from the plan's protocol: {difference}",
+                                _stop_power.source_words(_PROTOCOL_SOURCE), "not fixed", "needs/PROTOCOL_CHECK.json"))
+    for p in map(_dict, _list(q.cannot_repair.get("problems"))):
+        if p.get("text") and not _stop_power.may_stop(p.get("source")):
+            out.append(_problem("checks", str(p["text"]), _stop_power.source_words(p.get("source")), "not fixed",
+                                ".fi/cannot_repair.json"))
     for note in _list(q.protocol_check.get("notes")):
         out.append(_problem("checks", str(note), "FI's reading of the code (a note, not a stop)", "left out",
                             "needs/PROTOCOL_CHECK.json"))

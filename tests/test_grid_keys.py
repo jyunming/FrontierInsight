@@ -273,27 +273,28 @@ async def test_a_misread_name_is_sent_back_and_a_repair_that_reads_the_right_one
 
 
 @pytest.mark.asyncio
-async def test_a_misread_name_that_stays_ends_in_the_honest_stop_without_asking_a_person(
+async def test_a_misread_name_that_stays_is_recorded_and_the_quest_goes_on_without_asking_a_person(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     eng, asked = _engine(tmp_path, monkeypatch, [json.dumps({"code": SIM_BAD, "patch_summary": "no change"})])
     stop = await eng._static_gate({})
     assert len(asked) == 2, "asked twice, the code kept as written"
-    assert stop is not None and stop["exec_give_up_reason"]
-    assert "the study does not have" in stop["exec_result"]["cannot_repair"]
-    assert "`rate_hz`" in stop["exec_result"]["cannot_repair"]
+    # A name read from the code is a reading (core/stop_power.py): recorded and said in the paper, never a stop.
+    assert stop is None
+    note = eng._run_checks_note()
+    assert "the study does not have" in note and "`rate_hz`" in note
     record = json.loads((eng.quest_root / "needs" / "grid_keys_check.json").read_text(encoding="utf-8"))
     assert record["reads"][0]["names"] == ["rate_hz", "freq"] and record["settings_of_the_study"] == ["rate", "size"]
-    # A resume of the same text asks nothing more and stops the same way.
+    # A resume of the same text asks nothing more and goes on the same way.
     again = await eng._static_gate({})
-    assert again is not None and len(asked) == 2
+    assert again is None and len(asked) == 2
 
 
 @pytest.mark.asyncio
 async def test_a_repair_that_is_not_the_same_code_is_not_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for i, reply in enumerate(("{}", json.dumps({"code": "def broken(:\n"}), json.dumps({"code": SIM_BAD}))):
         eng, asked = _engine(tmp_path / str(i), monkeypatch, [reply])
-        assert await eng._static_gate({}) is not None
+        assert await eng._static_gate({}) is None
         assert (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SIM_BAD, reply
 
 

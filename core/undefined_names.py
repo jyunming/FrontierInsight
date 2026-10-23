@@ -20,6 +20,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import grid_keys as _grid_keys
+from .stop_power import READ
+
+#: What a name nothing binds rests on (:mod:`core.stop_power`): a reading of the code, so it never ends a quest.
+SOURCE = READ
 
 #: Names the module always has, besides the built-ins.
 _MODULE_NAMES = frozenset({"__file__", "__name__", "__doc__", "__spec__", "__loader__", "__package__", "__builtins__",

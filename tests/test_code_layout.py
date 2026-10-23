@@ -247,7 +247,7 @@ def test_the_layout_is_for_a_simulation_only(tmp_path: Path) -> None:
     assert f"{PKG}/" not in _engine(tmp_path / "e", split_analysis=False)._split_block(state)
 
 
-def test_a_missing_part_is_a_warning_and_a_stop_only_under_research(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_missing_part_is_a_warning_and_a_repair_only_under_research(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _engine(tmp_path)
     code = engine.quest_root / "code"
     code.mkdir(parents=True, exist_ok=True)
@@ -267,10 +267,12 @@ def test_a_missing_part_is_a_warning_and_a_stop_only_under_research(tmp_path: Pa
     patch = engine._code_problems_stop({"design": {"protocol": PROTOCOL}, "exec_reflect_iter": 0})
     assert patch is not None and "package code/engine_callable/ is missing" in patch["exec_result"]["stderr_tail"]
     assert "cannot_repair" not in patch["exec_result"] and stops == []
-    # With the repairs used up the quest ends in the honest stop.
+    # With the repairs used up it is recorded and said in the paper, and the quest goes on: it is read from the code.
     last = engine._code_problems_stop({"design": {"protocol": PROTOCOL},
                                        "exec_reflect_iter": engine.config.engine.exec_reflect_max_iterations})
-    assert last is not None and last["exec_result"]["cannot_repair"] and stops == []
+    assert last is None and stops == []
+    assert "package code/engine_callable/ is missing" in engine._run_checks_note()
+    engine._forget_cannot_repair()
     # Once the repair has added the missing parts the folder is read again and nothing is sent back.
     _write_tool(code)
     assert engine._check_code_layout({"design": {"protocol": PROTOCOL}}) == []

@@ -39,6 +39,11 @@ from typing import Any
 
 from .goal_coverage import _generated, _literal, asked_numbers, code_numbers
 
+from .stop_power import READ
+
+#: What a fault found here rests on (core/stop_power.py): FI's reading of the script's text.
+SOURCE = READ
+
 _RUN_WORDS = {
     "runs", "run", "replicates", "replicate", "reps", "trials", "trial", "samples", "sample", "realizations",
     "realisations", "simulations", "simulation", "sims", "repeats",

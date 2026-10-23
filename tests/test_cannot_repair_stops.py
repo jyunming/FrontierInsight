@@ -55,7 +55,7 @@ async def _ends_in_the_honest_stop(eng: Engine, patch: dict[str, Any], said: str
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("which", ["labels", "layout"])
-async def test_a_missing_label_or_layout_is_sent_to_the_repair_then_ends_in_the_honest_stop(
+async def test_a_missing_label_or_layout_is_sent_to_the_repair_then_recorded_and_the_quest_goes_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str,
 ) -> None:
     eng = _engine(tmp_path)
@@ -67,9 +67,10 @@ async def test_a_missing_label_or_layout_is_sent_to_the_repair_then_ends_in_the_
     assert patch is not None and "cannot_repair" not in patch["exec_result"]
     assert patch["exec_result"]["returncode"] == 1 and sentence in patch["exec_result"]["stderr_tail"]
     assert "Keep everything else as it is" in patch["exec_result"]["stderr_tail"]
+    # What the repairs leave is read from the code: recorded, said in the paper, and the quest goes on.
     last = eng._code_problems_stop({"exec_reflect_iter": eng.config.engine.exec_reflect_max_iterations})
-    assert last is not None
-    await _ends_in_the_honest_stop(eng, last, sentence)
+    assert last is None and eng._cannot_repair_stop() is None
+    assert sentence in eng._run_checks_note()
 
 
 def test_without_research_a_missing_label_only_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,14 +111,14 @@ def test_the_analysis_repair_names_the_missing_lists_and_where_the_values_are() 
 
 
 @pytest.mark.asyncio
-async def test_a_script_that_still_differs_from_the_protocol_is_not_run_and_ends_in_the_honest_stop(tmp_path: Path) -> None:
+async def test_a_script_that_still_differs_from_the_protocol_is_recorded_and_the_quest_goes_on(tmp_path: Path) -> None:
+    # The comparison reads the script's text, so a difference that stands is said in the paper, not a stop.
     eng = _engine(tmp_path)
     mismatch = mock.Mock()
     mismatch.message.return_value = "n_runs is 5 in simulate.py, line 3, but the protocol fixed 30"
     eng._stop_for_protocol([mismatch])
-    patch = eng._cannot_repair_stop()
-    assert patch is not None
-    await _ends_in_the_honest_stop(eng, patch, "n_runs is 5")
+    assert eng._cannot_repair_stop() is None
+    assert "n_runs is 5" in eng._run_checks_note()
     eng._forget_cannot_repair()  # the code is written again
     assert eng._cannot_repair_stop() is None
 
@@ -126,7 +127,8 @@ async def test_a_script_that_still_differs_from_the_protocol_is_not_run_and_ends
 async def test_a_reply_without_both_scripts_ends_in_the_honest_stop_in_block_mode(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     eng.config.execution.split_failure = "block"
-    eng._split_contract_broken(["the reply did not hold both scripts"], what="the code-writing step did not return both scripts")
+    eng._split_contract_broken(["the reply did not hold both scripts"], what="the code-writing step did not return both scripts",
+                               source="measured")
     patch = eng._cannot_repair_stop()
     assert patch is not None
     await _ends_in_the_honest_stop(eng, patch, "did not hold both scripts")

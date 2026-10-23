@@ -41,6 +41,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .stop_power import READ
+
+#: What a fault found here rests on (core/stop_power.py): FI's reading of the script's text.
+SOURCE = READ
+
 #: Names that hold one setting (one cell of the grid).
 SETTING_NAMES = frozenset({"cell", "setting", "settings"})
 #: The trial contract's entry points: their first parameter is the setting.

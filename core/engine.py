@@ -157,6 +157,7 @@ from . import best_design_report as _best_report
 from . import protocol_check as _protocol
 from . import retractions as _retractions
 from . import split_run as _split_run
+from . import stop_power as _stop_power
 from . import stats as _stats
 from .config import (
     DEFAULT_PAPER_FORMAT,
@@ -3505,8 +3506,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # review stops forcing them after ``_PAGE_LIMIT_REWRITES``), so the
         # iteration budget neither pays for them nor stops them.
         # The paper claims what FI's own records contradict: it is written again, with the contradiction named, up to
-        # ``_RECORD_REWRITES`` times (outside engine.max_iterations, so even a one-round quest gets them). A paper
-        # that still claims it is not delivered as a finished paper: the quest ends in the honest stop.
+        # ``_RECORD_REWRITES`` times (outside engine.max_iterations, so even a one-round quest gets them). What is still
+        # flagged after them is taken out of the paper (:meth:`_record_contradiction_hits`); what could not be taken out
+        # is listed in QUALITY.md. The check reads the paper's words, so it never ends the quest (core/stop_power.py).
         if any(_hit_name(h) == _record_claims.HIT for h in must_flag):
             if int(state.get("record_rewrites") or 0) <= _RECORD_REWRITES:
                 self._log.info(
@@ -3515,9 +3517,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     int(state.get("record_rewrites") or 0), _RECORD_REWRITES)
                 return "rewrite"
             self._log.warning(
-                "[route] the paper still claims what FI's own records contradict after %d rewrites — "
-                "stopping without a paper", _RECORD_REWRITES)
-            return "stuck"
+                "[route] after %d rewrites the paper still has sentences FI's check of its records flags; they are listed "
+                "in QUALITY.md, and the check reads the paper's words, so the quest goes on", _RECORD_REWRITES)
+            must_flag = [h for h in must_flag if _hit_name(h) != _record_claims.HIT]
         page_rewrites = int(state.get("page_limit_rewrites") or 0)
         if _only_page_limit_hits(must_flag) and page_rewrites <= _PAGE_LIMIT_REWRITES:
             self._log.info(
@@ -10523,12 +10525,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     broken.append(f"experiment.py imports the model's package {model_package}: the analysis must read "
                                   "only FI's record of the trials")
                 if broken:
-                    self._split_contract_broken(broken, what="the two scripts break the two-script contract")
+                    self._split_contract_broken(broken, what="the two scripts break the two-script contract",
+                                                source=_stop_power.READ)
             else:
                 if self.config.execution.split_failure == "block":
                     self._split_contract_broken(
                         ["the reply did not hold both scripts (`# file: simulate.py` and `# file: experiment.py`), also when asked again"],
-                        what="the code-writing step did not return both scripts",
+                        what="the code-writing step did not return both scripts", source=_stop_power.MEASURED,
                     )
                 self._log.warning(
                     "[implement] the reply still did not hold both scripts; this quest runs as "
@@ -11401,16 +11404,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
             self._run_manifest_record(record)
 
-    def _split_contract_broken(self, found: list[str], *, what: str) -> None:
+    def _split_contract_broken(self, found: list[str], *, what: str, source: str) -> None:
         """A quest that should keep two scripts got scripts that break the contract, or a reply without both: ``warn`` says
-        so and goes on, ``block`` stops the quest (a resume asks for the scripts again) and degrades nothing."""
+        so and goes on, ``block`` records it with what it rests on (``source``): a reply without both scripts (measured)
+        stops the quest (a resume asks for the scripts again); a contract FI read from the code is recorded and the
+        quest goes on (:mod:`core.stop_power`)."""
         if self.config.execution.split_failure != "block":
             self._log.warning("[implement] %s: %s", what, "; ".join(found))
             return
         self._record_cannot_repair(
             what[0].upper() + what[1:] + ": " + "; ".join(found),
             ["asked for both scripts, and once more when the reply did not hold both (`execution.split_failure: block`)",
-             *[_one_line(f, 300) for f in found[:3]]])
+             *[_one_line(f, 300) for f in found[:3]]], source=source)
 
     def _pause_for_contract(self, *, kind: str, headline: str, steps: list[str], problems: list[str]) -> None:
         self._pause_for_human(
@@ -11688,7 +11693,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         *, extended: bool = False,
     ) -> tuple[str, list[str]]:
         """Hold the script to the plan's protocol: repair a script that differs, up to
-        ``engine.protocol_repair_attempts`` times, and stop the quest (``block``) or warn (``warn``) if it still does.
+        ``engine.protocol_repair_attempts`` times, and record what still differs. The comparison reads the script's text
+        (``protocol_check.SOURCE``), so a difference that stands ends the quest only if that source may stop one
+        (:mod:`core.stop_power`); otherwise it is recorded, the paper says it, and the quest goes on.
 
         The repair asks for one script at a time and keeps a rewrite only if it parses and the differences named for
         that script are gone, so a repair never leaves a script worse than the one it had. Every attempt is recorded in
@@ -11744,7 +11751,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     code = text
         final = _protocol.check(protocol, self._scripts_on_disk())
         record = {
-            "status": "ok" if not final else ("warned" if self.config.engine.protocol_check == "warn" else "stopped"),
+            "status": "ok" if not final else (
+                "stopped" if self.config.engine.protocol_check == "block" and _stop_power.may_stop(_protocol.SOURCE)
+                else "warned"),
             "attempts": attempts,
             "differences": [m.message() for m in final],
             "protocol": protocol,
@@ -11763,8 +11772,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.info("[protocol] the analysis loops over only %s of %s; after the run FI checks, from its own count of "
                                "the trials, that the analysis reports every setting", suspect.found, suspect.name)
             return code, deps
-        if self.config.engine.protocol_check == "warn":
-            self._log.warning("[protocol] the script still differs from the plan's protocol: %s", "; ".join(m.message() for m in final))
+        if record["status"] == "warned":
+            self._log.warning("[protocol] the script still differs from the plan's protocol: %s; this is %s, so the run "
+                              "goes on and the paper says so", "; ".join(m.message() for m in final),
+                              _stop_power.source_words(_protocol.SOURCE))
             return code, deps
         self._stop_for_protocol(final)
         return code, deps  # the run step ends in the honest stop without running it
@@ -13642,15 +13653,35 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     _CANNOT_REPAIR_FILE = "cannot_repair.json"
 
-    def _record_cannot_repair(self, text: str, tried: list[str]) -> None:
-        """Write down, before the study runs, that FI's repairs of the code ended with a problem that stands: the run step
-        then ends in the honest stop (no paper) without running the script. Nobody is asked to change code."""
+    def _record_cannot_repair(self, text: str, tried: list[str], *, source: str) -> None:
+        """Write down, before the study runs, that FI's repairs of the code ended with a problem that stands, and what the
+        problem rests on (``source``, :mod:`core.stop_power`). One FI measured, or that two sources agree on, ends the run
+        step in the honest stop (no paper) without running the script. One that rests on FI's reading of the code is kept
+        for QUALITY.md and the paper's limitations, and the quest goes on. Nobody is asked to change code."""
+        path = self.fi_dir / self._CANNOT_REPAIR_FILE
+        problems = [p for p in self._cannot_repair_problems() if p.get("text") != text]
+        problems.append({"text": text, "tried": tried, "source": source})
+        stopping = next((p for p in problems if _stop_power.may_stop(p.get("source"))), None)
+        record: dict[str, Any] = {"problems": problems, "at": _frozen.now()}
+        if stopping is not None:
+            record.update(text=stopping["text"], tried=stopping["tried"])
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
-            (self.fi_dir / self._CANNOT_REPAIR_FILE).write_text(
-                json.dumps({"text": text, "tried": tried, "at": _frozen.now()}) + "\n", encoding="utf-8")
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
         except OSError as e:
             self._log.warning("[stuck] couldn't write down the problem FI could not repair: %r", e)
+
+    def _cannot_repair_problems(self) -> list[dict[str, Any]]:
+        """Every problem :meth:`_record_cannot_repair` wrote down for this text of the code, oldest first."""
+        try:
+            record = json.loads((self.fi_dir / self._CANNOT_REPAIR_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(record, dict):
+            return []
+        if "problems" not in record and record.get("text"):  # written before problems said what they rest on
+            return [{"text": str(record["text"]), "tried": list(record.get("tried") or []), "source": _stop_power.MEASURED}]
+        return [p for p in record.get("problems") or [] if isinstance(p, dict) and p.get("text")]
 
     def _forget_cannot_repair(self) -> None:
         """The code is written again: an earlier problem does not stop the new code."""
@@ -13660,21 +13691,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             pass
 
     def _cannot_repair_stop(self) -> QuestState | None:
-        """The honest stop for a problem the code step recorded (:meth:`_record_cannot_repair`), or ``None``."""
-        try:
-            record = json.loads((self.fi_dir / self._CANNOT_REPAIR_FILE).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        """The honest stop for a problem the code step recorded (:meth:`_record_cannot_repair`) that may end the quest, or
+        ``None``. A problem that rests on FI's reading of the code is said once in run.log and the quest goes on."""
+        problems = self._cannot_repair_problems()
+        said = self.__dict__.setdefault("_went_on_said", set())
+        for p in problems:
+            if not _stop_power.may_stop(p.get("source")) and p["text"] not in said:
+                said.add(p["text"])
+                self._log.warning("[execute] %s; this is %s, so the run goes on and the paper says so",
+                                  p["text"], _stop_power.source_words(p.get("source")))
+        stopping = next((p for p in problems if _stop_power.may_stop(p.get("source"))), None)
+        if stopping is None:
             return None
-        if not isinstance(record, dict) or not record.get("text"):
-            return None
-        return self._stop_before_run(str(record["text"]), "cannot_repair", tried=[str(t) for t in record.get("tried") or []])
+        return self._stop_before_run(str(stopping["text"]), "cannot_repair", tried=[str(t) for t in stopping.get("tried") or []])
 
     def _code_problems_stop(self, state: QuestState) -> QuestState | None:
         """Under ``rigor_profile: research``, before anything runs: a simulation that does not say where it implements each
         equation of the plan, or a ``code/`` folder missing its package, tests or equation list, goes to the existing repair
         like a failed run, with a plain directive naming what is missing (at most ``engine.exec_reflect_max_iterations``
-        repairs); what is still missing after them ends in the honest stop. Nobody is asked to edit code. ``None`` when
-        nothing is missing (or for a profile that only says so in run.log)."""
+        repairs); what is still missing after them is FI's reading of the code, so it is recorded, the paper says it and
+        the quest goes on (:mod:`core.stop_power`). Nobody is asked to edit code. ``None`` to go on."""
         labels = self._check_equation_labels(state)
         layout = self._check_code_layout(state)
         if self.config.rigor_profile != "research" or not (labels or layout):
@@ -13698,11 +13734,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
             return self._code_review_failed_run(
                 directive, script=_split_run.SIMULATE_NAME if self._split_on(state) else "experiment.py")
-        return self._stop_before_run(
-            "; ".join(problems), "cannot_repair",
-            tried=["read the code against what the plan requires of it before running it",
-                   *[_one_line(p, 300) for p in problems[:3]],
-                   f"sent the code back to be repaired {iters} time(s); it still lacked this"])
+        self._record_cannot_repair(
+            "; ".join(problems),
+            ["read the code against what the plan requires of it before running it",
+             *[_one_line(p, 300) for p in problems[:3]],
+             f"sent the code back to be repaired {iters} time(s); it still lacked this"], source=_stop_power.READ)
+        return self._cannot_repair_stop()
 
     def _check_code_layout(self, state: QuestState) -> list[str]:
         """After the code is written, before anything runs: say in run.log what the research-tool layout of ``code/`` is
@@ -16918,14 +16955,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return new_code, False, "applied"
 
     def _stop_for_protocol(self, mismatches: list[Any]) -> None:
-        """The script still contradicts the plan's protocol after the repairs: the quest ends in the honest stop at the run
-        step (:meth:`_cannot_repair_stop`), with what differed, and the script is not run. Nobody is asked to edit it."""
+        """The script still contradicts the plan's protocol after the repairs: the difference goes to the record of problems
+        FI could not repair (:meth:`_record_cannot_repair`) with what it rests on, which decides whether the run step
+        ends in the honest stop. Nobody is asked to edit it."""
         differences = [m.message() for m in mismatches]
         self._record_cannot_repair(
             "the experiment's script differs from the protocol the plan fixed: " + "; ".join(differences),
             ["compared the script with the protocol the plan fixed", *[_one_line(d, 300) for d in differences[:3]],
              f"asked the model to repair the script up to {int(self.config.engine.protocol_repair_attempts)} time(s); "
-             "the difference stood"])
+             "the difference stood"], source=_protocol.SOURCE)
 
     def _adopt_scripts_fixed_by_hand(self, state: QuestState) -> QuestState | None:
         """After a protocol stop, keep the scripts on disk when they now agree with the plan (a person edited them, or
@@ -17065,7 +17103,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._record_cannot_repair(
                     "the script's randomness cannot be traced to FI_REPLICATE_SEED, which a research run requires: " + why,
                     ["read the script for the seed FI gives each repeat",
-                     "asked the model for one repair: " + _one_line(why, 300)])
+                     "asked the model for one repair: " + _one_line(why, 300)], source=_stop_power.READ)
             return code, deps
         code_path.write_text(new_code, encoding="utf-8")
         self._log.info(
@@ -20728,13 +20766,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
                 _missing_headline :=_code_review.resolve_headline(
                     self.quest_root, self.quest_root / "code", state.get("result_json"))):
-            # A second model found the study's main quantity missing from the code, the repairs did not add it, and the
-            # run's own results do not hold it either (a reviewer's word alone never stops a quest).
-            why = ("the code does not compute the study's main quantity, and the run's results do not hold it "
-                   "(" + "; ".join(_missing_headline)[:200] + ")")
-            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
-            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
-                    "stuck_reason": "headline_missing"}
+            # A second model found the study's main quantity missing from the code, the repairs did not add it, and no
+            # result of the run is named like it. That rests on one reading and a match of names (a quantity the results
+            # hold under other words is not found by it), so it does not end the quest (core/stop_power.py): the paper
+            # says, in its limitations, that the quantity was not computed (core/code_review.py::write_note).
+            self._log.warning(
+                "[evidence_gate] a second model found the study's main quantity missing from the code, and no result is "
+                "named like it (%s); this is %s, so the paper says it is not computed and the quest goes on",
+                "; ".join(_missing_headline)[:200], _stop_power.source_words(_stop_power.READ))
         if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
                 _constant := _code_review.resolve_logic(self.quest_root, self.quest_root / "code", state.get("result_json"))):
             # A second model found, with high severity, that the study's main quantity is a constant in the code, and the

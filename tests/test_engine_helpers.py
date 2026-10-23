@@ -672,8 +672,9 @@ def test_a_protocol_stop_names_the_script_the_difference_was_found_in(tmp_path: 
     engine._pause_for_human = lambda **kw: seen.update(kw)  # type: ignore[method-assign]
     engine._stop_for_protocol([Mismatch("runs", "runs_per_setting", [200.0], [50.0], "N_RUNS in simulate.py, line 7")])
     assert seen == {}, "nobody is asked to change the script"
-    stop = engine._cannot_repair_stop()
-    said = stop["exec_result"]["cannot_repair"]
+    # A protocol difference is FI's reading of the code: recorded and said, and the quest goes on (core/stop_power.py).
+    assert engine._cannot_repair_stop() is None
+    said = " ".join(p["text"] for p in engine._cannot_repair_problems())
     assert "simulate.py" in said and "experiment.py" not in said
 
 

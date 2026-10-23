@@ -243,14 +243,13 @@ async def test_a_reviewer_s_word_alone_never_stops_a_quest_the_results_decide(tm
     assert out is None, "nothing stops before the run"
     code = engine.quest_root / "code"
     assert cr.headline_missing(engine.quest_root, code) == [HEADLINE]
-    # The run's results do not hold the quantity either: now the honest stop.
+    # The run's results do not hold the quantity either. That rests on one reading and a match of names, so the quest
+    # goes on and the paper is told the quantity is not computed (core/stop_power.py).
     lacking = {**STATE, "result_json": {"settling_time_mean": 1.2}}
-    verdict = engine._no_results_verdict(lacking)
-    assert verdict and verdict["stuck"] and verdict["stuck_reason"] == "headline_missing"
-    stuck = await engine._node_stuck_no_findings({**lacking, "evidence_assessment": verdict})
-    problem = stuck["stuck"]["problem"]
-    assert "does not compute the study's main quantity" in problem and "quality_factor" in problem
-    assert (engine.quest_root / "needs" / "STUCK.json").is_file()
+    assert engine._no_results_verdict(lacking) is None
+    assert cr.resolve_headline(engine.quest_root, code, lacking["result_json"]) == [HEADLINE]
+    assert "quality_factor" in cr.write_note(engine.quest_root, code), "the paper is told it was not computed"
+    assert not (engine.quest_root / "needs" / "STUCK.json").is_file()
     # The results do hold it (the reviewer was wrong): the quest goes on and the disagreement is recorded.
     holding = {**STATE, "result_json": {"by_c": {"quality_factor": 3.4}}}
     assert engine._no_results_verdict(holding) is None
@@ -276,8 +275,10 @@ async def test_a_result_with_only_a_similar_name_does_not_stand_in_for_the_headl
     state = {**STATE, "design": design}
     engine._client = _Reader(missing=("error",))
     assert await engine._code_review_gate(state, final=True) is None
-    verdict = engine._no_results_verdict({**state, "result_json": {"error_count": 4}})
-    assert verdict and verdict["stuck_reason"] == "headline_missing", "error_count is not error"
+    code = engine.quest_root / "code"
+    assert engine._no_results_verdict({**state, "result_json": {"error_count": 4}}) is None, "a reading never stops"
+    missing = cr.resolve_headline(engine.quest_root, code, {"error_count": 4})
+    assert len(missing) == 1 and "error" in missing[0], "error_count is not error"
     assert engine._no_results_verdict({**state, "result_json": {"Error": 0.2}}) is None
 
 

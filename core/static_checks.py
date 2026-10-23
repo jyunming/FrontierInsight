@@ -5,8 +5,9 @@ find in a minute: a setting the code reads under a name the study does not have 
 the model's functions that the plan never gives (:mod:`core.typed_constants`), a "second implementation" that compares a
 value with itself (:mod:`core.independent_check`), a name the code uses that nothing defines or imports
 (:mod:`core.undefined_names`). A fault is sent back to be repaired, in plain words and with no expected
-value in the request, at most :data:`REPAIRS` times for the text of the code; what is still there afterwards is handled the
-way its module says (an honest stop, or a note the evidence and the paper carry). Nobody is asked to edit code.
+value in the request, at most :data:`REPAIRS` times for the text of the code; what is still there afterwards is a note the
+evidence and the paper carry. Every check here reads the code (each module's ``SOURCE``), and a reading never ends a quest
+(:mod:`core.stop_power`). Nobody is asked to edit code.
 
 They live here and not in ``engine.py`` so the node only calls :meth:`StaticChecksMixin._static_gate`. Every method uses
 the engine's own attributes (``quest_root``, ``fi_dir``, ``_log``, ``_chat`` ...).
@@ -139,7 +140,9 @@ class StaticChecksMixin:
 
     def _static_standing(self, name: str, module: Any, on_standing: str, found: list[Any], files: dict[str, str],
                          protocol: Any, design: Any) -> dict[str, Any] | None:
-        """What a fault that stands after the repairs does: the honest stop, or (a note is already written) going on."""
+        """What a fault that stands after the repairs does: a ``note`` is already written and the quest goes on; a fault
+        that would stop is handed to the record of problems FI could not repair with what it rests on (the module's
+        ``SOURCE``, :mod:`core.stop_power`), which ends the quest only for a measured or agreed one."""
         stops = on_standing == "stop"
         if on_standing == "headline":
             hit = getattr(module, "headline_hit", None)
@@ -151,7 +154,7 @@ class StaticChecksMixin:
         self._record_cannot_repair(  # type: ignore[attr-defined]
             text, [f"read the code against the plan before running it ({name})", *[f.says([]) if hasattr(f, "says") else str(f)
                                                                                   for f in found[:2]],
-                   f"sent the code back to be repaired {REPAIRS} times; it still had this"])
+                   f"sent the code back to be repaired {REPAIRS} times; it still had this"], source=module.SOURCE)
         return self._cannot_repair_stop()  # type: ignore[attr-defined]
 
     async def _repair_static(self, state: Any, module: Any, found: list[Any], protocol: Any, design: Any) -> bool:

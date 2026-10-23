@@ -353,8 +353,12 @@ async def test_a_protocol_edited_in_the_plan_while_stopped_is_the_one_the_script
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_BAD_GRID, repair=_BAD_GRID, protocol=protocol))
     cfg = _cfg(tmp_path)
     first = Engine(cfg)
+    # A stop before the protocol is frozen: the comparison is given stop power for this first run only (it is a reading
+    # and never stops a quest by itself, core/stop_power.py); what is tested is that the resume reads the edited plan.
+    monkeypatch.setattr("core.engine._protocol.SOURCE", "measured")
     await first.run()
     assert (first.fi_dir / "cannot_repair.json").is_file()
+    monkeypatch.setattr("core.engine._protocol.SOURCE", "read")
 
     path = plan.plan_path(first.quest_root)
     edited = path.read_text(encoding="utf-8").replace("- 0.9\n", "- 0.8\n").replace("- 1.5\n", "- 1.2\n")

@@ -341,11 +341,11 @@ async def test_warn_records_the_difference_and_the_quest_goes_on(
 
 
 @pytest.mark.asyncio
-async def test_a_script_that_still_differs_ends_in_the_honest_stop_and_asks_nobody_to_edit_it(
+async def test_a_script_that_still_differs_is_recorded_and_the_quest_goes_on_asking_nobody(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After the repairs the script is not run and the quest ends without a paper, saying what differs; the stop is not
-    a pause, and nobody is told to edit the script or the plan."""
+    """After the repairs a difference that stands is recorded and said, and the quest goes on: the comparison reads the
+    script's text (core/stop_power.py). It is not a pause, and nobody is told to edit the script or the plan."""
     calls: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_BAD, repair=_BAD))
     cfg = _cfg(tmp_path)
@@ -356,15 +356,16 @@ async def test_a_script_that_still_differs_ends_in_the_honest_stop_and_asks_nobo
     assert calls.count("ProtocolRepair") == 2, "two repairs were asked for before stopping"
     assert "[protocol] paused" not in log and "paused for the protocol" not in log
     assert not (first.fi_dir / "pause.json").exists()
-    record = json.loads((first.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
-    assert "adds [0.8, 1.2, 2] and leaves out [0.9, 1.5]" in record["problem"]
-    assert "edit" not in " ".join(record["tried"]).lower()
-    assert json.loads((first.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))["status"] == "stopped"
-    assert not (first.quest_root / "paper" / "paper.md").exists()
+    assert not (first.quest_root / "needs" / "STUCK.json").exists()
+    record = json.loads((first.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "warned"
+    assert any("adds [0.8, 1.2, 2] and leaves out [0.9, 1.5]" in d for d in record["differences"])
+    assert "reading of the code" in log
+    assert "the script may differ from the plan's protocol" in (first.quest_root / "QUALITY.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
-async def test_running_the_code_step_again_writes_the_script_again_and_forgets_the_stop(
+async def test_running_the_code_step_again_writes_the_script_again_and_checks_it_afresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -372,7 +373,8 @@ async def test_running_the_code_step_again_writes_the_script_again_and_forgets_t
     cfg = _cfg(tmp_path)
     first = Engine(cfg)
     await first.run()
-    assert (first.fi_dir / "cannot_repair.json").is_file()
+    first_record = json.loads((first.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert first_record["status"] == "warned"
     before = calls.count("Implementation")
 
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_GOOD, repair=None))
@@ -381,7 +383,8 @@ async def test_running_the_code_step_again_writes_the_script_again_and_forgets_t
 
     assert artifacts.paper_md is not None
     assert calls.count("Implementation") > before, "the script is written again"
-    assert not (second.fi_dir / "cannot_repair.json").exists(), "a later pass must not stop on the old problem"
+    record = json.loads((second.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "ok", "the new script is checked afresh"
 
 
 @pytest.mark.asyncio

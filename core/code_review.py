@@ -951,7 +951,7 @@ def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any
 
 def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     """After a run: of the headline requirements a reader still called missing, those the run's results do not hold
-    either (the quest then stops, honestly). The ones the results do hold are recorded as a disagreement between the
+    either (the paper says, in its limitations, that they are not computed: a reading never ends the quest). The ones the results do hold are recorded as a disagreement between the
     reader and the results (the reader was wrong, and the paper is not told they were not computed). Only a requirement
     the reader called missing: one it called computed differently from the plan is computed, by its own reading, so it
     never stops the quest as "not computed" (the paper says it is not as the plan defines it, and FI leaves its values out

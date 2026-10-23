@@ -258,7 +258,7 @@ async def test_a_typed_in_shape_is_sent_back_and_a_computed_rewrite_is_kept(tmp_
 
 
 @pytest.mark.asyncio
-async def test_one_that_stays_is_a_note_for_the_paper_and_the_evidence_but_not_a_stop_unless_a_headline_rests_on_it(
+async def test_one_that_stays_is_a_note_for_the_paper_and_the_evidence_and_never_a_stop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     eng, asked = _engine(tmp_path, monkeypatch, [json.dumps({"code": SHAPED, "patch_summary": "no change"})])
@@ -270,10 +270,10 @@ async def test_one_that_stays_is_a_note_for_the_paper_and_the_evidence_but_not_a
     record = json.loads((eng.quest_root / "needs" / "typed_constants_check.json").read_text(encoding="utf-8"))
     assert record["functions"][0]["function"] == "response" and 3.7 in record["functions"][0]["numbers"]
 
-    stopped, _asked = _engine(tmp_path / "head", monkeypatch, [json.dumps({"code": SHAPED})])
-    stop = await stopped._static_gate({"design": {"variables": {"dependent": ["y"]}}})
-    assert stop is not None and "written into it" in stop["exec_result"]["cannot_repair"]
-    assert stop["exec_give_up_reason"]
+    # Even when a headline result rests on it, it is FI's reading of the code (core/stop_power.py): said, not a stop.
+    head, _asked = _engine(tmp_path / "head", monkeypatch, [json.dumps({"code": SHAPED})])
+    assert await head._static_gate({"design": {"variables": {"dependent": ["y"]}}}) is None
+    assert "written into it" in head._run_checks_note()
 
 
 @pytest.mark.asyncio
