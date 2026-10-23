@@ -782,11 +782,12 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
         return False
 
 
-def keep_refused(quest_root: Path, ref: str, rel: str, text: str, message: str, *, log: Any = None) -> bool:
+def keep_refused(quest_root: Path, ref: str, files: dict[str, str], message: str, *, log: Any = None) -> bool:
     """Keep a version of ``rel`` that was tried and refused in ``code/``'s own git repository, on the side reference
-    ``refs/fi/refused/<ref>``: one commit whose parent is the current HEAD and whose tree is HEAD's with ``rel`` set to
-    ``text``. The branch, the index and the working folder are not touched. Best effort: ``False`` (and a log line) when git
-    cannot do it."""
+    ``refs/fi/refused/<ref>``: one commit whose parent is the current HEAD and whose tree is HEAD's with each file of
+    ``files`` (path -> text) set to its text. A reference of that name already there is never overwritten: the try is
+    kept beside it (``<ref>-2``, ...). The branch, the index and the working folder are not touched. Best effort:
+    ``False`` (and a log line) when git cannot do it."""
     import os
     import re
     import subprocess
@@ -796,26 +797,36 @@ def keep_refused(quest_root: Path, ref: str, rel: str, text: str, message: str, 
     if not git_dir.is_dir():
         return False
     index = git_dir / "fi_refused.index"
-    name = re.sub(r"[^A-Za-z0-9._-]+", "-", ref).strip("-.") or "try"
+    # a name git takes: no "..", no ".lock" ending, no part starting with "."
+    name = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._-]+", "-", ref)).strip("-.") or "try"
+    if name.endswith(".lock"):
+        name = name[: -len(".lock")] + "-lock"
     try:
+        index.unlink(missing_ok=True)  # one left by an earlier run that stopped must not carry into this tree
         extra = {"GIT_INDEX_FILE": str(index)}
         head = _git(code_dir, "rev-parse", "--verify", "-q", "HEAD")
         parent = head.stdout.strip() if head.returncode == 0 else ""
-        if parent and _git(code_dir, "read-tree", parent, env_extra=extra).returncode != 0:
+        if _git(code_dir, "read-tree", *([parent] if parent else ["--empty"]), env_extra=extra).returncode != 0:
             return False
-        blob = _git(code_dir, "hash-object", "-w", "--stdin", stdin=text)
-        if blob.returncode != 0:
-            return False
-        cache = f"100644,{blob.stdout.strip()},{Path(rel).as_posix()}"
-        if _git(code_dir, "update-index", "--add", "--cacheinfo", cache, env_extra=extra).returncode != 0:
-            return False
+        for rel, text in files.items():
+            blob = _git(code_dir, "hash-object", "-w", "--stdin", stdin=text)
+            if blob.returncode != 0:
+                return False
+            cache = f"100644,{blob.stdout.strip()},{Path(rel).as_posix()}"
+            if _git(code_dir, "update-index", "--add", "--cacheinfo", cache, env_extra=extra).returncode != 0:
+                return False
         tree = _git(code_dir, "write-tree", env_extra=extra)
         if tree.returncode != 0:
             return False
         made = _git(code_dir, "commit-tree", tree.stdout.strip(), *(["-p", parent] if parent else []), "-m", message)
         if made.returncode != 0:
             return False
-        return _git(code_dir, "update-ref", f"refs/fi/refused/{name}", made.stdout.strip()).returncode == 0
+        for n in range(1, 100):
+            # an empty old value: made only when no reference of that name is there yet
+            target = f"refs/fi/refused/{name}" + ("" if n == 1 else f"-{n}")
+            if _git(code_dir, "update-ref", target, made.stdout.strip(), "").returncode == 0:
+                return True
+        return False
     except (OSError, subprocess.SubprocessError) as exc:
         if log is not None:
             log.warning("[code] could not keep a refused version in code/'s history: %s", exc)

@@ -1006,8 +1006,9 @@ class Env:
     changed: list[str] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)
     baseline_static: dict[str, int] = field(default_factory=dict)
-    #: The file the last :func:`_attempt` took from the model's reply (``None``: it gave none), for :func:`keep_try`.
-    tried: str | None = None
+    #: The files the last :func:`_attempt` took from the model's reply (path -> text; empty: it gave none), for
+    #: :func:`keep_try`.
+    tried: dict[str, str] = field(default_factory=dict)
 
 
 def keep_try(env: "Env", issue: dict[str, Any], rel: str, number: int, accepted: bool, why: str) -> None:
@@ -1020,10 +1021,10 @@ def keep_try(env: "Env", issue: dict[str, Any], rel: str, number: int, accepted:
 
         who = f"{issue.get('id')} ({issue.get('function') or 'no function'}; {issue.get('quantity') or 'no quantity'})"
         if accepted:
-            _project.record_change(env.root, f"finding repair accepted: {who}", category="fixed", log=env.log)
+            _project.record_change(env.root, env.scrub(f"finding repair accepted: {who}"), category="fixed", log=env.log)
         elif env.tried:
-            _project.keep_refused(env.root, f"{issue.get('id')}-{number}", rel, env.tried,
-                                  f"finding repair refused: {who}: {why[:300]}", log=env.log)
+            _project.keep_refused(env.root, f"{issue.get('id')}-{number}", dict(env.tried),
+                                  env.scrub(f"finding repair refused: {who}: {why[:300]}"), log=env.log)
     except Exception:  # noqa: BLE001 -- the record is a convenience; the repair goes on whatever happens to it
         pass
 
@@ -1257,7 +1258,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         mine_too = callers.get(rel, set())
         skipped: list[str] = []
         new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *mine_too}, skipped)
-        env.tried = new  # the model's file as it came, kept even when a check below refuses it
+        env.tried = {rel: new} if new is not None else {}  # the model's files as they came, kept even when refused
         if skipped:
             env.log.warning("[code_review] %s: the reply also defined %s, which the finding is not about; not used",
                             issue.get("id"), ", ".join(f"`{n}`" for n in skipped))
@@ -1277,12 +1278,13 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                 new, why = None, f"its change to {target}: {why_not}"
             elif changed != before:
                 edits[target] = (before, changed)
+                env.tried[target] = changed
                 names = [*names, *(f"{target}:{n}" for n in done)]
     else:
         from . import code_review as _review
 
         new = _review.parse_files(reply, [rel]).get(rel)
-        env.tried = new  # the model's file as it came, kept even when a check below refuses it
+        env.tried = {rel: new} if new else {}  # the model's file as it came, kept even when a check below refuses it
         names, why = [rel], "" if new else "the reply held no whole file"
         # moving what runs on import under a main guard is not a change of the module the finding must speak of
         was, now = without_main_guard(old, new) if new else (old, new)
@@ -1386,7 +1388,7 @@ async def repair_issue(env: Env, issue: dict[str, Any], rel: str) -> bool:
         if not spend(env, issue, kind):
             continue
         number = len(issue.setdefault("repairs", [])) + 1
-        env.tried = None
+        env.tried = {}
         accepted, why = await _attempt(env, issue, rel, who, detail)
         await asyncio.to_thread(keep_try, env, issue, rel, number, accepted, why)
         by = env.other if who == "other" else env.code_model

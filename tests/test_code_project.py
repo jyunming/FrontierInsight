@@ -573,3 +573,50 @@ def test_a_stopped_run_with_no_error_text_read_returns_empty():
     fake = _StoppedRun(None)
     assert _drain(fake) == ""
     assert fake.stdout.closed and fake.stderr.closed
+
+
+def _git_out(code, *args):
+    return subprocess.run(["git", *args], cwd=code, capture_output=True, text=True, encoding="utf-8").stdout.strip()
+
+
+def test_a_refused_try_keeps_every_file_it_changed_and_never_overwrites_an_earlier_one(tmp_path):
+    import shutil
+
+    if shutil.which("git") is None:
+        import pytest
+
+        pytest.skip("git is not installed")
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (code / "b.py").write_text("y = 1\n", encoding="utf-8")
+    assert code_project.record_change(tmp_path, "code written")
+    files = {"a.py": "x = 2\n", "b.py": "y = 2\n"}
+    assert code_project.keep_refused(tmp_path, "F..1.lock", files, "first")
+    refs = _git_out(code, "for-each-ref", "--format=%(refname)", "refs/fi/refused/").split()
+    assert refs == ["refs/fi/refused/F.1-lock"]
+    assert _git_out(code, "show", f"{refs[0]}:a.py") == "x = 2"
+    assert _git_out(code, "show", f"{refs[0]}:b.py") == "y = 2"
+    # the same name again (a resume that numbers the try again): kept beside it, the first one untouched
+    assert code_project.keep_refused(tmp_path, "F..1.lock", {"a.py": "x = 3\n"}, "second")
+    assert _git_out(code, "log", "--format=%s", "-1", "refs/fi/refused/F.1-lock") == "first"
+    assert _git_out(code, "show", "refs/fi/refused/F.1-lock-2:a.py") == "x = 3"
+    assert _git_out(code, "status", "--porcelain") == ""
+
+
+def test_a_left_over_index_does_not_carry_into_a_refused_try_without_history(tmp_path):
+    import shutil
+
+    if shutil.which("git") is None:
+        import pytest
+
+        pytest.skip("git is not installed")
+    code = tmp_path / "code"
+    code.mkdir()
+    code_project._git(code, "init", "-q")
+    stale = code / ".git" / "fi_refused.index"
+    code_project._git(code, "update-index", "--add", "--info-only", "--cacheinfo",
+                      "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,stale.py", env_extra={"GIT_INDEX_FILE": str(stale)})
+    assert stale.is_file()
+    assert code_project.keep_refused(tmp_path, "F-1-1", {"a.py": "x = 2\n"}, "try")
+    assert _git_out(code, "ls-tree", "--name-only", "refs/fi/refused/F-1-1").split() == ["a.py"]
