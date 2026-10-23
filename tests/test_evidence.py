@@ -939,6 +939,18 @@ def test_a_check_fi_corrected_never_validates_even_when_it_cites_a_source(tmp_pa
                                                  for g in got["all_gaps"]["independently_validated"]), source
 
 
+def test_a_second_implementation_that_cites_a_retrieved_source_validates_by_that_route() -> None:
+    """Either route validates: it cites a frozen source, or it shares no code. A second implementation whose reference
+    cites a source but does not say it shares no code was downgraded."""
+    from core import oracle_check as oc
+
+    cited = {"name": "two_ways", "kind": "second_implementation",
+             "reference": "Compared with the closed form of the handbook, [1] (eq. 3), computed by a plain loop"}
+    assert not oc._NOT_SHARED_RE.search(oc.reference_of(cited))
+    assert oc.validates(cited, {}, SOURCES)
+    assert not oc.validates(cited, {}, [])  # the known negative: no retrieved source, no statement of independence
+
+
 def test_only_a_plain_statement_that_no_code_is_shared_counts_for_a_second_implementation() -> None:
     from core import oracle_check as oc
 

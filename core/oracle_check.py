@@ -802,8 +802,8 @@ def validates(oracle: dict[str, Any], protocol: dict[str, Any] | None, sources: 
     plan's model derived itself (a `derivation`, an equation whose source is a derivation) shows only that the code
     agrees with the plan, not that either is right."""
     ref = reference_of(oracle)
-    if kind_of(oracle) == "second_implementation":
-        return bool(_NOT_SHARED_RE.search(ref))
+    if kind_of(oracle) == "second_implementation" and _NOT_SHARED_RE.search(ref):
+        return True  # one route; a second implementation that cites a retrieved source also validates by the other
     if _derivation_steps(ref) is None and _cites(ref, sources)[0]:
         return True
     for eid, eq in _equations(protocol).items():
