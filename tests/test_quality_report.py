@@ -135,6 +135,16 @@ def test_a_check_its_trials_could_not_decide_is_not_said_to_have_failed(tmp_path
     assert "not decided 3 times" in items[0]["text"] and "failed" not in items[0]["text"].split("not decided")[1]
 
 
+def test_a_check_that_was_undecided_and_then_failed_is_counted_by_kind(tmp_path: Path) -> None:
+    root = tmp_path / "q-transition"
+    undecided = "the oracle 'mean_rate' was not decided: the trials could not tell it from its expected value"
+    failed = "the oracle 'mean_rate' failed: FI measured 3, the protocol expects 1 within 0.01 (absolute tolerance 0.01)"
+    _audit(root, [{"kind": "check_result", "check": "oracle", "status": "stopped", "problems": [undecided]},
+                  {"kind": "check_result", "check": "oracle", "status": "stopped", "problems": [failed]}])
+    text = _stage(qr.build(root), "run")["problems"]["items"][0]["text"]
+    assert "(not decided 1 time, failed 1 time)" in text, text
+
+
 def test_check_fixed_by_a_later_attempt(tmp_path: Path) -> None:
     root = tmp_path / "q-fixed"
     bad = ["the oracle 'limit_case' failed: FI measured 3, the protocol expects 1 within 0.01 (absolute tolerance 0.01)"]

@@ -247,11 +247,15 @@ def _oracle_problems(q: _Quest) -> list[dict[str, str]]:
         return []
     out: list[dict[str, str]] = []
     seen: dict[str, int] = {}
+    kinds: dict[str, dict[str, int]] = {}
     first_text: dict[str, tuple[str, str]] = {}
     for status, problems, src in rounds:
         for p in problems:
             key = next(iter(_pending_names([p])))
             seen[key] = seen.get(key, 0) + 1
+            # Each round is named by its own sentence: a check its trials could not decide did not fail.
+            kind = "not decided" if " was not decided" in str(p) else "failed"
+            kinds.setdefault(key, {})[kind] = kinds.setdefault(key, {}).get(kind, 0) + 1
             first_text.setdefault(key, (str(p), src))
     last_status, last_problems, _ = rounds[-1]
     still = _pending_names(last_problems)
@@ -260,8 +264,7 @@ def _oracle_problems(q: _Quest) -> list[dict[str, str]]:
             status = "left out" if last_status == "went_on_failing" else "not fixed"
         else:
             status = "fixed"
-        # A check its trials could not decide (core/oracle_check.py: "was not decided") did not fail: said as it was.
-        tries = (f" ({'not decided' if ' was not decided' in text else 'failed'} {seen[key]} times)"
+        tries = (" (" + ", ".join(f"{k} {n} time{'s' if n != 1 else ''}" for k, n in kinds[key].items()) + ")"
                  if seen[key] > 1 else "")
         out.append(_problem("run", text + tries, "FI's own known-answer check", status, src))
     return out
