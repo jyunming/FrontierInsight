@@ -220,6 +220,7 @@ def _global_stage_requests(block: dict[str, Any]) -> list[int]:
 def test_the_global_stage_asks_one_trial_at_a_time_unless_a_generation_is_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
     block = _block(starts=2, per_start=60)
     block.pop("grid")  # no coarse scan: the global stage runs
+    monkeypatch.setattr(search, "DE_GENERATIONAL", False)
     steady = _global_stage_requests(block)
     assert steady[0] > 1 and set(steady[1:]) == {1}, "the population, then one trial after another"
     monkeypatch.setattr(search, "DE_GENERATIONAL", True)

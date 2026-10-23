@@ -126,8 +126,10 @@ CMA_SPLIT = False
 #: and 7 numbers, 100, 300 and 1000 evaluations per start, 3 seeds, a smooth and a multimodal function): the design the
 #: whole search ended with was 0.12 of 100 worse on average (worse in 8 of 18 cases, better in 3, equal in 7) with 5 to
 #: 10 times fewer waits for answers; over 144 numbers (the recorded plans) it was as good (99.76 against 99.70 on the
-#: smooth one, 82.1 against 82.1 on the multimodal one) and the wait for answers was 13 times fewer.
-DE_GENERATIONAL = False
+#: smooth one, 82.1 against 82.1 on the multimodal one) and the wait for answers was 13 times fewer. On by the
+#: maintainer's decision (2026-10-23): a recorded 144-number plan's search, 8 at once, took 36 h of simulation time
+#: instead of 97 h, with the same best design.
+DE_GENERATIONAL = True
 #: The CMA-ES's first step, as a share of each design number's range.
 CMA_SIGMA0 = 0.3
 
