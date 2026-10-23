@@ -318,6 +318,26 @@ _PHASED_GAPS = {
 }
 
 
+def _derived_only_gaps(protocol: dict[str, Any], frozen: dict[str, Any] | None, oracle_record: Any,
+                       corrected: Any) -> list[str]:
+    """The gap (one sentence, or none) when every known-answer check that passed has an expected value the plan's model
+    derived itself or FI corrected (:func:`core.oracle_check.validates`). A check that rests on a value from a source the
+    quest retrieved, or on a second implementation that shares no code with the simulation, validates the code; a check
+    corrected by FI never does, whatever its reference says."""
+    sources = frozen.get("sources") if isinstance(frozen, dict) and not frozen.get("sources_problem") else None
+    passed = {n.strip().lower() for n in _oracle_check.engine_passed(_oracle_check.last_judged(oracle_record))}
+    if not isinstance(sources, list) or not passed:
+        return []
+    fixed = {str(n).strip().lower() for n in corrected} if isinstance(corrected, dict) else set()
+    for oracle in _oracle_check.declared(protocol):
+        name = str(oracle["name"]).strip().lower()
+        if name in passed and name not in fixed and _oracle_check.validates(oracle, protocol, sources):
+            return []
+    return ["every known-answer check that passed rests on the plan's own derivation (or on a value FI corrected), none on "
+            "a value from a source or on a second implementation: the code agrees with the plan, which does not show "
+            "that either is right"]
+
+
 def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
     settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
@@ -461,6 +481,16 @@ def assess(
                           "arithmetic alone: nothing independent confirms it"
                           for n, c in corrected.items()
                           if isinstance(c, dict) and c.get("source") == "arithmetic" and not c.get("confirmed_by"))
+        # Every other correction (the plan's model conceded, a judge sided with the code, another model recomputed what the
+        # arithmetic gave): a value that was settled between models and chosen because it agrees with the measurement is
+        # still the plan's own derivation, corrected. Only a literature value or an independent second implementation
+        # validates a check, so a corrected check never counts as one.
+        valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected by FI's own look at the "
+                          "plan's working: it is a derivation by the models, not a value from a source or a second "
+                          "implementation, so nothing independent confirms it"
+                          for n, c in corrected.items()
+                          if isinstance(c, dict) and c.get("source") not in ("recompute", "numeric")
+                          and not (c.get("source") == "arithmetic" and not c.get("confirmed_by")))
     fitted = oracle_record.get("fitted_to_test_run") if isinstance(oracle_record, dict) else None
     if protocol is not None and isinstance(fitted, list) and fitted:
         # The plan changed these checks after FI's test run measured them, and the change makes that measurement pass:
@@ -547,6 +577,11 @@ def assess(
         # Which code implements which equation of the model: an oracle that rests on E1 checks the code the simulation
         # says is E1. Only the labels are read, not the mathematics behind them.
         valid_gaps.extend(equation_label_gaps or [])
+        # Rule 3 (the maintainer's decision): a value the plan's own model derived is not a known answer. When every
+        # check that passed rests on such a derivation (or on a value FI corrected), the code agrees with the plan, and
+        # nothing shows either is right. Judged on the sources the freeze recorded; a protocol frozen without them is
+        # not judged here.
+        valid_gaps.extend(_derived_only_gaps(protocol, frozen, oracle_record, corrected))
         # Under research: a second, different model read the checks, and the checks held at a setting the code never saw.
         valid_gaps.extend(independence_gaps or [])
     valid_gaps.extend(optimum_gaps.get("independently_validated", []))

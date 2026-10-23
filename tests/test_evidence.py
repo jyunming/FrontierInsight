@@ -887,3 +887,64 @@ def test_a_check_the_code_reader_flags_is_not_independent_evidence(tmp_path: Pat
     rec.update(version=code_review.version(code), read_version=code_review.version(code), problems=[], final=True)
     code_review.save(root, rec)
     assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"
+
+
+# --- a known answer the plan's model derived is not validation (the maintainer's rule 3) ------------------------------------
+
+SOURCES = [{"label": "1", "title": "A handbook of heat sinks", "doi": "10.1000/handbook"}]
+
+
+def _checked(tmp_path: Path, oracles: list[dict[str, Any]], *, corrected: dict[str, Any] | None = None,
+             passed: tuple[str, ...] = ()) -> dict[str, Any]:
+    root = _quest(tmp_path, freeze=False, protocol_status="ok", oracle_status="ok", protocol={"oracles": oracles})
+    frozen_protocol.freeze(root, {"oracles": oracles}, approved_by="test", source="plan.md", sources=SOURCES)
+    judged = [{"name": o["name"], "value": 1.0, "passed_by_engine": True, "measured_by": "engine"} for o in oracles]
+    (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({
+        "status": "ok", "judged_by": "engine", "contract": "trial", "attempts": [{"judged": judged}],
+        **({"corrected": corrected} if corrected else {}),
+    }), encoding="utf-8")
+    return evidence.assess(root, _state(design={"hypothesis": "h", "protocol": {"oracles": oracles}}), settings=ON)
+
+
+DERIVED = {"name": "cooling_time", "expected": 1.0, "tolerance": 0.01,
+           "reference": "derivation: the cup cools by exp(-t/tau), so at t = tau the excess is 1/e = 0.3679 of the start"}
+CITED = {"name": "plate_conduction", "expected": 2.0, "tolerance": 0.01,
+         "reference": "Steady conduction through a slab, q = k dT / L, from [1] (Handbook, eq. 3)"}
+INDEPENDENT = {"name": "two_ways", "kind": "second_implementation", "expected": 0, "tolerance": 1e-9,
+               "reference": "A second implementation sharing no code with the simulation: it uses a plain loop"}
+
+
+def _rests_on_derivation(got: dict[str, Any]) -> bool:
+    return any("rests on the plan's own derivation" in g for g in got["all_gaps"].get("independently_validated", []))
+
+
+def test_a_result_whose_every_passing_check_is_the_plans_own_derivation_is_not_independently_validated(tmp_path: Path) -> None:
+    got = _checked(tmp_path, [DERIVED])
+    assert _rests_on_derivation(got) and got["levels"]["independently_validated"] is False
+
+
+def test_one_check_from_a_source_or_a_second_implementation_is_enough(tmp_path: Path) -> None:
+    """The known positive: a literature value, or a second implementation that shares no code, still validates."""
+    assert not _rests_on_derivation(_checked(tmp_path / "a", [DERIVED, CITED]))
+    assert not _rests_on_derivation(_checked(tmp_path / "b", [DERIVED, INDEPENDENT]))
+
+
+def test_a_check_fi_corrected_never_validates_even_when_it_cites_a_source(tmp_path: Path) -> None:
+    """A referee-corrected check is not validated (maintainer, 2026-10-22): only a literature value or an independent
+    second implementation is. A correction a judge or the plan's model settled had no gap at all."""
+    for source in ("challenge", "numeric", "recompute"):
+        got = _checked(tmp_path / source, [CITED], corrected={"plate_conduction": {
+            "from": 1.0, "to": 2.0, "source": source, "confirmed_by": {"source": source}}})
+        assert _rests_on_derivation(got) and any("plate_conduction" in g and "corrected" in g
+                                                 for g in got["all_gaps"]["independently_validated"]), source
+
+
+def test_only_a_plain_statement_that_no_code_is_shared_counts_for_a_second_implementation() -> None:
+    from core import oracle_check as oc
+
+    for said in ("shares no code with the simulation", "sharing no BH decision code with the simulation",
+                 "a second solver that shares no function with the simulation"):
+        assert oc._NOT_SHARED_RE.search(said), said
+    for said in ("shares no assumptions with that part of the model", "shares no data, only the simulation code is reused",
+                 "shares nothing but the grid"):
+        assert not oc._NOT_SHARED_RE.search(said), said

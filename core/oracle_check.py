@@ -363,7 +363,7 @@ _POINTER_RE = re.compile(r"^(?:from|see|in|as in|according to|following|per|cf\.
 _MATH_RE = re.compile(r"[=<>≈≤≥→]")
 # What a second implementation says about the code it does not share with the simulation: a negation about code.
 _NOT_SHARED_RE = re.compile(
-    r"shares? no (?:code|function|module|routine|part)|(?:does not|doesn[’']t|do not|don[’']t) share\b"
+    r"shar(?:es?|ing) no(?:\s+[\w-]+){0,2}\s+(?:code|function|module|routine|part)\b|(?:does not|doesn[’']t|do not|don[’']t) share\b"
     r"|no (?:shared|common) code|no code (?:in common|with|shared)"
     r"|(?:does not|doesn[’']t|without) (?:use|call|reuse|import|using|calling|reusing|importing)\b[^.;]{0,60}"
     r"\b(?:code|simulation|function|module|stepper|solver|routine|simulate\.py|run_trial|run_cell)\b"
