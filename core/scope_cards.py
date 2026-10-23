@@ -34,6 +34,11 @@ def _strings(value: Any) -> list[str]:
     return [str(x).strip() for x in value if str(x).strip()]
 
 
+def _dicts(value: Any) -> list[dict]:
+    """The mappings of a list; anything that is not a list holds none."""
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, (list, tuple)) else []
+
+
 def normalize(reply: Any, source_ids: set[str]) -> tuple[list[dict], list[str]]:
     """The model's reply as checked cards, plus one sentence for each literature line FI removed."""
     if isinstance(reply, str):
@@ -61,7 +66,7 @@ def normalize(reply: Any, source_ids: set[str]) -> tuple[list[dict], list[str]]:
             continue
         seen.add(fingerprint)
         literature: list[dict[str, str]] = []
-        for line in item.get("literature") or []:
+        for line in _dicts(item.get("literature")):
             if not isinstance(line, dict):
                 continue
             says, source = str(line.get("says") or "").strip(), str(line.get("source") or "").strip()
@@ -133,7 +138,7 @@ def read_answer(answer: Any, cards: list[dict]) -> dict | None:
         return {"question": text, "study_type": answer.get("study_type") or None,
                 "main_results": _strings(answer.get("main_results")),
                 "compared_settings": _strings(answer.get("compared_settings")),
-                "literature": [x for x in answer.get("literature") or [] if isinstance(x, dict)],
+                "literature": _dicts(answer.get("literature")),
                 "run_time": str(answer.get("run_time") or "").strip()}
     if not isinstance(answer, str):
         return None
@@ -142,8 +147,10 @@ def read_answer(answer: Any, cards: list[dict]) -> dict | None:
         return None
     if text.isdigit():
         return _from_number(int(text), cards)
-    if len(text) == 1 or (text[0] in "eE" and text[1:].strip().isdigit()):
-        return None  # a bare "e", or "e 2" without the edit: no study named
+    if text[0] in "eE" and text[1:].strip().isdigit():
+        return _from_number(int(text[1:].strip()), cards)  # "e 2" whose edit never came: card 2 as offered
+    if len(text) == 1:
+        return None  # a single letter names no study
     return {"question": text, "study_type": None, "main_results": [], "compared_settings": [],
             "literature": [], "run_time": "", "written_by_person": True}
 

@@ -144,3 +144,18 @@ def test_the_study_card_prompt_has_its_placeholders():
     assert names <= set(string.Template(text).get_identifiers())
     out = string.Template(text).substitute({n: f"<<{n}>>" for n in names})
     assert "$" not in out.replace("$$", "")
+
+
+def test_a_literature_field_that_is_not_a_list_is_dropped_not_a_crash():
+    reply = {"cards": [{"question": "q", "study_type": "measure", "literature": 1}]}
+    cards, removed = sc.normalize(reply, {"1"})
+    assert cards[0]["literature"] == [] and removed == []
+    edited = sc.read_answer({"study": {"question": "my own study", "literature": 1}}, [])
+    assert edited is not None and edited["literature"] == []
+
+
+def test_e_and_a_number_whose_edit_never_came_picks_that_card():
+    cards = [_card(), _card(question="Which cup keeps tea warm longest?")]
+    assert sc.read_answer("e 2", cards) == cards[1]
+    assert sc.read_answer("E1", cards) == cards[0]
+    assert sc.read_answer("e 9", cards) is None
