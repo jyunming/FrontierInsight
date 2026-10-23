@@ -405,6 +405,17 @@ def _labels_in(group: str) -> list[str]:
     return out
 
 
+def _is_index(text: str, start: int) -> bool:
+    """Whether the bracket at ``start`` indexes a symbol (``u [1]``, ``x1 [2]``, ``y_0 [1]``) rather than cites a source: it
+    follows a lone letter, or a name with a digit or an underscore in it, which is how a variable is written and not how
+    a source is named."""
+    before = re.search(r"([A-Za-z][A-Za-z0-9_]*)\s*$", text[:start])
+    if before is None or (before.start() > 0 and (text[before.start() - 1].isalnum() or text[before.start() - 1] == "_")):
+        return False
+    word = before.group(1)
+    return len(word) == 1 or any(c.isdigit() or c == "_" for c in word)
+
+
 def _code_list(text: str, start: int, group: str) -> bool:
     """Whether the bracket at ``start`` holding several numbers (``group``) is a list or an interval, not a citation:
     one with a 0 in it (``[0, 1]``: no source is numbered 0), one assigned to a name (``y0=[1, 2]``,
@@ -472,7 +483,7 @@ def _cites(text: str, sources: list[dict[str, str]]) -> tuple[list[str], list[st
     found, missing = [], []
     for match in _LABEL_RE.finditer(text):
         group = match.group(1)
-        if _code_list(text, match.start(), group):
+        if _code_list(text, match.start(), group) or _is_index(text, match.start()):
             continue
         for label in _labels_in(group):
             (found if label in labels else missing).append(f"[{label}]")

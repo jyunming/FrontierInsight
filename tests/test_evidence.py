@@ -948,6 +948,9 @@ def test_a_second_implementation_that_cites_a_retrieved_source_validates_by_that
              "reference": "Compared with the closed form of the handbook, [1] (eq. 3), computed by a plain loop"}
     assert not oc._NOT_SHARED_RE.search(oc.reference_of(cited))
     assert oc.validates(cited, {}, SOURCES)
+    index_only = {"name": "two_ways", "kind": "second_implementation", "reference": "the field u [1] is compared point by point"}
+    assert not oc.validates(index_only, {}, SOURCES), "a bracketed index after a symbol is not a citation"
+    assert oc.validates({**index_only, "reference": "compared with the field u from [1]"}, {}, SOURCES)
     assert not oc.validates(cited, {}, [])  # the known negative: no retrieved source, no statement of independence
 
 
