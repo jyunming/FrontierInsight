@@ -1,0 +1,226 @@
+"""The starting points of a search are answered as their designs finish, and a start that converges first gives what it
+did not use to the others (core/optimise_search.py, ``_Search._stream`` and ``_give_back``; core/optimise.py,
+``EvaluationPool``).
+
+A live search planned 6 starting points. Each step of the search waited for the slowest design of the step before any
+start went on, and a start that converged early left its share of the budget unspent. Now every start goes on as soon as
+its own designs are answered (the other starts' designs keep the machine busy), the rows are put back in the order of the
+step-by-step search, and the unused share goes to the starts still running. Neutral toy objective only.
+"""
+from __future__ import annotations
+
+import asyncio
+import random
+import time
+from typing import Any
+
+import pytest
+
+from core import optimise
+from core import optimise_search as search
+
+DIMS = 4
+
+
+def _block(starts: int = 4, per_start: int = 60, method: str = "global_then_local", dims: int = DIMS) -> dict[str, Any]:
+    names = [f"x{i}" for i in range(dims)]
+    return {
+        "objective": {"quantity": "f", "direction": "minimise", "unit": "J"},
+        "design_variables": [{"name": n, "low": -2.0, "high": 2.0, "kind": "continuous"} for n in names],
+        "baseline": {"values": {n: 0.0 for n in names}, "source": "the design in use"},
+        "evaluation_budget": {"starts": starts, "per_start": per_start},
+        "search_method": method,
+        "grid": {"x0": [-1.5, 0.0, 1.5], "x1": [-1.5, 0.0, 1.5]},
+    }
+
+
+def _bowl(design: dict[str, Any]) -> float:
+    xs = [float(design[f"x{i}"]) for i in range(len(design))]
+    return sum((x - 0.3 * (i + 1)) ** 2 for i, x in enumerate(xs))
+
+
+def _scan_rows(request: dict[str, Any], block: dict[str, Any], f: Any) -> list[dict[str, Any]]:
+    base = block["baseline"]["values"]
+    names = {v["name"] for v in block["design_variables"]}
+    rows = []
+    for cell in search.grid_cells(request["grid"]):
+        design = {**base, **{k: v for k, v in cell.items() if k in names}}
+        rows.append({"design": design, "values": {"f": f(design)}})
+    return rows
+
+
+def _drive(block: dict[str, Any], f: Any = _bowl, *, stream: bool, rng: random.Random | None = None,
+           seed: int = 1) -> tuple[dict[str, Any], list[int]]:
+    """Run the search. With ``stream`` the designs it asks for finish one at a time in a random order; the second value
+    is how many designs were running at each wait."""
+    gen = search.search(block, seed=seed, batch=True, stream=stream)
+    running: dict[Any, dict[str, Any]] = {}
+    widths: list[int] = []
+    try:
+        request = next(gen)
+        while True:
+            if request["kind"] == "scan":
+                request = gen.send(_scan_rows(request, block, f))
+            elif request["kind"] == "evaluate_many":
+                request = gen.send([{"values": {"f": f(r["design"])}} for r in request["requests"]])
+            elif request["kind"] == "evaluate_stream":
+                for r in request["requests"]:
+                    assert r["id"] not in running, "a design is not asked for twice while it runs"
+                    running[r["id"]] = r
+                widths.append(len(running))
+                assert running, "the search waits for a design only when one is running"
+                picks = [(rng or random.Random(0)).choice(sorted(running))]
+                request = gen.send([(k, {"values": {"f": f(running.pop(k)["design"])}}) for k in picks])
+            else:
+                request = gen.send({"values": {"f": f(request["design"])}})
+    except StopIteration as done:
+        return done.value, widths
+
+
+def _rows(outcome: dict[str, Any]) -> list[tuple[Any, ...]]:
+    return [(r["n"], r["stage"], r["start"], tuple(sorted(r["design"].items())), r["objective"]) for r in outcome["rows"]]
+
+
+@pytest.mark.parametrize("method", ["global_then_local", "bounded_local"])
+@pytest.mark.parametrize("order", [0, 1, 2])
+def test_starts_answered_as_designs_finish_give_the_record_of_the_step_by_step_search(method: str, order: int) -> None:
+    """The same designs per start, the same rows in the same order, the same best design, whichever design finishes
+    first."""
+    block = _block(method=method)
+    step_by_step, _ = _drive(block, stream=False)
+    streamed, widths = _drive(block, stream=True, rng=random.Random(order))
+    assert _rows(streamed) == _rows(step_by_step)
+    assert streamed["best"] == step_by_step["best"] and streamed["start_log"] == step_by_step["start_log"]
+    assert streamed["evaluations"] == step_by_step["evaluations"]
+    assert max(widths) > 1, "the starts' designs run together, one start's wait does not hold back the others"
+
+
+def test_the_stream_asks_for_the_designs_of_several_starts_before_any_is_answered() -> None:
+    block = _block(starts=5, method="bounded_local")
+    _out, widths = _drive(block, stream=True)
+    assert max(widths) >= 5
+
+
+def test_a_search_not_answered_as_designs_finish_never_asks_for_a_stream() -> None:
+    gen = search.search(_block(), seed=1, batch=True)  # ``stream`` is off by default: a driver without a pool is served
+    kinds = set()
+    try:
+        request = next(gen)
+        while True:
+            kinds.add(request["kind"])
+            if request["kind"] == "scan":
+                request = gen.send(_scan_rows(request, _block(), _bowl))
+            elif request["kind"] == "evaluate_many":
+                request = gen.send([{"values": {"f": _bowl(r["design"])}} for r in request["requests"]])
+            else:
+                request = gen.send({"values": {"f": _bowl(request["design"])}})
+    except StopIteration:
+        pass
+    assert "evaluate_stream" not in kinds and "evaluate_many" in kinds
+
+
+def test_a_start_that_converges_first_gives_the_budget_it_did_not_use_to_the_others() -> None:
+    """One starting point sits on a plateau, so its search converges after a few evaluations; the others keep improving on
+    a bowl and ran out of their own share long before. The plan's budget is spent across the starts that were still
+    going."""
+    def f(design: dict[str, Any]) -> float:
+        return 1.0 if design["x0"] < -1.0 else _bowl(design)
+
+    block = _block(starts=4, per_start=70, method="bounded_local")
+    block["baseline"]["values"]["x0"] = -1.9  # the baseline is the first starting point: on the plateau
+    outcome, _ = _drive(block, f, stream=False)
+    by_start = {s["start"]: s for s in outcome["start_log"]}
+    assert by_start[0]["stopped_because"] == "converged" and by_start[0]["evaluations"] < 70
+    # the others used more than their own share of 70, and together the whole budget of 4 x 70 was spent
+    assert max(s["evaluations"] for s in outcome["start_log"]) > 70
+    assert outcome["evaluations"] == 4 * 70
+
+
+def test_the_shares_of_the_budget_are_even_and_leave_nothing_over() -> None:
+    """The remainder of an uneven share goes to the first starts, and the baseline's evaluation is part of the first
+    start's share: 4 starts and a budget of 4 x 50 are 50 evaluations each, the baseline among the first's."""
+    block = _block(starts=4, per_start=50, method="bounded_local")
+    outcome, _ = _drive(block, lambda d: -_bowl(d) * 0.0 + sum(abs(float(d[f"x{i}"]) - 0.1 * (i + 1)) for i in range(DIMS)),
+                        stream=False)
+    assert outcome["evaluations"] == 4 * 50
+    assert sorted(s["evaluations"] for s in outcome["start_log"]) == [50, 50, 50, 50]
+
+
+# --- the pool the real search is answered from -----------------------------------------------------------------------
+
+
+class _Nothing:
+    async def settle(self) -> None:
+        return None
+
+
+class _Pool(optimise.EvaluationPool):
+    """The pool with the simulation replaced by a delay: each design takes the seconds its first number says."""
+
+    def __init__(self, *, at_once: int, log: list[tuple[str, Any, float]]):
+        self.at_once, self.events, self.t0 = at_once, log, time.monotonic()
+        self.gate = asyncio.Semaphore(at_once)
+        self.tasks = {}
+        self.serial = 0
+        self.on_done = None
+        self.outside = _Nothing()
+
+    async def _one(self, ident: Any, name: str, cell: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+        async with self.gate:
+            self.events.append(("start", ident, time.monotonic() - self.t0))
+            await asyncio.sleep(cell["seconds"])
+            self.events.append(("end", ident, time.monotonic() - self.t0))
+            return {"values": {"f": 1.0}}, "", ""
+
+
+@pytest.mark.asyncio
+async def test_a_place_in_the_pool_is_refilled_the_moment_a_design_finishes() -> None:
+    """Two at once: a slow design (0.6 s) and a quick one (0.05 s) run first; a third design submitted later starts when
+    the quick one ends, not when the slow one does."""
+    events: list[tuple[str, Any, float]] = []
+    pool = _Pool(at_once=2, log=events)
+    pool.submit("slow", {"seconds": 0.6})
+    pool.submit("quick", {"seconds": 0.05})
+    got = await pool.wait()
+    assert [ident for ident, _ in got] == ["quick"]
+    pool.submit("next", {"seconds": 0.05})
+    got += await pool.wait()
+    assert [ident for ident, _ in got] == ["quick", "next"]
+    started = {ident: t for kind, ident, t in events if kind == "start"}
+    ended = {ident: t for kind, ident, t in events if kind == "end"}
+    assert started["next"] < ended["slow"] - 0.2, "the third design did not wait for the slowest of the first two"
+    left = await pool.close()
+    assert [ident for ident, _ in left] == ["slow"] and not pool.tasks
+
+
+# --- the global stage asked a generation at a time (off by default) -----------------------------------------------------
+
+
+def _global_stage_requests(block: dict[str, Any]) -> list[int]:
+    """How many designs each request of the global stage holds (a single design is 1)."""
+    gen = search.search(block, seed=1, batch=True)
+    sizes: list[int] = []
+    try:
+        request = next(gen)
+        while True:
+            if request["kind"] == "evaluate_many":
+                if request["requests"][0]["stage"] == "global":
+                    sizes.append(len(request["requests"]))
+                request = gen.send([{"values": {"f": _bowl(r["design"])}} for r in request["requests"]])
+            else:
+                if request.get("stage") == "global":
+                    sizes.append(1)
+                request = gen.send({"values": {"f": _bowl(request["design"])}})
+    except StopIteration:
+        return sizes
+
+
+def test_the_global_stage_asks_one_trial_at_a_time_unless_a_generation_is_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    block = _block(starts=2, per_start=60)
+    block.pop("grid")  # no coarse scan: the global stage runs
+    steady = _global_stage_requests(block)
+    assert steady[0] > 1 and set(steady[1:]) == {1}, "the population, then one trial after another"
+    monkeypatch.setattr(search, "DE_GENERATIONAL", True)
+    generational = _global_stage_requests(block)
+    assert generational[0] == steady[0] and generational[1] == generational[0], "then a whole generation at a time"
+    assert len(generational) < len(steady) / 4

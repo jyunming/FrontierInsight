@@ -95,3 +95,33 @@ def test_a_bounded_local_search_over_many_numbers_is_a_cma_es_too(monkeypatch: p
     assert new["best"]["objective"] < old["best"]["objective"] / 2, (new["best"]["objective"], old["best"]["objective"])
     assert new["evaluations"] <= 600 and population >= 4 + 8 and new_waits < old_waits
 
+
+
+def test_the_plans_starts_are_one_cma_run_by_default_and_the_notes_say_so() -> None:
+    """A plan asked for 6 starting points over 144 continuous numbers and one CMA-ES spent the budget from the first. On
+    test functions with a known optimum that was the better search than six separate ones (see ``CMA_SPLIT``), so it
+    stays, but the record states it instead of leaving "6 starts" to be read as six searches."""
+    outcome, _w, _p = _drive(_block(16, 100))
+    assert not any(s["stopped_because"] == "budget" and s["start"] > 0 for s in outcome["start_log"][:6])
+    assert any("one CMA-ES" in n and "not 6 separate searches" in n for n in outcome["notes"]), outcome["notes"]
+
+
+def test_with_the_split_on_every_start_is_searched_on_its_share_of_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(search, "CMA_SPLIT", True)
+    outcome, _w, _p = _drive(_block(16, 100))
+    log = [s for s in outcome["start_log"] if s["evaluations"] > 1]
+    assert len(log) >= 6 and {s["start"] for s in log} >= set(range(6)), [s["start"] for s in log]
+    assert outcome["evaluations"] == 600, "the whole budget is spent across the starts"
+    assert not any("one CMA-ES" in n for n in outcome["notes"])
+
+
+def test_the_split_gives_a_starts_unused_share_to_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the split on, a start that stops early does not leave its share unspent."""
+    monkeypatch.setattr(search, "CMA_SPLIT", True)
+    s = search._Search(_block(16, 100), seed=1, method=None)
+    s.shares = {0: 100, 1: 100, 2: 100}
+    s.used_by_start = {0: 40, 1: 100, 2: 100}
+    s._give_back(0, [1, 2])
+    assert s.shares == {0: 40, 1: 130, 2: 130}
+    s._give_back(0, [1, 2])  # nothing left to give the second time
+    assert s.shares == {0: 40, 1: 130, 2: 130}

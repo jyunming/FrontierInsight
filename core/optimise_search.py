@@ -11,6 +11,12 @@ answer:
 * ``{"kind": "evaluate", "cell": ..., "design": ..., "stage": ..., "start": ...}``: evaluate this design. The answer
   is ``{"values": {...}}`` (what the simulation returned), ``{"failed": "why"}``, or ``{"stop": "why"}`` (the time is up);
   ``elapsed_s`` may ride along.
+* ``{"kind": "evaluate_many", "requests": [...]}`` (with ``batch``): designs chosen before any of their answers is read;
+  the answer is a list, one answer per request, in order.
+* ``{"kind": "evaluate_stream", "requests": [...]}`` (with ``stream``): the starting points running side by side ask for
+  their designs without waiting for each other; each request has an ``id``, and the answer is a list of
+  ``(id, answer)`` for the designs that have finished (at least one; the list of requests may be empty while designs run).
+  A start goes on as soon as its own designs are answered; the rows are listed in the order of the step-by-step search.
 * ``{"kind": "drive", "spec": ...}``: run one step of a library method (:func:`drive`) where the library is installed;
   the answer is what :func:`drive` returned there.
 
@@ -106,6 +112,22 @@ STEPPED_SHARE = 0.25
 #: the better design in most cases, and it asks for a whole population at a time instead of one design. Fewer numbers
 #: were not measured, so they keep the simplex.
 CMA_FROM_DIMS = 8
+#: Whether the starting points of a CMA-ES local stage are each searched on their own share of the budget, side by side
+#: (:meth:`_Search._side_by_side`), as the plan's ``starts`` ask. Off: one CMA-ES spends the budget from the first
+#: starting point and begins again from the next ones only when it converges (:meth:`_Search._cma_restarts`). Measured on
+#: analytic test functions with a known optimum (a smooth bowl and a multimodal one; 16, 64 and 144 numbers; 100, 300 and
+#: 1000 evaluations per start; 3 seeds each; both ``bounded_local`` and ``global_then_local``), the shared-out search found
+#: the worse design in 35 of 36 cases and tied in the other (both stuck at the same value); at 144 numbers and 1000
+#: evaluations per start the bowl's best was 86 of 100 against 99.7. The search says so in its notes.
+CMA_SPLIT = False
+#: Whether differential evolution (the global stage, when the coarse scan gave no starting design) asks for a whole
+#: generation of trials at a time instead of one trial after another. Steady-state (off) is the search as it was;
+#: generational (on) lets the trials run at the same time. Measured on analytic test functions with a known optimum (3, 5
+#: and 7 numbers, 100, 300 and 1000 evaluations per start, 3 seeds, a smooth and a multimodal function): the design the
+#: whole search ended with was 0.12 of 100 worse on average (worse in 8 of 18 cases, better in 3, equal in 7) with 5 to
+#: 10 times fewer waits for answers; over 144 numbers (the recorded plans) it was as good (99.76 against 99.70 on the
+#: smooth one, 82.1 against 82.1 on the multimodal one) and the wait for answers was 13 times fewer.
+DE_GENERATIONAL = False
 #: The CMA-ES's first step, as a share of each design number's range.
 CMA_SIGMA0 = 0.3
 
@@ -575,9 +597,11 @@ def _same_result(a, b):
 
 class _Search:
     def __init__(self, block, seed, method, rounds=None, results=None, batch=False, stop_flat=True,
-                 stop_stepped=True):
+                 stop_stepped=True, stream=False):
         self.block = block
         self.batch = bool(batch)
+        #: Whether the starts running side by side are answered as each design finishes (:meth:`_stream`), not step by step.
+        self.stream = bool(stream) and self.batch
         self.stop_flat = bool(stop_flat)
         self.stop_stepped = bool(stop_stepped)
         #: Answers asked for together (:meth:`evaluate_many`), by design key, each used once by :meth:`evaluate`.
@@ -595,15 +619,23 @@ class _Search:
         self.method_used = requested
         self.method_why = ""
         self.rows = []
+        #: For each row, where it stands in the step-by-step order (``(step, start)``), set only while the starts are
+        #: answered as designs finish (:meth:`_stream`), which puts the rows back in that order afterwards.
+        self.row_order = []
+        self.order = None
         self.cache = {}
         self.used = 0
         #: Evaluations counted per starting point; while the starts run side by side (``own_caps``), each start's share
         #: of the budget is counted on its own evaluations, not on the whole search's.
         self.used_by_start = {}
         self.own_caps = False
+        #: While the starts run side by side, each start's current share of the budget: what a start that converged did
+        #: not spend is given to the starts still running (:meth:`_give_back`).
+        self.shares = {}
         self.stopped = None
         self.notes = []
         self.start_log = []
+        self.start_order = []  # where each start's line stands in the step-by-step order, as ``row_order`` does
         self.failures_in_a_row = 0
         self.any_ok = False
         self.baseline = self.space.canonical(block["baseline"]["values"])
@@ -695,6 +727,7 @@ class _Search:
         if judged.get("reason"):
             row["reason"] = judged["reason"]
         self.rows.append(row)
+        self.row_order.append(self.order)
         return row
 
     def evaluate(self, design, stage, start, cap=None):
@@ -706,6 +739,7 @@ class _Search:
             return self.cache[key]
         if self.stopped is not None:
             raise _Stop()
+        cap = self._cap(start, cap)
         if cap is not None and (self.used_by_start.get(start, 0) if self.own_caps else self.used) >= cap:
             raise _StartDone("budget")
         if self.used >= self.total:
@@ -751,6 +785,7 @@ class _Search:
         designs = [self.space.canonical(d) for d in designs]
         if (self.batch or self.own_caps) and self.stopped is None and len(designs) > 1:
             room = self.total - self.used
+            cap = self._cap(start, cap)
             if cap is not None:
                 room = min(room, cap - (self.used_by_start.get(start, 0) if self.own_caps else self.used))
             todo, keys = [], set()
@@ -1113,11 +1148,25 @@ class _Search:
 
     def _local_starts(self, points, *, first_cap=None, offset=0):
         if self._cma_fits():
-            # Many continuous design numbers: one CMA-ES spends what is left of the budget (_cma_restarts), whichever
-            # method placed the starting points.
+            if len(points) > 1 and CMA_SPLIT:
+                # Many continuous design numbers: a CMA-ES from each starting point, side by side, each on its share of
+                # the budget (what a start that converged leaves goes to the others, :meth:`_give_back`), whichever method
+                # placed the starting points. When every start converged before the budget was spent, the rest goes to
+                # restarts with a larger population (:meth:`_cma_restarts`).
+                yield from self._side_by_side(points, offset, cma=True)
+                if self.used < self.total and self.stopped is None:
+                    yield from self._cma_restarts(points, offset, first=len(points), lam=2 * self._cma_lam())
+                return
+            if len(points) > 1:
+                note = (f"the design has {self.space.dims} continuous numbers, so the local search is one CMA-ES that spends "
+                        f"the budget from the first starting point and begins again from the next only when it converges, "
+                        f"not {len(points)} separate searches (on test functions with a known optimum, one run found the "
+                        "better design than separate ones in 35 of 36 cases)")
+                if note not in self.notes:
+                    self.notes.append(note)
             yield from self._cma_restarts(points, offset)
             return
-        if first_cap is None and len(points) > 1:
+        if len(points) > 1:
             # The starting points do not depend on each other's answers: they run side by side (_side_by_side), however
             # many evaluations run at the same time, so the search is the same on any machine.
             yield from self._side_by_side(points, offset)
@@ -1147,14 +1196,40 @@ class _Search:
             out.append((yield request))
         return out
 
-    def _side_by_side(self, points, offset):
+    def _cap(self, start, cap):
+        """Where a local search's share of the budget ends: its ``cap``, or, while the starts run side by side, the share
+        it holds now (a start that converged gave its unused evaluations to the others)."""
+        if cap is not None and self.own_caps:
+            return self.shares.get(start, cap)
+        return cap
+
+    def _give_back(self, finished, live):
+        """The evaluations the start ``finished`` did not use of its share, shared out evenly among the starts ``live``
+        (the lowest numbers take the remainder), so the plan's whole budget is spent across its starts."""
+        left = self.shares.get(finished, 0) - self.used_by_start.get(finished, 0)
+        if left <= 0 or not live:
+            return
+        self.shares[finished] -= left
+        each, extra = divmod(left, len(live))
+        for k, other in enumerate(sorted(live)):
+            self.shares[other] = self.shares.get(other, 0) + each + (1 if k < extra else 0)
+
+    def _side_by_side(self, points, offset, cma=False):
         """The local searches from ``points`` at the same time, each on its own share of the budget (``per_start``, or an
-        even share of what is left): every step, each start's next design (or designs) are asked for together in one
-        batch, and each start goes on from its own answers exactly as it would alone. A design two starts ask for at
+        even share of what is left; a start that converges first gives what it did not use to the others): every step,
+        each start's next design (or designs) are asked for together in one batch, and each start goes on from its own
+        answers exactly as it would alone. A design two starts ask for at
         once is evaluated once. A stop of the whole search (budget, time) ends every start, each recorded."""
-        share = max(1, min(self.per_start, (self.total - self.used) // max(1, len(points))))
+        # Each start's share counts what it has used already (the first start's is the baseline's evaluation): an even
+        # share of what is left and what the starts used, at most ``per_start``. When it is short of ``per_start``, the
+        # remainder goes to the first starts, so none of the budget is left over.
+        n = max(1, len(points))
+        room = self.total - self.used + sum(self.used_by_start.get(offset + i, 0) for i in range(n))
+        share = max(1, min(self.per_start, room // n))
+        extra = room - share * n if share < self.per_start else 0
         self.own_caps = True
-        gens = {i: self._local(u0, offset + i, share) for i, u0 in enumerate(points)}
+        self.shares = {offset + i: share + (1 if i < extra else 0) for i in range(n)}
+        gens = {i: self._local(u0, offset + i, self.shares[offset + i], cma=cma) for i, u0 in enumerate(points)}
         pending = {}
         try:
             for i, gen in list(gens.items()):
@@ -1162,7 +1237,8 @@ class _Search:
                     pending[i] = next(gen)
                 except StopIteration:
                     del gens[i]
-            while pending:
+                    self._give_back(offset + i, [offset + j for j in gens])
+            while pending and not self.stream:
                 asked, where, index = [], [], {}
                 for i in sorted(pending):
                     request = pending[i]
@@ -1184,6 +1260,9 @@ class _Search:
                         pending[i] = gens[i].send(answer)
                     except StopIteration:
                         del gens[i]
+                        self._give_back(offset + i, [offset + j for j in gens])
+            if pending and self.stream:
+                yield from self._stream(gens, pending, offset)
         except _Stop:
             for i, gen in gens.items():
                 try:
@@ -1193,11 +1272,77 @@ class _Search:
             raise
         finally:
             self.own_caps = False
+            self.shares = {}
 
-    def _local(self, u0, start, cap, began=None):
+    def _stream(self, gens, pending, offset):
+        """:meth:`_side_by_side` with the starts answered as their designs finish, not step by step: every design a start
+        asks for goes to the pool at once (``{"kind": "evaluate_stream", "requests": [...]}``, each with an ``id``), the
+        driver answers with the ones that finished (``[(id, answer), ...]``, at least one), and a start goes on as soon as
+        all the designs of its own step are answered, so a slow design holds back its start only, not the other starts.
+        Each start still goes on from its own answers exactly as it would alone, so the designs each start evaluates are
+        the same; what can differ is the order the answers arrive in. The rows are put back in the order of the
+        step-by-step search afterwards (its step, then the start), so the record reads the same. A design two starts ask
+        for is evaluated once; which of them is charged for it is the one that is answered first. A count-threshold stop
+        (``no_effect``, ``flat_objective``, ``stepped_objective``) fires on the answers in the order they arrive."""
+        steps = {i: 0 for i in gens}
+        needs = {}  # start -> the keys of the designs its step asks for, in order
+        answers = {}  # key -> answer
+        inflight = set()
+        first_row, first_start = len(self.rows), len(self.start_log)
+        try:
+            while pending:
+                new = []
+                for i in sorted(pending):
+                    if i in needs:
+                        continue
+                    request = pending[i]
+                    parts = request["requests"] if request["kind"] == "evaluate_many" else [request]
+                    keys = []
+                    for part in parts:
+                        key = self.space.key(self.space.canonical(part["design"]))
+                        keys.append(key)
+                        if key not in answers and key not in inflight and key not in self.cache:
+                            inflight.add(key)
+                            new.append(dict(part, id=key))
+                    needs[i] = (keys, request["kind"])
+                ready = [i for i in sorted(needs) if all(k in answers or k in self.cache for k in needs[i][0])]
+                for i in ready:
+                    keys, kind = needs.pop(i)
+                    got = [answers.get(k) for k in keys]
+                    steps[i] += 1
+                    self.order = (steps[i], i)
+                    try:
+                        pending[i] = gens[i].send(got if kind == "evaluate_many" else got[0])
+                    except StopIteration:
+                        del gens[i], pending[i]
+                        self._give_back(offset + i, [offset + j for j in gens])
+                    finally:
+                        self.order = None
+                if ready:
+                    continue  # the starts that went on may ask for more; send those before waiting
+                if not new and not inflight:
+                    raise RuntimeError("the search waits for a design nobody asked for")
+                replies = yield {"kind": "evaluate_stream", "requests": new}
+                for key, reply in replies if isinstance(replies, list) else []:
+                    answers[key] = reply
+                    inflight.discard(key)
+        finally:
+            # Put this stretch's rows in the order of the step-by-step search, and number them again.
+            tail = sorted(range(first_row, len(self.rows)), key=lambda k: (self.row_order[k] or (0, 0), k))
+            rows = [self.rows[k] for k in tail]
+            orders = [self.row_order[k] for k in tail]
+            self.rows[first_row:] = rows
+            self.row_order[first_row:] = orders
+            for n, row in enumerate(self.rows[first_row:], start=first_row + 1):
+                row["n"] = n
+            tail = sorted(range(first_start, len(self.start_log)), key=lambda k: (self.start_order[k] or (0, 0), k))
+            self.start_log[first_start:] = [self.start_log[k] for k in tail]
+            self.start_order[first_start:] = [self.start_order[k] for k in tail]
+
+    def _local(self, u0, start, cap, began=None, cma=False):
         began = self.used if began is None else max(0, began)
         try:
-            yield from self._nelder_mead(u0, start, cap)
+            yield from (self._cma(u0, start, cap) if cma else self._nelder_mead(u0, start, cap))
             why = "converged"
         except _StartDone as done:
             why = str(done)
@@ -1211,6 +1356,7 @@ class _Search:
         used = self.used_by_start.get(start, 0) if self.own_caps else self.used - began
         self.start_log.append({"start": start, "from": self.space.design(u0), "evaluations": used,
                                "stopped_because": why, "best_objective": self._best_of_start(start)})
+        self.start_order.append(self.order)
 
     def _best_of_start(self, start):
         rows = [r for r in self.rows if r["start"] == start and r["feasible"]]
@@ -1231,13 +1377,16 @@ class _Search:
             return False
         return True
 
-    def _cma_restarts(self, points, offset):
-        """A CMA-ES from the first starting point with what is left of the budget; when it converges first, it starts
-        again from the next starting point (and from the first again after the last) with twice the population (the
-        "IPOP" restarts), until the budget is spent. A CMA-ES needs its evaluations together: shared out among the
-        starting points it found worse designs than one run, on test functions with known minima."""
-        lam = 4 + int(3 * math.log(self.space.dims))
-        k = 0
+    def _cma_lam(self):
+        return 4 + int(3 * math.log(self.space.dims))
+
+    def _cma_restarts(self, points, offset, first=0, lam=None):
+        """A CMA-ES from the starting point number ``first`` with what is left of the budget; when it converges first, it
+        starts again from the next starting point (and from the first again after the last) with twice the population
+        (the "IPOP" restarts), until the budget is spent. A search with several starting points runs them side by side
+        first (:meth:`_side_by_side`) and comes here only for what they left."""
+        lam = lam or self._cma_lam()
+        k = first
         while self.used < self.total:
             u0 = points[k % len(points)] if points else self.space.unit(self.baseline)
             began, start = self.used, offset + k
@@ -1386,7 +1535,9 @@ class _Search:
 
     def _evolution(self, cap):
         """Differential evolution over the whole range until ``cap`` evaluations are spent (the baseline is one of the
-        population)."""
+        population). By default each trial is made from the population as it stands and kept at once when it is no worse
+        than the member it was made for, so the trials follow one another; with :data:`DE_GENERATIONAL` the trials of a
+        whole generation are made from the population as the generation began and asked for together."""
         d = self.space.dims
         size = max(4, min(10 * d, cap // 3))
         population = [self.space.unit(self.baseline)] + self._lhs(size - 1)
@@ -1394,20 +1545,36 @@ class _Search:
             fitness = yield from self._fs(population, "global", None, cap)
             proposals, most = 0, 20 * cap + 50
             while True:
+                if DE_GENERATIONAL:
+                    trials = []
+                    for i in range(size):
+                        proposals += 1
+                        if proposals > most:
+                            return
+                        trials.append(self._de_trial(population, i, size, d))
+                    results = yield from self._fs(trials, "global", None, cap)
+                    for i in range(size):
+                        if results[i] <= fitness[i]:
+                            population[i], fitness[i] = trials[i], results[i]
+                    continue
                 for i in range(size):
                     proposals += 1
                     if proposals > most:
                         return
-                    a, b, c = self.rng.sample([k for k in range(size) if k != i], 3)
-                    mutant = [population[a][j] + 0.7 * (population[b][j] - population[c][j]) for j in range(d)]
-                    mutant = [min(1.0, max(0.0, m)) for m in mutant]
-                    keep = self.rng.randrange(d)
-                    trial = [mutant[j] if (self.rng.random() < 0.9 or j == keep) else population[i][j] for j in range(d)]
+                    trial = self._de_trial(population, i, size, d)
                     ft = yield from self._f(trial, "global", None, cap)
                     if ft <= fitness[i]:
                         population[i], fitness[i] = trial, ft
         except _StartDone:
             return
+
+    def _de_trial(self, population, i, size, d):
+        """The trial for member ``i``: a mutant of three other members, crossed with member ``i`` (rand/1/bin)."""
+        a, b, c = self.rng.sample([k for k in range(size) if k != i], 3)
+        mutant = [population[a][j] + 0.7 * (population[b][j] - population[c][j]) for j in range(d)]
+        mutant = [min(1.0, max(0.0, m)) for m in mutant]
+        keep = self.rng.randrange(d)
+        return [mutant[j] if (self.rng.random() < 0.9 or j == keep) else population[i][j] for j in range(d)]
 
     def _exhaustive(self):
         count = self.space.count()
@@ -1530,7 +1697,8 @@ class _Search:
         }
 
 
-def search(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True, stop_stepped=True):
+def search(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True, stop_stepped=True,
+           stream=False):
     """The search as a generator of requests (see the module docstring); returns the outcome. ``rounds``: the rounds of
     a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``).
     ``results``: the names of the results the plan gives, watched for a design that changes none of them. ``batch``:
@@ -1540,7 +1708,7 @@ def search(block, *, seed, method=None, rounds=None, results=None, batch=False, 
     another, so the search and its record are the same. ``stop_flat``: whether a search whose objective never moves stops
     early (``flat_objective``); off, the fact is recorded and the search runs its budget."""
     return (yield from _Search(block, seed, method, rounds, results, batch=batch, stop_flat=stop_flat,
-                               stop_stepped=stop_stepped).run())
+                               stop_stepped=stop_stepped, stream=stream).run())
 
 
 # --- a comparison across named alternatives: one search for each -----------------------------------------------------
@@ -1588,7 +1756,8 @@ def level_says(level):
     return ", ".join(f"{k} = {v}" for k, v in level.items())
 
 
-def compare(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True, stop_stepped=True):
+def compare(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True, stop_stepped=True,
+            stream=False):
     """:func:`search`, once for each alternative the plan compares (:func:`compared_levels`), one after another, each with
     the plan's own design variables, ranges, budget and seed; the comparison is made between the best design of each.
     Every request it yields says its alternative (``"level"``), and a scan request the alternative's block (``"block"``)
@@ -1599,16 +1768,18 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
     levels = compared_levels(block)
     if not levels:
         return (yield from search(block, seed=seed, method=method, rounds=rounds, results=results, batch=batch,
-                                  stop_flat=stop_flat, stop_stepped=stop_stepped))
+                                  stop_flat=stop_flat, stop_stepped=stop_stepped, stream=stream))
     outcomes = []
     for level in levels:
         sub = level_block(block, level)
         gen = search(sub, seed=seed, method=method, rounds=rounds, results=results, batch=batch, stop_flat=stop_flat,
-                     stop_stepped=stop_stepped)
+                     stop_stepped=stop_stepped, stream=stream)
         try:
             request = next(gen)
             while True:
                 request = dict(request, level=dict(level))
+                if request["kind"] in ("evaluate_many", "evaluate_stream"):
+                    request["requests"] = [dict(r, level=dict(level)) for r in request["requests"]]
                 if request["kind"] == "scan":
                     request["block"] = sub
                 reply = yield request

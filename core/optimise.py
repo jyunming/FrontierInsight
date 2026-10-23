@@ -412,6 +412,84 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
             "elapsed_s": elapsed}, stderr, ""
 
 
+class EvaluationPool:
+    """Designs that do not depend on each other's answers, up to ``at_once`` at the same time, each in a process of its
+    own exactly as :func:`_evaluate` runs one (the same seeds, so the answers are those of one after another). A design
+    joins the pool the moment it is submitted and a place frees up the moment another finishes: nothing waits for the
+    slowest design of a group. :meth:`submit` starts a design, :meth:`wait` returns the ones that have finished, and
+    :meth:`close` waits for the rest and clears the shared folder (the locks and temporary files a design stopped for its
+    time left there, :meth:`core.outside_run.OutsideExecutor.settle`). A design not started before ``deadline`` is
+    answered ``{"stop": "time"}``. ``on_done(id, answer, load error)`` is called as each one finishes (its journal line,
+    the progress), so a long run keeps what it finished if the quest is stopped."""
+
+    def __init__(self, executor: Any, python: Any, quest_root: Path, module: str, entry: str, *, at_once: int, runs: int,
+                 base_seed: int, deadline: float, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+                 seed_key: str = "", on_done: Any = None, log: Any = None):
+        self.executor, self.python, self.quest_root = executor, python, quest_root
+        self.module, self.entry, self.runs, self.base_seed = module, entry, runs, base_seed
+        self.deadline, self.thresholds, self.seed_key, self.on_done = deadline, thresholds, seed_key, on_done
+        (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
+        self.outside = _outside.OutsideExecutor(executor, quest_root, log=log)
+        self.gate = asyncio.Semaphore(max(1, at_once))
+        self.env = _execution.threads_beside(env, max(1, at_once))  # each process its share of the cores
+        self.work = quest_root / WORK_DIR
+        self.tasks: dict[asyncio.Task, Any] = {}
+        self.serial = 0
+
+    def submit(self, ident: Any, cell: dict[str, Any]) -> None:
+        self.serial += 1
+        name = f"eval{self.serial}"
+        task = asyncio.ensure_future(self._one(ident, name, cell))
+        self.tasks[task] = ident
+
+    async def _one(self, ident: Any, name: str, cell: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+        async with self.gate:
+            left = self.deadline - time.monotonic()
+            if left <= 0:
+                got: tuple[dict[str, Any], str, str] = ({"stop": "time"}, "", "")
+            else:
+                try:
+                    got = await _evaluate(self.executor, self.python, self.quest_root, self.module, self.entry, cell,
+                                          runs=self.runs, base_seed=self.base_seed, timeout_s=left, env=self.env,
+                                          thresholds=self.thresholds, seed_key=self.seed_key, name=name,
+                                          outside=self.outside)
+                except Exception as exc:  # noqa: BLE001 -- one design's trouble (a file it could not write) is its answer
+                    got = {"failed": f"FI could not run this design ({type(exc).__name__}: {exc})"[:300]}, "", ""
+                finally:
+                    for left_over in (self.work / f"{name}.json", self.work / f"{name}.out.jsonl"):
+                        left_over.unlink(missing_ok=True)
+            if self.on_done is not None:
+                self.on_done(ident, got[0], got[2])
+            return got
+
+    @property
+    def running(self) -> int:
+        return len(self.tasks)
+
+    async def wait(self) -> list[tuple[Any, tuple[dict[str, Any], str, str]]]:
+        """The designs that finished, ``[(id, (answer, stderr, load error))]``: waits until there is one (at least one
+        design must be running)."""
+        if not self.tasks:
+            return []
+        done, _pending = await asyncio.wait(list(self.tasks), return_when=asyncio.FIRST_COMPLETED)
+        out = []
+        for task in [t for t in self.tasks if t in done]:  # in the order they were submitted
+            out.append((self.tasks.pop(task), task.result()))
+        return out
+
+    async def close(self) -> list[tuple[Any, tuple[dict[str, Any], str, str]]]:
+        """Every design still running, waited for and returned; then the shared folder is cleared."""
+        out = []
+        try:
+            while self.tasks:
+                out.extend(await self.wait())
+        finally:
+            for task in self.tasks:  # only when the wait itself was cut short (the quest was stopped)
+                task.cancel()
+            await self.outside.settle()
+        return out
+
+
 async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: str, entry: str,
                         cells: list[dict[str, Any]], *, at_once: int, runs: int, base_seed: int, deadline: float,
                         env: dict[str, str] | None, thresholds: dict[str, Any] | None,
@@ -432,37 +510,14 @@ async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: st
                 on_done(len(out), got[0], got[2])
             out.append(got)
         return out
-    (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
-    outside = _outside.OutsideExecutor(executor, quest_root, log=log)
-    gate = _execution.SettingsGate(at_once, log=log)  # fewer at once when the memory would not hold them
-    outside.meter = gate.note
-    env = _execution.threads_beside(env, at_once)  # each process its share of the cores
-    work = quest_root / WORK_DIR
-
-    async def one(k: int, cell: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
-        async with gate.slot():
-            left = deadline - time.monotonic()
-            if left <= 0:
-                got: tuple[dict[str, Any], str, str] = ({"stop": "time"}, "", "")
-            else:
-                try:
-                    got = await _evaluate(executor, python, quest_root, module, entry, cell, runs=runs,
-                                          base_seed=base_seed, timeout_s=left, env=env, thresholds=thresholds,
-                                          seed_key=seed_key, name=f"eval{k}", outside=outside)
-                except Exception as exc:  # noqa: BLE001 -- one design's trouble (a file it could not write) is its answer
-                    got = {"failed": f"FI could not run this design ({type(exc).__name__}: {exc})"[:300]}, "", ""
-                finally:
-                    for left_over in (work / f"eval{k}.json", work / f"eval{k}.out.jsonl"):
-                        left_over.unlink(missing_ok=True)
-            if on_done is not None:
-                on_done(k, got[0], got[2])
-            return got
-
-    try:
-        return list(await asyncio.gather(*(one(k, c) for k, c in enumerate(cells))))
-    finally:
-        # the locks and temporary files a design stopped for its time left in the shared folder (OutsideExecutor.settle)
-        await outside.settle()
+    pool = EvaluationPool(executor, python, quest_root, module, entry, at_once=at_once, runs=runs, base_seed=base_seed,
+                          deadline=deadline, env=env, thresholds=thresholds, seed_key=seed_key, on_done=on_done, log=log)
+    for k, cell in enumerate(cells):
+        pool.submit(k, cell)
+    answers: dict[int, tuple[dict[str, Any], str, str]] = {}
+    for ident, got in await pool.close():
+        answers[ident] = got
+    return [answers[k] for k in range(len(cells))]
 
 
 def _read_journal(path: Path, key: str, space: Any) -> tuple[dict[str, dict[str, Any]], float]:
@@ -784,15 +839,33 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     constant = _degenerate.expected_constants(protocol)
     results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
     gen = _search.compare(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1,
-                       stop_flat=stop_flat, stop_stepped=stop_stepped)
+                          stop_flat=stop_flat, stop_stepped=stop_stepped, stream=at_once > 1)
     replay_space = _search.Space(block["design_variables"]) if replay else None
     load_error = ""
     done_outcome: dict[str, Any] | None = None
     last_note = time.monotonic()
     evaluated = 0
+    pool: EvaluationPool | None = None  # the designs running now, when the search is answered as each one finishes
+    streamed: dict[Any, dict[str, Any]] = {}  # the request of each design in the pool, by its id
+
+    def finished_streamed(ident: Any, answer: dict[str, Any], loaded: str) -> None:
+        nonlocal evaluated, last_note
+        asked_one = streamed.get(ident) or {}
+        if ("values" in answer or "failed" in answer) and not loaded and not answer.get("process") \
+                and isinstance(asked_one.get("design"), dict):
+            _journal(journal, asked_one["design"], answer, asked_one.get("level"))
+        if "values" in answer or "failed" in answer:
+            evaluated += 1
+        if log is not None and time.monotonic() - last_note > 60:
+            last_note = time.monotonic()
+            log.info("[optimise] still searching: %d evaluation(s) so far (%d at the same time)", evaluated, at_once)
+
     try:
         request = next(gen)
         while True:
+            if pool is not None and pool.running and request["kind"] != "evaluate_stream":
+                await pool.close()  # designs asked for before a stop: their answers are in the journal, not needed now
+                pool = None
             if request["kind"] == "scan":
                 reply = await scan(request["grid"], request.get("block"), request.get("level"))  # type: ignore[assignment]
                 scan_rows = scan_rows or list(reply)
@@ -833,6 +906,35 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                     answers[k] = {"stop": "the simulation could not be loaded"} if load_error else answer
                     load_error = load_error or loaded
                 reply = answers  # type: ignore[assignment]
+            elif request["kind"] == "evaluate_stream":
+                # Designs the starts chose, answered as each one finishes: a place in the pool is refilled the moment
+                # another design ends, and the search goes on with the ones that finished.
+                if pool is None:
+                    pool = EvaluationPool(executor, python, quest_root, module, entry, at_once=at_once, runs=runs,
+                                          base_seed=int(base_seed), deadline=deadline, env=env, thresholds=thresholds,
+                                          on_done=finished_streamed, log=log)
+                ready: list[Any] = []
+                for one in request["requests"]:
+                    replayed = (replay.get(_replay_key(replay_space, one["design"], one.get("level")))
+                                if replay_space is not None and isinstance(one.get("design"), dict) else None)
+                    if scan_unchanged:
+                        ready.append((one["id"], {"stop": "scan_unchanged"}))
+                    elif replayed is not None:
+                        ready.append((one["id"], dict(replayed)))
+                    elif load_error:
+                        ready.append((one["id"], {"stop": "the simulation could not be loaded"}))
+                    else:
+                        streamed[one["id"]] = one
+                        pool.submit(one["id"], one["cell"])
+                while not ready and pool.running:
+                    for ident, (answer, err, loaded) in await pool.wait():
+                        if err:
+                            stderr_parts.append(err)
+                        # one after another, the designs after the one whose simulation could not be loaded are not run
+                        ready.append((ident, {"stop": "the simulation could not be loaded"} if load_error else answer))
+                        load_error = load_error or loaded
+                        streamed.pop(ident, None)
+                reply = ready  # type: ignore[assignment]
             elif request["kind"] == "evaluate":
                 left = deadline - time.monotonic()
                 replayed = (replay.get(_replay_key(replay_space, request["design"], request.get("level")))
@@ -874,6 +976,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             request = gen.send(reply)
     except StopIteration as stop:
         done_outcome = stop.value
+    finally:
+        if pool is not None:
+            await pool.close()
     outcome = done_outcome or {}
     elapsed = time.monotonic() - started + before_s
     planned = _plan.budget(block)

@@ -51,6 +51,8 @@ from . import stats as _stats
 SCHEMA = "fi.optimum-check/v1"
 CHECK_PATH = Path("needs") / "OPTIMUM_CHECK.json"
 RECORD = Path(".fi") / "optimisation" / "check.json"
+#: Seconds between the progress lines of a running check in run.log.
+PROGRESS_EVERY_S = 30
 #: The environment variable that tells the analysis script where FI's check is.
 CHECK_ENV = "FI_OPTIMUM_CHECK"
 #: How far each variable is nudged around the best design, as a share of its range.
@@ -1078,6 +1080,20 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
                      "simulation, apart from the search's budget)", planned)
         gen = check(block, record_in, rows, noisy=noisy, check_runs=runs)
         load_error = ""
+        done_runs, last_line = 0, time.monotonic()
+
+        def progress(answer: dict[str, Any]) -> None:
+            """One line in run.log as designs finish (at most one in ``PROGRESS_EVERY_S`` seconds): how many of the
+            runs the check planned are done, so a long check shows it is moving and how far it has come."""
+            nonlocal done_runs, last_line
+            if "values" not in answer and "failed" not in answer:
+                return
+            done_runs += runs
+            if log is not None and time.monotonic() - last_line >= PROGRESS_EVERY_S:
+                last_line = time.monotonic()
+                log.info("[optimise] checking at finer settings: %d of at most %s run(s) done", done_runs,
+                         _plan.budget(block)["check"])
+
         try:
             request = next(gen)
             while True:
@@ -1090,7 +1106,8 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
                     answers = await _optimise.evaluate_many(
                         executor, python, quest_root, module, entry, [r["cell"] for r in request["requests"]],
                         at_once=at_once, runs=runs, base_seed=int(base_seed), deadline=deadline, env=env,
-                        thresholds=thresholds, seed_key=seed_key, log=log) if not load_error else []
+                        thresholds=thresholds, seed_key=seed_key, log=log,
+                        on_done=lambda _k, answer, _loaded: progress(answer)) if not load_error else []
                     load_error = load_error or next((le for _r, _e, le in answers if le), "")
                     replies = [r for r, _e, _le in answers] or [{"failed": load_error}] * len(request["requests"])
                     request = gen.send(replies)
@@ -1103,6 +1120,7 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
                     reply, _err, load_error = await _optimise._evaluate(
                         executor, python, quest_root, module, entry, request["cell"], runs=runs,
                         base_seed=int(base_seed), timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key)
+                    progress(reply)
                 request = gen.send(reply)
         except StopIteration as done:
             record = done.value
