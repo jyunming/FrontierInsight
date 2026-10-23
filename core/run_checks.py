@@ -261,6 +261,7 @@ class RunChecksMixin:
             self._typed_checked_sha = sha
             return False
         rewrote = False
+        written: str | None = None  # the text a try of this pass wrote and no run has used yet
         text = path.read_text(encoding="utf-8")
         used = self._typed_counter(text)
         while found and used < TYPED_RESULT_REPAIRS:
@@ -268,8 +269,15 @@ class RunChecksMixin:
             self._log.warning(  # type: ignore[attr-defined]
                 "[execute] %s returns numbers typed into the code (%s); asking for them to be computed (%d of %d)",
                 path.name, "; ".join(f.says() for f in found[:4]), used, TYPED_RESULT_REPAIRS)
-            rewrote = await self._repair_typed_results(state, path, found) or rewrote
+            earlier = path.read_text(encoding="utf-8") if written is not None else ""
+            wrote = await self._repair_typed_results(state, path, found)
+            rewrote = wrote or rewrote
             text = path.read_text(encoding="utf-8")
+            if written is not None and wrote and earlier and earlier != text:
+                # the version the first try wrote was replaced by this one before any run of it
+                await self._keep_overwritten_try(path, used - 1, earlier, "typed-results repair replaced before it ran: "
+                                                 "a later try wrote over it")
+            written = text if wrote else written
             self._save_typed_counter(text, used)
             path, found = self._typed_results_in_simulation(state)
         self._typed_checked_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
@@ -287,6 +295,19 @@ class RunChecksMixin:
             "[execute] %s The paper does not use %s and says so in its limitations.", note,
             "it" if len(keys) == 1 else "them")
         return rewrote
+
+    async def _keep_overwritten_try(self, path: Path, number: int, text: str, message: str) -> None:
+        """Keep a version written into ``code/`` and overwritten before any run, on a side reference of the folder's git
+        history. Best effort: never changes what the check does."""
+        try:
+            from . import code_project as _project
+
+            code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+            rel = path.relative_to(code_dir).as_posix()
+            await asyncio.to_thread(_project.keep_refused, self.quest_root, f"typed-{path.stem}-{number}",  # type: ignore[attr-defined]
+                                    {rel: text}, message, log=self._log)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 -- the record is a convenience; the check goes on whatever happens to it
+            pass
 
     async def _repair_typed_results(self, state: Any, path: Path, found: list[_typed.TypedResult]) -> bool:
         """ONE repair of the simulation: kept only if it parses, keeps what FI reads from it, and has fewer typed-in

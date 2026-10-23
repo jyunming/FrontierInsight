@@ -1141,3 +1141,36 @@ def test_a_search_speed_up_is_held_to_the_baseline_and_designs_spread_over_the_s
     assert len(set(xs)) == len(xs) and min(xs) < -1 and max(xs) > 1
     assert all(c["axis0"] == 1 for c in cells)  # the scan's other settings at their base value
     assert run_checks._search_sample({"design_variables": "not a list"}, {}) == []
+
+
+TWO_TYPED_SIM = TYPED_SIM.replace('"lid_on": 1.0}', '"lid_on": 1.0, "lid_off": 2.0}')
+
+
+@pytest.mark.asyncio
+async def test_a_typed_results_rewrite_that_a_later_try_writes_over_is_kept_on_a_side_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+    import subprocess
+
+    from core import code_project
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    first = TWO_TYPED_SIM.replace('"lid_on": 1.0', '"lid_on": float(temp < 80.0)')
+    second = first.replace('"lid_off": 2.0', '"lid_off": float(temp > 80.0)')
+    eng, asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": first}), json.dumps({"code": second})])
+    code = eng.quest_root / "code"
+    (code / "simulate.py").write_text(TWO_TYPED_SIM, encoding="utf-8")
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=code, capture_output=True, text=True, check=True).stdout
+
+    code_project.record_change(eng.quest_root, "code written")
+    head = git("rev-parse", "HEAD")
+    assert await eng._results_from_computation({}) is True and len(asked) == 2
+    assert (code / "simulate.py").read_text(encoding="utf-8") == second
+    assert git("for-each-ref", "--format=%(refname)", "refs/fi/refused/").split() == ["refs/fi/refused/typed-simulate-1"]
+    assert git("show", "refs/fi/refused/typed-simulate-1:simulate.py") == first
+    assert git("rev-parse", "HEAD") == head
+    assert set(git("status", "--porcelain").split()) <= {"M", "simulate.py"}  # the working folder is the newest try only

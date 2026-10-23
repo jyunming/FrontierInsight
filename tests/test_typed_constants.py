@@ -296,3 +296,33 @@ def test_an_unused_nested_function_that_calls_a_flagged_function_taints_nothing(
     other = ('from pkg import model\n\n\ndef wrapper(v):\n    def never_called():\n        return model.response(v)\n    return v\n\n\n'
              'def run_cell(cell):\n    return {"y": wrapper(cell["x"])}\n')
     assert tc.tainted_outputs({**files, "simulate.py": other}, found) == set()
+
+
+def _git(code: Path, *args: str) -> str:
+    import subprocess
+
+    return subprocess.run(["git", *args], cwd=code, capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.asyncio
+async def test_a_static_repair_that_is_taken_back_without_a_run_is_kept_on_a_side_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+
+    from core import code_project
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    refused = SHAPED + "\n# a rewrite that still has the typed number\n"
+    eng, asked = _engine(tmp_path, monkeypatch, [json.dumps({"code": refused, "patch_summary": "no real change"})])
+    code = eng.quest_root / "code"
+    code_project.record_change(eng.quest_root, "code written")
+    head = _git(code, "rev-parse", "HEAD")
+    assert await eng._static_gate({}) is None and len(asked) == 2
+    refs = _git(code, "for-each-ref", "--format=%(refname)", "refs/fi/refused/").split()
+    assert "refs/fi/refused/static-model-1" in refs and "refs/fi/refused/static-model-2" in refs
+    assert _git(code, "show", "refs/fi/refused/static-model-1:pkg/model.py") == refused
+    assert "the static faults were not fewer" in _git(code, "log", "-1", "--format=%s", "refs/fi/refused/static-model-1")
+    assert (code / "pkg" / "model.py").read_text(encoding="utf-8") == SHAPED, "the step still keeps the old code"
+    assert _git(code, "status", "--porcelain") == "" and _git(code, "rev-parse", "HEAD") == head

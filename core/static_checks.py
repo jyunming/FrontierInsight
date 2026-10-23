@@ -110,7 +110,7 @@ class StaticChecksMixin:
                 used += 1
                 self._log.warning(  # type: ignore[attr-defined]
                     "[execute] %s; asking for it to be repaired (%d of %d)", module.plain_note(found, protocol), used, REPAIRS)
-                await self._repair_static(state, module, found, protocol, design)
+                await self._repair_static(state, module, found, protocol, design, used)
                 files = self._static_files()
                 sha = self._static_fingerprint(files)
                 self._save_static_counter(name, sha, used)
@@ -152,7 +152,8 @@ class StaticChecksMixin:
                    f"sent the code back to be repaired {REPAIRS} times; it still had this"])
         return self._cannot_repair_stop()  # type: ignore[attr-defined]
 
-    async def _repair_static(self, state: Any, module: Any, found: list[Any], protocol: Any, design: Any) -> bool:
+    async def _repair_static(self, state: Any, module: Any, found: list[Any], protocol: Any, design: Any,
+                             number: int = 1) -> bool:
         """ONE repair of the file the first fault is in: kept only if it parses, keeps what FI reads from it, and has fewer
         faults of this kind in that file than before."""
         from . import engine as _e
@@ -204,6 +205,8 @@ class StaticChecksMixin:
         after = len([f for f in module.problems(self._static_files(), protocol, design) if f.script == script])
         if after >= before:
             path.write_text(code, encoding="utf-8")
+            await self._keep_unrun_try(f"static-{Path(script).stem}-{number}", {script: new_code},
+                                       f"static repair refused: the static faults were not fewer ({before} -> {after})")
             self._log.warning(  # type: ignore[attr-defined]
                 "[execute] the rewritten %s still has %d fault(s) of this kind; keeping it as written", script, after)
             return False
@@ -211,6 +214,19 @@ class StaticChecksMixin:
             "[execute] rewrote %s to repair the fault (%d left in it): %s", script, after,
             str(parsed.get("patch_summary") or "no summary")[:120])
         return True
+
+    async def _keep_unrun_try(self, ref: str, files: dict[str, str], message: str) -> None:
+        """Keep a version that was written into ``code/`` and taken back before any run, on a side reference of the
+        folder's git history. Best effort: never changes what the step does."""
+        try:
+            import asyncio
+
+            from . import code_project as _project
+
+            await asyncio.to_thread(_project.keep_refused, self.quest_root, ref, files, message,  # type: ignore[attr-defined]
+                                    log=self._log)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 -- the record is a convenience; the repair goes on whatever happens to it
+            pass
 
     # ---- what stood, for the paper and the evidence -------------------------------------------------------------------
 
