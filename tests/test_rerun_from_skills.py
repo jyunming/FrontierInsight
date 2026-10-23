@@ -23,7 +23,7 @@ SKILL = "zzlieflat-charts"
 def test_the_skills_step_is_offered_before_the_code_and_has_its_words() -> None:
     assert rerun_from.resolve("skills") == "skills" and rerun_from.resolve("select_skills") == "skills"
     assert rerun_from.resolve("Skill") == "skills"
-    assert rerun_from.choices() == "ideas, literature, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
+    assert rerun_from.choices() == "ideas, literature, studies, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
     assert "again from the quest's current config" in rerun_from.REDOES["skills"]
     assert rerun_from.picks_skills("skills") and not rerun_from.picks_skills("code")
 

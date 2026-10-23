@@ -788,7 +788,7 @@ async def test_after_literature_pause_then_resume_does_not_search_again(
     assert "Experiment Design" not in calls_before_resume
     assert "Experiment Design" in calls
     path = dump_state(second.quest_root)
-    assert "->  pause_after_literature" in path and "->  select_skills" in path
+    assert "->  pause_after_literature" in path and "->  scope" in path and "->  select_skills" in path
 
 
 # ---------------------------------------------------------------------------

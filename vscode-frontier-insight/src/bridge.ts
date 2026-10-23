@@ -65,7 +65,13 @@ interface LmRequest {
 interface ClarifyRequest {
     type: "clarify_request";
     id: number;
-    questions: Record<string, { question: string; default: unknown }>;
+    questions: Record<string, { question: string; default: unknown; cards?: StudyCard[] }>;
+}
+
+/** One study the topic could mean; the card the person picks (or edits) is sent back whole. */
+interface StudyCard {
+    question: string;
+    [field: string]: unknown;
 }
 
 interface HumanReviewRequest {
@@ -320,6 +326,21 @@ export class Bridge {
         const keys = Object.keys(req.questions);
         for (const key of keys) {
             const entry = req.questions[key];
+            if (Array.isArray(entry.cards) && entry.cards.length) {
+                const study = await this.pickStudy(entry.cards, entry.question || key);
+                if (study === undefined) {
+                    this.send({ type: "clarify_cancelled", id: req.id });
+                    this.opts.progress.markdown(
+                        "\n— study choice cancelled by user; quest will fail.\n",
+                    );
+                    return;
+                }
+                answers[key] = study;
+                this.opts.progress.markdown(
+                    `  **Study:** ${escapeMd(typeof study === "object" ? String(study.question) : String(study))}\n\n`,
+                );
+                continue;
+            }
             const defaultIsList = Array.isArray(entry.default);
             const defaultStr = defaultIsList
                 ? (entry.default as unknown[]).join(", ")
@@ -361,6 +382,63 @@ export class Bridge {
             answers,
         });
         this.opts.progress.markdown("\n— clarify answers submitted; resuming…\n\n");
+    }
+
+    /**
+     * Offer the study cards as a pick list: one item per card, "Edit a card…" (pick a card, then change its
+     * question) and "Write my own…". Returns the card number, the edited card or a sentence; undefined on Esc.
+     */
+    private async pickStudy(
+        cards: StudyCard[],
+        prompt: string,
+    ): Promise<number | StudyCard | string | undefined> {
+        const firstLine = prompt.split("\n")[0];
+        const items = cards.map((c, i) => ({
+            label: `${i + 1}. ${c.question}`,
+            action: "pick" as const,
+            index: i,
+        }));
+        const choices = [
+            ...items,
+            { label: "Edit a card…", action: "edit" as const, index: -1 },
+            { label: "Write my own…", action: "own" as const, index: -1 },
+        ];
+        const chosen = await vscode.window.showQuickPick(choices, {
+            title: "Pick the study to run",
+            placeHolder: firstLine,
+            ignoreFocusOut: true,
+        });
+        if (!chosen) {
+            return undefined;
+        }
+        if (chosen.action === "pick") {
+            return chosen.index + 1;
+        }
+        if (chosen.action === "own") {
+            const text = await vscode.window.showInputBox({
+                title: "Write my own study",
+                prompt: "The study you want, in a sentence",
+                ignoreFocusOut: true,
+            });
+            return text === undefined || !text.trim() ? undefined : text.trim();
+        }
+        const which = await vscode.window.showQuickPick(items, {
+            title: "Edit which study?",
+            ignoreFocusOut: true,
+        });
+        if (!which) {
+            return undefined;
+        }
+        const card = cards[which.index];
+        const text = await vscode.window.showInputBox({
+            title: "Edit the study's question",
+            value: card.question,
+            ignoreFocusOut: true,
+        });
+        if (text === undefined) {
+            return undefined;
+        }
+        return { ...card, question: text.trim() || card.question };
     }
 
     /**

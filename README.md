@@ -70,6 +70,7 @@ Every quest writes **`plan.md`** before the experiment is designed. Ask FI to st
 ```yaml
 pauses:
   plan: ask      # or answer "Stop to read and edit the plan" in the interview
+  scope: ask     # before the plan, pick the study to run from 3 or 4 studies FI offers (off skips it)
 ```
 
 ```bash

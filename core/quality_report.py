@@ -178,6 +178,7 @@ class _Quest:
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.pause = _dict(_json(fi / "pause.json"))
+        self.scope = _dict(_json(fi / "scope.json"))
         self.cost = _dict(_json(fi / "cost.summary.json"))
         self.stuck = _dict(_json(root / "needs" / "STUCK.json"))
         self.critique = [x for x in _list(_json(root / "needs" / "DESIGN_CRITIQUE.json")) if isinstance(x, dict)]
@@ -386,6 +387,23 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
                                       "the results belong to the plan's settings, not to what the redesign meant",
                             "FI's design check", "left out", ".fi/drafted_parts_asked.json"))
     return out
+
+
+def _scope_summary(q: _Quest) -> dict[str, Any] | None:
+    """Which study was picked, or that nobody picked one and which studies the topic could also have meant
+    (``.fi/scope.json``). ``None`` when there is no such record."""
+    if not q.scope:
+        return None
+    from . import scope_cards as _sc
+
+    cards = [_dict(c) for c in _list(q.scope.get("cards"))]
+    chosen = _dict(q.scope.get("chosen"))
+    removed = [str(x) for x in _list(q.scope.get("removed")) if str(x).strip()]
+    if q.scope.get("chosen_by") == "person" and chosen:
+        return {"chosen_by": "person", "chosen": str(chosen.get("question") or ""), "removed": removed,
+                "lines": [f"The person chose this study: {_one(chosen.get('question'), 300)}"]}
+    return {"chosen_by": "nobody", "chosen": "", "removed": removed,
+            "lines": [_sc.nobody_line(), *[_one(c.get("question"), 300) for c in cards if c.get("question")]]}
 
 
 def _plan_problems(q: _Quest) -> list[dict[str, str]]:
@@ -1129,6 +1147,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
+        "scope": _scope_summary(q),
         "trial_checks": _trial_checks_summary(q),
         "citations": _citations(q),
         "paper_pdf": _paper_pdf(q),
@@ -1328,6 +1347,11 @@ def render(report: dict[str, Any]) -> str:
     pilot = report.get("pilot")
     if pilot:
         lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
+    scope = report.get("scope")
+    if scope:
+        lines += ["", "## The study", "", scope["lines"][0]]
+        lines += [f"- {line}" for line in scope["lines"][1:]]
+        lines += [f"- Removed: {_cell(x)}" for x in scope.get("removed") or []]
     trials = report.get("trial_checks")
     if trials:
         lines += ["", "## FI's checks of the trials", ""]
