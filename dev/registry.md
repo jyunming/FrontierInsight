@@ -207,6 +207,11 @@ same PR that adds, splits or renames one.
   `_node_analyze` (changed), the improve loop (changed; a kept round waits for the full run, a revert passes
   `undo_pending`); `code_project.record_change` makes a change to `DOCUMENTATION` files alone (README.md, requirements.txt, run.py,
   study.json, METHODS.md, tests/test_oracles.py: FI's own runs never read them) `tidied`, and commits a CHANGELOG.md-only change with no entry.
+  `code_project.CodeRuns` (built in `Engine.__init__`, set as the executor's `before_run`, awaited at the top of
+  `VenvExecutor.execute` / `DockerExecutor.execute`) commits code/ as "the code as it ran (<node>)" before any run
+  when a file listing differs from the last commit, so every version that runs is a commit whichever step wrote it;
+  `Engine._hold_code_runs` pauses it around the improve loop, the speed-up and the finding repairs, which commit each
+  try with their own words.
 - `core/improve.py` — the improve loop and the ratchet: one edit per round to the simulation against the protocol's
   criteria. `parse_edit` / `check_edit` (the edit refused before it runs: another file, not found once, does not
   parse, `normalized` unchanged = print/comment-only, a version already tried by `fingerprint`, a check's expected
