@@ -45,6 +45,8 @@ import re
 import sys
 from typing import Any
 
+from . import oracle_forms as _forms
+
 # What a tolerance of 0 can mean for a computed value: floating-point arithmetic cannot give it more exactly than a few
 # dozen units in its last place (a plan's 0 on a computed p-value failed correct code on a measured 1.1e-16), so 0 is read
 # as "exact to machine precision". A count that is off by 1 still fails; a tolerance above 0 is never widened.
@@ -1270,7 +1272,7 @@ _EXPECTED_FORMULA_SHORT = ("the expected value as one formula FI can compute: nu
 
 
 #: The longest ``expected_formula`` a repair may propose (one formula, not a program).
-MAX_FORMULA = 3000
+MAX_FORMULA = _forms.MAX_FORMULA_CHARS  # the evaluator's own limit: a longer formula could never be computed
 
 
 def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -604,10 +604,17 @@ def test_a_long_expected_formula_is_kept_whole_and_one_too_long_is_dropped_with_
     """A formula was cut at 600 characters, so a long one became a different expression that failed to compute and was
     dropped with no word to the reader of the log."""
     base = {"name": ORACLE["name"], "expected": 1, "tolerance": 0.2, "reason": "the working had a slip"}
-    long_formula = " + ".join(f"{i}*x" for i in range(200))
-    assert 600 < len(long_formula) < oc.MAX_FORMULA
-    kept = oc.proposals([{**base, "expected_formula": long_formula}], [ORACLE])[0]
-    assert kept["expected_formula"] == long_formula and "expected_formula_dropped" not in kept
+    from core import oracle_forms as forms
+
+    assert oc.MAX_FORMULA == forms.MAX_FORMULA_CHARS, "one limit: the evaluator's own"
+    under = "2 * 1." + "0" * (oc.MAX_FORMULA - 8) + "5"  # just under the limit, few nodes
+    over = "2 * 1." + "0" * (oc.MAX_FORMULA - 5) + "5"  # just over it
+    assert len(under) <= oc.MAX_FORMULA < len(over)
+    kept = oc.proposals([{**base, "expected_formula": under}], [ORACLE])[0]
+    assert kept["expected_formula"] == under and "expected_formula_dropped" not in kept
+    assert forms.evaluate(kept["expected_formula"], {}).value is not None, "kept AND evaluates"
+    dropped = oc.proposals([{**base, "expected_formula": over}], [ORACLE])[0]
+    assert "expected_formula" not in dropped and str(len(over)) in dropped["expected_formula_dropped"]
     too_long = oc.proposals([{**base, "expected_formula": "1 + " * oc.MAX_FORMULA + "1"}], [ORACLE])[0]
     assert "expected_formula" not in too_long and "characters" in too_long["expected_formula_dropped"]
     assert oc.proposals([{**base, "expected_formula": "2*x"}], [ORACLE])[0]["expected_formula"] == "2*x"
