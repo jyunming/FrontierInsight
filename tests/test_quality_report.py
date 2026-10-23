@@ -145,6 +145,21 @@ def test_a_check_that_was_undecided_and_then_failed_is_counted_by_kind(tmp_path:
     assert "(not decided 1 time, failed 1 time)" in text, text
 
 
+def test_the_sentence_describes_the_latest_round_not_the_first(tmp_path: Path) -> None:
+    undecided = "the oracle 'mean_rate' was not decided: the trials could not tell it from its expected value"
+    failed = "the oracle 'mean_rate' failed: FI measured 3, the protocol expects 1 within 0.01 (absolute tolerance 0.01)"
+
+    def line(name: str, rounds: list[list[str]]) -> str:
+        root = tmp_path / name
+        _audit(root, [{"kind": "check_result", "check": "oracle", "status": "stopped", "problems": p} for p in rounds])
+        return _stage(qr.build(root), "run")["problems"]["items"][0]["text"]
+
+    text = line("a", [[undecided], [failed]])
+    assert text.startswith("the oracle 'mean_rate' failed") and "was not decided" not in text, text
+    text = line("b", [[failed], [], [undecided]])
+    assert text.startswith("the oracle 'mean_rate' was not decided") and "failed: FI measured" not in text, text
+
+
 def test_check_fixed_by_a_later_attempt(tmp_path: Path) -> None:
     root = tmp_path / "q-fixed"
     bad = ["the oracle 'limit_case' failed: FI measured 3, the protocol expects 1 within 0.01 (absolute tolerance 0.01)"]

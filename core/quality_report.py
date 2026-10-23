@@ -248,7 +248,7 @@ def _oracle_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     seen: dict[str, int] = {}
     kinds: dict[str, dict[str, int]] = {}
-    first_text: dict[str, tuple[str, str]] = {}
+    latest: dict[str, tuple[str, str]] = {}
     for status, problems, src in rounds:
         for p in problems:
             key = next(iter(_pending_names([p])))
@@ -256,10 +256,10 @@ def _oracle_problems(q: _Quest) -> list[dict[str, str]]:
             # Each round is named by its own sentence: a check its trials could not decide did not fail.
             kind = "not decided" if " was not decided" in str(p) else "failed"
             kinds.setdefault(key, {})[kind] = kinds.setdefault(key, {}).get(kind, 0) + 1
-            first_text.setdefault(key, (str(p), src))
+            latest[key] = (str(p), src)  # the latest round: the sentence says what the check is now
     last_status, last_problems, _ = rounds[-1]
     still = _pending_names(last_problems)
-    for key, (text, src) in first_text.items():
+    for key, (text, src) in latest.items():
         if key in still:
             status = "left out" if last_status == "went_on_failing" else "not fixed"
         else:
