@@ -1286,12 +1286,13 @@ class _Search:
         (``no_effect``, ``flat_objective``, ``stepped_objective``) fires on the answers in the order they arrive."""
         steps = {i: 0 for i in gens}
         needs = {}  # start -> the keys of the designs its step asks for, in order
+        line = []  # the starts in the order they asked: they are answered in this order, whatever order designs finish in
         answers = {}  # key -> answer
         inflight = set()
         first_row, first_start = len(self.rows), len(self.start_log)
+        new = []  # designs asked for and not yet handed to the pool
         try:
             while pending:
-                new = []
                 for i in sorted(pending):
                     if i in needs:
                         continue
@@ -1305,12 +1306,17 @@ class _Search:
                             inflight.add(key)
                             new.append(dict(part, id=key))
                     needs[i] = (keys, request["kind"])
-                ready = [i for i in sorted(needs) if all(k in answers or k in self.cache for k in needs[i][0])]
-                for i in ready:
+                    line.append(i)
+                went = False
+                # Designs may finish in any order, but a start goes on only once every start that asked before it has:
+                # what is recorded, what is charged and where a count-threshold stop fires then depend on the plan alone.
+                while line and all(k in answers or k in self.cache for k in needs[line[0]][0]):
+                    i = line.pop(0)
                     keys, kind = needs.pop(i)
                     got = [answers.get(k) for k in keys]
                     steps[i] += 1
                     self.order = (steps[i], i)
+                    went = True
                     try:
                         pending[i] = gens[i].send(got if kind == "evaluate_many" else got[0])
                     except StopIteration:
@@ -1318,11 +1324,13 @@ class _Search:
                         self._give_back(offset + i, [offset + j for j in gens])
                     finally:
                         self.order = None
-                if ready:
-                    continue  # the starts that went on may ask for more; send those before waiting
+                    break  # the start that went on may ask for more: those go to the pool before the next start goes on
+                if went:
+                    continue
                 if not new and not inflight:
                     raise RuntimeError("the search waits for a design nobody asked for")
-                replies = yield {"kind": "evaluate_stream", "requests": new}
+                asked_now, new = new, []
+                replies = yield {"kind": "evaluate_stream", "requests": asked_now}
                 for key, reply in replies if isinstance(replies, list) else []:
                     answers[key] = reply
                     inflight.discard(key)
@@ -1770,7 +1778,7 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
         return (yield from search(block, seed=seed, method=method, rounds=rounds, results=results, batch=batch,
                                   stop_flat=stop_flat, stop_stepped=stop_stepped, stream=stream))
     outcomes = []
-    for level in levels:
+    for number, level in enumerate(levels):
         sub = level_block(block, level)
         gen = search(sub, seed=seed, method=method, rounds=rounds, results=results, batch=batch, stop_flat=stop_flat,
                      stop_stepped=stop_stepped, stream=stream)
@@ -1780,9 +1788,15 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
                 request = dict(request, level=dict(level))
                 if request["kind"] in ("evaluate_many", "evaluate_stream"):
                     request["requests"] = [dict(r, level=dict(level)) for r in request["requests"]]
+                if request["kind"] == "evaluate_stream":
+                    # A design id carries its alternative: a late answer of one alternative is never taken for the
+                    # same design of the next.
+                    request["requests"] = [dict(r, id=(number, r["id"])) for r in request["requests"]]
                 if request["kind"] == "scan":
                     request["block"] = sub
                 reply = yield request
+                if request["kind"] == "evaluate_stream" and isinstance(reply, list):
+                    reply = [(ident[1], answer) for ident, answer in reply if ident[0] == number]
                 request = gen.send(reply)
         except StopIteration as finished:
             outcomes.append(finished.value)

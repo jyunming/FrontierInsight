@@ -50,19 +50,20 @@ def _scan_rows(request: dict[str, Any], block: dict[str, Any], f: Any) -> list[d
 
 
 def _drive(block: dict[str, Any], f: Any = _bowl, *, stream: bool, rng: random.Random | None = None,
-           seed: int = 1) -> tuple[dict[str, Any], list[int]]:
+           seed: int = 1, results: list[str] | None = None) -> tuple[dict[str, Any], list[int]]:
     """Run the search. With ``stream`` the designs it asks for finish one at a time in a random order; the second value
     is how many designs were running at each wait."""
-    gen = search.search(block, seed=seed, batch=True, stream=stream)
+    gen = search.search(block, seed=seed, batch=True, stream=stream, results=results)
+    vals = lambda d: {"f": f(d), **({"g": 2.0} if results else {})}  # noqa: E731
     running: dict[Any, dict[str, Any]] = {}
     widths: list[int] = []
     try:
         request = next(gen)
         while True:
             if request["kind"] == "scan":
-                request = gen.send(_scan_rows(request, block, f))
+                request = gen.send([dict(r, values=vals(r["design"])) for r in _scan_rows(request, block, f)])
             elif request["kind"] == "evaluate_many":
-                request = gen.send([{"values": {"f": f(r["design"])}} for r in request["requests"]])
+                request = gen.send([{"values": vals(r["design"])} for r in request["requests"]])
             elif request["kind"] == "evaluate_stream":
                 for r in request["requests"]:
                     assert r["id"] not in running, "a design is not asked for twice while it runs"
@@ -70,9 +71,9 @@ def _drive(block: dict[str, Any], f: Any = _bowl, *, stream: bool, rng: random.R
                 widths.append(len(running))
                 assert running, "the search waits for a design only when one is running"
                 picks = [(rng or random.Random(0)).choice(sorted(running))]
-                request = gen.send([(k, {"values": {"f": f(running.pop(k)["design"])}}) for k in picks])
+                request = gen.send([(k, {"values": vals(running.pop(k)["design"])}) for k in picks])
             else:
-                request = gen.send({"values": {"f": f(request["design"])}})
+                request = gen.send({"values": vals(request["design"])})
     except StopIteration as done:
         return done.value, widths
 
@@ -225,3 +226,96 @@ def test_the_global_stage_asks_one_trial_at_a_time_unless_a_generation_is_asked_
     generational = _global_stage_requests(block)
     assert generational[0] == steady[0] and generational[1] >= generational[0] - 2, "then a whole generation at a time"
     assert len(generational) < len(steady) / 4
+
+
+# --- the answer to a design does not depend on the order designs finish in ------------------------------------------------
+
+
+def _flat_block() -> dict[str, Any]:
+    block = _block(starts=4, per_start=60, method="bounded_local")
+    block["evaluation_budget"] = {"starts": 4, "per_start": 60}
+    return block
+
+
+@pytest.mark.parametrize("order", [0, 1, 2, 3])
+def test_a_stop_that_counts_designs_fires_at_the_same_design_whatever_order_they_finish_in(order: int) -> None:
+    """A design that changes none of the results stops the search once enough designs are counted. The designs are counted in the
+    order they were asked for, not the order they finish in, so two runs of the same plan with different timing record
+    the same rows and stop at the same design."""
+    block = _flat_block()
+    flat = lambda design: 5.0  # noqa: E731
+    reference, _ = _drive(block, flat, stream=True, rng=random.Random(100), results=["f", "g"])
+    other, _ = _drive(block, flat, stream=True, rng=random.Random(order), results=["f", "g"])
+    assert reference["stopped_because"] == "no_effect", reference["stopped_because"]
+    assert _rows(other) == _rows(reference)
+    assert other["stopped_because"] == reference["stopped_because"] and other["evaluations"] == reference["evaluations"]
+
+
+def test_a_count_stop_with_a_moving_objective_is_the_same_in_any_finishing_order() -> None:
+    block = _block(starts=4, per_start=40, method="bounded_local")
+    outs = [_drive(block, _bowl, stream=True, rng=random.Random(k))[0] for k in range(4)]
+    assert all(_rows(o) == _rows(outs[0]) and o["best"] == outs[0]["best"] for o in outs)
+
+
+# --- a late answer of one alternative is not the answer of the next ----------------------------------------------------------
+
+
+def test_a_design_still_running_when_one_alternative_ends_is_not_taken_for_the_same_design_of_the_next() -> None:
+    block = _block(starts=3, per_start=30, method="bounded_local")
+    block["fixed"] = {"shape": "cup"}
+    block["grid"] = {"shape": ["cup", "mug"], "x0": [-1.5, 0.0, 1.5], "x1": [-1.5, 0.0, 1.5]}
+    gen = search.compare(block, seed=1, batch=True, stream=True)
+    running: list[tuple[Any, Any, float]] = []  # (id, level, value) of every design not yet answered
+    stale_given = 0
+    seen_second: list[float] = []
+    stopped_first = False
+    try:
+        request = next(gen)
+        while True:
+            level = request.get("level", {}).get("shape")
+            if request["kind"] == "scan":
+                request = gen.send(_scan_rows(request, block, _bowl))
+            elif request["kind"] == "evaluate_stream":
+                for r in request["requests"]:
+                    running.append((r["id"], level, 999.0 if level == "cup" else _bowl(r["design"])))
+                stale = [e for e in running if e[1] != level]
+                if stale:  # the pool still holds the first alternative's designs: they finish first
+                    reply = [(e[0], {"values": {"f": e[2]}}) for e in stale]
+                    stale_given += len(stale)
+                    running = [e for e in running if e[1] == level]
+                elif level == "cup" and not stopped_first and len(running) > 1:
+                    stopped_first = True  # the first alternative ends with designs still running
+                    first = running.pop(0)
+                    reply = [(first[0], {"stop": "time"})]
+                else:
+                    first = running.pop(0)
+                    reply = [(first[0], {"values": {"f": first[2]}})]
+                    if level == "mug":
+                        seen_second.append(first[2])
+                request = gen.send(reply)
+            elif request["kind"] == "evaluate_many":
+                request = gen.send([{"values": {"f": _bowl(r["design"])}} for r in request["requests"]])
+            else:
+                request = gen.send({"values": {"f": _bowl(request["design"])}})
+    except StopIteration as done:
+        outcome = done.value
+    assert stopped_first and stale_given > 0, "the first alternative ended with designs running"
+    second = [r for r in outcome["rows"] if r.get("level", {}).get("shape") == "mug"]
+    assert second and all(r["objective"] != 999.0 for r in second)
+
+
+# --- stopping the search stops the designs that are running ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_closing_the_pool_for_a_stop_does_not_wait_for_the_designs_that_run() -> None:
+    events: list[tuple[str, Any, float]] = []
+    pool = _Pool(at_once=2, log=events)
+    pool.submit("a", {"seconds": 30})
+    pool.submit("b", {"seconds": 30})
+    await asyncio.sleep(0.05)
+    tasks = list(pool.tasks)
+    started = time.monotonic()
+    left = await pool.close(discard=True)
+    assert time.monotonic() - started < 5 and left == []
+    assert all(t.cancelled() for t in tasks) and not pool.tasks

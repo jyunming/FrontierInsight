@@ -947,3 +947,58 @@ def test_the_stop_is_part_of_the_searchs_key_only_when_it_is_off(tmp_path: Path)
     on = optimise._run_key(root, sim, block, 0, "run_cell", None)
     assert optimise._run_key(root, sim, block, 0, "run_cell", None, stop_flat=True) == on
     assert optimise._run_key(root, sim, block, 0, "run_cell", None, stop_flat=False) != on
+
+
+SLEEPY = SIMULATE.replace(
+    "    x, y = cell[\"x\"], cell[\"y\"]\n",
+    "    x, y = cell[\"x\"], cell[\"y\"]\n"
+    "    if x != 0:\n"
+    "        with open(r\"__COUNT__.pids\", \"a\", encoding=\"utf-8\") as fh:\n"
+    "            fh.write(str(os.getpid()) + chr(10))\n"
+    "        import time\n"
+    "        time.sleep(120)\n",
+)
+
+
+class _KillingExecutor(LocalExecutor):
+    """The local executor that also ends the process when its run is cancelled, as the quest's executors do."""
+
+    async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> ExecutionResult:
+        proc = await asyncio.create_subprocess_exec(*cmd, cwd=str(cwd), stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.PIPE, env=env)
+        started = time.monotonic()
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except BaseException:
+            proc.kill()
+            await proc.wait()
+            raise
+        return ExecutionResult(proc.returncode if proc.returncode is not None else -1, out.decode(errors="replace"),
+                               err.decode(errors="replace"), time.monotonic() - started, False)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_search_run_with_designs_running_stops_them_at_once(tmp_path: Path) -> None:
+    """The quest is stopped while several designs run at the same time: the search ends within seconds and no simulation
+    process is left running (the pool used to wait for every design to end before it stopped any)."""
+    import psutil
+
+    root = _quest(tmp_path, SLEEPY)
+    pids_file = tmp_path / "count.txt.pids"
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 15}, search_method="bounded_local")
+    task = asyncio.ensure_future(optimise.run_search(_KillingExecutor(), sys.executable, root, "code/simulate.py",
+                                                     protocol, base_seed=0, timeout_s=300, at_once=4))
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        if pids_file.is_file() and len(pids_file.read_text(encoding="utf-8").split()) >= 2:
+            break
+        await asyncio.sleep(0.2)
+    pids = [int(p) for p in pids_file.read_text(encoding="utf-8").split()]
+    assert len(pids) >= 2, "the designs run together"
+    started = time.monotonic()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert time.monotonic() - started < 20
+    await asyncio.sleep(1.0)
+    assert not [p for p in pids if psutil.pid_exists(p) and psutil.Process(p).status() != psutil.STATUS_ZOMBIE]

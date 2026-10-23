@@ -477,16 +477,23 @@ class EvaluationPool:
             out.append((self.tasks.pop(task), task.result()))
         return out
 
-    async def close(self) -> list[tuple[Any, tuple[dict[str, Any], str, str]]]:
-        """Every design still running, waited for and returned; then the shared folder is cleared."""
+    async def close(self, discard: bool = False) -> list[tuple[Any, tuple[dict[str, Any], str, str]]]:
+        """Every design still running, waited for and returned; then the shared folder is cleared. With ``discard`` (the
+        search no longer wants them, or the quest was stopped) the designs still running are not waited for: their
+        processes are stopped first, then the folder is cleared."""
         out = []
         try:
-            while self.tasks:
+            while self.tasks and not discard:
                 out.extend(await self.wait())
         finally:
-            for task in self.tasks:  # only when the wait itself was cut short (the quest was stopped)
+            running = list(self.tasks)  # only left when discarding, or when the wait itself was cut short
+            for task in running:
                 task.cancel()
-            await self.outside.settle()
+            try:
+                await asyncio.gather(*running, return_exceptions=True)
+            finally:
+                self.tasks.clear()
+                await self.outside.settle()
         return out
 
 
@@ -864,8 +871,11 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         request = next(gen)
         while True:
             if pool is not None and pool.running and request["kind"] != "evaluate_stream":
-                await pool.close()  # designs asked for before a stop: their answers are in the journal, not needed now
+                # designs asked for before a stop (or by a start that is over): not needed now, and never taken for the
+                # same design of the next alternative
+                await pool.close(discard=True)
                 pool = None
+                streamed.clear()
             if request["kind"] == "scan":
                 reply = await scan(request["grid"], request.get("block"), request.get("level"))  # type: ignore[assignment]
                 scan_rows = scan_rows or list(reply)
@@ -978,7 +988,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         done_outcome = stop.value
     finally:
         if pool is not None:
-            await pool.close()
+            await pool.close(discard=True)
     outcome = done_outcome or {}
     elapsed = time.monotonic() - started + before_s
     planned = _plan.budget(block)
