@@ -174,3 +174,18 @@ def test_server_scope_post_refuses_an_answer_that_names_no_study_and_a_second_an
     assert client.post("/api/quests/qs/scope", json={"answers": {"study": 1}}).status_code == 409
     assert json.loads((q / ".fi" / "scope_answer.json").read_text(encoding="utf-8")) == {"study": "How fast does it cool?"}
     assert not list((q / ".fi").glob("*.tmp"))
+
+
+def test_server_scope_post_works_on_a_drive_without_links(tmp_path: Path, monkeypatch) -> None:
+    import os
+
+    def no_links(*a, **k):
+        raise OSError("links are not supported here")
+
+    monkeypatch.setattr(os, "link", no_links)
+    q = _quest(tmp_path)
+    (q / ".fi" / "scope_questions.json").write_text(json.dumps(scope_cards.question(CARDS)), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    assert client.post("/api/quests/qs/scope", json={"answers": {"study": 3}}).status_code == 200
+    assert client.post("/api/quests/qs/scope", json={"answers": {"study": 1}}).status_code == 409
+    assert json.loads((q / ".fi" / "scope_answer.json").read_text(encoding="utf-8")) == {"study": 3}

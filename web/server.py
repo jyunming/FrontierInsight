@@ -2800,7 +2800,15 @@ def make_app(
         try:
             tmp.write_text(json.dumps(answers, indent=2) + "\n", encoding="utf-8")
             try:
-                os.link(tmp, fi / "scope_answer.json")
+                try:
+                    os.link(tmp, fi / "scope_answer.json")
+                except FileExistsError:
+                    raise
+                except OSError:
+                    # A drive without links: the answer file is created only when none is there (a run reading it
+                    # half-written reads it again a second later).
+                    with open(fi / "scope_answer.json", "x", encoding="utf-8") as out:
+                        out.write(tmp.read_text(encoding="utf-8"))
             except FileExistsError:
                 raise HTTPException(409, f"the study for quest {quest_id} was already chosen") from None
         except OSError as e:
