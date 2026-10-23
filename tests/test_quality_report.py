@@ -125,6 +125,16 @@ def test_known_answer_check_that_keeps_failing(tmp_path: Path) -> None:
     assert any("kept failing" in t for t in texts)
 
 
+def test_a_check_its_trials_could_not_decide_is_not_said_to_have_failed(tmp_path: Path) -> None:
+    """A correct but slow simulation ends 'not decided' at the time given; the report said it 'failed 3 times'."""
+    root = tmp_path / "q-undecided"
+    undecided = ["the oracle 'mean_rate' was not decided: the trials that ran could not tell it from its expected value "
+                 "within the time given, so it is neither confirmed nor refuted"]
+    _audit(root, [{"kind": "check_result", "check": "oracle", "status": "stopped", "problems": undecided}] * 3)
+    items = _stage(qr.build(root), "run")["problems"]["items"]
+    assert "not decided 3 times" in items[0]["text"] and "failed" not in items[0]["text"].split("not decided")[1]
+
+
 def test_check_fixed_by_a_later_attempt(tmp_path: Path) -> None:
     root = tmp_path / "q-fixed"
     bad = ["the oracle 'limit_case' failed: FI measured 3, the protocol expects 1 within 0.01 (absolute tolerance 0.01)"]

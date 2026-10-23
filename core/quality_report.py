@@ -260,7 +260,9 @@ def _oracle_problems(q: _Quest) -> list[dict[str, str]]:
             status = "left out" if last_status == "went_on_failing" else "not fixed"
         else:
             status = "fixed"
-        tries = f" (failed {seen[key]} times)" if seen[key] > 1 else ""
+        # A check its trials could not decide (core/oracle_check.py: "was not decided") did not fail: said as it was.
+        tries = (f" ({'not decided' if ' was not decided' in text else 'failed'} {seen[key]} times)"
+                 if seen[key] > 1 else "")
         out.append(_problem("run", text + tries, "FI's own known-answer check", status, src))
     return out
 
