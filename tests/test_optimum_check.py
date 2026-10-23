@@ -735,12 +735,19 @@ def run_cell(cell):
 
 
 @pytest.mark.asyncio
-async def test_the_checks_designs_at_one_level_run_at_the_same_time_and_give_the_same_record(tmp_path: Path) -> None:
+async def test_the_checks_designs_at_one_level_run_at_the_same_time_and_give_the_same_record(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The check's designs at a finer level do not depend on each other: run 4 at a time they give exactly the record
     one after another gives, in less time."""
     import time as _time
 
+    from core import execution as _execution
     from tests.test_optimise_runner import LocalExecutor
+
+    # What is timed is the designs running together, not the memory gate: no spacing while their size is unknown, and
+    # a computer whose memory holds them all (a busy test machine would otherwise hold some back).
+    monkeypatch.setattr(_execution.SettingsGate, "STAGGER", 0.0)
+    monkeypatch.setattr(_execution, "_free_mb", lambda: 1e9)
 
     block = _block(design_variables=[{"name": "x", "low": -1, "high": 5, "kind": "integer"}],
                    baseline={"values": {"x": 0}, "source": "s"},

@@ -432,7 +432,8 @@ class EvaluationPool:
         (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
         self.outside = _outside.OutsideExecutor(executor, quest_root, log=log)
         self.log = log
-        self.gate = asyncio.Semaphore(max(1, at_once))
+        self.gate = _execution.SettingsGate(max(1, at_once), log=log)  # fewer at once when the memory would not hold them
+        self.outside.meter = self.gate.note
         self.env = _execution.threads_beside(env, max(1, at_once))  # each process its share of the cores
         self.work = quest_root / WORK_DIR
         self.tasks: dict[asyncio.Task, Any] = {}
@@ -445,7 +446,7 @@ class EvaluationPool:
         self.tasks[task] = ident
 
     async def _one(self, ident: Any, name: str, cell: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
-        async with self.gate:
+        async with self.gate.slot():
             left = self.deadline - time.monotonic()
             if left <= 0:
                 got: tuple[dict[str, Any], str, str] = ({"stop": "time"}, "", "")
