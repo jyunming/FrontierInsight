@@ -158,6 +158,12 @@ LANGUAGE = (
 )
 
 
+def formula_problem(text: Any) -> str:
+    """Why FI's evaluator would refuse ``text`` as a formula (the very test it applies: length, nodes, what it may call),
+    or ``""`` when it would read it."""
+    return _tree(text)[1]
+
+
 def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None) -> tuple[ast.Expression | None, str]:
     """The parsed formula, or ``(None, why it cannot be read)``. ``functions``: the functions it may call (default
     :data:`FUNCTIONS`)."""

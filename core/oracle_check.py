@@ -1283,9 +1283,6 @@ _EXPECTED_FORMULA_SHORT = ("the expected value as one formula FI can compute: nu
 
 
 #: The longest ``expected_formula`` a repair may propose (one formula, not a program).
-MAX_FORMULA = _forms.MAX_FORMULA_CHARS  # the evaluator's own limit: a longer formula could never be computed
-
-
 def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The usable entries of a repair's ``oracle_change``: each names a declared oracle, gives a finite ``expected`` and a
     non-negative ``tolerance``, and says why. Anything else is dropped, never guessed at."""
@@ -1308,11 +1305,12 @@ def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if formula:
             # A formula is kept whole or not at all: cut at 600 characters it was a different expression, which then
             # failed to compute and was dropped with no word to the reader of the log.
-            if len(formula) <= MAX_FORMULA:
+            why = _forms.formula_problem(formula)  # the evaluator's own test, every limit of it
+            if not why:
                 entry["expected_formula"] = formula
             else:
-                entry["expected_formula_dropped"] = (f"its `expected_formula` is {len(formula)} characters, over the "
-                                                     f"{MAX_FORMULA} FI reads")
+                entry["expected_formula_dropped"] = (f"its `expected_formula` ({len(formula)} characters) cannot be "
+                                                     f"computed: {why}")
         check = str(item.get("check") or "").strip()
         if check:
             entry["check"] = check[:600]

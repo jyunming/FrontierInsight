@@ -606,17 +606,21 @@ def test_a_long_expected_formula_is_kept_whole_and_one_too_long_is_dropped_with_
     base = {"name": ORACLE["name"], "expected": 1, "tolerance": 0.2, "reason": "the working had a slip"}
     from core import oracle_forms as forms
 
-    assert oc.MAX_FORMULA == forms.MAX_FORMULA_CHARS, "one limit: the evaluator's own"
-    under = "2 * 1." + "0" * (oc.MAX_FORMULA - 8) + "5"  # just under the limit, few nodes
-    over = "2 * 1." + "0" * (oc.MAX_FORMULA - 5) + "5"  # just over it
-    assert len(under) <= oc.MAX_FORMULA < len(over)
+    limit = forms.MAX_FORMULA_CHARS
+    under = "2 * 1." + "0" * (limit - 8) + "5"  # just under the character limit, few nodes
+    over = "2 * 1." + "0" * (limit - 5) + "5"  # just over it
+    many_nodes = "+".join(["1"] * 60)   # under the character limit but over the node limit
+    assert len(under) <= limit < len(over) and len(many_nodes) <= limit
     kept = oc.proposals([{**base, "expected_formula": under}], [ORACLE])[0]
     assert kept["expected_formula"] == under and "expected_formula_dropped" not in kept
     assert forms.evaluate(kept["expected_formula"], {}).value is not None, "kept AND evaluates"
     dropped = oc.proposals([{**base, "expected_formula": over}], [ORACLE])[0]
     assert "expected_formula" not in dropped and str(len(over)) in dropped["expected_formula_dropped"]
-    too_long = oc.proposals([{**base, "expected_formula": "1 + " * oc.MAX_FORMULA + "1"}], [ORACLE])[0]
-    assert "expected_formula" not in too_long and "characters" in too_long["expected_formula_dropped"]
+    assert forms.evaluate(many_nodes, {}).value is None, "the evaluator refuses it"
+    nodes = oc.proposals([{**base, "expected_formula": many_nodes}], [ORACLE])[0]
+    assert "expected_formula" not in nodes and "too long a formula" in nodes["expected_formula_dropped"]
+    short = "+".join(["1"] * 20)
+    assert oc.proposals([{**base, "expected_formula": short}], [ORACLE])[0]["expected_formula"] == short
     assert oc.proposals([{**base, "expected_formula": "2*x"}], [ORACLE])[0]["expected_formula"] == "2*x"
 
 
