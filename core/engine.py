@@ -150,6 +150,7 @@ from . import hidden_check as _hidden
 from . import refinement_check as _refine
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
+from . import scope_cards as _scope_cards
 from . import optimise as _optimise
 from . import optimise_refine as _optimise_refine
 from . import optimise_search as _optimise_search
@@ -220,6 +221,7 @@ STAGE_PROGRESS: dict[str, str] = {
     "clarify": "Checking the setup.",
     "ideate": "Choosing the angle to take.",
     "literature": "Searching the literature.",
+    "scope": "Offering the studies this topic could mean.",
     "select_skills": "Choosing which tools to use.",
     "plan": "Writing the plan.",
     "design": "Designing the experiment.",
@@ -332,6 +334,8 @@ class QuestState(TypedDict, total=False):
     clarify_questions: dict[str, Any]
     clarify_answers: dict[str, Any]
     clarify_done: bool
+    # The study a person picked before the plan (core/scope_cards.py), or None: nobody picked one.
+    scope_card: dict[str, Any] | None
     title_confirmed: bool
     ideas: list[dict[str, Any]]
     chosen_idea: dict[str, Any]
@@ -896,6 +900,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._run_started_at = time.time()
         self._clarify_answerable = (
             clarify_callback is not None or (self.fi_dir / "clarify_answer.json").is_file())
+        self._scope_answerer = clarify_callback  # the study cards are answered through the same channel
         import time as _time
         # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
         self._quest_recorded = False
@@ -2507,6 +2512,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         g.add_node("ideate", self._audited("ideate", self._node_ideate))
         g.add_node("literature", self._audited("literature", self._node_literature))
         g.add_node("pause_after_literature", self._audited("pause_after_literature", self._node_pause_after_literature))
+        g.add_node("scope", self._audited("scope", self._node_scope))
         g.add_node("select_skills", self._audited("select_skills", self._node_select_skills))
         g.add_node("plan", self._audited("plan", self._node_plan))
         g.add_node("design", self._audited("design", self._node_design))
@@ -2565,7 +2571,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # for a stop there: the search is saved, and a resume starts here
         # rather than searching again.
         g.add_edge("literature", "pause_after_literature")
-        g.add_edge("pause_after_literature", "select_skills")
+        g.add_edge("pause_after_literature", "scope")
+        g.add_edge("scope", "select_skills")
         g.add_edge("select_skills", "plan")
         g.add_edge("plan", "design")
         # design → implement (normal sim path) OR auto_collect_data
@@ -5455,8 +5462,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         seek = (_optim.may_seek_best(state.get("topic") or self.config.topic)
                 or self._study_type_asked(state) == "find_best_design"
                 or bool(_topic_req.searched(self._topic_requirements_read())))
+        card = state.get("scope_card")
         prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + (_STUDY_TYPE_DIRECTIVE if seek else "")
-                  + self._study_type_note(state))
+                  + self._study_type_note(state)
+                  + (f"\n\n{_scope_cards.plan_note(card)}\n" if isinstance(card, dict) else ""))
         obj = await self._design_reply(prompt, node="plan")
         extra = obj.pop("plan", None)
         design = obj
@@ -5695,7 +5704,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return kept, notes
     @staticmethod
     def _study_type_asked(state: QuestState) -> str | None:
-        """The kind of study the person named at the clarify step (``measure`` / ``find_best_design``), or ``None``."""
+        """The kind of study the person named (``measure`` / ``find_best_design``), or ``None``: the study card they
+        picked before the plan comes first, then their answer at the clarify step."""
+        card = state.get("scope_card")
+        if isinstance(card, dict) and card.get("study_type") in _scope_cards.STUDY_TYPES:
+            return str(card["study_type"])
         return _optim.resolve_answer((state.get("clarify_answers") or {}).get("study_type"))
 
     def _asks_for_best_design(self, state: QuestState, *, topic: bool = True) -> str:
@@ -9055,6 +9068,70 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if read:
             self._write_literature_files(merged, self.quest_root / "data" / "literature")
         return {"literature": merged}
+
+    async def _node_scope(self, state: QuestState) -> QuestState:
+        """Before the plan, the few different studies the topic could mean, for a person to pick one
+        (:mod:`core.scope_cards`). Runs once per quest: a record in ``.fi/scope.json`` (picked or not) is read, never
+        asked again. With nobody to answer the cards are still recorded, and the plan is written from the topic alone."""
+        if (self.config.pauses.scope == "off" or self.config.engine.analyze_local_first
+                or int(state.get("iteration", 0) or 0) > 0 or _plan.plan_path(self.quest_root).is_file()):
+            return {}
+        record = _scope_cards.read_record(self.quest_root)
+        if record is not None:
+            chosen = record.get("chosen")
+            return {"scope_card": chosen} if isinstance(chosen, dict) else {}
+        sources = _labelled_sources(state.get("literature") or [])
+        ids = {f"[{label}]" for label, _m, _i in sources} | {label for label, _m, _i in sources}
+        listing = "\n".join(
+            f"[{label}] {meta.get('title') or meta.get('source') or 'untitled'} — "
+            + _one_line(_item_content(item), 300) for label, meta, item in sources) or "(none)"
+        again = ""
+        cards: list[dict[str, Any]] = []
+        removed: list[str] = []
+        for _ in range(2):
+            prompt = self._prompts["scope"].substitute(
+                topic=state.get("topic") or self.config.topic, answers=_format_clarify(state),
+                direction=json.dumps(state.get("chosen_idea") or {}, indent=2), sources=listing, again=again)
+            reply = await self._chat(prompt, node="scope")
+            cards, removed = _scope_cards.normalize(_parse_json_lenient(reply) or reply, ids)
+            if _scope_cards.distinct_enough(cards):
+                break
+            again = (f"Your last reply gave {len(cards)} different studies"
+                     + (": " + "; ".join(c["question"] for c in cards) if cards else "")
+                     + ". Two cards with the same study type and the same main results are one study. "
+                       "Write 3 or 4 studies that differ in their study type or in their main results.")
+        chosen = await self._scope_answer(cards) if cards else None
+        try:
+            _scope_cards.write_record(self.quest_root, cards, chosen, removed, widest=_scope_cards.has_widest(cards))
+        except OSError as exc:
+            self._log.warning("[scope] could not write %s (%r); the choice is kept for this run only",
+                              _scope_cards.RECORD, exc)
+        if chosen is not None:
+            self._log.info("[scope] the study to run: %s", chosen.get("question", ""))
+        else:
+            self._log.info("[scope] nobody picked the study to run; the plan is written from the topic alone")
+        return {"scope_card": chosen}
+
+    async def _scope_answer(self, cards: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """The card a person picked: an answer staged in ``.fi/scope_answer.json`` (read now), else the answer channel
+        the clarify questions use, waited for up to ``pauses.timeout_s`` (0: no limit). ``None``: nobody picked."""
+        path = self.quest_root / _scope_cards.ANSWER
+        if path.is_file():
+            try:
+                return _scope_cards.read_answer(json.loads(path.read_text(encoding="utf-8")), cards)
+            except (OSError, ValueError) as exc:
+                self._log.warning("[scope] could not read %s (%r)", _scope_cards.ANSWER, exc)
+        ask = getattr(self, "_scope_answerer", None)
+        if ask is None:
+            return None
+        try:
+            waiting = ask(_scope_cards.question(cards))
+            limit = float(self.config.pauses.timeout_s)
+            answer = await (asyncio.wait_for(waiting, timeout=limit) if limit > 0 else waiting)
+        except (asyncio.TimeoutError, BridgeError) as exc:
+            self._log.warning("[scope] no answer to the study cards (%s)", type(exc).__name__)
+            return None
+        return _scope_cards.read_answer(answer, cards)
 
     async def _read_literature_figures(self, state: QuestState, literature: list[Any]) -> int:
         """Read the values off the papers' figures (``knowledge.read_figures``), in place: the model for the step
@@ -26294,6 +26371,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "oracle_numeric_reference",         # ... and, still unsettled, a script that computes the answer numerically
         "implement",                      # legacy one-shot (resume fallback)
         "implement_outline",                # two-stage implement: scaffold
+        "scope",                # the few studies the topic could mean, for a person to pick before the plan
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
         "implement_agent",                  # engine.code_writer: agent -- the coding agent's task (core/agent_build.py)
