@@ -670,7 +670,7 @@ def pin(python: Path | str, deps: list[str]) -> list[str]:
     return [f"{names[d]}=={versions[names[d]]}" if d in names and names[d] in versions else d for d in deps]
 
 
-def _git(code_dir: Path, *args: str) -> Any:
+def _git(code_dir: Path, *args: str, stdin: str | None = None, env_extra: dict[str, str] | None = None) -> Any:
     import subprocess
 
     import os
@@ -682,12 +682,13 @@ def _git(code_dir: Path, *args: str) -> Any:
     # And git never looks above code/ for a repository: with code/.git gone or broken, a commit must fail, never land in
     # a repository that happens to hold the quest folder (with whatever that repository has uncommitted).
     env = {**scrub_secrets(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-           "GIT_CEILING_DIRECTORIES": str(Path(code_dir).resolve().parent)}
+           "GIT_CEILING_DIRECTORIES": str(Path(code_dir).resolve().parent), **(env_extra or {})}
     return subprocess.run(
         ["git", "-c", "user.name=Frontier Insight", "-c", "user.email=fi@localhost", "-c", "commit.gpgsign=false",
          "-c", "core.autocrlf=false", "-c", f"core.hooksPath={null}", "-c", "core.fsmonitor=false",
          "-c", f"safe.directory={code_dir.as_posix()}", *args],
         cwd=code_dir, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, env=env,
+        input=stdin,
     )
 
 
@@ -779,6 +780,62 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
         if log is not None:
             log.warning("[code] could not record this change in code/'s history: %s", exc)
         return False
+
+
+def keep_refused(quest_root: Path, ref: str, files: dict[str, str], message: str, *, log: Any = None) -> bool:
+    """Keep a version of ``rel`` that was tried and refused in ``code/``'s own git repository, on the side reference
+    ``refs/fi/refused/<ref>``: one commit whose parent is the current HEAD and whose tree is HEAD's with each file of
+    ``files`` (path -> text) set to its text. A reference of that name already there is never overwritten: the try is
+    kept beside it (``<ref>-2``, ...). The branch, the index and the working folder are not touched. Best effort:
+    ``False`` (and a log line) when git cannot do it."""
+    import os
+    import re
+    import subprocess
+
+    code_dir = Path(quest_root) / "code"
+    git_dir = code_dir / ".git"
+    if not git_dir.is_dir():
+        return False
+    index = git_dir / "fi_refused.index"
+    # a name git takes: no "..", no ".lock" ending, no part starting with "."
+    name = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._-]+", "-", ref)).strip("-.") or "try"
+    if name.endswith(".lock"):
+        name = name[: -len(".lock")] + "-lock"
+    try:
+        index.unlink(missing_ok=True)  # one left by an earlier run that stopped must not carry into this tree
+        extra = {"GIT_INDEX_FILE": str(index)}
+        head = _git(code_dir, "rev-parse", "--verify", "-q", "HEAD")
+        parent = head.stdout.strip() if head.returncode == 0 else ""
+        if _git(code_dir, "read-tree", *([parent] if parent else ["--empty"]), env_extra=extra).returncode != 0:
+            return False
+        for rel, text in files.items():
+            blob = _git(code_dir, "hash-object", "-w", "--stdin", stdin=text)
+            if blob.returncode != 0:
+                return False
+            cache = f"100644,{blob.stdout.strip()},{Path(rel).as_posix()}"
+            if _git(code_dir, "update-index", "--add", "--cacheinfo", cache, env_extra=extra).returncode != 0:
+                return False
+        tree = _git(code_dir, "write-tree", env_extra=extra)
+        if tree.returncode != 0:
+            return False
+        made = _git(code_dir, "commit-tree", tree.stdout.strip(), *(["-p", parent] if parent else []), "-m", message)
+        if made.returncode != 0:
+            return False
+        for n in range(1, 100):
+            # an empty old value: made only when no reference of that name is there yet
+            target = f"refs/fi/refused/{name}" + ("" if n == 1 else f"-{n}")
+            if _git(code_dir, "update-ref", target, made.stdout.strip(), "").returncode == 0:
+                return True
+        return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        if log is not None:
+            log.warning("[code] could not keep a refused version in code/'s history: %s", exc)
+        return False
+    finally:
+        try:
+            index.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def record_note(quest_root: Path, note: str, *, log: Any = None) -> bool:
