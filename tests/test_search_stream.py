@@ -319,3 +319,76 @@ async def test_closing_the_pool_for_a_stop_does_not_wait_for_the_designs_that_ru
     left = await pool.close(discard=True)
     assert time.monotonic() - started < 5 and left == []
     assert all(t.cancelled() for t in tasks) and not pool.tasks
+
+
+# --- designs that finished when the search stopped ---------------------------------------------------------------------------
+
+
+def _drive_batch(block: dict[str, Any], f: Any, *, together: bool, results: list[str]) -> tuple[dict[str, Any], int]:
+    """The stream driver with the designs it asks for finishing one at a time (``together`` False) or all that run
+    finishing at once; the second value is how many designs the stream handed back as run to the end."""
+    gen = search.search(block, seed=1, batch=True, stream=True, results=results)
+    vals = lambda d: {"f": f(d), "g": 2.0}  # noqa: E731
+    running: dict[Any, dict[str, Any]] = {}
+    handed = 0
+    try:
+        request = next(gen)
+        while True:
+            if request["kind"] == "scan":
+                request = gen.send([dict(r, values=vals(r["design"])) for r in _scan_rows(request, block, f)])
+            elif request["kind"] == "evaluate_many":
+                request = gen.send([{"values": vals(r["design"])} for r in request["requests"]])
+            elif request["kind"] == "evaluate_stream":
+                for r in request["requests"]:
+                    running[r["id"]] = r
+                picks = sorted(running) if together else [sorted(running)[0]]
+                handed += len(picks)
+                request = gen.send([(k, {"values": vals(running.pop(k)["design"])}) for k in picks])
+            else:
+                request = gen.send({"values": vals(request["design"])})
+    except StopIteration as done:
+        return done.value, handed
+
+
+def test_designs_that_finished_when_a_stop_fired_are_listed_apart_and_change_nothing_else() -> None:
+    """Several designs finish at once and the stop fires on the first of them in request order: the others ran to the end
+    (they are in the journal) but are no part of the rows, the budget or the best, which are those of one design at a time.
+    The record lists them apart, so rows plus those equal the designs run."""
+    block = _flat_block()
+    flat = lambda design: 5.0  # noqa: E731
+    one, handed_one = _drive_batch(block, flat, together=False, results=["f", "g"])
+    many, handed_many = _drive_batch(block, flat, together=True, results=["f", "g"])
+    assert many["stopped_because"] == "no_effect"
+    assert _rows(many) == _rows(one) and many["best"] == one["best"] and many["evaluations"] == one["evaluations"]
+    unused = many.get("run_not_used") or {}
+    assert unused.get("count", 0) >= 2, "the designs that had finished with the stopping one are listed"
+    assert unused["count"] == len(unused["designs"])
+    stream_rows = sum(1 for r in many["rows"] if r["stage"] == "local")
+    assert stream_rows + unused["count"] == handed_many, "every design the stream ran is a row or listed"
+    assert sum(1 for r in one["rows"] if r["stage"] == "local") + one["run_not_used"]["count"] == handed_one
+
+
+@pytest.mark.asyncio
+async def test_a_real_fault_of_a_design_that_was_running_when_the_pool_is_discarded_is_logged() -> None:
+    class Says:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def warning(self, msg: str, *args: Any) -> None:
+            self.lines.append(msg % args)
+
+    class Broken(_Pool):
+        async def _one(self, ident: Any, name: str, cell: dict[str, Any]) -> Any:
+            if ident == "broken":
+                raise RuntimeError("the callback fell over")
+            return await super()._one(ident, name, cell)
+
+    says = Says()
+    pool = Broken(at_once=2, log=[])
+    pool.log = says
+    pool.submit("broken", {"seconds": 0})
+    pool.submit("slow", {"seconds": 30})
+    await asyncio.sleep(0.1)  # the first has failed and nobody has collected it
+    await pool.close(discard=True)
+    assert len(says.lines) == 1 and "RuntimeError" in says.lines[0] and "the callback fell over" in says.lines[0]
+    assert not any("CancelledError" in line for line in says.lines), "the stop itself is not a fault"

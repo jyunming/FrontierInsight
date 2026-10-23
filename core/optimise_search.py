@@ -634,6 +634,7 @@ class _Search:
         self.shares = {}
         self.stopped = None
         self.notes = []
+        self.run_not_used = []  # designs that finished when a stop fired but were not part of the search's record
         self.start_log = []
         self.start_order = []  # where each start's line stands in the step-by-step order, as ``row_order`` does
         self.failures_in_a_row = 0
@@ -1275,15 +1276,17 @@ class _Search:
             self.shares = {}
 
     def _stream(self, gens, pending, offset):
-        """:meth:`_side_by_side` with the starts answered as their designs finish, not step by step: every design a start
-        asks for goes to the pool at once (``{"kind": "evaluate_stream", "requests": [...]}``, each with an ``id``), the
-        driver answers with the ones that finished (``[(id, answer), ...]``, at least one), and a start goes on as soon as
-        all the designs of its own step are answered, so a slow design holds back its start only, not the other starts.
-        Each start still goes on from its own answers exactly as it would alone, so the designs each start evaluates are
-        the same; what can differ is the order the answers arrive in. The rows are put back in the order of the
-        step-by-step search afterwards (its step, then the start), so the record reads the same. A design two starts ask
-        for is evaluated once; which of them is charged for it is the one that is answered first. A count-threshold stop
-        (``no_effect``, ``flat_objective``, ``stepped_objective``) fires on the answers in the order they arrive."""
+        """:meth:`_side_by_side` with every start's designs sent to the pool at once and answered as they finish: every
+        design a start asks for goes to the pool when it is asked (``{"kind": "evaluate_stream", "requests": [...]}``,
+        each with an ``id``), the driver answers with the ones that finished (``[(id, answer), ...]``, at least one), and a
+        place in the pool is refilled the moment a design ends. The answers are used in the order the starts asked, not the
+        order the designs finished in: a start goes on once all the designs of its own step are answered and every start
+        that asked before it has gone on, so the rows, the budget charged and the design at which a count-threshold stop
+        (``no_effect``, ``flat_objective``, ``stepped_objective``) fires depend on the plan alone, whatever the timing. The
+        cost is that a slow design holds back the starts that asked after it (their designs already sent keep running, but
+        they do not ask for more until it is answered). A design two starts ask for is evaluated once and charged to the
+        one that asked first. When a stop fires, designs that had already finished but come after it in that order are no
+        part of the rows, the budget or the best; they are listed apart in the outcome (``run_not_used``)."""
         steps = {i: 0 for i in gens}
         needs = {}  # start -> the keys of the designs its step asks for, in order
         line = []  # the starts in the order they asked: they are answered in this order, whatever order designs finish in
@@ -1291,6 +1294,7 @@ class _Search:
         inflight = set()
         first_row, first_start = len(self.rows), len(self.start_log)
         new = []  # designs asked for and not yet handed to the pool
+        asked = {}  # key -> the design asked for
         try:
             while pending:
                 for i in sorted(pending):
@@ -1304,6 +1308,7 @@ class _Search:
                         keys.append(key)
                         if key not in answers and key not in inflight and key not in self.cache:
                             inflight.add(key)
+                            asked[key] = part["design"]
                             new.append(dict(part, id=key))
                     needs[i] = (keys, request["kind"])
                     line.append(i)
@@ -1334,6 +1339,16 @@ class _Search:
                 for key, reply in replies if isinstance(replies, list) else []:
                     answers[key] = reply
                     inflight.discard(key)
+        except _Stop:
+            # The search stops at the design its request order says. Designs that had already run to the end are not
+            # part of its rows, its budget or its best (those do not depend on the timing); they are listed apart so the
+            # designs run are all accounted for.
+            self.run_not_used = [
+                {"design": dict(asked[k]),
+                 **({"values": dict(a["values"])} if "values" in a else {"failed": str(a.get("failed"))[:200]})}
+                for k, a in answers.items()
+                if k in asked and k not in self.cache and isinstance(a, dict) and ("values" in a or "failed" in a)]
+            raise
         finally:
             # Put this stretch's rows in the order of the step-by-step search, and number them again.
             tail = sorted(range(first_row, len(self.rows)), key=lambda k: (self.row_order[k] or (0, 0), k))
@@ -1699,6 +1714,8 @@ class _Search:
                       "constraints": dict(best["constraints"]), "feasible": True, "evaluation": best["n"],
                       "start": best["start"], "stage": best["stage"]} if best else None),
             "rounds": list(self.round_log),
+            **({"run_not_used": {"count": len(self.run_not_used), "designs": list(self.run_not_used)}}
+               if self.run_not_used else {}),
             **({"no_effect": dict(self.no_effect)} if self.no_effect else {}),
             **({"flat_objective": dict(self.flat_objective)} if self.flat_objective else {}),
             **({"stepped_objective": dict(self.stepped_objective)} if self.stepped_objective else {}),
@@ -1840,6 +1857,10 @@ def merge_outcomes(outcomes, levels, block):
         "rounds": [dict(r, level=dict(lv)) for o, lv in zip(outcomes, levels) for r in o["rounds"]],
         "fixed": dict(level_block(block, win["level"])["fixed"]),
     }
+    unused = [dict(d, level=dict(lv)) for o, lv in zip(outcomes, levels)
+              for d in (o.get("run_not_used") or {}).get("designs", [])]
+    if unused:
+        out["run_not_used"] = {"count": len(unused), "designs": unused}
     # A stop that is a fact about the simulation (it does not move the objective) is the search's only when every
     # alternative's search found it: one alternative that did move it shows the simulation reaches the objective.
     for key in ("no_effect", "flat_objective", "stepped_objective"):
@@ -2183,6 +2204,7 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
                    "per_start": outcome["per_start"], "scan": outcome["scan_evaluations"],
                    "failed": outcome["failed"], "infeasible": outcome["infeasible"],
                    "budget_ran_out": outcome["budget_ran_out"], "stopped_because": outcome["stopped_because"],
+                   **({"run_not_used": outcome["run_not_used"]["count"]} if outcome.get("run_not_used") else {}),
                    **({"no_effect": outcome["no_effect"]} if outcome.get("no_effect") else {}),
                    **({"flat_objective": outcome["flat_objective"]} if outcome.get("flat_objective") else {}),
                    **({"stepped_objective": outcome["stepped_objective"]} if outcome.get("stepped_objective") else {})}

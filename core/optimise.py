@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import time
 from dataclasses import dataclass, field
@@ -430,6 +431,7 @@ class EvaluationPool:
         self.deadline, self.thresholds, self.seed_key, self.on_done = deadline, thresholds, seed_key, on_done
         (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
         self.outside = _outside.OutsideExecutor(executor, quest_root, log=log)
+        self.log = log
         self.gate = asyncio.Semaphore(max(1, at_once))
         self.env = _execution.threads_beside(env, max(1, at_once))  # each process its share of the cores
         self.work = quest_root / WORK_DIR
@@ -490,7 +492,12 @@ class EvaluationPool:
             for task in running:
                 task.cancel()
             try:
-                await asyncio.gather(*running, return_exceptions=True)
+                for task, ended in zip(running, await asyncio.gather(*running, return_exceptions=True)):
+                    if isinstance(ended, BaseException) and not isinstance(ended, asyncio.CancelledError):
+                        # a real fault of a design's run, not the stop we asked for: say so once, with what it was
+                        (getattr(self, "log", None) or logging.getLogger(__name__)).warning(
+                            "[optimise] a design that was running when the search stopped failed: %s: %s",
+                            type(ended).__name__, str(ended)[:300])
             finally:
                 self.tasks.clear()
                 await self.outside.settle()
