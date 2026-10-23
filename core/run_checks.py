@@ -536,7 +536,26 @@ class RunChecksMixin:
         over = sized.get("over_topic_limit")
         if isinstance(over, dict) and over.get("note"):
             parts.append(f"{over['note']} Say this in the paper (it is among FI's facts about this run, given below).")
+        if scope := self._scope_gap_note():
+            parts.append(scope)
         return "\n\n".join(parts)
+
+    def _scope_gap_note(self) -> str:
+        """For the writer: each result or setting of the study the person chose that the frozen plan has no name for
+        (core/scope_cards.py ``gaps``, a reading by names). It is told in the limitations and never stops the quest."""
+        from . import scope_cards as _sc
+
+        record = _sc.read_record(self.quest_root)  # type: ignore[attr-defined]
+        card = record.get("chosen") if isinstance(record, dict) else None
+        protocol = _frozen.protocol_of(self.quest_root)  # type: ignore[attr-defined]
+        if not isinstance(card, dict) or not card or protocol is None:
+            return ""
+        design = {"protocol": protocol}
+        names = [r for r in _sc._strings(card.get("main_results")) if _sc.gaps({"main_results": [r]}, design)]
+        names += [s for s in _sc._strings(card.get("compared_settings"))
+                  if _sc.gaps({"compared_settings": [s]}, design)]
+        return "\n".join(f"The person chose a study that names {x}; the plan does not cover it and gives no reason. "
+                         "Say so in the limitations." for x in names)
 
     # ---- a setting of the grid the code never reads ----------------------------------------------------------------------
 
