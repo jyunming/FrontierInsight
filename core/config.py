@@ -613,6 +613,7 @@ PauseForUserInput = Literal[
 ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
 ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
 PlanPause = Literal["off", "ask"]                  # stop once plan.md is written, to read and edit it
+ScopePause = Literal["off", "ask"]                 # before the plan, pick the study to run from a few FI offers
 SupplyPause = Literal[                              # was pause_for_user_input
     "never", "after_literature", "before_build", "before_review", "both", "all",
 ]
@@ -661,6 +662,9 @@ class PausesConfig(BaseModel):
     # file. ``plan.md`` is written whatever this is set to; ``"off"`` (default) only means the quest does
     # not wait for you, so unattended and fleet runs are not held up.
     plan: PlanPause = "off"
+    # ANSWER — before the plan, pick the study to run from a few FI offers (or write your own); ``off`` skips it.
+    # With nobody to answer, the offers are recorded and the plan is written from the topic alone.
+    scope: ScopePause = "ask"
     # ANSWER — pause after the review verdict for accept / reject / refine.
     #   "ask" (default) pauses · "off" lets the review-loop drive unattended.
     review: ReviewPause = "ask"
@@ -698,6 +702,11 @@ class PausesConfig(BaseModel):
     @classmethod
     def _norm_plan(cls, v: Any) -> Any:
         # The unquoted-`off` Norway problem again, as for ``review`` and ``clarify``.
+        return "off" if v is False else v
+
+    @field_validator("scope", mode="before")
+    @classmethod
+    def _norm_scope(cls, v: Any) -> Any:
         return "off" if v is False else v
 
 

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import string
 from pathlib import Path
 
 import pytest
 
 from core import scope_cards as sc
+from core.config import Config
 
 
 def _card(question="How fast does a cup of tea cool?", study_type="measure", results=("cool rate",),
@@ -127,3 +129,18 @@ def test_plan_note_and_nobody_line():
     note = sc.plan_note(_card())
     assert "How fast does a cup of tea cool?" in note and "chose" in note
     assert sc.nobody_line().startswith("Nobody picked the study to run;")
+def test_unquoted_off_turns_the_study_cards_off():
+    assert Config.model_validate({"topic": "t", "pauses": {"scope": False}}).pauses.scope == "off"
+    assert Config.model_validate({"topic": "t", "pauses": {"scope": "off"}}).pauses.scope == "off"
+
+
+def test_study_cards_are_on_by_default():
+    assert Config.model_validate({"topic": "t"}).pauses.scope == "ask"
+
+
+def test_the_study_card_prompt_has_its_placeholders():
+    text = (Path(__file__).resolve().parent.parent / "agents" / "scope.md").read_text(encoding="utf-8")
+    names = {"topic", "answers", "direction", "sources", "again"}
+    assert names <= set(string.Template(text).get_identifiers())
+    out = string.Template(text).substitute({n: f"<<{n}>>" for n in names})
+    assert "$" not in out.replace("$$", "")
