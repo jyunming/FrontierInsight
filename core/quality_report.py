@@ -25,7 +25,6 @@ from typing import Any
 
 from . import review_pairs as _pairs
 from . import stop_power as _stop_power
-from .protocol_check import SOURCE as _PROTOCOL_SOURCE
 
 SCHEMA = "fi.quality/v1"
 STAGES = ("plan", "checks", "design", "code", "run", "analysis", "paper", "review")
@@ -289,10 +288,6 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for eid in _list(eq.get("not_tested")):
         out.append(_problem("checks", f"equation {eid} has no test", "FI's equation test", "left out",
                             ".fi/equation_tests.json"))
-    if q.protocol_check.get("status") == "warned":
-        for difference in _list(q.protocol_check.get("differences")):
-            out.append(_problem("checks", f"the script may differ from the plan's protocol: {difference}",
-                                _stop_power.source_words(_PROTOCOL_SOURCE), "not fixed", "needs/PROTOCOL_CHECK.json"))
     for p in map(_dict, _list(q.cannot_repair.get("problems"))):
         if p.get("text") and not _stop_power.may_stop(p.get("source")):
             out.append(_problem("checks", str(p["text"]), _stop_power.source_words(p.get("source")), "not fixed",

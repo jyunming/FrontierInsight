@@ -153,6 +153,9 @@ def test_the_paper_is_written_again_twice_and_then_the_quest_goes_on_the_usual_w
         assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": seen}) == route
     # After them the check, a reading of the paper's words, never ends the quest (core/stop_power.py).
     assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": 3}) not in ("rewrite", "stuck")
+    # What is still flagged is recorded for QUALITY.md (a reading of the paper's words: it never stops the quest).
+    left = [p for p in eng._cannot_repair_problems() if p.get("check") == "record_claims"]
+    assert left and left[0]["source"] == "read" and eng._cannot_repair_stop() is None
     # Without the hit the route is the usual one.
     assert eng._route_after_review({"review": {"verdict": "accept", "must_flag_hits": []}, "iteration": 1}) not in ("rewrite", "stuck")
 

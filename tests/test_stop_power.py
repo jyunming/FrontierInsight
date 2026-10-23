@@ -34,7 +34,7 @@ def test_only_a_measured_or_agreed_finding_may_stop() -> None:
 
 def test_a_reading_of_the_code_is_recorded_and_the_run_goes_on(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
-    eng._record_cannot_repair("the analysis counts 50 runs, not the 200 the plan fixes", ["read the code"], source=sp.READ)
+    eng._record_cannot_repair("the analysis counts 50 runs, not the 200 the plan fixes", ["read the code"], source=sp.READ, check="a")
     assert eng._cannot_repair_stop() is None
     record = json.loads((eng.fi_dir / "cannot_repair.json").read_text(encoding="utf-8"))
     assert "text" not in record and record["problems"][0]["source"] == sp.READ
@@ -44,7 +44,7 @@ def test_a_reading_of_the_code_is_recorded_and_the_run_goes_on(tmp_path: Path) -
 
 def test_a_measured_problem_still_stops_the_run_step(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
-    eng._record_cannot_repair("the reply did not hold both scripts", ["asked twice"], source=sp.MEASURED)
+    eng._record_cannot_repair("the reply did not hold both scripts", ["asked twice"], source=sp.MEASURED, check="b")
     stop = eng._cannot_repair_stop()
     assert stop is not None and "both scripts" in stop["exec_result"]["cannot_repair"]
 
@@ -54,7 +54,7 @@ def test_a_reading_never_hides_a_measured_problem(tmp_path: Path, order: str) ->
     eng = _engine(tmp_path)
     found = [("a reading of the code", sp.READ), ("a measured fault", sp.MEASURED)]
     for text, source in (found if order == "read_first" else found[::-1]):
-        eng._record_cannot_repair(text, ["tried"], source=source)
+        eng._record_cannot_repair(text, ["tried"], source=source, check=text)
     stop = eng._cannot_repair_stop()
     assert stop is not None and stop["exec_result"]["cannot_repair"] == "a measured fault"
     assert "a reading of the code" in eng._run_checks_note()
@@ -70,7 +70,7 @@ def test_a_record_written_before_sources_were_kept_still_stops(tmp_path: Path) -
 
 def test_quality_report_lists_a_reading_that_went_on(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
-    eng._record_cannot_repair("a run count typed into the analysis", ["read the code"], source=sp.READ)
+    eng._record_cannot_repair("a run count typed into the analysis", ["read the code"], source=sp.READ, check="a")
     report = build(eng.quest_root)
     items = [p for stage in report["stages"] for p in stage["problems"]["items"]]
     rows = [p for p in items if "run count typed" in p["text"]]
@@ -81,3 +81,22 @@ def test_every_check_that_hands_a_problem_to_the_record_says_its_source() -> Non
     from core import grid_keys, independent_check, protocol_check, typed_constants
     for module in (grid_keys, independent_check, protocol_check, typed_constants):
         assert module.SOURCE in sp.SOURCES
+
+
+def test_a_reading_of_the_same_text_never_replaces_a_measured_problem(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    eng._record_cannot_repair("the same problem", ["measured"], source=sp.MEASURED, check="one")
+    eng._record_cannot_repair("the same problem", ["read"], source=sp.READ, check="two")
+    stop = eng._cannot_repair_stop()
+    assert stop is not None and stop["exec_result"]["cannot_repair"] == "the same problem"
+
+
+def test_a_check_that_finds_nothing_again_takes_its_own_problems_out(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    eng._record_cannot_repair("a layout problem", ["read"], source=sp.READ, check="layout")
+    eng._record_cannot_repair("a seed problem", ["read"], source=sp.READ, check="seed")
+    eng._clear_cannot_repair("layout")
+    assert [p["text"] for p in eng._cannot_repair_problems()] == ["a seed problem"]
+    assert "a layout problem" not in eng._run_checks_note()
+    eng._clear_cannot_repair("seed")
+    assert eng._cannot_repair_problems() == [] and not (eng.fi_dir / "cannot_repair.json").exists()

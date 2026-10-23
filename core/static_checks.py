@@ -129,6 +129,7 @@ class StaticChecksMixin:
         path = self.quest_root / RECORD_DIR / f"{name}_check.json"  # type: ignore[attr-defined]
         path.unlink(missing_ok=True)
         if not found:
+            self._clear_cannot_repair(name)  # type: ignore[attr-defined]
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,7 +155,8 @@ class StaticChecksMixin:
         self._record_cannot_repair(  # type: ignore[attr-defined]
             text, [f"read the code against the plan before running it ({name})", *[f.says([]) if hasattr(f, "says") else str(f)
                                                                                   for f in found[:2]],
-                   f"sent the code back to be repaired {REPAIRS} times; it still had this"], source=module.SOURCE)
+                   f"sent the code back to be repaired {REPAIRS} times; it still had this"], source=module.SOURCE,
+            check=name)
         return self._cannot_repair_stop()  # type: ignore[attr-defined]
 
     async def _repair_static(self, state: Any, module: Any, found: list[Any], protocol: Any, design: Any) -> bool:

@@ -361,7 +361,9 @@ async def test_a_script_that_still_differs_is_recorded_and_the_quest_goes_on_ask
     assert record["status"] == "warned"
     assert any("adds [0.8, 1.2, 2] and leaves out [0.9, 1.5]" in d for d in record["differences"])
     assert "reading of the code" in log
-    assert "the script may differ from the plan's protocol" in (first.quest_root / "QUALITY.md").read_text(encoding="utf-8")
+    assert "differs from the protocol the plan fixed" in (first.quest_root / "QUALITY.md").read_text(encoding="utf-8")
+    assert first._cannot_repair_stop() is None and any(
+        p["check"] == "protocol" for p in first._cannot_repair_problems()), "recorded for the writer, and it goes on"
 
 
 @pytest.mark.asyncio

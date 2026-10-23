@@ -3519,6 +3519,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning(
                 "[route] after %d rewrites the paper still has sentences FI's check of its records flags; they are listed "
                 "in QUALITY.md, and the check reads the paper's words, so the quest goes on", _RECORD_REWRITES)
+            for h in must_flag:
+                if _hit_name(h) == _record_claims.HIT:
+                    self._record_cannot_repair(
+                        "the paper still has a sentence FI's records contradict: " + _one_line(str(h), 300),
+                        [f"wrote the paper again {_RECORD_REWRITES} times, naming the contradiction",
+                         "took out what could be taken out"], source=_stop_power.READ, check="record_claims")
             must_flag = [h for h in must_flag if _hit_name(h) != _record_claims.HIT]
         page_rewrites = int(state.get("page_limit_rewrites") or 0)
         if _only_page_limit_hits(must_flag) and page_rewrites <= _PAGE_LIMIT_REWRITES:
@@ -11415,7 +11421,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._record_cannot_repair(
             what[0].upper() + what[1:] + ": " + "; ".join(found),
             ["asked for both scripts, and once more when the reply did not hold both (`execution.split_failure: block`)",
-             *[_one_line(f, 300) for f in found[:3]]], source=source)
+             *[_one_line(f, 300) for f in found[:3]]], source=source, check="split")
 
     def _pause_for_contract(self, *, kind: str, headline: str, steps: list[str], problems: list[str]) -> None:
         self._pause_for_human(
@@ -11764,6 +11770,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.info("[protocol] %s", "; ".join(notes))
         self._protocol_record(record)
         if not final:
+            self._clear_cannot_repair("protocol")
             self._log.info(
                 "[protocol] the script holds to the plan's protocol%s",
                 "" if len(attempts) == 1 else f" (after {len(attempts) - 1} repair(s))",
@@ -11776,9 +11783,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[protocol] the script still differs from the plan's protocol: %s; this is %s, so the run "
                               "goes on and the paper says so", "; ".join(m.message() for m in final),
                               _stop_power.source_words(_protocol.SOURCE))
-            return code, deps
         self._stop_for_protocol(final)
-        return code, deps  # the run step ends in the honest stop without running it
+        return code, deps  # a stopping difference ends the run step in the honest stop without running it
 
     async def _repair_script_for_protocol(
         self, state: QuestState, path: Path, code: str, deps: list[str],
@@ -13653,14 +13659,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     _CANNOT_REPAIR_FILE = "cannot_repair.json"
 
-    def _record_cannot_repair(self, text: str, tried: list[str], *, source: str) -> None:
-        """Write down, before the study runs, that FI's repairs of the code ended with a problem that stands, and what the
-        problem rests on (``source``, :mod:`core.stop_power`). One FI measured, or that two sources agree on, ends the run
-        step in the honest stop (no paper) without running the script. One that rests on FI's reading of the code is kept
-        for QUALITY.md and the paper's limitations, and the quest goes on. Nobody is asked to change code."""
+    def _record_cannot_repair(self, text: str, tried: list[str], *, source: str, check: str) -> None:
+        """Write down, before the study runs, that FI's repairs of the code ended with a problem that stands, what the
+        problem rests on (``source``, :mod:`core.stop_power`) and which check found it (``check``). One FI measured, or that
+        two sources agree on, ends the run step in the honest stop (no paper) without running the script. One that rests
+        on FI's reading of the code is kept for QUALITY.md and the paper's limitations, and the quest goes on. A reading
+        never replaces a measured problem of the same text. Nobody is asked to change code."""
+        problems = self._cannot_repair_problems()
+        same = next((p for p in problems if p.get("text") == text), None)
+        if same is not None and _stop_power.may_stop(same.get("source")) and not _stop_power.may_stop(source):
+            return
+        problems = [p for p in problems if p is not same]
+        problems.append({"text": text, "tried": tried, "source": source, "check": check})
+        self._write_cannot_repair(problems)
+
+    def _clear_cannot_repair(self, check: str) -> None:
+        """The check ``check`` ran again and found nothing (the code was repaired since): its problems are taken out of the
+        record, so neither the paper nor QUALITY.md reports a problem that is fixed."""
+        problems = self._cannot_repair_problems()
+        kept = [p for p in problems if p.get("check") != check]
+        if len(kept) != len(problems):
+            self._write_cannot_repair(kept)
+
+    def _write_cannot_repair(self, problems: list[dict[str, Any]]) -> None:
         path = self.fi_dir / self._CANNOT_REPAIR_FILE
-        problems = [p for p in self._cannot_repair_problems() if p.get("text") != text]
-        problems.append({"text": text, "tried": tried, "source": source})
+        if not problems:
+            self._forget_cannot_repair()
+            return
         stopping = next((p for p in problems if _stop_power.may_stop(p.get("source"))), None)
         record: dict[str, Any] = {"problems": problems, "at": _frozen.now()}
         if stopping is not None:
@@ -13714,6 +13739,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         labels = self._check_equation_labels(state)
         layout = self._check_code_layout(state)
         if self.config.rigor_profile != "research" or not (labels or layout):
+            self._clear_cannot_repair("layout")
             return None
         problems = [*labels, *layout]
         iters = int(state.get("exec_reflect_iter") or 0)
@@ -13738,7 +13764,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "; ".join(problems),
             ["read the code against what the plan requires of it before running it",
              *[_one_line(p, 300) for p in problems[:3]],
-             f"sent the code back to be repaired {iters} time(s); it still lacked this"], source=_stop_power.READ)
+             f"sent the code back to be repaired {iters} time(s); it still lacked this"], source=_stop_power.READ,
+            check="layout")
         return self._cannot_repair_stop()
 
     def _check_code_layout(self, state: QuestState) -> list[str]:
@@ -16963,7 +16990,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "the experiment's script differs from the protocol the plan fixed: " + "; ".join(differences),
             ["compared the script with the protocol the plan fixed", *[_one_line(d, 300) for d in differences[:3]],
              f"asked the model to repair the script up to {int(self.config.engine.protocol_repair_attempts)} time(s); "
-             "the difference stood"], source=_protocol.SOURCE)
+             "the difference stood"], source=_protocol.SOURCE, check="protocol")
 
     def _adopt_scripts_fixed_by_hand(self, state: QuestState) -> QuestState | None:
         """After a protocol stop, keep the scripts on disk when they now agree with the plan (a person edited them, or
@@ -17103,7 +17130,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._record_cannot_repair(
                     "the script's randomness cannot be traced to FI_REPLICATE_SEED, which a research run requires: " + why,
                     ["read the script for the seed FI gives each repeat",
-                     "asked the model for one repair: " + _one_line(why, 300)], source=_stop_power.READ)
+                     "asked the model for one repair: " + _one_line(why, 300)], source=_stop_power.READ, check="seed")
             return code, deps
         code_path.write_text(new_code, encoding="utf-8")
         self._log.info(
