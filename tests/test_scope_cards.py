@@ -168,3 +168,13 @@ def test_plan_section_names_the_pick_or_says_nobody_picked():
     nobody = sc.plan_section({"cards": cards, "chosen": None, "chosen_by": "nobody"})
     assert sc.nobody_line() in nobody and "- How fast does a cup of tea cool?" in nobody
     assert sc.plan_section(None) == "" and sc.plan_section({"cards": []}) == ""
+
+
+def test_gaps_read_the_readers_names_the_protocol_gives():
+    design = {"protocol": {"grid": {"m": ["a", "b"]}, "metrics": [{"id": "t_end"}],
+                           "labels": {"m": "Cup material $m$ (-)", "t_end": "Final temperature $T$ (K)"}}}
+    assert sc.gaps(_card(results=("final temperature",), settings=("cup material",)), design) == []
+    # a reader's name for something the plan does not vary is not a setting it varies
+    found = sc.gaps(_card(results=(), settings=("lid colour",)),
+                    {"protocol": {"grid": {"m": [1]}, "labels": {"lid": "Lid colour"}}})
+    assert len(found) == 1 and "lid colour" in found[0]

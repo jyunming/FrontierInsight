@@ -9,6 +9,7 @@ chosen card. The comparison is by names (a reading), so it is disclosed and neve
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -206,6 +207,15 @@ def _plan_names(design: dict) -> tuple[set[str], set[str]]:
         for v in (block.get("design_variables") or []) if isinstance(block, dict) else []:
             if isinstance(v, dict) and v.get("name"):
                 settings.add(_key(v["name"]))
+    for part in parts:
+        # the reader's names the protocol gives a setting or a result ("Cup material $m$ (-)"), with and without the
+        # symbol and unit, count as its names too
+        labels = part.get("labels")
+        for code_name, shown in (labels.items() if isinstance(labels, dict) else ()):
+            names = {_key(shown), _key(re.split(r"[$(\[]", str(shown), maxsplit=1)[0])} - {""}
+            for found in (metrics, settings):
+                if _key(code_name) in found:
+                    found.update(names)
     return metrics, settings
 
 

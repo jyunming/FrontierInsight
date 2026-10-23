@@ -1945,6 +1945,15 @@ def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger, timeout_s: flo
                 answers = staged()
                 if answers is not None:
                     return answers
+        except BaseException:
+            # The run stopped waiting (the time allowed ran out, or it was stopped): the page must not go on showing
+            # a question nobody waits on. A run killed outright leaves it for a resume, which asks it again.
+            if staged() is None:
+                try:
+                    questions_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
         finally:
             try:
                 waiting_path.unlink(missing_ok=True)

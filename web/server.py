@@ -2784,10 +2784,25 @@ def make_app(
         fi = quest_root / ".fi"
         if not (fi / "scope_questions.json").is_file() or (fi / "scope_answer.json").is_file():
             raise HTTPException(409, f"no pending study choice for quest {quest_id}")
-        tmp = fi / "scope_answer.json.tmp"
+        try:
+            asked = json.loads((fi / "scope_questions.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            asked = {}
+        entry = asked.get("study") if isinstance(asked, dict) else None
+        cards = entry.get("cards") if isinstance(entry, dict) else None
+        from core import scope_cards as _scope_cards
+
+        if _scope_cards.read_answer(answers, cards if isinstance(cards, list) else []) is None:
+            raise HTTPException(400, "pick one of the studies by its number, or write the study you want")
+        # Each request writes its own file; linking it into place fails when an answer is there already, so of two
+        # answers sent at once one is kept and the other is told so.
+        tmp = fi / f"scope_answer.{secrets.token_hex(8)}.tmp"
         try:
             tmp.write_text(json.dumps(answers, indent=2) + "\n", encoding="utf-8")
-            os.replace(tmp, fi / "scope_answer.json")
+            try:
+                os.link(tmp, fi / "scope_answer.json")
+            except FileExistsError:
+                raise HTTPException(409, f"the study for quest {quest_id} was already chosen") from None
         except OSError as e:
             raise HTTPException(500, f"could not save the answer: {e}") from e
         finally:

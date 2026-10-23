@@ -142,3 +142,35 @@ def test_web_scope_callback_never_reads_the_setup_answer(tmp_path: Path) -> None
         return await asyncio.wait_for(task, 10)
 
     assert asyncio.run(go()) == {"study": 1}
+
+
+def test_a_study_choice_nobody_waits_on_any_more_leaves_the_page(tmp_path: Path) -> None:
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    cb = launch._web_page_clarify_callback(fi, LOG, 0.0, name="scope")
+
+    async def go() -> None:
+        await asyncio.wait_for(cb(scope_cards.question(CARDS)), 1.5)
+
+    try:
+        asyncio.run(go())
+    except asyncio.TimeoutError:
+        pass
+    else:
+        raise AssertionError("the wait should have run out")
+    assert not (fi / "scope_questions.json").exists() and not (fi / "scope_waiting.json").exists()
+    client = TestClient(make_app(tmp_path.parent))
+    assert client.get(f"/api/quests/{tmp_path.name}").json()["pending_scope"] is False
+
+
+def test_server_scope_post_refuses_an_answer_that_names_no_study_and_a_second_answer(tmp_path: Path) -> None:
+    q = _quest(tmp_path)
+    (q / ".fi" / "scope_questions.json").write_text(json.dumps(scope_cards.question(CARDS)), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    for bad in ({}, {"study": True}, {"study": 9}, {"study": ""}, {"study": {"study_type": "measure"}}):
+        assert client.post("/api/quests/qs/scope", json={"answers": bad}).status_code == 400, bad
+    assert not (q / ".fi" / "scope_answer.json").exists()
+    assert client.post("/api/quests/qs/scope", json={"answers": {"study": "How fast does it cool?"}}).status_code == 200
+    assert client.post("/api/quests/qs/scope", json={"answers": {"study": 1}}).status_code == 409
+    assert json.loads((q / ".fi" / "scope_answer.json").read_text(encoding="utf-8")) == {"study": "How fast does it cool?"}
+    assert not list((q / ".fi").glob("*.tmp"))
