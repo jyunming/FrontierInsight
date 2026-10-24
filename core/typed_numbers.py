@@ -196,12 +196,31 @@ def sentence_around(markdown: str, start: int, end: int) -> str:
     return _plain(re.sub(r"\s+", " ", markdown[a:b]).strip())
 
 
+def _clause_breaks(text: str, cites: list[tuple[int, int]]) -> list[int]:
+    """The places of the ";" that end a clause: not inside a citation ("[W1; W2]") and not inside brackets or parentheses
+    ("(Smith 2020; Lee 2021)"). The depth starts again on every line, so one unclosed bracket hides no later clause."""
+    out: list[int] = []
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "
+":
+            depth = 0
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == ";" and depth == 0 and not any(x <= i < y for x, y in cites):
+            out.append(i)
+    return out
+
+
 def numbers(markdown: str) -> list[Typed]:
     """Every number in the writer's own words, with where it is and whether it is a label or inside math."""
     text = writers_text(markdown)
     t = _normalise(text)
     maths = [m.span() for m in MATH.finditer(markdown or "")]
     cites = [m.span() for m in _CITE.finditer(text)]
+    breaks = _clause_breaks(text, cites)
     out: list[Typed] = []
     for m in _NUM.finditer(t):
         s, e = m.span()
@@ -231,9 +250,10 @@ def numbers(markdown: str) -> list[Typed]:
         if negative:
             value = -value
         a, b = _sentence(text, s, e)
-        clause_end = text.find(";", e, b)
-        clause_end = b if clause_end == -1 else clause_end
-        clause_start = text.rfind(";", a, s) + 1 or a
+        before_s = [x for x in breaks if a <= x < s]
+        after_e = [x for x in breaks if e <= x < b]
+        clause_start = before_s[-1] + 1 if before_s else a
+        clause_end = after_e[0] if after_e else b
         sentence = re.sub(r"\s+", " ", (markdown or "")[a:b]).strip()
         near = text[max(0, s - 24):s]
         label = bool(_LABEL.search(near)) or (digits.isdigit() and bool(_LABEL_LIST.search(near)))

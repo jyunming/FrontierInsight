@@ -201,6 +201,13 @@ def test_a_citation_before_the_number_in_its_clause_covers_it():
     assert _typed("As reported in [W1]; the rate was 35%.") == ["35%"]
 
 
+def test_a_semicolon_inside_a_citation_is_not_a_clause_boundary():
+    """A review finding: the ";" of "[W1; W2]" or "(Smith 2020; Lee 2021)" cut the clause, so the cited number looked uncited."""
+    assert _typed("As reported in [W1; W2], the rate was 35%.") == []
+    assert _typed("As reported (Smith 2020; Lee 2021), the rate was 35%.") == []
+    assert _typed("As reported in [W1; W2]; the rate was 35%.") == ["35%"]
+
+
 def test_a_cited_prior_number_before_its_marker_is_still_exempt():
     assert _typed("Prior work found a barrier of 71.3 kJ/mol [3].") == []
 
