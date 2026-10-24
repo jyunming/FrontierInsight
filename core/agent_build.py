@@ -113,6 +113,23 @@ def compare_rounds(earlier: list[tuple[int, dict[str, bool | None]]], now: dict[
     return out
 
 
+def verdict_files(details: Any) -> set[str]:
+    """The files (relative to ``code/``) a verdict's details name: every ``script`` of the records the static checks and
+    the typed-results check keep (``{"functions": [{"script": ..., "line": ...}]}``). Empty when the verdict names none
+    (a check of a run, which is about the agent's code as a whole)."""
+    out: set[str] = set()
+    if isinstance(details, dict):
+        if isinstance(details.get("script"), str) and details["script"]:
+            out.add(details["script"])
+        for value in details.values():
+            if isinstance(value, (dict, list)):
+                out |= verdict_files(value)
+    elif isinstance(details, list):
+        for item in details:
+            out |= verdict_files(item)
+    return out
+
+
 def writes_code(node: str | None) -> bool:
     """A request (by its node name) that writes or repairs the experiment's code: refused in agent mode."""
     node = str(node or "")
@@ -175,11 +192,14 @@ def seconds_used(quest_root: Path) -> float:
 
 
 def note_judgement(quest_root: Path, *, claimed: str, found: list[str], passed: bool, after_freeze: bool = False,
-                   checks: dict[str, bool | None] | None = None, compared: dict[str, Any] | None = None) -> None:
+                   checks: dict[str, bool | None] | None = None, compared: dict[str, Any] | None = None,
+                   fi_own: list[str] | None = None) -> None:
     """FI's judgement of the code the last round left, beside what the agent said of it (``.fi/agent_coder.json``):
     ``claimed`` is the agent's last message, ``found`` what FI's checks found; ``checks`` each check's result
     (recorded as ``checks`` and the list ``passed``), ``compared`` the comparison with the best earlier round
-    (:func:`compare_rounds`: ``compared_with``, ``newly_passed``, ``newly_failed``)."""
+    (:func:`compare_rounds`: ``compared_with``, ``newly_passed``, ``newly_failed``); ``fi_own`` the findings about a
+    file the agent may not change (FI's own finding, kept as ``fi_own_findings``: not sent to the agent, not counted
+    against its progress)."""
     data = _record(quest_root)
     rounds = [r for r in data.get("rounds") or [] if isinstance(r, dict)]
     if not rounds:
@@ -194,6 +214,8 @@ def note_judgement(quest_root: Path, *, claimed: str, found: list[str], passed: 
         rounds[-1]["compared_with"] = compared.get("best")
         rounds[-1]["newly_passed"] = list(compared.get("newly_passed") or [])
         rounds[-1]["newly_failed"] = list(compared.get("newly_failed") or [])
+    if fi_own:
+        rounds[-1]["fi_own_findings"] = [f[:600] for f in fi_own][:20]
     if after_freeze:
         rounds[-1]["after_freeze"] = True
     _save_record(quest_root, data)
@@ -382,6 +404,7 @@ class AgentBuildMixin:
 
         found: list[str] = []
         checks: dict[str, bool | None] = {}
+        self._fi_own_findings = []  # type: ignore[attr-defined]
         # A round that left no script (it ran out of time before writing one) is a finding for the next round: the
         # checks below read the script, and one real round that wrote nothing in its 20 minutes stopped the quest there.
         if not (self.quest_root / "code" / _split_run.ANALYSIS_NAME).is_file():  # type: ignore[attr-defined]
@@ -443,11 +466,23 @@ class AgentBuildMixin:
         except Exception as exc:  # noqa: BLE001 -- the gate's own finding is reason enough
             self._log.info("[implement] FI's list of the code's faults could not be made (%r)", exc)  # type: ignore[attr-defined]
             verdicts = []
+        coder = await self._code_agent()
+        fi_own: list[str] = []
         for v in verdicts:
+            # A fault in a file the agent may not change (FI's own copies, the tests FI writes) cannot be cleared by it: it
+            # is FI's finding, kept and disclosed, and neither sent to the agent nor counted as a check it fails.
+            files = verdict_files(v.details) if v.passed is False else set()
+            if files and not any(coder.may_edit(f) for f in files):
+                fi_own.append(f"{check_words(v.check)}: {v.says} (in {', '.join(sorted(files))}, which the coding agent may "
+                              "not change)")
+                continue
             if checks.get(v.check) is not False:
                 checks[v.check] = v.passed
             if v.passed is False:
                 found.append(v.says)
+        self._fi_own_findings = fi_own  # type: ignore[attr-defined]
+        for line in fi_own:
+            self._log.warning("[implement] FI's own finding, not the coding agent's to fix: %s", line)  # type: ignore[attr-defined]
         return None, found, checks
 
     async def _agent_build(self, state: Any, py: Any, exec_env: Any, seed_path: Path) -> tuple[Any, str | None, bool]:
@@ -463,7 +498,8 @@ class AgentBuildMixin:
             earlier = [r for r in judged_rounds(self.quest_root) if r[0] < n]  # type: ignore[attr-defined]
             compared = compare_rounds(earlier, checks) if passed is None else None
             note_judgement(self.quest_root, claimed=coder.last_message, found=found, passed=passed is not None  # type: ignore[attr-defined]
-                           and passed[0] is None, checks=checks if passed is None else None, compared=compared)
+                           and passed[0] is None, checks=checks if passed is None else None, compared=compared,
+                           fi_own=list(getattr(self, "_fi_own_findings", None) or []))
             if passed is not None:
                 if passed[0] is None:
                     self._log.info("[implement] FI's checks pass the coding agent's code")  # type: ignore[attr-defined]
@@ -490,6 +526,9 @@ class AgentBuildMixin:
                     why += " (passed in an earlier round and fails now: " + "; ".join(still) + ")"
                 text = ("FI's checks still find faults in the coding agent's code, and " + why + ": "
                         + "; ".join(f.splitlines()[0] for f in found if f.strip())[:1500])
+                if getattr(self, "_fi_own_findings", None):
+                    text += (" FI's own findings, which the agent may not change and which did not count against it: "
+                             + "; ".join(self._fi_own_findings)[:800])  # type: ignore[attr-defined]
                 return self._stop_before_run(text, "cannot_repair", tried=[  # type: ignore[attr-defined]
                     "the coding agent wrote the code and fixed what FI's checks found, round by round",
                     *[f.splitlines()[0][:300] for f in found[:3] if f.strip()]]), None, False
