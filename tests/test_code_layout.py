@@ -335,7 +335,10 @@ async def test_a_simulation_quest_gets_the_research_tool_layout_by_default(
     ran = _pytest_file(code)
     assert ran.returncode == 0, ran.stdout + ran.stderr
     record = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
-    assert record["levels"]["independently_validated"] is True, record["all_gaps"]
+    # The one check is the plan's own derivation (no retrieved source, no second implementation), which the level does
+    # not count (core/evidence.py); the layout adds no other gap.
+    gaps = record["all_gaps"].get("independently_validated", [])
+    assert len(gaps) == 1 and "rests on the plan's own derivation" in gaps[0], record["all_gaps"]
 
 
 @pytest.mark.asyncio
