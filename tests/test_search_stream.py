@@ -474,3 +474,28 @@ def test_a_count_stop_fires_at_the_same_design_when_one_start_is_slow() -> None:
                                              results=["f", "g"])
         assert reference["stopped_because"] == "no_effect"
         _same_record(timed, reference)
+
+
+def test_a_look_ahead_copy_does_not_hold_the_rows_or_the_cache_of_the_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Many starts over a large coarse scan: each start's look-ahead copy, as made, carries its own small state, not the
+    scan's rows or the designs already evaluated (a full copy for each start would hold the scan once per start)."""
+    block = _block(starts=8, per_start=10, method="bounded_local")
+    axis = [-2.0 + 4.0 * k / 59 for k in range(60)]
+    block["grid"] = {"x0": axis, "x1": axis}  # 3600 scan rows
+    made: list[int] = []
+    original = search._Search._look_ahead
+
+    def spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        out = original(self, *args, **kwargs)
+        copy_ = out[0]
+        assert len(self.rows) > 3000 and copy_.rows is not self.rows and len(copy_.rows) == 0
+        assert copy_.cache.maps[1] is self.cache, "the designs already evaluated are read through, not copied"
+        big = {k: len(v) for k, v in vars(copy_).items()
+               if k not in ("cache", "block", "space") and hasattr(v, "__len__") and not isinstance(v, str) and len(v) > 1000}
+        assert not big, big
+        made.append(1)
+        return out
+
+    monkeypatch.setattr(search._Search, "_look_ahead", spy)
+    outcome, _ = _drive(block, stream=True)
+    assert len(made) == 8 and len(outcome["rows"]) > 3000

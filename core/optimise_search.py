@@ -74,6 +74,7 @@ same seed gives the same search.
 
 from __future__ import annotations
 
+import collections
 import copy
 import itertools
 import json
@@ -1282,12 +1283,21 @@ class _Search:
             self.shares = {}
 
     def _look_ahead(self, u0, start, number, cma):
-        """A copy of the search that runs the local search of one start alone, for :meth:`_stream` to see what the start
+        """A light copy of the search that runs the local search of one start alone, for :meth:`_stream` to see what the start
         will ask for next. It is made before any start takes a step, with the random draws the earlier starts take at their
         first step already taken, so it asks for the designs the start asks for; it shares nothing with the search, and
         what it does is never recorded (a design it asks for that the search does not is only run, and listed apart if the
         search stops). Returns ``[copy, its generator, its pending request or None]``."""
-        copy_ = copy.deepcopy(self)
+        # Only what this start's search changes is copied. The record (rows, start log) starts empty, the designs already
+        # evaluated are read through from the search's own cache, and the block and the space are shared: with many
+        # starts over a large coarse scan, a full copy for each start would hold the scan once per start.
+        shared = ("rows", "row_order", "start_log", "start_order", "cache", "block", "space")
+        copy_ = copy.copy(self)
+        for name, value in vars(self).items():
+            if name not in shared:
+                setattr(copy_, name, copy.deepcopy(value))
+        copy_.rows, copy_.row_order, copy_.start_log, copy_.start_order = [], [], [], []
+        copy_.cache = collections.ChainMap({}, self.cache)
         for _ in range(number):
             copy_.rng.randrange(2 ** 32)
         gen = copy_._local(u0, start, copy_.shares[start], cma=cma)
