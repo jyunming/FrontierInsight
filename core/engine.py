@@ -20338,9 +20338,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
         except Exception as e:  # noqa: BLE001 — gate must never abort the quest
             if gate_off:
-                self._log.warning("[evidence_gate] FI's own checks before the writing could not be read (%r); the gate "
-                                  "is off, so the paper is written", e)
-                return {}
+                # FI's own stop conditions could not be checked: the same route as a failed gate call (recorded as
+                # unknown, a gap in the evidence record), never a silent passthrough to the writer.
+                self._log.warning("[evidence_gate] FI's own checks before the writing could not be run (%r); the gate "
+                                  "is off, but the failure is recorded as status=unknown", e)
             status = "unknown"
             failure = f"{type(e).__name__}: {e}"[:300]
             self._log.warning(

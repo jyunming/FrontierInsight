@@ -578,6 +578,28 @@ async def test_evidence_gate_off_still_stops_on_a_fault_fi_has_shown(
     assert patch["evidence_assessment"]["decided_by"] == "rule"
 
 
+async def test_evidence_gate_off_records_a_failed_own_check_as_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Old code: with the gate off, an exception in FI's own rule verdicts was caught and the node returned {}, so the
+    paper was written although FI could not check its own stop conditions. It now follows the failed-gate route."""
+    engine = Engine(_route_config(
+        tmp_path, review_loop=True, max_iterations=2, evidence_gate=False))
+
+    def boom(_state):  # noqa: ANN001
+        raise RuntimeError("rule verdict broke")
+
+    async def no_model(*_a, **_k):  # noqa: ANN002, ANN003
+        raise AssertionError("the gate is off: the model is never asked")
+
+    monkeypatch.setattr(engine, "_flat_objective_verdict", boom)
+    monkeypatch.setattr(engine, "_chat", no_model)
+    patch = await engine._node_evidence_gate({"topic": "t", "literature": [], "analysis": {}})
+    assert patch != {}
+    assert patch["evidence_assessment"]["status"] == "unknown"
+    assert "rule verdict broke" in patch["evidence_assessment"]["failure"]
+
+
 async def test_evidence_gate_fails_open_on_unparseable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
