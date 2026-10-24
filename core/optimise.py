@@ -1197,11 +1197,15 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
     if compared and best is not None:
         from . import optimise_search as _osearch
 
-        lines.append(f"[optimise] {len(compared)} alternatives were each searched on their own; the best design is the "
+        same = [p for p in compared if p.get("same_as")]
+        lines.append(f"[optimise] {len(compared)} alternatives were "
+                     + ("compared" if same else "each searched on their own") + "; the best design is the "
                      f"one of {_osearch.level_says(best.get('level') or {})}. Best of each: "
                      + "; ".join(f"{_osearch.level_says(p['level'])}: "
                                  + (f"{_fmt(p['best']['objective'])}{unit}" if p.get("best") else "no design that meets every limit")
                                  for p in compared))
+        for p in same:
+            lines.append(f"[optimise] {_osearch.same_as_says(p)}")
     for r in record.get("continued") or []:
         target = f", toward {quantity} = {_fmt(r['target'])}{unit}" if r.get("target") is not None else ""
         reached = ("; the target was reached at the search's settings" if r.get("target_reached") else
