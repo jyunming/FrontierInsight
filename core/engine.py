@@ -11414,9 +11414,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     protocol, random_source=source, checked=checked, **({"without": without} if without else {}))
                 if self._manifest_note:
                     self._log.info("[run_manifest] %s", self._manifest_note)
+            # A measurement the trials make once and return under every value of a setting is owed once.
+            copied = _trial_runner.copied_settings(
+                self.quest_root, {**_optimise_search.study_grid(counted),
+                                  **(counted.get("in_each_run") if isinstance(counted.get("in_each_run"), dict) else {})},
+                [str(m.get("id")) for m in counted.get("metrics") or [] if isinstance(m, dict) and m.get("id")])
             found = (row_problems + altered + ([random_run_cell] if random_run_cell else [])
                      + _run_manifest.problems(counted, manifest, result_json=result_json, trial_mode=True,
-                                              recorded=recorded, recorded_by_cell=per_cell) + not_run
+                                              recorded=recorded, recorded_by_cell=per_cell, copied=copied) + not_run
                      + row_sim)
             # A list printed under the wrong name that holds another output's values at its setting is counted as that
             # output, and said once.
@@ -11439,11 +11444,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             found = found + no_ids
             self._manifest_analysis_problems = (
                 _run_manifest.analysis_output_problems(counted, manifest, result_json, trial_mode=True, recorded=recorded,
-                                                     recorded_by_cell=per_cell)
+                                                     recorded_by_cell=per_cell, copied=copied)
                 + not_run + no_ids
             )
             self._manifest_differences = _run_manifest.differences(counted, manifest, result_json, recorded=recorded,
-                                                                    recorded_by_cell=per_cell)
+                                                                    recorded_by_cell=per_cell, copied=copied)
             # The kind each finding was given where it was made; from here on the findings are plain sentences.
             self._manifest_fabricated = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.FABRICATED]
             self._manifest_unprinted = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.UNPRINTED]
