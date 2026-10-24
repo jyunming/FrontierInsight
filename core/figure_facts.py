@@ -13,9 +13,9 @@ sentences per figure, which the paper gets through placeholders (:mod:`core.pape
 * ``{{figure:<stem>:layout}}`` -- "two panels side by side (left: "A"; right: "B")".
 * ``{{figure:<stem>:lines}}`` -- "solid lines and markers are drawn; no dotted or dashed line is drawn".
 
-As a backstop for a writer who types the layout or a line style anyway, :func:`caption_findings` compares the layout and
-line-style words of a caption with the same records. It reads a caption's words, so it is a net under the placeholders and
-not the fix: the fix is that the writer need not type these facts at all.
+There is no check of a caption's own words against these records: a live run showed it misreading a negated sentence
+("no dotted line is drawn") as naming a dotted line, and a position word can be negated the same way ("not in the upper
+panel"). The fix is that the writer need not type these facts at all.
 """
 
 from __future__ import annotations
@@ -225,63 +225,3 @@ def facts(quest_root: Path | str) -> dict[str, str]:
             if text:
                 out[f"{stem}:{kind}"] = text
     return out
-
-
-# ---- the backstop: a caption's own words against the same records -------------------------------------------------
-
-_PAPER_IMAGE = re.compile(r"!\[(?P<alt>(?:[^\[\]]|\[[^\[\]]*\])*)\]\((?P<src>[^)\s]+)")
-#: A position word naming a panel: "upper panel", "left-hand plot", "top row", "lower half". Axis words ("left axis",
-#: "right y-axis") name a twin axis and are not panels.
-_POSITION = re.compile(
-    r"\b(?P<pos>upper|lower|top|bottom|left|right)(?:[- ]hand)?(?:[- ](?:most|side))?\s+"
-    r"(?:(?:two|sub|pair of)\s+)?(?P<what>panels?|subplots?|plots?|rows?|halves|half|panes?|columns?)\b",
-    re.I)
-_VERTICAL, _HORIZONTAL = {"upper", "lower", "top", "bottom"}, {"left", "right"}
-_STYLE_CLAIM = re.compile(r"\b(?P<style>dotted|dashed|dash-dotted|dot-dashed)\b(?:\s+\w+){0,3}?\s+"
-                          r"(?:line|lines|curve|curves|trace|traces|baseline|baselines|reference|overlay)", re.I)
-
-
-def _allowed(arrangement: str) -> set[str]:
-    return {"single": set(), "side_by_side": _HORIZONTAL, "stacked": _VERTICAL, "grid": _HORIZONTAL | _VERTICAL
-            }.get(arrangement, set())
-
-
-def caption_findings(paper_md: str, quest_root: Path | str) -> list[str]:
-    """One finding for each caption that places a panel where the figure has none (``upper panel`` of two panels side by
-    side) or names a dotted or dashed line the figure does not draw, from the figure's own records. Empty when a figure has
-    no record. A position word with no panel of that kind in the figure is a fault; a position word the layout allows is
-    never judged (which panel is "left" is not decided from words)."""
-    known = records_of(quest_root)
-    findings: list[str] = []
-    for m in _PAPER_IMAGE.finditer(paper_md or ""):
-        name = Path(m.group("src")).name
-        got = known.get(_stem(name))
-        if got is None:
-            continue
-        record, lines_data = got
-        caption = m.group("alt")
-        lay = layout(record)
-        if lay is not None:
-            allowed = _allowed(lay["arrangement"])
-            bad = []
-            for hit in _POSITION.finditer(caption):
-                pos = hit.group("pos").lower()
-                if pos not in allowed and hit.group(0).lower() not in bad:
-                    bad.append(hit.group(0).lower())
-            if bad:
-                findings.append(
-                    f'figure_caption: the caption of figures/{name} says "{bad[0]}"'
-                    + (f' (and {len(bad) - 1} more)' if len(bad) > 1 else "")
-                    + f", but the figure has {layout_sentence(record)}. Describe the layout as FI records it: write "
-                    f"{{{{figure:{_stem(name)}:layout}}}} instead of typing it")
-        if lines_data is not None:
-            drawn = styles_drawn(lines_data)
-            if drawn:
-                said = {s.group("style").lower().replace("dot-dashed", "dash-dotted") for s in _STYLE_CLAIM.finditer(caption)}
-                missing = sorted(s for s in said if s not in drawn)
-                if missing:
-                    findings.append(
-                        f'figure_caption: the caption of figures/{name} names {" and ".join(missing)} lines, but the '
-                        f"in the figure {lines_sentence(lines_data)}. Write "
-                        f"{{{{figure:{_stem(name)}:lines}}}} instead of typing the line styles")
-    return findings

@@ -1424,13 +1424,6 @@ def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fa
     return hits
 
 
-def figure_hits(paper_md: str, quest_root: Path | str) -> list[str]:
-    """A must-fix hit for each caption that places a panel or names a line style its figure does not have, from FI's own
-    record of the figure (:func:`core.figure_facts.caption_findings`)."""
-    return [f"{HIT}: " + f.removeprefix("figure_caption: ")
-            for f in _figures.caption_findings(_disclosure.without_block(paper_md), quest_root)]
-
-
 def value_hits(paper_md: str, quest_root: Path | str) -> list[str]:
     """A must-fix hit for each result key FI could not fill (it reads "not recorded"), naming the key, why, and the
     writer's sentence (as the passage editor locates it): the writer fixes the key or leaves the number out."""
@@ -1577,7 +1570,6 @@ def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s:
     typed that is not a number of the plan or the topic. Never raises."""
     try:
         hits = placement_hits(paper_md, quest_root, topic=topic, fallback_s=fallback_s)
-        hits += figure_hits(paper_md, quest_root)
         if keyed:
             hits += value_hits(paper_md, quest_root)
             hits += typed_hits(paper_md, plan_protocol(quest_root, protocol), topic, quest_root)

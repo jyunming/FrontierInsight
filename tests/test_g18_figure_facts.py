@@ -34,49 +34,15 @@ def _quest(tmp_path: Path, record, lines=None, stem="fig_a") -> Path:
     return tmp_path
 
 
-def test_side_by_side_panels_are_not_upper_and_lower(tmp_path):
-    """Old code: nothing compared a caption's "upper/lower panel" with the figure, so two panels drawn side by side were
-    described as stacked in 4 of 4 graded papers. The record puts them in one row."""
-    root = _quest(tmp_path, _record(SIDE, SIDE_RIGHT, titles=("Fit", "Residual")), _lines("-", "-"))
-    assert figure_facts.layout(_record(SIDE, SIDE_RIGHT))["arrangement"] == "side_by_side"
-    paper = "![Upper panel: the fit. Lower panel: the residual.](figures/fig_a.png)"
-    (hit,) = paper_facts.figure_hits(paper, root)
-    assert "upper panel" in hit and "side by side" in hit and "{{figure:fig_a:layout}}" in hit
-
-
-def test_stacked_panels_allow_top_and_bottom_but_not_left(tmp_path):
-    """Known positive: top and bottom of stacked panels pass; a left panel of a stacked pair does not."""
-    root = _quest(tmp_path, _record(TOP, BOTTOM), _lines("-"))
-    assert figure_facts.layout(_record(TOP, BOTTOM))["arrangement"] == "stacked"
-    assert paper_facts.figure_hits("![Top panel: the fit. Bottom panel: the residual.](figures/fig_a.png)", root) == []
-    assert len(paper_facts.figure_hits("![Left panel: the fit.](figures/fig_a.png)", root)) == 1
-
-
-def test_twin_axis_is_one_panel_and_a_left_axis_is_not_a_panel(tmp_path):
-    """A twin axis shares its panel's box; "left axis" names an axis, not a panel."""
-    record = _record(SIDE, SIDE)
-    assert figure_facts.layout(record)["panels"] == 1
-    root = _quest(tmp_path, record, _lines("-"))
-    assert paper_facts.figure_hits("![The gain on the left axis and the cost on the right axis.](figures/fig_a.png)",
-                                   root) == []
-
-
-def test_dotted_baseline_that_is_not_drawn_is_flagged(tmp_path):
-    """Old code: a caption naming "dotted linearised baseline curves" passed although the figure draws solid lines only."""
-    root = _quest(tmp_path, _record(SIDE), _lines("-", "-"))
-    (hit,) = paper_facts.figure_hits("![Measured gain with dotted baseline curves.](figures/fig_a.png)", root)
-    assert "dotted" in hit and "no dashed or dotted line is drawn" in hit
-
-
-def test_dotted_line_that_is_drawn_passes(tmp_path):
-    root = _quest(tmp_path, _record(SIDE), _lines("-", ":"))
-    assert paper_facts.figure_hits("![Measured gain with a dotted baseline curve.](figures/fig_a.png)", root) == []
-    assert "dotted" in figure_facts.lines_sentence(_lines("-", ":"))
-
-
-def test_no_record_says_nothing(tmp_path):
-    assert paper_facts.figure_hits("![Upper panel.](figures/other.png)", tmp_path) == []
-    assert figure_facts.facts(tmp_path) == {}
+def test_negated_captions_give_no_finding(tmp_path):
+    """Old code: a caption saying "no dotted line is drawn" was flagged as naming a dotted line (2 of 2 live captions), and
+    "not in the upper panel" would have been flagged the same way. Captions are no longer read against the record."""
+    root = _quest(tmp_path, _record(SIDE, SIDE_RIGHT), _lines("-", "-"))
+    for caption in ("Power against m; no dotted line is drawn, the bound is not shown.",
+                    "Gap in the right panel; nothing is drawn in the upper panel and there is no lower panel."):
+        assert not hasattr(paper_facts, "figure_hits")
+        assert not hasattr(figure_facts, "caption_findings")
+        assert paper_facts.check(f"![{caption}](figures/fig_a.png)", root) == []
 
 
 def test_sentences(tmp_path):
