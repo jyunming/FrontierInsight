@@ -1285,18 +1285,21 @@ class _Search:
     def _look_ahead(self, u0, start, number, cma):
         """A light copy of the search that runs the local search of one start alone, for :meth:`_stream` to see what the start
         will ask for next. It is made before any start takes a step, with the random draws the earlier starts take at their
-        first step already taken, so it asks for the designs the start asks for; it shares nothing with the search, and
-        what it does is never recorded (a design it asks for that the search does not is only run, and listed apart if the
+        first step already taken, so it asks for the designs the start asks for; it shares the block, the space and a read
+        layer of the cache with the search (its own writes stay in the copy), and what it does is never recorded (a design it asks for that the search does not is only run, and listed apart if the
         search stops). Returns ``[copy, its generator, its pending request or None]``."""
-        # Only what this start's search changes is copied. The record (rows, start log) starts empty, the designs already
-        # evaluated are read through from the search's own cache, and the block and the space are shared: with many
-        # starts over a large coarse scan, a full copy for each start would hold the scan once per start.
-        shared = ("rows", "row_order", "start_log", "start_order", "cache", "block", "space")
+        # Only what this start's search changes is copied. The record (rows, start log, notes, the rounds and the designs run
+        # but not used) starts empty, the designs already evaluated are read through from the search's own cache, and the
+        # block and the space are shared: with many starts over a large coarse scan, a full copy for each start would hold
+        # the scan once per start.
+        shared = ("rows", "row_order", "start_log", "start_order", "cache", "block", "space", "notes", "run_not_used",
+                  "rounds", "round_log")
         copy_ = copy.copy(self)
         for name, value in vars(self).items():
             if name not in shared:
                 setattr(copy_, name, copy.deepcopy(value))
         copy_.rows, copy_.row_order, copy_.start_log, copy_.start_order = [], [], [], []
+        copy_.notes, copy_.run_not_used, copy_.rounds, copy_.round_log = [], [], [], []
         copy_.cache = collections.ChainMap({}, self.cache)
         for _ in range(number):
             copy_.rng.randrange(2 ** 32)

@@ -486,13 +486,17 @@ def test_a_look_ahead_copy_does_not_hold_the_rows_or_the_cache_of_the_search(mon
     original = search._Search._look_ahead
 
     def spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        kept = (self.run_not_used, self.round_log, self.rounds)
+        self.run_not_used, self.round_log, self.rounds = [{}] * 5000, [{}] * 5000, [{}] * 5000  # grown lists
         out = original(self, *args, **kwargs)
+        self.run_not_used, self.round_log, self.rounds = kept
         copy_ = out[0]
         assert len(self.rows) > 3000 and copy_.rows is not self.rows and len(copy_.rows) == 0
         assert copy_.cache.maps[1] is self.cache, "the designs already evaluated are read through, not copied"
         big = {k: len(v) for k, v in vars(copy_).items()
                if k not in ("cache", "block", "space") and hasattr(v, "__len__") and not isinstance(v, str) and len(v) > 1000}
         assert not big, big
+        assert not (copy_.notes or copy_.run_not_used or copy_.rounds or copy_.round_log)
         made.append(1)
         return out
 
