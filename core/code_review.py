@@ -1002,7 +1002,7 @@ def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]
                 or v.get("status") != MISSING):
             continue
         name = str(v.get("name") or "")
-        if in_results(name, result) or (names_a_key(name) and named_in_results(name, result)):
+        if in_results(name, result) or (names_a_key(name) and _the_longer_form_of(_tokens(name), _keys_with_numbers(result)) is not None):
             v["contradicted"] = True
             changed = True
         else:
