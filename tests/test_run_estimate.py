@@ -297,9 +297,7 @@ def test_the_precision_floor_follows_the_kind_of_the_metric() -> None:
     assert est.runs_floor(MEAN_PLAN, 10, {"y": 3.0}) == 10, "never more than the run already had"
     # Not estimable (no trials to take a spread from, or no spread at all): no cut below the plan's own runs.
     assert est.runs_floor(MEAN_PLAN, 400, None) == 400 and est.runs_floor(MEAN_PLAN, 400, {}) == 400
-    assert est.runs_floor(MEAN_PLAN, 400, {"other": 1.0}) == 400
-    # A spread of exactly zero was measured (the timed trials agreed): two runs show it, so the run may be cut to two.
-    assert est.runs_floor(MEAN_PLAN, 400, {"y": 0.0}) == 2
+    assert est.runs_floor(MEAN_PLAN, 400, {"y": 0.0}) == 400 and est.runs_floor(MEAN_PLAN, 400, {"other": 1.0}) == 400
     # A stated minimum still applies on top.
     assert est.runs_floor({**MEAN_PLAN, "min_runs_per_setting": 50}, 400, {"y": 1.0}) == 50
 

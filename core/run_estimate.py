@@ -1079,7 +1079,7 @@ def _stated_min(protocol: dict[str, Any] | None) -> int | None:
 
 def precision_known(protocol: dict[str, Any] | None, spreads: dict[str, float] | None = None) -> bool:
     """Whether the runs a precision target needs can be worked out before the run: always, but for a target on a mean
-    whose spread the timed trials did not show (fewer than two trials; a spread of exactly zero is a measurement)."""
+    whose spread the timed trials did not show (fewer than two trials, or all equal)."""
     if not isinstance(protocol, dict):
         return True
     precision = protocol.get("precision")
@@ -1090,8 +1090,7 @@ def precision_known(protocol: dict[str, Any] | None, spreads: dict[str, float] |
     if kind != "mean":
         return True
     sd = (spreads or {}).get(metric or "")
-    # A spread of exactly 0 is a measurement (the timed trials agreed), not a missing one: see :func:`runs_floor`.
-    return isinstance(sd, (int, float)) and not isinstance(sd, bool) and sd >= 0
+    return isinstance(sd, (int, float)) and sd > 0
 
 
 def precision_metric(protocol: dict[str, Any] | None) -> tuple[str | None, str | None]:
@@ -1116,7 +1115,7 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
 
     The precision target is read by the kind of the metric it is on: a proportion needs `trials_for_half_width` (the worst case,
     a probability near 0.5); a mean needs n >= (z * s / h) ** 2 with `s` the spread the timed trials of the same setting
-    showed (`spreads`, two trials or more), and when that spread is not known no run may be cut at all (a spread of exactly zero, measured, needs two)."""
+    showed (`spreads`, two trials or more), and when that spread is not known or is zero no run may be cut at all."""
     from .stats import _Z95, trials_for_half_width
 
     floor = 1
@@ -1130,13 +1129,11 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
             metric, kind = precision_metric(protocol)
             if kind == "mean":
                 sd = (spreads or {}).get(metric or "")
-                if not isinstance(sd, (int, float)) or isinstance(sd, bool) or not sd >= 0:
-                    return int(before_runs)  # the spread cannot be estimated: no cut below the plan's own runs
-                # A spread of exactly 0 was measured (two or more timed trials of the same setting gave the same value):
-                # the formula then asks for no runs at all, which is not "infinite runs" and not "no cut" either. Two runs
-                # are what showed the spread, so two is the least that may stand in for the target (the plan's own minimum
-                # still applies on top); a run that is only slightly too long is cut instead of stopped.
-                floor = max(floor, 2 if sd == 0 else int(math.ceil(round((_Z95 * sd / float(target)) ** 2, 9))))
+                if sd is None or not sd > 0:
+                    # The spread cannot be estimated, and two equal timed values (a 0/1 outcome both 0, a count) are not
+                    # evidence of zero variance: no cut below the plan's own runs.
+                    return int(before_runs)
+                floor = max(floor, int(math.ceil(round((_Z95 * sd / float(target)) ** 2, 9))))
             else:
                 need = trials_for_half_width(float(target))
                 if need:

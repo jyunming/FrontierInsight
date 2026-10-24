@@ -15,24 +15,21 @@ from core.optimise import OptimisationRunner  # noqa: F401  (the import is the c
 MEAN_PLAN = {"metrics": [{"id": "y", "kind": "mean"}], "precision": {"target_half_width": 0.5, "metric": "y"}}
 
 
-def test_a_spread_of_zero_is_not_a_missing_spread() -> None:
-    """Old code: two timed trials that agreed (spread exactly 0) made ``runs_floor`` return the plan's own runs and
-    ``precision_known`` False, so a run only slightly too long was stopped. Now zero is a measured spread: two runs."""
-    assert est.runs_floor(MEAN_PLAN, 400, {"y": 0.0}) == 2
-    assert est.runs_floor({**MEAN_PLAN, "min_runs_per_setting": 30}, 400, {"y": 0.0}) == 30
-    assert est.precision_known(MEAN_PLAN, {"y": 0.0}) is True
-    # known positives: a missing spread still forbids any cut, and a real spread still sets the floor
-    assert est.runs_floor(MEAN_PLAN, 400, {}) == 400 and est.runs_floor(MEAN_PLAN, 400, None) == 400
-    assert est.precision_known(MEAN_PLAN, {}) is False
+def test_two_equal_pilot_values_are_not_evidence_of_zero_variance() -> None:
+    """Two equal pilot values of a random 0/1 metric (both 0) give a spread of 0. A cut to two runs on that would let a study
+    planned at 400 runs claim its precision target on two runs; a zero spread allows no cut, as a missing one does."""
+    assert est.runs_floor(MEAN_PLAN, 400, {"y": 0.0}) == 400
+    assert est.precision_known(MEAN_PLAN, {"y": 0.0}) is False
+    probes = [est.Probe(None, None, {"m": 20}, 0.5 + 1000 * 0.1, fixed_s=0.5, per_trial_s=0.1, timed_trials=50)]
+    assert est.fit_runs({"m": [20]}, 1000, False, probes, MEAN_PLAN, limit_s=30.0, topic_limit=False, spreads={"y": 0.0}) is None
+    # known positive: a real spread still sets the floor
     assert est.runs_floor(MEAN_PLAN, 400, {"y": 1.0}) == 16
 
 
-def test_a_zero_spread_run_that_is_a_little_too_long_is_cut_not_stopped() -> None:
-    probes = [est.Probe(None, None, {"m": 20}, 0.5 + 1000 * 0.1, fixed_s=0.5, per_trial_s=0.1, timed_trials=50)]
-    fit = est.fit_runs({"m": [20]}, 1000, False, probes, MEAN_PLAN, limit_s=30.0, topic_limit=False, spreads={"y": 0.0})
-    assert fit is not None and 2 <= fit.runs < 1000
-    none = est.fit_runs({"m": [20]}, 1000, False, probes, MEAN_PLAN, limit_s=30.0, topic_limit=False, spreads={})
-    assert none is None
+def test_a_deterministic_study_is_never_cut_by_runs() -> None:
+    """A study without randomness (the code defines run_cell) has one run per setting; there is nothing to cut."""
+    probes = [est.Probe(None, None, {"m": 20}, 100.0)]
+    assert est.fit_runs({"m": [20]}, 1000, True, probes, MEAN_PLAN, limit_s=30.0, topic_limit=False, spreads={"y": 0.0}) is None
 
 
 PARTS_GRID = {"kind": ["a", "b"], "n": [1, 10, 100], "m": [1, 2]}
