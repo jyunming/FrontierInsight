@@ -49,7 +49,8 @@ PROTO = {
     "criteria": [{"name": "nobody infected at R0 = 0", "oracle": "no_spread", "direction": "lower", "target": 0.01,
                   "tolerance": 0.001}],
 }
-SIM = SIM_TRIAL_BY_HAND + '\n\ndef oracle():\n    return {"half": 0.5004}\n'
+# The hand count is written another way than the simulation's own, so a slip in one is not copied into the other.
+SIM = SIM_TRIAL_BY_HAND.replace('float(draw < cell["R0"] / 4)', 'float(4 * draw < cell["R0"])') + '\n\ndef oracle():\n    return {"half": 0.5004}\n'
 PAPER = ("# Final size of a toy epidemic\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
          "The headline score was 0.987 across the settings. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n")
 CITING = ("# What earlier work says\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
