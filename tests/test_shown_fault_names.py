@@ -43,8 +43,8 @@ def test_r8_s_names_are_found_in_the_results(tmp_path: Path) -> None:
     issues = record["issues"]
     assert code_review.reported_under_another_name(record, issues["F-b5e6edb8"], result) == ["k_relative_bias_by_temp"]
     assert code_review.reported_under_another_name(record, issues["F-fe5d51ce"], result) == ["k_95_coverage_by_temp"]
-    # not held under any name the check can tell: still a missing quantity
-    assert code_review.reported_under_another_name(record, issues["F-650ad5f3"], result) == []
+    # the plan's Ea_lnA_correlation is held as the one key that is the same name with one more word in it
+    assert code_review.reported_under_another_name(record, issues["F-650ad5f3"], result) == ["Ea_lnA_empirical_correlation"]
     # a problem of logic (a confidence interval set to null) is never a difference of names
     assert code_review.reported_under_another_name(record, issues["F-3af8cc05"], result) == []
 
@@ -93,19 +93,18 @@ def test_r8_does_not_stop_and_the_paper_states_what_is_left_out(tmp_path: Path, 
     assert saved["F-b5e6edb8"]["changes_result"] is False
     assert saved["F-b5e6edb8"]["reported_as"] == ["k_relative_bias_by_temp"]
     assert {"F-b5e6edb8", "F-fe5d51ce"}.isdisjoint({i["id"] for i in code_findings.shown_open(code_review.load(root))})
-    # the plan's quantity the code does not compute: a part not done
-    assert saved["F-650ad5f3"]["at_gate"]["outcome"] == "not_computed"
-    assert saved["F-650ad5f3"]["at_gate"]["names"] == ["Ea_lnA_correlation"]
+    # the plan's Ea_lnA_correlation is held as Ea_lnA_empirical_correlation: a difference of names too
+    assert saved["F-650ad5f3"]["changes_result"] is False
+    assert saved["F-650ad5f3"]["reported_as"] == ["Ea_lnA_empirical_correlation"]
     # a fault a test showed in a quantity that is not the study's main one: left out of the results
     assert saved["F-3af8cc05"]["at_gate"]["outcome"] == "left_out"
     assert saved["F-3af8cc05"]["at_gate"]["keys"] == ["Ea_lnA_empirical_correlation"]
     checked = json.loads((root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
     assert checked["removed_quantities"] == ["Ea_lnA_empirical_correlation"]
     assert checked["removed_values"]["Ea_lnA_empirical_correlation"]
-    assert "Do NOT report" in checked["say"] and "`Ea_lnA_correlation` was not computed" in checked["say"]
+    assert "Do NOT report" in checked["say"]
     record = disclosure.run_record(root)
     assert "computes `Ea_lnA_empirical_correlation` wrongly" in record
-    assert "does not compute `Ea_lnA_correlation`, which the plan asks for" in record
     # the gate run again on the same files adds nothing
     asyncio.run(eng._shown_fault_verdict(  # type: ignore[arg-type]
         {"exec_result": {"returncode": 0}, "result_json": _load("kinetics_r8", tmp_path / "again")[2]}))
