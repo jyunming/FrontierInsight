@@ -605,3 +605,14 @@ def test_a_reference_naming_a_value_a_constant_no_longer_holds_is_refused_in_pla
 def test_a_reference_naming_a_grid_value_is_accepted_as_before() -> None:
     assert rv.problems(_alpha_protocol({"alpha": [0.1, 0.5], "n": [10]}, None, {"alpha": 0.5})) == []
     assert "holds for no setting" in rv.problems(_alpha_protocol({"alpha": [0.1, 0.2], "n": [10]}, None, {"alpha": 0.5}))[0]
+
+
+def test_a_reference_on_a_constant_gives_a_reference_at_every_setting_and_an_or_filter_reads_the_grid() -> None:
+    protocol = _alpha_protocol({"n": [10, 20]}, {"alpha": 0.5}, {"alpha": 0.5})
+    rows = [r for r in rv.compute(protocol, rv.grid_settings(protocol))["by_setting"] if r["metric"] == "level"]
+    assert len(rows) == 2 and all(r["reference"] == 0.5 for r in rows)
+    # either a constant the study no longer holds at that value, or a grid value: the grid value still covers a setting
+    either = _alpha_protocol({"n": [10, 20]}, {"alpha": 0.1}, [{"alpha": 0.5}, {"n": 20}])
+    assert rv.problems(either) == []
+    rows = [r for r in rv.compute(either, rv.grid_settings(either))["by_setting"] if r["metric"] == "level"]
+    assert [r["reference"] for r in rows] == [None, 0.5]
