@@ -23782,6 +23782,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # words are in QUALITY.md. Another rewrite for it would change nothing, so the router does not send one.
             if (said and not counted and not rerun and _disclosure.reason_key(said) in _disclosure.stated_reasons(self.quest_root)):
                 review["reason_repeated"] = True
+                # The verdict stays revise: no more rewrites are spent, but the reason is not answered, and the record
+                # (QUALITY.md) and the paper's Limitations say so.
+                _disclosure.mark_unresolved(self.quest_root, said)
                 self._log.info("[review] the reviewer's reason repeats one FI's record already keeps (QUALITY.md) and no "
                                "check of FI's backs it — not writing the paper again for it")
             # Kept whether or not the paper is written again after this review: an objection raised only in the last

@@ -47,6 +47,26 @@ def test_the_same_reason_again_does_not_cost_another_rewrite(tmp_path: Path) -> 
     assert eng._route_after_review({"review": again, "iteration": 2}) == "done"  # type: ignore[arg-type]
 
 
+def test_a_repeated_reason_keeps_revise_and_is_stated_as_unresolved(tmp_path: Path) -> None:
+    """Review finding: the same reason coming back means the rewrite did not answer it. The verdict stays revise (never
+    accept), no further rewrite is spent, and the reason is in the quality report and the paper's Limitations as unresolved
+    (old code recorded it only as an objection that was 'kept', with no sign it was still standing)."""
+    from core import frozen_protocol
+
+    frozen_protocol.freeze(tmp_path, {"grid": {"n": [5]}, "runs_per_setting": 2}, approved_by="test", source="test")
+    eng = _engine(tmp_path)
+    reason = "The gain is only shown for one damping value."
+    eng._note_design_objections({"iteration": 0}, {"verdict": "revise", "must_flag_hits": [], "blocking": reason})  # type: ignore[arg-type]
+    assert "still asked for a revision" not in disclosure.run_record(tmp_path)
+    again = {"verdict": "revise", "must_flag_hits": [], "blocking": reason}
+    eng._note_design_objections({"iteration": 1}, again)  # type: ignore[arg-type]
+    assert eng._route_after_review({"review": again, "iteration": 2}) == "done"  # type: ignore[arg-type]
+    assert again["verdict"] == "revise"
+    assert "still asked for a revision" in disclosure.run_record(tmp_path) and "one damping value" in disclosure.run_record(tmp_path)
+    [item] = [i for i in paper_facts.required_items(tmp_path) if i.kind == paper_facts.UNRESOLVED_REVIEW]
+    assert "one damping value" in item.sentence and "not resolved" in item.sentence
+
+
 def test_a_new_reason_or_a_measured_hit_still_costs_a_rewrite(tmp_path: Path) -> None:
     """Known positive: a different reason is a new objection, and a must-flag hit is never skipped on a repeated reason."""
     eng = _engine(tmp_path)

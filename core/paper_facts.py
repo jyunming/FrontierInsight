@@ -92,6 +92,7 @@ RUN_DIFFERENCE = "run_difference"
 PAGE_LIMIT = "page_limit"
 SHARED_SEEDS = "shared_seeds"
 UNSUPPORTED_CLAIMS = "unsupported_claims"
+UNRESOLVED_REVIEW = "unresolved_review"
 #: The sentences of the delivered paper the last claim check found supported by neither the run's results nor a cited
 #: source (``Engine._state_unsupported_claims``): ``{"claims": [{"claim", "evidence"}]}``. Empty when the last check found none.
 UNSUPPORTED_RECORD = Path(".fi") / "unsupported_claims.json"
@@ -121,13 +122,19 @@ _KIND_WORDS = {
     PAGE_LIMIT: "that the paper is longer than the topic's page limit",
     SHARED_SEEDS: "that trial t has the same random seed in every setting, so the settings' results are not independent",
     UNSUPPORTED_CLAIMS: "sentences of the paper that were not found supported by the run's results or a cited source",
+    UNRESOLVED_REVIEW: "a reason the reviewer gave for a revision again after the paper was written again for it",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
+<<<<<<< HEAD
               FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages", SHARED_SEEDS: "shared-seeds",
               UNSUPPORTED_CLAIMS: "unsupported"}
+=======
+              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages",
+              UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review"}
+>>>>>>> 5de12196 (A reviewer reason that returns after its rewrite stays revise and is stated as unresolved)
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -418,6 +425,11 @@ def required_items(quest_root: Path | str) -> list[Item]:
     if isinstance(pages, dict) and pages.get("final") and isinstance(pages.get("pages"), int)             and isinstance(pages.get("limit"), int) and pages["pages"] > pages["limit"]:
         add(PAGE_LIMIT, "page limit", _sentence(
             f"This paper is {pages['pages']} pages, over the {pages['limit']}-page limit set for it"), key="limit")
+    from . import disclosure as _disc
+
+    unresolved = _disc.unresolved_sentence(_read(root, str(_disc.OBJECTIONS_RECORD)))
+    if unresolved:
+        add(UNRESOLVED_REVIEW, "unresolved review reason", _sentence(unresolved), key="reason")
     said = unsupported_claims_text(_read(root, str(UNSUPPORTED_RECORD)))
     if said:
         add(UNSUPPORTED_CLAIMS, "unsupported sentences", _sentence(said), key="claims")

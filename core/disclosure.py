@@ -508,6 +508,42 @@ def add_objections(quest_root: Path, hits: list[tuple[str, str]], said: str) -> 
     path.write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
 
 
+def mark_unresolved(quest_root: Path, said: Any) -> None:
+    """The reviewer gave this reason again after the paper was written again for it: the rewrite did not answer it. The
+    record's rows with that reason are marked ``unresolved`` (the quality report and the paper's Limitations say so)."""
+    key = reason_key(said)
+    rows = _objection_rows(quest_root)
+    changed = False
+    for r in rows:
+        if key and reason_key(r.get("said")) == key and not r.get("unresolved"):
+            r["unresolved"], changed = True, True
+    if changed:
+        path = Path(quest_root) / OBJECTIONS_RECORD
+        path.write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
+
+
+def unresolved_reasons(rows: Any) -> list[str]:
+    """The reviewer's reasons (one line each, in its words) that the paper written again for them did not answer."""
+    out: list[str] = []
+    for r in rows if isinstance(rows, list) else []:
+        if isinstance(r, dict) and r.get("unresolved"):
+            reason = " ".join(str(r.get("said") or "").split()).rstrip(".")
+            if reason and reason not in out:
+                out.append(reason)
+    return out
+
+
+def unresolved_sentence(rows: Any) -> str:
+    """The sentence for the quality report and the Limitations: the reviewer's verdict stays revise on these reasons."""
+    said = unresolved_reasons(rows)
+    if not said:
+        return ""
+    more = f" and {len(said) - _SHOWN} more" if len(said) > _SHOWN else ""
+    return ("The reviewer still asked for a revision after the paper was written again for its reason, and no check of FI's "
+            f"confirms or rules out that reason, so it is not resolved: {'; '.join(chr(34) + w + chr(34) for w in said[:_SHOWN])}"
+            f"{more}.")
+
+
 def clear_objections(quest_root: Path) -> None:
     (Path(quest_root) / OBJECTIONS_RECORD).unlink(missing_ok=True)
 
@@ -604,6 +640,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
         parts.append(_untested_sentence(untested))
     parts.append(_precision_sentence(_read_json(quest_root / PRECISION_RECORD)))
     parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
+    parts.append(unresolved_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts = [p for p in parts if p]
     return f"{_RECORD_LEAD} " + " ".join(parts) if parts else ""
 
