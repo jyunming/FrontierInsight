@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from . import disclosure as _disclosure
+from . import figure_facts as _figures
 from . import frozen_protocol as _frozen
 from . import paper_values as _values
 from . import run_facts as _run_facts
@@ -74,6 +75,10 @@ _FACT_WORDS = {
 #: Not a fact: its numbers are accounted for setting by setting (core/results_by_setting.py), never as FI's record.
 BLOCK_NAMES = ("results_table",)
 _BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.results_by_setting.PAPER_BLOCK
+#: ``{{figure:<file stem>:layout}}`` and ``{{figure:<file stem>:lines}}``: what a saved figure draws, from the recorder's
+#: files (:mod:`core.figure_facts`), not from the writer. The marker key is ``figure-<kind>-<stem>``.
+_FIGURE_KEY = "figure-"
+_FIGURE_WORDS = {"layout": "how the figure's panels are arranged", "lines": "which line styles the figure draws"}
 _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_time", "limit": "time_limit",
             "runtime_limit": "time_limit", "limit_met": "time_limit_met", "within_limit": "time_limit_met",
             "trials_each_setting": "trials_per_setting", "failed_trials": "trials_failed", "random_seed": "seed"}
@@ -974,6 +979,22 @@ _SOURCES = re.compile(r"^#{1,6}[ \t]+" + _disclosure._SECTION_NUMBER
                       + r"(?:references|bibliography|further[ \t]+reading|works[ \t]+cited|sources)\b", re.I)
 
 
+def _figure_key(key: str) -> str | None:
+    """``<stem>:<kind>`` of a figure marker key (``figure-<kind>-<stem>``), else ``None``."""
+    if not key.startswith(_FIGURE_KEY):
+        return None
+    kind, _, stem = key[len(_FIGURE_KEY):].partition("-")
+    return f"{stem}:{kind}" if kind in _figures.KINDS and stem else None
+
+
+def _figure_facts(root: Path) -> dict[str, str]:
+    """The figure facts FI holds (:func:`core.figure_facts.facts`), only for file stems a marker can carry."""
+    try:
+        return {k: v for k, v in _figures.facts(root).items() if re.fullmatch(r"[\w-]+:\w+", k)}
+    except Exception:  # noqa: BLE001 -- a record that cannot be read is a fact FI does not hold
+        return {}
+
+
 def _norm_name(raw: str) -> str:
     name = re.sub(r"[\s.\-]+", "_", raw.strip().strip("{} ").strip().lower())
     return _ALIASES.get(name, name)
@@ -1003,6 +1024,9 @@ def to_placeholders(markdown: str) -> str:
         key = m.group(1)
         if key.startswith(_ITEM_KEY):
             return "{{not_done:" + key[len(_ITEM_KEY):] + "}}"
+        figure = _figure_key(key)
+        if figure is not None:
+            return "{{figure:" + figure + "}}"
         return "{{" + key + "}}"
 
     return _MARK.sub(back, _values.to_placeholders(markdown or ""))
@@ -1138,6 +1162,7 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
     root = Path(quest_root)
     known = facts(root, topic=topic, fallback_s=fallback_s)
     items = {i.id.lower(): i for i in required_items(root)}
+    figure_known = _figure_facts(root)
     unfilled: list[str] = []
     # A {{calc:...}} is a key FI fills with the result numbers below, not a fact of the run.
     text = _values.keyed_calcs(to_placeholders(markdown))
@@ -1149,7 +1174,7 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
         plain = _inside(m.start(), hidden)
         before = text[max(0, m.start() - 40):m.start()]
         mine = (_is_item(name) or arg is not None and name.startswith("not") or name in BLOCK_NAMES
-                or name in FACT_NAMES)
+                or name in FACT_NAMES or name == "figure" and arg is not None)
         if _LATEX_COMMAND_BEFORE.search(before) if mine else _LATEX_BEFORE.search(before):
             return m.group(0)
         if _is_item(name) or arg is not None and name.startswith("not"):
@@ -1161,6 +1186,16 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
             if item is None:
                 unfilled.append(f"not_done:{_slug(ident)}")
             return f"<!-- fi:fact-{key} -->{item.sentence if item else NOT_RECORDED}<!-- /fi:fact-{key} -->"
+        if name == "figure" and arg is not None:
+            stem, _, kind = (arg or "").strip().rpartition(":")
+            stem, kind = stem.strip(), kind.strip().lower()
+            text_ = figure_known.get(f"{stem}:{kind}")
+            if text_ is None:
+                unfilled.append(f"figure:{stem}:{kind}")
+            if plain:
+                return text_ if text_ else m.group(0)
+            key = f"{_FIGURE_KEY}{kind}-{stem}" if re.fullmatch(r"[\w-]+", stem) and kind in _figures.KINDS                 else _key(f"figure_{stem}_{kind}")
+            return f"<!-- fi:fact-{key} -->{text_ or NOT_RECORDED}<!-- /fi:fact-{key} -->"
         if name in BLOCK_NAMES:
             if plain:
                 return m.group(0)
@@ -1218,7 +1253,8 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     has_table = bool(block_text(root, "results_table"))
     over = estimate.get("over_topic_limit") if isinstance(estimate, dict) else None
     over_note = _one(over["note"]) if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip() else ""
-    if not known and not items and not reduced_note and not over_note and not has_table:
+    figure_known = _figure_facts(root)
+    if not known and not items and not reduced_note and not over_note and not has_table and not figure_known:
         return ""
     lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. Do not type them: write the "
                  "placeholder (double braces, exactly as shown) where the fact goes, and FI puts the value in from its "
@@ -1239,6 +1275,15 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
             lines.append(f"Example (in the Methods): \"{sentence}.\"")
         if needed:
             lines.append(f"Required: the paper must hold {', '.join(needed)} (in the Methods, or where the run is described).")
+    if figure_known:
+        lines.append("What each figure draws, from FI's record of the saved picture. Do not describe a figure's panel "
+                     "layout (upper, lower, left, right, side by side) or its line styles (dotted, dashed, solid) in your "
+                     "own words: you have not seen the picture, and a caption that places a panel or a line style the "
+                     "figure does not have is sent back to you. Write the placeholder where the layout or the line styles "
+                     "belong (in the caption or the text), and FI puts the plain sentence in:")
+        for fact_key, value in figure_known.items():
+            stem, _, kind = fact_key.rpartition(":")
+            lines.append(f"- {{{{figure:{stem}:{kind}}}}} ({_FIGURE_WORDS[kind]}): \"{value}\"")
     if reduced_note:
         lines.append(f"Reduced size: {reduced_note} Say this in the paper, with the numbers.")
     if has_table:
@@ -1320,6 +1365,12 @@ def _unknown_hits(markdown: str, quest_root: Path | str, known: dict[str, Fact])
                 hits.append(f"{HIT}: {{{{not_done:{key[len(_ITEM_KEY):]}}}}} is not one of the parts FI recorded as not "
                             "done, so the paper reads \"not recorded\" there. "
                             + (f"Use one of {listed}, or take it out." if listed else "Take it out."))
+        elif _figure_key(key) is not None:
+            if _figure_key(key) not in _figure_facts(Path(quest_root)):
+                ref = _figure_key(key)
+                hits.append(f"{HIT}: {{{{figure:{ref}}}}} is not a figure FI has a record of, so the paper reads "
+                            "\"not recorded\" there. Name a figure file as listed in FI's record, or describe "
+                            "the figure without a placeholder.")
         elif key not in FACT_NAMES and key not in BLOCK_NAMES:
             hits.append(f"{HIT}: {{{{{key}}}}} is not one of FI's placeholders, so the paper reads \"not recorded\" there. "
                         f"Use one of {names}, or write it in your own words without double braces.")
@@ -1345,6 +1396,13 @@ def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fa
     # The items the study must state are not checked here: FI places each one that the paper does not hold
     # (:func:`place_items`), so where the writer put it is not a fault of the paper.
     return hits
+
+
+def figure_hits(paper_md: str, quest_root: Path | str) -> list[str]:
+    """A must-fix hit for each caption that places a panel or names a line style its figure does not have, from FI's own
+    record of the figure (:func:`core.figure_facts.caption_findings`)."""
+    return [f"{HIT}: " + f.removeprefix("figure_caption: ")
+            for f in _figures.caption_findings(_disclosure.without_block(paper_md), quest_root)]
 
 
 def value_hits(paper_md: str, quest_root: Path | str) -> list[str]:
@@ -1474,6 +1532,7 @@ def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s:
     typed that is not a number of the plan or the topic. Never raises."""
     try:
         hits = placement_hits(paper_md, quest_root, topic=topic, fallback_s=fallback_s)
+        hits += figure_hits(paper_md, quest_root)
         if keyed:
             hits += value_hits(paper_md, quest_root)
             hits += typed_hits(paper_md, plan_protocol(quest_root, protocol), topic)
