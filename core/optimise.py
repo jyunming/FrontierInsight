@@ -697,6 +697,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     # and the rounds before this one) is on disk, its evaluations are answered from the record, not run again.
     replay: dict[str, dict[str, Any]] = {}
     replay_scan: dict[str, list[dict[str, Any]]] | None = None
+    scan_carried: dict[str, Any] = {}
     if rounds and not frozen and isinstance(record, dict) and record.get("key") != key and any(
             record.get("key") == _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds[:k], stop_flat,
                                           stop_stepped, stop_unchanged)
@@ -725,6 +726,15 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 replay[_replay_key(space, row["design"], row.get("level"))] = answer
         if scan_seen and (quest_root / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file():
             replay_scan = scan_seen
+            # The scan is not run again, so what FI measured in it (settings that changed no result, numbers that differ
+            # on a second call) is taken from the record of the search being continued: a continued search says it too.
+            try:
+                earlier_best = json.loads(_record_files(record, record_text).get(BEST_PATH.as_posix(), ""))
+            except ValueError:
+                earlier_best = None
+            if isinstance(earlier_best, dict):
+                scan_carried = {k: earlier_best[k] for k in ("scan_settings_without_effect", "unsteady")
+                                if earlier_best.get(k)}
         if log is not None and replay:
             log.info("[optimise] continuing the search FI already ran (%d evaluation(s) of it are taken from its record, "
                      "not run again), with %d more evaluation(s) asked for", len(replay),
@@ -852,8 +862,10 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             in_each_run=_search.in_each_run(block) or None,
             log=log) if entry == "run_cell" and deadline - time.monotonic() > 1 else set()
         scan_unsteady.update(unsteady)
-        unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol), ignore=unsteady,
-                                         declared=watched_results(protocol))
+        # Every returned number is compared here, not only the plan's declared metrics: a search's results are also its
+        # objective and its limits' quantities (not metrics), and an alternative that differs in one of them is not
+        # "unchanged" (a level that gives the first one's results is skipped later, not sent back).
+        unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol), ignore=unsteady)
         if unchanged:
             scan_note.append(_flat.unchanged_axes_note(unchanged))
             if log is not None:
@@ -1045,6 +1057,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                                  extra=extra)
     if warnings:
         record["simulation_may_search_itself"] = warnings
+    record.update({k: v for k, v in scan_carried.items() if k not in record})
     if scan_note:
         record["scan_settings_without_effect"] = scan_note[-1]
     if scan_unchanged:
