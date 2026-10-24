@@ -1560,8 +1560,10 @@ class OptimisationRunner:
         while (((run.record or {}).get("evaluations") or {}).get("stopped_because") == "budget"
                and not run.load_error and not run.problems and not run.reused):
             fired = _still_improving_somewhere(run, direction)
-            # A round continues every level of a compared search: it costs per_start evaluations for each.
-            parts = max(1, len(((run.record or {}).get("compared") or {}).get("levels") or []))
+            # A round continues every level of a compared search that was searched: it costs per_start evaluations
+            # for each (a level that gave the first level's results is not searched, core/optimise_search.py).
+            parts = max(1, sum(1 for part in ((run.record or {}).get("compared") or {}).get("levels") or []
+                               if isinstance(part, dict) and not part.get("same_as")))
             # Whole seconds, as the search is given them: a round that fits only in a fraction of a second more is not
             # started, and the search is never given more than is left.
             left = int(timeout_s - (time.monotonic() - started))

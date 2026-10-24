@@ -294,3 +294,20 @@ async def test_a_frozen_study_never_continues(tmp_path: Path) -> None:
                                          frozen=True)
     await _go(runner, root)
     assert _rounds(root) == before
+
+
+@pytest.mark.asyncio
+async def test_a_round_costs_only_the_levels_that_were_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The plan compares three values of a condition that changes no result the search judges (only a number the plan
+    # does not name): the second and third give the first one's results and are not searched, so a round costs one
+    # level's share of evaluations, not three.
+    root = _quest(tmp_path)
+    simulate = root / "code" / "simulate.py"
+    simulate.write_text(simulate.read_text(encoding="utf-8").replace(
+        '"g": x}', '"g": x, "h": {"cup": 0.0, "mug": 1.0, "bowl": 2.0}[cell["shape"]]}'), encoding="utf-8")
+    block = _block(fixed={"shape": "cup"}, grid={"shape": ["cup", "mug", "bowl"]})
+    monkeypatch.setattr(optimise, "_seconds_per_evaluation", lambda run: 20.0)  # 8 x 20 s fits in 300 s; 3 x 160 not
+    await _go(_runner(root, block), root, timeout_s=300)
+    levels = _best(root)["compared"]["levels"]
+    assert [bool(p.get("same_as")) for p in levels] == [False, True, True]
+    assert _rounds(root) and _rounds(root)[0]["auto"] == 1
