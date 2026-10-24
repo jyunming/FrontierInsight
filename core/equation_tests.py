@@ -120,7 +120,13 @@ EXAMPLE_RULE = (
     "times with fixed seeds and compares the mean (and variance) of the draws with yours, within five standard errors. "
     "When the equation has several outputs (`a = ...; b = ...`, or two joined by `and`), the function returns them by name "
     "(a dict with those keys) and `expected_formula` is a mapping from each output's name to its formula, one for every "
-    "output: the mapping is how the example says which outputs there are. An equation with one output gives one formula.")
+    "output: the mapping is how the example says which outputs there are. An equation with one output gives one formula. "
+    "Write `expected_formula` by a DIFFERENT route from the equation's own form, so that a slip in the equation (a factor "
+    "of 2 or pi, a sign, a different convention for the same quantity, a variable that is a rate in one place and a period "
+    "in another) cannot pass: take inputs at a case whose output is known on its own (a limit, a special value, a value "
+    "the source prints for those inputs, a simpler closed form that the equation must reduce to there) and write that "
+    "known output as `expected_formula`. FI holds the equation as written to it, and a gap between the two is put back to "
+    "you. Never copy the equation's right-hand side into `expected_formula`: that can only agree with itself.")
 
 
 def _text(value: Any) -> str:

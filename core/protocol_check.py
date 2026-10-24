@@ -723,6 +723,12 @@ def metric_notes(protocol: dict[str, Any] | None) -> list[str]:
                          "intervals and standard errors against the truth, and the paper will say that their calibration "
                          "was not checked; declare one for each number the simulation estimates and knows the true "
                          "value of, while the plan is a draft.")
+        open_multiplier = metric_spec.multiplier_unstated(protocol)
+        if open_multiplier:
+            notes.append("The plan gives no `degrees_of_freedom` for the interval of " + ", ".join(f"`{i}`" for i in open_multiplier)
+                         + ", so FI counts how often it covers the truth but does not hold its multiplier (t or normal) to the "
+                         "one the design chose; if the interval is the estimate plus and minus one multiplier times the "
+                         "standard error, add it while the plan is a draft.")
         return notes
     if not isinstance(protocol.get("runs_per_setting"), (int, float)) and not isinstance(protocol.get("precision"), dict):
         return []

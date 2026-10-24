@@ -149,6 +149,28 @@ KNOWN_VALUE_HELP = (
     "multiple, or \"normal\" for the normal quantile; leave it out when the multiple changes between settings)")
 
 
+#: What the plan is told about declaring a known true value (spliced into the plan request by the engine, after the
+#: paragraph that describes the fields). Real plans left the field out, so the calibration and quantile checks never ran:
+#: the ask is therefore one per metric, with the reason each part is there.
+PLAN_RULE = (
+    "Go through EVERY metric in `metrics` and ask of each one: does the simulation know its true value because it "
+    "builds it in (a parameter the data are generated with and then recovered, a rate or probability the simulation "
+    "sets)? If so it gets a `known_value`, not only the headline metric; a metric without one is never checked against "
+    "the truth, and the paper has to say so. For an estimate that comes with an uncertainty, name both the standard "
+    "error and the interval's two ends, so that FI can count how often the interval covers the truth. When the "
+    "interval is the estimate plus and minus one multiplier times the standard error with the same multiplier in every "
+    "setting, ALWAYS give `degrees_of_freedom`: it is the multiplier you chose for the design, so choose it from the "
+    "error model and write it down (\"normal\" when the standard error rests on a known variance or on a large "
+    "sample; the whole number n-1, or whatever the estimator has, when the variance is estimated from n observations). "
+    "FI recovers the multiplier the code used from the trials' own intervals and sends the code back when it differs "
+    "from yours; a plan that leaves `degrees_of_freedom` out gets no such check. `true_value` is always a number the "
+    "study itself fixes (a constant, a threshold, a grid parameter, or a formula of them). Never put there a value you "
+    "worked out for a quantity that comes out of the simulation (a rate you derived, a limit you recalled): that is a "
+    "derivation, it belongs in `oracles` with a `derivation:` reference, and FI reports it as unverified without "
+    "gating the run on it."
+)
+
+
 def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
     """A metric's declared known value, checked for its shape: ``(clean mapping, "")`` or ``(None, why)``. Which names
     resolve (a threshold, a grid parameter) is the protocol's to say (:func:`known_value_problems`)."""
@@ -235,6 +257,18 @@ def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
             out.append(f"The metric `{spec['id']}` declares its true value as `{truth}`, which is neither a threshold, a "
                        "constant nor a grid parameter of the protocol, so FI cannot measure its uncertainty against it; "
                        "give the number, or the name of the threshold, constant or grid parameter that holds it.")
+    return out
+
+
+def multiplier_unstated(protocol: dict[str, Any] | None) -> list[str]:
+    """The ids of the metrics that declare a standard error and an interval for a known true value but no
+    ``degrees_of_freedom``: FI counts their coverage, but it cannot hold the interval's multiplier (t or normal) to the
+    one the design chose, so a multiplier that does not match the error model passes. One id each, in the declared order."""
+    out = []
+    for spec in declared(protocol):
+        kv = spec.get("known_value") or {}
+        if kv and "standard_error" in kv and "interval" in kv and "degrees_of_freedom" not in kv:
+            out.append(str(spec["id"]))
     return out
 
 
