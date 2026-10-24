@@ -516,6 +516,9 @@ class AgentBuildMixin:
         the freeze the agent has :data:`AFTER_FREEZE_ROUNDS` round(s); then the failure stands, as in chat mode."""
         frozen = _frozen.load(self.quest_root) is not None  # type: ignore[attr-defined]
         if frozen and after_freeze_rounds(self.quest_root) >= AFTER_FREEZE_ROUNDS:  # type: ignore[attr-defined]
+            kept = self._result_check_gave_up(state)  # type: ignore[attr-defined]
+            if kept is not None:  # a run the results check sent back keeps its results
+                return {**spent, **kept}
             why = "the coding agent's round after the freeze is used; the run's failure stands"
             self._log.warning("[execute_reflect] %s", why)  # type: ignore[attr-defined]
             return {**spent, "exec_give_up_reason": why}
@@ -525,6 +528,9 @@ class AgentBuildMixin:
                     f"{str(exec_result.get('stderr_tail') or '')[-2000:]}")
         result = await coder.continue_(feedback)
         if result.exhausted:
+            kept = self._result_check_gave_up(state)  # type: ignore[attr-defined]
+            if kept is not None:  # a run the results check sent back keeps its results
+                return {**spent, **kept}
             why = "the coding agent's rounds are used; the run's failure stands"
             self._log.warning("[execute_reflect] %s", why)  # type: ignore[attr-defined]
             return {**spent, "exec_give_up_reason": why}

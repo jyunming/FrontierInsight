@@ -17975,7 +17975,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return self._manifest_stop(acting, manifest_attempts_next or manifest_attempts)
         # What the run reports is compared with what ran; a fault is sent back like a failed run, and what stays is left out
         # (core/result_checks.py).
+        ran_with_results = result.returncode == 0
         result, failed_script = await self._results_match_run(state, result, failed_script, split)
+        result_check_sent_back = ran_with_results and result.returncode != 0
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
@@ -18272,6 +18274,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # (core/optimise.py): the gate sends what FI measured back to the plan.
                 "flat_objective": (dict(getattr(runner, "flat_objective", None) or {}) if result.returncode != 0 else {}),
                 "numeric_warnings": self._scan_numeric_warnings(state, result.stderr, result_json),
+                # The run finished with results and the results check sent it back (core/result_checks.py): a repair
+                # that gives up runs the same code once more, its results kept. Held on this run's own record, so it
+                # never outlives the run.
+                "result_check_sent_back": result_check_sent_back,
             },
             "figures": figures,
             "figure_records": figure_records,
@@ -19017,7 +19023,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn:
             # A run the run-manifest check sent back, with no repair left (earlier crashes spent them, or none are
             # allowed): the difference stands, and the quest stops and names it, never going on with no results.
-            stop = self._manifest_repair_gave_up(state)
+            stop = self._manifest_repair_gave_up(state) or self._result_check_gave_up(state)
             if stop is not None:
                 return stop
             # Proceed regardless; analyze owns the authoritative degenerate
@@ -19231,7 +19237,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
                 "patch_summary": f"(gave up: {give_up[:120]})",
             })
-            return self._manifest_repair_gave_up(state, history) or {
+            return self._manifest_repair_gave_up(state, history) or self._result_check_gave_up(state, history) or {
                 "exec_give_up_reason": give_up,
                 "exec_reflect_iter": iters + bump,
                 "exec_reflect_history": history,
@@ -19250,7 +19256,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
             if overlaps:
                 return spent
-            return self._manifest_repair_gave_up(state) or {
+            return self._manifest_repair_gave_up(state) or self._result_check_gave_up(state) or {
                 "exec_give_up_reason": "(LLM produced no patched code)",
                 "exec_reflect_iter": iters + bump,
             }
