@@ -18,6 +18,13 @@ def test_the_same_list_under_two_sibling_keys_is_counted_once() -> None:
     assert run_manifest._account(nested, "m", {}, (5, 0), None)["acc_defined"] == 5
 
 
+def test_two_arms_with_equal_values_are_two_sets_of_trials() -> None:
+    """Two independent arms can give the same deterministic values: FI's record (10 trials) says they are 10, so equal
+    values are never taken as a copy."""
+    result = {"m_values": {"arm_a": [1, 2, 3, 4, 5], "arm_b": [1, 2, 3, 4, 5]}}
+    assert run_manifest._account(result, "m", {}, (10, 0), None)["acc_defined"] == 10
+
+
 def test_different_sibling_lists_still_add_up() -> None:
     """Known positive: two different lists side by side are two sets of trials (the rows of one table) and still add."""
     result = {"m_values": {"0": [1.0, 2.0, 3.0], "1": [4.0, 5.0, 6.0]}}
