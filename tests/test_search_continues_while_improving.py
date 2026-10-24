@@ -68,6 +68,14 @@ def test_a_baseline_that_breaks_a_limit_counts_from_the_first_design_that_meets_
     assert optimise.still_improving(rows, "maximise") is None
 
 
+def test_a_first_design_that_meets_every_limit_in_the_last_tenth_fires() -> None:
+    rows = _rows([0.0] * 18 + [1.0, 2.0], -0.5)
+    for row in rows[:19]:
+        row["feasible"] = False  # nothing met every limit before the last tenth
+    fired = optimise.still_improving(rows, "maximise")
+    assert fired is not None and fired["total"] == 1.0 and fired["share"] == 1.0
+
+
 def test_a_converged_trace_does_not_fire() -> None:
     values = [float(min(i, 50)) for i in range(100)]
     assert optimise.still_improving(_rows(values, -1.0), "maximise") is None

@@ -1079,8 +1079,10 @@ def still_improving(rows: list[dict[str, Any]], direction: str) -> dict[str, flo
             if base is None:
                 base = v
             best_final = v
-    if base is None or best_at is None:
+    if base is None:
         return None
+    if best_at is None:  # the first design that meets every limit came in the last tenth: all of it is recent
+        best_at = base
     total = sign * (best_final - base)
     gain = sign * (best_final - best_at)
     if total > 0 and gain > 0.05 * total:
