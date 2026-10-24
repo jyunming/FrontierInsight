@@ -202,8 +202,7 @@ def _clause_breaks(text: str, cites: list[tuple[int, int]]) -> list[int]:
     out: list[int] = []
     depth = 0
     for i, ch in enumerate(text):
-        if ch == "
-":
+        if ch == "\n":
             depth = 0
         elif ch in "([{":
             depth += 1
