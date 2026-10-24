@@ -85,6 +85,7 @@ UNDEFINED = "undefined"
 FEWER_RUNS = "fewer_runs"
 RUN_DIFFERENCE = "run_difference"
 PAGE_LIMIT = "page_limit"
+SHARED_SEEDS = "shared_seeds"
 UNSUPPORTED_CLAIMS = "unsupported_claims"
 #: The sentences of the delivered paper the last claim check found supported by neither the run's results nor a cited
 #: source (``Engine._state_unsupported_claims``): ``{"claims": [{"claim", "evidence"}]}``. Empty when the last check found none.
@@ -113,13 +114,14 @@ _KIND_WORDS = {
     FEWER_RUNS: "a part of the plan not fully done, to fit the time allowed",
     RUN_DIFFERENCE: "a difference between what the analysis reports and FI's record of the trials that ran",
     PAGE_LIMIT: "that the paper is longer than the topic's page limit",
+    SHARED_SEEDS: "that trial t has the same random seed in every setting, so the settings' results are not independent",
     UNSUPPORTED_CLAIMS: "sentences of the paper that were not found supported by the run's results or a cited source",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
-              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages",
+              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages", SHARED_SEEDS: "shared-seeds",
               UNSUPPORTED_CLAIMS: "unsupported"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
@@ -405,6 +407,8 @@ def required_items(quest_root: Path | str) -> list[Item]:
         add(RUN_DIFFERENCE, RUN_DIFFERENCE_NAME, _sentence(run_difference_text(manifest)), key="record")
     _left_out_setting_items(root, add)
     _trial_check_items(root, add)
+    if (said_seeds := shared_seeds_text(root)):
+        add(SHARED_SEEDS, "seeds shared across settings", _sentence(said_seeds), key="seeds")
     pages = _read(root, str(PAGE_RECORD))
     if isinstance(pages, dict) and pages.get("final") and isinstance(pages.get("pages"), int)             and isinstance(pages.get("limit"), int) and pages["pages"] > pages["limit"]:
         add(PAGE_LIMIT, "page limit", _sentence(
@@ -413,6 +417,34 @@ def required_items(quest_root: Path | str) -> list[Item]:
     if said:
         add(UNSUPPORTED_CLAIMS, "unsupported sentences", _sentence(said), key="claims")
     return items
+
+
+def shared_seeds_text(root: Path) -> str:
+    """The sentence FI puts in the Limitations when its own trial record shows the settings sharing seeds: trial ``t`` of
+    every setting ran on one seed (``paired: true``, common random numbers; ``core/trial_runner.py::trial_seed`` with an
+    empty key). ``""`` when the ledger shows the settings drew different seeds, or there is one setting only.
+
+    Why it is stated: settings that share their random draws move together, so their results are one correlated
+    fluctuation, not independent repeats. A difference between two settings is sharper for it, but an interval pooled
+    across settings, or a count of "agreeing" settings, then overstates the precision, and a reader cannot tell this
+    from the paper unless it says so. The fact comes from the ledger of the seeds the trials ran with, never from the
+    paper's words."""
+    rows = _disclosure._ledger_rows(root)
+    if not rows:
+        return ""
+    planned, trials = rows
+    if len({cell for cell, _t in trials}) < 2:
+        return ""
+    shown = _disclosure._seeds_paired(trials)
+    if shown is None:
+        study = _read(root, "code/study.json")
+        shown = bool(isinstance(study, dict) and study.get("paired") is True and len(planned) > 1) or None
+    if not shown:
+        return ""
+    return ("In every setting, trial t ran on the same random seed (common random numbers), so the settings' results are "
+            "correlated, not independent: a difference between two settings is paired, but an interval pooled across "
+            "settings, or a count of settings that agree, would understate the uncertainty, because the settings are not "
+            "independent repeats")
 
 
 _MAX_UNSUPPORTED_LISTED = 8
