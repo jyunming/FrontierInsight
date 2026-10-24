@@ -687,7 +687,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 continue
             if not isinstance(row, dict) or row.get("event") != "evaluation" or not isinstance(row.get("design"), dict):
                 continue
-            answer: dict[str, Any] = ({"values": {quantity: row["objective"], **(row.get("constraints") or {})}}
+            # The objective, the limits and the plan's named results (the row keeps them), as the simulation gave them.
+            answer: dict[str, Any] = ({"values": {quantity: row["objective"], **(row.get("constraints") or {}),
+                                                  **(row.get("results") if isinstance(row.get("results"), dict) else {})}}
                                       if row.get("status") == "ok" else {"failed": str(row.get("reason") or "failed")})
             answer["elapsed_s"] = row.get("elapsed_s")
             if row.get("stage") == "scan":

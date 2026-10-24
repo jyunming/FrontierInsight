@@ -311,3 +311,28 @@ async def test_a_round_costs_only_the_levels_that_were_searched(tmp_path: Path, 
     levels = _best(root)["compared"]["levels"]
     assert [bool(p.get("same_as")) for p in levels] == [False, True, True]
     assert _rounds(root) and _rounds(root)[0]["auto"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_continued_round_still_skips_an_alternative_that_gives_the_first_ones_results(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The plan names a result besides the objective and the limit. The round's earlier evaluations are answered from
+    # FI's record: they must carry that result too, or the second and third alternatives look different from the first
+    # (one side without the result) and are searched in full in the round.
+    root = _quest(tmp_path)
+    simulate = root / "code" / "simulate.py"
+    simulate.write_text(simulate.read_text(encoding="utf-8").replace(
+        '"g": x}', '"g": x, "mass": 2.0 * x + y, "h": {"cup": 0.0, "mug": 1.0, "bowl": 2.0}[cell["shape"]]}'),
+        encoding="utf-8")
+    block = _block(fixed={"shape": "cup"}, grid={"shape": ["cup", "mug", "bowl"]})
+    protocol = {"optimisation": block,
+                "metrics": [{"id": "mass", "kind": "mean", "estimand": "the part's mass", "unit": "one design"}]}
+    monkeypatch.setattr(optimise, "_seconds_per_evaluation", lambda run: 20.0)
+    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
+                                         simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
+    await _go(runner, root, timeout_s=300)
+    assert _rounds(root) and _rounds(root)[0]["auto"] == 1
+    levels = _best(root)["compared"]["levels"]
+    assert [bool(p.get("same_as")) for p in levels] == [False, True, True], levels
+    ledger = [json.loads(x) for x in (root / "raw" / "optimisation_ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert all("mass" in (r.get("results") or {}) for r in ledger if r.get("event") == "evaluation" and r.get("status") == "ok")

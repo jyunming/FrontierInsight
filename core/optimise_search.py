@@ -654,6 +654,9 @@ class _Search:
         held = {str(block["objective"]["quantity"])} | {str(c.get("quantity")) for c in block.get("constraints") or []
                                                          if isinstance(c, dict)}
         self.held_results = held
+        # The results the plan names besides the objective and the limits: each evaluation's row keeps them, so a search
+        # continued from FI's record (core/optimise.py) has every design's results as the simulation gave them.
+        self.named = sorted({str(r) for r in results or []} - held)
         self.results = sorted({str(r) for r in results or []} | held) if set(results or []) - held else []
         self.base_results = None
         self.unmoved = set(self.space.free)
@@ -713,7 +716,7 @@ class _Search:
             judged = judge(self.block, item.get("values"), str(item.get("reason") or ""))
             self.cache[key] = judged
             self.any_ok = self.any_ok or judged["status"] == "ok"
-            self._row(design, judged, "scan", None, item.get("elapsed_s"), counted=False)
+            self._row(design, judged, "scan", None, item.get("elapsed_s"), counted=False, values=item.get("values"))
             self._watch_objective(design, key, judged, "scan", item.get("values"), stop=False)
         # Decided on the whole scan, every setting recorded first: one that gives another value ends the watch.
         self._stepped_stop()
@@ -722,7 +725,7 @@ class _Search:
 
     # one evaluation
 
-    def _row(self, design, judged, stage, start, elapsed, counted=True):
+    def _row(self, design, judged, stage, start, elapsed, counted=True, values=None):
         row = {"event": "evaluation", "n": len(self.rows) + 1, "stage": stage, "start": start, "design": dict(design),
                "objective": judged["objective"], "constraints": dict(judged["constraints"]),
                "feasible": judged["feasible"], "status": judged["status"],
@@ -731,6 +734,9 @@ class _Search:
                "elapsed_s": elapsed if _number(elapsed) else None}
         if judged.get("reason"):
             row["reason"] = judged["reason"]
+        named = {n: values[n] for n in self.named if n in values} if isinstance(values, dict) else {}
+        if named:
+            row["results"] = named
         self.rows.append(row)
         self.row_order.append(self.order)
         return row
@@ -767,7 +773,7 @@ class _Search:
         self.used += 1
         self.used_by_start[start] = self.used_by_start.get(start, 0) + 1
         self.cache[key] = judged
-        self._row(design, judged, stage, start, reply.get("elapsed_s"))
+        self._row(design, judged, stage, start, reply.get("elapsed_s"), values=reply.get("values"))
         self._watch_effect(design, key, reply.get("values") if judged["status"] == "ok" else None)
         self._watch_objective(design, key, judged, stage, reply.get("values"))
         if judged["status"] == "ok":
@@ -1995,6 +2001,10 @@ def _probe_alternative(sub, level, first, seen, names):
                      "objective": judged["objective"], "constraints": dict(judged["constraints"]),
                      "feasible": judged["feasible"], "status": "ok", "method": first["method_used"], "counted": True,
                      "elapsed_s": reply.get("elapsed_s") if _number(reply.get("elapsed_s")) else None})
+        named = {n: values[n] for n in names if n in values and n != str(sub["objective"]["quantity"])
+                 and n not in judged["constraints"]}
+        if named:
+            rows[-1]["results"] = named
     return rows
 
 
