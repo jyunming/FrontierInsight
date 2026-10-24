@@ -128,13 +128,8 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
-<<<<<<< HEAD
               FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages", SHARED_SEEDS: "shared-seeds",
-              UNSUPPORTED_CLAIMS: "unsupported"}
-=======
-              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages",
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review"}
->>>>>>> 5de12196 (A reviewer reason that returns after its rewrite stays revise and is stated as unresolved)
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
