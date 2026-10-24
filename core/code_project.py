@@ -893,8 +893,9 @@ class CodeRuns:
                 step = (self._node() if callable(self._node) else "") or "a check"
                 if (code_dir / ".git").is_dir():
                     # git skips a file whose size and time match its index entry; a rewrite of the same size within
-                    # one tick of the clock would not be committed. An emptied index makes git read every file again.
-                    await asyncio.to_thread(_git, code_dir, "read-tree", "--empty")
+                    # one tick of the clock would not be committed. --renormalize reads every tracked file again (the
+                    # index keeps every entry, whatever happens to the commit after).
+                    await asyncio.to_thread(_git, code_dir, "add", "--renormalize", "--", ".")
                 await asyncio.to_thread(record_change, self.quest_root, f"the code as it ran ({step})",
                                         category="changed", log=self._log)
                 # Seen only once code/ is committed: a commit git could not make now (a lock left for a moment) is
