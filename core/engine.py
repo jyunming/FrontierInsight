@@ -20216,8 +20216,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         control flow is ONE bounded ``broaden_lit`` re-entry (capped by
         ``evidence_gate_max_broaden``).
         """
-        if not self.config.engine.evidence_gate:
-            return {}
+        # With the gate turned off (``engine.evidence_gate: false``) the model's judgement of the evidence is skipped,
+        # but not FI's own facts: a search whose objective never moved, an analysis FI cannot read, a run with no
+        # results and a fault a test has shown still decide the route. Turning the gate off once skipped the shown-fault
+        # stop as well, and a paper was written over a fault FI had shown.
+        gate_off = not self.config.engine.evidence_gate
         # The typed contract this quest is held to (topic type, source
         # policy, baseline, success metric). derive_protocol is pure +
         # total — it guards every state access and has defaults — so it
@@ -20312,11 +20315,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             }
             ruled = self._flat_objective_verdict(state) or self._unreadable_analysis_verdict(state) or (
                 self._no_results_verdict(state)) or (
-                await self._shown_fault_verdict(state)) or _evidence_gate_rule(
+                await self._shown_fault_verdict(state)) or (None if gate_off else _evidence_gate_rule(
                 protocol.topic_type, n_sources, n_supporting,
                 analyze_local_first=self.config.engine.analyze_local_first,
                 retrieval_on=self.config.knowledge.enabled,
-            )
+            ))
+            if ruled is None and gate_off:
+                return {}
             if ruled is not None:
                 parsed, decided_by = ruled, "rule"
             else:
@@ -20332,6 +20337,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         "sufficient", "broaden", "insufficient"),
                 )
         except Exception as e:  # noqa: BLE001 — gate must never abort the quest
+            if gate_off:
+                self._log.warning("[evidence_gate] FI's own checks before the writing could not be read (%r); the gate "
+                                  "is off, so the paper is written", e)
+                return {}
             status = "unknown"
             failure = f"{type(e).__name__}: {e}"[:300]
             self._log.warning(

@@ -556,6 +556,28 @@ async def test_evidence_gate_disabled_is_passthrough(tmp_path: Path) -> None:
     assert patch == {}
 
 
+async def test_evidence_gate_off_still_stops_on_a_fault_fi_has_shown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Old code: with the gate off the node returned at once, so a fault a test had shown (FI's own fact, not the
+    model's judgement) no longer stopped the quest and the paper was written over it."""
+    engine = Engine(_route_config(
+        tmp_path, review_loop=True, max_iterations=2, evidence_gate=False))
+
+    async def shown(_state):  # noqa: ANN001
+        return {"verdict": "insufficient", "stuck": True, "stuck_reason": "shown_fault",
+                "rationale": "a test shows a fault in a reported number"}
+
+    async def no_model(*_a, **_k):  # noqa: ANN002, ANN003
+        raise AssertionError("the gate is off: the model is never asked")
+
+    monkeypatch.setattr(engine, "_shown_fault_verdict", shown)
+    monkeypatch.setattr(engine, "_chat", no_model)
+    patch = await engine._node_evidence_gate({"topic": "t", "literature": [], "analysis": {}})
+    assert patch["evidence_assessment"]["route"] == "stuck"
+    assert patch["evidence_assessment"]["decided_by"] == "rule"
+
+
 async def test_evidence_gate_fails_open_on_unparseable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
