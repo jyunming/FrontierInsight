@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+import zlib
 from typing import Any
 
 import pytest
@@ -393,3 +394,112 @@ async def test_a_real_fault_of_a_design_that_was_running_when_the_pool_is_discar
     await pool.close(discard=True)
     assert len(says.lines) == 1 and "RuntimeError" in says.lines[0] and "the callback fell over" in says.lines[0]
     assert not any("CancelledError" in line for line in says.lines), "the stop itself is not a fault"
+
+
+# --- a slow design does not hold back the starts that asked after it -----------------------------------------------------
+
+
+def _drive_timed(block: dict[str, Any], f: Any, seconds: Any, *, at_once: int = 8, results: list[str] | None = None,
+                 ) -> tuple[dict[str, Any], list[tuple[float, int, int]], dict[Any, float]]:
+    """The stream driver with a clock: ``at_once`` workers, a design takes ``seconds(request)`` and the designs that end at
+    the earliest moment are handed back together. Returns the outcome, every design asked for as (time asked, start, number
+    of the start's designs asked so far) and the time each design ended."""
+    gen = search.search(block, seed=1, batch=True, stream=True, results=results)
+    vals = lambda d: {"f": f(d), **({"g": 2.0} if results else {})}  # noqa: E731
+    clock, serial = 0.0, 0
+    free = [0.0] * at_once
+    running: list[tuple[float, int, Any, dict[str, Any]]] = []
+    asked: list[tuple[float, int, int]] = []
+    ended: dict[Any, float] = {}
+    per_start: dict[int, int] = {}
+    try:
+        request = next(gen)
+        while True:
+            if request["kind"] == "scan":
+                request = gen.send([dict(r, values=vals(r["design"])) for r in _scan_rows(request, block, f)])
+            elif request["kind"] == "evaluate_many":
+                request = gen.send([{"values": vals(r["design"])} for r in request["requests"]])
+            elif request["kind"] == "evaluate_stream":
+                for r in request["requests"]:
+                    begin = max(clock, min(free))
+                    free.remove(min(free))
+                    finish = begin + seconds(r)
+                    free.append(finish)
+                    serial += 1
+                    running.append((finish, serial, r["id"], r))
+                    per_start[r["start"]] = per_start.get(r["start"], 0) + 1
+                    asked.append((clock, r["start"], per_start[r["start"]]))
+                running.sort(key=lambda e: (e[0], e[1]))
+                clock = running[0][0]
+                handed = [e for e in running if e[0] <= clock]
+                running = [e for e in running if e[0] > clock]
+                for e in handed:
+                    ended[e[2]] = e[0]
+                request = gen.send([(e[2], {"values": vals(e[3]["design"])}) for e in handed])
+            else:
+                request = gen.send({"values": vals(request["design"])})
+    except StopIteration as done:
+        return done.value, asked, ended
+
+
+def _same_record(a: dict[str, Any], b: dict[str, Any]) -> None:
+    assert _rows(a) == _rows(b)
+    assert a["best"] == b["best"] and a["start_log"] == b["start_log"] and a["evaluations"] == b["evaluations"]
+    assert a["stopped_because"] == b["stopped_because"] and a["budget_ran_out"] == b["budget_ran_out"]
+
+
+@pytest.mark.parametrize("slow", [0, 2, 3])
+@pytest.mark.parametrize("per_start", [40, 12])
+def test_a_slow_start_does_not_hold_back_the_others_and_the_record_is_the_same(slow: int, per_start: int) -> None:
+    """One start's designs take 1000 times as long. The others ask for their later steps while its design is running
+    (they do not wait for it), and the rows, the budget, the stop and the best are those of one design at a time. The
+    smaller share makes starts end on their share and hand the rest on."""
+    block = _block(starts=4, per_start=per_start, method="bounded_local")
+    seconds = lambda r: 1000.0 if r["start"] == slow else 1.0 + (zlib.crc32(repr(r["id"]).encode()) % 7) / 10  # noqa: E731
+    step_by_step, _ = _drive(block, stream=False)
+    timed, asked, ended = _drive_timed(block, _bowl, seconds)
+    _same_record(timed, step_by_step)
+    first_slow = min(t for t in ended.values() if t >= 1000.0)
+    before = [n for t, start, n in asked if start != slow and t < first_slow]
+    if per_start >= 40:
+        assert max(before) > 3 * (DIMS + 1), "a start that is not slow went on while the slow design was running"
+
+
+def test_a_count_stop_fires_at_the_same_design_when_one_start_is_slow() -> None:
+    block = _flat_block()
+    flat = lambda design: 5.0  # noqa: E731
+    reference, _ = _drive(block, flat, stream=False, results=["f", "g"])
+    for slow in (0, 3):
+        timed, _asked, _ended = _drive_timed(block, flat, lambda r: 1000.0 if r["start"] == slow else 1.0,
+                                             results=["f", "g"])
+        assert reference["stopped_because"] == "no_effect"
+        _same_record(timed, reference)
+
+
+def test_a_look_ahead_copy_does_not_hold_the_rows_or_the_cache_of_the_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Many starts over a large coarse scan: each start's look-ahead copy, as made, carries its own small state, not the
+    scan's rows or the designs already evaluated (a full copy for each start would hold the scan once per start)."""
+    block = _block(starts=8, per_start=10, method="bounded_local")
+    axis = [-2.0 + 4.0 * k / 59 for k in range(60)]
+    block["grid"] = {"x0": axis, "x1": axis}  # 3600 scan rows
+    made: list[int] = []
+    original = search._Search._look_ahead
+
+    def spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        kept = (self.run_not_used, self.round_log, self.rounds)
+        self.run_not_used, self.round_log, self.rounds = [{}] * 5000, [{}] * 5000, [{}] * 5000  # grown lists
+        out = original(self, *args, **kwargs)
+        self.run_not_used, self.round_log, self.rounds = kept
+        copy_ = out[0]
+        assert len(self.rows) > 3000 and copy_.rows is not self.rows and len(copy_.rows) == 0
+        assert copy_.cache.maps[1] is self.cache, "the designs already evaluated are read through, not copied"
+        big = {k: len(v) for k, v in vars(copy_).items()
+               if k not in ("cache", "block", "space") and hasattr(v, "__len__") and not isinstance(v, str) and len(v) > 1000}
+        assert not big, big
+        assert not (copy_.notes or copy_.run_not_used or copy_.rounds or copy_.round_log)
+        made.append(1)
+        return out
+
+    monkeypatch.setattr(search._Search, "_look_ahead", spy)
+    outcome, _ = _drive(block, stream=True)
+    assert len(made) == 8 and len(outcome["rows"]) > 3000

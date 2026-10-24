@@ -74,6 +74,8 @@ same seed gives the same search.
 
 from __future__ import annotations
 
+import collections
+import copy
 import itertools
 import json
 import math
@@ -1232,6 +1234,9 @@ class _Search:
         extra = room - share * n if share < self.per_start else 0
         self.own_caps = True
         self.shares = {offset + i: share + (1 if i < extra else 0) for i in range(n)}
+        # Streamed: each start also has a look-ahead copy (:meth:`_look_ahead`), made before any start takes its first step.
+        look = ([self._look_ahead(u0, offset + i, i, cma) for i, u0 in enumerate(points)]
+                if self.stream and len(points) > 1 else [])
         gens = {i: self._local(u0, offset + i, self.shares[offset + i], cma=cma) for i, u0 in enumerate(points)}
         pending = {}
         try:
@@ -1265,7 +1270,7 @@ class _Search:
                         del gens[i]
                         self._give_back(offset + i, [offset + j for j in gens])
             if pending and self.stream:
-                yield from self._stream(gens, pending, offset)
+                yield from self._stream(gens, pending, offset, look)
         except _Stop:
             for i, gen in gens.items():
                 try:
@@ -1277,7 +1282,31 @@ class _Search:
             self.own_caps = False
             self.shares = {}
 
-    def _stream(self, gens, pending, offset):
+    def _look_ahead(self, u0, start, number, cma):
+        """A light copy of the search that runs the local search of one start alone, for :meth:`_stream` to see what the start
+        will ask for next. It is made before any start takes a step, with the random draws the earlier starts take at their
+        first step already taken, so it asks for the designs the start asks for; it shares the block, the space and a read
+        layer of the cache with the search (its own writes stay in the copy), and what it does is never recorded (a design it asks for that the search does not is only run, and listed apart if the
+        search stops). Returns ``[copy, its generator, its pending request or None]``."""
+        # Only what this start's search changes is copied. The record (rows, start log, notes, the rounds and the designs run
+        # but not used) starts empty, the designs already evaluated are read through from the search's own cache, and the
+        # block and the space are shared: with many starts over a large coarse scan, a full copy for each start would hold
+        # the scan once per start.
+        shared = ("rows", "row_order", "start_log", "start_order", "cache", "block", "space", "notes", "run_not_used",
+                  "rounds", "round_log")
+        copy_ = copy.copy(self)
+        for name, value in vars(self).items():
+            if name not in shared:
+                setattr(copy_, name, copy.deepcopy(value))
+        copy_.rows, copy_.row_order, copy_.start_log, copy_.start_order = [], [], [], []
+        copy_.notes, copy_.run_not_used, copy_.rounds, copy_.round_log = [], [], [], []
+        copy_.cache = collections.ChainMap({}, self.cache)
+        for _ in range(number):
+            copy_.rng.randrange(2 ** 32)
+        gen = copy_._local(u0, start, copy_.shares[start], cma=cma)
+        return [copy_, gen, None]
+
+    def _stream(self, gens, pending, offset, look=()):
         """:meth:`_side_by_side` with every start's designs sent to the pool at once and answered as they finish: every
         design a start asks for goes to the pool when it is asked (``{"kind": "evaluate_stream", "requests": [...]}``,
         each with an ``id``), the driver answers with the ones that finished (``[(id, answer), ...]``, at least one), and a
@@ -1285,10 +1314,13 @@ class _Search:
         order the designs finished in: a start goes on once all the designs of its own step are answered and every start
         that asked before it has gone on, so the rows, the budget charged and the design at which a count-threshold stop
         (``no_effect``, ``flat_objective``, ``stepped_objective``) fires depend on the plan alone, whatever the timing. The
-        cost is that a slow design holds back the starts that asked after it (their designs already sent keep running, but
-        they do not ask for more until it is answered). A design two starts ask for is evaluated once and charged to the
-        one that asked first. When a stop fires, designs that had already finished but come after it in that order are no
-        part of the rows, the budget or the best; they are listed apart in the outcome (``run_not_used``)."""
+        search itself therefore waits for a slow design, but the pool does not: each start also has a look-ahead copy
+        (:meth:`_look_ahead`) that goes on as soon as its own answers are in and sends the designs it asks for to the pool
+        early, so the search finds them answered when its turn comes. The copy changes nothing that is recorded: a design
+        it asked for that the search never asks is only run, and listed apart if the search stops. A design two starts ask
+        for is evaluated once and charged to the one that asked first. When a stop fires, designs that had already finished
+        but come after it in that order are no part of
+        the rows, the budget or the best; they are listed apart in the outcome (``run_not_used``)."""
         steps = {i: 0 for i in gens}
         needs = {}  # start -> the keys of the designs its step asks for, in order
         line = []  # the starts in the order they asked: they are answered in this order, whatever order designs finish in
@@ -1297,6 +1329,39 @@ class _Search:
         first_row, first_start = len(self.rows), len(self.start_log)
         new = []  # designs asked for and not yet handed to the pool
         asked = {}  # key -> the design asked for
+        ahead = {}  # start -> [look-ahead copy, its generator, the request it waits on]
+        for number, (copy_, gen, _none) in enumerate(look):
+            try:
+                ahead[number] = [copy_, gen, next(gen)]
+            except Exception:  # noqa: BLE001 -- a look-ahead only helps: whatever ends it, the search goes on without it
+                pass
+
+        def look_ahead():
+            """Let every look-ahead copy go on as far as the answers in hand take it; the designs it asks for next go to
+            the pool at once, so a place in the pool is not idle while the search waits for a slow design."""
+            moved = True
+            while moved:
+                moved = False
+                for number in sorted(ahead):
+                    copy_, gen, request = ahead[number]
+                    parts = request["requests"] if request["kind"] == "evaluate_many" else [request]
+                    keys = []
+                    for part in parts:
+                        key = self.space.key(self.space.canonical(part["design"]))
+                        keys.append(key)
+                        if key not in answers and key not in inflight:
+                            inflight.add(key)
+                            asked[key] = part["design"]
+                            new.append(dict(part, id=key))
+                    if not all(k in answers for k in keys):
+                        continue
+                    got = [answers[k] for k in keys]
+                    try:
+                        ahead[number][2] = gen.send(got if request["kind"] == "evaluate_many" else got[0])
+                        moved = True
+                    except Exception:  # noqa: BLE001 -- over (converged, stopped or its share spent), or a fault: drop it
+                        del ahead[number]
+
         try:
             while pending:
                 for i in sorted(pending):
@@ -1314,6 +1379,7 @@ class _Search:
                             new.append(dict(part, id=key))
                     needs[i] = (keys, request["kind"])
                     line.append(i)
+                look_ahead()
                 went = False
                 # Designs may finish in any order, but a start goes on only once every start that asked before it has:
                 # what is recorded, what is charged and where a count-threshold stop fires then depend on the plan alone.
@@ -1352,6 +1418,8 @@ class _Search:
                 if k in asked and k not in self.cache and isinstance(a, dict) and ("values" in a or "failed" in a)]
             raise
         finally:
+            for copy_, gen, _request in list(ahead.values()):
+                gen.close()
             # Put this stretch's rows in the order of the step-by-step search, and number them again.
             tail = sorted(range(first_row, len(self.rows)), key=lambda k: (self.row_order[k] or (0, 0), k))
             rows = [self.rows[k] for k in tail]
