@@ -121,6 +121,34 @@ def interval(s: dict[str, Any]) -> tuple[float | None, float | None, str]:
     return s["mean"] - half, s["mean"] + half, "t interval of the mean"
 
 
+def per_setting_precision(quest_root: Path, metric: str, target: float) -> dict[str, Any] | None:
+    """How the plan's precision target (a 95% interval of the mean no wider than ``target`` either side) holds for
+    ``metric`` in each setting of FI's trial record, the interval worked out from that setting's own trials: ``{"target",
+    "metric", "settings"`` (settings with an interval), ``"met"`` (those within the target), ``"widest"`` (the widest
+    half-width), ``"widest_setting"``, ``"without_interval"`` (settings whose trials give none: a single trial)``}``.
+    Settings are never pooled: their true values differ, and one interval over them all would be narrower than any of
+    theirs. ``None`` when no setting has an interval for it."""
+    met = settings = without = 0
+    widest, widest_at = -1.0, ""
+    for c in summaries(_record(quest_root)):
+        s = c["metrics"].get(metric)
+        if not s or not s["n"]:
+            continue
+        lower, upper, _method = interval(s)
+        if lower is None or upper is None:
+            without += 1
+            continue
+        half = (upper - lower) / 2.0
+        settings += 1
+        met += half <= target
+        if half > widest:
+            widest, widest_at = half, c["key"]
+    if not settings:
+        return None
+    return {"target": float(target), "metric": metric, "settings": settings, "met": met, "widest": widest,
+            "widest_setting": widest_at, "without_interval": without}
+
+
 def kept_values(summarised: list[dict[str, Any]]) -> list[str]:
     """The value names the table reports, in the order they first appear: not a trial index, not one number in every
     trial of every setting (a setting echoed back, a constant)."""

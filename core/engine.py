@@ -13984,6 +13984,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                           if not judged and (state.get("result_json") or replicates)
                           and isinstance(target, (int, float)) and not isinstance(target, bool)
                           and 0 < target < 1e300 else None)
+            # FI's own trial record has the trials of each setting: the target is held to each setting's own interval
+            # (never one pooled over settings whose true values differ). Said in the record, never a route back to design.
+            per_setting = _trial_table.per_setting_precision(self.quest_root, on, float(target)) if not_judged and on else None
+            if per_setting:
+                not_judged = None
             replicates_for_specs = state.get("result_json_replicates") or []
             protocol_now = self._protocol_block(state)
             try:
@@ -14021,6 +14026,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 oracle_source_gaps=oracle_source_gaps, equation_label_gaps=label_gaps,
                 independence_gaps=independence_gaps, precision_not_judged=not_judged,
+                precision_per_setting=per_setting,
                 settings={
                     "protocol_check": self.config.engine.protocol_check,
                     "oracle_check": self.config.engine.oracle_check,
@@ -14121,6 +14127,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if not entry["precision_reached"]:
                     missed.append(f"{key} (±{entry['ci_half_width']:.3f})")
         if not missed:
+            # No pooled interval for the quantity the target is on: FI's trial record gives each setting's own.
+            judged = any(isinstance(e, dict) and "target_half_width" in e for e in aggregate.values())
+            if on_declared and not judged and isinstance(target, (int, float)) and not isinstance(target, bool) and 0 < target < 1e300:
+                per_setting = _trial_table.per_setting_precision(self.quest_root, on_declared, float(target))
+                words = _evidence.precision_per_setting_words(per_setting) if per_setting else ""
+                if words:
+                    return (f"{words[0].upper()}{words[1:]}. Say so in the limitations and do not claim a precision the "
+                            f"trials do not give.")
             return ""
         return (
             f"The protocol's target 95% half-width of ±{float(target):g} was not reached for {len(missed)} of the "

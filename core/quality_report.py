@@ -465,6 +465,7 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("run", _one(str(_list(pilot["problems"])[0]), 200), "FI's pilot check",
                             "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     out += _precision_not_judged(q)
+    out += _precision_per_setting(q)
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
     if stop and not any(p["found_by"].startswith("FI's run-record check") for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",
@@ -484,6 +485,15 @@ def _precision_not_judged(q: _Quest) -> list[dict[str, str]]:
         return []
     return [_problem("run", _evidence.precision_not_judged_words(fact), "FI's precision check", "left out",
                      "needs/EVIDENCE.json")]
+
+
+def _precision_per_setting(q: _Quest) -> list[dict[str, str]]:
+    """The plan's precision target held to each setting's own trials (``needs/EVIDENCE.json`` ``precision_per_setting``),
+    when not every setting met it."""
+    from . import evidence as _evidence
+
+    words = _evidence.precision_per_setting_words(_dict(q.evidence.get("precision_per_setting")))
+    return [_problem("run", words, "FI's precision check", "not fixed", "needs/EVIDENCE.json")] if words else []
 
 
 def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
