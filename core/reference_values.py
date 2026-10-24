@@ -360,16 +360,23 @@ def without_bad_reference(protocol: dict[str, Any], why: str | None) -> tuple[di
 
 
 _LITERAL = re.compile(r"(?<![\w.])(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?")
+# A whole number written in a formula (not a part of a decimal such as ``0.05``, not an exponent such as ``1e-5``).
+_WHOLE = re.compile(r"(?<![\w.])(?<![eE][-+])\d+(?![\w.])")
 
 
-def _finest(formula: str, given: dict[str, float]) -> float | None:
+def _finest(formula: str, given: dict[str, float], whole: bool = False) -> float | None:
     """The finest relative precision a reference's numbers are written to: its decimal literals and the decimal values
-    of the plan's names it uses (``0.17748`` is written to 5e-6 / 0.17748). Whole numbers count as exact. ``None``
-    when it writes none."""
+    of the plan's names it uses (``0.17748`` is written to 5e-6 / 0.17748). A whole number written in the formula
+    (``1849``) counts only when ``whole`` is true, which the caller sets when the reference is the same whole number at
+    every setting: then it is written to the unit (±0.5). Otherwise a whole number is a parameter (``400`` in
+    ``sqrt(2/400)``), not a measurement written down, and gives no precision. A whole number's trailing zeros are not
+    written digits: ``1800`` is known to plus or minus 50, so a round number is not taken for a copy. ``None`` when it
+    writes no number that counts."""
     used = _forms.names(formula, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
     texts = _LITERAL.findall(formula) + [repr(float(v)) for k, v in given.items()
                                          if k in used and isinstance(v, (int, float)) and math.isfinite(v)
                                          and not float(v).is_integer()]
+    whole_texts = _WHOLE.findall(formula) if whole else []
     shares: list[float] = []
     for text in texts:
         try:
@@ -379,6 +386,13 @@ def _finest(formula: str, given: dict[str, float]) -> float | None:
         exponent = number.as_tuple().exponent
         if number.is_finite() and number != 0 and isinstance(exponent, int):
             shares.append(0.5 * 10.0 ** exponent / abs(float(number)))
+    for text in whole_texts:
+        number = int(text)
+        if number == 0:
+            continue
+        # Trailing zeros are not written digits: the last written digit of 1800 is the hundreds one (half-unit 50).
+        zeros = len(text) - len(text.rstrip("0"))
+        shares.append(0.5 * 10.0 ** zeros / abs(number))
     return min(shares) if shares else None
 
 
@@ -387,17 +401,25 @@ def copies_measured(ref: dict[str, Any], measured: list[tuple[float, float | Non
     """Whether a reference reproduces the measured means more closely than they are known, so it was read off the run,
     not worked out: in more than half of the settings it covers (``measured``: ``(mean, 95% half-width, the reference
     FI computed there)`` of each), the mean is the reference to the precision the reference's numbers are written to
-    (:func:`_finest`), and that precision is finer than a tenth of the half-width. A bare number (``0.1775``), an
-    expression of one (``0.17748 + 0*m``) and a plan's number holding one (``p_seen`` = 0.17748) are all caught; a
-    formula of the settings whose numbers are short (``1 - (1 - 0.05/m)**m``), or a nominal 0.95, is not."""
+    (:func:`_finest`), and that precision is finer than a tenth of the half-width. A bare number (``0.1775``), a whole
+    one (``1849``, written to the unit), an expression of one (``0.17748 + 0*m``) and a plan's number holding one
+    (``p_seen`` = 0.17748) are all caught; a formula of the settings whose numbers are short (``1 - (1 - 0.05/m)**m``),
+    a nominal 0.95, or a round whole number (``1800``, known only to the hundreds) is not."""
     text = str(ref.get("formula") or "").strip()
-    share = _finest(text, given or {}) if text else None
+    values = [_num(value) for _mean, _half, value in measured]
+    # A whole number in the formula is a written value only when the reference is that same whole number at every
+    # setting; a formula whose value varies, or is not whole (``sqrt(2/400)``), reads its integers as parameters. A
+    # value that is missing (None) or not finite at any setting makes it False: it is never a reason to raise.
+    whole = bool(values) and all(v is not None and v == values[0] and v.is_integer() for v in values)
+    share = _finest(text, given or {}, whole) if text else None
     if share is None or not measured:
         return False
     hits = 0
-    for mean, half, value in measured:
-        tol = share * abs(value)
-        if half is not None and half > 0 and tol < half / 10 and abs(mean - value) <= tol:
+    for (mean, half, _value), known in zip(measured, values):  # ``known``: the value as a finite number, or None
+        if known is None:  # no reference value at this setting: nothing to compare, so no copy here
+            continue
+        tol = share * abs(known)
+        if half is not None and half > 0 and tol < half / 10 and abs(mean - known) <= tol:
             hits += 1
     return hits * 2 > len(measured)
 
