@@ -830,6 +830,11 @@ class AgentCoder:
         names = {Path(n).as_posix() for n in (*FI_OWNED_FILES, *(self._owned() if self._owned else []))}
         return rel in names or rel.split("/", 1)[0] in FI_OWNED_DIRS
 
+    def may_edit(self, rel: str) -> bool:
+        """Whether the agent may change ``rel`` (relative to ``code/``): the opposite of the owner test a round is kept by.
+        A finding about a file it may not change is not the agent's to fix."""
+        return not self._owned_rel(Path(str(rel)).as_posix())
+
     def _fresh_copy(self, work: Path) -> None:
         """The scratch folder holds exactly a copy of ``code/``: no ``.git`` history, no environment, no caches, and none
         of the files an older FI left in ``code/tests/`` with expected values in them (removed from ``code/`` first,
