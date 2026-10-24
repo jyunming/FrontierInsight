@@ -796,6 +796,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             docker_limits=DockerLimits.from_config(config.execution),
             log=self._log,  # a container stopped by a limit says so in run.log
         )
+        # Every version of code/ that runs is a commit in code/'s history (core/code_project.py:CodeRuns).
+        self._code_runs = _code_project.CodeRuns(self.quest_root, node=lambda: self._audit_node, log=self._log)
+        self.executor.before_run = self._code_runs.before_run
         self.knowledge = Knowledge(config.knowledge)
         self.audit = _audit_log.AuditLog(self.fi_dir / "audit.jsonl", self.quest_id, enabled=config.engine.audit_trace)
         self._audit_node = ""       # the node running now, for events written from inside it
@@ -12706,7 +12709,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             scrub=lambda text: _pairs.scrub(text, values), log=self._log, package=package,
             other=(reader if same is False else ""), code_model=self._model_for_node("implement") or self.config.provider.model or "",
             on_accept=on_accept, small_run=self._small_run_again)
-        changed = await _finding_repair.repair_issues(env)
+        with self._hold_code_runs():  # each try is its own commit or side reference (finding_repair.keep_try)
+            changed = await _finding_repair.repair_issues(env)
         record["repaired"] = bool(changed)
         # Progress is what FI's own test runs show: the faults a failing test showed that now pass it (code_review.note_reading).
         record["round_fixed"] = sum(1 for i in _code_findings.issues_of(record).values()
@@ -15173,7 +15177,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if why is not None:
             self._log.info("[improve] no change to the simulation: %s", why)
             return done
-        return await self._improve_loop(state, protocol, baseline, baseline_n=last.get("n"), earlier=record)
+        with self._hold_code_runs():  # each round commits the version it ran, with its values
+            return await self._improve_loop(state, protocol, baseline, baseline_n=last.get("n"), earlier=record)
+
+    def _hold_code_runs(self) -> Any:
+        """While a step commits each version it tries with its own words, the commit before each run waits
+        (code_project.CodeRuns). An engine built without one (a test's stand-in) holds nothing."""
+        import contextlib
+
+        runs = getattr(self, "_code_runs", None)
+        return runs.held() if runs is not None else contextlib.nullcontext()
 
     def _improve_undo_unfinished(self) -> None:
         """Before a rerun from a step moves the loop's record aside: a loop cut short left a round's version in code/,
@@ -21384,6 +21397,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._progress(
                 f"Trying code/ in a clean environment (at most {limit / 60:g} min; it does not change the results)"
             )
+            if getattr(self, "_code_runs", None) is not None:  # the clean check runs code/run.py itself, outside
+                await self._code_runs.before_run()  # the executor
             result = await asyncio.to_thread(_code_project.verify, self.quest_root, run_timeout_s=limit)
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(digest, encoding="utf-8")

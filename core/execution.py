@@ -317,6 +317,10 @@ class VenvExecutor:
     `DockerExecutor`.
     """
 
+    #: Awaited before each run when set (the engine's code_project.CodeRuns.before_run: the code as it runs is a
+    #: commit in code/'s history).
+    before_run: Any = None
+
     def __init__(
         self, *, python_version: str = "3.11", system_site_packages: bool = True,
     ) -> None:
@@ -349,7 +353,7 @@ class VenvExecutor:
         # actually existing (mirrors cleanup_after_success) AND a cheap pip
         # probe (catches a partial ensurepip); rebuild a broken dir from clean.
         if (venv_dir / "pyvenv.cfg").exists() and py.is_file():
-            probe = await self.execute(
+            probe = await self._run(
                 [str(py), "-c", "import pip"], cwd=quest_root, timeout_s=30,
             )
             if probe.returncode == 0:
@@ -381,7 +385,7 @@ class VenvExecutor:
             return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
         py = self.python_path(quest_root)
         cmd = [str(py), "-m", "pip", "install", "--quiet", *pkgs]
-        result = await self.execute(cmd, cwd=quest_root, timeout_s=600)
+        result = await self._run(cmd, cwd=quest_root, timeout_s=600)
         # Retry a failed install once. Two quests installing matplotlib at the
         # same moment in one process have twice left one of them with a pip
         # that fell back to building it from source and failed ("Could not
@@ -394,7 +398,7 @@ class VenvExecutor:
                 "[install] pip install rc=%d; retrying once. %s",
                 result.returncode, pip_failure_summary(result.stderr),
             )
-            result = await self.execute(cmd, cwd=quest_root, timeout_s=600)
+            result = await self._run(cmd, cwd=quest_root, timeout_s=600)
         if result.returncode == 0:
             self._record_requested(pkgs, quest_root)
         return result
@@ -434,12 +438,26 @@ class VenvExecutor:
                 wanted.append(m.group(0))
         if not wanted:
             return ""
-        probe = await self.execute(
+        probe = await self._run(
             [str(py), "-c", _PIN_SCRIPT, *wanted], cwd=quest_root, timeout_s=60,
         )
         return probe.stdout if probe.returncode == 0 else ""
 
     async def execute(
+        self,
+        cmd: list[str],
+        *,
+        cwd: Path,
+        timeout_s: int,
+        env: dict[str, str] | None = None,
+    ) -> ExecutionResult:
+        # A run of the quest's code: what runs is committed first (before_run). FI's own setup, installs and
+        # probes go through _run and are not runs of the code.
+        if self.before_run is not None:
+            await self.before_run()
+        return await self._run(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    async def _run(
         self,
         cmd: list[str],
         *,
@@ -557,7 +575,7 @@ class VenvExecutor:
             # happens to have installed alongside what this quest actually
             # asked for, which is not what "what did this quest need"
             # should mean. Harmless no-op when system_site_packages=False.
-            freeze = await self.execute(
+            freeze = await self._run(
                 [str(py), "-m", "pip", "freeze", "--local"],
                 cwd=quest_root,
                 timeout_s=60,
@@ -568,7 +586,7 @@ class VenvExecutor:
                 # folder was deleted (it probes each one); the venv's own
                 # distributions, read with importlib.metadata, are what
                 # ``--local`` would have listed.
-                local = await self.execute([str(py), "-c", _LOCAL_SCRIPT], cwd=quest_root, timeout_s=60)
+                local = await self._run([str(py), "-c", _LOCAL_SCRIPT], cwd=quest_root, timeout_s=60)
                 if local.returncode != 0:
                     _log.warning(
                         "cleanup_after_success: pip freeze rc=%d (%s) and the importlib.metadata "
@@ -1022,6 +1040,10 @@ class DockerExecutor:
     mounted, read-only, each at ``/fi-skills/<name>`` (``set_skill_mounts``).
     """
 
+    #: Awaited before each run when set (the engine's code_project.CodeRuns.before_run: the code as it runs is a
+    #: commit in code/'s history).
+    before_run: Any = None
+
     def __init__(
         self, *, image: str = "python:3.11-slim", limits: DockerLimits | None = None,
         log: logging.Logger | None = None,
@@ -1401,13 +1423,27 @@ class DockerExecutor:
         pkgs = list(packages)
         if not pkgs:
             return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
-        return await self.execute(
+        return await self._run(
             ["python", "-m", "pip", "install", "--quiet", *pkgs],
             cwd=quest_root,
             timeout_s=600,
         )
 
     async def execute(
+        self,
+        cmd: list[str],
+        *,
+        cwd: Path,
+        timeout_s: int,
+        env: dict[str, str] | None = None,
+    ) -> ExecutionResult:
+        # A run of the quest's code: what runs is committed first (before_run). FI's own setup, installs and
+        # probes go through _run and are not runs of the code.
+        if self.before_run is not None:
+            await self.before_run()
+        return await self._run(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    async def _run(
         self,
         cmd: list[str],
         *,
