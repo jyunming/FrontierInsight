@@ -311,6 +311,13 @@ def test_after_the_freeze_the_agent_gets_one_round_then_the_failure_stands(tmp_p
     assert "round after the freeze is used" in again["exec_give_up_reason"]
     assert len(agent.prompts) == 2
 
+    # a run the results check sent back keeps its results: the same code runs once more, nothing is given up
+    sent_back = {**failed, "result_check_sent_back": True}
+    kept = asyncio.run(eng._reflect_by_agent({"exec_reflect_history": [], "exec_result": sent_back}, 1, 1, "1", "",
+                                             sent_back, {}))
+    assert "exec_give_up_reason" not in kept and kept["exec_patch_pending"] is True
+    assert len(agent.prompts) == 2
+
 
 def test_the_improve_loop_does_not_run_on_the_agents_code(tmp_path: Path) -> None:
     eng = _engine(tmp_path)

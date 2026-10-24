@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -527,3 +528,47 @@ async def test_dropping_a_figure_removes_exactly_that_file_and_keeps_its_sibling
     assert (eng.fi_dir / "figure_records" / "empty_one.json").exists(), "the record stays while another format needs it"
     eng._drop_figures(["empty_one.svg"])
     assert not (eng.fi_dir / "figure_records" / "empty_one.json").exists() and (folder / "empty_one_other.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_gives_up_on_a_sent_back_run_keeps_its_results_and_leaves_out_what_is_wrong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    state: dict[str, Any] = {"iteration": 0}
+    result, _ = await eng._results_match_run(state, _run(), None, True)
+    assert result.returncode == 1, "the run is sent back first"
+    give_up = json.dumps({"code": "", "deps": [], "patch_summary": "", "give_up_reason": "cannot see what to change"})
+
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=give_up)})()
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    reflect_state = {
+        "iteration": 0, "exec_result": {"returncode": 1, "stdout_tail": "", "stderr_tail": result.stderr,
+                        "result_check_sent_back": True},
+        "result_json": None, "code": "print(1)", "design": {},
+    }
+    patch = await eng._node_execute_reflect(reflect_state)
+    assert not patch.get("exec_give_up_reason"), "the results are not given up with the repair"
+    assert patch["exec_patch_pending"] is True
+    assert eng._route_after_execute_reflect({**reflect_state, **patch}) == "retry"
+    # the same code runs once more: its results stand, what is still wrong is left out and said
+    (eng.quest_root / "figures" / "empty_one.png").write_bytes(b"png")
+    (eng.quest_root / "figures" / "fine.png").write_bytes(b"png")
+    result, _ = await eng._results_match_run(state, _run(), None, True)
+    assert result.returncode == 0
+    record = json.loads((eng.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
+    assert record["removed_quantities"] == ["level"] and record["removed_figures"] == ["empty_one.png"]
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_gives_up_on_a_crash_still_gives_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+
+    reply = json.dumps({"code": "", "deps": [], "patch_summary": "", "give_up_reason": "needs a device this machine lacks"})
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=reply)})()
+    patch = await eng._node_execute_reflect({
+        "iteration": 0, "exec_result": {"returncode": 1, "stdout_tail": "", "stderr_tail": "Traceback: boom"},
+        "result_json": None, "code": "print(1)", "design": {},
+    })
+    assert patch["exec_give_up_reason"].startswith("needs a device")
+    assert not patch.get("exec_patch_pending")

@@ -289,6 +289,25 @@ class ResultChecksMixin:
         except OSError:
             pass
 
+    def _result_check_gave_up(self, state: Any, history: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+        """When the repair gives up (or writes no code) on a run this check sent back: the run's results are not lost
+        with it. The same code runs once more with this check's repairs counted as spent, so its results stand and what
+        is still wrong is left out and said (:meth:`_leave_out_results`), as when the repairs run out. A reading of the
+        results never ends a quest with nothing to write up. ``None`` when the last run was not sent back by this check."""
+        if not (state.get("exec_result") or {}).get("result_check_sent_back"):
+            return None
+        self._save_result_counter(state, REPAIRS)
+        self._log.warning(  # type: ignore[attr-defined]
+            "[execute_reflect] no repair of what the results check found; the run is made once more and what is "
+            "still wrong is left out of the results, as when its repairs run out")
+        patch: dict[str, Any] = {
+            "exec_patch_pending": True,
+            "exec_reflect_iter": int(state.get("exec_reflect_iter") or 0) + 1,  # the repair asked counts, so this is bounded
+        }
+        if history is not None:
+            patch["exec_reflect_history"] = history  # the repair's own reason for giving up, kept
+        return patch
+
     async def _results_match_run(self, state: Any, result: Any, failed_script: str | None, split: bool) -> tuple[Any, str | None]:
         """After a run that finished: send the results back like a failed run when they do not match what ran (at most
         :data:`REPAIRS` times, and while the quest has repairs left), else leave out what is still wrong and say so.
