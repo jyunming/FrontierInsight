@@ -5613,7 +5613,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             once = _protocol.run_count_notes(normalized, fi_runs=fi_runs)
             # A design that names nothing random is not asked for a precision its repeats would buy.
             if not once:
-                audit += _protocol.precision_notes(normalized.get("protocol"), int(self.config.engine.execute_replicates))
+                # FI's own trials (two scripts) are every trial of a setting, each with its own seed, and run once: the trials
+                # of a setting are its runs, as the run step counts them (replicates_n there), not runs times the seeds.
+                seeds = 1 if fi_runs or self.config.execution.background_jobs else int(self.config.engine.execute_replicates)
+                audit += _protocol.precision_notes(normalized.get("protocol"), seeds)
             audit += _protocol.grid_notes(normalized)
             audit += once
             audit += _criteria.plan_notes(normalized.get("protocol"), fi_runs=fi_runs)

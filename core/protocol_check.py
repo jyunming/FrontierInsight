@@ -585,6 +585,21 @@ def precision_notes(protocol: dict[str, Any] | None, seeds: int) -> list[str]:
             f"target precision: for a probability near 0.5 that is at best a 95% interval of about "
             f"±{reach:.3f}. Say the width the claim needs in `precision.target_half_width`, and the runs follow from it."
         ]
+    from .run_estimate import precision_metric
+    from .stats import _Z95
+
+    on, kind = precision_metric(protocol)
+    if kind == "mean":
+        # A mean's half-width follows from the spread of one trial's value, not from the count a probability near 0.5
+        # needs: say the largest spread the planned trials reach the target with, for the plan to hold its own spread to.
+        widest = float(target) * math.sqrt(trials) / _Z95
+        return [
+            f"The protocol targets a 95% half-width of ±{target:g} on the mean `{on}`: {int(runs)} runs over "
+            f"{max(1, int(seeds))} seed(s) give {trials} trials per setting, which reach it only if one trial's `{on}` "
+            f"varies with a standard deviation of at most {widest:.3g} (in `{on}`'s own units, as the target is). If the "
+            f"spread you expect is larger, raise the trials per setting to (1.96 x spread / {target:g})^2"
+            + (f", divided over the {int(seeds)} seeds" if int(seeds) > 1 else "") + ", or widen the target."
+        ]
     need = trials_for_half_width(float(target))
     if need is not None and trials < need:
         return [
