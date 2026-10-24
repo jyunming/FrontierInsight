@@ -60,67 +60,101 @@ def _functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctio
     return {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _shallow(nodes: list[ast.AST]):
+    """Every node of ``nodes`` and below, not entering the body of a nested function, class or lambda (the nested scope
+    itself is yielded)."""
+    stack = list(reversed(nodes))
+    while stack:
+        n = stack.pop()
+        yield n
+        if not isinstance(n, _SCOPES):
+            stack.extend(reversed(list(ast.iter_child_nodes(n))))
+
+
+def _params(node: ast.AST) -> set[str]:
+    args = getattr(node, "args", None)
+    if not isinstance(args, ast.arguments):
+        return set()
+    names = [a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]]
+    names += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+    return set(names)
+
+
 class _Calls:
     """Which calls in the simulation go to the model's package.
 
     With ``modules`` (the top-level names of the package's folders) a call counts only when its target is bound to the
     package by an import: ``from pkg.mod import f`` then ``f(...)``, ``import pkg.mod as m`` / ``from pkg import mod`` then
-    ``mod.f(...)``. A name the simulation defines itself (a ``def`` or an assignment) is its own, whatever the package calls
-    its functions, so an unrelated local ``update`` is not the package's ``update``. Without ``modules`` a call counts when
-    its simple name is a function name of the package (the older, looser reading)."""
+    ``mod.f(...)``. Names are resolved scope by scope: a name the simulation binds itself (a ``def``, a class, an
+    assignment, a parameter, another import) is its own inside the function that binds it and every function nested in it,
+    whatever the package calls its functions, so an unrelated local ``update`` is not the package's ``update``. Without
+    ``modules`` a call counts when its simple name is a function name of the package (the older, looser reading)."""
 
     def __init__(self, tree: ast.Module, package: set[str], modules: set[str] | None) -> None:
         self.package = package
         self.modules = modules
-        self.funcs: set[str] = set()     # names bound to a function of the package
-        self.aliases: set[str] = set()   # names bound to a module of the package
-        if modules is None:
-            return
-        local: set[str] = set()
-        for n in tree.body:
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                local.add(n.name)
-            elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
-                for t in targets:
-                    # Only a name that is bound: ``model.C0 = 1`` or ``d[k] = 1`` binds nothing, and uses ``model`` / ``d``.
-                    local.update(x.id for x in ast.walk(t) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store))
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Import):
+        self._hits: dict[int, str] = {}
+        if modules is not None:
+            self._scope(tree.body, set(), set(), set())
+
+    def _bindings(self, body: list[ast.AST], params: set[str]) -> tuple[set[str], set[str], set[str]]:
+        """``(names bound plainly, names bound to a package function, names bound to a package module)`` in one scope."""
+        assert self.modules is not None
+        plain, funcs, aliases = set(params), set(), set()
+        for n in _shallow(body):
+            if isinstance(n, _SCOPES):
+                if not isinstance(n, ast.Lambda):
+                    plain.add(n.name)
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                plain.add(n.id)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                plain.add(n.name)
+            elif isinstance(n, ast.Import):
                 for a in n.names:
-                    if a.name.split(".")[0] in modules:
-                        # ``import pkg.mod as m`` binds m to the module; ``import pkg.mod`` binds pkg.
-                        self.aliases.add(a.asname or a.name.split(".")[0])
-            elif isinstance(n, ast.ImportFrom) and n.level == 0 and (n.module or "").split(".")[0] in modules:
+                    bound = a.asname or a.name.split(".")[0]
+                    (aliases if a.name.split(".")[0] in self.modules else plain).add(bound)
+            elif isinstance(n, ast.ImportFrom):
+                from_package = n.level == 0 and (n.module or "").split(".")[0] in self.modules
                 for a in n.names:
                     bound = a.asname or a.name
-                    if a.name == "*":
-                        self.funcs.update(package)
-                    elif a.name in package:
-                        self.funcs.add(bound)
+                    if not from_package:
+                        plain.add(bound)
+                    elif a.name == "*":
+                        funcs.update(self.package)
+                    elif a.name in self.package:
+                        funcs.add(bound)
                     else:
-                        self.aliases.add(bound)
-        self.funcs -= local
-        self.aliases -= local
+                        aliases.add(bound)
+        # A name bound both to the package and plainly in one scope is the scope's own.
+        return plain, funcs - plain, aliases - plain
+
+    def _scope(self, body: list[ast.AST], params: set[str], funcs: set[str], aliases: set[str]) -> None:
+        plain, new_funcs, new_aliases = self._bindings(body, params)
+        funcs = (funcs - plain) | new_funcs
+        aliases = (aliases - plain) | new_aliases
+        for n in _shallow(body):
+            if isinstance(n, ast.Call):
+                f = n.func
+                if isinstance(f, ast.Name) and f.id in funcs:
+                    self._hits[id(n)] = f.id
+                elif isinstance(f, ast.Attribute) and f.attr in self.package:
+                    root = f.value
+                    while isinstance(root, ast.Attribute):
+                        root = root.value
+                    if isinstance(root, ast.Name) and root.id in aliases:
+                        self._hits[id(n)] = f.attr
+            if isinstance(n, _SCOPES):
+                inner = [n.body] if isinstance(n, ast.Lambda) else list(n.body)
+                self._scope(inner, _params(n), funcs, aliases)
 
     def to_package(self, node: ast.AST) -> set[str]:
         """The package functions called inside ``node``."""
         if self.modules is None:
             return _called_names(node) & self.package
-        out: set[str] = set()
-        for n in ast.walk(node):
-            if not isinstance(n, ast.Call):
-                continue
-            f = n.func
-            if isinstance(f, ast.Name) and f.id in self.funcs:
-                out.add(f.id)
-            elif isinstance(f, ast.Attribute) and f.attr in self.package:
-                root = f.value
-                while isinstance(root, ast.Attribute):
-                    root = root.value
-                if isinstance(root, ast.Name) and root.id in self.aliases:
-                    out.add(f.attr)
-        return out
+        return {self._hits[id(n)] for n in ast.walk(node) if isinstance(n, ast.Call) and id(n) in self._hits}
 
 
 def _reaching(simulation: ast.Module, calls: _Calls) -> set[str]:

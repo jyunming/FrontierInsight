@@ -208,3 +208,25 @@ def test_calls_bound_to_the_package_by_each_import_form_count() -> None:
     assert _caught(sc.check(shadowed, PACKAGE, ["a"], package_modules=modules)) == {"a"}
     unrelated = _trial("import numpy as gm", "gm.fit_gain([1.0])")
     assert _caught(sc.check(unrelated, PACKAGE, ["a"], package_modules=modules)) == {"a"}
+
+
+def test_a_name_bound_inside_the_trial_shadows_the_package_there() -> None:
+    """The first binding fix read only module-level definitions, so a `fit_gain` defined inside `run_trial` (or a parameter
+    of that name) was still taken for the package's and the fake passed."""
+    modules = ["gain_model"]
+    imports = "from gain_model.model import fit_gain"
+    nested_def = (imports + "\n\ndef run_trial(c, t, s):\n    def fit_gain(x):\n        return 3.0\n"
+                  "    return {'a': fit_gain([1.0])}\n")
+    parameter = (imports + "\n\ndef run_trial(c, t, s, fit_gain=len):\n    return {'a': fit_gain([1.0])}\n")
+    assigned = (imports + "\n\ndef run_trial(c, t, s):\n    fit_gain = lambda x: 3.0\n    return {'a': fit_gain([1.0])}\n")
+    nested_scope = (imports + "\n\ndef run_trial(c, t, s):\n    def fit_gain(x):\n        return 3.0\n"
+                    "    def inner():\n        return fit_gain([1.0])\n    return {'a': inner()}\n")
+    for source in (nested_def, parameter, assigned, nested_scope):
+        assert _caught(sc.check(source, PACKAGE, ["a"], package_modules=modules)) == {"a"}, source
+
+
+def test_a_shadow_in_another_function_does_not_hide_the_package_call() -> None:
+    """Known positive: a local `fit_gain` in an unrelated helper leaves the trial's own call bound to the package."""
+    source = ("from gain_model.model import fit_gain\n\ndef helper():\n    def fit_gain(x):\n        return 0.0\n    return fit_gain\n\n"
+              "def run_trial(c, t, s):\n    return {'a': fit_gain([1.0])}\n")
+    assert sc.check(source, PACKAGE, ["a"], package_modules=["gain_model"]) == []
