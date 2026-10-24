@@ -214,8 +214,12 @@ class SettingsGate:
         young = [t for t in self._started if now - t < self.RAMP_S]
         if need is None:
             # Nothing to measure from yet: one more setting every STAGGER seconds, so the first ones can show their size.
+            # A spacing, not a memory limit, so it is not reported as holding settings back.
             return now - self._started[-1] >= self.STAGGER
-        return free - self._reserve - len(young) * need >= need
+        if free - self._reserve - len(young) * need >= need:
+            return True
+        self._say_held()  # only a real memory limit is reported as holding settings back
+        return False
 
     def _say_held(self) -> None:
         if self._held_said or self._log is None:
@@ -241,8 +245,6 @@ class SettingsGate:
                     self.most_at_once = max(self.most_at_once, len(self._started))
                     mine = self._started[-1]
                     break
-                if len(self._started) < self.at_once:
-                    self._say_held()
             await asyncio.sleep(self._poll_s) if len(self._started) < self.at_once else await self._wait_for_slot()
         self.held_back_s += max(0.0, time.monotonic() - waited)
         try:

@@ -446,14 +446,16 @@ class EvaluationPool:
 
     def __init__(self, executor: Any, python: Any, quest_root: Path, module: str, entry: str, *, at_once: int, runs: int,
                  base_seed: int, deadline: float, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-                 seed_key: str = "", on_done: Any = None, log: Any = None):
+                 seed_key: str = "", on_done: Any = None, log: Any = None, gate: Any = None):
         self.executor, self.python, self.quest_root = executor, python, quest_root
         self.module, self.entry, self.runs, self.base_seed = module, entry, runs, base_seed
         self.deadline, self.thresholds, self.seed_key, self.on_done = deadline, thresholds, seed_key, on_done
         (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
         self.outside = _outside.OutsideExecutor(executor, quest_root, log=log)
         self.log = log
-        self.gate = _execution.SettingsGate(max(1, at_once), log=log)  # fewer at once when the memory would not hold them
+        # Fewer at once when the memory would not hold them. A search passes the one gate it shares by all its batches, so
+        # the size measured by the batches before is kept; a gate made here starts again from nothing.
+        self.gate = gate if gate is not None else _execution.SettingsGate(max(1, at_once), log=log)
         self.outside.meter = self.gate.note
         self.env = _execution.threads_beside(env, max(1, at_once))  # each process its share of the cores
         self.work = quest_root / WORK_DIR
@@ -529,7 +531,8 @@ class EvaluationPool:
 async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: str, entry: str,
                         cells: list[dict[str, Any]], *, at_once: int, runs: int, base_seed: int, deadline: float,
                         env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-                        seed_key: str = "", on_done: Any = None, log: Any = None) -> list[tuple[dict[str, Any], str, str]]:
+                        seed_key: str = "", on_done: Any = None, log: Any = None,
+                        gate: Any = None) -> list[tuple[dict[str, Any], str, str]]:
     """Designs that do not depend on each other's answers, up to ``at_once`` at the same time, each in a process of its
     own exactly as :func:`_evaluate` runs one (the same seeds, so the answers are those of one after another):
     ``[(answer, stderr, load error)]`` in the order of ``cells``. A design not started before ``deadline`` is answered
@@ -547,7 +550,8 @@ async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: st
             out.append(got)
         return out
     pool = EvaluationPool(executor, python, quest_root, module, entry, at_once=at_once, runs=runs, base_seed=base_seed,
-                          deadline=deadline, env=env, thresholds=thresholds, seed_key=seed_key, on_done=on_done, log=log)
+                          deadline=deadline, env=env, thresholds=thresholds, seed_key=seed_key, on_done=on_done, log=log,
+                          gate=gate)
     for k, cell in enumerate(cells):
         pool.submit(k, cell)
     answers: dict[int, tuple[dict[str, Any], str, str]] = {}
@@ -879,6 +883,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     last_note = time.monotonic()
     evaluated = 0
     pool: EvaluationPool | None = None  # the designs running now, when the search is answered as each one finishes
+    # One memory gate for the whole search: every batch and pool of it shares the size of a setting measured so far.
+    gate = _execution.SettingsGate(max(1, at_once), log=log)
     streamed: dict[Any, dict[str, Any]] = {}  # the request of each design in the pool, by its id
 
     def finished_streamed(ident: Any, answer: dict[str, Any], loaded: str) -> None:
@@ -934,7 +940,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 
                 got = await evaluate_many(executor, python, quest_root, module, entry, [asked[k]["cell"] for k in fresh],
                                           at_once=at_once, runs=runs, base_seed=int(base_seed), deadline=deadline,
-                                          env=env, thresholds=thresholds, on_done=finished, log=log)
+                                          env=env, thresholds=thresholds, on_done=finished, log=log, gate=gate)
                 for k, (answer, err, loaded) in zip(fresh, got):
                     if err:
                         stderr_parts.append(err)
@@ -948,7 +954,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 if pool is None:
                     pool = EvaluationPool(executor, python, quest_root, module, entry, at_once=at_once, runs=runs,
                                           base_seed=int(base_seed), deadline=deadline, env=env, thresholds=thresholds,
-                                          on_done=finished_streamed, log=log)
+                                          on_done=finished_streamed, log=log, gate=gate)
                 ready: list[Any] = []
                 for one in request["requests"]:
                     replayed = (replay.get(_replay_key(replay_space, one["design"], one.get("level")))
