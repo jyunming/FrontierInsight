@@ -99,6 +99,7 @@ class Mismatch:
     where: str = ""  # "R0_LIST in experiment.py, line 166"; empty when the script holds no such list
     missing: list[float] = field(default_factory=list)  # protocol values the script does not contain at all
     part: str = "grid"  # where the protocol fixes the axis: "grid", or "in_each_run" (compared inside each run)
+    from_loop: bool = False  # the list compared is a ``for`` loop's literal values, not a list the script assigns to a name
 
     def left_out(self) -> list[float]:
         """The protocol values of a grid axis that the list found does not hold."""
@@ -162,6 +163,7 @@ class _Found:
     line: int
     script: str
     positional: bool = False  # a loop variable the body never hands on as an argument: it picks positions or output names
+    loop: bool = False  # found as ``for name in (literal, ...)``, not assigned to a name
 
 
 def _numeric_sequence(node: ast.AST) -> list[float] | None:
@@ -266,7 +268,7 @@ class _Reader(ast.NodeVisitor):
                     and any(isinstance(a, ast.Name) and a.id == var for a in [*call.args, *[k.value for k in call.keywords]])
                     for stmt in node.body for call in ast.walk(stmt)
                 )
-                self.lists.append(_Found(var, seq, node.lineno, self.script, positional=not handed_on))
+                self.lists.append(_Found(var, seq, node.lineno, self.script, positional=not handed_on, loop=True))
         self.generic_visit(node)
 
 
@@ -513,7 +515,7 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
             if not any(_same_set(f.values, want) for f in candidates):
                 best = max(candidates, key=lambda f: sum(_has(want, v) for v in f.values))
                 out.append(Mismatch("grid", str(axis), want, best.values, f"{best.name} in {best.script}, line {best.line}",
-                                    part=part))
+                                    part=part, from_loop=best.loop))
         elif not fi_runs_trials:  # under the trial contract FI hands the grid in: absent is expected, a contradiction is not
             absent = [v for v in want if not _has(numbers, v)]
             if absent:
@@ -550,6 +552,27 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
             if not any(_has(numbers, form) for form in forms):
                 out.append(Mismatch("threshold", str(name), [float(v)]))
     return out
+
+
+def check_repairable(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_loops: bool = False) -> list[Mismatch]:
+    """The differences :func:`check` finds that may send a script back to be rewritten: all but the ones that rest only on
+    a ``for`` loop's literal values (:func:`loop_hints`).
+
+    A loop over literals is how a script walks the values of a computation as often as it is how it defines the grid: a
+    live quest's acceptance function looped over ``(0.05, 0.2)`` to test a property that is undefined at 0, the plan's grid
+    was run in full, and the script was read as "leaves out 0" and sent back twice. A reading of that kind (core/stop_power.py)
+    is told to the reader, never fought; what the loop's values did to the grid is counted from FI's record after the run."""
+    return [m for m in check(protocol, scripts, analysis_loops=analysis_loops) if not m.from_loop]
+
+
+def loop_hints(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[str]:
+    """The differences that rest only on a ``for`` loop's literal values, as notes in plain words (never a repair, never a
+    stop)."""
+    return [
+        "FI read a loop over fixed values in the script as a setting's values, and they differ from the plan: "
+        + m.message() + ". This is only a reading of the code; what the run covered is counted from FI's record of its trials."
+        for m in check(protocol, scripts) if m.from_loop
+    ]
 
 
 def analysis_suspects(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mismatch]:

@@ -11868,7 +11868,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         unplaced_to = _split_run.SIMULATE_NAME if simulate_path.is_file() else "experiment.py"
         call_failures_left = 1  # a repair call that got no answer (a provider timeout) is tried again, once, uncounted
         for attempt in range(budget + 1):
-            mismatches = _protocol.check(protocol, self._scripts_on_disk())
+            mismatches = _protocol.check_repairable(protocol, self._scripts_on_disk())
             attempts.append({"attempt": attempt, "differences": [m.message() for m in mismatches]})
             if not mismatches:
                 break
@@ -11893,7 +11893,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     text, deps, _ = await self._repair_script_for_protocol(state, path, path.read_text(encoding="utf-8"), deps, protocol, own)
                 if name == "experiment.py":
                     code = text
-        final = _protocol.check(protocol, self._scripts_on_disk())
+        final = _protocol.check_repairable(protocol, self._scripts_on_disk())
         record = {
             "status": "ok" if not final else (
                 "stopped" if self.config.engine.protocol_check == "block" and _stop_power.may_stop(_protocol.SOURCE)
@@ -11902,7 +11902,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "differences": [m.message() for m in final],
             "protocol": protocol,
         }
-        notes = _protocol.rng_notes(protocol, self._scripts_on_disk())  # read from free code: a note, never a stop or a repair
+        notes = [*_protocol.rng_notes(protocol, self._scripts_on_disk()),  # read from free code: a note, never a stop or a repair
+                 *_protocol.loop_hints(protocol, self._scripts_on_disk())]
         if notes:
             record["notes"] = notes
             self._log.info("[protocol] %s", "; ".join(notes))
@@ -11960,7 +11961,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except (SyntaxError, ValueError):
             usable = False
         scripts = {**self._scripts_on_disk(), path.name: new_code} if usable else {}
-        remaining = [m for m in _protocol.check(protocol, scripts) if not m.where or path.name in m.where] if usable else mismatches
+        remaining = [m for m in _protocol.check_repairable(protocol, scripts) if not m.where or path.name in m.where] if usable else mismatches
         if not usable or len(remaining) >= len(mismatches):
             self._log.warning("[protocol] the repair of %s did not remove the differences; keeping it as written", path.name)
             return code, deps, False
@@ -21262,6 +21263,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                   else "may not reach the simulation (FI cannot tell)", verdict.get("why"))
         except Exception as e:  # noqa: BLE001 -- the paper's {{seed}} reads the code again when it is filled
             self._log.warning("[write] the code's seed could not be put on record (%s: %s)", type(e).__name__, str(e)[:200])
+        try:
+            for note in _run_facts.shared_stream_notes_for(self.quest_root):  # measured from the trials; a note only
+                self._log.info("[write] %s", note)
+        except Exception as e:  # noqa: BLE001 -- a note FI cannot compute is left out
+            self._log.warning("[write] the trials could not be compared for shared random numbers (%s: %s)",
+                              type(e).__name__, str(e)[:200])
         try:
             section = _paper_facts.writer_section(
                 self.quest_root, topic=str(self.config.topic or ""),

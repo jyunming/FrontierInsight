@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -772,3 +773,77 @@ def record_seed(quest_root: Path | str) -> dict[str, Any]:
     verdict = seed_verdict(quest_root)
     _write(quest_root, seed=verdict)
     return verdict
+
+
+#: Settings whose per-trial numbers move together this closely (Pearson r, over at least ``_MIN_TRIALS`` trials both
+#: ran) were not given independent random numbers: two independent noisy series of that length are almost never this alike.
+_SHARED_R = 0.9
+_MIN_TRIALS = 20
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    n = len(xs)
+    if n < 2:
+        return None
+    mx, my = math.fsum(xs) / n, math.fsum(ys) / n
+    sxx = math.fsum((x - mx) ** 2 for x in xs)
+    syy = math.fsum((y - my) ** 2 for y in ys)
+    if sxx <= 0 or syy <= 0:
+        return None
+    return math.fsum((x - mx) * (y - my) for x, y in zip(xs, ys)) / math.sqrt(sxx * syy)
+
+
+def shared_stream_notes(cells: Any) -> list[str]:
+    """Which settings drew the same random numbers, MEASURED from FI's record of the trials (``raw/trials.json``): for each
+    number a setting reports per trial, the settings whose per-trial values (matched by trial number) move together
+    (:data:`_SHARED_R`). Reading the code for a generator built from something that does not depend on the setting cannot
+    tell a stream built once and cached, or a reseed on purpose, from a real reuse; the numbers the trials returned can.
+    Settings that share their random numbers on purpose (a plan that asks for common random numbers) are not a fault, so
+    this only tells: one plain sentence per number, never a stop or a repair. ``cells`` is the file's list of records
+    (or ``{"cells": [...]}``); a record without per-trial numbers is skipped."""
+    if isinstance(cells, dict):
+        cells = cells.get("cells")
+    if not isinstance(cells, list):
+        return []
+    series: dict[str, dict[str, dict[Any, float]]] = {}  # metric -> setting key -> trial -> value
+    for c in cells:
+        if not isinstance(c, dict) or c.get("level") or not isinstance(c.get("metrics"), dict):
+            continue
+        key = json.dumps(c.get("cell"), sort_keys=True, default=str)
+        for name, m in c["metrics"].items():
+            if not isinstance(m, dict) or not isinstance(m.get("values"), list) or not isinstance(m.get("trials"), list):
+                continue
+            by_trial = {t: v for t, v in zip(m["trials"], m["values"])
+                        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
+            series.setdefault(str(name), {})[key] = by_trial
+    notes: list[str] = []
+    for name, per_setting in sorted(series.items()):
+        keys = sorted(per_setting)
+        pairs = 0
+        close = 0
+        for i, a in enumerate(keys):
+            for b in keys[i + 1:]:
+                shared = sorted(set(per_setting[a]) & set(per_setting[b]), key=str)
+                if len(shared) < _MIN_TRIALS:
+                    continue
+                r = _pearson([per_setting[a][t] for t in shared], [per_setting[b][t] for t in shared])
+                if r is None:
+                    continue
+                pairs += 1
+                close += r >= _SHARED_R
+        if pairs and close * 2 >= pairs:
+            notes.append(
+                f"In FI's record of the trials, `{name}` moves together between settings in {close} of {pairs} pairs "
+                f"(trial by trial): the settings appear to have drawn the same random numbers. If the plan asks for that "
+                f"(common random numbers) it is as planned; if not, differences between settings are smaller than "
+                f"independent runs would show.")
+    return notes
+
+
+def shared_stream_notes_for(quest_root: Path | str) -> list[str]:
+    """:func:`shared_stream_notes` over the quest's ``raw/trials.json``; empty when there is none or it cannot be read."""
+    try:
+        data = json.loads((Path(quest_root) / "raw" / "trials.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return shared_stream_notes(data)
