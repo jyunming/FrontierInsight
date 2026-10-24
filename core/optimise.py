@@ -1527,9 +1527,13 @@ class OptimisationRunner:
                                  source=sim_text, expected=_degenerate.expected_constants(protocol))
         if flat is not None:
             return self._flat_result(flat, run, started)
-        # FI checks the best design at finer settings (core/optimum_check.py), with a time limit of its own. A check that
+        # FI checks the best design at finer settings (core/optimum_check.py), within the same time limit as the search. A check that
         # fails is the study's result, reported and carried on with; one that cannot run is recorded as not finished.
-        check_text, check_key = await self._check(cmd[0], run, protocol, base, timeout_s, env)
+        # The check shares the one time limit with the search (``execution.timeout_s`` bounds the whole call): it gets what the
+        # search left, not a whole limit of its own, which let a search that used the limit be followed by a check of up to
+        # as long again (72 runs past an 8 h limit). A check that finds no time left is recorded as not finished.
+        check_left = max(1, int(timeout_s) - int(time.monotonic() - started))
+        check_text, check_key = await self._check(cmd[0], run, protocol, base, check_left, env)
         self.last_check = (check_text, check_key)
         try:
             checked = json.loads(check_text) if check_text else None

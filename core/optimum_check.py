@@ -28,8 +28,8 @@ evaluates again, through the same harness and in a process of its own for each d
 The check never stops the quest: a failed check is the study's honest result ("the improvement over the baseline
 disappears at finer settings"), written into ``needs/OPTIMUM_CHECK.json`` (one plain verdict and a plain sentence per
 check, with the numbers) and run.log, and it limits the evidence level (:func:`evidence_gaps`). Its evaluations are its
-own: they are not taken from the search's budget, and they have their own time limit (``execution.timeout_s``); a check
-cut short by it is ``unverified``, never a pass.
+own: they are not taken from the search's budget, and they share the one time limit (``execution.timeout_s``) with the search, the check
+getting what the search left; a check cut short by it is ``unverified``, never a pass.
 
 Like :mod:`core.optimise_search`, the check itself is a generator that asks for evaluations and is sent the answers
 (:func:`check`), so the same logic runs through FI's harness (:func:`run_check`) and in-process (:func:`check_sync`).

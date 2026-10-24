@@ -769,9 +769,15 @@ class RunChecksMixin:
 
         if isinstance(runner, _optimise.OptimisationRunner):
             return await self._size_the_scan(state, runner, python, env)
-        if (not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs  # type: ignore[attr-defined]
-                or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0):  # type: ignore[attr-defined]
+        if not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs:  # type: ignore[attr-defined]
             return None
+        # A frozen protocol (or a redesign) cannot be cut, but its run is still timed and the estimate said before it starts:
+        # a redesign's run took four hours with nothing said beforehand because only the first design was timed.
+        if int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
+            await self._say_estimate_only(state, runner, python, env)
+            return None
+        if _frozen.load(self.quest_root) is not None:  # type: ignore[attr-defined]
+            return None  # a resume of a run that was timed before it was frozen
         # The time the run is sized to: the topic's own limit when it states one (never more than FI's), else FI's
         # ``execution.timeout_s``, which stays the hard stop of a run in either case.
         hard_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
@@ -933,6 +939,35 @@ class RunChecksMixin:
                 return None  # sized to the plan's minimum, knowingly over the topic's limit: nothing to gain by timing again
         return None
 
+    async def _say_estimate_only(self, state: Any, runner: Any, python: Any, env: Any) -> None:
+        """The estimate of a run whose protocol cannot be changed (frozen, or a redesign): time the same settings as for a first
+        design, say the one plain line, and go on. Nothing is cut, stopped or recorded as sized, and a timing that fails or finds
+        nothing says nothing (a failed timing never prints an estimate)."""
+        try:
+            hard_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
+            topic_s = self._topic_limit_s(state)
+            by_topic = topic_s is not None and topic_s < hard_s
+            limit_s = float(topic_s) if by_topic else hard_s  # type: ignore[arg-type]
+            budget_s = max(hard_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
+            grid, runs, thresholds = self._grid_and_runs(state)
+            inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
+            probes, why = await _estimate.measure(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
+                runs=runs, deterministic=runner.deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
+                thresholds=thresholds, in_each_run=inside)
+            if probes is None:
+                self._log.info("[execute] the run was not timed before it started (%s)", why)  # type: ignore[attr-defined]
+                return
+            est = _estimate.estimate(grid, runs, runner.deterministic, probes)
+            if est is None:
+                return
+            line = _estimate.says(est, limit_s, topic=by_topic)
+            self._log.info("[execute] %s (this design is not cut: its plan is already fixed)", line)  # type: ignore[attr-defined]
+            print(f"[FI] {line}")
+            self._say_headroom(est, hard_s)
+        except Exception as exc:  # noqa: BLE001 - a number said for information must never stop the run
+            self._log.warning("[execute] the run could not be timed before it started (%r)", exc)  # type: ignore[attr-defined]
+
     async def _slowdown_at_once(self, runner: Any, python: Any, env: Any, probes: list[Any], runs: int,
                                 thresholds: dict[str, Any], inside: Any, at_once: int, budget_s: float,
                                 deterministic: bool | None = None) -> float | None:
@@ -1075,6 +1110,7 @@ class RunChecksMixin:
         if est is None:
             return None
         searched = 0
+        checked = 0  # the evaluations of FI's check at finer settings, counted when they make the study too long
         whole: Any = None  # the scan with the search's evaluations, when one evaluation was timed
         if not _estimate.known_too_long(est, limit_s):
             # The search shares the scan's time (one deadline for both, core/optimise.py): every evaluation is a design
@@ -1122,7 +1158,27 @@ class RunChecksMixin:
                 whole = together
                 if _estimate.known_too_long(together, limit_s):
                     est, searched = together, search_n
-            if not searched:
+            # FI's check of the best design at finer settings runs after the search and is held to the same time limit
+            # (core/optimise.py): its evaluations are counted at what one design costs here, at the least (a finer setting
+            # costs more, so this is a lower bound; a check of 72 runs at ~75 minutes each was not counted and ran far past
+            # the limit).
+            try:
+                check_n = int(_optimisation_plan.budget(block).get("check") or 0)
+            except (KeyError, TypeError, ValueError):
+                check_n = 0
+            unit = per_eval or first_s or None
+            if check_n and unit:
+                with_check = _replace(whole if whole is not None else est,
+                                      seconds=(whole if whole is not None else est).seconds + unit / runs * check_n,
+                                      at_least=True)
+                whole = with_check
+                if _estimate.known_too_long(with_check, limit_s):
+                    est, checked = with_check, check_n
+                    if not searched and search_n:
+                        searched = search_n
+                    elif not searched:
+                        searched = 0
+            if not searched and not checked:
                 # The line a person reads is the whole study: the scan alone said "about 6 minutes" of a search that ran
                 # for hours.
                 if whole is not None:
@@ -1142,8 +1198,10 @@ class RunChecksMixin:
             if sped.get("kept"):
                 return await self._size_the_scan(state, runner, python, env, speed_done=True)
         text = self._too_long_text(est, limit_s, cut=False)
-        if searched:
-            text = (f"the coarse scan's {scan:,} settings and the search's {searched:,} evaluations would take "
+        if searched or checked:
+            text = (f"the coarse scan's {scan:,} settings and the search's {searched:,} evaluations"
+                    + (f" and FI's check of the best design at finer settings ({checked:,} runs)" if checked else "")
+                    + f" would take "
                     f"{'at least ' if est.at_least else 'about '}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}"
                     f", more than the {_estimate.plain_duration(limit_s)} allowed (one new design takes about "
                     f"{'at least ' if lower else ''}{_estimate.plain_duration(per_eval or 0.0)}); FI does not run a smaller "

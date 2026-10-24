@@ -376,7 +376,10 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
             total_ratio = min(total_ratio * scale, cells * max(c, 1.0))
     seconds, at_least = base.seconds * total_ratio, any(p.at_least for p in probes)
     sizes = _search.sub_study_sizes(grid) if staged else []
-    timed_parts = {p.index: p for p in probes if p.axis == PART}
+    timed_parts: dict[int | None, Probe] = {}
+    for p in probes:  # a part timed at more than one setting is costed at the dearer
+        if p.axis == PART and (p.index not in timed_parts or p.seconds > timed_parts[p.index].seconds):
+            timed_parts[p.index] = p
     part_costs: list[tuple[str, int, float]] = []
     if sizes and timed_parts:
         # Settings of different parts can cost very different amounts (what a run computes differs), so the cost is summed
@@ -581,7 +584,11 @@ async def measure(
     # so that is the most a part's setting is given (a lower bound it leaves is then already over).
     parts = [(PART, k, cell) for k, (_name, cell) in enumerate(_search.part_cells(grid))]
     sizes = [size for _name, size in _search.sub_study_sizes(grid)]
-    for axis, index, cell in cells[:1] + parts + cells[1:]:
+    # The part's costliest-looking setting is timed too (after every part's middle one): a part whose middle setting is cheap
+    # but whose large settings are not was costed at the cheap one, and the study's estimate missed hours.
+    big = [(PART, k, cell) for k, (_name, cell) in enumerate(_search.costly_part_cells(grid))
+           if cell != parts[k][2]]
+    for axis, index, cell in cells[:1] + parts + big + cells[1:]:
         ok, why = await time_cell(axis, index, cell, math.ceil(limit_s / max(1, sizes[index])) + 1 if axis == PART else 0.0)
         if not ok:
             return None, why
@@ -1072,7 +1079,7 @@ def _stated_min(protocol: dict[str, Any] | None) -> int | None:
 
 def precision_known(protocol: dict[str, Any] | None, spreads: dict[str, float] | None = None) -> bool:
     """Whether the runs a precision target needs can be worked out before the run: always, but for a target on a mean
-    whose spread the timed trials did not show (fewer than two trials, or all equal)."""
+    whose spread the timed trials did not show (fewer than two trials; a spread of exactly zero is a measurement)."""
     if not isinstance(protocol, dict):
         return True
     precision = protocol.get("precision")
@@ -1083,7 +1090,8 @@ def precision_known(protocol: dict[str, Any] | None, spreads: dict[str, float] |
     if kind != "mean":
         return True
     sd = (spreads or {}).get(metric or "")
-    return isinstance(sd, (int, float)) and sd > 0
+    # A spread of exactly 0 is a measurement (the timed trials agreed), not a missing one: see :func:`runs_floor`.
+    return isinstance(sd, (int, float)) and not isinstance(sd, bool) and sd >= 0
 
 
 def precision_metric(protocol: dict[str, Any] | None) -> tuple[str | None, str | None]:
@@ -1108,7 +1116,7 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
 
     The precision target is read by the kind of the metric it is on: a proportion needs `trials_for_half_width` (the worst case,
     a probability near 0.5); a mean needs n >= (z * s / h) ** 2 with `s` the spread the timed trials of the same setting
-    showed (`spreads`, two trials or more), and when that spread is not known or is zero no run may be cut at all."""
+    showed (`spreads`, two trials or more), and when that spread is not known no run may be cut at all (a spread of exactly zero, measured, needs two)."""
     from .stats import _Z95, trials_for_half_width
 
     floor = 1
@@ -1122,9 +1130,13 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
             metric, kind = precision_metric(protocol)
             if kind == "mean":
                 sd = (spreads or {}).get(metric or "")
-                if sd is None or not sd > 0:
+                if not isinstance(sd, (int, float)) or isinstance(sd, bool) or not sd >= 0:
                     return int(before_runs)  # the spread cannot be estimated: no cut below the plan's own runs
-                floor = max(floor, int(math.ceil(round((_Z95 * sd / float(target)) ** 2, 9))))
+                # A spread of exactly 0 was measured (two or more timed trials of the same setting gave the same value):
+                # the formula then asks for no runs at all, which is not "infinite runs" and not "no cut" either. Two runs
+                # are what showed the spread, so two is the least that may stand in for the target (the plan's own minimum
+                # still applies on top); a run that is only slightly too long is cut instead of stopped.
+                floor = max(floor, 2 if sd == 0 else int(math.ceil(round((_Z95 * sd / float(target)) ** 2, 9))))
             else:
                 need = trials_for_half_width(float(target))
                 if need:

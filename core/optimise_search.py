@@ -2267,6 +2267,23 @@ def part_cells(grid):
     return out
 
 
+def costly_part_cells(grid):
+    """``[(name, setting)]``: for each sub-study of a :class:`StudyGrid`, the setting of it that looks the costliest, else ``[]``:
+    every setting it varies at its largest number (a count, a size, a number of steps is what a run's work grows with; a
+    setting whose values are not numbers stays at its middle value), every other at the value it holds. The middle setting
+    of :func:`part_cells` can be far cheaper than the part's biggest one (a sub-study whose settings load many more inputs
+    at its large values was timed only at its cheap middle), so a part is timed at both and costed at the dearer."""
+    out = []
+    for i, sub in enumerate(getattr(grid, "sub_studies", None) or [], start=1):
+        picks = []
+        for (name, values), choices in zip(grid.items(), _axis_choices(grid, sub)):
+            numbers = [(float(values[k]), k) for k in choices
+                       if isinstance(values[k], (int, float)) and not isinstance(values[k], bool)]
+            picks.append(max(numbers)[1] if len(choices) > 1 and len(numbers) == len(choices) else choices[len(choices) // 2])
+        out.append((sub.get("name") or f"sub-study {i}", {name: values[k] for (name, values), k in zip(grid.items(), picks)}))
+    return out
+
+
 def check_listable(grid):
     """Raise :class:`TooManySettings` when listing the whole grid would hold more than :data:`MAX_LISTED_SETTINGS`."""
     size = grid_size(grid)
