@@ -1859,16 +1859,26 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
     so the scan, which measures every alternative together, is read for the one it starts. Without a compared condition it
     is exactly :func:`search`. The outcome is the one of :func:`search`, over every alternative: the best design is the best
     of the alternatives (it names its ``level``), the baseline is the one of that alternative, and ``levels`` has the best
-    design, the baseline and the evaluations of each."""
+    design, the baseline and the evaluations of each. An alternative after the first is first asked for a few designs the
+    first one evaluated (:func:`_probe_alternative`); when it gives exactly the same results for every one, it is not
+    searched (``same_as`` in its entry of ``levels``)."""
     levels = compared_levels(block)
     if not levels:
         return (yield from search(block, seed=seed, method=method, rounds=rounds, results=results, batch=batch,
                                   stop_flat=stop_flat, stop_stepped=stop_stepped, stream=stream))
     outcomes = []
+    seen = {}  # the first alternative's answers, by design: what the probe of each later alternative is compared with
+    names = _compared_names(block, results)
     for number, level in enumerate(levels):
         sub = level_block(block, level)
+        if number > 0:
+            same = yield from _probe_alternative(sub, level, outcomes[0], seen, names)
+            if same is not None:
+                outcomes.append(_same_outcome(outcomes[0], levels[0], same))
+                continue
         gen = search(sub, seed=seed, method=method, rounds=rounds, results=results, batch=batch, stop_flat=stop_flat,
                      stop_stepped=stop_stepped, stream=stream)
+        asked = {}  # a streamed design, by its id
         try:
             request = next(gen)
             while True:
@@ -1884,10 +1894,124 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
                 reply = yield request
                 if request["kind"] == "evaluate_stream" and isinstance(reply, list):
                     reply = [(ident[1], answer) for ident, answer in reply if ident[0] == number]
+                if number == 0:
+                    _remember(seen, request, reply, asked, names)
                 request = gen.send(reply)
         except StopIteration as finished:
             outcomes.append(finished.value)
     return merge_outcomes(outcomes, levels, block)
+
+
+PROBE_DESIGNS = 8  # the designs an alternative is asked for before it is searched (see :func:`_probe_alternative`)
+
+
+def _design_key(design):
+    return json.dumps(design, sort_keys=True, default=str)
+
+
+def _compared_names(block, results):
+    """The results two alternatives are compared on: the objective, every limited quantity and every result the plan names."""
+    names = {str(block["objective"]["quantity"])}
+    names |= {str(c.get("quantity")) for c in block.get("constraints") or [] if isinstance(c, dict)}
+    return sorted(names | {str(r) for r in results or []})
+
+
+def _remember(seen, request, reply, asked, names):
+    """Keep, for each design the first alternative's search evaluated, what the simulation gave for ``names``."""
+    kind = request["kind"]
+    if kind == "evaluate":
+        pairs = [(request.get("design"), reply)]
+    elif kind == "evaluate_many" and isinstance(reply, list):
+        pairs = [(r.get("design"), a) for r, a in zip(request["requests"], reply)]
+    elif kind == "evaluate_stream":
+        for r in request["requests"]:
+            asked[r["id"][1]] = r.get("design")
+        pairs = [(asked.get(i), a) for i, a in reply] if isinstance(reply, list) else []
+    else:
+        return
+    for design, answer in pairs:
+        if isinstance(design, dict) and isinstance(answer, dict) and isinstance(answer.get("values"), dict):
+            seen[_design_key(design)] = {n: answer["values"][n] for n in names if n in answer["values"]}
+
+
+def _probe_designs(first, seen):
+    """Up to :data:`PROBE_DESIGNS` designs the first alternative evaluated and answered: its baseline, then ones spread
+    over its run (the first, the best, and evenly spaced ones). Deterministic."""
+    chosen, keys = [], set()
+    base = first["baseline"]
+    if base.get("status") == "ok" and _design_key(base["design"]) in seen:
+        chosen.append(dict(base["design"]))
+        keys.add(_design_key(base["design"]))
+    pool = []
+    for row in first["rows"]:
+        key = _design_key(row["design"])
+        if row["counted"] and row["status"] == "ok" and key in seen and key not in keys:
+            keys.add(key)
+            pool.append(dict(row["design"]))
+    room = PROBE_DESIGNS - len(chosen)
+    n = len(pool)
+    if n <= room:
+        return chosen + pool
+    order = []
+    if first["best"]:
+        order.append(next((i for i, d in enumerate(pool) if _design_key(d) == _design_key(first["best"]["design"])), 0))
+    order += [round(i * (n - 1) / (room - 2)) for i in range(room - 1)]  # from the first design to the last
+    order = list(dict.fromkeys(order))
+    order += [i for i in range(n) if i not in order][:room - len(order)]  # where two of them fell on the same design
+    return chosen + [pool[i] for i in order[:room]]
+
+
+def _probe_alternative(sub, level, first, seen, names):
+    """Before an alternative after the first is searched (a generator): ask the simulation for a few designs the first
+    alternative evaluated, at this alternative (one ``evaluate_many`` request, answered in order). When every one gives
+    exactly the first alternative's value of the objective, every limited quantity and every result the plan names (never
+    a timing), the alternative changes nothing the study reads and a search of it would find the same numbers again: the
+    rows of the probe are returned and the alternative is not searched. When any differs, or the simulation did not
+    answer, ``None``: the alternative is searched as usual, and these evaluations stay outside its budget and its rows
+    (a repeated search asks them again). Exact equality: a simulation whose answers vary between calls fails the test and
+    is searched."""
+    probes = _probe_designs(first, seen)
+    if len(probes) < 2:
+        return None
+    requests = [{"kind": "evaluate", "cell": cell_of(sub, d), "design": dict(d), "stage": "probe", "start": 0,
+                 "level": dict(level)} for d in probes]
+    replies = yield {"kind": "evaluate_many", "requests": requests, "level": dict(level)}
+    if not isinstance(replies, list) or len(replies) != len(probes):
+        return None
+    rows = []
+    for design, reply in zip(probes, replies):
+        if not isinstance(reply, dict) or not isinstance(reply.get("values"), dict):
+            return None
+        values = reply["values"]
+        wanted = seen[_design_key(design)]
+        if any((n in wanted) != (n in values) or (n in wanted and values[n] != wanted[n]) for n in names):
+            return None
+        judged = judge(sub, values)
+        if judged["status"] != "ok":
+            return None
+        rows.append({"event": "evaluation", "n": len(rows) + 1, "stage": "probe", "start": 0, "design": dict(design),
+                     "objective": judged["objective"], "constraints": dict(judged["constraints"]),
+                     "feasible": judged["feasible"], "status": "ok", "method": first["method_used"], "counted": True,
+                     "elapsed_s": reply.get("elapsed_s") if _number(reply.get("elapsed_s")) else None})
+    return rows
+
+
+def _same_outcome(first, first_level, rows):
+    """The outcome of an alternative that was not searched because it gave the first one's answers (``same_as``): the
+    probe's rows as its own evaluations, the first alternative's best design and baseline. Its budget is the probe."""
+    out = {
+        "rows": rows, "evaluations": len(rows), "scan_evaluations": 0, "budget": len(rows),
+        "starts": first["starts"], "per_start": first["per_start"], "stopped_because": "same_as_first",
+        "budget_ran_out": False, "method_requested": first["method_requested"], "method_used": first["method_used"],
+        "method_why": first["method_why"], "notes": [], "baseline": first["baseline"], "start_log": [],
+        "seed": first["seed"], "failed": 0, "infeasible": sum(1 for r in rows if not r["feasible"]),
+        "best": dict(first["best"]) if first["best"] else None, "rounds": [],
+        "same_as": dict(first_level), "probes": len(rows),
+    }
+    for key in ("no_effect", "flat_objective", "stepped_objective"):
+        if first.get(key):
+            out[key] = dict(first[key])
+    return out
 
 
 def merge_outcomes(outcomes, levels, block):
@@ -1901,9 +2025,13 @@ def merge_outcomes(outcomes, levels, block):
     per = []
     for outcome, level in zip(outcomes, levels):
         best = outcome["best"]
-        per.append({"level": dict(level), "best": dict(best, evaluation=best["evaluation"] + offset) if best else None,
+        # An alternative that was not searched has the first one's best design, numbered as in the first one's rows.
+        shift = 0 if outcome.get("same_as") else offset
+        per.append({"level": dict(level), "best": dict(best, evaluation=best["evaluation"] + shift) if best else None,
                     "baseline": outcome["baseline"], "evaluations": outcome["evaluations"],
-                    "budget": outcome["budget"], "stopped_because": outcome["stopped_because"]})
+                    "budget": outcome["budget"], "stopped_because": outcome["stopped_because"],
+                    **({"same_as": dict(outcome["same_as"]), "probes": outcome["probes"]}
+                       if outcome.get("same_as") else {})})
         offset += len(outcome["rows"])
     winners = [p for p in per if p["best"] is not None]
     win = min(winners, key=lambda p: sign * p["best"]["objective"]) if winners else per[0]
@@ -1937,6 +2065,13 @@ def merge_outcomes(outcomes, levels, block):
         if all(o.get(key) for o in outcomes):
             out[key] = dict(first[key])
     return out
+
+
+def same_as_says(entry):
+    """The plain sentence for an alternative that was not searched because it gave the results of another (no final stop)."""
+    n = int(entry.get("probes") or 0)
+    return (f"{level_says(entry['level'])} gave the same results as {level_says(entry['same_as'])} for every one of the "
+            f"{n} designs tried at both, so the search was not run again for it")
 
 
 def rehearse(block, *, batch, seed=0):
@@ -2187,13 +2322,13 @@ def grid_cells(grid):
 
 
 def run_sync(block, evaluate, *, seed, method=None, scan_step=None, drive_step=None, deadline=None,
-             max_evaluations=None, rounds=None):
+             max_evaluations=None, rounds=None, results=None):
     """Run the search here, calling ``evaluate(cell) -> dict`` for each design (an exception is a failed evaluation),
     ``scan_step(grid) -> rows`` for the coarse scan (default: ``evaluate`` on each of its cells) and
     ``drive_step(spec)`` (default: :func:`drive` in this process) for a library's method. ``deadline`` is a
     ``time.monotonic()`` time after which no evaluation starts; ``max_evaluations`` stops the search where an earlier
     one was stopped by its time limit (so ``code/run.py`` repeats that search, not a longer one)."""
-    gen = compare(block, seed=seed, method=method, rounds=rounds)
+    gen = compare(block, seed=seed, method=method, rounds=rounds, results=results)
     done = 0
     names = [str(v["name"]) for v in block["design_variables"]]
 
@@ -2223,13 +2358,17 @@ def run_sync(block, evaluate, *, seed, method=None, scan_step=None, drive_step=N
                         answer = one(cell)
                         reply.append({"design": {n: cell[n] for n in names}, "values": answer.get("values"),
                                       "reason": answer.get("failed", ""), "elapsed_s": answer["elapsed_s"]})
-            elif request["kind"] == "evaluate":
-                if ((deadline is not None and time.monotonic() >= deadline)
-                        or (max_evaluations is not None and done >= max_evaluations)):
-                    reply = {"stop": "time"}
-                else:
-                    reply = one(request["cell"])
-                    done += 1
+            elif request["kind"] in ("evaluate", "evaluate_many"):
+                # ``evaluate_many`` (the probe of an alternative, see :func:`compare`): one after another here.
+                replies = []
+                for one_request in request["requests"] if request["kind"] == "evaluate_many" else [request]:
+                    if ((deadline is not None and time.monotonic() >= deadline)
+                            or (max_evaluations is not None and done >= max_evaluations)):
+                        replies.append({"stop": "time"})
+                    else:
+                        replies.append(one(one_request["cell"]))
+                        done += 1
+                reply = replies if request["kind"] == "evaluate_many" else replies[0]
             else:
                 reply = (drive_step or drive)(request["spec"])
             request = gen.send(reply)
@@ -2296,9 +2435,15 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
             says += ")"
         says += "."
         if outcome.get("levels"):
-            says += (f" It is the best of {len(outcome['levels'])} alternatives, each searched on its own "
-                     f"({'; '.join(level_says(p['level']) + (': ' + _fmt(p['best']['objective']) + u if p['best'] else ': no design that meets every limit') for p in outcome['levels'])}); the winner is "
+            shown = "; ".join(level_says(p["level"]) + (": " + _fmt(p["best"]["objective"]) + u if p["best"]
+                                                        else ": no design that meets every limit")
+                              for p in outcome["levels"])
+            same = [p for p in outcome["levels"] if p.get("same_as")]
+            says += (f" It is the best of {len(outcome['levels'])} alternatives"
+                     f"{', each searched on its own' if not same else ''} ({shown}); the winner is "
                      f"{level_says(best['level'])}.")
+            for p in same:
+                says += " " + same_as_says(p) + "."
     rounds = [r for r in outcome.get("rounds") or [] if isinstance(r, dict)]
     if rounds:
         says += (f" The search was continued {len(rounds)} time(s) at the person's request "
