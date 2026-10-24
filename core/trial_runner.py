@@ -2454,6 +2454,75 @@ def recorded_series(quest_root: Path, names: set[str] | list[str]) -> dict[str, 
     return {name: {key: [v for _, v in sorted(rows)] for key, rows in cells.items()} for name, cells in out.items()}
 
 
+def _level_text(value: Any) -> str:
+    """A setting's value as text, a number read as a number (``0`` and ``0.0`` are one value)."""
+    try:
+        return repr(float(str(value).strip()))
+    except ValueError:
+        return str(value).strip()
+
+
+def copied_settings(quest_root: Path, grid: dict[str, list[Any]], names: set[str] | list[str]) -> dict[str, list[str]]:
+    """For each of ``names``, the settings of ``grid`` at whose every value FI's run record holds the same value for it,
+    trial by trial (the same trial ids, and equal values, an undefined one equal to an undefined one), wherever the other
+    settings are held: a measurement the trials make once and return under each value of the setting (two procedures run
+    on the same random numbers, and a difference between them returned by both). Measured from FI's own record, never from
+    a name; a setting is copied only when every value of it holds the name and at least one trial has a number there.
+    Trials whose values no longer match the ledger's hash are left out (as :func:`recorded_values_by_cell` does)."""
+    root = Path(quest_root)
+    wanted = {str(n) for n in names}
+    axes = [a for a, v in (grid or {}).items() if isinstance(v, list) and len(v) > 1]
+    if not wanted or not axes:
+        return {}
+    try:
+        record = json.loads((root / RUN_RECORD).read_text(encoding="utf-8"))
+        lines = (root / RAW_DIRNAME / LEDGER_NAME).read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return {}
+    hashes: dict[tuple[str, int], str] = {}
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(row, dict) and row.get("event") == "trial" and row.get("status") == "ok"
+                and _trial_id(row) is not None):
+            hashes[(str(row.get("cell")), _trial_id(row))] = str(row.get("values_sha256") or "")
+    series: dict[str, dict[str, dict[int, Any]]] = {}
+    for cell in record.get("cells") or [] if isinstance(record, dict) else []:
+        for row in cell.get("rows") or []:
+            if not isinstance(row, dict) or row.get("status") != "ok" or _trial_id(row) is None:
+                continue
+            values = row.get("values") or {}
+            digest = hashlib.sha256(json.dumps(values, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
+            if hashes.get((str(cell.get("key")), _trial_id(row))) != digest:
+                continue
+            for where, name, v in _in_run.flat(str(cell.get("key")), values):
+                if name in wanted:
+                    number = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+                    series.setdefault(name, {}).setdefault(where, {})[_trial_id(row)] = (
+                        number if number is not None and math.isfinite(number) else None)
+    out: dict[str, list[str]] = {}
+    for name, by_key in series.items():
+        parsed = {key: dict(p.split("=", 1) for p in key.split(",") if "=" in p) for key in by_key}
+        for axis in axes:
+            levels = {_level_text(v) for v in grid[axis]}
+            groups: dict[tuple, dict[str, dict[int, Any]]] = {}
+            spelled_twice = False
+            for key, cell in parsed.items():
+                if axis in cell:
+                    rest = tuple(sorted((a, v) for a, v in cell.items() if a != axis))
+                    level = _level_text(cell[axis])
+                    spelled_twice = spelled_twice or level in groups.get(rest, {})
+                    groups.setdefault(rest, {})[level] = by_key[key]
+            # Every value of the setting, each once, and nothing else; and the same trials and values at each.
+            same = bool(groups) and not spelled_twice and all(
+                set(g) == levels and all(s == next(iter(g.values())) for s in g.values()) for g in groups.values())
+            if same and any(v is not None for g in groups.values() for s in g.values() for v in s.values()):
+                out.setdefault(name, []).append(axis)
+    return out
+
+
 #: Grid axis names that are a size (a population, a number of agents): the only axes a trial's value may be divided by.
 _SIZE_AXIS = re.compile(
     r"^(n|n_\w+|\w+_n|size|\w+_size|size_\w+|population|pop\w*|agents|n_?agents|particles|n_?particles|"
