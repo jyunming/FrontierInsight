@@ -271,7 +271,7 @@ def run_cell(cell):
     with open(r"__CWD__", "a", encoding="utf-8") as fh:
         fh.write(os.getcwd() + "\\n")
     x, y = cell["x"], cell["y"]
-    if cell.get("x", 0) > 4.5:
+    if cell.get("x", 0) > 2.5:
         raise RuntimeError("the solver diverged")
     return {"f": cell["scale"] * ((x - 2) ** 2 + (y + 1) ** 2), "g": x + y}
 '''
@@ -386,7 +386,7 @@ async def test_a_failed_evaluation_is_in_the_ledger_and_the_search_goes_on(tmp_p
     failed = [r for r in rows if r["status"] == "failed"]
     assert failed and all("diverged" in r["reason"] for r in failed)
     best = json.loads((root / "results" / "best_design.json").read_text(encoding="utf-8"))
-    assert best["best"]["design"]["x"] <= 4.5 and best["evaluations"]["failed"] == len(failed)
+    assert best["best"]["design"]["x"] <= 2.5 and best["evaluations"]["failed"] == len(failed)
 
 
 @pytest.mark.asyncio
@@ -493,7 +493,7 @@ async def test_scipy_is_used_when_the_quests_environment_has_it(tmp_path: Path) 
     assert abs(best["design"]["x"] - 2) < 0.05 and abs(best["design"]["y"] + 1) < 0.05, best
     # The same method in this process (as code/run.py runs it) asks for the same designs.
     def toy(cell: dict[str, Any]) -> dict[str, float]:
-        if cell["x"] > 4.5:
+        if cell["x"] > 2.5:
             raise RuntimeError("the solver diverged")
         return {"f": cell["scale"] * ((cell["x"] - 2) ** 2 + (cell["y"] + 1) ** 2), "g": cell["x"] + cell["y"]}
 
