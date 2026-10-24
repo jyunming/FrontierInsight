@@ -13931,6 +13931,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         False: only work it out (what the review pause shows before an accept), writing and recording nothing."""
         try:
             missed: list[str] = []
+            on = _precision_target_on(self._protocol_block(state) or {})  # the metric the plan's target is on, when declared
             replicates = state.get("result_json_replicates") or []
             if len(replicates) > 1 or (replicates and state.get("result_json_trials")):
                 aggregate = _aggregate_result_json_replicates(
@@ -13938,14 +13939,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
                 self._annotate_precision(state, aggregate)
                 missed = [k for k, v in aggregate.items() if isinstance(v, dict) and v.get("precision_reached") is False]
-                judged = any(isinstance(v, dict) and "target_half_width" in v for v in aggregate.values())
+                # Judged means the quantity the target is on was held to it: a probability judged beside a mean the target
+                # names, given without its values, left the mean's target unjudged and unsaid.
+                judged = any(isinstance(v, dict) and "target_half_width" in v
+                             and (not on or _is_metric_key(k, on, _declared_metrics(self._protocol_block(state) or {})))
+                             for k, v in aggregate.items())
             else:
                 judged = False
-            # The plan's precision target that no result was held to (each setting ran once, so no interval): a gap, kept
-            # in the record, never read as a target reached.
+            # The plan's precision target that no result was held to (each setting ran once, so no interval; or the quantity
+            # it is on has no interval): a gap, kept in the record, never read as a target reached.
             precision = (self._protocol_block(state) or {}).get("precision")
             target = precision.get("target_half_width") if isinstance(precision, dict) else None
-            not_judged = ({"target": float(target), "metric": str(precision.get("metric") or "").strip()}
+            not_judged = ({"target": float(target), "metric": on or str(precision.get("metric") or "").strip()}
                           if not judged and (state.get("result_json") or replicates)
                           and isinstance(target, (int, float)) and not isinstance(target, bool)
                           and 0 < target < 1e300 else None)
@@ -14048,13 +14053,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         on, kind = _run_estimate.precision_metric(protocol)
         mean_on = str(on) if on and kind == "mean" else ""
 
+        declared = _declared_metrics(protocol)
+
         def is_(key: str, name: str) -> bool:
-            return key == name or key.rsplit(".", 1)[-1] == name
+            return _is_metric_key(key, name, declared)
 
         # The target is for the metric the protocol names (``precision.metric``), when it names one: a live quest's
         # target for its outbreak probability was held against every pooled interval in the run.
         named = str(precision.get("metric") or "").strip() if isinstance(precision, dict) else ""
-        if named and not any(
+        # A metric the plan declares keeps the target even with no pooled interval (a mean given without its values), and so
+        # does the plan's only metric when none is named: no other quantity is held to a target set on another scale, and
+        # the target is left unjudged, a gap.
+        on_declared = _precision_target_on(protocol)
+        if on_declared:
+            named = on_declared
+        elif named and not any(
             isinstance(e, dict) and e.get("ci_method") in (_CI_WILSON, _CI_BOOTSTRAP) and is_(k, named)
             for k, e in aggregate.items()
         ):
@@ -30123,6 +30136,30 @@ def _walk_paths(obj: Any, prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...],
         elif isinstance(v, list) and v and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
             found[path] = [float(x) for x in v]
     return found
+
+
+def _is_metric_key(key: str, name: str, declared: set[str] | frozenset[str] = frozenset()) -> bool:
+    """Whether a pooled entry's key is the metric ``name``: the name itself, or the end of a path to it (``by_x.0.9.name``;
+    a name with a dot in it included), unless a longer declared metric ends the key (``by_x.risk.rate`` is ``risk.rate``,
+    not ``rate``)."""
+    def ends(d: str) -> bool:
+        return key == d or key.endswith("." + d)
+
+    return ends(name) and not any(len(d) > len(name) and ends(d) for d in declared)
+
+
+def _declared_metrics(protocol: dict[str, Any]) -> set[str]:
+    """The ids of the metrics the plan declares."""
+    return {str(m.get("id")) for m in protocol.get("metrics") or [] if isinstance(m, dict) and m.get("id")}
+
+
+def _precision_target_on(protocol: dict[str, Any]) -> str:
+    """The metric the plan's precision target is on, when it is one the plan declares (``precision.metric``, or the plan's
+    only metric); ``""`` when the target names none of them (prose, say), and every probability is held to it."""
+    from . import run_estimate as _run_estimate
+
+    on, _kind = _run_estimate.precision_metric(protocol)
+    return str(on) if on and str(on) in _declared_metrics(protocol) else ""
 
 
 def _pool_evidence(
