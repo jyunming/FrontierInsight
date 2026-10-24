@@ -1531,8 +1531,10 @@ class OptimisationRunner:
         while (((run.record or {}).get("evaluations") or {}).get("stopped_because") == "budget"
                and not run.load_error and not run.problems and not run.reused):
             fired = still_improving(run.rows, direction)
-            left = timeout_s - (time.monotonic() - started)
-            if fired is None or per is None or per_start * per > left:
+            # Whole seconds, as the search is given them: a round that fits only in a fraction of a second more is not
+            # started, and the search is never given more than is left.
+            left = int(timeout_s - (time.monotonic() - started))
+            if fired is None or per is None or left < 1 or per_start * per > left:
                 break
             rounds = read_rounds(self.quest_root, norm)
             number = max([int(r["auto"]) for r in rounds if isinstance(r.get("auto"), int)] or [0]) + 1
@@ -1546,7 +1548,7 @@ class OptimisationRunner:
                               "evaluation(s), %d s left of the time limit", round(100 * fired["share"]), per_start,
                               int(left))
             round_started = time.monotonic()
-            run = await search(max(1, int(left)))
+            run = await search(left)
             path = self.quest_root / ROUNDS_PATH
             self._rounds = path.read_bytes() if path.is_file() else None
             per = max(per, (time.monotonic() - round_started) / per_start)
