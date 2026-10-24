@@ -160,6 +160,16 @@ the repair hid the zeros as nulls. A name cannot tell the two apart; the
 protocol can. A quantity the protocol's ``failure_policy`` names, whose 0 the
 run's own manifest does not contradict, is exempt (the engine passes it as
 ``zero_expected``). Any other 0 is held to the rule as before.
+
+Why the design can say a bound is an honest value
+=================================================
+The failure policy only covers a count of failures, and only at 0. A proportion that is exactly 0 or 1 because the event
+never happened (or always did) in a small study, or a quantity that stops at its physical limit (a weight that cannot go
+below 0), has no such name to find. The design can say so itself: an assertion with ``"may_equal_bound": true`` is not
+sent back for sitting on its bound in several settings, at either end. Everything else about it is still checked: a value
+outside the range, or one the script capped, is a violation as before. Without that declaration the rule is unchanged, and
+the repairs it causes are few and counted (``engine.exec_reflect_max_iterations``), after which the run goes on and the
+value stays on the record.
 """
 
 from __future__ import annotations
@@ -194,6 +204,9 @@ class Assertion:
     max: float | None = None
     unit: str = ""
     reason: str = ""
+    #: The design says this quantity can honestly be exactly on its bound (no failures, a proportion that is 0 or 1 because
+    #: the event never happened or always did). Then sitting on the bound is its answer, not a sign of a trivial result.
+    may_equal_bound: bool = False
 
     def describe(self) -> str:
         if self.min is not None and self.max is not None:
@@ -852,6 +865,7 @@ def parse_assertions(design: Any) -> list[Assertion]:
                 max=hi,
                 unit=str(item.get("unit") or "").strip(),
                 reason=str(item.get("reason") or "").strip(),
+                may_equal_bound=item.get("may_equal_bound") is True,
             )
         )
     return out
@@ -1323,6 +1337,8 @@ def violations(
                 # On a bound of 0 only an exact 0 is the trivial answer; see "Why a tiny value is not on 0".
                 on_bound.setdefault(bound, []).append((tokens, path))
         for bound, entries in on_bound.items():
+            if a.may_equal_bound:
+                continue  # the design says this quantity can honestly sit on its bound: see "Why the design can say a bound..."
             if bound == 0 and a.path in zero_expected:
                 continue  # 0 is this quantity's answer: see "Why a count of failures may sit at 0"
             v = _at_bound(a, bound, entries, matched, result_json, literals)
