@@ -42,12 +42,17 @@ _FI_V = re.compile(r"<!-- fi:v \{\{v:.*?\}\} -->.*?<!-- /fi:v -->", re.S)
 _FI_PAIR = re.compile(r"<!-- fi:((?:fact-[\w-]+|best-design|phased))(?::[0-9a-f]+)? -->.*?<!-- /fi:\1 -->", re.S)
 _COMMENT = re.compile(r"<!--.*?-->", re.S)
 _PLACEHOLDER = re.compile(r"\{\{[^{}\n]{1,320}\}\}")
-_FENCE = re.compile(r"^[ \t]*(?P<f>```|~~~)[^\n]*\n.*?^[ \t]*(?P=f)[^\n]*$|^[ \t]*(?:```|~~~).*\Z", re.M | re.S)
-_TAIL = re.compile(r"^#{1,6}[ \t]+(?:\d+\.?[ \t]*)?(references|further reading|bibliography|works cited)\b.*\Z",
-                   re.I | re.M | re.S)
+# A closed fenced block is a code listing and is left out. An unclosed fence hides only its own paragraph (up to the next blank
+# line), never the rest of the paper. Inline code is the writer's text like any other and is checked.
+_FENCE = re.compile(r"^[ \t]*(?P<f>```|~~~)[^\n]*\n.*?^[ \t]*(?P=f)[^\n]*$|^[ \t]*(?:```|~~~).*?(?=\n[ \t]*\n|\Z)",
+                    re.M | re.S)
+# The sources: from a References-style heading to the next heading of the same or a higher level (an appendix or a section
+# placed after the list is the writer's text and is checked).
+_TAIL_HEAD = re.compile(r"^(#{1,6})[ \t]+(?:\d+\.?[ \t]*)?(?:references|further reading|bibliography|works cited)\b[^\n]*$",
+                        re.I | re.M)
+_ANY_HEAD = re.compile(r"^(#{1,6})[ \t]+\S", re.M)
 _IMG_TARGET = re.compile(r"\]\([^)]*\)")
 _URL = re.compile(r"https?://\S+")
-_CODE = re.compile(r"`[^`\n]+`")
 _HEADING_NUMBER = re.compile(r"^(#{1,6}[ \t]+)(?:\d+(?:\.\d+)*\.?[ \t]|[IVXLC]+\.[ \t])", re.M)
 _LIST_NUMBER = re.compile(r"^([ \t]*(?:[-*+][ \t]+)?)\d+[.)][ \t]", re.M)
 # An inline enumeration inside one paragraph: "(1) ... (2) ... (3) ...". Each label is followed by text.
@@ -60,6 +65,8 @@ _LABEL_WORDS = (r"(?:Figures?|Figs?\.|Tables?|Eqs?\.|Equations?|Sections?|§§?|
                 r"Supplement\w*)[ \t\u00a0]*\(?")
 _LABEL = re.compile(_LABEL_WORDS + r"$")
 _LABEL_LIST = re.compile(_LABEL_WORDS + r"(?:\d+[a-z]?[ \t]*(?:,|and|&|or|to|\u2013|-)[ \t]*)+$")
+#: A quantile level written as a name of the method, "the 97.5th percentile": a label of the level, not a value.
+_LEVEL_AFTER = re.compile(r"(?:st|nd|rd|th)[ \t-]*(?:percentile|quantile)", re.I)
 _CITE = re.compile(r"\[\s*W?\d+(?:\s*[–-]\s*\d+)?(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*\s*\]")
 
 
@@ -73,6 +80,19 @@ def _plain(sentence: str) -> str:
 
 def _blank(match: re.Match[str]) -> str:
     return re.sub(r"[^\n]", " ", match.group(0))
+
+
+def _blank_sources(t: str) -> str:
+    """``t`` with each References-style section blanked: from its heading to the next heading of the same or a higher level."""
+    for head in list(_TAIL_HEAD.finditer(t)):
+        level = len(head.group(1))
+        end = len(t)
+        for nxt in _ANY_HEAD.finditer(t, head.end()):
+            if len(nxt.group(1)) <= level:
+                end = nxt.start()
+                break
+        t = t[:head.start()] + re.sub(r"[^\n]", " ", t[head.start():end]) + t[end:]
+    return t
 
 
 def _enumeration_labels(text: str, maths: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -94,10 +114,14 @@ def _enumeration_labels(text: str, maths: list[tuple[int, int]]) -> list[tuple[i
 
 def writers_text(markdown: str) -> str:
     """``markdown`` with everything that is not the writer's own words blanked out (same length, so offsets hold): FI's value
-    markers and blocks, other HTML comments, double-brace placeholders, code, URLs, image targets, a heading's or list's
-    number, an inline enumeration's labels "(1) ... (2) ...", and the sources from ``References`` / ``Further reading`` on."""
+    markers and blocks, other HTML comments, double-brace placeholders, fenced code, URLs, image targets, a heading's or list's
+    number, an inline enumeration's labels "(1) ... (2) ...", and the sources under a ``References`` / ``Further reading``
+    heading. A closed fenced block is left out, an unclosed fence only to the end of its paragraph; inline code is kept."""
     t = markdown or ""
-    for pattern in (_FI_V, _FI_PAIR, _COMMENT, _FENCE, _TAIL, _PLACEHOLDER, _IMG_TARGET, _URL, _CODE):
+    for pattern in (_FI_V, _FI_PAIR, _COMMENT, _FENCE):
+        t = pattern.sub(_blank, t)
+    t = _blank_sources(t)
+    for pattern in (_PLACEHOLDER, _IMG_TARGET, _URL):
         t = pattern.sub(_blank, t)
     t = _HEADING_NUMBER.sub(lambda m: m.group(1) + re.sub(r"[^\n]", " ", m.group(0)[len(m.group(1)):]), t)
     t = _LIST_NUMBER.sub(lambda m: m.group(1) + " " * (len(m.group(0)) - len(m.group(1))), t)
@@ -152,7 +176,10 @@ class Typed:
     in_math: bool
     structural: bool
     sentence: str
-    cited: bool  # the sentence carries a citation label
+    # A citation stands in the number's own clause (from the previous ";" or the sentence start to the next ";" or the
+    # sentence end), before or after it. A number in another clause, after a ";", is the paper's own and is not left to the
+    # claim check.
+    cited: bool
 
 
 def _sentence(text: str, start: int, end: int) -> tuple[int, int]:
@@ -181,6 +208,16 @@ def numbers(markdown: str) -> list[Typed]:
             continue  # glued to a word or a symbol: m2, z196, fig1, x^2
         digits = re.sub(r"[ ,  ]", "", m.group("int")) + (m.group("frac") or "")
         sign = (m.group("sign") or "").strip()
+        # A "-" or "+" is a sign only when no operand stands before it; between two operands ("a - 2.5", "5-10") it is an
+        # operator and stays out of the span, so replacing the number never eats it.
+        if m.group("sign") and m.group("sign").strip() != "±" and re.search(r"[\w)\]}%]\s*$", t[max(0, s - 3):s]):
+            if re.search(r"[\d)\]}%]\s*$", t[max(0, s - 3):s]):
+                sign = ""  # after a number or a closing bracket it is an operator; after a word ("was -0.5") the value keeps it
+            s = m.start("int")
+        while s < e and t[s].isspace():
+            s += 1
+        while e > s and t[e - 1].isspace():
+            e -= 1
         negative = sign in ("−", "-")
         if negative and re.search(r"\d\s?$", t[max(0, s - 3):s]):
             negative = False  # a dash between two numbers is a range, not a sign
@@ -192,6 +229,9 @@ def numbers(markdown: str) -> list[Typed]:
         if negative:
             value = -value
         a, b = _sentence(text, s, e)
+        clause_end = text.find(";", e, b)
+        clause_end = b if clause_end == -1 else clause_end
+        clause_start = text.rfind(";", a, s) + 1 or a
         sentence = re.sub(r"\s+", " ", (markdown or "")[a:b]).strip()
         near = text[max(0, s - 24):s]
         label = bool(_LABEL.search(near)) or (digits.isdigit() and bool(_LABEL_LIST.search(near)))
@@ -199,8 +239,8 @@ def numbers(markdown: str) -> list[Typed]:
             token=(markdown or "")[s:e].strip(), start=s, end=e, value=value, pct=bool(m.group("pct")),
             integer=not m.group("frac") and exp == 0 and not m.group("pct"),
             in_math=any(x <= s < y for x, y in maths),
-            structural=label or any(x <= s < y for x, y in cites),
-            sentence=_plain(sentence), cited=bool(_CITE.search(text[a:b]))))
+            structural=label or any(x <= s < y for x, y in cites) or bool(_LEVEL_AFTER.match(text, e)),
+            sentence=_plain(sentence), cited=bool(_CITE.search(text[clause_start:clause_end]))))
     return out
 
 
