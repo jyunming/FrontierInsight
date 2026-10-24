@@ -124,29 +124,37 @@ def interval(s: dict[str, Any]) -> tuple[float | None, float | None, str]:
 def per_setting_precision(quest_root: Path, metric: str, target: float) -> dict[str, Any] | None:
     """How the plan's precision target (a 95% interval of the mean no wider than ``target`` either side) holds for
     ``metric`` in each setting of FI's trial record, the interval worked out from that setting's own trials: ``{"target",
-    "metric", "settings"`` (settings with an interval), ``"met"`` (those within the target), ``"widest"`` (the widest
-    half-width), ``"widest_setting"``, ``"without_interval"`` (settings whose trials give none: a single trial)``}``.
+    "metric", "settings"`` (every setting of the record, so a setting that never gave a value is in the count),
+    ``"met"`` (those within the target), ``"widest"`` (the widest half-width, ``-1`` when no setting has an interval),
+    ``"widest_setting"``, ``"without_interval"`` (settings whose trials give none: a single trial), ``"without_value"``
+    (names of the settings that ran no trial or gave no finite value for it: never counted as met)``}``.
     Settings are never pooled: their true values differ, and one interval over them all would be narrower than any of
     theirs. ``None`` when no setting has an interval for it."""
     met = settings = without = 0
+    no_value: list[str] = []
     widest, widest_at = -1.0, ""
+    judged = 0
     for c in summaries(_record(quest_root)):
         s = c["metrics"].get(metric)
+        if not c["metrics"] and not c.get("planned"):
+            continue  # a per-value record with nothing in it is not a setting
+        settings += 1
         if not s or not s["n"]:
+            no_value.append(c["key"])
             continue
         lower, upper, _method = interval(s)
         if lower is None or upper is None:
             without += 1
             continue
         half = (upper - lower) / 2.0
-        settings += 1
+        judged += 1
         met += half <= target
         if half > widest:
             widest, widest_at = half, c["key"]
-    if not settings:
+    if not judged:
         return None
     return {"target": float(target), "metric": metric, "settings": settings, "met": met, "widest": widest,
-            "widest_setting": widest_at, "without_interval": without}
+            "widest_setting": widest_at, "without_interval": without, "without_value": no_value}
 
 
 def kept_values(summarised: list[dict[str, Any]]) -> list[str]:

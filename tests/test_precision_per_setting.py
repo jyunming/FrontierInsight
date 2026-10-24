@@ -45,15 +45,24 @@ def test_each_setting_is_judged_on_its_own_trials(tmp_path: Path) -> None:
         {"cell": {"gain": 9}, "key": "gain=9", "metrics": {"settle_time": {"values": [2.0]}}}])
     got = trial_table.per_setting_precision(root, "settle_time", 0.05)
     assert got is not None
-    assert (got["settings"], got["met"], got["without_interval"], got["widest_setting"]) == (3, 2, 1, "gain=2")
+    assert (got["settings"], got["met"], got["without_interval"], got["widest_setting"]) == (4, 2, 1, "gain=2")
     assert 0.2 < got["widest"] < 0.3
     words = evidence.precision_per_setting_words(got)
-    assert "2 of 3 settings" in words and "`settle_time`" in words and "1 more setting" in words
+    assert "2 of 4 settings" in words and "`settle_time`" in words and "1 more setting" in words
     # every setting met: no gap; no record or no interval anywhere: nothing to say
     assert evidence.precision_per_setting_words(trial_table.per_setting_precision(
         _record(tmp_path / "ok", _cells([0.01, 0.02])), "settle_time", 0.05)) == ""
     assert trial_table.per_setting_precision(tmp_path / "none", "settle_time", 0.05) is None
     assert trial_table.per_setting_precision(root, "other", 0.05) is None
+
+
+def test_a_setting_with_no_trials_is_not_a_target_met(tmp_path: Path) -> None:
+    """Old code: 3 settings, one with no trials, read as 2 of 2 met."""
+    cells = _cells([0.01, 0.01]) + [{"cell": {"gain": 7}, "key": "gain=7", "metrics": {}, "planned": 20, "ok": 0}]
+    got = trial_table.per_setting_precision(_record(tmp_path, cells), "settle_time", 0.05)
+    assert got is not None and (got["settings"], got["met"], got["without_value"]) == (3, 2, ["gain=7"])
+    words = evidence.precision_per_setting_words(got)
+    assert "2 of 3 settings" in words and "1 setting(s) have no value (gain=7)" in words
 
 
 def test_settings_are_never_pooled(tmp_path: Path) -> None:

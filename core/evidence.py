@@ -896,21 +896,29 @@ def precision_not_judged_words(fact: dict[str, Any]) -> str:
 
 def precision_per_setting_words(fact: dict[str, Any]) -> str:
     """The sentence for a precision target held to each setting's own trials (``fact`` as
-    :func:`core.trial_table.per_setting_precision` gives it); ``""`` when every setting met it."""
+    :func:`core.trial_table.per_setting_precision` gives it); ``""`` only when every setting met it. A setting with no
+    value is in the count and never met."""
     try:
         settings, met, without = int(fact["settings"]), int(fact["met"]), int(fact.get("without_interval") or 0)
         target, widest = float(fact["target"]), float(fact["widest"])
     except (KeyError, TypeError, ValueError):
         return ""
-    if met >= settings and not without:
+    raw = fact.get("without_value")
+    no_value = [str(x) for x in raw] if isinstance(raw, list) else []
+    if met >= settings and not without and not no_value:
         return ""
     metric = str(fact.get("metric") or "").strip()
     where = str(fact.get("widest_setting") or "").strip()
     words = (f"the plan's precision target (a 95% interval no wider than ±{target:g}"
              + (f" on `{metric}`" if metric else "") + f") was reached in {met} of {settings} settings, each judged on "
-             f"its own trials; the widest is ±{widest:.3g}" + (f" ({where})" if where else ""))
+             "its own trials")
+    if widest >= 0:
+        words += f"; the widest is ±{widest:.3g}" + (f" ({where})" if where else "")
     if without:
         words += f"; {without} more setting(s) had too few trials for an interval"
+    if no_value:
+        shown = ", ".join(no_value[:4]) + (", ..." if len(no_value) > 4 else "")
+        words += f"; {len(no_value)} setting(s) have no value ({shown})"
     return words
 
 
