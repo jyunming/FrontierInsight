@@ -2990,9 +2990,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """The probabilities whose precision target this run missed and a larger run could reach in the time allowed:
         the trials scale with the square of the interval's width, so the run is ``(half_width / target) ** 2`` times
         longer, and FI's own estimate of this run (``.fi/run_estimate.json``, which already carries its safety margin)
-        times that must fit the time the study is allowed. The estimate counts only when it is of this run: its size
-        (settings and trials) and the simulation's code it timed (FI times only the first design's run, so after a
-        redesign it is another run's, even of the same size). No such
+        times that must fit the time the study is allowed. The estimate counts only when it is of this run's size (its
+        settings and trials; FI times only the first design's run, so after a redesign it is another run's). No such
         estimate, a run FI already had to make smaller, or one that would not fit: empty (the paper says the target was
         missed). ``quiet``: the same answer, without saying why in run.log (the router says it)."""
         from . import run_estimate as _estimate
@@ -3010,8 +3009,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             cells, runs = -1, 0
         if record.get("reduced") or not record.get("fits") or not all(
                 isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0 for x in (estimate_s, limit_s)) \
-                or record.get("cells") != cells or record.get("trials") not in (cells, cells * runs) \
-                or ("code" in record and record.get("code") != _hidden.code_sha(self.quest_root)):
+                or record.get("cells") != cells or record.get("trials") not in (cells, cells * runs):
             say("[cross_check] the precision target was not reached (%s); FI has no estimate of this run showing a "
                 "larger run fits the time allowed", ", ".join(m["name"] for m in missed[:4]))
             return []

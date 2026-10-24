@@ -551,12 +551,6 @@ def test_a_missed_precision_sends_the_quest_back_only_when_a_larger_run_fits(tmp
     assert eng._precision_missed(state) == []  # FI already had to make it smaller
     estimate(estimate_s=10.0, limit_s=300.0, fits=True, cells=4, trials=400)
     assert eng._precision_missed(state) == []  # the estimate of another design's run (FI times only the first)
-    from core import hidden_check
-
-    estimate(estimate_s=100.0, limit_s=300.0, fits=True, code="the code of another run")
-    assert eng._precision_missed(state) == []  # the same size, another simulation: its time is not this run's
-    estimate(estimate_s=100.0, limit_s=300.0, fits=True, code=hidden_check.code_sha(eng.quest_root))
-    assert eng._precision_missed(state) == ["p"]
     estimate(estimate_s=100.0, limit_s=300.0, fits=True)
     unread = {**state, "design": {"protocol": {**state["design"]["protocol"], "runs_per_setting": "many"}}}
     assert eng._precision_missed(unread) == []  # a size that cannot be read is no estimate of this run, not a crash

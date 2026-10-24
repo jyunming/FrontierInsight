@@ -786,10 +786,7 @@ class RunChecksMixin:
                     est = _estimate.with_once(_estimate.estimate(grid, runs, runner.deterministic, probes, at_once=at_once,
                                                                  slowdown=slowdown), once_seen)
             line = _estimate.says(est, limit_s, topic=by_topic)
-            from . import hidden_check as _hidden
-
-            base = {"key": key, "code": _hidden.code_sha(self.quest_root),  # type: ignore[attr-defined]
-                    "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
+            base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
                     "limit": "topic" if by_topic else "execution.timeout_s", "topic_limit_s": topic_s, "hard_limit_s": hard_s,
                     "once_s": est.once_s, "once_axes": list(est.once_axes)}

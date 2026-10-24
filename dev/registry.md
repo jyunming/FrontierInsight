@@ -339,8 +339,7 @@ same PR that adds, splits or renames one.
   `run_record` (FI's record of the run in the limitations) also says the plan's precision target missed, from
   `PRECISION_RECORD` (`.fi/precision_missed.json`, written by `write_precision_record` in `Engine._node_write` from
   `Engine._precision_shortfalls`). `Engine._precision_missed` (the same shortfalls, kept only when FI's run-time
-  estimate `.fi/run_estimate.json` of this run, its size and its code (`code`, `hidden_check.code_sha`), shows a run
-  large enough for them fits the time allowed) is the only reason the cross_check route follows the analysis's
+  estimate `.fi/run_estimate.json` of a run of this size shows a run large enough for them fits the time allowed) is the only reason the cross_check route follows the analysis's
   `re_experiment` to the design. `_node_cross_check` decides that route once (`_cross_check_route`, stored as
   `cross_check_route`) before it raises `iteration`, and `_route_after_cross_check` reads it; the redesign's prompt
   gets `Engine._precision_redesign_note` (each quantity missed, its trials and the trials that reach the target).
