@@ -39,6 +39,7 @@ from . import plan as _plan
 from . import run_estimate as _estimate
 from .result_checks import TYPED_RECORD
 from . import split_run as _split_run
+from . import step_coverage as _step_coverage
 from . import stop_power as _stop_power
 from . import trial_runner as _trial_runner
 from . import typed_results as _typed
@@ -565,6 +566,8 @@ class RunChecksMixin:
                          "limitations as FI's reading of the code, not as a fact of the results.")
         if observed := self._no_difference_note():
             parts.append(observed)
+        if uncomputed := self._step_coverage_note():
+            parts.append(uncomputed)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
@@ -650,6 +653,51 @@ class RunChecksMixin:
         except OSError as e:
             self._log.warning("[execute] FI could not add that line to plan.md: %r", e)  # type: ignore[attr-defined]
         return None
+
+    def _record_step_coverage(self, state: Any, simulate: Path) -> list[str]:
+        """After the checks of the code and before the run: is each metric the simulation returns computed through the
+        functions of the model's package (core/step_coverage.py)? A ``run_trial`` that returns the plan's true value plus noise
+        with a matching standard error, and never calls the model, passes the failure-rate, calibration, seed and typed-result
+        checks; only this question tells it from an honest one.
+
+        RECORD ONLY, as the checks that read code without running it always were: the metrics that are not computed through the
+        package are written to ``.fi/step_coverage.json``, become a gap in the evidence record (core/evidence.py) and a line in
+        QUALITY.md, and are given to the writer for the limitations. The quest is neither stopped nor is the code sent back,
+        because a reading of syntax can miss a call it should have followed. Nothing is said when the quest has no package or
+        the simulation has no ``run_trial`` / ``run_cell``. Never raises; returns the warnings."""
+        try:
+            from . import code_layout as _code_layout
+            from . import code_review as _code_review
+
+            code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+            sources = _code_layout.package_sources(code_dir)
+            names = _step_coverage.package_function_names(sources)
+            protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+            metrics = protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []
+            path = self.fi_dir / _step_coverage.RECORD  # type: ignore[attr-defined]
+            if not names or not metrics or not simulate.is_file():
+                path.unlink(missing_ok=True)   # an earlier reading is not about this code
+                return []
+            warnings = _step_coverage.check(simulate.read_text(encoding="utf-8"), names, metrics, only_returned=True,
+                                            package_modules=_step_coverage.package_module_names(sources))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"warnings": warnings, "package_functions": names,
+                                        "code_version": _code_review.version(code_dir)}, indent=2) + "\n", encoding="utf-8")
+            for w in warnings:
+                self._log.warning("[execute] FI's step check: %s", w)  # type: ignore[attr-defined]
+            return warnings
+        except Exception as e:  # noqa: BLE001 -- a check that cannot be made never stops a quest
+            self._log.warning("[execute] FI could not check which numbers are computed through the model (%s)",  # type: ignore[attr-defined]
+                              str(e)[:200] or type(e).__name__)
+            return []
+
+    def _step_coverage_note(self) -> str:
+        """For the writer: a metric the simulation returns without computing it through the model's functions."""
+        warnings = [str(w) for w in _read_json(self.fi_dir / _step_coverage.RECORD).get("warnings") or []]  # type: ignore[attr-defined]
+        if not warnings:
+            return ""
+        return ("FI's reading of the simulation found: " + "; ".join(_one(w, 300) for w in warnings[:4])
+                + ".\nSay so plainly in the limitations: those numbers are not shown to come from the model's equations.")
 
     def _settings_the_study_compares(self, state: Any, protocol: dict[str, Any], axes: list[str]) -> dict[str, str]:
         """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records

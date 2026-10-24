@@ -175,6 +175,7 @@ class _Quest:
         self.pilot = _dict(_json(fi / "pilot_check.json"))
         self.cannot_repair = _dict(_json(fi / "cannot_repair.json"))
         self.trial_checks = _dict(_json(fi / "trial_checks.json"))
+        self.step_coverage = _dict(_json(fi / "step_coverage.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.pause = _dict(_json(fi / "pause.json"))
@@ -502,6 +503,13 @@ def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
         said = f"{read}; they showed the simulation does not measure what the protocol names, and it was sent back to be repaired"
     return {"outcome": p["outcome"], "trials": trials, "settings": settings, "repairs": repairs,
             "problems": [str(x) for x in _list(p.get("problems"))], "says": said}
+
+
+def _step_coverage_summary(q: _Quest) -> dict[str, Any] | None:
+    """FI's reading of which reported numbers are computed through the model's package (core/step_coverage.py): the plain
+    sentence of each that is not. ``None`` when every one is, or the check did not apply."""
+    warnings = [str(w) for w in _list(q.step_coverage.get("warnings"))]
+    return {"warnings": [_one(w, 300) for w in warnings]} if warnings else None
 
 
 def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
@@ -1148,6 +1156,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
         "scope": _scope_summary(q),
+        "step_coverage": _step_coverage_summary(q),
         "trial_checks": _trial_checks_summary(q),
         "citations": _citations(q),
         "paper_pdf": _paper_pdf(q),
@@ -1352,6 +1361,12 @@ def render(report: dict[str, Any]) -> str:
         lines += ["", "## The study", "", scope["lines"][0]]
         lines += [f"- {line}" for line in scope["lines"][1:]]
         lines += [f"- Removed: {_cell(x)}" for x in scope.get("removed") or []]
+    steps = report.get("step_coverage")
+    if steps:
+        lines += ["", "## Numbers not shown to come from the model", "",
+                  "FI read the simulation and found a number it reports that is not computed through the functions of the "
+                  "model's package. It is recorded as a gap in the evidence; nothing was stopped or sent back."]
+        lines += [f"- {w}" for w in steps["warnings"]]
     trials = report.get("trial_checks")
     if trials:
         lines += ["", "## FI's checks of the trials", ""]
