@@ -67,6 +67,25 @@ def test_a_repeated_reason_keeps_revise_and_is_stated_as_unresolved(tmp_path: Pa
     assert "one damping value" in item.sentence and "not resolved" in item.sentence
 
 
+def test_the_delivered_paper_carries_the_unresolved_reason(tmp_path: Path) -> None:
+    """Review finding: the item was built but nothing placed it after the last review, so paper.md lacked the sentence.
+    Old code: the saved paper after the repeated-reason review had no such sentence."""
+    from core import frozen_protocol
+
+    frozen_protocol.freeze(tmp_path, {"grid": {"n": [5]}, "runs_per_setting": 2}, approved_by="test", source="test")
+    eng = _engine(tmp_path)
+    paper = tmp_path / "paper" / "paper.md"
+    paper.write_text("\n".join(["# Title", "", "## Results", "", "Text.", "", "## Limitations", "", "One limit.", ""]),
+                     encoding="utf-8")
+    state: Any = {"paper_md": str(paper), "iteration": 1}
+    reason = "The gain is only shown for one damping value."
+    eng._note_design_objections(state, {"verdict": "revise", "must_flag_hits": [], "blocking": reason})
+    assert "damping value" not in paper.read_text(encoding="utf-8")
+    eng._note_design_objections(state, {"verdict": "revise", "must_flag_hits": [], "blocking": reason})
+    text = paper.read_text(encoding="utf-8")
+    assert "one damping value" in text and "not resolved" in text and "{{" not in text
+
+
 def test_a_new_reason_or_a_measured_hit_still_costs_a_rewrite(tmp_path: Path) -> None:
     """Known positive: a different reason is a new objection, and a must-flag hit is never skipped on a repeated reason."""
     eng = _engine(tmp_path)

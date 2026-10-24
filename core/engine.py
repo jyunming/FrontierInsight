@@ -21362,6 +21362,28 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[write] %s", v.hit.text())
         return out.text
 
+    def _state_unresolved_review(self, state: QuestState) -> None:
+        """The review ends on a reason it gave before and the paper written again did not answer: FI's sentence about it
+        goes into the paper that is delivered (its Limitations), since nothing writes or places items after this review.
+        FI's own sentence, no model call; best-effort."""
+        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not path or not Path(path).is_file():
+            return
+        try:
+            before = Path(path).read_text(encoding="utf-8")
+            after = self._render_paper_facts(
+                _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
+            if after != before:
+                checked = Path(path).read_bytes()
+                Path(path).write_text(after, encoding="utf-8")
+                for check in ("claim_check", "citation_check"):
+                    _receipts.carry_over(self.quest_root, check, "paper", checked, Path(path).read_bytes(),
+                                         "FI stated the reviewer's unresolved reason in the Limitations and added no claim")
+                self._log.info("[review] the reviewer's reason that the rewrite did not answer is stated in the paper's "
+                               "Limitations")
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[review] the paper could not be given its sentence on the unresolved review reason (%s)", e)
+
     def _refresh_paper_facts(self, state: QuestState) -> None:
         """Before a paper is checked: a paper on disk that still carries FI's old blocks (a quest resumed from before they
         left the paper) or a placeholder not filled is cleaned and filled again from the records, so the checks read what
@@ -23785,6 +23807,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # The verdict stays revise: no more rewrites are spent, but the reason is not answered, and the record
                 # (QUALITY.md) and the paper's Limitations say so.
                 _disclosure.mark_unresolved(self.quest_root, said)
+                self._state_unresolved_review(state)
                 self._log.info("[review] the reviewer's reason repeats one FI's record already keeps (QUALITY.md) and no "
                                "check of FI's backs it — not writing the paper again for it")
             # Kept whether or not the paper is written again after this review: an objection raised only in the last
