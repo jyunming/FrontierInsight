@@ -41,6 +41,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -108,16 +109,159 @@ def working_files(quest_root: Path | str) -> set[str]:
     return out
 
 
-def remove_created_since(quest_root: Path | str, before: set[str], left: list[str] | None = None) -> list[str]:
+#: FI's record of the files each setting that FINISHED wrote (path -> size and modification time at that moment).
+FINISHED_FILES_RECORD = ".fi/finished_files.json"
+#: Where a file a stopped setting left half-written is moved (not deleted), under ``.fi/``.
+STOPPED_ASIDE = ".fi/previous"
+_record_lock = threading.Lock()
+
+
+def _file_state(quest_root: Path, rel: str) -> list[int] | None:
+    """A file's size and modification time (ns) as FI records it, or None when it is not there."""
+    try:
+        st = (quest_root / rel).stat()
+    except OSError:
+        return None
+    return [st.st_size, st.st_mtime_ns]
+
+
+def finished_files(quest_root: Path | str) -> dict[str, list[int]]:
+    """FI's record of what finished settings wrote (:data:`FINISHED_FILES_RECORD`); empty when there is none."""
+    import json
+
+    try:
+        data = json.loads((Path(quest_root) / FINISHED_FILES_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, list)} if isinstance(data, dict) else {}
+
+
+def working_states(quest_root: Path | str, names: set[str] | None = None) -> dict[str, list[int]]:
+    """The size and modification time of the working files (or of ``names``): the snapshot taken when a setting starts,
+    so a file it wrote over is told by its state changing, not by a clock."""
+    root = Path(quest_root)
+    return {r: s for r in (working_files(root) if names is None else names) if (s := _file_state(root, r)) is not None}
+
+
+def _rewritten(quest_root: Path, states: dict[str, list[int]]) -> set[str]:
+    """Of the files in ``states``, the ones whose state now differs from it (written over, or gone-and-back)."""
+    return {r for r, s in states.items() if _file_state(quest_root, r) not in (None, s)}
+
+
+#: The runs now running in each quest (by its folder), each with whether another ran at any time beside it.
+_active: dict[str, dict[int, bool]] = {}
+
+
+def begin_run(quest_root: Path | str) -> int:
+    """Note that a run began in this quest; the token to give :func:`end_run`. Every run already running is marked as
+    overlapped, and so is this one when another runs."""
+    with _record_lock:
+        runs = _active.setdefault(str(Path(quest_root).resolve()), {})
+        for other in runs:
+            runs[other] = True
+        token = uuid.uuid4().int
+        runs[token] = bool(runs)
+        return token
+
+
+def end_run(quest_root: Path | str, token: int) -> bool:
+    """Note that the run ended; whether another run overlapped it at any time."""
+    with _record_lock:
+        key = str(Path(quest_root).resolve())
+        runs = _active.get(key, {})
+        overlapped = runs.pop(token, False)
+        if not runs:
+            _active.pop(key, None)
+        return overlapped
+
+
+def record_finished(quest_root: Path | str, start_states: dict[str, list[int]], overlapped: bool = False) -> list[str]:
+    """After a setting FINISHED: record the state of every working file that is new or changed since ``start_states``
+    (the snapshot at its start). A later setting that is stopped for its time can then tell a file it left half-written
+    (its state is not one a finished setting recorded) from one a finished setting wrote whole, even when both are under
+    the file's final name. When another setting ran at the same time (``overlapped``) nothing is recorded: FI cannot tell
+    which of them wrote a changed file, and a file the other left half-written must not be taken for a finished one. Not
+    recording errs toward moving a file aside, which loses nothing."""
+    import json
+
+    root = Path(quest_root)
+    if overlapped:
+        return []
+    now = working_states(root)
+    wrote = {r: st for r, st in now.items() if start_states.get(r) != st}
+    if not wrote:
+        return []
+    with _record_lock:
+        record = finished_files(root)
+        record.update(wrote)
+        path = root / FINISHED_FILES_RECORD
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + f".{uuid.uuid4().hex[:6]}.tmp")
+            tmp.write_text(json.dumps(record), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            return []
+    return sorted(wrote)
+
+
+def _not_a_finished_state(quest_root: Path, rels: set[str]) -> set[str]:
+    """Of these files, the ones whose state now is not one a finished setting recorded."""
+    record = finished_files(quest_root)
+    return {r for r in rels if record.get(r) != _file_state(quest_root, r)}
+
+
+def _move_aside(quest_root: Path | str, rels: list[str], left: list[str] | None = None) -> list[str]:
+    """Move these files of the quest to :data:`STOPPED_ASIDE` (nothing is deleted); the ones moved. A file that cannot
+    be moved is tried once more, then added to ``left``."""
+    import time
+
+    root = Path(quest_root)
+    aside = root / STOPPED_ASIDE / f"stopped_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    moved: list[str] = []
+    for rel in rels:
+        for attempt in range(2):
+            try:
+                target = aside / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(root / rel, target)
+                moved.append(rel)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                if attempt == 0:
+                    time.sleep(0.5)
+                elif left is not None:
+                    left.append(rel)
+    return moved
+
+
+def remove_created_since(quest_root: Path | str, before: set[str], left: list[str] | None = None, *,
+                         states: dict[str, list[int]] | None = None) -> list[str]:
     """Remove the files under the quest's working folders that were not in ``before``; the paths removed. For a trial
     FI stopped for its time: it did not finish, so what it was writing (a lock, a half-written cache entry) is not
     something the next trial may trust. A file that cannot be removed (on Windows a handle of the stopped process can
-    outlive it for a moment) is tried once more, then added to ``left``."""
+    outlive it for a moment) is tried once more, then added to ``left``.
+
+    With ``states`` (:func:`working_states`, taken when the stopped setting began) two more things hold. A file that was there before and was written
+    over during the stopped setting (code that saves straight under the final name, and was cut off part way) is moved
+    aside to :data:`STOPPED_ASIDE`, not left to be read as a result; and a file, new or rewritten, whose state is one a
+    finished setting recorded (:func:`record_finished`) is kept: a finished setting wrote it whole."""
     root = Path(quest_root)
     created = working_files(root) - before
     # A finished value in the shared folder stays (unfinished_shared): only its locks and temporary files go.
     shared = {r for r in created if r == SHARED_CACHE or r.startswith(SHARED_CACHE + "/")}
-    return _remove_files(root, sorted((created - shared) | set(unfinished_shared(shared))), left)
+    doomed = (created - shared) | set(unfinished_shared(shared))
+    rewritten: set[str] = set()
+    if states is not None:
+        # FI's own folders (code/) are not written by a setting; a rewrite there is not a result.
+        rewritten = {r for r in _rewritten(root, states)
+                     if r.split("/", 1)[0] not in FI_OWNED}
+        doomed = _not_a_finished_state(root, doomed)
+        rewritten = _not_a_finished_state(root, rewritten)
+    gone = _remove_files(root, sorted(doomed), left)
+    return gone + _move_aside(root, sorted(rewritten), left)
 
 
 def unfinished_shared(rels: list[str] | set[str]) -> list[str]:
@@ -126,7 +270,10 @@ def unfinished_shared(rels: list[str] | set[str]) -> list[str]:
     writer is told so): a file under its own name is a finished value and is kept for the next setting; a lock or a
     temporary file (a name ending in ``.lock``, or in ``.tmp`` with or without digits after it, or with ``.tmp.`` in
     it, as a library adding its own extension to ``<name>.tmp`` writes; not ``x.tmp_table.npz``) is not. An exception by name, stated: FI cannot
-    tell a lock from a value otherwise, and a value it removes is worked out again by every later setting."""
+    tell a lock from a value otherwise, and a value it removes is worked out again by every later setting. The exception
+    covers files the stopped run CREATED; a file that was already there and was written over is judged by the record of
+    finished settings instead (:func:`remove_created_since`, ``states``), because a rewrite under the final name is
+    exactly what a cut-off save looks like."""
     out = []
     for rel in sorted(rels):
         if not (rel == SHARED_CACHE or rel.startswith(SHARED_CACHE + "/")):
@@ -179,12 +326,19 @@ async def execute_keeping_only_finished(executor: Any, cmd: list[str], *, cwd: P
     files it created are removed (see :func:`remove_created_since`); a trial that finished keeps what it wrote."""
     root = Path(cwd)
     await asyncio.to_thread(prepare_shared_cache, root, log)
-    before = await asyncio.to_thread(working_files, root)
-    result = await executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+    states = await asyncio.to_thread(working_states, root)
+    before = set(states)
+    token = begin_run(root)
+    try:
+        result = await executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+    finally:
+        overlapped = end_run(root, token)
     if getattr(result, "timed_out", False):
         left: list[str] = []
-        gone = await asyncio.to_thread(remove_created_since, root, before, left)
+        gone = await asyncio.to_thread(lambda: remove_created_since(root, before, left, states=states))
         say_removed(log if log is not None else logging.getLogger(f"frontier_insight.{root.resolve().name}"), gone, left)
+    elif getattr(result, "returncode", 0) in (0, None):
+        await asyncio.to_thread(record_finished, root, states, overlapped)
     return result
 
 
@@ -592,13 +746,19 @@ class OutsideExecutor:
         for other in self._running:
             self._running[other] = True
         self._running[token] = bool(self._running)
-        shared_before = await asyncio.to_thread(_shared_names, self.quest_root) if box.linked else set()
+        shared_states = await asyncio.to_thread(working_states, self.quest_root, _shared_names(self.quest_root)) if box.linked else {}
+        shared_before = set(shared_states)
+        start_states = await asyncio.to_thread(working_states, self.quest_root)
+        run_token = begin_run(self.quest_root)
+        overlapped = False
         if box.linked and self._shared_start is None:
             self._shared_start = set(shared_before)
         try:
             argv = [cmd[0], *(self._map(a, root) for a in cmd[1:])]
             run_env = {k: self._map(v, root) for k, v in env.items()} if env is not None else None
             result = await self.inner.execute(argv, cwd=root, timeout_s=timeout_s, env=run_env)
+            overlapped = end_run(self.quest_root, run_token)
+            run_token = 0
             stopped = bool(getattr(result, "timed_out", False))
             if self.meter is not None:
                 self.meter(getattr(result, "peak_mb", None))
@@ -606,7 +766,9 @@ class OutsideExecutor:
             if box.unfinished:
                 say_removed(self._log, box.unfinished)
             if stopped and box.linked:
-                await self._clean_shared(shared_before, beside=self._running.get(token, False))
+                await self._clean_shared(shared_before, beside=self._running.get(token, False), states=shared_states)
+            elif not stopped and getattr(result, "returncode", 0) in (0, None):
+                await asyncio.to_thread(record_finished, self.quest_root, start_states, overlapped)
             dropped = [r for r in box.left_out if not r.endswith(".pyc") and "/__pycache__/" not in f"/{r}"]
             if dropped and not self._only_named:  # a check's run keeps only what FI named, by design
                 self._log.warning("[run] the code ran from a copy outside the quest folder and wrote into FI's own "
@@ -617,16 +779,28 @@ class OutsideExecutor:
                                            stderr=box.to_quest(result.stderr or ""))
             return result
         finally:
+            if run_token:
+                end_run(self.quest_root, run_token)
             self._running.pop(token, None)
             await asyncio.to_thread(box.remove)
 
-    async def _clean_shared(self, before: set[str], *, beside: bool) -> None:
+    async def _clean_shared(self, before: set[str], *, beside: bool, states: dict[str, list[int]] | None = None) -> None:
         """After a run FI stopped for its time: the files that appeared in the shared folder while it ran. Alone, they are
         its own: the locks and temporary files among them (:func:`unfinished_shared`) are removed, so the next setting does
         not wait on them, and a value it finished is kept. With another run beside it, FI cannot tell which run wrote
         which, so they are kept and said."""
         # Only what it left unfinished (a lock, a temporary file): a value it finished is kept (unfinished_shared).
-        created = unfinished_shared(await asyncio.to_thread(_shared_names, self.quest_root) - before)
+        now = await asyncio.to_thread(_shared_names, self.quest_root)
+        created = unfinished_shared(now - before)
+        if states is not None and not beside:
+            # A value that was there before and was written over while this run ran, and is not what a finished setting
+            # wrote (code that saves under the final name was cut off part way): moved aside, not read as a result.
+            rewritten = await asyncio.to_thread(
+                lambda: _not_a_finished_state(self.quest_root, _rewritten(self.quest_root, states)))
+            if rewritten:
+                left_over: list[str] = []
+                moved = await asyncio.to_thread(_move_aside, self.quest_root, sorted(rewritten), left_over)
+                say_removed(self._log, moved, left_over)
         if not created:
             return
         if beside:
