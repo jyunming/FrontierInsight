@@ -45,6 +45,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -113,6 +114,28 @@ _SKIP_FILES = {
 }
 #: Folders of FI's own files, by prefix: the trial runs, FI's copies of the code, its input and output captures.
 _SKIP_PREFIXES = (".fi/trials/", ".fi/io/", ".fi/improve/", ".fi/optimisation/", ".fi/previous/")
+
+
+@functools.lru_cache(maxsize=1)
+def _fi_live_files() -> tuple[frozenset[str], tuple[str, ...]]:
+    """``(exact paths, path prefixes)`` of the files in ``.fi/`` that FI itself writes while a round runs (its sign of
+    life, its logs, the model-call and cost records and their notes). Taken from the constants of the modules that write
+    them, so a renamed file is renamed here too and the tripwire never reads FI's own write as the agent's. Any other
+    file in ``.fi/`` is still watched."""
+    from . import attempt_records as _ar, engine as _engine, record_anchor as _anchor, run_marker as _marker
+    fi = Path(".fi")
+    exact = {Path(_marker.RECORD).as_posix(), Path(_marker.HISTORY).as_posix(),
+             (fi / _engine.PROGRESS_LOG_NAME).as_posix(), (fi / "cost.summary.json").as_posix()}
+    exact |= {(fi / n).as_posix() for n in (_ar.MODEL_CALLS, _ar.MODEL_CALLS_LOST, _ar.MODEL_CALLS_AFTER_SEAL,
+                                            _ar.MODEL_CALLS_CLOSED, _anchor.HEADS_LOST)}
+    return frozenset(exact), ((fi / _anchor.HEADS).as_posix(),)
+
+
+def _is_fi_live(rel: str) -> bool:
+    exact, prefixes = _fi_live_files()
+    return rel in exact or rel.startswith(prefixes)
+
+
 _KEEP_BYTES = 2_000_000          # a file this small is kept in memory to put back; a larger one is only recorded
 _KEEP_TOTAL = 64_000_000
 
@@ -696,7 +719,7 @@ class AgentCoder:
             for leaf in leaves:
                 path = Path(here) / leaf
                 rel = path.relative_to(root).as_posix()
-                if rel in _SKIP_FILES or rel.startswith(_SKIP_PREFIXES) or rel.endswith(".pyc"):
+                if rel in _SKIP_FILES or rel.startswith(_SKIP_PREFIXES) or rel.endswith(".pyc") or _is_fi_live(rel):
                     continue
                 try:
                     st = path.stat()
