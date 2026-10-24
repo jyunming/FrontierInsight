@@ -480,6 +480,20 @@ def failed_share_verdict(failed: int, started: int, verdict: str | None) -> tupl
     return verdict, ""
 
 
+def is_partial(mc: dict[str, Any] | None) -> bool:
+    """True for a rule of every trial that held in every trial judged, when time ran out before all were (verdict
+    ``"partial"``). Stop and repair logic reads it as a pass; what was checked is reported as not fully checked."""
+    return isinstance(mc, dict) and mc.get("verdict") == "partial"
+
+
+def partial_words(mc: dict[str, Any] | None) -> str:
+    """The plain sentence for a partial check, ``""`` for any other."""
+    if not is_partial(mc):
+        return ""
+    return (f"passed on {int(mc.get('judged') or 0)} of {int(mc.get('planned') or 0)} trials; the rest were not judged "
+            "in the time allowed")
+
+
 def words(mc: dict[str, Any] | None) -> str:
     """How the check's number was had, in a few plain words for a record line: ``the mean over 310 trials, Monte Carlo
     error ±0.0024 (one standard error)``, ``the worst of 20 trials``; ``""`` for a check judged on one number."""
@@ -494,7 +508,9 @@ def words(mc: dict[str, Any] | None) -> str:
     elif read_as == "every_trial":
         text = f"the worst of {n} trial{'s' if n != 1 else ''}"
         asked = int(mc.get("trials_asked") or 0)
-        if asked > n and mc.get("why") != "failed_trials":
+        if is_partial(mc):
+            text += f" ({partial_words(mc)})"
+        elif asked > n and mc.get("why") != "failed_trials":
             text += f" (judged on {n} of {asked} trials)"
     else:
         text = "one trial's number, the same in every trial"
@@ -532,7 +548,8 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
 def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, why: str, failed: int, started: int,
            failed_example: str = "", **extra: Any) -> dict[str, Any]:
     """The ``mc`` entry a check keeps (``needs/ORACLE_CHECK.json``): how it was read, its trials and their error, and
-    the verdict they gave (``pass``, ``fail``, ``undecided``) with why it was not decided (``time``, ``most_trials``,
+    the verdict they gave (``pass``, ``fail``, ``undecided``, or ``partial``: passed on every trial judged but time ran
+    out before all ``planned`` were; it carries ``judged`` and ``planned``) with why it was not decided (``time``, ``most_trials``,
     ``failed_trials``)."""
     stat = stat or {}
     se = stat.get("se")

@@ -2048,15 +2048,19 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
         if check is None or check.get("value") is None:
             return check, problem, False
         if ran < most:
-            # Not every trial was judged: the pass of the trials that were stays a pass, and the record says how many
-            # were judged (an honest run never loses a pass for lack of time).
+            # Not every trial was judged: the pass of the trials that were is kept for stop and repair (an honest run
+            # never loses a pass for lack of time) but it is its own verdict, "partial", with the counts, so every
+            # record that says what was checked says it was not all of it.
             why_open = "time"
+            if verdict == "pass":
+                verdict = "partial"
     finite = [v for v in values if v is not None]
     if varies or why_failed or why_open:
         check["mc"] = _mc.record({"trials": len(finite), "dropped": len(values) - len(finite), "varies": varies,
                                   "on": "trials"}, read_as="every_trial", verdict=verdict,
                                  why=why_failed or why_open, failed=lost, started=ran, trials_asked=most,
-                                 failed_example=clip_keeping_place(failed[0], 200) if failed else "")
+                                 failed_example=clip_keeping_place(failed[0], 200) if failed else "",
+                                 **({"judged": ran, "planned": most} if verdict == "partial" else {}))
     return check, problem, False
 
 

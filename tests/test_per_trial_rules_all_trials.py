@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from core import mc_error as mc, trial_runner
+from core import mc_error as mc, oracle_check, trial_runner
 from core.execution import SharedInterpreterExecutor
 
 SIM = '''
@@ -71,3 +71,43 @@ def test_a_pass_on_fewer_trials_than_asked_stays_a_pass_and_names_the_gap() -> N
     record = mc.record({"trials": 25, "dropped": 0, "varies": True, "on": "trials"}, read_as="every_trial",
                        verdict="pass", why="time", failed=0, started=25, trials_asked=40)
     assert record["verdict"] == "pass" and "judged on 25 of 40 trials" in mc.words(record)
+
+
+def test_time_running_out_gives_the_verdict_partial_with_counts(tmp_path: Path, monkeypatch: Any) -> None:
+    """Fails on the old code (verdict stayed "pass"): the first 20 of 40 trials hold, no time is left for the rest."""
+    monkeypatch.setattr(mc, "PILOT_SHARE", 0.0)  # no time left after the first batch
+    check = _measure(tmp_path, set(), most=40)
+    record = check["mc"]
+    assert record["verdict"] == "partial", record
+    assert record["judged"] == mc.PILOT_TRIALS and record["planned"] == 40
+    assert mc.is_partial(record) and "passed on 20 of 40 trials" in mc.words(record)
+    assert "not judged in the time allowed" in mc.partial_words(record)
+
+
+def test_a_full_run_is_not_partial() -> None:
+    record = mc.record({"trials": 40, "dropped": 0, "varies": True, "on": "trials"}, read_as="every_trial",
+                       verdict="pass", why="", failed=0, started=40, trials_asked=40)
+    assert not mc.is_partial(record) and mc.partial_words(record) == ""
+
+
+def test_partial_is_a_pass_for_stop_and_repair_and_a_gap_for_the_record() -> None:
+    """Fails on the old code: mc_of dropped an unknown verdict, and nothing marked the check as partly judged."""
+    oracle = {"name": "gap_small", "kind": "invariant", "expected": 0.0, "tolerance": 0.5}
+    record = mc.record({"trials": 20, "dropped": 0, "varies": True, "on": "trials"}, read_as="every_trial",
+                       verdict="partial", why="time", failed=0, started=20, trials_asked=40, judged=20, planned=40)
+    reported = {"engine_measured": True,
+                "checks": [{"name": "gap_small", "value": 0.2, "passed": True, "measured_by": "engine", "mc": record}]}
+    (j,) = oracle_check.judged([oracle], reported)
+    # stop / repair: a pass, nothing to fix, no problem raised
+    assert j["passed_by_engine"] is True and not j.get("undecided")
+    assert oracle_check.problems([oracle], reported, 0) == []
+    assert oracle_check.not_passed([j]) == []
+    # the record of what was checked: not fully checked
+    assert oracle_check.partial_checks([j]) == [j]
+    said = oracle_check.partial_gap_words(j)
+    assert "passed on 20 of 40 trials" in said and "not judged in the time allowed" in said
+    assert "passed on 20 of 40 trials" in oracle_check.analysis_note([j])
+    # a full pass carries no such gap
+    full = {**reported, "checks": [{**reported["checks"][0], "mc": {**record, "verdict": "pass"}}]}
+    (k,) = oracle_check.judged([oracle], full)
+    assert oracle_check.partial_checks([k]) == []
