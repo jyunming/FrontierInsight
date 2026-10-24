@@ -6271,12 +6271,32 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # a part written under `protocol` wins over the same part written beside it
         return {**top, "protocol": {**beside, **inner}}
 
+    #: The most raw answers of the plan's model kept in ``.fi/plan_answers/``, and the most characters of each.
+    _PLAN_ANSWERS_KEPT = 40
+    _PLAN_ANSWER_CHARS = 60000
+
+    def _keep_plan_answer(self, text: str | None) -> None:
+        """Write the plan's model's raw answer to a request to complete the plan to ``.fi/plan_answers/NNN.txt``, whether or not
+        the quest keeps every model call (``output.save_model_calls``, off by default). When such an answer is refused, the
+        refusal is only worth reading beside the answer itself: without it nobody can tell whether a rule was unclear or the
+        model wrote something unreadable. Small, bounded, and a failure to write never stops the quest."""
+        try:
+            folder = self.fi_dir / "plan_answers"
+            folder.mkdir(parents=True, exist_ok=True)
+            number = len(list(folder.glob("*.txt"))) + 1
+            if number > self._PLAN_ANSWERS_KEPT:
+                return
+            (folder / f"{number:03d}.txt").write_text((text or "")[: self._PLAN_ANSWER_CHARS], encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't keep the plan model's answer: %r", e)
+
     async def _ask_for_plan_parts(self, prompt: str) -> dict[str, Any]:
         """One JSON object of the asked parts from the plan's model (node ``plan_revise``, so it is the same model, limits
         and call count as every other request of the plan step). A reply that holds no such object is asked once more,
         short (``agents/json_reanswer.md``): at most two calls. ``ValueError`` (the reader's reason, sent back with the next
         request) when neither reply can be read."""
         text = await self._chat(prompt, node="plan_revise")
+        self._keep_plan_answer(text)
         obj = _parse_json_lenient(text, node="plan_revise")
         if isinstance(obj, dict) and obj:
             return self._as_design_parts(obj)
@@ -6296,6 +6316,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             original_prompt=prompt, what_was_wrong=wrong,
             keys="`protocol` (the asked parts under their names), and `study_type` or `variables` only when asked", earlier_reply=echo)
         text = await self._chat(retry, node="plan_revise")
+        self._keep_plan_answer(text)
         obj = _parse_json_lenient(text, node="plan_revise")
         if isinstance(obj, dict) and obj:
             self._log.info("[plan] the second, shorter answer could be read")
@@ -6941,6 +6962,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             else:
                 candidate = {**merged, part: new_protocol[part]}
             fixed, why = _plan.normalize_protocol(candidate)
+            if (fixed is None or part not in fixed) and part == "sub_studies" and isinstance(new_protocol[part], list):
+                # One entry that cannot be read does not cost the other parts of the study their answer: the entries that
+                # read are tried together (the rule that every value of the grid is run is still asked), and the reason
+                # for each entry left out goes back to the model.
+                entries, entry_reasons = _plan.readable_sub_studies(new_protocol[part], candidate.get("grid"),
+                                                                    candidate.get("in_each_run"))
+                if entries and entry_reasons:
+                    again, _again_why = _plan.normalize_protocol({**candidate, part: entries})
+                    if again is not None and part in again:
+                        fixed, why = again, None
+                        reasons.extend(entry_reasons)
+                        self._log.warning("[plan] `protocol.sub_studies`: %d entr%s of the answer could not be read and "
+                                          "%s left out: %s", len(entry_reasons), "y" if len(entry_reasons) == 1 else "ies",
+                                          "was" if len(entry_reasons) == 1 else "were", "; ".join(entry_reasons)[:600])
             if fixed is None or part not in fixed:
                 self._log.warning("[plan] the plan's model wrote `protocol.%s` again but it still cannot be read: %s", part, why)
                 entry = _plan.offending_entry({part: new_protocol[part]}, why)
@@ -28080,7 +28115,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "criteria": [{"name": "<short name>", "what": "<one sentence>", "oracle": "<the name of one of the oracles above>", "use": "<error (how far it lands from its expected value, the default) | value (the measured value itself)>", "direction": "<lower | higher | target>", "target": <a number: for lower the most it may be, for higher the least, for target the value aimed at>, "tolerance": <a number: how close to the target counts as met, and how much a later version may change before it counts as worse>}]
 }
 
-`grid` is crossed: the study runs every combination of the values of ALL its settings, so each setting multiplies every other. When the topic is several separate studies (for example one comparison of methods, and a different sweep of a condition that only matters for one method), do not put all their settings into one `grid`: list every setting with its values in `grid`, and divide them in `sub_studies`, one entry for each part, naming in `vary` the settings that part crosses (a setting can be in several parts). The study then runs the settings of each part in turn, so its size is the sum of the parts, not the product of every setting; a setting a part does not vary stays at the one value you give it in `hold` (write one for every other setting of `grid` that has several values). Every setting of `grid` that takes more than one value must be varied by some part, or held at each of its values by the parts between them, or its values would never be run. Leave `sub_studies` out when every setting is meant to be crossed with every other.
+`grid` is crossed: the study runs every combination of the values of ALL its settings, so each setting multiplies every other. When the topic is several separate studies (for example one comparison of methods, and a different sweep of a condition that only matters for one method), do not put all their settings into one `grid`: list every setting with its values in `grid`, and divide them in `sub_studies`, one entry for each part, naming in `vary` the settings that part crosses (a setting can be in several parts). The study then runs the settings of each part in turn, so its size is the sum of the parts, not the product of every setting; a setting a part does not vary stays at the one value you give it in `hold` (write one for every other setting of `grid` that has several values). Every setting of `grid` that takes more than one value must be varied by some part, or held at each of its values by the parts between them, or its values would never be run. Leave `sub_studies` out when every setting is meant to be crossed with every other. FI runs the settings of `grid` (and of `sub_studies`) and nothing else: when the method says a setting is also run (a second step size at two ratios, an extra condition), that run must be a value of a `grid` setting or a part of `sub_studies`, never only a sentence in the method; a run the method describes and the grid does not hold is not run.
 
 `constants` lists every other number the method uses that is neither a grid value nor a threshold nor a setting of the model: a quantile of a distribution (1.96 for a 95% interval), a physical constant (the gas constant R), a conversion factor. Give each a name and its value. The paper may state these numbers and only these (and the plan's own settings and thresholds): any other number in the paper's text must come from FI's records, and FI refuses a number the plan does not state. Leave `constants` out when the method uses none.
 

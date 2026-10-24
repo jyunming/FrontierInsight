@@ -243,6 +243,69 @@ def _grid_values(axis: Any, values: Any, part: str = "grid") -> tuple[list[Any] 
     return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
 
 
+def _read_sub_study(number: int, sub: dict[str, Any], grid: dict[str, Any], inside: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """``(the entry, None)`` or ``(None, why)`` for ONE entry of ``protocol.sub_studies`` read on its own: its ``vary`` and
+    ``hold`` against the grid. Whether the entries together run every value of every setting is not asked here
+    (:func:`_sub_studies`)."""
+    where = "`protocol.sub_studies`"
+    name = " ".join(str(sub.get("name") or "").split())
+    here = f"{where} entry {number}" + (f" (`{name}`)" if name else "")
+    vary = sub.get("vary")
+    if not isinstance(vary, list) or not vary or not all(isinstance(a, str) and a.strip() for a in vary):
+        return None, f"{here} needs `vary`: the list of settings of `protocol.grid` it varies"
+    vary = [a.strip() for a in vary]
+    if len(set(vary)) < len(vary):
+        return None, f"{here} lists a setting twice in `vary`"
+    for axis in vary:
+        if axis in inside:
+            return None, (f"{here} varies `{axis}`, which every run goes through together "
+                          "(`protocol.in_each_run`); it is not a setting of a sub-study")
+        if axis not in grid:
+            return None, (f"{here} varies `{axis}`, which is not a setting of `protocol.grid` "
+                          f"(it has: {', '.join(str(a) for a in grid)})")
+    hold = sub.get("hold")
+    if hold is not None and not isinstance(hold, dict):
+        return None, f"{here}: `hold` must map a setting of `protocol.grid` to the value it is held at"
+    held: dict[str, Any] = {}
+    for axis, value in (hold or {}).items():
+        if axis not in grid:
+            return None, f"{here} holds `{axis}`, which is not a setting of `protocol.grid`"
+        if axis in vary:
+            return None, f"{here} both varies and holds `{axis}`: it is one or the other"
+        match = [v for v in grid[axis] if v == value]
+        if not match:
+            return None, f"{here} holds `{axis}` at {value!r}, which is not one of its values in `protocol.grid`: {grid[axis]}"
+        held[str(axis)] = match[0]
+    unheld = [a for a, v in grid.items() if a not in vary and a not in held and len(v) > 1]
+    if unheld:
+        return None, (f"{here} does not say the value it holds {', '.join(f'`{a}`' for a in unheld)} at: add each to "
+                      "`hold` (a value it has in `protocol.grid`), or to `vary` if this part crosses it")
+    return {"name": name, "vary": vary, "hold": held}, None
+
+
+def readable_sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """``(the entries of ``protocol.sub_studies`` that read on their own, one reason per entry that does not)``. One entry
+    that cannot be read (it varies a setting the grid lacks, holds a value the setting does not have) used to cost the
+    whole list its answer; the entries that read are kept as the model wrote them, and the reasons go back to the model.
+    Whether the kept entries together run every value of the grid is still asked by :func:`normalize_protocol`: nothing
+    is loosened."""
+    if not isinstance(grid, dict) or not grid or not isinstance(subs, list):
+        return [], []
+    inside = inside if isinstance(inside, dict) else {}
+    kept: list[dict[str, Any]] = []
+    reasons: list[str] = []
+    for number, sub in enumerate(subs, start=1):
+        if not isinstance(sub, dict):
+            reasons.append(f"`protocol.sub_studies` entry {number} is not a mapping with a `name`, `vary` and `hold`")
+            continue
+        one, why = _read_sub_study(number, sub, grid, inside)
+        if one is None:
+            reasons.append(f"{why}; this entry was not used")
+        else:
+            kept.append(sub)
+    return kept, reasons
+
+
 def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
     """``(the sub-studies, None)`` or ``(None, why)``, read from ``protocol.sub_studies``. Each sub-study names the settings of
     ``protocol.grid`` it varies (``vary``: all their values, crossed) and the value it holds each other setting
@@ -258,39 +321,10 @@ def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]
     inside = inside if isinstance(inside, dict) else {}
     fixed: list[dict[str, Any]] = []
     for number, sub in enumerate(subs, start=1):
-        name = " ".join(str(sub.get("name") or "").split())
-        here = f"{where} entry {number}" + (f" (`{name}`)" if name else "")
-        vary = sub.get("vary")
-        if not isinstance(vary, list) or not vary or not all(isinstance(a, str) and a.strip() for a in vary):
-            return None, f"{here} needs `vary`: the list of settings of `protocol.grid` it varies"
-        vary = [a.strip() for a in vary]
-        if len(set(vary)) < len(vary):
-            return None, f"{here} lists a setting twice in `vary`"
-        for axis in vary:
-            if axis in inside:
-                return None, (f"{here} varies `{axis}`, which every run goes through together "
-                              "(`protocol.in_each_run`); it is not a setting of a sub-study")
-            if axis not in grid:
-                return None, (f"{here} varies `{axis}`, which is not a setting of `protocol.grid` "
-                              f"(it has: {', '.join(str(a) for a in grid)})")
-        hold = sub.get("hold")
-        if hold is not None and not isinstance(hold, dict):
-            return None, f"{here}: `hold` must map a setting of `protocol.grid` to the value it is held at"
-        held: dict[str, Any] = {}
-        for axis, value in (hold or {}).items():
-            if axis not in grid:
-                return None, f"{here} holds `{axis}`, which is not a setting of `protocol.grid`"
-            if axis in vary:
-                return None, f"{here} both varies and holds `{axis}`: it is one or the other"
-            match = [v for v in grid[axis] if v == value]
-            if not match:
-                return None, f"{here} holds `{axis}` at {value!r}, which is not one of its values in `protocol.grid`: {grid[axis]}"
-            held[str(axis)] = match[0]
-        unheld = [a for a, v in grid.items() if a not in vary and a not in held and len(v) > 1]
-        if unheld:
-            return None, (f"{here} does not say the value it holds {', '.join(f'`{a}`' for a in unheld)} at: add each to "
-                          "`hold` (a value it has in `protocol.grid`), or to `vary` if this part crosses it")
-        fixed.append({"name": name, "vary": vary, "hold": held})
+        one, why = _read_sub_study(number, sub, grid, inside)
+        if one is None:
+            return None, why
+        fixed.append(one)
     for axis, values in grid.items():
         if len(values) > 1 and not any(axis in sub["vary"] for sub in fixed):
             held_at = [sub["hold"][axis] for sub in fixed if axis in sub["hold"]]
@@ -734,9 +768,12 @@ PART_RULES = {
             "the method and the topic.",
     "sub_studies": "`protocol.sub_studies`: the separate parts of the study, a list; each entry has a `name` and `vary`, the "
                    "list of settings of `protocol.grid` that part crosses with one another (all their values), and "
-                   "optionally `hold`, a mapping from another setting of the grid to the value the part keeps it at (a "
-                   "setting it neither varies nor holds stays at its first value). Every setting of the grid with more than "
-                   "one value is varied by at least one part.",
+                   "`hold`, a mapping from EVERY other setting of the grid that has more than one value to the value the part "
+                   "keeps it at (one of that setting's values in `protocol.grid`); a setting a part neither varies nor "
+                   "holds is refused, it does not stay at its first value. Every value of every setting of the grid is run "
+                   "by some part: the setting is in the `vary` of at least one part, or the parts' `hold` values between "
+                   "them cover all of its values (a value that no part varies or holds is never run, and the answer is "
+                   "refused).",
     "in_each_run": "`protocol.in_each_run`: what every run goes through together, all its values in one run on the same "
                    "random numbers (one fit across all of them, every method applied to the same simulated data), as a "
                    "mapping from each such factor's name to the list of ALL its values: at least two, each listed once, "
