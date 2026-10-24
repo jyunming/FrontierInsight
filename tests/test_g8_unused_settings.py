@@ -106,3 +106,19 @@ def test_a_study_whose_every_setting_matters_is_not_sent_back_and_identical_esti
     assert result.returncode == 0
     assert runner.no_difference and "`est_plain` and `est_weighted`" in runner.no_difference
     assert not (root / trial_runner.UNCHANGED_SENT).exists()
+
+
+def test_a_setting_the_code_reads_that_truly_changes_nothing_is_an_observation_not_a_repair_request(tmp_path: Path) -> None:
+    """The simulation reads `lid` but the effect is nil in this range. Old code (and the first version of the send-back)
+    asked for a repair, pressing the model to invent an effect; now the run goes on with the code unchanged and the fact
+    is recorded as an observed absence of difference."""
+    sim = ('def run_cell(cell):\n    gain = 0.0 if cell["lid"] == "shut" else 0.0\n'
+           '    return {"t_out": 20.0 - cell["flow"] + gain}\n')
+    root = _quest(tmp_path, sim)
+    (root / "code" / "experiment.py").write_text(SWEEP_ANALYSIS, encoding="utf-8")
+    runner = _runner(root, {"flow": [1.0, 2.0, 3.0], "lid": ["open", "shut"]})
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    result = asyncio.run(runner.execute(cmd, cwd=root, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert result.returncode == 0 and runner.flat is None and runner.failed_script is None
+    assert runner.no_difference and "`lid`" in runner.no_difference
+    assert not (root / trial_runner.UNCHANGED_SENT).exists()

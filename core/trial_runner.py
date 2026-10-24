@@ -1128,8 +1128,15 @@ class TrialsRunner:
                 self.no_difference = " ".join(notes)
                 if self.log is not None:
                     self.log.warning("[execute] %s", self.no_difference)
-            if unchanged and self._unchanged_repair_left():
-                return self._unchanged_result(unchanged, run, started)
+            # Equal results alone show that no difference was observed, not that the setting is unread: a treatment that
+            # truly changes nothing in this range looks the same, and asking for a repair would press the model to invent
+            # an effect. The simulation is sent back only for the settings its own code never lets reach what it
+            # returns (the text read, as for a flat sweep); the others stay an observation, reported as no difference.
+            unread = _flat.unread_settings(self.simulate.read_text(encoding="utf-8", errors="replace"),
+                                           [a for a, _ in unchanged]) if unchanged else None
+            proven = [(a, p) for a, p in unchanged if a in (unread or [])]
+            if proven and self._unchanged_repair_left():
+                return self._unchanged_result(proven, run, started)
         if flat is not None:
             self.flat = flat
             self.failed_script = self.simulate.name
