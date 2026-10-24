@@ -411,12 +411,13 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
         }
         if evaluations.get("stopped_because") == "time" and isinstance(evaluations.get("search"), int):
             study["max_evaluations"] = evaluations["search"]
-        # The rounds a person asked the search to continue with (core/optimise_refine.py): run.py continues it the same.
+        # The rounds the search was continued with (a person's, core/optimise_refine.py, or FI's own while it was still
+        # improving, core/optimise.py): run.py continues it the same.
         from . import optimise as _optimise
 
         rounds = _optimise.read_rounds(code_dir.parent, block)
         if rounds:
-            study["rounds"] = [{k: r[k] for k in ("added", "target", "search_target") if k in r} for r in rounds]
+            study["rounds"] = [{k: r[k] for k in ("added", "target", "search_target", "auto") if k in r} for r in rounds]
         return study
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     sub_studies = getattr(_search.study_grid(protocol), "sub_studies", None)

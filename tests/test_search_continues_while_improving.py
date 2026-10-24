@@ -181,6 +181,13 @@ async def test_a_search_still_improving_when_its_budget_ran_out_continues_once_w
     assert "still improving" in rounds[0]["asked"]
     best = _best(root)
     assert best["best"]["objective"] < plain_best, "the continued search found a better design"
+    # The record says FI continued it, never that a person asked.
+    assert all(r.get("by") == "FI" for r in best["continued"]) and best["continued"]
+    assert "by FI" in json.dumps(best) and "at the person's request" not in json.dumps(best)
+    from core import best_design_report
+    text = best_design_report.section(root, block)
+    assert "Continued by FI, still improving when its budget ran out (round 1)" in text
+    assert "at the person's request" not in text
     # Each evaluation of the whole record ran once: the first eight were answered from the record, not run again.
     ledger = [json.loads(x) for x in (root / "raw" / "optimisation_ledger.jsonl").read_text(encoding="utf-8").splitlines()]
     counted = [r for r in ledger if r.get("event") == "evaluation" and r.get("counted")]

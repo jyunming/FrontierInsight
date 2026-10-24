@@ -342,7 +342,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
         lines.append("")
     for r in best.get("continued") or []:
         toward = f", toward {quantity} = {_fmt(r['target'])}{u}" if _num(r.get("target")) else ""
-        lines += [f"*Continued at the person's request (round {r.get('round')}):* {r.get('evaluations')} of "
+        who = ("by FI, still improving when its budget ran out" if r.get("by") == "FI" else "at the person's request")
+        lines += [f"*Continued {who} (round {r.get('round')}):* {r.get('evaluations')} of "
                   f"{r.get('added')} more evaluations{toward}, from {_design(r.get('from'))}; stopped because "
                   f"{_STOPPED.get(str(r.get('stopped_because')), r.get('stopped_because'))}.", ""]
     if check:

@@ -1181,7 +1181,8 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
         target = f", toward {quantity} = {_fmt(r['target'])}{unit}" if r.get("target") is not None else ""
         reached = ("; the target was reached at the search's settings" if r.get("target_reached") else
                    "; the target was not reached at the search's settings" if r.get("target") is not None else "")
-        lines.append(f"[optimise] continued at the person's request (round {r.get('round')}): {r.get('evaluations')} of "
+        who = ("by FI, still improving when its budget ran out" if r.get("by") == "FI" else "at the person's request")
+        lines.append(f"[optimise] continued {who} (round {r.get('round')}): {r.get('evaluations')} of "
                      f"{r.get('added')} more evaluation(s){target}, from {_design(r.get('from') or {})}; stopped "
                      f"because {_STOPPED.get(str(r.get('stopped_because')), r.get('stopped_because'))}{reached}")
     settings = record.get("search_settings") or {}

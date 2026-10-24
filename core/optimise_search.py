@@ -1107,6 +1107,8 @@ class _Search:
                "best_before": before["objective"] if before else None, "evaluations": 0}
         if aim is not None and aim != target:
             log["search_target"] = aim
+        if spec.get("auto"):
+            log["by"] = "FI"  # FI continued it itself: the search was still improving when its budget ran out
         # The round spends what it was given, never what an earlier part of the search left unused; the budget the
         # record states is the plan's and every round's.
         budget_after = self.total + added
@@ -2301,7 +2303,12 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
                      f"{level_says(best['level'])}.")
     rounds = [r for r in outcome.get("rounds") or [] if isinstance(r, dict)]
     if rounds:
-        says += (f" The search was continued {len(rounds)} time(s) at the person's request "
+        by_fi = sum(1 for r in rounds if r.get("by") == "FI")
+        who = ("at the person's request" if not by_fi else
+               "by FI, because it was still improving when its budget ran out" if by_fi == len(rounds) else
+               f"({len(rounds) - by_fi} at the person's request, {by_fi} by FI because it was still improving when its "
+               "budget ran out)")
+        says += (f" The search was continued {len(rounds)} time(s) {who} "
                  f"({sum(int(r.get('added') or 0) for r in rounds)} more evaluation(s) allowed).")
     says += (" Found and scored at the search's own numerical settings only; it has not been recomputed at finer "
              "settings.")
