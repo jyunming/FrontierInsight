@@ -439,8 +439,17 @@ def test_a_sweep_with_a_setting_that_changes_nothing_runs_and_says_so(tmp_path: 
         protocol={"grid": {"flow": [1.0, 2.0, 3.0], "coating": ["bare", "painted"]}}, deterministic=True,
         simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
     cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    # FI measured that the coating reaches no result: the simulation is sent back once, told which setting.
+    sent = asyncio.run(runner.execute(cmd, cwd=root, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert sent.returncode == 1 and runner.failed_script == "simulate.py" and "changing coating" in sent.stderr
+    assert "`flow`" not in (runner.no_difference or "") and "flow," not in sent.stderr
+    # The repair is spent: the run goes on and the fact is said.
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=root,
+        protocol={"grid": {"flow": [1.0, 2.0, 3.0], "coating": ["bare", "painted"]}}, deterministic=True,
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
     result = asyncio.run(runner.execute(cmd, cwd=root, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
-    assert result.returncode == 0 and runner.flat is None, "an observation, not a fault: the run goes on"
+    assert result.returncode == 0 and runner.flat is None, "an observation after the repair: the run goes on"
     assert runner.no_difference and "`coating`" in runner.no_difference and "`flow`" not in runner.no_difference
 
 
@@ -524,7 +533,8 @@ def test_a_sweep_whose_only_moving_number_is_a_timing_names_the_setting_that_cha
         simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
     cmd = [sys.executable, str(root / "code" / "experiment.py")]
     result = asyncio.run(runner.execute(cmd, cwd=root, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
-    assert result.returncode == 0 and runner.flat is None
+    # The timing is left out, so `coating` is found and the simulation is sent back once (it used to be a note only).
+    assert result.returncode == 1 and runner.failed_script == "simulate.py"
     assert runner.no_difference and "`coating`" in runner.no_difference and "`flow`" not in runner.no_difference
 
 

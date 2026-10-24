@@ -334,6 +334,12 @@ main()
 HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + HARNESS_BODY
 
 
+#: Written when the simulation was sent back once because settings of the study changed none of the plan's declared
+#: results: after it the fact is only recorded (once per quest). The same file the search's coarse scan writes
+#: (core/optimise.py ``UNCHANGED_SENT``).
+UNCHANGED_SENT = Path(".fi") / "optimisation" / "scan_unchanged_sent.json"
+
+
 def numerical_axes(protocol: Any) -> set[str]:
     """The names of the numerical settings of a protocol (a measurement's ``numerical_settings``, or a search's under
     ``optimisation``): resolutions FI's check at finer settings judges, never a setting the study compares."""
@@ -1107,12 +1113,23 @@ class TrialsRunner:
                 self.log.info("[execute] every setting gave the same numbers, and the simulation's code does read the settings: "
                               "kept as an observed absence of difference, not a fault. %s", self.no_difference)
         elif seen is None:
-            # Some results moved, but one setting may still have moved none of them (core/flat_output.py).
-            unchanged = _flat.unchanged_axes(run.cells, skip=numerical_axes(protocol), ignore=unsteady)
-            if unchanged:
-                self.no_difference = _flat.unchanged_axes_note(unchanged)
+            # Some results moved, but one setting may still have moved none of the plan's declared results
+            # (core/flat_output.py). FI measured that: the same record that shows it is what sends the simulation back.
+            from . import metric_spec as _metric_spec
+
+            declared = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id")]
+            unchanged = _flat.unchanged_axes(run.cells, skip=numerical_axes(protocol), ignore=unsteady,
+                                             declared=declared)
+            notes = [_flat.unchanged_axes_note(unchanged)] if unchanged else []
+            twins = _flat.identical_results(run.cells, declared=declared, ignore=unsteady)
+            if twins:
+                notes.append(_flat.identical_results_note(twins))
+            if notes:
+                self.no_difference = " ".join(notes)
                 if self.log is not None:
                     self.log.warning("[execute] %s", self.no_difference)
+            if unchanged and self._unchanged_repair_left():
+                return self._unchanged_result(unchanged, run, started)
         if flat is not None:
             self.flat = flat
             self.failed_script = self.simulate.name
@@ -1151,6 +1168,41 @@ class TrialsRunner:
             stderr=(run.stderr() + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
         )
 
+
+    def _unchanged_repair_left(self) -> bool:
+        """Whether settings that changed no declared result send the simulation back: once per quest, while a repair is
+        left (afterwards the fact is only recorded and given to the writer, as before)."""
+        left = self._repairs_left() if callable(self._repairs_left) else self._repairs_left
+        return (left is None or bool(left)) and not (self.quest_root / UNCHANGED_SENT).is_file()
+
+    def _unchanged_result(self, unchanged: list[tuple[str, int]], run: TrialRun, started: float) -> Any:
+        """The run, sent back to be repaired once: settings of the study changed none of the results the plan declares
+        (core/flat_output.py ``unchanged_axes``, numbers that differ on a second call left out). The same words as the
+        coarse scan of a search uses (core/optimise.py), so a setting is judged the same way in both kinds of study."""
+        from core.execution import ExecutionResult
+
+        names = ", ".join(a for a, _ in unchanged)
+        pairs = min(p for _, p in unchanged)
+        try:
+            (self.quest_root / UNCHANGED_SENT).parent.mkdir(parents=True, exist_ok=True)
+            (self.quest_root / UNCHANGED_SENT).write_text(
+                json.dumps({"settings": [a for a, _ in unchanged], "pairs": pairs}, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        self.flat = self.no_difference
+        self.failed_script = self.simulate.name
+        say = (f"FI's run found that changing {names} changed none of the results the plan declares: in each of at least "
+               f"{pairs} pairs of settings that differ in one of them alone, every one of those results was the same "
+               "(numbers that differ when the same setting is run again, such as a timing, were left out). The "
+               "simulation does not let these settings reach its results, so the study would compare one result "
+               f"repeated. Repair simulate.py so that each of {names} changes what the simulation computes as the plan "
+               "says it should, and keep every setting the plan compares (do not remove one from the plan or from the "
+               "grid). If simulate.py already lets a setting reach what it computes and the plan's own equations give it "
+               "no effect there, leave that setting's code as it is; change nothing else.")
+        if self.log is not None:
+            self.log.warning("[execute] %s", say)
+        return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
+                               stderr=f"{run.stderr()}\n{say}".strip())
 
     def _check_trials(self, run: TrialRun, protocol: dict[str, Any], started: float) -> Any:
         """FI's two checks of what the trials gave (core/trial_checks.py): the failed trials of each setting, and the reported

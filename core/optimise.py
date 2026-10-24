@@ -848,7 +848,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             in_each_run=_search.in_each_run(block) or None,
             log=log) if entry == "run_cell" and deadline - time.monotonic() > 1 else set()
         scan_unsteady.update(unsteady)
-        unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol), ignore=unsteady)
+        unchanged = _flat.unchanged_axes(trial_run.cells, skip=_trials.numerical_axes(protocol), ignore=unsteady,
+                                         declared=watched_results(protocol))
         if unchanged:
             scan_note.append(_flat.unchanged_axes_note(unchanged))
             if log is not None:

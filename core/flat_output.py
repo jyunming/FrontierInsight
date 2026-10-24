@@ -252,7 +252,34 @@ def _observed_in(by_cell: list[tuple[dict[str, Any], dict[str, list[float]]]]) -
 MIN_PAIRS = 2
 
 
-def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = (), ignore: Iterable[str] = ()) -> list[tuple[str, int]]:
+def declared_only(names: Iterable[str], present: Iterable[str]) -> set[str]:
+    """The names to leave out so that only the plan's declared results (``names``) are compared, given the names a run
+    returned (``present``): everything returned that the plan did not declare (a timing, a counter, a diagnostic the
+    simulation prints). ``set()`` (compare everything returned) when the run returned none of the declared names: FI cannot
+    tell which numbers are the results then, and judging nothing would hide a setting that changed nothing."""
+    declared = {str(n) for n in names}
+    returned = {str(n) for n in present}
+    if not declared & returned:
+        return set()
+    return returned - declared
+
+
+def returned_names(cells: list[Any]) -> set[str]:
+    """Every name a run of ``cells`` (:class:`core.trial_runner.CellRun` objects) returned a number under, an in-run value's
+    numbers under their plain name."""
+    out: set[str] = set()
+    for c in cells:
+        for r in getattr(c, "rows", []):
+            if r.get("status") != "ok":
+                continue
+            for _at, name, v in _in_run.flat("", r.get("values") or {}):
+                if _is_number(v):
+                    out.add(str(name))
+    return out
+
+
+def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = (), ignore: Iterable[str] = (),
+                   declared: Iterable[str] | None = None) -> list[tuple[str, int]]:
     """The settings of a study that changed no number the simulation returned, with how many pairs showed it:
     ``[(axis, pairs)]``. ``cells`` are :class:`core.trial_runner.CellRun` objects. For each varied axis, the pairs are
     the settings that differ in that axis alone; the axis is listed when there are at least :data:`MIN_PAIRS` of them and
@@ -262,8 +289,13 @@ def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = (), ignore: Iterab
     a result of it. ``skip``: axes left out (numerical settings, which the check at finer settings judges). Each
     value's numbers a run returns (``in_each_run``) are compared with its plain ones, under the value's name. A value's
     own record of the per-setting summary (``level``) is not a setting of the study. ``ignore``: names of numbers that
-    are no result of the setting (a timing: :func:`core.trial_runner.unsteady_names`), never compared."""
+    are no result of the setting (a timing: :func:`core.trial_runner.unsteady_names`), never compared. ``declared``: the
+    names of the results the plan declares: when the run returned any of them, only those are compared (a timing or a
+    counter the simulation also returns moves with the machine, not with the setting, and used to hide a setting that
+    changed every declared result not at all); when it returned none of them, every number is compared as before."""
     left_out = {str(n) for n in ignore}
+    if declared:
+        left_out |= declared_only(declared, returned_names(cells))
     rows: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
     for c in cells:
         if getattr(c, "level", None):
@@ -313,6 +345,62 @@ def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = (), ignore: Iterab
         if not moved and pairs >= MIN_PAIRS:
             out.append((axis, pairs))
     return out
+
+
+#: Two results are "identical" once they agree in at least this many trials (one agreeing trial proves nothing).
+MIN_IDENTICAL_TRIALS = 3
+
+
+def identical_results(cells: list[Any], *, declared: Iterable[str] | None = None,
+                      ignore: Iterable[str] = ()) -> list[tuple[str, str, int]]:
+    """Pairs of results the run returned that are the same number in every trial of every setting, while each of them
+    differs from one trial to another: ``[(a, b, trials)]``. Two estimators (or two arms of a comparison) that agree
+    trial by trial are not two findings: either the second is the first computed again, or they are equal by construction
+    (an identity of the model), and a paper must not present "no difference between them" as something the study found.
+    ``declared``: only the plan's declared results are compared (the whole run when none of them was returned);
+    ``ignore``: names that are no result (a timing). A result that is the same in every trial is not paired: that is a
+    constant, which :func:`observed_flat_sweep` judges."""
+    left_out = {str(n) for n in ignore}
+    if declared:
+        left_out |= declared_only(declared, returned_names(cells))
+    columns: dict[str, list[float]] = {}
+    complete = True
+    count = None
+    for c in cells:
+        if getattr(c, "level", None):
+            continue
+        for r in getattr(c, "rows", []):
+            if r.get("status") != "ok":
+                continue
+            row = {str(name) if not at else f"{at}: {name}": float(v) for at, name, v in _in_run.flat("", r.get("values") or {})
+                   if _is_number(v) and str(name) not in left_out}
+            for n, v in row.items():
+                columns.setdefault(n, []).append(v)
+            count = (count or 0) + 1
+    if not count:
+        return []
+    names = sorted(n for n, v in columns.items() if len(v) == count and _varies(v))
+    out: list[tuple[str, str, int]] = []
+    taken: set[str] = set()
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if b in taken or count < MIN_IDENTICAL_TRIALS:
+                continue
+            if all(same(x, y) for x, y in zip(columns[a], columns[b])):
+                out.append((a, b, count))
+                taken.add(b)
+    return out
+
+
+def identical_results_note(pairs: list[tuple[str, str, int]]) -> str:
+    """The plain observation of :func:`identical_results`, for run.log, the analysis and the writer; ``""`` for none."""
+    if not pairs:
+        return ""
+    said = "; ".join(f"`{a}` and `{b}` (in all {n} trials)" for a, b, n in pairs[:4])
+    return (f"These results were the same number in every trial, while each changed from trial to trial: {said}. Two "
+            "results that agree trial by trial are one result written twice, or equal by construction of the model, so "
+            "'no difference between them' is not a finding of the study: report that they are identical by design (or "
+            "that one is computed from the other) and draw no conclusion about which is better.")
 
 
 def _short(value: Any, limit: int = 40) -> str:
