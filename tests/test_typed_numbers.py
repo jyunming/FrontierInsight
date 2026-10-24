@@ -204,7 +204,7 @@ def test_a_citation_before_the_number_in_its_clause_covers_it():
 def test_a_semicolon_inside_a_citation_is_not_a_clause_boundary():
     """A review finding: the ";" of "[W1; W2]" or "(Smith 2020; Lee 2021)" cut the clause, so the cited number looked uncited."""
     assert _typed("As reported in [W1; W2], the rate was 35%.") == []
-    assert _typed("As reported (Smith 2020; Lee 2021), the rate was 35%.") == []
+    assert tn._clause_breaks("As reported (Smith 2020; Lee 2021), then [3]; and more.", []) == [len("As reported (Smith 2020; Lee 2021), then [3]")]
     assert _typed("As reported in [W1; W2]; the rate was 35%.") == ["35%"]
 
 
