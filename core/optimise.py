@@ -1547,6 +1547,9 @@ class OptimisationRunner:
                               "its evaluations gave %d%% of its improvement): FI continues it with %d more "
                               "evaluation(s), %d s left of the time limit", round(100 * fired["share"]), per_start,
                               int(left))
+            left = int(timeout_s - (time.monotonic() - started))  # again: writing the round took time too
+            if left < 1:
+                break
             round_started = time.monotonic()
             run = await search(left)
             path = self.quest_root / ROUNDS_PATH
