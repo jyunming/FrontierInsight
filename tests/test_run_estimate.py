@@ -401,7 +401,8 @@ def test_replay_a_part_that_never_finishes_makes_the_estimate_a_lower_bound_over
     probes, why = asyncio.run(est.measure(ex, sys.executable, root, "code/simulate.py", grid, runs=1, deterministic=True,
                                           limit_s=600.0, budget_s=600.0))
     assert why == "" and probes is not None
-    assert sorted(p.index for p in probes if p.axis == est.PART) == [0, 1, 2], "a setting of every part was timed"
+    # each part is timed (a part whose costliest-looking setting differs from its middle one is timed at both)
+    assert sorted({p.index for p in probes if p.axis == est.PART}) == [0, 1, 2], "a setting of every part was timed"
     e = est.estimate(grid, 1, True, probes)
     assert e is not None and e.at_least and est.known_too_long(e, 600.0)
     # timed as before (no setting of the parts), the same study looks small: the slow part is never reached

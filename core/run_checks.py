@@ -1110,6 +1110,8 @@ class RunChecksMixin:
         if est is None:
             return None
         searched = 0
+        core_est: Any = None  # the scan and the search without the check, once the check was added
+        check_s = 0.0
         checked = 0  # the evaluations of FI's check at finer settings, counted when they make the study too long
         whole: Any = None  # the scan with the search's evaluations, when one evaluation was timed
         if not _estimate.known_too_long(est, limit_s):
@@ -1168,9 +1170,11 @@ class RunChecksMixin:
                 check_n = 0
             unit = per_eval or first_s or None
             if check_n and unit:
-                with_check = _replace(whole if whole is not None else est,
-                                      seconds=(whole if whole is not None else est).seconds + unit / runs * check_n,
-                                      at_least=True)
+                core_est = whole if whole is not None else est
+                # The check runs its designs ``at_once`` at a time like the search, each as much slower as FI measured.
+                share = (slowdown if slowdown is not None else 1.0) / at_once if at_once > 1 else 1.0
+                check_s = unit / runs * check_n * share
+                with_check = _replace(core_est, seconds=core_est.seconds + check_s, at_least=True)
                 whole = with_check
                 if _estimate.known_too_long(with_check, limit_s):
                     est, checked = with_check, check_n
@@ -1207,7 +1211,9 @@ class RunChecksMixin:
                     f"{'at least ' if lower else ''}{_estimate.plain_duration(per_eval or 0.0)}); FI does not run a smaller "
                     "study than the plan's")
         self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
-        fits_in = self._what_fits(est, limit_s, search=True)
+        # The check's time comes out of the room for settings first: it is not a cost of each setting.
+        fits_in = (self._what_fits(core_est, max(1.0, limit_s - check_s * _estimate.SAFETY), search=True)
+                   if checked and core_est is not None else self._what_fits(est, limit_s, search=True))
         if fits_in is not None:
             # FI's own check of the best design at finer settings runs after the search and is not in its budget: the plan
             # is told what it costs, so the scan and the search are sized to the time left.

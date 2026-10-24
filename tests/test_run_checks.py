@@ -412,9 +412,14 @@ async def test_a_resume_after_the_runs_were_lowered_does_not_lower_them_a_second
 @pytest.mark.asyncio
 async def test_nothing_is_timed_for_a_later_pass_or_a_cluster_job(tmp_path: Path) -> None:
     eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8)
-    assert await eng._size_the_run({"iteration": 1}, runner, sys.executable, None) is None and ex.calls == 0
+    # A redesign (iteration 1) cannot be cut but IS timed, so its estimate is said before it runs (a redesign once ran four
+    # hours with nothing said); it is never stopped or recorded as sized.
+    assert await eng._size_the_run({"iteration": 1}, runner, sys.executable, None) is None and ex.calls > 0
+    assert not (eng.fi_dir / "run_estimate.json").exists()
     eng.config.execution.background_jobs = True
-    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None and ex.calls == 0
+    after_redesign = ex.calls
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None and ex.calls == after_redesign
+    assert await eng._size_the_run({"iteration": 1}, runner, sys.executable, None) is None and ex.calls == after_redesign
 
 
 FAILS_AT_END = '''\
@@ -966,7 +971,8 @@ async def test_a_search_whose_evaluations_do_not_fit_the_time_left_after_its_sca
     assert "the coarse scan's 3 settings and the search's 20,000 evaluations" in text, text
     fit = patch["exec_result"]["too_long_fit"]
     assert fit["search"] is True and fit["settings"] == 20003
-    assert fit["settings_that_fit"] == int(3600 / (1.5 * 15.0))
+    # FI's check of the best design (10 runs, at least 15 s each) takes its share of the time out of the room for settings
+    assert fit["settings_that_fit"] == int((3600 - 1.5 * 10 * 15.0) / (1.5 * 15.0))
     block["evaluation_budget"]["per_start"] = 10  # 80 evaluations: 83 x 15 s = 21 min, 31 min with the margin
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
 
@@ -1008,7 +1014,8 @@ async def test_a_search_that_asks_for_designs_together_is_counted_at_the_setting
     # The line a person reads counts the search too, not the coarse scan alone (3 settings: about a minute).
     said = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
     line = next(x for x in said.splitlines()[::-1] if "the search's coarse scan" in x)
-    assert "and its 1,000 evaluations: FI estimates the experiment takes about 1 h 16 min" in line, line
+    # the check of the best design at finer settings is counted too (a lower bound), run 8 at a time like the rest
+    assert "and its 1,000 evaluations: FI estimates the experiment takes at least 1 h" in line, line
     assert "(the coarse scan alone: 27 seconds)" in line
     # A library method runs in the quest's own Python one design at a time: counted one after another.
     block["search_method"] = "scipy:minimize"
