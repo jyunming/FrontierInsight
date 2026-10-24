@@ -21404,7 +21404,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         deferred = bool(self._typed_pass_hits(paper_md, state))
         removed: list[tuple[str, str]] = []
         if keyed and left <= 0 and not deferred and _paper_facts.typed_hits(
-                paper_md, _paper_facts.plan_protocol(self.quest_root, protocol), topic, self.quest_root):
+                paper_md, _paper_facts.plan_protocol(self.quest_root, protocol), topic):
             removed = self._take_out_typed_numbers(state, protocol)
             if removed:
                 path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
@@ -21453,7 +21453,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             topic = str(self.config.topic or "")
             plan = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))
-            hits = _paper_facts.typed_hits(paper_md, plan, topic, self.quest_root) + _paper_facts.value_hits(paper_md, self.quest_root)
+            hits = _paper_facts.typed_hits(paper_md, plan, topic) + _paper_facts.value_hits(paper_md, self.quest_root)
             # Only a hit that quotes its sentence can be edited (the passage editor refuses a round with any other, such as
             # the count of typed numbers past the first sentences); the numbers of the rest are taken out after the edit.
             return [h for h in hits if paper_patch._QUOTED in h]
@@ -21473,7 +21473,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             before = Path(path).read_bytes()
             plan = _typed_numbers.plan_numbers(_paper_facts.plan_protocol(self.quest_root, protocol),
                                                str(self.config.topic or ""))
-            text, taken = _typed_numbers.remove(before.decode("utf-8"), plan, _paper_facts.run_counts(self.quest_root))
+            text, taken = _typed_numbers.remove(before.decode("utf-8"), plan)
             if not taken:
                 return []
             # Bytes back as bytes: text mode would write the draft's own CRLF as CR CR LF on Windows, which every later

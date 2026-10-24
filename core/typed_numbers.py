@@ -180,8 +180,6 @@ class Typed:
     # sentence end), before or after it. A number in another clause, after a ";", is the paper's own and is not left to the
     # claim check.
     cited: bool
-    # The few characters after the number (inside its sentence): what the number counts, for a count of FI's own.
-    after: str = ""
 
 
 def _sentence(text: str, start: int, end: int) -> tuple[int, int]:
@@ -261,8 +259,7 @@ def numbers(markdown: str) -> list[Typed]:
             integer=not m.group("frac") and exp == 0 and not m.group("pct"),
             in_math=any(x <= s < y for x, y in maths),
             structural=label or any(x <= s < y for x, y in cites) or bool(_LEVEL_AFTER.match(text, e)),
-            sentence=_plain(sentence), cited=bool(_CITE.search(text[clause_start:clause_end])),
-            after=text[e:min(b, e + 48)]))
+            sentence=_plain(sentence), cited=bool(_CITE.search(text[clause_start:clause_end]))))
     return out
 
 
@@ -309,29 +306,9 @@ def plan_numbers(protocol: dict[str, Any] | None, topic: str = "") -> frozenset[
     return frozenset(found)
 
 
-#: What a count of FI's own is a count of: the words that may follow the number. A number equal to FI's count of settings
-#: but followed by anything else ("12 volunteers") is not that count and stays a typed number.
-_COUNT_NOUNS = {
-    "settings": re.compile(r"^\W{0,2}(?:[\w-]+\s+){0,2}?(?:settings?|configurations?|conditions?|cells?|scenarios?|grid points?)\b", re.I),
-    "trials_per_setting": re.compile(r"^\W{0,2}(?:[\w-]+\s+){0,2}?(?:trials?|runs?|replicates?|repetitions?|simulations?|"
-                                    r"independent runs?)\b", re.I),
-    "trials_failed": re.compile(r"^\W{0,2}(?:[\w-]+\s+){0,2}?(?:trials?|runs?)\b", re.I),
-}
-
-
-def is_own_count(n: Typed, counts: dict[str, frozenset[int]] | None) -> bool:
-    """A whole number equal to a count FI holds from its own records (the settings, the trials per setting, the trials that
-    failed), followed by what it counts. FI fills such a count itself (``{{settings}}``, ``{{trials_per_setting}}``), so
-    the writer typing the same value is not a made-up result: it reads as FI's value and is kept."""
-    if not counts or not n.integer or n.in_math or abs(n.value) > 10**9:
-        return False
-    return any(int(n.value) in values and values and _COUNT_NOUNS[name].match(n.after)
-               for name, values in counts.items() if name in _COUNT_NOUNS)
-
-
-def allowed(n: Typed, plan: frozenset[Decimal], counts: dict[str, frozenset[int]] | None = None) -> bool:
-    """Rule R1 for one typed number. ``counts`` are the counts FI holds from its own records, by placeholder name."""
-    if n.structural or is_own_count(n, counts):
+def allowed(n: Typed, plan: frozenset[Decimal]) -> bool:
+    """Rule R1 for one typed number."""
+    if n.structural:
         return True
     if n.value in plan or (n.pct and n.value / 100 in plan):
         return True
@@ -350,27 +327,25 @@ class Report:
         return sum(len(tokens) for _s, tokens in self.sentences)
 
 
-def typed_outside_the_plan(markdown: str, plan: frozenset[Decimal],
-                           counts: dict[str, frozenset[int]] | None = None) -> list[Typed]:
+def typed_outside_the_plan(markdown: str, plan: frozenset[Decimal]) -> list[Typed]:
     """The numbers of ``markdown`` that R1 does not allow and the claim check does not own (a cited sentence's)."""
-    return [n for n in numbers(markdown) if not allowed(n, plan, counts) and not n.cited]
+    return [n for n in numbers(markdown) if not allowed(n, plan) and not n.cited]
 
 
-def report(markdown: str, plan: frozenset[Decimal], counts: dict[str, frozenset[int]] | None = None) -> Report:
-    bad = typed_outside_the_plan(markdown, plan, counts)
+def report(markdown: str, plan: frozenset[Decimal]) -> Report:
+    bad = typed_outside_the_plan(markdown, plan)
     by: dict[str, list[str]] = {}
     for n in bad:
         by.setdefault(n.sentence, []).append(n.token)
-    cited = sum(1 for n in numbers(markdown) if n.cited and not n.structural and not allowed(n, plan, counts))
+    cited = sum(1 for n in numbers(markdown) if n.cited and not n.structural and not allowed(n, plan))
     return Report(tuple((s, tuple(dict.fromkeys(t))) for s, t in by.items()), cited)
 
 
-def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mismatch",
-         counts: dict[str, frozenset[int]] | None = None) -> list[str]:
+def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mismatch") -> list[str]:
     """One must-fix hit per sentence that holds a number R1 does not allow, shaped ``name: message — “sentence”`` (the shape
     the passage editor locates, :mod:`core.paper_patch`). ``markdown`` is the paper with FI's values as the writer's keys
     (:func:`core.paper_facts.to_placeholders`), so the sentence quoted is the writer's own text."""
-    rep = report(markdown, plan, counts)
+    rep = report(markdown, plan)
     out: list[str] = []
     for sentence, tokens in rep.sentences[:MAX_SENTENCES]:
         many = len(tokens) > 1
@@ -389,11 +364,10 @@ def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mism
     return out
 
 
-def remove(markdown: str, plan: frozenset[Decimal],
-           counts: dict[str, frozenset[int]] | None = None) -> tuple[str, list[tuple[str, str]]]:
+def remove(markdown: str, plan: frozenset[Decimal]) -> tuple[str, list[tuple[str, str]]]:
     """``markdown`` with each number R1 does not allow replaced by :data:`REMOVED`, and ``(number, sentence)`` for each one
-    taken out (the sentence as it read before). A count equal to FI's own (``counts``) is kept: it is FI's value."""
-    bad = typed_outside_the_plan(markdown, plan, counts)
+    taken out (the sentence as it read before)."""
+    bad = typed_outside_the_plan(markdown, plan)
     taken = [(n.token, n.sentence) for n in bad]
     text = markdown or ""
     for n in sorted(bad, key=lambda x: -x.start):
