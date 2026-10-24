@@ -846,13 +846,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                          "in the search's budget", len(rows), worked)
         return rows
 
-    # The plan's results, watched for a design that changes none of them (core/optimise_search.py, ``no_effect``).
-    # Not a result the plan itself expects to stay put (an invariant, a fixed-input check): its staying put says nothing
-    # about the design.
-    from . import degenerate_results as _degenerate
-
-    constant = _degenerate.expected_constants(protocol)
-    results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
+    results = watched_results(protocol)
     gen = _search.compare(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1,
                           stop_flat=stop_flat, stop_stepped=stop_stepped, stream=at_once > 1)
     replay_space = _search.Space(block["design_variables"]) if replay else None
@@ -1231,6 +1225,16 @@ def trial_cells(run: SearchRun, quest_root: Path) -> tuple[list[dict[str, Any]],
                       "metrics": {}})
         reasons[EVALUATIONS_KEY] = Counter(str(r.get("reason") or "the evaluation failed") for r in failed)
     return cells, reasons
+
+
+def watched_results(protocol: dict[str, Any]) -> list[str]:
+    """The plan's results, watched for a design that changes none of them (core/optimise_search.py, ``no_effect``) and
+    for a compared alternative that gives the same results as the first. Not a result the plan itself expects to stay
+    put (an invariant, a fixed-input check): its staying put says nothing about the design."""
+    from . import degenerate_results as _degenerate
+
+    constant = _degenerate.expected_constants(protocol)
+    return [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
 
 
 class OptimisationRunner:
