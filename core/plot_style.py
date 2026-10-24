@@ -776,7 +776,65 @@ try:
                 points += count
             return line_px, points
 
-        def _fi_layout(fig):
+        def _fi_axis_texts(ax, axis):
+            # The tick labels of one axis that are drawn: only the ticks inside the
+            # visible range (matplotlib keeps spare tick objects beyond it), and only
+            # the labels that show text.
+            lo, hi = sorted(axis.get_view_interval())
+            texts = []
+            for tick in axis.get_major_ticks():
+                if lo <= tick.get_loc() <= hi:
+                    for label in (tick.label1, tick.label2):
+                        if label.get_visible() and label.get_text().strip():
+                            texts.append(label)
+            return texts
+
+        def _fi_label_findings(fig, renderer, cropped):
+            # Tick labels run into each other, an axis label is drawn over the tick
+            # labels, or a label runs past the edge of the figure. Measured on the drawn
+            # canvas, with the same share as a title: a little touching is not a clash.
+            # A label past the canvas edge only counts when the saved picture is that
+            # canvas: a tight crop widens to keep every label (see _fi_overflow_box).
+            found = []
+            figure_box = fig.bbox
+            for ax in fig.get_axes():
+                for axis_name, axis in (("x", ax.xaxis), ("y", ax.yaxis)):
+                    ticks = _fi_axis_texts(ax, axis)
+                    boxes = [(t, t.get_window_extent(renderer)) for t in ticks]
+                    for i, (first, a) in enumerate(boxes):
+                        for second, b in boxes[i + 1:]:
+                            share = _fi_share(a, b)
+                            if share >= _FI_TITLE_SHARE:
+                                found.append({"check": "tick_label_overlap", "axis": axis_name,
+                                              "text": first.get_text(), "over": second.get_text(),
+                                              "share": round(share, 2)})
+                    label = axis.label
+                    if not label.get_visible() or not label.get_text().strip():
+                        continue
+                    label_box = label.get_window_extent(renderer)
+                    all_ticks = _fi_axis_texts(ax, ax.xaxis) + _fi_axis_texts(ax, ax.yaxis)
+                    for tick in all_ticks:
+                        share = _fi_share(label_box, tick.get_window_extent(renderer))
+                        if share >= _FI_TITLE_SHARE:
+                            found.append({"check": "axis_label_overlap", "axis": axis_name,
+                                          "text": label.get_text(), "over": tick.get_text(),
+                                          "share": round(share, 2)})
+            # A label past the canvas edge, a pixel of rounding allowed.
+            edge = 1.0
+            for ax in ([] if cropped else fig.get_axes()):
+                texts = [ax.xaxis.label, ax.yaxis.label] + _fi_axis_texts(ax, ax.xaxis) + _fi_axis_texts(ax, ax.yaxis)
+                for text in texts:
+                    if not text.get_visible() or not text.get_text().strip():
+                        continue
+                    box = text.get_window_extent(renderer)
+                    if box.width <= 0 and box.height <= 0:
+                        continue
+                    if (box.x0 < figure_box.x0 - edge or box.x1 > figure_box.x1 + edge
+                            or box.y0 < figure_box.y0 - edge or box.y1 > figure_box.y1 + edge):
+                        found.append({"check": "label_clipped", "text": text.get_text()})
+            return found
+
+        def _fi_layout(fig, cropped=False):
             # Text drawn over text, and a legend drawn over the data, measured on the
             # canvas the figure was saved from. None when it could not be measured.
             found = []
@@ -807,6 +865,12 @@ try:
                                       "line_px": round(line_px, 1), "points": points})
             except Exception:
                 return None
+            # The label checks have their own guard: a defect in them must not drop the
+            # title and legend findings above.
+            try:
+                found.extend(_fi_label_findings(fig, renderer, cropped))
+            except Exception:
+                pass
             return found
 
         _fi_savefig = _FiFigure.savefig
@@ -815,9 +879,11 @@ try:
 
         def _fi_recording_savefig(self, fname, *args, **kwargs):
             started = _fi_time.perf_counter()
+            # Read before the crop below rewrites bbox_inches: a tight crop keeps every label.
+            cropped = kwargs.get("bbox_inches", _fi_mpl.rcParams["savefig.bbox"]) == "tight"
             # A tight crop keeps an axis label that runs past the canvas edge: the crop is the widened box
             # (see _fi_overflow_box), since savefig's own tight box leaves that label out.
-            if kwargs.get("bbox_inches", _fi_mpl.rcParams["savefig.bbox"]) == "tight":
+            if cropped:
                 try:
                     pad = float(kwargs.get("pad_inches", _fi_mpl.rcParams["savefig.pad_inches"]))
                     box = _fi_overflow_box(self, _fi_draw(self))
@@ -841,7 +907,7 @@ try:
                         pass
                     # Measuring draws the figure once more, so a figure that was slow to
                     # save is not measured.
-                    layout = _fi_layout(self) if saved_in < 10 else None
+                    layout = _fi_layout(self, cropped) if saved_in < 10 else None
                     if layout is not None:
                         record["layout"] = layout
                     # Each seed's lines, for the engine to redraw a figure as the

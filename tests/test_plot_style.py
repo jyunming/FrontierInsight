@@ -464,6 +464,30 @@ def test_bootstrap_records_a_legend_drawn_over_scatter_points(tmp_path) -> None:
     assert layout("clean") == []
 
 
+def test_bootstrap_records_tick_labels_that_run_into_each_other(tmp_path) -> None:
+    """Long x tick labels on a small figure, each wider than its tick spacing:
+    neighbours are drawn over each other. The old code measured only titles and
+    legends, so this figure recorded nothing. The clean figure (short labels, a
+    roomy canvas) must record nothing."""
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots(figsize=(3, 3))\n"
+        "ax.plot([0, 1, 2], [0, 1, 0]); ax.set_xticks([0, 1, 2])\n"
+        "ax.set_xticklabels(['settle_time_alpha_long_label', 'settle_time_beta_long_label', "
+        "'settle_time_gamma_long_label'])\n"
+        "fig.savefig('crowded.png')\n"
+        "fig2, ax2 = plt.subplots(figsize=(8, 5))\n"
+        "ax2.plot([0, 1, 2], [0, 1, 0]); ax2.set_xticks([0, 1, 2]); ax2.set_xticklabels(['a', 'b', 'c'])\n"
+        "ax2.set_xlabel('gain'); ax2.set_ylabel('hit_rate'); fig2.savefig('clean.png')\n"
+    ))
+    found = layout("crowded")
+    overlaps = [f for f in found if f["check"] == "tick_label_overlap"]
+    assert overlaps and all(f["axis"] == "x" and f["share"] >= 0.2 for f in overlaps)
+    assert any(f["text"] == "settle_time_alpha_long_label" and f["over"] == "settle_time_beta_long_label"
+               for f in overlaps)
+    assert layout("clean") == []
+
+
 def test_bootstrap_measures_a_legend_on_a_log_axis_where_it_is_drawn(tmp_path) -> None:
     """On a log-log axis a diagonal line is still a diagonal: the legend is
     measured in pixels, not in data units. Data that lies past the axis limits

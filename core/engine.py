@@ -31880,6 +31880,23 @@ def _figure_overlap_findings(state: QuestState) -> list[str]:
                         f'figures/{name}: the figure title "{_one_line(item.get("text"))}" is drawn '
                         f'over the panel title "{_one_line(item.get("over"))}"'
                     )
+                elif item.get("check") == "tick_label_overlap":
+                    found.append(
+                        f'figures/{name}: the {_one_line(item.get("axis"), 4)}-axis tick labels '
+                        f'"{_one_line(item.get("text"), 40)}" and "{_one_line(item.get("over"), 40)}" '
+                        "run into each other"
+                    )
+                elif item.get("check") == "axis_label_overlap":
+                    found.append(
+                        f'figures/{name}: the {_one_line(item.get("axis"), 4)}-axis label '
+                        f'"{_one_line(item.get("text"))}" is drawn over the tick label '
+                        f'"{_one_line(item.get("over"), 40)}"'
+                    )
+                elif item.get("check") == "label_clipped":
+                    found.append(
+                        f'figures/{name}: the label "{_one_line(item.get("text"))}" runs past the edge '
+                        "of the figure"
+                    )
                 elif item.get("check") == "legend_over_data":
                     names = [_one_line(n, 30) for n in (item.get("legend") or [])[:4]]
                     more = ", ..." if len(item.get("legend") or []) > 4 else ""
@@ -31939,7 +31956,7 @@ def _figure_overlap_directive(findings: list[str]) -> str:
     return (
         "FIGURE LAYOUT: the script exited 0, printed its RESULT_JSON and drew its figures, "
         "and those results stand: the account of a crash above does not apply. But the saved "
-        "figures have text or a legend drawn over what a reader needs, measured on the "
+        "figures have text, a legend or a label drawn over what a reader needs, measured on the "
         "finished canvas:\n"
         + "\n".join(f"- {finding}" for finding in findings[:8])
         + "\n\nChange only how these figures are laid out, so that nothing is drawn over "
@@ -31950,7 +31967,10 @@ def _figure_overlap_directive(findings: list[str]) -> str:
         "emptiest corner, which is not always empty. Keep the legend inside the saved image "
         "(bbox_inches=\"tight\" does that). For a figure title over a panel title: make "
         "room for it (fig.suptitle(..., y=1.02) with bbox_inches=\"tight\", or "
-        "fig.tight_layout(rect=(0, 0, 1, 0.94)), or a constrained layout).\n\n"
+        "fig.tight_layout(rect=(0, 0, 1, 0.94)), or a constrained layout). For tick labels that run "
+        "into each other: rotate them (plt.setp(ax.get_xticklabels(), rotation=30, ha=\"right\")), "
+        "or show fewer ticks. For an axis label drawn over tick labels, or a label past the edge of "
+        "the figure: make room (fig.subplots_adjust, or bbox_inches=\"tight\").\n\n"
         "Do NOT change any computation, data, parameter, use of the random seed, printed value, "
         "the final RESULT_JSON line, the file name of any figure, or what any panel plots: only "
         "positions, sizes and the number of legend columns. Return the whole script in `code`, one "
