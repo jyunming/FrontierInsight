@@ -164,3 +164,17 @@ def test_a_driver_that_answers_evaluate_many_reaches_the_same_outcome() -> None:
     assert [bool(p.get("same_as")) for p in outcome["levels"]] == [False, True, True]
     assert outcome["best"]["level"] == CUP
     assert _other_rows(outcome)[0]["elapsed_s"] == 0.5
+
+
+def test_run_py_compares_the_same_named_results_as_fis_search(tmp_path) -> None:
+    # code/run.py repeats FI's search: it must judge an alternative on the same results FI's search did, or it skips
+    # an alternative that FI searched (one that changes only a result the plan names).
+    from core import code_project
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text("def run_trial(setting, seed):\n    return {}\n", encoding="utf-8")
+    protocol = {"optimisation": BLOCK, "metrics": [{"id": "mass", "kind": "mean", "estimand": "the mass of the part", "unit": "one simulated part"}]}
+    study = code_project.study_of(code, protocol)
+    assert study is not None and study["results"] == ["mass"]
+    assert 'results=study.get("results")' in code_project.RUN_SOURCE
