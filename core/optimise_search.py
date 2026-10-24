@@ -2147,13 +2147,14 @@ def grid_too_large(grid):
         return ""
     if getattr(listed, "sub_studies", None):
         parts = ", ".join(f"`{name}` {n:,}" for name, n in sorted(sub_study_sizes(listed), key=lambda kv: -kv[1]))
-        return (f"the settings in `protocol.grid` and `protocol.sub_studies` are {size:,} (the settings of each sub-study, "
-                f"every combination of the values of the settings it varies): {parts}; FI does not list or run more than "
-                f"{MAX_LISTED_SETTINGS:,}")
+        return (f"the settings in `protocol.grid` and `protocol.sub_studies` are {size:,}, and FI does not list or run more "
+                f"than {MAX_LISTED_SETTINGS:,} (the settings of each sub-study, every combination of the values of the "
+                f"settings it varies): {parts}")
     axes = ", ".join(f"`{k}` {n} value{'s' if n != 1 else ''}"
                      for k, n in sorted(counts.items(), key=lambda kv: -kv[1]) if n > 1)
-    return (f"the settings in `protocol.grid` are {size:,} (every combination of the values of its {len(counts)} settings, "
-            f"each multiplying every other): {axes}; FI does not list or run more than {MAX_LISTED_SETTINGS:,}")
+    # The limit before the list: a console line cut at its length still says it.
+    return (f"the settings in `protocol.grid` are {size:,}, and FI does not list or run more than {MAX_LISTED_SETTINGS:,} "
+            f"(every combination of the values of its {len(counts)} settings, each multiplying every other): {axes}")
 
 
 def iter_grid_indexes(grid):

@@ -34,6 +34,9 @@ def test_the_real_grid_is_counted_and_named_axis_by_axis() -> None:
     assert "147,604,654,080,000" in said and "500,000" in said and "`protocol.grid`" in said
     assert math.prod(AXES.values()) == 147_604_654_080_000
     assert said.index("`spacing` 135 values") < said.index("`ring_inner_outer` 52 values") < said.index("`shape` 5 values")
+    # the console line cuts the sentence at 300 characters: the count and the limit come before the long list
+    many = {f"setting_{i}": [0, 1, 2] for i in range(40)}
+    assert "500,000" in search.grid_too_large(many)[:300] and len(search.grid_too_large(many)) > 300
     # the same count the run stops on
     with pytest.raises(search.TooManySettings) as caught:
         search.check_listable(BIG)
