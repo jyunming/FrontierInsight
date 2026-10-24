@@ -31,6 +31,14 @@ from core.result_checks import left_out_by_record as _left_out_by_record
 #: The table goes into the writer's evidence only up to this many rows; a longer one stays in its file.
 WRITER_MAX_ROWS = 200
 
+#: A row's ``status`` when no number stands in it. "not run": no trial ran for that setting (the record holds no value
+#: for it and no trial that succeeded), so there is nothing to describe, not even a failure. "no finite value": trials
+#: ran and every value they gave was NaN, infinite or missing (an overflow, a divergence); the row carries how many
+#: and the reasons the runs gave. Told apart here, from FI's own record, because a model reading the analysis sees
+#: ``None`` for both and has labelled a setting that never ran as an overflow.
+NOT_RUN = "not run"
+NO_FINITE = "no finite value"
+
 
 def _record(quest_root: Path) -> list[dict[str, Any]]:
     """The cells of ``raw/trials.json`` that carry metrics, without a quantity FI left out of the results."""
@@ -86,6 +94,26 @@ def missing(metric: Any) -> dict[str, Any]:
     return {"missing": count, **({"why_missing": dict(why)} if isinstance(why, dict) and why else {})}
 
 
+def status_of(s: dict[str, Any], counts: dict[str, Any]) -> str:
+    """``""`` for a value some trials gave; :data:`NO_FINITE` when trials ran and none gave a finite number (``missing``
+    says how many, ``why_missing`` why); :data:`NOT_RUN` when the setting has no value at all and no trial that
+    succeeded or failed (``counts``: the record's ``ok`` and ``failed``, both present and 0). A setting with no value
+    and no such counts, or with trials that succeeded or failed, has no status."""
+    if s.get("n"):
+        return ""
+    if s.get("missing"):
+        return NO_FINITE
+    ok, failed = counts.get("ok"), counts.get("failed")
+    # "Not run" claims that no trial ran, so only the record's own counts may say it: ok and failed both present, both 0.
+    # Without counts (an older record) a setting with no value may as well be one whose every trial failed.
+    return NOT_RUN if ok == 0 and failed == 0 and isinstance(ok, int) and isinstance(failed, int) else ""
+
+
+def not_run_summary() -> dict[str, Any]:
+    """The summary of a value for a setting that never ran (see :data:`NOT_RUN`)."""
+    return {**summary([]), "status": NOT_RUN}
+
+
 def summaries(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Each record of ``raw/trials.json`` as ``{"cell", "key", "level", "metrics": {name: summary}}`` (see
     :func:`summary`), in the record's order, with the record's counts of runs (``planned``, ``ok``, ``failed``) when it
@@ -98,9 +126,16 @@ def summaries(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
         label = str(c.get("key") or ", ".join(f"{k}={v}" for k, v in setting.items()) or "the one setting")
         entry: dict[str, Any] = {
             "cell": setting, "key": label, "level": dict(level) if isinstance(level, dict) and level else None,
-            "metrics": {str(name): {**summary(_values(metric)), **missing(metric)} for name, metric in c["metrics"].items()}}
+            "metrics": {}}
         entry.update({k: c[k] for k in ("planned", "ok", "failed")
                       if isinstance(c.get(k), int) and not isinstance(c.get(k), bool)})
+        for name, metric in c["metrics"].items():
+            one = {**summary(_values(metric)), **missing(metric)}
+            one["status"] = status_of(one, entry)
+            entry["metrics"][str(name)] = one
+        # The record says in numbers that no trial of this setting succeeded or failed: it never ran, whatever values
+        # (none) it holds. It then stands in every value's table as "not run", though it names none of them.
+        entry["not_run"] = entry.get("ok") == 0 and entry.get("failed") == 0
         out.append(entry)
     return out
 
@@ -128,8 +163,15 @@ def kept_values(summarised: list[dict[str, Any]]) -> list[str]:
     for c in summarised:
         for name, s in c["metrics"].items():
             by_metric.setdefault(name, []).append(s)
-    return [name for name, per_cell in by_metric.items()
-            if not all(s["index"] for s in per_cell if s["n"]) and not all(s["constant"] for s in per_cell)]
+    out = []
+    for name, per_cell in by_metric.items():
+        shown = [s for s in per_cell if s["n"]]
+        if not shown:  # no setting gave a number: kept only when the table can say why (not run / no finite value)
+            if any(s.get("status") for s in per_cell):
+                out.append(name)
+        elif not all(s["index"] for s in shown) and not all(s["constant"] for s in shown):
+            out.append(name)
+    return out
 
 
 def rows_of(summarised: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -138,12 +180,17 @@ def rows_of(summarised: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for name in kept_values(summarised):
         for c in summarised:
             s = c["metrics"].get(name)
-            if not s or not s["n"]:
+            if s is None and c.get("not_run"):
+                s = not_run_summary()  # the setting never ran, so it names none of the values it would have given
+            if not s or not (s["n"] or s.get("status")):
                 continue
             lower, upper, method = interval(s)
-            out.append({"setting": c["key"], "metric": name, "n": s["n"], "mean": s["mean"], "sd": s["sd"],
-                        "ci_lower": lower, "ci_upper": upper, "method": method if lower is not None else "",
-                        "cell": c["cell"]})
+            row = {"setting": c["key"], "metric": name, "n": s["n"], "mean": s["mean"] if s["n"] else None,
+                   "sd": s["sd"] if s["n"] else None, "ci_lower": lower, "ci_upper": upper,
+                   "method": method if lower is not None else "", "cell": c["cell"], "status": s.get("status") or ""}
+            if row["status"] == NO_FINITE:
+                row.update({k: s[k] for k in ("missing", "why_missing") if k in s})
+            out.append(row)
     return out
 
 
@@ -155,6 +202,18 @@ def rows(quest_root: Path) -> list[dict[str, Any]]:
 
 def _num(x: Any) -> str:
     return "" if x is None else f"{x:.6g}"
+
+
+def _status_text(r: dict[str, Any]) -> str:
+    """The mean cell of a row with no number: ``not run``, or ``no finite value (overflow: 3)`` -- the reasons the runs
+    gave, each with the runs it covers (``no finite value (3 runs)`` when they gave none)."""
+    if r.get("status") != NO_FINITE:
+        return str(r.get("status") or "")
+    why = r.get("why_missing") or {}
+    if why:
+        return f"{NO_FINITE} (" + "; ".join(f"{k}: {v}" for k, v in sorted(why.items(), key=lambda kv: -kv[1])) + ")"
+    count = int(r.get("missing") or 0)
+    return f"{NO_FINITE} ({count} run{'s' if count != 1 else ''})" if count else NO_FINITE
 
 
 def markdown(table: list[dict[str, Any]]) -> str:
@@ -171,7 +230,8 @@ def markdown(table: list[dict[str, Any]]) -> str:
     ]
     for r in table:
         interval = f"{_num(r['ci_lower'])} to {_num(r['ci_upper'])}" if r["ci_lower"] is not None else ""
-        lines.append(f"| {r['setting']} | {r['metric']} | {r['n']} | {_num(r['mean'])} | {_num(r['sd'])} | {interval} "
+        mean = _status_text(r) if r.get("status") else _num(r["mean"])
+        lines.append(f"| {r['setting']} | {r['metric']} | {r['n']} | {mean} | {_num(r['sd'])} | {interval} "
                      f"| {r['method']} |")
     return "\n".join(lines) + "\n"
 
