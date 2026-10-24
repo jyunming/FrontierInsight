@@ -1996,10 +1996,16 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
     before, on trial 0's (and carry no ``mc``)."""
     name = str(oracle["name"]).strip()
     expected, limit, _mode = _oracle.limit_of(oracle)
+    most = max(1, int(most_trials))
+    pilot = min(_mc.PILOT_TRIALS, most)
+    started = time.monotonic()
+    # A rule of every trial is judged on all ``most`` trials, not on the first batch alone: a disagreement that shows only
+    # in trial 25 must not pass. The first batch is an early stop (a fault seen there stops at once); only when it holds
+    # are the rest run, in what is left of the time.
     rows, why, failed, ran = await run_case_trials(
-        executor, python, quest_root, module, cell=case, trials=list(range(min(_mc.PILOT_TRIALS, max(1, most_trials)))),
-        timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run, budget_s=budget_s, paired=paired,
-        store=store)
+        executor, python, quest_root, module, cell=case, trials=list(range(pilot)),
+        timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run,
+        budget_s=budget_s, paired=paired, store=store)
     if not rows:
         return None, why, True
     first = rows[0]
@@ -2009,21 +2015,47 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
     check, problem = _check_from(name, measure, first)
     if check is None or check.get("value") is None or expected is None or limit is None:
         return check, problem, False  # trial 0 gives no number: said as before
-    values = _mc.per_trial_values(rows, measure)
-    finite = [v for v in values if v is not None]
-    lost = len(failed) + (len(values) - len(finite))
-    varies = any(abs(v - finite[0]) > 1e-15 + 1e-12 * abs(finite[0]) for v in finite[1:])
-    at = _mc.worst(values, float(expected))
-    if at is not None and varies:
-        check, problem = _check_from(name, measure, rows[at])
+
+    def judge() -> tuple[dict[str, Any] | None, str, str | None, str, int, list[float | None], bool]:
+        values = _mc.per_trial_values(rows, measure)
+        finite = [v for v in values if v is not None]
+        lost = len(failed) + (len(values) - len(finite))
+        varies = any(abs(v - finite[0]) > 1e-15 + 1e-12 * abs(finite[0]) for v in finite[1:])
+        at = _mc.worst(values, float(expected))
+        got, said = _check_from(name, measure, rows[at]) if (at is not None and varies) else (check, problem)
+        if got is None or got.get("value") is None:
+            return got, said, None, "", lost, values, varies
+        verdict = "pass" if abs(float(got["value"]) - float(expected)) <= float(limit) else "fail"
+        verdict, why_failed = _mc.failed_share_verdict(lost, ran, verdict)
+        return got, said, verdict, why_failed, lost, values, varies
+
+    check, problem, verdict, why_failed, lost, values, varies = judge()
     if check is None or check.get("value") is None:
         return check, problem, False
-    verdict = "pass" if abs(float(check["value"]) - float(expected)) <= float(limit) else "fail"
-    verdict, why_failed = _mc.failed_share_verdict(lost, ran, verdict)
-    if varies or why_failed:
+    why_open = ""
+    if verdict != "fail" and ran < most:
+        # The extra trials may use at most the first batch's share of the check's time, and never more than is left of
+        # it, so the checks after this one keep the time they had.
+        left = min(budget_s * _mc.PILOT_SHARE, budget_s - (time.monotonic() - started))
+        more: list[dict[str, Any]] = []
+        if left >= 0.5:
+            more, _why, more_failed, more_ran = await run_case_trials(
+                executor, python, quest_root, module, cell=case, trials=list(range(ran, most)),
+                timeout_s=max(1, int(math.ceil(left)) + 1), env=env, thresholds=thresholds, in_each_run=in_each_run,
+                budget_s=left, paired=paired, store=store)
+            rows, failed, ran = rows + more, failed + more_failed, ran + more_ran
+        check, problem, verdict, why_failed, lost, values, varies = judge()
+        if check is None or check.get("value") is None:
+            return check, problem, False
+        if ran < most:
+            # Not every trial was judged: the pass of the trials that were stays a pass, and the record says how many
+            # were judged (an honest run never loses a pass for lack of time).
+            why_open = "time"
+    finite = [v for v in values if v is not None]
+    if varies or why_failed or why_open:
         check["mc"] = _mc.record({"trials": len(finite), "dropped": len(values) - len(finite), "varies": varies,
-                                  "on": "trials"}, read_as="every_trial", verdict=verdict, why=why_failed,
-                                 failed=lost, started=ran,
+                                  "on": "trials"}, read_as="every_trial", verdict=verdict,
+                                 why=why_failed or why_open, failed=lost, started=ran, trials_asked=most,
                                  failed_example=clip_keeping_place(failed[0], 200) if failed else "")
     return check, problem, False
 
@@ -2095,7 +2127,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
             got = (await _measure_mean(executor, python, quest_root, module, means=means, proportions=proportions,
                                        repeated=repeated, **kw)
                    if how == "mean"
-                   else await _measure_every(executor, python, quest_root, module, **kw))
+                   else await _measure_every(executor, python, quest_root, module,
+                                             **{**kw, "most_trials": int(most_trials) if most_trials else _mc.EVERY_TRIALS}))
             if got is not None:
                 check, problem, not_run = got
                 if not_run:

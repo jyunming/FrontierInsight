@@ -60,6 +60,9 @@ from . import trial_checks as _trial_checks
 BAND_SE = 3.0
 #: The first batch of trials, from which the spread is read (and on which a rule of every trial is judged).
 PILOT_TRIALS = 20
+#: How many trials a rule of every trial is judged on when no study size is given: the first batch, then more up to this
+#: many (a disagreement that shows only in a later trial must not pass on the first batch alone).
+EVERY_TRIALS = 10 * PILOT_TRIALS
 #: Fewer trials than this give a spread too rough to decide anything by.
 MIN_TRIALS = 10
 #: The most trials FI runs for one check.
@@ -490,6 +493,9 @@ def words(mc: dict[str, Any] | None) -> str:
             text += f", Monte Carlo error ±{_oracle.fmt_digits(float(se), 2)} (one standard error)"
     elif read_as == "every_trial":
         text = f"the worst of {n} trial{'s' if n != 1 else ''}"
+        asked = int(mc.get("trials_asked") or 0)
+        if asked > n and mc.get("why") != "failed_trials":
+            text += f" (judged on {n} of {asked} trials)"
     else:
         text = "one trial's number, the same in every trial"
     failed, started = int(mc.get("failed_trials") or 0), int(mc.get("started") or 0)
@@ -505,7 +511,10 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
         return "the trials did not decide it"
     if mc.get("why") == "failed_trials":
         return (f"{mc.get('failed_trials')} of {mc.get('started')} trials on its case failed, so the trials that "
-                "finished cannot stand for the case")
+                "finished cannot stand for the case and the check was not decided (it is not a pass)")
+    if mc.get("read_as") == "every_trial":
+        return (f"a rule of every trial held in the {int(mc.get('trials') or 0)} trials FI could run in the time it had, "
+                f"fewer than the {int(mc.get('trials_asked') or 0)} it needs, so it is not shown to hold in all of them")
     n, se = int(mc.get("trials") or 0), mc.get("se")
     when = ("the most FI runs for one check" if mc.get("why") == "most_trials" else "all FI could run in the time it had")
     tolerance = f"±{_oracle.fmt_digits(float(limit), 2)}" if _number(limit) else "its tolerance"
