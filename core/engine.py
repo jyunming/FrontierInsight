@@ -22113,6 +22113,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         when it has used up its shortening rewrites, and a paper can also leave the review loop earlier (its other
         findings out of rounds), so the delivered paper is measured here, whatever route brought it."""
         out = await self._check_citations(state)
+        # Before the page count is measured: its sentence is a few lines of the paper's own.
+        self._state_unsupported_claims({**state, **out})  # type: ignore[arg-type]
         limit = resolve_page_limit(self.config)
         paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
         if limit is not None and paper_path and Path(paper_path).is_file():
@@ -23495,6 +23497,49 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             trial.unlink(missing_ok=True)
         self._log.info("[page_limit] the draft is still over the limit after %d sentences were taken out", len(taken))
         return None
+
+    def _state_unsupported_claims(self, state: QuestState) -> int:
+        """The paper as delivered: the sentences the last claim check found supported by neither the run's results nor a
+        cited source are kept in ``.fi/unsupported_claims.json`` and stated in the Limitations (core/paper_facts.py
+        ``UNSUPPORTED_CLAIMS``), sentence by sentence, from FI's own record: no model call and nothing taken out of the
+        paper. Until now these findings were only in QUALITY.md, so a reader of the paper was not told. A claim the paper no
+        longer holds is not listed; a record with none empties, and a sentence an earlier pass placed is taken out. A claim
+        check that did not run to an answer leaves the record as it was. The sentence adds no claim, so the claim check's
+        and the citation check's receipts move to the paper that carries it. Returns how many claims are stated."""
+        if not self.config.engine.claim_grounding:
+            return 0
+        grounding = state.get("claim_grounding") or {}
+        paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if not isinstance(grounding, dict) or grounding.get("status") != "ok" or not paper_path                 or not Path(paper_path).is_file():
+            return 0
+        try:
+            before = Path(paper_path).read_text(encoding="utf-8")
+            flat = " ".join(before.split())
+            sentences = re.split(r"(?<=[.!?])\s+", flat)
+            standing = [c for c in grounding.get("claims") or []
+                        if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
+                        and (" ".join(str(c["claim"]).split()) in flat
+                             or any(_same_statement(str(c["claim"]), s) for s in sentences))]
+            if not _paper_facts.write_unsupported_record(self.quest_root, standing):
+                return 0
+            clean = _disclosure.without_block(before)
+            if not standing:
+                clean = _paper_facts.drop_item(clean, _paper_facts.UNSUPPORTED_CLAIMS)
+            after = self._render_paper_facts(_paper_facts.place_items(clean, self.quest_root), state)
+            if after != before:
+                checked = Path(paper_path).read_bytes()
+                Path(paper_path).write_text(after, encoding="utf-8")
+                for check in ("claim_check", "citation_check"):
+                    _receipts.carry_over(self.quest_root, check, "paper", checked, Path(paper_path).read_bytes(),
+                                         "FI stated the claims its own check found unsupported in the Limitations and "
+                                         "added no claim")
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[claim_check] the paper could not be given its sentence on unsupported claims (%s)", e)
+            return 0
+        if standing:
+            self._log.warning("[claim_check] %d sentence(s) of the paper as delivered were not found supported; its "
+                              "Limitations say so", len(standing))
+        return len(standing)
 
     async def _state_page_overrun(self, state: QuestState, paper_path: Path, limit: int, pages: int) -> int:
         """The paper stays over its page limit: FI's measurement goes on record (``.fi/page_limit.json``), FI puts the
