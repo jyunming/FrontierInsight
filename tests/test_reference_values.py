@@ -573,6 +573,53 @@ def test_a_reference_that_evaluates_to_the_measured_value_is_dropped(formula: st
     assert "reference" not in table.columns and "read off the run" in table.caption
 
 
+def test_an_integer_written_copy_is_dropped_the_old_code_missed_it() -> None:
+    """Old code: ``_LITERAL`` matched only numbers with a decimal point and whole numbers were never counted, so a
+    reference written ``1849`` gave no written precision and was never taken for a value copied from the run, although
+    its last written digit (the units) is known to plus or minus 0.5, far finer than a half-width of 30."""
+    measured = [(1849.02, 30.0, 1849.0), (1848.7, 30.0, 1849.0), (1851.4, 30.0, 1849.0)]
+    assert rv.copies_measured({"formula": "1849"}, measured) is True
+    assert rv.copies_measured({"formula": "1849 + 0*n"}, measured) is True
+
+
+def test_a_round_whole_number_is_not_taken_for_a_copy() -> None:
+    """Known positive for the negative side: ``1800`` writes only its hundreds digit, so it is known to plus or minus 50
+    (trailing zeros are not written digits), which is coarser than the half-width of 30; it is not a copy."""
+    measured = [(1800.4, 30.0, 1800.0), (1799.1, 30.0, 1800.0), (1801.2, 30.0, 1800.0)]
+    assert rv.copies_measured({"formula": "1800"}, measured) is False
+
+
+def test_a_decimal_copy_is_still_caught_and_a_short_formula_is_not() -> None:
+    """Known positive: a decimal written to 5 places that equals the mean is still a copy; a formula of the settings
+    with short numbers and a nominal 0.95 are still not copies (the behaviour the integer rule must not change)."""
+    assert rv.copies_measured({"formula": "0.17748"}, [(0.17748, 0.01, 0.17748)]) is True
+    assert rv.copies_measured({"formula": "1 - (1 - 0.05/m)**m"}, [(0.0488, 0.01, 0.0488)]) is False
+    assert rv.copies_measured({"formula": "0.95"}, [(0.95, 0.01, 0.95)]) is False
+
+
+def test_a_missing_reference_value_does_not_raise_and_is_no_copy_evidence() -> None:
+    """Old code (the first version of this change): ``float(v).is_integer()`` was called on every reference value, so
+    one ``None`` value raised TypeError. Now a missing value at one setting is skipped (no copy there), and the whole-number
+    rule is off for the whole run, so the function returns a verdict instead of raising."""
+    decimal = [(0.17748, 0.01, None), (0.17748, 0.01, 0.17748), (0.17748, 0.01, 0.17748)]
+    assert rv.copies_measured({"formula": "0.17748"}, decimal) is True  # two of three settings still copy
+    whole = [(1849.02, 30.0, None), (1848.7, 30.0, 1849.0), (1851.4, 30.0, 1849.0)]
+    assert rv.copies_measured({"formula": "1849"}, whole) is False  # not every value is a whole number: no precision
+
+
+def test_an_honest_formula_with_an_integer_parameter_is_not_a_copy() -> None:
+    """Old code (the first version of this change): every whole number in a formula gave a precision, so ``400`` in
+    ``sqrt(2/400)`` (±0.5/400 = 0.125%) made a mean within 0.1% of the honest theory a copy, although the run's half-width
+    is 2%. Now a whole number counts only when the reference is that same whole number at every setting; here the
+    value is not whole, and in the varying case the value changes with the setting, so neither is a copy."""
+    honest = math.sqrt(2 / 400)
+    assert rv.copies_measured({"formula": "sqrt(2/400)"}, [(honest * 1.0005, 0.02, honest)]) is False
+    assert rv.copies_measured({"formula": "sqrt(2/n_trials)"}, [(honest * 1.0005, 0.02, honest)],
+                              {"n_trials": 400}) is False
+    varying = [(1800.0 + n + 0.2, 30.0, 1800.0 + n) for n in (10, 20, 30)]
+    assert rv.copies_measured({"formula": "1800 + n"}, varying) is False
+
+
 # --- a reference may name a setting the study holds constant -----------------------------------------------------------
 
 def _alpha_protocol(grid: dict[str, Any], constants: dict[str, Any] | None, when: dict[str, Any]) -> dict[str, Any]:
