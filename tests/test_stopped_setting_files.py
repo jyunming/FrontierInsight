@@ -125,3 +125,28 @@ def test_a_half_written_file_is_not_recorded_as_finished_by_a_setting_that_ran_b
     assert "data/value.bin" not in outside_run.finished_files(root)
     assert not (root / "data" / "value.bin").exists(), "the cut-off file is moved aside"
     assert list((root / ".fi" / "previous").rglob("value.bin"))
+
+
+def test_a_setting_that_begins_after_anothers_process_ended_but_before_its_files_are_recorded_overlaps_it(tmp_path: Path) -> None:
+    """Old code: a run left the registry the moment its process ended, so a setting that began and half-wrote
+    ``data/value.bin`` before the first one's files were recorded was not counted as beside it, and the half-written
+    file was recorded as finished."""
+    root = _quest(tmp_path)
+    (root / "data" / "value.bin").write_bytes(b"x" * 1000)
+
+    class _Result:
+        returncode = 0
+
+        @property
+        def timed_out(self) -> bool:
+            # Read by FI right after A's process ended, before it records A's files: B begins and writes half a file.
+            self.b_token = outside_run.begin_run(root)
+            (root / "data" / "value.bin").write_bytes(b"x" * 10)
+            return False
+
+    class _A:
+        async def execute(self, cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001, ANN201
+            return _Result()
+
+    asyncio.run(outside_run.execute_keeping_only_finished(_A(), ["python", "a.py"], cwd=root, timeout_s=5))
+    assert "data/value.bin" not in outside_run.finished_files(root)

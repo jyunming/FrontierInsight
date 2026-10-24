@@ -164,6 +164,12 @@ def begin_run(quest_root: Path | str) -> int:
         return token
 
 
+def run_overlapped(quest_root: Path | str, token: int) -> bool:
+    """Whether another run overlapped this one so far (the run stays registered)."""
+    with _record_lock:
+        return _active.get(str(Path(quest_root).resolve()), {}).get(token, False)
+
+
 def end_run(quest_root: Path | str, token: int) -> bool:
     """Note that the run ended; whether another run overlapped it at any time."""
     with _record_lock:
@@ -329,17 +335,19 @@ async def execute_keeping_only_finished(executor: Any, cmd: list[str], *, cwd: P
     states = await asyncio.to_thread(working_states, root)
     before = set(states)
     token = begin_run(root)
+    # The run stays registered until its files are recorded: a setting that begins after this one's process ended but
+    # before the recording could be the writer of a file the recording would take.
     try:
         result = await executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+        if getattr(result, "timed_out", False):
+            left: list[str] = []
+            gone = await asyncio.to_thread(lambda: remove_created_since(root, before, left, states=states))
+            say_removed(log if log is not None else logging.getLogger(f"frontier_insight.{root.resolve().name}"), gone, left)
+        elif getattr(result, "returncode", 0) in (0, None):
+            await asyncio.to_thread(lambda: record_finished(root, states, run_overlapped(root, token)))
+        return result
     finally:
-        overlapped = end_run(root, token)
-    if getattr(result, "timed_out", False):
-        left: list[str] = []
-        gone = await asyncio.to_thread(lambda: remove_created_since(root, before, left, states=states))
-        say_removed(log if log is not None else logging.getLogger(f"frontier_insight.{root.resolve().name}"), gone, left)
-    elif getattr(result, "returncode", 0) in (0, None):
-        await asyncio.to_thread(record_finished, root, states, overlapped)
-    return result
+        end_run(root, token)
 
 
 def code_version(quest_root: Path | str) -> str:
@@ -756,15 +764,12 @@ class OutsideExecutor:
         shared_before = set(shared_states)
         start_states = await asyncio.to_thread(working_states, self.quest_root)
         run_token = begin_run(self.quest_root)
-        overlapped = False
         if box.linked and self._shared_start is None:
             self._shared_start = set(shared_before)
         try:
             argv = [cmd[0], *(self._map(a, root) for a in cmd[1:])]
             run_env = {k: self._map(v, root) for k, v in env.items()} if env is not None else None
             result = await self.inner.execute(argv, cwd=root, timeout_s=timeout_s, env=run_env)
-            overlapped = end_run(self.quest_root, run_token)
-            run_token = 0
             stopped = bool(getattr(result, "timed_out", False))
             if self.meter is not None:
                 self.meter(getattr(result, "peak_mb", None))
@@ -774,7 +779,7 @@ class OutsideExecutor:
             if stopped and box.linked:
                 await self._clean_shared(shared_before, beside=self._running.get(token, False), states=shared_states)
             elif not stopped and getattr(result, "returncode", 0) in (0, None):
-                await asyncio.to_thread(record_finished, self.quest_root, start_states, overlapped)
+                await asyncio.to_thread(lambda: record_finished(self.quest_root, start_states, run_overlapped(self.quest_root, run_token)))
             dropped = [r for r in box.left_out if not r.endswith(".pyc") and "/__pycache__/" not in f"/{r}"]
             if dropped and not self._only_named:  # a check's run keeps only what FI named, by design
                 self._log.warning("[run] the code ran from a copy outside the quest folder and wrote into FI's own "
@@ -785,8 +790,7 @@ class OutsideExecutor:
                                            stderr=box.to_quest(result.stderr or ""))
             return result
         finally:
-            if run_token:
-                end_run(self.quest_root, run_token)
+            end_run(self.quest_root, run_token)
             self._running.pop(token, None)
             await asyncio.to_thread(box.remove)
 
