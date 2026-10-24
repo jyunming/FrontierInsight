@@ -727,6 +727,15 @@ _NAMED = re.compile(r"`protocol\.optimisation\.(\w+)` `([^`]+)`")
 
 #: How :func:`repair` says that a part of the block was left out (the engine finds a left-out first scan by it).
 LEFT_OUT_UNREAD = "was left out of the plan because it could not be read"
+#: How FI's note says one setting of a search's first scan was left out (the rest of the scan kept): the plan step asks
+#: for it back while the scan still lacks it (core/engine.py ``_scan_left_out``).
+SCAN_SETTING_LEFT_OUT = "was left out of the scan (`protocol.optimisation.grid`) because it could not be read"
+
+
+def scan_setting_left_out(note: str) -> str | None:
+    """The setting a note of FI's says was left out of the first scan (:data:`SCAN_SETTING_LEFT_OUT`), else ``None``."""
+    found = re.search(r"the setting `([^`]+)` " + re.escape(SCAN_SETTING_LEFT_OUT), note or "")
+    return found.group(1) if found else None
 
 
 def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
@@ -825,6 +834,34 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                     notes.append(f"the numerical setting `{name}` was left out of the optimisation because it could not "
                                  f"be read ({why}); write it in the plan if the check should refine it")
                 out["numerical_settings"] = settings
+                continue
+        if key == "grid" and isinstance(out.get("grid"), dict) and len(out["grid"]) > 1:
+            # One setting of the scan that cannot be read is left out, not the scan and its parts with it: real plans lost
+            # every setting they compared, and the parts that divide them, over one condition with no held value.
+            axis = re.match(re.escape(_P) + r"\.grid` scans `([^`]+)`, which is neither a design variable", why)
+            name = axis.group(1) if axis else ""
+            variables = {_text(v.get("name")) for v in out.get("design_variables") or [] if isinstance(v, dict)}
+            # Only a compared condition with no held value: a design variable's own scan axis stays the whole scan's to
+            # rewrite, since the search would otherwise scan without it and still change it.
+            if name in {str(k) for k in out["grid"]} and name not in variables:
+                out["grid"] = {k: v for k, v in out["grid"].items() if str(k) != name}
+                if isinstance(out.get("sub_studies"), list):
+                    kept_parts = []
+                    for sub in out["sub_studies"]:
+                        if not isinstance(sub, dict):
+                            kept_parts.append(sub)
+                            continue
+                        part = dict(sub)
+                        if isinstance(sub.get("vary"), list):
+                            part["vary"] = [v for v in sub["vary"] if str(v) != name]
+                            if sub["vary"] and not part["vary"]:
+                                continue  # a part that varied only that setting goes with it
+                        if isinstance(sub.get("hold"), dict):
+                            part["hold"] = {k: v for k, v in sub["hold"].items() if str(k) != name}
+                        kept_parts.append(part)
+                    out["sub_studies"] = kept_parts
+                notes.append(f"the setting `{name}` {SCAN_SETTING_LEFT_OUT} ({why}{shown}); the other settings of the "
+                             "scan are kept. Put it back, with what it needs, if the study should be compared across it")
                 continue
         if key in out:
             del out[key]

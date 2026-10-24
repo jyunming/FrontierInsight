@@ -6831,17 +6831,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     def _scan_left_out(self, design: Any) -> list[str]:
         """The notes FI wrote into plan.md when its reading of the search block left out a part of the first scan
-        (``grid``, ``sub_studies``, ``in_each_run``: :func:`core.optimisation_plan.repair`) that the block still lacks, each
-        with the reader's exact reason; empty for a design with no search block. Only FI's own notes are read."""
+        (``grid``, ``sub_studies``, ``in_each_run``: :func:`core.optimisation_plan.repair`) that the block still lacks, or
+        one setting of the scan that the scan still lacks, each with the reader's exact reason; empty for a design with no
+        search block. Only FI's own notes are read."""
         path = _plan.plan_path(self.quest_root)
         if not _optim.has_block(design) or not path.is_file():
             return []
         block = design["protocol"]["optimisation"]
+        scanned = {str(k) for k in block.get("grid") or {}} if isinstance(block.get("grid"), dict) else set()
         found: list[str] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             note = line.strip().lstrip("-").strip()
-            if note not in found and any(f"`protocol.optimisation.{part}` {_optim.LEFT_OUT_UNREAD}" in line
-                                         and block.get(part) is None for part in ("grid", "sub_studies", "in_each_run")):
+            if note in found:
+                continue
+            if any(f"`protocol.optimisation.{part}` {_optim.LEFT_OUT_UNREAD}" in line
+                   and block.get(part) is None for part in ("grid", "sub_studies", "in_each_run")):
+                found.append(note)
+                continue
+            # One setting of the scan left out, the rest kept: asked back while the scan still lacks it.
+            setting = _optim.scan_setting_left_out(note)
+            if setting is not None and setting not in scanned:
                 found.append(note)
         return found
 
@@ -7518,6 +7527,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 unreadable.add("evaluation_budget")
             if _optim.scan_problem(old, self._scan_limit_s()):
                 unreadable.add("grid")  # a scan that cannot run is what the plan was asked to rewrite
+            one_left_out = any(_optim.scan_setting_left_out(n) for n in self._scan_left_out(old))
+            if one_left_out:
+                # A setting of the scan FI's reading left out (the rest kept) is what the plan was asked for: the scan and
+                # its parts are the answer's, with the conditions it brings under `fixed`; the settings of the scan the
+                # plan already had are put back below.
+                unreadable |= {"grid", "sub_studies"}
             if "" in unreadable:
                 unreadable = set(old_block)  # the block as a whole could not be read: nothing of it is kept
             merged = dict(block)
@@ -7540,6 +7555,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     if {k: v for k, v in new_fixed.items() if k not in added} == merged["fixed"]:
                         put_back = [p for p in put_back if p != "fixed"]  # the answer only added: nothing was put back
                     merged["fixed"] = {**merged["fixed"], **added}
+            if one_left_out and isinstance(old_block.get("grid"), dict) and isinstance(merged.get("grid"), dict):
+                # The settings the plan's scan already had, as the plan had them: the answer only adds the one asked for.
+                changed = [str(k) for k, v in old_block["grid"].items() if merged["grid"].get(k) != v]
+                if changed:
+                    put_back.append("the scan's " + ", ".join(f"`{k}`" for k in changed))
+                merged["grid"] = {**merged["grid"], **old_block["grid"]}
             if put_back:
                 self._log.warning("[plan] the plan's model also changed what the plan already said about %s; FI kept the "
                                   "plan's own", ", ".join(put_back))
