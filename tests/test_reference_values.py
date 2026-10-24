@@ -571,3 +571,48 @@ def test_a_reference_that_evaluates_to_the_measured_value_is_dropped(formula: st
     copied = P.with_references(protocol, {"fdr_uncorrected": {"formula": formula, "when": {"m": 20, "pi1": 0.2}}})
     table = _table(_build("fdr_s1", copied), "fdr_uncorrected")
     assert "reference" not in table.columns and "read off the run" in table.caption
+
+
+# --- a reference may name a setting the study holds constant -----------------------------------------------------------
+
+def _alpha_protocol(grid: dict[str, Any], constants: dict[str, Any] | None, when: dict[str, Any]) -> dict[str, Any]:
+    protocol: dict[str, Any] = {"grid": grid,
+                                "metrics": [{"id": "level", "estimand": "e", "kind": "mean", "unit": "a run", "reference": {"formula": "0.5", "when": when}}]}
+    if constants is not None:
+        protocol["constants"] = constants
+    return protocol
+
+
+def test_a_reference_may_name_a_setting_moved_from_the_grid_to_the_constants() -> None:
+    assert rv.problems(_alpha_protocol({"n": [10, 20]}, {"alpha": 0.5}, {"alpha": 0.5})) == []
+    protocol = _alpha_protocol({"n": [10, 20]}, {"alpha": 0.5}, {"alpha": 0.5})
+    assert plan.normalize_protocol(protocol)[1] is None
+    assert [s for s in rv.grid_settings(protocol) if rv.applies(protocol["metrics"][0]["reference"], s)] == []  # no held
+    assert all(rv.applies(protocol["metrics"][0]["reference"], s, rv.held_values(protocol))
+               for s in rv.grid_settings(protocol))
+
+
+def test_a_reference_naming_a_setting_the_study_does_not_have_is_still_refused() -> None:
+    (why,) = rv.problems(_alpha_protocol({"n": [10, 20]}, {"beta": 1}, {"alpha": 0.5}))
+    assert "not a setting of `protocol.grid`" in why
+
+
+def test_a_reference_naming_a_value_a_constant_no_longer_holds_is_refused_in_plain_words() -> None:
+    (why,) = rv.problems(_alpha_protocol({"n": [10, 20]}, {"alpha": 0.1}, {"alpha": 0.5}))
+    assert "a value the study no longer runs" in why and "'alpha' is held at 0.1" in why
+
+
+def test_a_reference_naming_a_grid_value_is_accepted_as_before() -> None:
+    assert rv.problems(_alpha_protocol({"alpha": [0.1, 0.5], "n": [10]}, None, {"alpha": 0.5})) == []
+    assert "holds for no setting" in rv.problems(_alpha_protocol({"alpha": [0.1, 0.2], "n": [10]}, None, {"alpha": 0.5}))[0]
+
+
+def test_a_reference_on_a_constant_gives_a_reference_at_every_setting_and_an_or_filter_reads_the_grid() -> None:
+    protocol = _alpha_protocol({"n": [10, 20]}, {"alpha": 0.5}, {"alpha": 0.5})
+    rows = [r for r in rv.compute(protocol, rv.grid_settings(protocol))["by_setting"] if r["metric"] == "level"]
+    assert len(rows) == 2 and all(r["reference"] == 0.5 for r in rows)
+    # either a constant the study no longer holds at that value, or a grid value: the grid value still covers a setting
+    either = _alpha_protocol({"n": [10, 20]}, {"alpha": 0.1}, [{"alpha": 0.5}, {"n": 20}])
+    assert rv.problems(either) == []
+    rows = [r for r in rv.compute(either, rv.grid_settings(either))["by_setting"] if r["metric"] == "level"]
+    assert [r["reference"] for r in rows] == [None, 0.5]
