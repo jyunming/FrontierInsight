@@ -1051,7 +1051,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 def still_improving(rows: list[dict[str, Any]], direction: str) -> dict[str, float] | None:
     """Whether the best design was still improving when the search ended, from the search's own ledger rows: the last
     tenth of its counted evaluations (the baseline's is not one of them) gave more than 5% of the whole improvement over
-    the baseline. ``{"gain_last_tenth", "total", "share"}`` (in the objective's unit, the share a fraction) when it
+    the baseline (or over the first design that met every limit, when the baseline did not). ``{"gain_last_tenth", "total", "share"}`` (in the objective's unit, the share a fraction) when it
     was, else ``None``."""
     sign = 1.0 if direction == "maximise" else -1.0
     ordered = sorted((r for r in rows if isinstance(r, dict) and r.get("event", "evaluation") == "evaluation"
@@ -1063,9 +1063,11 @@ def still_improving(rows: list[dict[str, Any]], direction: str) -> dict[str, flo
         ok = row.get("status") == "ok" and row.get("feasible") is not False
         return float(v) if ok and isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
 
+    # The improvement is counted from the first design that meets every limit: the baseline when it does, else the
+    # first such design the search found (a baseline that breaks a limit has no value to improve on).
     base = next((value(r) for r in ordered if r.get("stage") == "baseline"), None)
     searched = [r for r in ordered if r.get("stage") != "baseline"]
-    if base is None or not searched:
+    if not searched:
         return None
     cut = len(searched) - max(1, math.ceil(len(searched) / 10))  # evaluations before the last tenth
     best_at = best_final = base
@@ -1073,12 +1075,33 @@ def still_improving(rows: list[dict[str, Any]], direction: str) -> dict[str, flo
         if i == cut:
             best_at = best_final
         v = value(row)
-        if v is not None and sign * (v - best_final) > 0:
+        if v is not None and (base is None or sign * (v - best_final) > 0):
+            if base is None:
+                base = v
             best_final = v
+    if base is None or best_at is None:
+        return None
     total = sign * (best_final - base)
     gain = sign * (best_final - best_at)
     if total > 0 and gain > 0.05 * total:
         return {"gain_last_tenth": gain, "total": total, "share": gain / total}
+    return None
+
+
+def _still_improving_somewhere(run: SearchRun, direction: str) -> dict[str, float] | None:
+    """:func:`still_improving` for the search as it was run: a search compared across the levels of a condition
+    (``compared``) is one search per level, each with its own baseline, budget and end, so each level whose own budget
+    ran out is judged on its own rows; the first one still improving is the answer."""
+    levels = (((run.record or {}).get("compared") or {}).get("levels")) or []
+    if not levels:
+        return still_improving(run.rows, direction)
+    for part in levels:
+        if not isinstance(part, dict) or part.get("stopped_because") != "budget":
+            continue
+        mine = [r for r in run.rows if isinstance(r, dict) and r.get("level") == part.get("level")]
+        fired = still_improving(mine, direction)
+        if fired is not None:
+            return {**fired, "level": part.get("level")}
     return None
 
 
@@ -1530,11 +1553,13 @@ class OptimisationRunner:
         per = _seconds_per_evaluation(run)
         while (((run.record or {}).get("evaluations") or {}).get("stopped_because") == "budget"
                and not run.load_error and not run.problems and not run.reused):
-            fired = still_improving(run.rows, direction)
+            fired = _still_improving_somewhere(run, direction)
+            # A round continues every level of a compared search: it costs per_start evaluations for each.
+            parts = max(1, len(((run.record or {}).get("compared") or {}).get("levels") or []))
             # Whole seconds, as the search is given them: a round that fits only in a fraction of a second more is not
             # started, and the search is never given more than is left.
             left = int(timeout_s - (time.monotonic() - started))
-            if fired is None or per is None or left < 1 or per_start * per > left:
+            if fired is None or per is None or left < 1 or per_start * parts * per > left:
                 break
             rounds = read_rounds(self.quest_root, norm)
             number = max([int(r["auto"]) for r in rounds if isinstance(r.get("auto"), int)] or [0]) + 1
@@ -1545,8 +1570,8 @@ class OptimisationRunner:
             if self.log is not None:
                 self.log.info("[optimise] the search was still improving when its budget ran out (the last tenth of "
                               "its evaluations gave %d%% of its improvement): FI continues it with %d more "
-                              "evaluation(s), %d s left of the time limit", round(100 * fired["share"]), per_start,
-                              int(left))
+                              "evaluation(s)%s, %d s left of the time limit", round(100 * fired["share"]), per_start,
+                              f" for each of its {parts} compared levels" if parts > 1 else "", int(left))
             left = int(timeout_s - (time.monotonic() - started))  # again: writing the round took time too
             if left < 1:
                 break
@@ -1554,7 +1579,7 @@ class OptimisationRunner:
             run = await search(left)
             path = self.quest_root / ROUNDS_PATH
             self._rounds = path.read_bytes() if path.is_file() else None
-            per = max(per, (time.monotonic() - round_started) / per_start)
+            per = max(per, (time.monotonic() - round_started) / (per_start * parts))
         return run
 
     def _check_trials(self, run: SearchRun, started: float) -> Any:

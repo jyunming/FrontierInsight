@@ -58,6 +58,16 @@ def test_a_trace_flat_then_rising_in_the_last_tenth_fires_for_maximise_and_minim
     assert optimise.still_improving(_rows(up, -0.5), "minimise") is None
 
 
+def test_a_baseline_that_breaks_a_limit_counts_from_the_first_design_that_meets_every_limit() -> None:
+    rows = _rows([0.0] * 18 + [1.0, 2.0], -0.5)
+    rows[0]["feasible"] = False  # the baseline breaks a limit: its value is not a start to improve on
+    fired = optimise.still_improving(rows, "maximise")
+    assert fired is not None and fired["total"] == 2.0 and fired["gain_last_tenth"] == 2.0
+    rows = _rows([3.0] + [3.0] * 19, -0.5)
+    rows[0]["feasible"] = False
+    assert optimise.still_improving(rows, "maximise") is None
+
+
 def test_a_converged_trace_does_not_fire() -> None:
     values = [float(min(i, 50)) for i in range(100)]
     assert optimise.still_improving(_rows(values, -1.0), "maximise") is None
@@ -99,6 +109,35 @@ def _block(**changes: Any) -> dict[str, Any]:
     fixed, why = op.normalize(block)
     assert why is None, why
     return fixed
+
+
+def _level_rows(level: dict[str, Any], values: list[float], baseline: float, first_n: int) -> list[dict[str, Any]]:
+    return [dict(r, level=level, n=r["n"] + first_n) for r in _rows(values, baseline)]
+
+
+def _compared(parts: list[tuple[dict[str, Any], list[float], str]]) -> optimise.SearchRun:
+    rows: list[dict[str, Any]] = []
+    for level, values, _ in parts:
+        rows += _level_rows(level, values, 0.0, len(rows))
+    record = {"evaluations": {"stopped_because": "budget"},
+              "compared": {"levels": [{"level": level, "stopped_because": stop} for level, _, stop in parts]}}
+    return optimise.SearchRun(record=record, rows=rows)
+
+
+def test_a_compared_search_is_judged_level_by_level() -> None:
+    rising = [0.0] * 18 + [1.0, 2.0]   # still improving at the end of its own budget
+    done = [5.0] + [5.0] * 19          # its best at the first design
+    # The level still improving comes first: the trace of the last level alone would say the search had converged.
+    run = _compared([({"family": "a"}, rising, "budget"), ({"family": "b"}, done, "budget")])
+    assert optimise.still_improving(run.rows[len(rising) + 1:], "maximise") is None
+    fired = optimise._still_improving_somewhere(run, "maximise")
+    assert fired is not None and fired["level"] == {"family": "a"}
+    # A level that stopped for another reason is not continued for its trace.
+    run = _compared([({"family": "a"}, rising, "converged"), ({"family": "b"}, done, "budget")])
+    assert optimise._still_improving_somewhere(run, "maximise") is None
+    # The baselines of later levels do not count as a level's own improvement.
+    run = _compared([({"family": "a"}, done, "budget"), ({"family": "b"}, done, "budget")])
+    assert optimise._still_improving_somewhere(run, "maximise") is None
 
 
 def test_add_round_keeps_auto_and_does_not_add_the_same_automatic_round_twice(tmp_path: Path) -> None:
