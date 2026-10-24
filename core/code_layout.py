@@ -511,6 +511,54 @@ def package_sources(code_dir: Path) -> dict[str, str]:
     return out
 
 
+#: Folders a run writes into (caches, results, figures). They are never a simulation's input: a key that covered them
+#: would change with every run and never be reused.
+GENERATED_FOLDERS = ("cache", "results", "figures", "raw", "__pycache__")
+#: The analysis script, which reads what the simulation wrote and changes nothing the simulation computes.
+ANALYSIS_SCRIPT = "experiment.py"
+#: FI's own copies of its helpers under ``code/``, not the quest's code.
+SKILLS_FOLDER = "skills"
+
+
+def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[Path]:
+    """Every file the simulation may depend on, in a stable sorted order (by path relative to ``quest_root``).
+
+    Under ``code/`` (or ``code``, when given): every file, whatever its suffix (a helper module beside ``simulate.py``,
+    a model package, a parameter table, a pickled lookup, a binary array: the simulation may read any of them), except
+    the analysis script (:data:`ANALYSIS_SCRIPT`), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
+    notes (``.md``), caches (``__pycache__``), hidden files and folders, and what a run writes (:data:`GENERATED_FOLDERS`).
+    Under ``<quest_root>/inputs/``: every file, since a simulation may read any of the person's files there. A change to
+    any listed file is a change to the simulation, so a cached result of the old version must not be reused (:func:`core.outside_run.code_version`,
+    :func:`core.trial_runner._run_key`, :func:`core.optimise._run_key` all hash these files)."""
+    root = Path(quest_root)
+    code_dir = Path(code) if code is not None else root / "code"
+    out: list[Path] = []
+    if code_dir.is_dir():
+        for path in code_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            parts = path.relative_to(code_dir).parts
+            if any(p.startswith(".") or p in GENERATED_FOLDERS for p in parts):
+                continue
+            if parts[0] in (TESTS_DIR, SKILLS_FOLDER) or (path.name.startswith("test_") and path.suffix == ".py"):
+                continue
+            if parts == (ANALYSIS_SCRIPT,) or path.suffix.lower() == ".md":
+                continue
+            out.append(path)
+    inputs = root / "inputs"
+    if inputs.is_dir():
+        out.extend(p for p in inputs.rglob("*") if p.is_file())
+    return sorted(out, key=lambda p: input_label(p, root))
+
+
+def input_label(path: Path, quest_root: Path | str) -> str:
+    """A listed file's name in a key: its path relative to the quest's folder, in forward slashes."""
+    try:
+        return Path(path).relative_to(Path(quest_root)).as_posix()
+    except ValueError:
+        return Path(path).as_posix()
+
+
 def _functions(tree: ast.AST) -> list[tuple[int, int, str]]:
     """``(first line, last line, qualified name)`` of every function, decorators included."""
     out: list[tuple[int, int, str]] = []

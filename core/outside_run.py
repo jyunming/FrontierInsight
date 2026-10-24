@@ -190,19 +190,25 @@ async def execute_keeping_only_finished(executor: Any, cmd: list[str], *, cwd: P
 
 def code_version(quest_root: Path | str) -> str:
     """A hash of the simulation's code as it is now: ``code/simulate.py`` and the model package beside it, the code each
-    setting runs and the code that decides a set of trials (``core.trial_runner._run_key``). The analysis script, the
-    tests and the notes in ``code/`` work out nothing kept in :data:`SHARED_CACHE`: when a real run's analysis script was
-    repaired after every setting had run, the values its unchanged simulation had kept were moved aside and worked out
-    again."""
+    setting runs and the code that decides a set of trials (``core.trial_runner._run_key``). Also every other file the
+    simulation may read (:func:`core.code_layout.simulation_inputs`): a helper module beside ``simulate.py``, a parameter
+    file in ``code/``, a file the person put in the quest's ``inputs/``. Changing any of them changes what the simulation
+    computes, so the cached values of the old version are not reused. The analysis script, the tests and the notes in
+    ``code/`` work out nothing kept in :data:`SHARED_CACHE`: when a real run's analysis script was repaired after every
+    setting had run, the values its unchanged simulation had kept were moved aside and worked out again."""
     from . import code_layout
 
     h = hashlib.sha256()
-    code = Path(quest_root) / CODE
+    root = Path(quest_root)
+    code = root / CODE
     with contextlib.suppress(OSError):
         h.update(b"simulate.py\0" + (code / "simulate.py").read_bytes() + b"\0")
     if code.is_dir():
         for rel, body in sorted(code_layout.package_sources(code).items()):
             h.update(rel.encode("utf-8") + b"\0" + body.encode("utf-8") + b"\0")
+    for path in code_layout.simulation_inputs(root):
+        with contextlib.suppress(OSError):
+            h.update(code_layout.input_label(path, root).encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
     return h.hexdigest()
 
 

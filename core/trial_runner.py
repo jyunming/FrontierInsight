@@ -1263,6 +1263,16 @@ def _run_key(simulate: Path, grid: Any, runs: int, base: int, deterministic: boo
 
     package = "".join(f"\n{rel}\n{body}" for rel, body in sorted(_code_layout.package_sources(Path(simulate).parent).items()))
     text += package.encode("utf-8")
+    # Every other file the simulation may read (a helper module beside it, a parameter file in code/, a file in the
+    # quest's inputs/): changing one of them is another simulation, so its cached trials are not reused. The quest's
+    # folder is the one that holds code/ (the simulation's parent folder).
+    code = Path(simulate).parent
+    root = code.parent
+    for path in _code_layout.simulation_inputs(root, code):
+        try:
+            text += f"\n{_code_layout.input_label(path, root)}\n".encode("utf-8") + path.read_bytes()
+        except OSError:
+            continue
     return hashlib.sha256(text + json.dumps([grid, runs, base, deterministic], sort_keys=True, default=str).encode()).hexdigest()
 
 
