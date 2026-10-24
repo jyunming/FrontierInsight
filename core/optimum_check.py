@@ -1243,13 +1243,14 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None) -> dict[str
                 rows.append(row)
         budget = _plan.evaluations(block)[0]
         counted = sum(1 for r in rows if r.get("counted", True))
-        # A person's request to search further adds to the plan's budget, by the amount FI recorded for it
+        # A round that continues the search (a person's request, or FI's own while it was still improving) adds to the
+        # plan's budget, by the amount FI recorded for it
         # (core/optimise_refine.py): the rounds in FI's own file, for this plan, not the search record's word for it.
         added = sum(int(r["added"]) for r in _optimise.read_rounds(quest_root, block))
         if budget is not None and counted > budget + added:
             out["protocol_runtime_matched"].append(
                 f"the search's record holds {counted} evaluations, more than the {budget + added} the plan allows"
-                + (f" ({budget} planned and {added} added at the person's request)" if added else ""))
+                + (f" ({budget} planned and {added} added by continuing the search)" if added else ""))
         space = _search.Space(block["design_variables"])
         outside = [r for r in rows if isinstance(r.get("design"), dict) and (
             set(r["design"]) != set(space.names) or not space.inside(r["design"]))]

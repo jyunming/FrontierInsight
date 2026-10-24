@@ -330,19 +330,27 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     compared = (best.get("compared") or {}).get("levels") if isinstance(best.get("compared"), dict) else None
     if compared:
         won = (best.get("best") or {}).get("level")
-        lines += [f"**Alternatives compared.** Each of the {len(compared)} alternatives was searched on its own, with the "
+        searched = "Each of the" if not any(p.get("same_as") for p in compared) else "Each of the searched ones of the"
+        lines += [f"**Alternatives compared.** {searched} {len(compared)} alternatives was searched on its own, with the "
                   "plan's own variables and budget, and the comparison is between their best designs:", ""]
         for p in compared:
             name = ", ".join(f"{k} = {v}" for k, v in (p.get("level") or {}).items())
             top = p.get("best") if isinstance(p.get("best"), dict) else None
             text = (f"{quantity} = {_fmt(top.get('objective'))}{u} at {_design(top.get('design'))}" if top
                     else "no design that meets every limit was found")
+            if p.get("same_as"):
+                other = ", ".join(f"{k} = {v}" for k, v in p["same_as"].items())
+                lines.append(f"- {name}: gave the same results as {other} for every one of the {p.get('probes')} designs "
+                             f"tried at both, so the search was not run again for it; {p.get('evaluations')} "
+                             "evaluation(s).")
+                continue
             lines.append(f"- {name}{' (the best)' if p.get('level') == won else ''}: {text}; "
                          f"{p.get('evaluations')} evaluation(s).")
         lines.append("")
     for r in best.get("continued") or []:
         toward = f", toward {quantity} = {_fmt(r['target'])}{u}" if _num(r.get("target")) else ""
-        lines += [f"*Continued at the person's request (round {r.get('round')}):* {r.get('evaluations')} of "
+        who = ("by FI, still improving when its budget ran out" if r.get("by") == "FI" else "at the person's request")
+        lines += [f"*Continued {who} (round {r.get('round')}):* {r.get('evaluations')} of "
                   f"{r.get('added')} more evaluations{toward}, from {_design(r.get('from'))}; stopped because "
                   f"{_STOPPED.get(str(r.get('stopped_because')), r.get('stopped_because'))}.", ""]
     if check:

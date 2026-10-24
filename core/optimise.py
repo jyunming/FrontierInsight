@@ -687,7 +687,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 continue
             if not isinstance(row, dict) or row.get("event") != "evaluation" or not isinstance(row.get("design"), dict):
                 continue
-            answer: dict[str, Any] = ({"values": {quantity: row["objective"], **(row.get("constraints") or {})}}
+            # The objective, the limits and the plan's named results (the row keeps them), as the simulation gave them.
+            answer: dict[str, Any] = ({"values": {quantity: row["objective"], **(row.get("constraints") or {}),
+                                                  **(row.get("results") if isinstance(row.get("results"), dict) else {})}}
                                       if row.get("status") == "ok" else {"failed": str(row.get("reason") or "failed")})
             answer["elapsed_s"] = row.get("elapsed_s")
             if row.get("stage") == "scan":
@@ -846,13 +848,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                          "in the search's budget", len(rows), worked)
         return rows
 
-    # The plan's results, watched for a design that changes none of them (core/optimise_search.py, ``no_effect``).
-    # Not a result the plan itself expects to stay put (an invariant, a fixed-input check): its staying put says nothing
-    # about the design.
-    from . import degenerate_results as _degenerate
-
-    constant = _degenerate.expected_constants(protocol)
-    results = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
+    results = watched_results(protocol)
     gen = _search.compare(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1,
                           stop_flat=stop_flat, stop_stepped=stop_stepped, stream=at_once > 1)
     replay_space = _search.Space(block["design_variables"]) if replay else None
@@ -1045,6 +1041,81 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                      load_error=load_error, files=_files(ledger_text, best_text, record_text))
 
 
+# --- a search still improving when its budget runs out -----------------------------------------------------------------
+
+
+def still_improving(rows: list[dict[str, Any]], direction: str) -> dict[str, float] | None:
+    """Whether the best design was still improving when the search ended, from the search's own ledger rows: the last
+    tenth of its counted evaluations (the baseline's is not one of them) gave more than 5% of the whole improvement over
+    the baseline (or over the first design that met every limit, when the baseline did not). ``{"gain_last_tenth", "total", "share"}`` (in the objective's unit, the share a fraction) when it
+    was, else ``None``."""
+    sign = 1.0 if direction == "maximise" else -1.0
+    ordered = sorted((r for r in rows if isinstance(r, dict) and r.get("event", "evaluation") == "evaluation"
+                      and r.get("counted", True) and r.get("stage") != "scan"),
+                     key=lambda r: r.get("n") if isinstance(r.get("n"), (int, float)) else 0)
+
+    def value(row: dict[str, Any]) -> float | None:
+        v = row.get("objective")
+        ok = row.get("status") == "ok" and row.get("feasible") is not False
+        return float(v) if ok and isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+    # The improvement is counted from the first design that meets every limit: the baseline when it does, else the
+    # first such design the search found (a baseline that breaks a limit has no value to improve on).
+    base = next((value(r) for r in ordered if r.get("stage") == "baseline"), None)
+    searched = [r for r in ordered if r.get("stage") != "baseline"]
+    if not searched:
+        return None
+    cut = len(searched) - max(1, math.ceil(len(searched) / 10))  # evaluations before the last tenth
+    best_at = best_final = base
+    for i, row in enumerate(searched):
+        if i == cut:
+            best_at = best_final
+        v = value(row)
+        if v is not None and (base is None or sign * (v - best_final) > 0):
+            if base is None:
+                base = v
+            best_final = v
+    if base is None:
+        return None
+    if best_at is None:  # the first design that meets every limit came in the last tenth: all of it is recent
+        best_at = base
+    total = sign * (best_final - base)
+    gain = sign * (best_final - best_at)
+    if total > 0 and gain > 0.05 * total:
+        return {"gain_last_tenth": gain, "total": total, "share": gain / total}
+    return None
+
+
+def _still_improving_somewhere(run: SearchRun, direction: str) -> dict[str, float] | None:
+    """:func:`still_improving` for the search as it was run: a search compared across the levels of a condition
+    (``compared``) is one search per level, each with its own baseline, budget and end, so each level whose own budget
+    ran out is judged on its own rows; the first one still improving is the answer."""
+    levels = (((run.record or {}).get("compared") or {}).get("levels")) or []
+    if not levels:
+        return still_improving(run.rows, direction)
+    for part in levels:
+        if not isinstance(part, dict) or part.get("stopped_because") != "budget":
+            continue
+        mine = [r for r in run.rows if isinstance(r, dict) and r.get("level") == part.get("level")]
+        fired = still_improving(mine, direction)
+        if fired is not None:
+            return {**fired, "level": part.get("level")}
+    return None
+
+
+def _seconds_per_evaluation(run: SearchRun) -> float | None:
+    """What one evaluation of this search cost, in wall seconds, from FI's record of it."""
+    spent = (run.record or {}).get("time") or {}
+    per = spent.get("seconds_per_evaluation")
+    if isinstance(per, (int, float)) and per > 0:
+        return float(per)
+    used = ((run.record or {}).get("evaluations") or {}).get("search")
+    seconds = spent.get("seconds")
+    if isinstance(seconds, (int, float)) and isinstance(used, int) and used > 0:
+        return float(seconds) / used
+    return None
+
+
 # --- run.log ---------------------------------------------------------------------------------------------------------
 
 _STOPPED = {
@@ -1122,16 +1193,21 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
     if compared and best is not None:
         from . import optimise_search as _osearch
 
-        lines.append(f"[optimise] {len(compared)} alternatives were each searched on their own; the best design is the "
+        same = [p for p in compared if p.get("same_as")]
+        lines.append(f"[optimise] {len(compared)} alternatives were "
+                     + ("compared" if same else "each searched on their own") + "; the best design is the "
                      f"one of {_osearch.level_says(best.get('level') or {})}. Best of each: "
                      + "; ".join(f"{_osearch.level_says(p['level'])}: "
                                  + (f"{_fmt(p['best']['objective'])}{unit}" if p.get("best") else "no design that meets every limit")
                                  for p in compared))
+        for p in same:
+            lines.append(f"[optimise] {_osearch.same_as_says(p)}")
     for r in record.get("continued") or []:
         target = f", toward {quantity} = {_fmt(r['target'])}{unit}" if r.get("target") is not None else ""
         reached = ("; the target was reached at the search's settings" if r.get("target_reached") else
                    "; the target was not reached at the search's settings" if r.get("target") is not None else "")
-        lines.append(f"[optimise] continued at the person's request (round {r.get('round')}): {r.get('evaluations')} of "
+        who = ("by FI, still improving when its budget ran out" if r.get("by") == "FI" else "at the person's request")
+        lines.append(f"[optimise] continued {who} (round {r.get('round')}): {r.get('evaluations')} of "
                      f"{r.get('added')} more evaluation(s){target}, from {_design(r.get('from') or {})}; stopped "
                      f"because {_STOPPED.get(str(r.get('stopped_because')), r.get('stopped_because'))}{reached}")
     settings = record.get("search_settings") or {}
@@ -1227,6 +1303,16 @@ def trial_cells(run: SearchRun, quest_root: Path) -> tuple[list[dict[str, Any]],
                       "metrics": {}})
         reasons[EVALUATIONS_KEY] = Counter(str(r.get("reason") or "the evaluation failed") for r in failed)
     return cells, reasons
+
+
+def watched_results(protocol: dict[str, Any]) -> list[str]:
+    """The plan's results, watched for a design that changes none of them (core/optimise_search.py, ``no_effect``) and
+    for a compared alternative that gives the same results as the first. Not a result the plan itself expects to stay
+    put (an invariant, a fixed-input check): its staying put says nothing about the design."""
+    from . import degenerate_results as _degenerate
+
+    constant = _degenerate.expected_constants(protocol)
+    return [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
 
 
 class OptimisationRunner:
@@ -1342,13 +1428,17 @@ class OptimisationRunner:
         except OSError:
             self._rounds = None
         self._rounds_read = True
-        run = await run_search(self.executor, cmd[0], self.quest_root,
-                               self.simulate.relative_to(self.quest_root).as_posix(), protocol, base_seed=base,
-                               timeout_s=timeout_s, env=env, log=self.log,
-                               frozen=self._is_frozen(), at_once=self.at_once,
-                               stop_flat=bool(self._stop_flat() if callable(self._stop_flat) else self._stop_flat),
-                               stop_stepped=self._stepped_repair_left(),
-                               stop_unchanged=self._unchanged_repair_left())
+        async def search(limit_s: int) -> SearchRun:
+            return await run_search(self.executor, cmd[0], self.quest_root,
+                                    self.simulate.relative_to(self.quest_root).as_posix(), protocol, base_seed=base,
+                                    timeout_s=limit_s, env=env, log=self.log,
+                                    frozen=self._is_frozen(), at_once=self.at_once,
+                                    stop_flat=bool(self._stop_flat() if callable(self._stop_flat) else self._stop_flat),
+                                    stop_stepped=self._stepped_repair_left(),
+                                    stop_unchanged=self._unchanged_repair_left())
+
+        run = await search(timeout_s)
+        run = await self._continue_while_improving(run, search, protocol, started, timeout_s)
         self.last = run
         # The coarse scan's settings that changed no result (core/flat_output.py), kept in the search's record so a
         # search used again says it too.
@@ -1458,6 +1548,53 @@ class OptimisationRunner:
             returncode=result.returncode, stdout=stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
         )
+
+    async def _continue_while_improving(self, run: SearchRun, search: Any, protocol: dict[str, Any], started: float,
+                                        timeout_s: int) -> SearchRun:
+        """A search that stopped only because its evaluation budget ran out, while its best design was still improving
+        (:func:`still_improving`), goes on by itself with one more round (one start's share of the budget) as long as
+        the round fits in what is left of this call's time limit. The earlier evaluations are answered from FI's record
+        of them, so only the new round runs the simulation. Any other end of a search is left as it is."""
+        from . import optimise_refine as _refine
+
+        norm = _plan.normalize(block_of(protocol))[0]
+        per_start = int((((norm or {}).get("evaluation_budget") or {}).get("per_start")) or 0)
+        if norm is None or per_start <= 0 or run.reused or self._is_frozen():
+            return run
+        direction = str((norm.get("objective") or {}).get("direction") or "minimise")
+        per = _seconds_per_evaluation(run)
+        while (((run.record or {}).get("evaluations") or {}).get("stopped_because") == "budget"
+               and not run.load_error and not run.problems and not run.reused):
+            fired = _still_improving_somewhere(run, direction)
+            # A round continues every level of a compared search that was searched: it costs per_start evaluations
+            # for each (a level that gave the first level's results is not searched, core/optimise_search.py).
+            parts = max(1, sum(1 for part in ((run.record or {}).get("compared") or {}).get("levels") or []
+                               if isinstance(part, dict) and not part.get("same_as")))
+            # Whole seconds, as the search is given them: a round that fits only in a fraction of a second more is not
+            # started, and the search is never given more than is left.
+            left = int(timeout_s - (time.monotonic() - started))
+            if fired is None or per is None or left < 1 or per_start * parts * per > left:
+                break
+            rounds = read_rounds(self.quest_root, norm)
+            number = max([int(r["auto"]) for r in rounds if isinstance(r.get("auto"), int)] or [0]) + 1
+            asked = (f"FI: the search was still improving when its budget ran out (the last tenth of its evaluations "
+                     f"gave {round(100 * fired['share'])}% of its improvement)")
+            _refine.add_round(self.quest_root, norm, {"added": per_start, "target": None, "asked": asked,
+                                                      "auto": number})
+            if self.log is not None:
+                self.log.info("[optimise] the search was still improving when its budget ran out (the last tenth of "
+                              "its evaluations gave %d%% of its improvement): FI continues it with %d more "
+                              "evaluation(s)%s, %d s left of the time limit", round(100 * fired["share"]), per_start,
+                              f" for each of its {parts} compared levels" if parts > 1 else "", int(left))
+            left = int(timeout_s - (time.monotonic() - started))  # again: writing the round took time too
+            if left < 1:
+                break
+            round_started = time.monotonic()
+            run = await search(left)
+            path = self.quest_root / ROUNDS_PATH
+            self._rounds = path.read_bytes() if path.is_file() else None
+            per = max(per, (time.monotonic() - round_started) / (per_start * parts))
+        return run
 
     def _check_trials(self, run: SearchRun, started: float) -> Any:
         """FI's check of the failed trials on a search (:func:`trial_cells`): a fault is a failed run of the simulation
