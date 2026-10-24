@@ -85,6 +85,10 @@ UNDEFINED = "undefined"
 FEWER_RUNS = "fewer_runs"
 RUN_DIFFERENCE = "run_difference"
 PAGE_LIMIT = "page_limit"
+UNSUPPORTED_CLAIMS = "unsupported_claims"
+#: The sentences of the delivered paper the last claim check found supported by neither the run's results nor a cited
+#: source (``Engine._state_unsupported_claims``): ``{"claims": [{"claim", "evidence"}]}``. Empty when the last check found none.
+UNSUPPORTED_RECORD = Path(".fi") / "unsupported_claims.json"
 #: FI's measurement of the finished paper against the topic's page limit (``Engine._page_limit_review``):
 #: ``{"pages", "limit", "final"}``. ``final``: no further shortening rewrite will follow, so the paper stays this long.
 PAGE_RECORD = Path(".fi") / "page_limit.json"
@@ -109,12 +113,14 @@ _KIND_WORDS = {
     FEWER_RUNS: "a part of the plan not fully done, to fit the time allowed",
     RUN_DIFFERENCE: "a difference between what the analysis reports and FI's record of the trials that ran",
     PAGE_LIMIT: "that the paper is longer than the topic's page limit",
+    UNSUPPORTED_CLAIMS: "sentences of the paper that were not found supported by the run's results or a cited source",
 }
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
-              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages"}
+              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages",
+              UNSUPPORTED_CLAIMS: "unsupported"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -403,7 +409,68 @@ def required_items(quest_root: Path | str) -> list[Item]:
     if isinstance(pages, dict) and pages.get("final") and isinstance(pages.get("pages"), int)             and isinstance(pages.get("limit"), int) and pages["pages"] > pages["limit"]:
         add(PAGE_LIMIT, "page limit", _sentence(
             f"This paper is {pages['pages']} pages, over the {pages['limit']}-page limit set for it"), key="limit")
+    said = unsupported_claims_text(_read(root, str(UNSUPPORTED_RECORD)))
+    if said:
+        add(UNSUPPORTED_CLAIMS, "unsupported sentences", _sentence(said), key="claims")
     return items
+
+
+_MAX_UNSUPPORTED_LISTED = 8
+_MAX_UNSUPPORTED_CHARS = 300
+_CITE_MARK = re.compile(r"\s*\[(?:W?\d+(?:\s*[,;–-]\s*W?\d+)*)\]")
+
+
+def _quoted_claim(text: Any) -> str:
+    """One claim as it is quoted in the Limitations: on one line, without the reference numbers it carried (they point at
+    the paper's list, not at a source of this sentence), without double braces (no placeholder), cut after a whole word
+    when long."""
+    one = _one(_CITE_MARK.sub("", str(text or ""))).replace("{{", "").replace("}}", "").replace('"', "'")
+    if len(one) > _MAX_UNSUPPORTED_CHARS:
+        one = one[:_MAX_UNSUPPORTED_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:") + " ..."
+    return one
+
+
+def unsupported_claims_text(record: Any) -> str:
+    """The sentence FI puts in the Limitations for the sentences of the paper its last claim check found supported by
+    neither the run's results nor a cited source (:data:`UNSUPPORTED_RECORD`): each one quoted, at most
+    :data:`_MAX_UNSUPPORTED_LISTED` and how many more there are. ``""`` when the record holds none."""
+    rows = record.get("claims") if isinstance(record, dict) else None
+    quoted: list[str] = []
+    for row in rows or []:
+        q = _quoted_claim(row.get("claim") if isinstance(row, dict) else row)
+        if q and q not in quoted:
+            quoted.append(q)
+    if not quoted:
+        return ""
+    shown = quoted[:_MAX_UNSUPPORTED_LISTED]
+    more = len(quoted) - len(shown)
+    return ("These sentences of the paper were not found supported by the run's results or a cited source: "
+            + "; ".join(f'"{q}"' for q in shown) + (f"; and {more} more" if more else ""))
+
+
+def write_unsupported_record(quest_root: Path | str, claims: list[dict[str, Any]]) -> bool:
+    """Keep the claims the last claim check judged unsupported, with its evidence words (:data:`UNSUPPORTED_RECORD`); an
+    empty list empties the record, so a sentence an earlier pass placed is taken out by :func:`drop_item`. Returns whether
+    the record could be written."""
+    path = Path(quest_root) / UNSUPPORTED_RECORD
+    rows = [{"claim": _one(c.get("claim")), "evidence": _one(c.get("evidence"))} for c in claims if _one(c.get("claim"))]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"claims": rows}, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def drop_item(markdown: str, kind: str) -> str:
+    """``markdown`` without the sentence FI placed for an item of ``kind`` (its marked span, and the list line or the
+    placeholder around it): used when the record that required it is empty now, so it does not stay in the paper (or turn
+    into "not recorded")."""
+    ident = re.escape(f"{_ID_PREFIX[kind]}-")
+    mark = rf"<!-- fi:fact-{re.escape(_ITEM_KEY)}{ident}[\w-]* -->.*?<!-- /fi:fact-{re.escape(_ITEM_KEY)}{ident}[\w-]* -->"
+    line = rf"^[ \t]*[-*][ \t]+(?:{mark}|\{{\{{not_done:{ident}[\w-]*\}}\}})[ \t]*\n?"
+    text = re.sub(line, "", markdown or "", flags=re.S | re.M)
+    return re.sub(mark, "", text, flags=re.S)
 
 
 _MAX_DIFFERENCE_CHARS = 500
