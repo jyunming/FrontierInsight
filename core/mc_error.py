@@ -60,6 +60,9 @@ from . import trial_checks as _trial_checks
 BAND_SE = 3.0
 #: The first batch of trials, from which the spread is read (and on which a rule of every trial is judged).
 PILOT_TRIALS = 20
+#: How many trials a rule of every trial is judged on when no study size is given: the first batch, then more up to this
+#: many (a disagreement that shows only in a later trial must not pass on the first batch alone).
+EVERY_TRIALS = 10 * PILOT_TRIALS
 #: Fewer trials than this give a spread too rough to decide anything by.
 MIN_TRIALS = 10
 #: The most trials FI runs for one check.
@@ -477,6 +480,20 @@ def failed_share_verdict(failed: int, started: int, verdict: str | None) -> tupl
     return verdict, ""
 
 
+def is_partial(mc: dict[str, Any] | None) -> bool:
+    """True for a rule of every trial that held in every trial judged, when time ran out before all were (verdict
+    ``"partial"``). Stop and repair logic reads it as a pass; what was checked is reported as not fully checked."""
+    return isinstance(mc, dict) and mc.get("verdict") == "partial"
+
+
+def partial_words(mc: dict[str, Any] | None) -> str:
+    """The plain sentence for a partial check, ``""`` for any other."""
+    if not is_partial(mc):
+        return ""
+    return (f"passed on {int(mc.get('judged') or 0)} of {int(mc.get('planned') or 0)} trials; the rest were not judged "
+            "in the time allowed")
+
+
 def words(mc: dict[str, Any] | None) -> str:
     """How the check's number was had, in a few plain words for a record line: ``the mean over 310 trials, Monte Carlo
     error ±0.0024 (one standard error)``, ``the worst of 20 trials``; ``""`` for a check judged on one number."""
@@ -490,6 +507,11 @@ def words(mc: dict[str, Any] | None) -> str:
             text += f", Monte Carlo error ±{_oracle.fmt_digits(float(se), 2)} (one standard error)"
     elif read_as == "every_trial":
         text = f"the worst of {n} trial{'s' if n != 1 else ''}"
+        asked = int(mc.get("trials_asked") or 0)
+        if is_partial(mc):
+            text += f" ({partial_words(mc)})"
+        elif asked > n and mc.get("why") != "failed_trials":
+            text += f" (judged on {n} of {asked} trials)"
     else:
         text = "one trial's number, the same in every trial"
     failed, started = int(mc.get("failed_trials") or 0), int(mc.get("started") or 0)
@@ -505,7 +527,10 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
         return "the trials did not decide it"
     if mc.get("why") == "failed_trials":
         return (f"{mc.get('failed_trials')} of {mc.get('started')} trials on its case failed, so the trials that "
-                "finished cannot stand for the case")
+                "finished cannot stand for the case and the check was not decided (it is not a pass)")
+    if mc.get("read_as") == "every_trial":
+        return (f"a rule of every trial held in the {int(mc.get('trials') or 0)} trials FI could run in the time it had, "
+                f"fewer than the {int(mc.get('trials_asked') or 0)} it needs, so it is not shown to hold in all of them")
     n, se = int(mc.get("trials") or 0), mc.get("se")
     when = ("the most FI runs for one check" if mc.get("why") == "most_trials" else "all FI could run in the time it had")
     tolerance = f"±{_oracle.fmt_digits(float(limit), 2)}" if _number(limit) else "its tolerance"
@@ -523,7 +548,8 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
 def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, why: str, failed: int, started: int,
            failed_example: str = "", **extra: Any) -> dict[str, Any]:
     """The ``mc`` entry a check keeps (``needs/ORACLE_CHECK.json``): how it was read, its trials and their error, and
-    the verdict they gave (``pass``, ``fail``, ``undecided``) with why it was not decided (``time``, ``most_trials``,
+    the verdict they gave (``pass``, ``fail``, ``undecided``, or ``partial``: passed on every trial judged but time ran
+    out before all ``planned`` were; it carries ``judged`` and ``planned``) with why it was not decided (``time``, ``most_trials``,
     ``failed_trials``)."""
     stat = stat or {}
     se = stat.get("se")

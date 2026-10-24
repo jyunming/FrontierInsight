@@ -935,7 +935,7 @@ def unjudgeable(oracles: list[dict[str, Any]]) -> list[str]:
 def mc_of(check: Any) -> dict[str, Any] | None:
     """The record of the trials a check was decided on (core/mc_error.py), when it has one with a verdict."""
     mc = check.get("mc") if isinstance(check, dict) else None
-    return mc if isinstance(mc, dict) and mc.get("verdict") in ("pass", "fail", "undecided") else None
+    return mc if isinstance(mc, dict) and mc.get("verdict") in ("pass", "fail", "undecided", "partial") else None
 
 
 def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -968,6 +968,10 @@ def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> li
             "limit": limit, "passed_by_engine": verdict, "script_said": (check or {}).get("passed"),
             "measured_by": "engine" if (reported or {}).get("engine_measured") and (check or {}).get("measured_by") == "engine" else "script",
             **({"mc": mc} if mc else {}), **({"undecided": True} if undecided else {}),
+            # "partial" counts as a pass for stop and repair (passed_by_engine stays True) but is kept apart so a record
+            # of what was checked can say it was not every trial (partial_checks).
+            **({"partial": {"judged": int(mc.get("judged") or 0), "planned": int(mc.get("planned") or 0)}}
+               if mc is not None and mc.get("verdict") == "partial" and verdict is True else {}),
         })
     return out
 
@@ -1008,6 +1012,19 @@ def engine_passed(judged_list: list[dict[str, Any]]) -> list[str]:
         if j.get("measured_by") == "engine" and _num(j.get("value")) is not None and j.get("passed_by_engine") is True
         and not j.get("flagged_by_reader")
     ]
+
+
+def partial_checks(judged_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The judged oracles that passed on every trial judged but not on all planned (time ran out): each is a pass for
+    stop and repair, and not a fully checked rule for a record of what was checked."""
+    return [j for j in judged_list if j.get("passed_by_engine") is True and isinstance(j.get("partial"), dict)]
+
+
+def partial_gap_words(j: dict[str, Any]) -> str:
+    """One sentence for a partial check, for the evidence gaps and the quality report."""
+    p = j.get("partial") or {}
+    return (f"the check '{j.get('name')}' passed on {int(p.get('judged') or 0)} of {int(p.get('planned') or 0)} trials; "
+            "the rest were not judged in the time allowed, so the rule is not shown to hold in every trial")
 
 
 def not_passed(judged_list: list[dict[str, Any]]) -> list[str]:
@@ -1053,6 +1070,10 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
     for j in judged_list:
         value, expected, limit = _num(j.get("value")), _num(j.get("expected")), _num(j.get("limit"))
         verdict = {True: "passed", False: "failed"}.get(j.get("passed_by_engine"), "not judged")
+        if isinstance(j.get("partial"), dict) and j.get("passed_by_engine") is True:
+            p = j["partial"]
+            verdict = (f"passed on {int(p.get('judged') or 0)} of {int(p.get('planned') or 0)} trials; the rest were not "
+                       "judged in the time allowed (say it was not checked in every trial)")
         verdict += "" if j.get("measured_by") == "engine" else " (the value is the script's own)"
         if j.get("flagged_by_reader"):
             verdict = (not_shown_words(str(j["flagged_by_reader"])) + "; do not say this check passed or that it "
