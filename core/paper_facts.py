@@ -1291,7 +1291,7 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
         return ""
     lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. Do not type them: write the "
                  "placeholder (double braces, exactly as shown) where the fact goes, and FI puts the value in from its "
-                 "records when the paper is saved. A seed or a run time typed as a number is sent back to "
+                 "records when the paper is saved. A seed, a run time or a count of settings or trials typed as a number is sent back to "
                  "you, and so is a claim about the topic's time limit that the record contradicts.")
     if known:
         lines.append("Placeholders (with what FI will put in for each, as the records stand now):")
