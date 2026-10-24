@@ -17760,6 +17760,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if regated is not None:
             oracle_code = regated
         gate_repaired = gate_repaired or regate_rewrote
+        # Is each number the simulation returns computed through the model's package? Recorded, not acted on
+        # (core/step_coverage.py).
+        self._record_step_coverage(state, simulate_path)
 
         # Pilot pass: run the experiment small before running it for real.
         #

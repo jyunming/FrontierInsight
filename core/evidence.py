@@ -686,6 +686,12 @@ def assess(
                        "version was confirmed; that confirmation does not count for it)")
     if settings.get("phased_record_gap"):
         ready_gaps.append(str(settings["phased_record_gap"]))
+    step_warnings = _json(fi / "step_coverage.json")
+    if isinstance(step_warnings, dict) and step_warnings.get("warnings"):
+        # A reported number not computed through the model's package reads as a fake truth (core/step_coverage.py): a gap,
+        # not a stop, because a reading of syntax can miss a call it should have followed.
+        ready_gaps.append("a number the simulation reports is not shown to be computed through the model's functions ("
+                          + "; ".join(str(w) for w in step_warnings["warnings"][:3]) + ")")
     if settings.get("code_writer_isolation") == "isolation_unverified":
         # The coding agent ran on this computer with no sandbox (core/agent_coder.py): said plainly, as for held-back
         # rows whose isolation was not shown (core/phased_isolation.py).
