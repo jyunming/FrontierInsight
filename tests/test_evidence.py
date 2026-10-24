@@ -241,6 +241,66 @@ def test_the_evidence_record_keeps_a_precision_target_no_result_was_held_to(tmp_
     assert "precision_not_judged" not in record
 
 
+
+def test_a_mean_the_target_names_given_without_its_values_is_a_gap_beside_a_judged_probability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "_aggregate_result_json_replicates", lambda *_a, **_k: {
+        "hit_rate": {"ci_method": engine_mod._CI_WILSON, "ci_lower": 0.40, "ci_upper": 0.60},
+        "settle_time": {"ci_method": "t_between_seeds", "ci_lower": 1.0, "ci_upper": 3.0}})
+    metrics = [{"id": "settle_time", "kind": "mean"}, {"id": "hit_rate", "kind": "proportion"}]
+    state = {"result_json_replicates": [{"hit_rate": 0.5, "settle_time": 2.0}, {"hit_rate": 0.4, "settle_time": 2.1}]}
+    eng = _engine_with_precision(tmp_path / "m", {"target_half_width": 0.05, "metric": "settle_time"})
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05, "metric": "settle_time"},  # type: ignore[method-assign]
+                                          "metrics": metrics}
+    record = eng._write_evidence(state, write=False)
+    assert record["precision_not_judged"] == {"target": 0.05, "metric": "settle_time"}
+    # the probability is not held to a target set on the mean's scale
+    agg = engine_mod._aggregate_result_json_replicates()
+    eng._annotate_precision(state, agg)
+    assert "target_half_width" not in agg["hit_rate"]
+    # known positive: the target on the probability, judged there, is no gap
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05, "metric": "hit_rate"},  # type: ignore[method-assign]
+                                          "metrics": metrics}
+    assert "precision_not_judged" not in eng._write_evidence(state, write=False)
+    agg = engine_mod._aggregate_result_json_replicates()
+    eng._annotate_precision(state, agg)
+    assert agg["hit_rate"]["precision_reached"] is False and "target_half_width" not in agg["settle_time"]
+
+
+def test_the_plans_only_metric_keeps_an_unnamed_target_and_a_dotted_name_is_matched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "_aggregate_result_json_replicates", lambda *_a, **_k: {
+        "hit_rate": {"ci_method": engine_mod._CI_WILSON, "ci_lower": 0.40, "ci_upper": 0.60},
+        "by_n.4.risk.rate": {"ci_method": engine_mod._CI_WILSON, "ci_lower": 0.48, "ci_upper": 0.52}})
+    state = {"result_json_replicates": [{"hit_rate": 0.5}, {"hit_rate": 0.4}]}
+    eng = _engine_with_precision(tmp_path / "u", {"target_half_width": 0.05})
+    # the plan's only metric is a mean, the target names none: it is on that mean, never on a probability beside it
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05},  # type: ignore[method-assign]
+                                          "metrics": [{"id": "settle_time", "kind": "mean"}]}
+    agg = engine_mod._aggregate_result_json_replicates()
+    assert eng._annotate_precision(state, agg) == "" and "target_half_width" not in agg["hit_rate"]
+    assert eng._write_evidence(state, write=False)["precision_not_judged"] == {"target": 0.05, "metric": "settle_time"}
+    # a declared name with a dot in it is the end of the pooled key's path
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05, "metric": "risk.rate"},  # type: ignore[method-assign]
+                                          "metrics": [{"id": "risk.rate", "kind": "proportion"}]}
+    agg = engine_mod._aggregate_result_json_replicates()
+    eng._annotate_precision(state, agg)
+    assert agg["by_n.4.risk.rate"]["precision_reached"] is True and "target_half_width" not in agg["hit_rate"]
+    assert "precision_not_judged" not in eng._write_evidence(state, write=False)
+    # a shorter declared name is not the end of a longer one's key: `rate` is not `risk.rate`
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05, "metric": "rate"},  # type: ignore[method-assign]
+                                          "metrics": [{"id": "risk.rate", "kind": "proportion"}, {"id": "rate", "kind": "proportion"}]}
+    agg = engine_mod._aggregate_result_json_replicates()
+    eng._annotate_precision(state, agg)
+    assert "target_half_width" not in agg["by_n.4.risk.rate"]
+    assert eng._write_evidence(state, write=False)["precision_not_judged"]["metric"] == "rate"
+
 def test_a_quest_waiting_for_the_reviews_human_decision_is_not_publication_ready(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     (root / ".fi").mkdir()
