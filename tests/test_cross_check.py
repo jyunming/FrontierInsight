@@ -91,7 +91,7 @@ async def test_cross_check_skipped_when_no_findings(tmp_path: Path) -> None:
 
     patch = await eng._node_cross_check({"analysis": {"key_findings": []}})
 
-    assert patch == {"cross_check": []}
+    assert patch == {"cross_check": [], "cross_check_route": "write"}
     chat_mock.assert_not_awaited()
 
 
@@ -103,7 +103,7 @@ async def test_cross_check_disabled_when_k_is_zero(tmp_path: Path) -> None:
 
     patch = await eng._node_cross_check({"analysis": {"key_findings": ["x"]}})
 
-    assert patch == {"cross_check": []}
+    assert patch == {"cross_check": [], "cross_check_route": "write"}
 
 
 @pytest.mark.asyncio
@@ -980,3 +980,43 @@ async def test_cross_check_single_model_path_unchanged(tmp_path: Path) -> None:
     assert entry["summary"] == "on-balance supporting"
     # Exactly one chat call — single-call path, no fan-out.
     assert chat_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_the_last_round_is_followed_not_spent_with_no_re_route(tmp_path: Path) -> None:
+    """At the last round (iteration + 1 == max_iterations) the node spends the round on a re-route it decided; the
+    router follows that decision instead of deciding again from the raised counter and writing."""
+    eng = Engine(_mk_cfg(tmp_path, max_iter=2))
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value="{}")})()
+    eng.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    for step, route in (("broaden_lit", "broaden_lit"), ("re_experiment", "redesign")):
+        eng._precision_missed = lambda s, quiet=False: ["p"]  # type: ignore[method-assign]
+        state = {"analysis": {"key_findings": ["x"], "next_step": step}, "iteration": 1}
+        patch = await eng._node_cross_check(dict(state))
+        assert patch["iteration"] == 2 and patch["cross_check_route"] == route
+        assert eng._route_after_cross_check({**state, **patch}) == route
+    # no round left: written up, and no round is spent
+    patch = await eng._node_cross_check({"analysis": {"key_findings": ["x"], "next_step": "broaden_lit"}, "iteration": 2})
+    assert "iteration" not in patch and patch["cross_check_route"] == "write"
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_cross_check_never_follows_an_earlier_route(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path, max_iter=3))
+    stale = {"analysis": {"key_findings": [], "next_step": "broaden_lit"}, "iteration": 1, "cross_check_route": "broaden_lit"}
+    patch = await eng._node_cross_check(dict(stale))
+    assert eng._route_after_cross_check({**stale, **patch}) == "write"
+
+
+def test_a_redesign_from_the_precision_record_is_told_the_target_and_the_size(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path, max_iter=2))
+    eng._precision_shortfalls = lambda s: [  # type: ignore[method-assign]
+        {"name": "p_hit", "half_width": 0.04, "target": 0.02, "trials": 100}]
+    state = {"topic": "t", "iteration": 1, "cross_check_route": "redesign",
+             "analysis": {"next_step": "re_experiment", "summary": "the results look wrong"}}
+    prompt = eng._design_prompt(state)
+    assert "MISSED THE PLAN'S PRECISION TARGET" in prompt and "p_hit" in prompt
+    assert "with 100 trials" in prompt and "about 400 trials reach it" in prompt
+    assert "non-physical" not in prompt and "REJECTED" not in prompt
+    # a design pass the precision record did not send gets no such block
+    assert "PRECISION TARGET" not in eng._design_prompt({**state, "cross_check_route": "write"})
