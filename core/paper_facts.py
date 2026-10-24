@@ -1514,10 +1514,29 @@ def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
     return out, taken
 
 
-def typed_hits(paper_md: str, protocol: dict[str, Any] | None, topic: str = "") -> list[str]:
+def run_counts(quest_root: Path | str | None) -> dict[str, frozenset[int]]:
+    """The counts FI holds from its own ledger, by placeholder name (``settings``, ``trials_per_setting``,
+    ``trials_failed``), as whole numbers: the values the typed-number check treats as FI's, not the writer's."""
+    if quest_root is None:
+        return {}
+    try:
+        each, settings, failed = _trial_counts(Path(quest_root))
+    except Exception:  # noqa: BLE001 -- no ledger, no counts: the check is as strict as before
+        return {}
+    out: dict[str, frozenset[int]] = {}
+    for name, text in (("trials_per_setting", each), ("settings", settings), ("trials_failed", failed)):
+        nums = frozenset(int(x.replace(",", "")) for x in re.findall(r"\d[\d,]*", text))
+        if nums:
+            out[name] = nums
+    return out
+
+
+def typed_hits(paper_md: str, protocol: dict[str, Any] | None, topic: str = "",
+               quest_root: Path | str | None = None) -> list[str]:
     """Rule R1 (:mod:`core.typed_numbers`) on the writer's own text: a hit for each sentence that types a number which is not
     a number of the plan or the topic, or a label. Run only on a paper written under the rule."""
-    return _typed.hits(to_placeholders(_disclosure.without_block(paper_md)), _typed.plan_numbers(protocol, topic), HIT)
+    return _typed.hits(to_placeholders(_disclosure.without_block(paper_md)), _typed.plan_numbers(protocol, topic), HIT,
+                       run_counts(quest_root))
 
 
 def plan_protocol(quest_root: Path | str, protocol: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -1535,7 +1554,7 @@ def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s:
         hits += figure_hits(paper_md, quest_root)
         if keyed:
             hits += value_hits(paper_md, quest_root)
-            hits += typed_hits(paper_md, plan_protocol(quest_root, protocol), topic)
+            hits += typed_hits(paper_md, plan_protocol(quest_root, protocol), topic, quest_root)
         return hits
     except Exception:  # noqa: BLE001 -- a check that cannot be made flags nothing
         return []
