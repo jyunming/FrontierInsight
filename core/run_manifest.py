@@ -580,7 +580,8 @@ def _value_named(segment: str, grid: dict[str, list[Any]], found: dict[str, Any]
 
 def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]] | None = None,
                      fits: Any = None, derived: set[int] | frozenset[int] = frozenset(),
-                     ) -> tuple[dict[Any, tuple[int, int]], dict[Any, dict[Any, tuple[int, int]]]]:
+                     ) -> tuple[dict[Any, tuple[int, int]], dict[Any, dict[Any, tuple[int, int]]],
+                                dict[Any, dict[Any, Any]]]:
     """``(real values, undefined)`` the analysis lists for ``metric_id``, per key the lists sit under (``None`` for the top
     level), and the same counts per mapping that holds those keys side by side.
 
@@ -601,9 +602,21 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
     estimators under ``summary/mean`` is the setting's block, not the estimator called mean).
 
     ``derived``: the ids of the lists drawn from the record rather than being it (:func:`_attribute`: a bootstrap
-    resample, a subset given twice). They never count as trials."""
+    resample, a subset given twice). They never count as trials.
+
+    The third result is, per holding mapping and key, the list itself (its values, frozen) when that key holds exactly one
+    ``<id>_values`` list: keys side by side that hold the very same list are one list given under two names, not two sets
+    of trials, and :func:`_account` counts them once."""
     values_key, undefined_key = f"{metric_id}_values", f"{metric_id}_undefined"
     found: dict[tuple[Any, Any], dict[Any, list[int]]] = {}
+    signature: dict[tuple[Any, Any], Any] = {}
+
+    def sign(under: Any, parent: Any, mapping: dict[str, Any]) -> None:
+        listed_here = mapping.get(values_key)
+        if isinstance(listed_here, list):
+            seen = signature.get((under, parent))
+            signature[(under, parent)] = (tuple(_freeze(x) for x in listed_here) if seen is None
+                                          else "several")
 
     def number(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -633,6 +646,7 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
             if isinstance(listed, list) or number(undefined):
                 add(read(under, path, view), parent, container if container is not None else id(node),
                     _mapping_counts(view, metric_id))
+                sign(read(under, path, view), parent, view)
             inner = ("inner", id(node))
             # One entry per key, its list and its count read together: the same undefined trials given as ``null`` in the
             # key's list and as the key's count are one account (:func:`_mapping_counts`), not two.
@@ -646,6 +660,7 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
                 if isinstance(undefined, dict) and key in undefined:
                     one[undefined_key] = undefined[key]
                 add(read(key, path + (key,), one), id(node), inner, _mapping_counts(one, metric_id))
+                sign(read(key, path + (key,), one), id(node), one)
             for k, v in node.items():
                 if k in (values_key, undefined_key) and isinstance(v, dict):
                     continue  # read above, one entry per key
@@ -662,7 +677,11 @@ def _listed_by_group(result_json: Any, metric_id: str, grid: dict[str, list[Any]
         families.setdefault(parent, {})[under] = counts
         seen = by_under.get(under, (0, 0))
         by_under[under] = (max(seen[0], counts[0]), max(seen[1], counts[1]))
-    return by_under, families
+    lists: dict[Any, dict[Any, Any]] = {}
+    for (under, parent), sig in signature.items():
+        if sig != "several":
+            lists.setdefault(parent, {})[under] = sig
+    return by_under, families, lists
 
 
 def _read_pairs(path: tuple[Any, ...], grid: dict[str, list[Any]], fits: Any,
@@ -888,7 +907,7 @@ def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recor
     record = _record_by_setting(recorded_by_cell, metric_id, grid) if recorded_by_cell and grid else {}
     fits = _fits_record(metric_id, grid, record) if record else None
     derived = _attribute(result_json, metric_id, grid, recorded_by_cell)[2] if record else set()
-    groups, families = _listed_by_group(result_json, metric_id, grid, fits, derived)
+    groups, families, family_lists = _listed_by_group(result_json, metric_id, grid, fits, derived)
 
     def cells_of(under: Any) -> set[frozenset[tuple[str, Any]]] | None:
         if isinstance(under, tuple) and len(under) == 2 and under[0] == "cells":
@@ -964,8 +983,19 @@ def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recor
         entry.pop("cells", None)
     defined, undefined = max(per_setting[0], pooled[0]), max(per_setting[1], pooled[1])
     side_by_side = (0, 0)
-    for members in families.values():
-        parts = [c for under, c in members.items() if not cells_of(under)]
+    for parent, members in families.items():
+        # The very same list under two sibling keys is one list given twice (a copy), counted once.
+        seen_lists: set[Any] = set()
+        parts = []
+        for under, c in members.items():
+            if cells_of(under):
+                continue
+            sig = family_lists.get(parent, {}).get(under)
+            if sig is not None and len(sig) >= 2 and sum(1 for x in sig if _num(x) is not None) >= 2:
+                if sig in seen_lists:
+                    continue
+                seen_lists.add(sig)
+            parts.append(c)
         total = (sum(c[0] for c in parts), sum(c[1] for c in parts))
         if total[0] + total[1] > side_by_side[0] + side_by_side[1]:
             side_by_side = total

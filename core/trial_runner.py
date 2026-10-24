@@ -2502,7 +2502,15 @@ def recorded_series(quest_root: Path, names: set[str] | list[str]) -> dict[str, 
 
 
 def _level_text(value: Any) -> str:
-    """A setting's value as text, a number read as a number (``0`` and ``0.0`` are one value)."""
+    """A setting's value as text, a number read as a number (``0`` and ``0.0`` are one value). A structured value (an array
+    setting) is read member by member, from the grid's list or from the ``[0.5;0.8]`` text :func:`cell_key` wrote for it, so
+    the two spellings of one array are one value."""
+    if isinstance(value, (list, tuple)):
+        return "[" + ";".join(_level_text(x) for x in value) + "]"
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == "[" and text[-1] == "]":
+        inner = text[1:-1].strip()
+        return "[" + ";".join(_level_text(x) for x in re.split(r"[;,]", inner) if x.strip()) + "]"
     try:
         return repr(float(str(value).strip()))
     except ValueError:
