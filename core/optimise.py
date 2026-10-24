@@ -156,8 +156,9 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
              rounds: list[dict[str, Any]] | None = None, stop_flat: bool = True, stop_stepped: bool = True,
              stop_unchanged: bool = True) -> str:
     """What decides a search: the simulation and the modules beside it, the files below ``code/`` it may use (the
-    model's package, a parameter file), the optimisation block, the seed, the entry, the thresholds, and FI's own harness
-    and search code. (A package installed since is not in it: a search that got no result is never kept, so a search
+    model's package, a parameter file), the person's files in ``inputs/`` it may read
+    (:func:`core.code_layout.simulation_inputs`), the optimisation block, the seed, the entry, the thresholds, and FI's
+    own harness and search code. (A package installed since is not in it: a search that got no result is never kept, so a search
     that failed for a missing package runs again anyway.)"""
     parts: list[bytes] = []
     code = Path(quest_root) / "code"
@@ -171,6 +172,16 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
     # search. (Only files below code/, so a quest with none keeps the key it had.)
     for path in _below_code(code):
         rel = path.relative_to(code).as_posix().encode()
+        try:
+            parts.append(rel + b"\0" + path.read_bytes())
+        except OSError:
+            parts.append(rel + b"\0")
+    # Every other file the simulation may read (core/code_layout.py::simulation_inputs): a helper module beside it, a
+    # parameter file in code/, a file the person put in the quest's inputs/. Changing one is another search.
+    from . import code_layout as _code_layout
+
+    for path in _code_layout.simulation_inputs(quest_root):
+        rel = _code_layout.input_label(path, quest_root).encode()
         try:
             parts.append(rel + b"\0" + path.read_bytes())
         except OSError:
@@ -220,6 +231,16 @@ def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: s
             parts.append(path.name.encode() + b"\0")
     for path in _below_code(code):  # the model's package, as in :func:`_run_key`
         rel = path.relative_to(code).as_posix().encode()
+        try:
+            parts.append(rel + b"\0" + (_phased._code_digest(path).encode() if path.suffix == ".py"
+                                         else path.read_bytes()))
+        except OSError:
+            parts.append(rel + b"\0")
+    # Every other file the simulation may read (core/code_layout.py::simulation_inputs), read the same way as above.
+    from . import code_layout as _code_layout
+
+    for path in _code_layout.simulation_inputs(quest_root):
+        rel = _code_layout.input_label(path, quest_root).encode()
         try:
             parts.append(rel + b"\0" + (_phased._code_digest(path).encode() if path.suffix == ".py"
                                          else path.read_bytes()))
