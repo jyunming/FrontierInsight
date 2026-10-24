@@ -640,7 +640,8 @@ def test_a_file_the_code_both_reads_and_writes_is_an_input(tmp_path: Path) -> No
 def test_the_node_makes_the_receipt_check_before_the_pilot_and_the_run() -> None:
     import inspect
 
-    body = inspect.getsource(Engine._node_execute)
+    # _node_execute is the wrapper of the agent mode; the steps of the node are in _node_execute_steps.
+    body = inspect.getsource(Engine._node_execute_steps)
     before_run = body.split("await self._figures_from_results(state)", 1)[1]
     assert before_run.index("await self._verify_gated_code(") < before_run.index("runner.execute(")
     assert "_gate_receipt.write(self.quest_root)" in body.split("await self._figures_from_results(state)", 1)[0]
