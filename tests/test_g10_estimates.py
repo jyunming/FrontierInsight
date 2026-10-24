@@ -22,6 +22,8 @@ def test_two_equal_pilot_values_are_not_evidence_of_zero_variance() -> None:
     assert est.precision_known(MEAN_PLAN, {"y": 0.0}) is False
     probes = [est.Probe(None, None, {"m": 20}, 0.5 + 1000 * 0.1, fixed_s=0.5, per_trial_s=0.1, timed_trials=50)]
     assert est.fit_runs({"m": [20]}, 1000, False, probes, MEAN_PLAN, limit_s=30.0, topic_limit=False, spreads={"y": 0.0}) is None
+    # a bool is not a spread
+    assert est.runs_floor(MEAN_PLAN, 400, {"y": True}) == 400 and est.precision_known(MEAN_PLAN, {"y": True}) is False
     # known positive: a real spread still sets the floor
     assert est.runs_floor(MEAN_PLAN, 400, {"y": 1.0}) == 16
 

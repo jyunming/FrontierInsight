@@ -1090,7 +1090,7 @@ def precision_known(protocol: dict[str, Any] | None, spreads: dict[str, float] |
     if kind != "mean":
         return True
     sd = (spreads or {}).get(metric or "")
-    return isinstance(sd, (int, float)) and sd > 0
+    return isinstance(sd, (int, float)) and not isinstance(sd, bool) and sd > 0
 
 
 def precision_metric(protocol: dict[str, Any] | None) -> tuple[str | None, str | None]:
@@ -1129,7 +1129,7 @@ def runs_floor(protocol: dict[str, Any] | None, before_runs: int, spreads: dict[
             metric, kind = precision_metric(protocol)
             if kind == "mean":
                 sd = (spreads or {}).get(metric or "")
-                if sd is None or not sd > 0:
+                if not isinstance(sd, (int, float)) or isinstance(sd, bool) or not sd > 0:
                     # The spread cannot be estimated, and two equal timed values (a 0/1 outcome both 0, a count) are not
                     # evidence of zero variance: no cut below the plan's own runs.
                     return int(before_runs)
