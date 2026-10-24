@@ -74,3 +74,32 @@ def test_code_run_py_scans_the_parts_and_gives_each_cell_what_it_goes_through(tm
     assert "case" not in study["grid"], "what each run goes through is not a setting of the scan"
     # The settings run.py lists are the parts' settings, the same as FI's own scan.
     assert namespace["cells"](study["grid"], study["sub_studies"]) == osearch.grid_cells(osearch.scan_grid(block))
+
+
+def test_one_scan_setting_that_cannot_be_read_is_left_out_not_the_scan_and_its_parts() -> None:
+    # `level` is a number the scan compares, but the plan does not say the value the search holds it at
+    bad = _parts(grid={**PARTS["grid"], "level": [0.3, 0.6]})
+    _, why = op.normalize(bad)
+    assert why and "scans `level`" in why, "the plan itself is still refused: it must say the held value"
+    repaired, notes = op.repair(bad)
+    assert repaired is not None and repaired["grid"] == PARTS["grid"], "the other settings of the scan stay"
+    assert [s["name"] for s in repaired["sub_studies"]] == ["spread", "offset"], "and so do its parts"
+    assert any("`level`" in n and "left out" in n and "protocol.optimisation.fixed" in n for n in notes), notes
+    # a part that varies only the setting left out goes with it; the others stay
+    alone = _parts(grid={**PARTS["grid"], "level": [0.3, 0.6]},
+                   sub_studies=[*PARTS["sub_studies"], {"name": "level", "vary": ["level"], "hold": {"kind": "spread"}}])
+    repaired, notes = op.repair(alone)
+    assert repaired is not None and [s["name"] for s in repaired["sub_studies"]] == ["spread", "offset"], notes
+    # what stays of a part is exact: the setting is taken out of its vary and hold, nothing is added
+    both = _parts(grid={**PARTS["grid"], "level": [0.3, 0.6]},
+                  sub_studies=[{"name": "spread", "vary": ["spread", "level"], "hold": {"kind": "spread", "offset": 0.0, "level": 0.3}},
+                               PARTS["sub_studies"][1]])
+    repaired, _notes = op.repair(both)
+    assert repaired is not None and repaired["sub_studies"][0]["vary"] == ["spread"]
+    assert repaired["sub_studies"][0]["hold"] == {"kind": "spread", "offset": 0.0}
+    # known positive: a scan of that one setting alone is left out whole, as before
+    only, _notes = op.repair({**BLOCK, "grid": {"level": [0.3, 0.6]}})
+    assert only is not None and "grid" not in only
+    # and a design variable's own scan values that cannot be used still cost the whole scan, as before
+    outside, _notes = op.repair({**BLOCK, "grid": {"x": [0.0, 9.0], "y": [0.0, 1.0]}})
+    assert outside is not None and "grid" not in outside

@@ -58,8 +58,9 @@ async def _plan_step(tmp_path: Path, answers: list[str], design: dict[str, Any] 
 
 def test_the_reader_leaves_out_a_scan_whose_condition_is_not_held_and_says_why() -> None:
     block, notes = optim.repair(_with_scan(fixed_too=False)["protocol"]["optimisation"])
-    assert block is not None and "grid" not in block
-    assert any(f"`protocol.optimisation.grid` {optim.LEFT_OUT_UNREAD}" in n and "inlet_temperature_C" in n for n in notes)
+    # only the setting that cannot be read is left out; the rest of the scan stays
+    assert block is not None and block["grid"] == {"fin_spacing": SCAN["fin_spacing"]}
+    assert any(optim.scan_setting_left_out(n) == "inlet_temperature_C" for n in notes), notes
 
 
 @pytest.mark.asyncio
@@ -77,6 +78,30 @@ async def test_a_scan_left_out_is_asked_back_with_the_exact_reason_and_kept_when
 
 
 @pytest.mark.asyncio
+async def test_an_answer_that_drops_a_setting_the_scan_already_had_gets_it_back(tmp_path: Path) -> None:
+    block = copy.deepcopy(_with_scan(fixed_too=True)["protocol"]["optimisation"])
+    block["grid"] = {"inlet_temperature_C": SCAN["inlet_temperature_C"]}  # the readable `fin_spacing` left out
+    eng, _asked = await _plan_step(tmp_path, [json.dumps({"protocol": {"optimisation": block}})] * 3)
+    design = plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design
+    assert design["protocol"]["optimisation"]["grid"] == SCAN, "the plan's own setting is put back beside the one asked for"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_whose_parts_do_not_fit_the_settings_put_back_is_refused_and_asked_again_bounded(
+        tmp_path: Path) -> None:
+    block = copy.deepcopy(_with_scan(fixed_too=True)["protocol"]["optimisation"])
+    block["grid"] = {"inlet_temperature_C": SCAN["inlet_temperature_C"]}
+    block["sub_studies"] = [{"name": "inlet", "vary": ["inlet_temperature_C"], "hold": {}}]  # leaves `fin_spacing` unrun
+    eng, asked = await _plan_step(tmp_path, [json.dumps({"protocol": {"optimisation": block}})] * 6)
+    scan_asks = [a for a in asked if "a part of it in the plan could not be read" in a or "was not used" in a]
+    assert 1 <= len(scan_asks) <= 4, len(scan_asks)
+    assert any("Your last answer was not used" in a for a in asked), "the reason goes back to the plan's model"
+    design = plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design
+    kept = design["protocol"]["optimisation"]
+    assert kept["grid"] == {"fin_spacing": SCAN["fin_spacing"]} and "sub_studies" not in kept, "the answer is not used"
+
+
+@pytest.mark.asyncio
 async def test_a_scan_still_unreadable_is_asked_once_and_the_search_goes_on_without_it(tmp_path: Path) -> None:
     still = json.dumps({"protocol": {"optimisation": _with_scan(fixed_too=False)["protocol"]["optimisation"]}})
     eng, asked = await _plan_step(tmp_path, [still] * 6)
@@ -84,7 +109,7 @@ async def test_a_scan_still_unreadable_is_asked_once_and_the_search_goes_on_with
     # asked once, and once more with the reason its answer was refused; a left-out scan never stops the quest
     assert 1 <= len(scan_asks) <= 2, len(scan_asks)
     design, _sha = eng._design_from_plan()
-    assert design is not None and "grid" not in design["protocol"]["optimisation"]
+    assert design is not None and design["protocol"]["optimisation"]["grid"] == {"fin_spacing": SCAN["fin_spacing"]}
     assert eng._stop_if_the_search_cannot_start({"topic": "heat sink", "iteration": 0}, design) is None
     assert eng._search_cannot_start_stop({"topic": "heat sink", "iteration": 0}, design) is None
     # The design step reads the same plan: what the plan step asked is not asked again there.
