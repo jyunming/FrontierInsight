@@ -827,23 +827,25 @@ def keep_refused(quest_root: Path, ref: str, rel: str, text: str, message: str, 
             pass
 
 
-def _fingerprint(code_dir: Path) -> tuple[tuple[str, int, int], ...] | None:
-    """Each file of ``code/`` (path, size, modification time), git's own folder and Python's caches left out; ``None``
-    without the folder. About a millisecond on a quest's code, so it is read before every run."""
+def _fingerprint(code_dir: Path) -> tuple[tuple[str, str], ...] | None:
+    """Each file of ``code/`` (path, hash of its bytes), git's own folder and Python's caches left out; ``None``
+    without the folder. About a millisecond on a quest's code, so it is read before every run; the bytes, not the
+    modification time, so a rewrite of the same size within one tick of a coarse clock is still seen."""
     if not code_dir.is_dir():
         return None
     import os
 
-    out: list[tuple[str, int, int]] = []
+    out: list[tuple[str, str]] = []
     for here, dirs, files in os.walk(code_dir):
         dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
         for name in files:
             path = os.path.join(here, name)
             try:
-                st = os.stat(path)
+                with open(path, "rb") as fh:
+                    digest = hashlib.sha256(fh.read()).hexdigest()
             except OSError:
                 continue
-            out.append((os.path.relpath(path, code_dir), st.st_size, st.st_mtime_ns))
+            out.append((os.path.relpath(path, code_dir), digest))
     return tuple(sorted(out))
 
 
@@ -889,9 +891,16 @@ class CodeRuns:
                 if now is None or now == self._seen:
                     return
                 step = (self._node() if callable(self._node) else "") or "a check"
+                if (code_dir / ".git").is_dir():
+                    # git skips a file whose size and time match its index entry; a rewrite of the same size within
+                    # one tick of the clock would not be committed. An emptied index makes git read every file again.
+                    await asyncio.to_thread(_git, code_dir, "read-tree", "--empty")
                 await asyncio.to_thread(record_change, self.quest_root, f"the code as it ran ({step})",
                                         category="changed", log=self._log)
-                self._seen = await asyncio.to_thread(_fingerprint, code_dir)
+                # Seen only once code/ is committed: a commit git could not make now (a lock left for a moment) is
+                # tried again before the next run.
+                _commit, dirty = await asyncio.to_thread(head, self.quest_root)
+                self._seen = await asyncio.to_thread(_fingerprint, code_dir) if dirty is False else None
         except Exception as exc:  # noqa: BLE001 -- the record never stops a run
             if self._log is not None:
                 self._log.warning("[code] could not record the code before a run: %s", exc)

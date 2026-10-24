@@ -621,3 +621,47 @@ def test_the_executor_records_the_code_before_it_runs(tmp_path):
     ex.before_run = before
     result = asyncio.run(ex.execute([sys.executable, "-c", "print('ran')"], cwd=tmp_path, timeout_s=60))
     assert calls == ["before"] and "ran" in result.stdout
+
+
+def test_a_rewrite_of_the_same_size_and_time_is_still_committed_and_a_failed_commit_is_tried_again(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    import shutil
+
+    import pytest
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    code = tmp_path / "code"
+    code.mkdir()
+    sim = code / "sim.py"
+    sim.write_text("x = 1\n", encoding="utf-8")
+    runs = code_project.CodeRuns(tmp_path, node=lambda: "execute")
+    asyncio.run(runs.before_run())
+    stamp = sim.stat()
+    sim.write_text("x = 2\n", encoding="utf-8")  # same size; the clock put back to the same tick
+    os.utime(sim, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    real = code_project.record_change
+    monkeypatch.setattr(code_project, "record_change", lambda *a, **k: False)  # git could not commit this time
+    asyncio.run(runs.before_run())
+    monkeypatch.setattr(code_project, "record_change", real)
+    asyncio.run(runs.before_run())  # the next run tries again
+    out = subprocess.run(["git", "show", "HEAD:sim.py"], cwd=code, capture_output=True, text=True, encoding="utf-8")
+    assert out.stdout == "x = 2\n"
+
+
+def test_installs_and_probes_are_not_runs_of_the_code(tmp_path):
+    import asyncio
+
+    from core.execution import VenvExecutor
+
+    calls = []
+
+    async def before():
+        calls.append("before")
+
+    ex = VenvExecutor()
+    ex.before_run = before
+    asyncio.run(ex.install([], quest_root=tmp_path))  # nothing to install: no run at all
+    asyncio.run(ex._run([sys.executable, "-c", "pass"], cwd=tmp_path, timeout_s=60))
+    assert calls == []

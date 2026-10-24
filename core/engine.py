@@ -21314,6 +21314,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._progress(
                 f"Trying code/ in a clean environment (at most {limit / 60:g} min; it does not change the results)"
             )
+            if getattr(self, "_code_runs", None) is not None:  # the clean check runs code/run.py itself, outside
+                await self._code_runs.before_run()  # the executor
             result = await asyncio.to_thread(_code_project.verify, self.quest_root, run_timeout_s=limit)
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(digest, encoding="utf-8")
