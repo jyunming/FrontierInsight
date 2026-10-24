@@ -487,6 +487,17 @@ def stated_objections(quest_root: Path) -> set[str]:
     return {str(n) for r in _objection_rows(quest_root) for n in r.get("names") or [] if str(n).strip()}
 
 
+def reason_key(said: Any) -> str:
+    """A reviewer's own reason in a form two wordings of the same sentence share: lower case, one space between words,
+    no closing full stop."""
+    return " ".join(str(said or "").lower().split()).rstrip(".!? ")
+
+
+def stated_reasons(quest_root: Path) -> set[str]:
+    """The reviewer's own reasons (free text, as :func:`reason_key` reads them) the record already holds."""
+    return {k for k in (reason_key(r.get("said")) for r in _objection_rows(quest_root)) if k}
+
+
 def add_objections(quest_root: Path, hits: list[tuple[str, str]], said: str) -> None:
     """Add one review's objections (``hits``: each ``(key, the hit as the reviewer wrote it)``, and the reviewer's own
     reason ``said``) to the record."""

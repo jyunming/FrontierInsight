@@ -749,6 +749,32 @@ def _trial_check_items(root: Path, add: Any) -> None:
                     f"in {n} of {of} settings, by more than chance explains"
                     + (f" (ratio {min(vals):.2g} to {max(vals):.2g}; 1 when right)" if vals else ""))
         add(CALIBRATION, plain or label or "a reported uncertainty", _sentence(said), key=f"{q.get('kind')}-{label}")
+    _power_limit_item(root, cal, add)
+
+
+def _power_limit_item(root: Path, cal: dict[str, Any], add: Any) -> None:
+    """The check of the reported standard errors passed, and the paper says how small a miss it could not have seen.
+
+    The check compares the spread of the estimates over the trials with the standard error the trials report; with a few
+    trials a setting it flags only a gross miss, so a standard error that is too small by less than the factor the trials
+    allow (``detects_from`` in the record, :func:`core.trial_checks.ratio_detection_floor`) passes it. A passed check is
+    not a proof of a right standard error, and the paper does not claim one. Said once for the worst (largest) limit of
+    the standard errors that passed; nothing when one is flagged (that has its own item), or the record has no limit."""
+    rows = [q for q in cal.get("quantities") or []
+            if isinstance(q, dict) and q.get("kind") == "se_ratio" and not q.get("fault") and not q.get("below")
+            and isinstance(q.get("detects_from"), (int, float)) and q.get("judged")]
+    if not rows:
+        return
+    worst = max(rows, key=lambda q: float(q["detects_from"]))
+    factor = float(worst["detects_from"])
+    plain = _label_of_names(root, worst.get("names") or [], "")
+    label = _one(worst.get("label"))
+    shown = f'"{plain}"' if plain else f"`{label}`"
+    many = len(rows) > 1
+    add(CALIBRATION, "power of the standard-error check", _sentence(
+        f"The standard error{'s' if many else ''} reported for {shown}{' and others' if many else ''} agreed with the spread "
+        f"of the estimates over the trials, but with this many trials the check could only have flagged one too small by "
+        f"a factor of about {factor:.2g} or more; a smaller error in the standard error is not ruled out"), key="se-power")
 
 
 def _failed_where(root: Path, most: int = 4) -> str:

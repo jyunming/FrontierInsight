@@ -3632,6 +3632,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not self.config.engine.review_loop:
             return "done"
         verdict = review.get("verdict", "accept")
+        if verdict == "revise" and review.get("reason_repeated"):
+            return "done"
         if verdict == "revise" and state.get("iteration", 0) < self.config.engine.max_iterations:
             # The reviewer's own judgement, with no check of FI's behind it: the paper is written again with the review
             # in hand, the reviewer's reason is kept in FI's record (printed in QUALITY.md), and the design is not changed.
@@ -23776,6 +23778,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 said = ""  # a person decides, or no review loop runs: the reason alone is no objection FI keeps
             rerun = (_review_sends_the_experiment_back(review, state)
                      and int(state.get("code_reexecutes") or 0) + 1 <= _CODE_REEXECUTES)
+            # The same reason again, with nothing measured behind it: the first rewrite already answered it, and its
+            # words are in QUALITY.md. Another rewrite for it would change nothing, so the router does not send one.
+            if (said and not counted and not rerun and _disclosure.reason_key(said) in _disclosure.stated_reasons(self.quest_root)):
+                review["reason_repeated"] = True
+                self._log.info("[review] the reviewer's reason repeats one FI's record already keeps (QUALITY.md) and no "
+                               "check of FI's backs it — not writing the paper again for it")
             # Kept whether or not the paper is written again after this review: an objection raised only in the last
             # round is in QUALITY.md too.
             if new or (said and not rerun):
@@ -32609,6 +32617,9 @@ def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str
     return findings
 
 
+_CAPTION_SOME_PANELS_PHRASE = " in only some panels: flat in "
+
+
 def _format_figure_check(paper_md: str, state: QuestState) -> str:
     """The figure check for the review prompt's ``$figure_check_block``."""
     records = state.get("figure_records") or {}
@@ -32626,15 +32637,32 @@ def _format_figure_check(paper_md: str, state: QuestState) -> str:
     findings = _figure_caption_findings(paper_md, records)
     if not findings:
         return "\n".join([*seed_only, "No caption names a series its figure does not show."])
-    return "\n".join([
-        *seed_only,
-        f"CAPTIONS THAT DESCRIBE WHAT THEIR FIGURE DOES NOT SHOW ({len(findings)}):",
-        *(f"  - {f}" for f in findings),
-        "",
-        "You MUST add a `figure_caption` entry to must_flag_hits and set verdict=revise, "
-        "asking for the caption to describe what the figure shows (or the figure to show "
-        "what the caption describes).",
-    ])
+    # A caption that calls a series flat when its figure draws it varying, or names a series its figure does not show,
+    # says something the figure contradicts: the reviewer must flag it. A caption that only NAMES a series the figure
+    # draws flat in SOME panels (and varying in the others) says nothing false: the series is on the figure. FI reports it
+    # (the review's figure_caption_warnings) and does not make the reviewer's verdict depend on it: forcing it gave a
+    # revise verdict, and a rewrite, for a caption that was right.
+    advisory = [f for f in findings if _CAPTION_SOME_PANELS_PHRASE in f]
+    forced = [f for f in findings if f not in advisory]
+    lines = [*seed_only]
+    if forced:
+        lines += [
+            f"CAPTIONS THAT DESCRIBE WHAT THEIR FIGURE DOES NOT SHOW ({len(forced)}):",
+            *(f"  - {f}" for f in forced),
+            "",
+            "You MUST add a `figure_caption` entry to must_flag_hits and set verdict=revise, "
+            "asking for the caption to describe what the figure shows (or the figure to show "
+            "what the caption describes).",
+        ]
+    if advisory:
+        lines += [
+            f"CAPTIONS THAT NAME A SERIES THEIR FIGURE DRAWS FLAT IN SOME PANELS ({len(advisory)}), for your information:",
+            *(f"  - {f}" for f in advisory),
+            "",
+            "These do not say anything false. Do NOT add them to must_flag_hits and do not make them the reason for a "
+            "revise verdict; mention one under `suggestions` only if you think a reader would be misled.",
+        ]
+    return "\n".join(lines)
 
 
 def _parse_json_lenient(
