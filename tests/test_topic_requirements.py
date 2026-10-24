@@ -504,6 +504,74 @@ async def test_a_formula_mapped_to_an_unrelated_equation_that_the_reader_rejects
     assert "states the formula `dT/dt = -k*(T - Tr)`" in tr.write_note(eng.quest_root)
 
 
+def test_a_gap_the_plans_own_map_names_an_element_for_says_both_and_one_with_no_map_does_not() -> None:
+    req = tr.parse({"quantities": [{"name": "heat lost per minute", "main": False}]})
+    mapped = tr.view(_draft(topic_map=[{"item": "heat lost per minute", "by": "metric:time_to_60_degrees"}]))
+    assert tr.mapping_of(req, mapped, "quantities", req["quantities"][0]) == ("judge", "time_to_60_degrees")
+    gaps, _ = tr.gaps_from(req, mapped, {"Q1": "missing"})
+    assert gaps[0]["named"] == "time_to_60_degrees"
+    assert gaps[0]["sentence"].endswith("The plan names the metric `time_to_60_degrees` for it, which FI's check (one model's "
+                                        "reading of the plan) did not accept as covering it.")
+    bare, _ = tr.gaps_from(req, tr.view(_draft()), {"Q1": "missing"})
+    assert "named" not in bare[0] and bare[0]["sentence"].endswith("but the plan does not measure it."), "no map, nothing said"
+
+
+def test_an_answer_that_gives_the_plans_own_map_again_is_told_so_and_any_other_answer_is_not() -> None:
+    req = tr.parse({"quantities": [{"name": "heat lost per minute", "main": False}],
+                    "formulas": [{"name": "cooling law", "text": "dT/dt = -k*(T - Tr)", "main": False}]})
+    view = tr.view(_draft(topic_map=[{"item": "heat lost per minute", "by": "metric:time_to_60_degrees"}]))
+    gaps, _ = tr.gaps_from(req, view, {"Q1": "missing", "M1": "missing"})
+    again = {"protocol": {"topic_map": [{"item": "Q1", "by": "metric:time_to_60_degrees"}]}}
+    reason = tr.restated(again, gaps)
+    assert "gives again the plan's own map (heat lost per minute to `time_to_60_degrees`)" in reason
+    assert "cooling law" not in reason, "the formula the plan maps nothing for is not said to be given again"
+    bare = {"protocol": {"topic_map": [{"item": "heat lost per minute", "by": "time_to_60_degrees"}]}}
+    assert "heat lost per minute to" in tr.restated(bare, gaps), "the item's name and an element without its kind alike"
+    assert tr.restated({"protocol": {"topic_map": [{"item": "Q1", "by": "metric:other_one"}]}}, gaps) == ""
+    assert tr.restated({"protocol": {"topic_map": [{"item": "M1", "by": "metric:time_to_60_degrees"}]}}, gaps) == "",         "the same element for another item is not the plan's map of this one"
+    assert tr.restated({"protocol": {}}, gaps) == "" and tr.restated("not an object", gaps) == ""
+
+
+def test_a_search_the_plans_own_map_names_is_told_as_given_again() -> None:
+    req = tr.parse({"searches": [{"what": "best light pattern", "objective": "largest depth", "main": True}]})
+    view = tr.view(_draft(topic_map=[{"item": "best light pattern", "by": "search:pattern_shape"}]))
+    view["search"], view["design_variables"] = True, {"pattern_shape": {}}
+    named = tr.mapping_of(req, view, "searches", req["searches"][0])
+    gaps, _ = tr.gaps_from(req, view, {"S1": "missing"})
+    assert named == ("judge", "optimisation")
+    assert "The plan names its search for the best design for it" in gaps[0]["sentence"]
+    assert "best light pattern" in tr.restated({"protocol": {"topic_map": [{"item": "S1", "by": "search:pattern_shape"}]}}, gaps)
+
+
+def test_the_papers_line_for_a_gap_the_plans_map_names_says_both(tmp_path: Path) -> None:
+    from core import paper_facts
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    gap = {"kind": "quantity", "name": "heat lost per minute", "named": "time_to_60_degrees", "sentence": "s"}
+    (fi / "topic_covered.json").write_text(json.dumps({"left": [gap]}), encoding="utf-8")
+    said = " ".join(i.sentence for i in paper_facts.required_items(tmp_path))
+    assert "FI's check did not find it among what the study's plan measures" in said
+    assert "The plan names the metric `time_to_60_degrees` for it" in said
+
+
+@pytest.mark.asyncio
+async def test_a_plan_model_that_holds_its_own_map_is_told_what_was_not_accepted_and_the_paper_says_both(tmp_path: Path) -> None:
+    # The plan maps the heat to a metric of another name; the reader does not accept it; the plan's model answers with the
+    # same map. It was told "none of what was asked in a form that can be read", which is not what happened.
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME],
+                               model={**MODEL, "equations": [*MODEL["equations"], NEWTON]},
+                               topic_map=[{"item": "heat lost per minute", "by": "metric:time_to_60_degrees"}]),
+                   judge=lambda item, shown: "missing" if item["kind"] == "quantity" and "heat" in item["name"] else "covered")
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    asked = [p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]
+    assert asked and "The plan names the metric `time_to_60_degrees` for it" in asked[0]
+    told = [p for p in asked if "Your last answer was not used" in p]
+    assert told and "gives again the plan's own map (heat lost per minute to `time_to_60_degrees`)" in told[0]
+    assert "none of what was asked" not in told[0]
+    assert "The plan names the metric `time_to_60_degrees` for it" in tr.write_note(eng.quest_root)
+
+
 # --- constraints: the cap and the writer's note -----------------------------------------------------------------------
 
 

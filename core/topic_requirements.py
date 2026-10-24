@@ -672,9 +672,39 @@ def gaps_from(req: dict[str, Any], plan: dict[str, Any], verdicts: dict[str, str
         if ident not in verdicts:
             unjudged.append(str(item.get("name") or item.get("text") or ident))
         elif verdicts[ident] == "missing" or (kind == "searches" and verdicts[ident] != "covered"):
-            gaps.append(gap({"factors": "factor", "quantities": "quantity", "formulas": "formula",
-                             "searches": "search"}[kind], item))
+            found_gap = gap({"factors": "factor", "quantities": "quantity", "formulas": "formula",
+                             "searches": "search"}[kind], item)
+            named = mapping_of(req, plan, kind, item)
+            if named is not None and named[0] == "judge":
+                # The plan's own map names an element for the item and the reading did not accept it: both are said, so the
+                # plan's model is not asked as if it had named nothing, and the paper does not say the plan had nothing.
+                # ``map_keys`` / ``map_elements``: what an entry for the item may call it, and the elements the plan's own
+                # entries for it name, for telling an answer that only repeats them.
+                keys = _map_keys(req, kind, item)
+                elements = sorted({_map_element(m.get("by")) for m in plan.get("topic_map") or []
+                                   if isinstance(m, dict) and _name_key(m.get("item")) in keys} - {""})
+                found_gap = {**found_gap, "named": named[1], "map_keys": sorted(keys), "map_elements": elements,
+                             "sentence": found_gap["sentence"] + " " + named_sentence(kind, named[1])}
+            gaps.append(found_gap)
     return gaps, unjudged
+
+
+_ELEMENT_WORD = {"factors": "the setting", "quantities": "the metric", "formulas": "the equation", "searches": "the search",
+                 "factor": "the setting", "level": "the setting", "quantity": "the metric", "formula": "the equation",
+                 "search": "the search"}
+
+
+def _map_element(by: Any) -> str:
+    """The element a ``protocol.topic_map`` entry's ``by`` names (``metric:x`` and ``x`` alike), as a name key."""
+    text = str(by or "")
+    return _name_key(text.partition(":")[2] if ":" in text else text)
+
+
+def named_sentence(kind: str, element: str) -> str:
+    """What is said of a gap whose item the plan's own map names an element for, which one model's reading did not accept."""
+    what = "its search for the best design" if element == "optimisation" else f"{_ELEMENT_WORD.get(kind, 'the part')} `{element}`"
+    return (f"The plan names {what} for it, which FI's check (one model's reading of the plan) did not accept as covering "
+            "it.")
 
 
 def main_gaps(gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -697,6 +727,23 @@ def mapped_items(req: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
             if found is not None and found[0] == "ok":
                 out[str(item.get("name") or item.get("text"))] = found[1]
     return out
+
+
+def restated(answer: Any, gaps: list[dict[str, Any]]) -> str:
+    """When an answer that :func:`merge` took nothing from names again, in its ``protocol.topic_map``, the element the plan's
+    own map already names for a gap (``gap["named"]``, which the reading did not accept): the reason sent back, in plain
+    words, so the next answer adds what covers the item instead of the same map. Empty otherwise."""
+    protocol = answer.get("protocol") if isinstance(answer, dict) and isinstance(answer.get("protocol"), dict) else {}
+    entries = [m for m in protocol.get("topic_map") or [] if isinstance(m, dict)] if isinstance(protocol.get("topic_map"), list) else []
+    given = {(_name_key(m.get("item")), _map_element(m.get("by"))) for m in entries}
+    again = [g for g in gaps if g.get("named") and any(i in (g.get("map_keys") or []) and e in (g.get("map_elements") or [])
+                                                       for i, e in given if i and e)]
+    if not again:
+        return ""
+    which = "; ".join(f"{g['name']} to `{g['named']}`" for g in again)
+    return (f"your answer gives again the plan's own map ({which}), which is already in the plan and which FI's check did not "
+            "accept as covering it. Add what covers it (a setting, a metric or an equation), or map it in "
+            "`protocol.topic_map` to another part of the plan that covers it")
 
 
 def _item_lines(req: dict[str, Any] | None) -> list[str]:

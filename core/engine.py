@@ -6598,7 +6598,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         old, new = _plan.raw_design_block(before_text), parts
         merged = _topic_req.merge(old, new, gaps) if isinstance(old, dict) and isinstance(new, dict) else None
         if merged is None:
-            raise ValueError("your answer has none of what was asked in a form that can be read; plan.md is unchanged")
+            raise ValueError((_topic_req.restated(new, gaps)
+                              or "your answer has none of what was asked in a form that can be read") + "; plan.md is unchanged")
         for moved in _topic_req.moved_holds(old.get("protocol"), merged.get("protocol")):
             self._log.warning("[plan] what the topic asks for changed a part of the study: %s", moved)
         # Part by part and entry by entry: what can be read is taken, and what cannot goes back with its reason (the
@@ -6740,7 +6741,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[design] what the topic asks for changed a part of the study: %s", moved)
             before = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
             fixed, refused = (_plan.accept_answer(before, merged.get("protocol")) if merged is not None
-                              else (None, ["nothing came back"]))
+                              else (None, [_topic_req.restated(obj, gaps) or "nothing came back"]))
             why = " ".join(refused)
             if merged is not None and fixed is not None and refused:
                 # Taken in part: what can be read is kept; what the topic still lacks is asked again with the reason.

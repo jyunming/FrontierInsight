@@ -193,7 +193,17 @@ def _sentence(text: str) -> str:
 def _topic_sentence(gap: Any) -> tuple[str, str]:
     """``(name, sentence)`` for one part of the topic FI's check did not find in the plan (an object of
     ``topic_covered.left``, or a plain sentence of an older record). What FI found is said, not that the study did not do
-    it: the check misses a setting held under another name or form."""
+    it: the check misses a setting held under another name or form. When the plan's own map named a part of the plan for
+    it (``named``), which one model's reading did not accept, that is said too."""
+    name, said = _topic_sentence_found(gap)
+    if isinstance(gap, dict) and _one(gap.get("named")) and said:
+        from .topic_requirements import named_sentence
+        said = f"{said} {named_sentence(str(gap.get('kind') or ''), _one(gap.get('named')))}"
+    return name, said
+
+
+def _topic_sentence_found(gap: Any) -> tuple[str, str]:
+    """:func:`_topic_sentence` without what the plan's own map named."""
     if isinstance(gap, str):
         said = _one(gap).rstrip(".")
         if re.match(r"(?i)the topic (asks|says|states|wants|requires)\b", said):
