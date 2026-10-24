@@ -479,6 +479,9 @@ class QuestState(TypedDict, total=False):
     # Cross-paper check per finding. List of per-finding
     # records carrying supporting / conflicting / neutral classifications.
     cross_check: list[dict[str, Any]]
+    # Where the quest goes after cross_check ("write" / "broaden_lit" / "redesign"), decided by the node before it
+    # spends a round; the router reads it.
+    cross_check_route: str
     # The typed research contract (core.protocol.ResearchProtocol, stored
     # as a dict) the quest is held to: topic_type, source_policy, baseline,
     # success_metric, … Derived at the evidence_gate from clarify + config.
@@ -2911,7 +2914,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         on empty cross_check: there are no findings to broaden literature
         against, so writing the paper with what we have is the safe
         choice (audit BLOCK #11).
+
+        The cross_check node decides the route (``cross_check_route``) before it spends a round, and this router reads
+        it, as the evidence gate's router does: a router that decided again after the node raised ``iteration`` saw the
+        last round as already spent and wrote instead. Without the field (a state the node did not make), the route is
+        decided here from the state as it is.
         """
+        route = state.get("cross_check_route")
+        if route in ("write", "broaden_lit", "redesign"):
+            return route
+        return self._cross_check_route(state)
+
+    def _cross_check_route(self, state: QuestState) -> str:
+        """``write``, ``broaden_lit`` or ``redesign`` from the analysis's ``next_step``, FI's precision record, the
+        confirm stage of ``engine.phased`` and the rounds left (``iteration`` before this round is spent)."""
         if not self.config.engine.enable_analyze_reroute:
             return "write"
         if not state.get("cross_check"):
@@ -2974,8 +2990,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """The probabilities whose precision target this run missed and a larger run could reach in the time allowed:
         the trials scale with the square of the interval's width, so the run is ``(half_width / target) ** 2`` times
         longer, and FI's own estimate of this run (``.fi/run_estimate.json``, which already carries its safety margin)
-        times that must fit the time the study is allowed. The estimate counts only when it is of this run's size (its
-        settings and trials; FI times only the first design's run, so after a redesign it is another run's). No such
+        times that must fit the time the study is allowed. The estimate counts only when it is of this run: its size
+        (settings and trials) and the simulation's code it timed (FI times only the first design's run, so after a
+        redesign it is another run's, even of the same size). No such
         estimate, a run FI already had to make smaller, or one that would not fit: empty (the paper says the target was
         missed). ``quiet``: the same answer, without saying why in run.log (the router says it)."""
         from . import run_estimate as _estimate
@@ -2993,7 +3010,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             cells, runs = -1, 0
         if record.get("reduced") or not record.get("fits") or not all(
                 isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0 for x in (estimate_s, limit_s)) \
-                or record.get("cells") != cells or record.get("trials") not in (cells, cells * runs):
+                or record.get("cells") != cells or record.get("trials") not in (cells, cells * runs) \
+                or ("code" in record and record.get("code") != _hidden.code_sha(self.quest_root)):
             say("[cross_check] the precision target was not reached (%s); FI has no estimate of this run showing a "
                 "larger run fits the time allowed", ", ".join(m["name"] for m in missed[:4]))
             return []
@@ -3004,6 +3022,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 float(estimate_s) * scale, float(limit_s))  # type: ignore[arg-type]
             return []
         return [m["name"] for m in missed]
+
+    def _precision_redesign_note(self, state: QuestState) -> str:
+        """For the redesign the precision record sent: each quantity whose interval was wider than the plan's target,
+        with the trials it had and the trials that reach the target (they grow with the square of the width ratio), and
+        what to keep. From FI's own record of the last run."""
+        import math
+
+        lines = []
+        for m in self._precision_shortfalls(state):
+            trials = m.get("trials")
+            ratio = (m["half_width"] / m["target"]) ** 2 if m["target"] > 0 else None
+            need = (f"; about {math.ceil(float(trials) * ratio)} trials reach it" if isinstance(trials, (int, float))
+                    and not isinstance(trials, bool) and trials > 0 and ratio else "")
+            lines.append(f"- {m['name']}: interval half-width {m['half_width']:.3g} against the target "
+                         f"{m['target']:.3g}" + (f", with {trials} trials" if trials else "") + need)
+        body = "\n".join(lines) or "- (the record of which quantities missed it could not be read again)"
+        return (f"FI's record of the last run:\n{body}\n"
+                "A run that large fits the time allowed (FI's own estimate of this run). Keep the question, the "
+                "settings and what is measured; change the number of trials so each target is reached.")
 
     def _route_after_evidence_gate(self, state: QuestState) -> str:
         """The evidence_gate node already decided write vs broaden (it
@@ -4951,31 +4988,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         review_feedback = ""
         if iteration > 0:
             review_feedback = json.dumps(state.get("review", {}), indent=2)
-        # When this redesign was triggered by analyze's ``re_experiment``
-        # reroute (the previous experiment produced non-physical or unsupported
-        # results), the review block above is empty — the review node only runs
-        # AFTER the paper is written, never before a pre-write re_experiment
-        # loop. Without the analyze/cross_check diagnosis the redesign is blind
-        # to WHY the last experiment was rejected and tends to regenerate the
-        # same flaw. Fold the analysis summary + key findings in so the design
-        # LLM can diagnose and correct the root cause rather than repeat it.
-        analysis = state.get("analysis") or {}
-        if iteration > 0 and analysis.get("next_step") == "re_experiment":
-            findings_txt = json.dumps(analysis.get("key_findings") or [], indent=2)
-            diag = (
-                "--- PRIOR EXPERIMENT REJECTED BY ANALYSIS "
-                "(diagnose and fix the root cause; do NOT reproduce it) ---\n"
-                "The previous experiment ran but its results were judged "
-                "non-physical or unsupported. Before redesigning, work out why "
-                "the results were wrong — common causes are unit or scale "
-                "inconsistencies, comparing two quantities defined on different "
-                "scales, degenerate or biased estimators, and parameters that "
-                "make an effect vanish — then change the experimental plan so "
-                "the numbers become physically sensible and internally "
-                "consistent.\n"
-                f"Analysis summary: {analysis.get('summary', '')}\n"
-                f"Key findings from the rejected run:\n{findings_txt}"
-            )
+        # A redesign sent from cross_check comes before any review, so the review block above is empty; without what
+        # FI measured, the redesign would repeat the same size.
+        if iteration > 0 and state.get("cross_check_route") == "redesign":
+            # The only redesign after results is FI's own precision record (_cross_check_route): the design is told
+            # which target was missed and the size its record says reaches it, not that the results were wrong.
+            diag = "--- THE LAST RUN MISSED THE PLAN'S PRECISION TARGET ---\n" + self._precision_redesign_note(state)
             review_feedback = f"{review_feedback}\n\n{diag}".strip()
         # Human-feedback refinement (when the gate is configured AND the
         # user picked "refine"). Folded into the same review_feedback
@@ -19874,12 +19892,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         findings = list((state.get("analysis") or {}).get("key_findings") or [])
         if not findings:
             self._log.info("[cross_check] no key_findings; skipping")
-            return {"cross_check": []}
+            return {"cross_check": [], "cross_check_route": "write"}
 
         per_finding_k = self.config.engine.cross_check_per_finding_k
         if per_finding_k <= 0:
             self._log.info("[cross_check] disabled by config (per_finding_k=0)")
-            return {"cross_check": []}
+            return {"cross_check": [], "cross_check_route": "write"}
 
         out: list[dict[str, Any]] = []
         no_result = self._experiment_gave_no_result(state)
@@ -20089,23 +20107,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not no_result:
             self._log.info("[cross_check] checked %d findings", len(out))
         patch: QuestState = {"cross_check": out}
-        # Cross-check iteration accounting: if analyze flagged a re-route AND
-        # there's budget left, bump the shared iteration counter here so
-        # the design node sees the new iteration on its next visit. This
-        # mirrors how `_node_review` bumps on `verdict=revise`.
-        if self.config.engine.enable_analyze_reroute:
-            next_step = (state.get("analysis") or {}).get("next_step", "publish")
-            # A re_experiment the router will not follow (FI's precision record does not agree) costs no round.
-            if (
-                next_step in ("re_experiment", "broaden_lit")
-                and state.get("iteration", 0) < self.config.engine.max_iterations
-                and (next_step == "broaden_lit" or self._precision_missed(state, quiet=True))
-            ):
-                patch["iteration"] = state.get("iteration", 0) + 1
-                self._log.info(
-                    "[cross_check] analyze.next_step=%s -> redesign (iteration %d)",
-                    next_step, patch["iteration"],
-                )
+        # The route is decided here, once, before the round is spent (the router reads it): a re-route raises the
+        # shared iteration counter so the design node sees the new iteration on its next visit, as `_node_review`
+        # does on a revise; a re-route FI does not follow (its precision record does not agree, the confirm stage of
+        # engine.phased, no round left) costs no round.
+        route = self._cross_check_route({**state, **patch})
+        patch["cross_check_route"] = route
+        if route != "write":
+            patch["iteration"] = state.get("iteration", 0) + 1
+            self._log.info("[cross_check] analyze.next_step=%s -> %s (iteration %d)",
+                           (state.get("analysis") or {}).get("next_step", "publish"), route, patch["iteration"])
         return patch
 
     def _resolve_write_persona(self, state: QuestState) -> str:
