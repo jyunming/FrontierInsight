@@ -21,7 +21,10 @@ inputs and which returns the equation's output as one number. The outline step n
 **The tolerance is a rule, not a guess.** A closed form agrees within a relative 1e-6 (and, only for an output that is exactly
 0, an absolute 1e-12: the size of floating-point round-off). When the plan states a numerical method for the equation
 (``"method"``), the plan's own numerical setting decides (``"tolerance"`` and ``"tolerance_mode"``, required with a
-method); a stated tolerance without a method can only make the test tighter. FI never invents a looser one.
+method); a stated tolerance without a method can only make the test tighter. FI never invents a looser one. The one
+widening is for a plan whose equation is written with rounded constants (``0.61`` for 0.6098...) and whose example is computed
+to full precision: the bar then grows to exactly the gap between the two (:func:`rounding_of` bounds it), so code that follows
+the equation as written and code that uses the full constant both pass.
 
 **An equation whose output is a random draw** (``"example": {"random": true, ...}``, the plan's own flag) is tested on the distribution, not on one call: ``expected_formula`` is the distribution's MEAN for those
 inputs (and ``variance_formula``, when the plan states it, its variance). The test calls the function ``DRAWS`` times
@@ -329,6 +332,14 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
             # too (an output near 0 is held to its size by the test, but two ways of working it out may differ there).
             if gap <= max(rel * abs(float(value)), abs_tol):
                 row["equation_agrees"] = True
+            elif (float(value) != 0.0 and not method
+                  and gap <= rounding_of(row["formula"]) * abs(float(value))):
+                # The equation is written with rounded constants (0.61 for 0.6098...) and the example with the full value:
+                # one number, two roundings. Code that follows the equation as written is right, and so is code that uses
+                # the full constant, so the test must accept both, and no more than both: its bar grows to the gap.
+                row["equation_agrees"] = True
+                row["rel"] = max(rel, 1.001 * gap / abs(float(value)))
+                row["rounded_form"] = True
             elif gap > max(rel * abs(float(value)), ABSOLUTE_FLOOR):
                 row["equation_agrees"] = False
             if row.get("equation_agrees") is False:
@@ -337,6 +348,29 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
                     f"its `expected_formula` gives {float(value):.10g} for its inputs, but the equation as written gives "
                     f"{own:.10g} for the same inputs (FI computed both)"))
     return rows
+
+
+_DECIMAL_RE = re.compile(r"(?<![\w.])(\d+\.\d*|\.\d+)(?:[eE]([+-]?\d+))?(?![\w.])")
+
+
+def rounding_of(formula: str) -> float:
+    """The relative error the rounding of the constants written in a plan's equation can account for: the largest, over the
+    decimal numbers in ``formula`` that have two or more significant digits, of half a unit in their last written digit
+    divided by their size (``0.61`` is 0.05 in 6.1, about 0.8%). A number written as an integer or with one significant
+    digit (``2``, ``0.5``) is taken as exact. ``0.0`` when the formula writes no such number. An equation's text is
+    the topic's rounded form of a law, so a worked example computed to full precision may differ from it by this much
+    and still be the same law; a gap larger than this is a real disagreement."""
+    best = 0.0
+    for m in _DECIMAL_RE.finditer(formula):
+        mantissa = m.group(1).rstrip("0").rstrip(".") if "." in m.group(1) else m.group(1)  # "2.50" is written as 2.5
+        if "." not in mantissa:
+            continue  # nothing after the point once the trailing zeros are gone: written as an integer
+        digits = mantissa.replace(".", "").lstrip("0")
+        value = float(mantissa)
+        if len(digits) < 2 or value == 0.0:
+            continue
+        best = max(best, 0.5 * 10.0 ** (-len(mantissa.split(".")[1])) / value)
+    return best
 
 
 _DEFINITION = re.compile(r"^\s*[A-Za-z_]\w*\s*(\([^()=]*\))?\s*=(?![=<>])(.*)$", re.S)

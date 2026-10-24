@@ -338,6 +338,31 @@ def _derived_only_gaps(protocol: dict[str, Any], frozen: dict[str, Any] | None, 
             "that either is right"]
 
 
+def _plan_derived_failure_gaps(protocol: dict[str, Any], frozen: dict[str, Any] | None, oracle_record: Any) -> list[str]:
+    """One sentence per known-answer check the quest went on with after it failed, whose expected value is the plan's own
+    working (:func:`core.oracle_check.validates` is false: no retrieved source, no second implementation). Such a value is a
+    claim of the plan's model, not a known answer: the failure may be the plan's (a derivation that squared a real part
+    only, a null rate typed as 0 where it is 0.05) as well as the code's, and the result must not read as a code error. A
+    check whose disagreement is already stated (``disagreement``) or that could not be judged is left to
+    :func:`core.accepted_checks.gap`."""
+    if not isinstance(oracle_record, dict):
+        return []
+    sources = frozen.get("sources") if isinstance(frozen, dict) and not frozen.get("sources_problem") else []
+    declared = {str(o["name"]).strip().lower(): o for o in _oracle_check.declared(protocol)}
+    out: list[str] = []
+    for e in oracle_record.get("went_on") or []:
+        if not isinstance(e, dict) or e.get("disagreement") or e.get("undecided") or e.get("measured") is None:
+            continue
+        name = str(e.get("name") or "").strip()
+        oracle = declared.get(name.lower())
+        if oracle is None or _oracle_check.validates(oracle, protocol, sources if isinstance(sources, list) else []):
+            continue
+        out.append(f"the known-answer check '{name}' that failed has an expected value the plan's own model worked out, not a "
+                   "value from a source or a second implementation: the plan's working may be wrong rather than the code, so "
+                   "the failure is reported as that, not read as a code error")
+    return out
+
+
 def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
     settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
@@ -511,6 +536,8 @@ def assess(
                    if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
         valid_gaps.extend([_went_on_gap(e) for e in entries]
                           or ["a known-answer check failed and the quest went on (oracle check: went_on_failing)"])
+        if protocol is not None:
+            valid_gaps.extend(_plan_derived_failure_gaps(protocol, frozen, oracle_record))
     elif protocol is not None and (not isinstance(oracle_record, dict) or oracle_record.get("status") != "ok"):
         status = oracle_record.get("status") if isinstance(oracle_record, dict) else "not run"
         valid_gaps.append(f"the script did not pass an independent oracle (oracle check: {status})")
