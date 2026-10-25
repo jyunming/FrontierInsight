@@ -31,8 +31,8 @@ def test_parallel_wall_under_the_limit_but_serial_over_it_is_not_within(tmp_path
 def test_a_lower_bound_under_the_limit_is_never_within(tmp_path: Path) -> None:
     root = _quest(tmp_path / "q", wall=12.0, total=40.0, at_once=4)
     known = paper_facts.facts(root, topic=TOPIC)
-    assert known["time_limit_met"].text == "not shown to be within" and "at least 40" in known["run_time"].text
-    assert "not shown to be within" in disclosure._time_sentence(root, TOPIC, 12.0)
+    assert known["time_limit_met"].text == "not shown to be within or over" and "at least 40" in known["run_time"].text
+    assert "not shown to be within or over" in disclosure._time_sentence(root, TOPIC, 12.0)
 
 
 def test_overlap_is_what_was_recorded_not_a_ratio(tmp_path: Path) -> None:
@@ -40,7 +40,7 @@ def test_overlap_is_what_was_recorded_not_a_ratio(tmp_path: Path) -> None:
     topic = "The whole study must run in under 102 seconds."
     root = _quest(tmp_path / "q", wall=100.0, total=105.0, at_once=2)
     assert paper_facts.facts(root, topic=topic)["time_limit_met"].text == "over"
-    assert "within" not in disclosure._time_sentence(root, topic, 100.0).replace("not shown to be within", "")
+    assert "is over the topic" in disclosure._time_sentence(root, topic, 100.0)
 
 
 def test_a_record_without_at_once_never_claims_overlap(tmp_path: Path) -> None:
@@ -83,16 +83,27 @@ def test_at_once_comes_from_fis_other_records_of_the_same_run(tmp_path: Path) ->
     assert "4 settings run at the same time" in paper_facts.facts(other, topic=TOPIC)["run_time"].text
 
 
-def test_every_settings_own_wall_time_makes_the_time_firm(tmp_path: Path) -> None:
-    root = tmp_path / "q"
-    run_facts.record_trials(root, key="k", wall_s=12.0, trials=10, cells=5, trial_sum_s=40.0, at_once=4, settings_s=50.0)
-    known = paper_facts.facts(root, topic=TOPIC)
-    assert known["time_limit_met"].text == "within" and "take 50 s" in known["run_time"].text
-    assert "at least" not in known["run_time"].text
-    sentence = disclosure._time_sentence(root, TOPIC, 12.0)
-    assert "at least" not in sentence and "is within" in sentence
-    run_facts.record_trials(root, key="k", wall_s=12.0, trials=10, cells=5, trial_sum_s=40.0, at_once=4, settings_s=75.0)
-    assert paper_facts.facts(root, topic=TOPIC)["time_limit_met"].text == "over"
+def _both(root: Path, *, wall: float, least: float, most: float, topic: str = TOPIC) -> tuple[str, str, str]:
+    run_facts.record_trials(root, key="k", wall_s=wall, trials=10, cells=5, trial_sum_s=least, at_once=4, settings_s=most)
+    known = paper_facts.facts(root, topic=topic)
+    return known["time_limit_met"].text, known["run_time"].text, disclosure._time_sentence(root, topic, wall)
+
+
+def test_within_only_when_the_most_it_can_take_is_under_the_limit(tmp_path: Path) -> None:
+    met, said, sentence = _both(tmp_path / "q", wall=12.0, least=40.0, most=50.0)
+    assert met == "within" and "between 40 s and 50 s" in said and "measured while the settings ran at the same time" in said
+    assert "is within the topic" in sentence and "between 40 s and 50 s" in sentence
+
+
+def test_over_when_the_least_it_can_take_is_over_the_limit(tmp_path: Path) -> None:
+    met, said, sentence = _both(tmp_path / "q", wall=12.0, least=70.0, most=150.0)
+    assert met == "over" and "is over the topic" in sentence
+
+
+def test_between_the_two_is_neither_within_nor_over(tmp_path: Path) -> None:
+    met, said, sentence = _both(tmp_path / "q", wall=12.0, least=40.0, most=75.0)
+    assert met == "not shown to be within or over" and "between 40 s and 75 s" in said
+    assert "not shown to be within or over the topic's limit of 60 s" in sentence
 
 
 def test_the_runner_keeps_each_settings_wall_time(tmp_path: Path) -> None:
@@ -110,4 +121,4 @@ def test_the_runner_keeps_each_settings_wall_time(tmp_path: Path) -> None:
 
 
 def test_the_writer_is_told_the_third_wording() -> None:
-    assert "not shown to be within" in paper_facts._FACT_WORDS["time_limit_met"]
+    assert "not shown to be within or over" in paper_facts._FACT_WORDS["time_limit_met"]

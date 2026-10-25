@@ -201,23 +201,52 @@ def settings_at_once(quest_root: Path | str) -> int:
     return max(1, int(found[-1])) if found else 1
 
 
+def _seconds(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < float("inf") else None
+
+
 def reader_run(quest_root: Path | str) -> dict[str, Any] | None:
     """What a reader's run of the delivered code takes, when FI ran the settings at the same time and so its wall time is
-    not that: ``{"seconds", "at_least", "at_once"}``, else ``None`` (FI recorded no overlap: its wall time is the run).
-    The delivered ``code/run.py`` runs the settings one after another. With the wall time of every setting's process
-    (``settings_s``) the time is firm; with only the trials' own times it is a lower bound (``at_least``: a limit is judged
-    over by it, never within). The search FI ran counts. This is the one place the time is worked out; the paper's facts
-    and the run record both read it."""
+    not that: ``{"least", "most", "at_once"}``, else ``None`` (FI recorded no overlap: its wall time is the run).
+    The delivered ``code/run.py`` runs the settings one after another. ``least``: the trials' own times added up (a run
+    cannot take less). ``most``: every setting's process time added up, measured WHILE the settings ran at the same time,
+    so it is an upper bound (``None`` when FI did not record it). The search FI ran counts in both. This is the one place
+    the time is worked out; the paper's facts and the run record both read it, and :func:`reader_verdict` judges it."""
     run = read(quest_root).get("trials_run")
     if not isinstance(run, dict):
         return None
     n = settings_at_once(quest_root)
     if n <= 1:
         return None
-    for value, at_least in ((run.get("settings_s"), False), (run.get("trial_sum_s"), True)):
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < float("inf"):
-            return {"seconds": float(value) + search_seconds(quest_root), "at_least": at_least, "at_once": n}
-    return None
+    least, most = _seconds(run.get("trial_sum_s")), _seconds(run.get("settings_s"))
+    if least is None:
+        least = _seconds(run.get("wall_s"))  # the run cannot take less than it did with the settings at once
+    if least is None and most is None:
+        return None
+    search = search_seconds(quest_root)
+    return {"least": None if least is None else least + search, "most": None if most is None else most + search,
+            "at_once": n}
+
+
+def reader_verdict(reader: dict[str, Any], wall: float, limit: float) -> str:
+    """``"over"`` when the run (its wall time, or at least the time a reader's run takes) is over ``limit``; ``"within"``
+    only when the most a reader's run takes is under it; else ``"not shown to be within"``."""
+    if wall > limit or (reader["least"] is not None and reader["least"] > limit):
+        return "over"
+    return "within" if reader["most"] is not None and reader["most"] <= limit else "not shown to be within or over"
+
+
+def reader_words(reader: dict[str, Any], plain: Any) -> str:
+    """The reader's run time in words (``plain`` writes a number of seconds): a single time, a least, or the range."""
+    least, most = reader["least"], reader["most"]
+    if least is not None and most is not None and most > least:
+        return (f"between {plain(least)} and {plain(most)}, the latter measured while the settings ran at the same time, "
+                "so a one-after-another run takes less than that")
+    if most is not None and least is None:
+        return f"at most {plain(most)} (measured while the settings ran at the same time)"
+    if most is not None:
+        return plain(most)
+    return f"at least {plain(least)}"
 
 
 def run_stage(quest_root: Path | str) -> tuple[str | None, dict[str, Any]]:
