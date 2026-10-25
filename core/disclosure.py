@@ -395,9 +395,11 @@ def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> st
     reader = _run_facts.reader_run(quest_root)
     if reader is not None:
         serial = reader["seconds"]
-        verdict = "over" if duration_s > limit or serial > limit else "not shown to be within"
-        return (f"{ran} with {reader['at_once']} settings run at the same time; one after another the settings take at "
-                f"least {_plain_seconds(serial)}, which is {verdict} the topic's limit of {_plain_seconds(limit)}.")
+        least = "at least " if reader["at_least"] else ""
+        verdict = ("over" if duration_s > limit or serial > limit
+                   else "not shown to be within" if reader["at_least"] else "within")
+        return (f"{ran} with {reader['at_once']} settings run at the same time; one after another the settings take "
+                f"{least}{_plain_seconds(serial)}, which is {verdict} the topic's limit of {_plain_seconds(limit)}.")
     return f"{ran}; the topic sets a limit of {_plain_seconds(limit)}, and the run was {'within' if duration_s <= limit else 'over'} it."
 
 

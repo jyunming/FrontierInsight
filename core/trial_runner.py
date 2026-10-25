@@ -413,6 +413,8 @@ class CellRun:
     load_error: str = ""
     #: The values each run compared inside it (``protocol.in_each_run``), one dict per combination; empty when none.
     levels: list[dict[str, Any]] = field(default_factory=list)
+    #: Seconds from this setting's process start to its end, as FI's runner measured it (``None`` when it was not run).
+    wall_s: float | None = None
 
 
 @dataclass
@@ -533,7 +535,7 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
 
 
 def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, Any], *, run_id: str,
-             thresholds: dict[str, Any] | None, not_reported: str) -> TrialRun:
+             thresholds: dict[str, Any] | None, not_reported: str, walls: dict[int, float] | None = None) -> TrialRun:
     """Read each cell's results file, keep the rows the harness FI started wrote (the cell's nonce, a trial it was
     given, reported once, with the seed it was given), and write the ledger and the summary. ``results`` holds each
     cell's process result by index (a cluster task has none: ``not_reported`` says why a trial is missing then)."""
@@ -542,14 +544,14 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
     raw.mkdir(parents=True, exist_ok=True)
     ledger = raw / LEDGER_NAME
     with open(ledger, "w", encoding="utf-8") as fh:
-        runs = _collect_cells(quest_root, plan, results, fh, run_id=run_id, not_reported=not_reported)
+        runs = _collect_cells(quest_root, plan, results, fh, run_id=run_id, not_reported=not_reported, walls=walls)
     summary = raw / SUMMARY_NAME
     summary.write_text(json.dumps(_summary(runs, thresholds), indent=1, allow_nan=True), encoding="utf-8")
     return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary)
 
 
 def _collect_cells(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, Any], fh: Any, *, run_id: str,
-                   not_reported: str) -> list["CellRun"]:
+                   not_reported: str, walls: dict[int, float] | None = None) -> list["CellRun"]:
     """Each cell's rows (see :func:`_collect`), with the ledger written to ``fh`` as they are read."""
     runs: list[CellRun] = []
     for task in plan:
@@ -561,7 +563,8 @@ def _collect_cells(quest_root: Path, plan: list[dict[str, Any]], results: dict[i
         run = CellRun(key=key, cell=task["cell"], planned=per_cell, levels=task.get("levels") or [],
                       returncode=getattr(result, "returncode", None) if result is not None else None,
                       timed_out=bool(getattr(result, "timed_out", False)),
-                      stderr=(getattr(result, "stderr", "") or "") if result is not None else "")
+                      stderr=(getattr(result, "stderr", "") or "") if result is not None else "",
+                      wall_s=(walls or {}).get(task["index"]))
         reported: dict[int, dict[str, Any]] = {}
         twice: set[int] = set()
         out_path = quest_root / task["out"]
@@ -641,6 +644,7 @@ async def run_trials(
         if on_plan is not None:
             on_plan(plan)
     results: dict[int, Any] = {}
+    walls: dict[int, float] = {}  # each setting's process, start to end (what code/run.py spends on it, one at a time)
     # Each cell runs from a copy of code/ outside the quest folder (core/outside_run.py): FI's records (needs/, .fi/)
     # are not next to the code; FI's harness, the cell's spec and its results file come and go by FI's own list.
     executor = _outside.OutsideExecutor(executor, quest_root, log=log)
@@ -656,10 +660,12 @@ async def run_trials(
             if left <= 0:
                 results[task["index"]] = type("NotRun", (), {"returncode": -1, "timed_out": True, "stderr": ""})()
                 return
+            began = time.monotonic()
             results[task["index"]] = await executor.execute(
                 [str(python), HARNESS_PATH.as_posix(), task["spec"], task["out"]],
                 cwd=quest_root, timeout_s=max(1, left), env=env,
             )
+            walls[task["index"]] = time.monotonic() - began
 
     try:
         if not lazy:
@@ -686,7 +692,7 @@ async def run_trials(
         if gate.at_once > 1:
             with contextlib.suppress(OSError):
                 (work / "at_once.json").write_text(json.dumps(gate.record()), encoding="utf-8")
-    return _collect(quest_root, plan, results, run_id=run_id, thresholds=thresholds, not_reported="")
+    return _collect(quest_root, plan, results, run_id=run_id, thresholds=thresholds, not_reported="", walls=walls)
 
 
 def settings_at_once(value: Any, *, cores: int | None = None, fleet: int = 1) -> int:
@@ -1400,7 +1406,11 @@ def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | No
         stage = phased.stage(quest_root)
     except Exception:  # noqa: BLE001 -- a record that cannot be read leaves the stage unsaid
         stage = None
+    walls = [c.wall_s for c in run.cells]
+    settings_s = (sum(walls) if walls and all(isinstance(w, (int, float)) and not isinstance(w, bool) for w in walls)
+                  else None)  # every setting's own wall time added up; None when a setting has none
     run_facts.record_trials(quest_root, key=key, wall_s=wall_s, trials=len(rows), cells=len(run.cells),
+                            settings_s=settings_s,
                             trial_sum_s=sum(times) if times else None,
                             stage=stage if stage in (phased.EXPLORE, phased.CONFIRM) else None, at_once=at_once)
 

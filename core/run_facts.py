@@ -121,7 +121,8 @@ def _write(quest_root: Path | str, **changes: Any) -> None:
 
 
 def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, trials: int, cells: int,
-                  trial_sum_s: float | None, stage: str | None = None, at_once: int | None = None) -> None:
+                  trial_sum_s: float | None, stage: str | None = None, at_once: int | None = None,
+                  settings_s: float | None = None) -> None:
     """Keep the wall time of a run of the trials (``wall_s``: seconds from before the first setting to after the last;
     ``None`` when it is not known, as for a cluster job), how many trials and settings it ran, the sum of the per-trial
     times in the ledger, and the stage of a quest run in two stages (``explore`` / ``confirm``; ``None`` otherwise).
@@ -133,6 +134,8 @@ def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, tri
         run["stage"] = str(stage)
     if at_once and int(at_once) > 1:
         run["at_once"] = int(at_once)  # how many settings ran at the same time (absent: one at a time)
+    if isinstance(settings_s, (int, float)) and not isinstance(settings_s, bool) and 0 <= settings_s < float("inf"):
+        run["settings_s"] = round(float(settings_s), 2)  # every setting's process, start to end, added up
     changes: dict[str, Any] = {"trials_run": run}
     if stage:
         by_stage = read(quest_root).get("by_stage")
@@ -172,22 +175,49 @@ def search_seconds(quest_root: Path | str) -> float:
     return _recorded_seconds(root / "results" / "best_design.json") + _recorded_seconds(root / "needs" / "OPTIMUM_CHECK.json")
 
 
+_AT_ONCE_LOG = re.compile(r"(\d+) settings of the study run at the same time")
+
+
+def settings_at_once(quest_root: Path | str) -> int:
+    """How many settings FI ran at the same time in the run whose trials are stored: its run record first, then FI's other
+    records of the same run (the estimate's ``at_once``, and the line FI logs when it starts the settings, in
+    ``.fi/run.log``). 1 when none says more than one. Never worked out from times."""
+    root = Path(quest_root)
+    run = read(root).get("trials_run")
+    n = run.get("at_once") if isinstance(run, dict) else None
+    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        return n
+    try:
+        est = json.loads((root / ".fi" / "run_estimate.json").read_text(encoding="utf-8"))
+        n = est.get("at_once") if isinstance(est, dict) else None
+    except (OSError, ValueError):
+        n = None
+    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        return n
+    try:
+        found = _AT_ONCE_LOG.findall((root / ".fi" / "run.log").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return 1
+    return max(1, int(found[-1])) if found else 1
+
+
 def reader_run(quest_root: Path | str) -> dict[str, Any] | None:
     """What a reader's run of the delivered code takes, when FI ran the settings at the same time and so its wall time is
     not that: ``{"seconds", "at_least", "at_once"}``, else ``None`` (FI recorded no overlap: its wall time is the run).
-    The delivered ``code/run.py`` runs the settings one after another. FI records the trials' own times, not what each
-    setting costs beyond them (a process per setting), so the time is a lower bound (``at_least``): a limit is judged
-    over by it, never within. The search FI ran counts. This is the one place the time is worked out; the paper's facts
+    The delivered ``code/run.py`` runs the settings one after another. With the wall time of every setting's process
+    (``settings_s``) the time is firm; with only the trials' own times it is a lower bound (``at_least``: a limit is judged
+    over by it, never within). The search FI ran counts. This is the one place the time is worked out; the paper's facts
     and the run record both read it."""
     run = read(quest_root).get("trials_run")
     if not isinstance(run, dict):
         return None
-    n, total = run.get("at_once"), run.get("trial_sum_s")
-    if isinstance(n, bool) or not isinstance(n, int) or n <= 1:
+    n = settings_at_once(quest_root)
+    if n <= 1:
         return None
-    if isinstance(total, bool) or not isinstance(total, (int, float)) or not 0 <= total < float("inf"):
-        return None
-    return {"seconds": float(total) + search_seconds(quest_root), "at_least": True, "at_once": n}
+    for value, at_least in ((run.get("settings_s"), False), (run.get("trial_sum_s"), True)):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < float("inf"):
+            return {"seconds": float(value) + search_seconds(quest_root), "at_least": at_least, "at_once": n}
+    return None
 
 
 def run_stage(quest_root: Path | str) -> tuple[str | None, dict[str, Any]]:

@@ -66,7 +66,9 @@ _FACT_WORDS = {
     "seed": "the seed the code used to draw the trials' random numbers",
     "run_time": "the measured wall time of the experiment (the run whose trials are reported)",
     "time_limit": "the run-time limit the topic sets",
-    "time_limit_met": "\"within\" or \"over\": whether the run kept to the topic's limit",
+    "time_limit_met": ("\"within\", \"over\" or \"not shown to be within\" (the settings ran at the same time and FI knows "
+                       "only the least a one-after-another run takes, which is under the limit): whether the run kept to "
+                       "the topic's limit"),
     "trials_per_setting": "how many trials each setting ran",
     "settings": "how many settings (combinations of the plan's parameters) were run",
     "trials_failed": "how many trials failed",
@@ -949,7 +951,7 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
     if seed:
         out["seed"] = Fact("seed", seed, required=True)
     wall, least = measured_run_time(root, fallback_s)
-    serial_s = None
+    serial_s, at_least = None, True
     stage, others = _run_facts.run_stage(root)
     if wall is not None:
         said = _plain(wall)
@@ -962,9 +964,9 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
             said += " for the exploring run, whose results are reported"
         reader = _run_facts.reader_run(root)
         if reader is not None:
-            serial_s = reader["seconds"]
+            serial_s, at_least = reader["seconds"], reader["at_least"]
             said += (f", with {reader['at_once']} settings run at the same time (run one after another, as the delivered "
-                     f"code does, the settings take at least {_plain(serial_s)})")
+                     f"code does, the settings take {'at least ' if at_least else ''}{_plain(serial_s)})")
         out["run_time"] = Fact("run_time", said, required=True)
     elif least is not None:
         what = ("the settings run, the search and its check at finer settings; FI did not time the rest"
@@ -977,7 +979,7 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
         # bound) is judged, and "within" is said only when no lower bound is in question.
         if wall is not None:
             met = "over" if wall > limit or (serial_s is not None and serial_s > limit) else (
-                "within" if serial_s is None else "not shown to be within")
+                "within" if serial_s is None or not at_least else "not shown to be within")
         else:
             met = "over" if least is not None and least > limit else ""
         if met:
