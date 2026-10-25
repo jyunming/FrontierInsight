@@ -22398,25 +22398,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             else:
                 # The passages the reviewer cited by id come first; only when it cited none (and FI has no finding) are
                 # all the sections that hold a figure asked for.
+                # Each figure_caption hit is placed on its own: by the passages the reviewer cited for it; only a hit with
+                # neither cited passages nor an FI finding asks for every section that holds a figure (logged by hit).
                 cited = review.get("hit_places") if isinstance(review.get("hit_places"), dict) else {}
-                cited_at: set[int] = set()
                 for h in hits:
-                    if _hit_name(h) == "figure_caption":
-                        found = _paper_scope.place(previous, sections,
-                                                   cited.get(h) or cited.get(re.sub(r"^\[[^\]]*\]\s*", "", h)))
-                        if found is None:
-                            cited_at = set()
-                            break
-                        cited_at |= found
-                if cited_at:
-                    for index in sorted(cited_at):
-                        add(index, "the review flags a figure caption in it")
-                else:
+                    if _hit_name(h) != "figure_caption":
+                        continue
+                    found = _paper_scope.place(previous, sections,
+                                               cited.get(h) or cited.get(re.sub(r"^\[[^\]]*\]\s*", "", h)))
+                    if found is not None:
+                        for index in sorted(found):
+                            add(index, "the review flags a figure caption in it")
+                        continue
                     holders = _paper_scope.holds_figures(previous, sections)
-                    self._log.info("[write] the review flags a figure caption with no cited passage and FI has no finding "
-                                   "naming a figure: asking for every section that holds a figure")
+                    self._log.info("[write] the figure-caption hit \"%s\" has no cited passage and FI has no finding "
+                                   "naming a figure: asking for every section that holds a figure", h[:80])
                     if not holders:
-                        unplaced.append("a figure caption (no section holds a figure)")
+                        unplaced.append(f"the figure caption \"{h[:60]}\" (no section holds a figure)")
                     for index in sorted(holders):
                         add(index, "the review flags a figure caption and names no figure; it holds a figure")
         quoted = [h for h in hits if _hit_name(h) in ("paper_record_mismatch", "mislabelled_statistic")]

@@ -301,3 +301,50 @@ def test_a_declared_new_section_is_kept_right_after_the_section_it_came_with() -
     undeclared = paper_scope.splice(paper, sections, {1}, "## A\nnew alpha\n\n## Limitations\nWhat limits it.\n")
     assert undeclared.text == "# T\n\n## A\nnew alpha\n\n## B\nbeta\n\n## C\ngamma\n"
     assert undeclared.ignored == ["Limitations"] and undeclared.added == []
+
+
+# --- two figure_caption hits: each is placed on its own ------------------------------------------------------------------
+
+FIGURE_DRAFT = (
+    "# T\n\n## Abstract\nWe measure it.\n\n"
+    "## Methods\nThe set-up is described in this sentence of the methods.\n\n"
+    "![Methods figure caption.](figures/m.png)\n\n"
+    "## Results\nThe results are described in this sentence.\n\n"
+    "![Results figure caption.](figures/r.png)\n\n"
+    "## Discussion\nThe discussion is described in this sentence.\n\n"
+    "![Discussion figure caption.](figures/d.png)\n"
+)
+HIT_A = "figure_caption: the first caption claims more than the figure shows"
+HIT_B = "figure_caption: the second caption claims more than the figure shows"
+PLACE_A = [{"id": "3.1", "section": "Results", "passage": "The results are described in this sentence."}]
+PLACE_B = [{"id": "4.1", "section": "Discussion", "passage": "The discussion is described in this sentence."}]
+
+
+def _scope_for(tmp_path: Path, places: dict[str, Any]) -> tuple[dict[int, list[str]], str, list[str]]:
+    eng, _client, logged = _engine(tmp_path, [FIGURE_DRAFT])
+    path = tmp_path / "paper" / "paper.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(FIGURE_DRAFT, encoding="utf-8")
+    sections = paper_scope.split(FIGURE_DRAFT)
+    state = _revise_state({"literature": [], "paper_md": str(path), "paper_basis": None}, [HIT_A, HIT_B],
+                          review={"hit_places": places}, claim_grounding={})
+    from core.engine import _paper_basis
+
+    state["paper_basis"] = _paper_basis(state)
+    _s, _end, asked, _targets, why = eng._scope_of_round(state, FIGURE_DRAFT, FIGURE_DRAFT, refine_round=False)
+    return asked, why, _info(logged)
+
+
+def test_a_cited_figure_hit_stays_cited_when_another_figure_hit_is_unplaced(tmp_path: Path) -> None:
+    asked, why, logged = _scope_for(tmp_path, {HIT_A: PLACE_A})
+    titles = {i: paper_scope.split(FIGURE_DRAFT)[i].title for i in asked}
+    assert "Results" in titles.values(), "hit A's cited section is asked for"
+    assert any("second caption" in m and "no cited passage" in m for m in logged), "the log names hit B"
+    assert not any("first caption" in m and "no cited passage" in m for m in logged), "hit A is not the unplaced one"
+
+
+def test_two_cited_figure_hits_touch_no_other_figure_section(tmp_path: Path) -> None:
+    asked, why, logged = _scope_for(tmp_path, {HIT_A: PLACE_A, HIT_B: PLACE_B})
+    titles = sorted(paper_scope.split(FIGURE_DRAFT)[i].title for i in asked)
+    assert titles == ["Discussion", "Results"] and not why
+    assert not any("no cited passage" in m for m in logged)
