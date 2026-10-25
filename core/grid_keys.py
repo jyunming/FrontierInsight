@@ -454,7 +454,7 @@ def supplied_names(protocol: dict[str, Any] | None, design: dict[str, Any] | Non
 
     protocol = protocol if isinstance(protocol, dict) else {}
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-    inside = _in_run.of(protocol) or {}
+    inside = _in_run.of_study(protocol) or {}
     axes = [str(k) for k in grid] + [str(k) for k in inside if str(k) not in grid]
     allowed = set(axes) | (set(IN_RUN_RECORD_FIELDS) if inside else set())
     allowed.update(_forms.fixed_settings_of_design({**(design or {}), "protocol": protocol}))

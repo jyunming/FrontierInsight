@@ -26235,7 +26235,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not self._split_on(state):
             return ""
         search = _optim.has_block(state.get("design")) and not self.config.execution.background_jobs
-        inside = _in_run.of(self._protocol_block(state))
+        inside = _in_run.of_study(self._protocol_block(state))
         block = (_SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
                  + (_SEARCH_PROTOCOL if search else "")
                  + (_IN_EACH_RUN_PROTOCOL.replace("$factors", ", ".join(f"`{k}`" for k in inside))
@@ -27895,6 +27895,8 @@ across all the values, a difference between two of them on the same data) is ret
 EACH value is returned as a mapping of each value to its number (`"power": {"bonferroni": 0.41, "bh": 0.52}`), or as a list
 of one number per value in the order the run was given them; every value is there (null where it does not exist, with
 the reason under `"why_missing"`). $key_rule
+A check of FI's against a known answer calls the same function on its own case with `FI_ORACLE=1` in the environment; the case is
+given the same lists as any cell.
 In FI_TRIALS each setting is followed by one record per value (its `cell` and `key` name the value too, as in
 `"key": "m=20,procedure=bh"`, with `"level"`): a number per value is in the value's own record and a number per run in the
 setting's own, each once. The analysis reports each from where it is, and never counts a number per run once per value.
