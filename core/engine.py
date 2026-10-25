@@ -18802,6 +18802,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     figure_records[name]["single_seed"] = 0
         self._record_no_difference(getattr(runner, "no_difference", None) if result.returncode == 0 else None)
         self._keep_raw_stdout(result.stdout)
+        self._keep_analysis_answers(result_json, state)
         patch: dict[str, Any] = {
             "exec_result": {
                 "returncode": result.returncode,
@@ -23934,6 +23935,41 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
         return found
 
+    def _keep_analysis_answers(self, result_json: Any, state: QuestState) -> None:
+        """Keep the value the run recorded under each name the plan gives a quantity, so the paper's key for a quantity no
+        trial returns can be filled (core/paper_values.py::write_answers). Best-effort."""
+        try:
+            _paper_values.write_answers(self.quest_root, result_json, self._protocol_block(state))
+        except Exception as e:  # noqa: BLE001 -- the quantity then has no key; the paper is not held to place it
+            self._log.warning("[execute] the run's recorded answers could not be kept for the paper's keys (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+
+    def _unplaced_topic_answers(self, paper_md: str, state: QuestState) -> list[str]:
+        """A quantity the topic asks for, that FI holds a value for and the paper never places (core/goal_coverage.py::
+        unplaced_answers): a set difference over FI's own records, so it is forced like a planned figure the paper leaves
+        out. Kept in ``paper/goal_coverage.json``. Never raises."""
+        try:
+            rec = self._paper_records(state)
+            if rec is None or not rec.cells or not paper_md:
+                return []
+            req = _disclosure._read_json(self.fi_dir / _topic_req.FILE)
+            found = goal_coverage.unplaced_answers(
+                req, self._protocol_block(state), set(rec.metrics()) | set(rec.answers), _paper_values.placed_metrics(paper_md))
+            path = self.quest_root / "paper" / "goal_coverage.json"
+            record = _disclosure._read_json(path) if path.is_file() else {}
+            if not isinstance(record, dict):
+                record = {}
+            if found or record.get("quantities_not_placed"):
+                record["quantities_not_placed"] = found
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        except Exception as e:  # noqa: BLE001 -- an advisory-grade failure never touches the quest
+            self._log.warning("[goal_coverage] the quantities the paper never gives could not be checked (%s)", e)
+            return []
+        for f in found:
+            self._log.warning("[goal_coverage] %s", f["sentence"])
+        return [f["sentence"] for f in found]
+
     def _reference_check_hits(self, state: QuestState) -> list[str]:
         """A reference quantity of the results that is exactly 0 at every setting of a sweep (core/numeric_oracle.py): what a
         root finder returning the trivial root of its bracket looks like. A check on the results, not on the paper; one
@@ -24752,6 +24788,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             goal_notes = self._goal_coverage_notes(state)
             if goal_notes:
                 review["goal_coverage_notes"] = goal_notes
+            review["must_flag_hits"] += self._unplaced_topic_answers(paper_md, state)
             # Forced, unlike the advisory number check above: a statistic the
             # paper mislabels is caught by recomputing it, so the finding can
             # name the contradiction instead of guessing at one.
@@ -24955,6 +24992,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         goal_notes = self._goal_coverage_notes(state)
         if goal_notes:
             review["goal_coverage_notes"] = goal_notes
+        unplaced = self._unplaced_topic_answers(paper_md, state)
+        if unplaced:
+            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *unplaced]
         # Forced, as on the single-reviewer path: a recomputed contradiction,
         # not a pattern match over prose.
         stat_hits = self._statistics_claim_hits(paper_md, state)

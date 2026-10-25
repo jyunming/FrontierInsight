@@ -248,3 +248,35 @@ def notes(topic: str, scripts: list[str], result: Any = None, figure_count: int 
             what = {"exact": "", "at least": "at least ", "at most": "at most "}[kind]
             out.append(f"The topic asks for {what}{n} figure{'s' if n != 1 else ''}; the run drew {figure_count}.")
     return out
+
+
+def unplaced_answers(req: dict[str, Any] | None, protocol: dict[str, Any] | None, held: set[str],
+                     placed: set[str]) -> list[dict[str, str]]:
+    """The quantities the topic asks for, that FI holds a value for and the paper never places.
+
+    All from FI's own records, no wording compared: ``req`` is what the topic asks for (``.fi/topic_requirements.json``),
+    the plan's own ``protocol.topic_map`` names the metric that answers each quantity, ``held`` is the metrics FI has a
+    value for (the trials' and the analysis's recorded ones, by name), and ``placed`` is the metrics the paper places with a
+    key FI filled (:func:`core.paper_values.placed_metrics`). Only a quantity the topic's reading marks as main is held to
+    this. One ``{"name", "metric", "sentence"}`` per quantity, in the topic's order."""
+    from . import topic_requirements as _topic_req
+
+    if not isinstance(req, dict) or not isinstance(protocol, dict):
+        return []
+    plan = _topic_req.view({}, protocol)
+    labels = {str(m.get("id")): str(m.get("label") or "") for m in protocol.get("metrics") or [] if isinstance(m, dict)}
+    out: list[dict[str, str]] = []
+    for item in req.get("quantities") or []:
+        if not isinstance(item, dict) or item.get("main") is not True:
+            continue
+        mapped = _topic_req.mapping_of(req, plan, "quantities", item)
+        if mapped is None or mapped[0] not in ("ok", "judge"):
+            continue
+        metric = mapped[1]
+        if metric not in held or metric in placed:
+            continue
+        name = str(item.get("name") or metric)
+        what = f" ({labels[metric]})" if labels.get(metric) else ""
+        out.append({"name": name, "metric": metric, "sentence": (
+            f"The topic asks for {name}; FI has a value for it (`{metric}`{what}) and the paper never gives it.")})
+    return out

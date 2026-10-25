@@ -365,7 +365,7 @@ same PR that adds, splits or renames one.
   number replaced by `[number removed]`; when no round is left, only after the one edit of a whole-paper draft that
   `Engine._typed_pass_hits` asks for: `review["typed_pass_hits"]`, routed to `rewrite` by `_route_after_review` before every
   route that would deliver the draft, made by `_node_write` with the passage editor only, `QuestState.draft_edited`). It skips FI's own `fi:fact-*`, `fi:best-design`, `fi:phased` blocks and the `fi:v` marker.
-- `core/paper_values.py` — the result keys `{{v:<value>[:sd|mean_ci] @ axis=value, ... [| %|ratio @ ...]}}`: `records_of`
+- `core/paper_values.py` — `write_answers` / `Records.answers` / `_answer`: a plan metric no trial returns, which the analysis recorded one value for, gets the key `{{v:<name>}}` (no settings), read from `.fi/analysis_answers.json` that `Engine._keep_analysis_answers` writes after each run. The result keys `{{v:<value>[:sd|mean_ci] @ axis=value, ... [| %|ratio @ ...]}}`: `records_of`
   (FI's table of the trials, `core/trial_table.py`), `resolve` (a key to its text, or "not recorded"; a Wilson interval for 0/1
   values), `fill`, `sheet` (the writer's "Results you can place" list, `Engine._values_sheet`), `WRITER_RULES`, and
   `.fi/paper_values.json` (each filled key and its number).
@@ -408,7 +408,7 @@ same PR that adds, splits or renames one.
   `summaries` / `rows`.
 - `core/numeric_warnings.py` — solver/runtime warnings from a run's own stderr that a paper must not be written over.
 - `core/plausibility.py` — the design's declared `result_assertions` (legal ranges for a result) checked in code, including caps the script puts on a result (`clamp_constants`; `direct_caps`: a cap written where a value is reported -- proven at its whole path in the printed result, or a warning (`engine._assertion_warnings`); `caps_of_other_values`: caps proven to be another value's, which do not count for a value on its bound).
-- `core/goal_coverage.py` — does the experiment use the numbers the topic itself asked for?
+- `core/goal_coverage.py` — does the experiment use the numbers the topic itself asked for? `unplaced_answers` also holds the paper to the topic: a main quantity the plan's `topic_map` answers with a metric FI has a value for, that the paper never places with a filled key, is a forced review hit (`Engine._unplaced_topic_answers`, recorded in `paper/goal_coverage.json` as `quantities_not_placed`).
 
 ## Config, interview, providers
 

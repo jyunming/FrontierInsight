@@ -20,6 +20,11 @@ The grammar::
                FI setting by setting, e.g. ``below <metric2> at all 5 values of sigma (0.914 to 0.927 times <metric2>)``;
                "within" means the reference lies inside the measured value's 95% interval at that setting
 
+A quantity the plan names and no trial returns, which the analysis works out across the settings (a threshold, a fit
+parameter: one value for the whole study), is placed as ``{{v:<metric>}}`` with no ``@``: FI reads it from the result it
+recorded for the run (``.fi/analysis_answers.json``, :func:`write_answers`), the value under that exact plan name and no
+other. It has one form (the value, with ``| %`` for a percent); it has no settings to name.
+
 Naming every axis is deliberate: a key that left one out would render a pooled number that reads like a per-setting
 one. Pooling is defined once: the trials of the matching settings are concatenated (Wilson interval for a 0/1 value,
 t interval otherwise, :mod:`core.trial_table`); ``sd`` is the pooled within-setting SD, sqrt(sum((n_i - 1) s_i^2) /
@@ -27,7 +32,8 @@ sum(n_i - 1)), not the SD of the concatenated trials.
 
 A key FI cannot fill (an unknown metric, form or axis value, an axis left out, a record that lacks the data) renders
 ``not recorded`` and is reported as a :class:`Hit`; it is never filled with a guess. No number is read from the
-analysis script's output: only the trials and the plan.
+analysis script's output except a plan metric no trial returns, by its exact name (above): the rest comes from the trials
+and the plan.
 
 Nothing here knows what a metric or an axis means; the names are the plan's.
 """
@@ -306,6 +312,9 @@ class Records:
     unread: tuple[str, ...] = ()
     #: The quantities FI left out of the results (name -> the check's note); no key reads one (:func:`left_out_of`).
     left_out: dict[str, str] = field(default_factory=dict)
+    #: The plan's quantities that no trial returned and the analysis recorded one value for (name -> value): placed without
+    #: settings, ``{{v:<name>}}`` (:func:`write_answers`).
+    answers: dict[str, float] = field(default_factory=dict)
     _refs_cache: dict[str, Any] = field(default_factory=dict)
     _alias_cache: dict[str, str] | None = None
     #: The topic as the person wrote it: its numbers may be used in a ``{{calc:...}}``, as they may be typed.
@@ -1090,6 +1099,9 @@ def resolve(text: str, rec: Records | None) -> Value:
     shown = shown[2:] if shown.startswith("v:") else shown
     if shown.startswith(CALC):
         return calc(shown[len(CALC):].strip(), rec.protocol if rec else None, rec.topic if rec else "")
+    answer = _answer(shown, rec)
+    if answer is not None:
+        return answer
     try:
         key = parse(shown)
         if rec is None or not rec.cells:
@@ -1211,6 +1223,11 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     rec = load(root, protocol, left_out=_checks.left_out_by_record(root))
     if rec is None or not rec.cells:
         return rec
+    # The plan's quantities no trial returned, which the analysis recorded one value for (never one FI left out).
+    planned = {str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
+               if isinstance(m, dict) and m.get("id")}
+    rec.answers = {k: v for k, v in _read_answers(root).items()
+                   if k in planned and k not in rec.metrics() and k not in rec.left_out}
     try:
         from . import grid_keys as _grid_keys
 
@@ -1227,6 +1244,67 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     except Exception:  # noqa: BLE001 -- an axis FI cannot tell is unread counts as read: nothing is pooled by guess
         rec.unread = ()
     return rec
+
+
+#: Where FI keeps what the analysis recorded for the plan's quantities no trial returns.
+ANSWERS = Path(".fi") / "analysis_answers.json"
+
+
+def write_answers(quest_root: Path | str, result_json: Any, protocol: dict[str, Any] | None) -> list[str]:
+    """Keep, from the result a run recorded (after FI took out the quantities it left out), the number under each name the
+    plan gives a quantity (``protocol.metrics[].id``): the exact name and nothing matched by its words. An empty or missing
+    result leaves the earlier record as it was (a run that failed recorded nothing). Returns the names kept."""
+    if not isinstance(result_json, dict) or not result_json:
+        return []
+    ids = [str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
+           if isinstance(m, dict) and m.get("id")]
+    values = {i: float(result_json[i]) for i in dict.fromkeys(ids)
+              if isinstance(result_json.get(i), (int, float)) and not isinstance(result_json.get(i), bool)
+              and math.isfinite(float(result_json[i]))}
+    try:
+        path = Path(quest_root) / ANSWERS
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"values": values}, indent=1) + "\n", encoding="utf-8")
+    except OSError:
+        return []
+    return list(values)
+
+
+def _read_answers(quest_root: Path | str) -> dict[str, float]:
+    try:
+        data = json.loads((Path(quest_root) / ANSWERS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    values = data.get("values") if isinstance(data, dict) else None
+    return {str(k): float(v) for k, v in (values or {}).items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))}
+
+
+def _answer(shown: str, rec: Records | None) -> Value | None:
+    """The value of a key that names a quantity the analysis recorded one value for (``{{v:<name>}}``); ``None`` when the
+    key names no such quantity, so the settings' keys are read as always."""
+    if rec is None or not rec.answers:
+        return None
+    segments = [s.strip() for s in shown.split("|")]
+    head = segments[0].partition("@")[0]
+    metric = head.partition(":")[0].strip()
+    if metric not in rec.answers:
+        return None
+    value = rec.answers[metric]
+    if "@" in segments[0] or ":" in head or any(s != "%" for s in segments[1:]):
+        return Value(shown, NOT_RECORDED, Hit(shown, f"{metric} is one value for the whole study, worked out by the analysis "
+                                              f"across the settings: write it as {placeholder(metric)} (add | % for a "
+                                              "percent), with no settings, form, comparison or reducer"))
+    percent = "%" in segments[1:]
+    return Value(shown, fmt(Measured(value), "mean", percent), numbers=[value],
+                 inputs={"value": metric, "source": "the analysis's recorded result"})
+
+
+def placed_metrics(markdown: str) -> set[str]:
+    """The quantities the paper places with a key FI filled (a rendered key, or a key not yet rendered), by name."""
+    unfilled = set(unfilled_in(markdown))
+    return {k.partition("@")[0].partition("|")[0].partition(":")[0].strip()
+            for k in keys_in(markdown) if k not in unfilled and not k.startswith(CALC)}
 
 
 def to_placeholders(markdown: str) -> str:
@@ -1354,6 +1432,21 @@ def _keys(lines: list[str]) -> int:
     return sum(1 for line in lines if line.startswith("- "))
 
 
+def _answers_block(rec: Records) -> str:
+    """The sheet's lines for the quantities the analysis worked out across the settings: one value for the whole study, a key
+    with no settings, the plan's label beside it. ``""`` when there are none."""
+    if not rec.answers:
+        return ""
+    labels = {str(m["id"]): str(m.get("label") or "") for m in (rec.protocol.get("metrics") if isinstance(rec.protocol, dict) else None) or []
+              if isinstance(m, dict) and m.get("id")}
+    lines = []
+    for name in [m for m in labels if m in rec.answers] + [m for m in rec.answers if m not in labels]:
+        shown = resolve(placeholder(name), rec)
+        lines.append(f"- {placeholder(name)} -> {shown.text}" + (f"  ({labels[name]})" if labels.get(name) else ""))
+    return ("Worked out by the analysis across the settings (one value for the whole study; its key has no '@' and no "
+            "settings):\n" + "\n".join(lines) + "\n")
+
+
 def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int = SHEET_MAX_SHOWN) -> str:
     """The "Results you can place" block: for each value the trials recorded, a line per setting (the key and the value
     as FI will write it, with its SD and the plan's reference where there are any), then the pooled line of each axis.
@@ -1419,14 +1512,14 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int 
                             listed.add(line)
                             body.append(line)
                             room -= 1
-        return head + "\n" + "\n".join(body) + "\n" + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
+        return head + "\n" + "\n".join(body) + "\n" + _answers_block(rec) + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
     full = [line for m in names for line in parts[m][0]]
     pooled = list(dict.fromkeys(line for m in names for _, line in parts[m][2]))  # a line pinned to one value can also be the line of that value's own axis
     extremes = [line for m in names for line in parts[m][1]]
     body = full + ["Pooled (the trials of the other axes together; sd is the within-setting pooled SD):"] + pooled
     if sum(1 for line in body if line.startswith("- ")) > max_lines:
         body = ["Too many settings to list; the pooled lines and each value's extremes:"] + pooled + extremes
-    return head + "\n" + "\n".join(body) + "\n" + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
+    return head + "\n" + "\n".join(body) + "\n" + _answers_block(rec) + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
 
 
 # --- what the prompts say -------------------------------------------------------------------------------------------
@@ -1456,6 +1549,8 @@ To say how a measured value compares with a theory or reference value, place {{v
 values of sigma (0.914 to 0.927 times ...)", or "consistent with" where the value's 95% interval holds it), setting by setting.
 Do not type above, below, larger, smaller, exceeds, within or equal for such a comparison; never set one pooled number beside
 another.
+A quantity listed under "Worked out by the analysis across the settings" is placed with its key as listed ({{v:<name>}}, no
+settings): it is the study's answer for that quantity, so place it where the paper gives that quantity.
 Numbers that are not available: a number that only the analysis script computed, and that no key on this list gives, is not
 available. The Analysis block above shows such numbers; do not copy any of them as digits. Use the key for the same quantity
 when the list has one, otherwise say it in words or leave it out."""
