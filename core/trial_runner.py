@@ -424,6 +424,9 @@ class TrialRun:
     cells: list[CellRun]
     ledger_path: Path
     summary_path: Path
+    #: The most settings that were running at the same time, counted by the runner as they started and ended (0: not counted,
+    #: as for a cluster job or trials read back from an earlier run).
+    most_at_once: int = 0
 
     @property
     def failed_trials(self) -> int:
@@ -535,7 +538,8 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
 
 
 def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, Any], *, run_id: str,
-             thresholds: dict[str, Any] | None, not_reported: str, walls: dict[int, float] | None = None) -> TrialRun:
+             thresholds: dict[str, Any] | None, not_reported: str, walls: dict[int, float] | None = None,
+             most_at_once: int = 0) -> TrialRun:
     """Read each cell's results file, keep the rows the harness FI started wrote (the cell's nonce, a trial it was
     given, reported once, with the seed it was given), and write the ledger and the summary. ``results`` holds each
     cell's process result by index (a cluster task has none: ``not_reported`` says why a trial is missing then)."""
@@ -547,7 +551,7 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
         runs = _collect_cells(quest_root, plan, results, fh, run_id=run_id, not_reported=not_reported, walls=walls)
     summary = raw / SUMMARY_NAME
     summary.write_text(json.dumps(_summary(runs, thresholds), indent=1, allow_nan=True), encoding="utf-8")
-    return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary)
+    return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary, most_at_once=most_at_once)
 
 
 def _collect_cells(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, Any], fh: Any, *, run_id: str,
@@ -644,6 +648,7 @@ async def run_trials(
         if on_plan is not None:
             on_plan(plan)
     results: dict[int, Any] = {}
+    running = [0, 0]  # settings running now, and the most that ran at the same time
     walls: dict[int, float] = {}  # each setting's process, start to end (what code/run.py spends on it, one at a time)
     # Each cell runs from a copy of code/ outside the quest folder (core/outside_run.py): FI's records (needs/, .fi/)
     # are not next to the code; FI's harness, the cell's spec and its results file come and go by FI's own list.
@@ -661,10 +666,15 @@ async def run_trials(
                 results[task["index"]] = type("NotRun", (), {"returncode": -1, "timed_out": True, "stderr": ""})()
                 return
             began = time.monotonic()
-            results[task["index"]] = await executor.execute(
-                [str(python), HARNESS_PATH.as_posix(), task["spec"], task["out"]],
-                cwd=quest_root, timeout_s=max(1, left), env=env,
-            )
+            running[0] += 1
+            running[1] = max(running[1], running[0])
+            try:
+                results[task["index"]] = await executor.execute(
+                    [str(python), HARNESS_PATH.as_posix(), task["spec"], task["out"]],
+                    cwd=quest_root, timeout_s=max(1, left), env=env,
+                )
+            finally:
+                running[0] -= 1
             walls[task["index"]] = time.monotonic() - began
 
     try:
@@ -692,7 +702,8 @@ async def run_trials(
         if gate.at_once > 1:
             with contextlib.suppress(OSError):
                 (work / "at_once.json").write_text(json.dumps(gate.record()), encoding="utf-8")
-    return _collect(quest_root, plan, results, run_id=run_id, thresholds=thresholds, not_reported="", walls=walls)
+    return _collect(quest_root, plan, results, run_id=run_id, thresholds=thresholds, not_reported="", walls=walls,
+                    most_at_once=running[1])
 
 
 def settings_at_once(value: Any, *, cores: int | None = None, fleet: int = 1) -> int:
@@ -1208,7 +1219,7 @@ class TrialsRunner:
             _save_run(self.quest_root, key, run)
             # How long the experiment took is the time of THIS run of the trials; the analysis run again on stored trials
             # (the branch above) is not the experiment and leaves the record as it is (core/run_facts.py).
-            _keep_run_time(self.quest_root, key, run, time.monotonic() - ran_from, self.at_once)
+            _keep_run_time(self.quest_root, key, run, time.monotonic() - ran_from)
         self.last = run
         if self.log is not None:
             self.log.info("[execute] FI ran %d trial(s) in %d cell(s): %d ok, %d failed (ledger: %s)",
@@ -1395,7 +1406,7 @@ class TrialsRunner:
                                stderr=f"{run.stderr()[-4000:]}\n{directive}".strip())
 
 
-def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | None, at_once: int = 1) -> None:
+def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | None) -> None:
     """Keep the wall time of a run of the trials, how many it ran, the sum of the per-trial times and, in a quest run in
     two stages, which stage the run belongs to (exploring or confirming) in ``.fi/run_facts.json``."""
     from . import phased, run_facts
@@ -1412,7 +1423,8 @@ def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | No
     run_facts.record_trials(quest_root, key=key, wall_s=wall_s, trials=len(rows), cells=len(run.cells),
                             settings_s=settings_s,
                             trial_sum_s=sum(times) if times else None,
-                            stage=stage if stage in (phased.EXPLORE, phased.CONFIRM) else None, at_once=at_once)
+                            stage=stage if stage in (phased.EXPLORE, phased.CONFIRM) else None,
+                            at_once=run.most_at_once or None)
 
 
 def _note_job(quest_root: Path, record: dict[str, Any], job: dict[str, Any]) -> None:

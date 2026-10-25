@@ -132,8 +132,8 @@ def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, tri
            "cells": int(cells), "trial_sum_s": None if trial_sum_s is None else round(float(trial_sum_s), 2)}
     if stage:
         run["stage"] = str(stage)
-    if at_once and int(at_once) > 1:
-        run["at_once"] = int(at_once)  # how many settings ran at the same time (absent: one at a time)
+    if at_once and int(at_once) >= 1:
+        run["at_once"] = int(at_once)  # the most settings that ran at the same time (absent: FI did not count)
     if isinstance(settings_s, (int, float)) and not isinstance(settings_s, bool) and 0 <= settings_s < float("inf"):
         run["settings_s"] = round(float(settings_s), 2)  # every setting's process, start to end, added up
     changes: dict[str, Any] = {"trials_run": run}
@@ -175,30 +175,22 @@ def search_seconds(quest_root: Path | str) -> float:
     return _recorded_seconds(root / "results" / "best_design.json") + _recorded_seconds(root / "needs" / "OPTIMUM_CHECK.json")
 
 
-_AT_ONCE_LOG = re.compile(r"(\d+) settings of the study run at the same time")
-
-
-def settings_at_once(quest_root: Path | str) -> int:
-    """How many settings FI ran at the same time in the run whose trials are stored: its run record first, then FI's other
-    records of the same run (the estimate's ``at_once``, and the line FI logs when it starts the settings, in
-    ``.fi/run.log``). 1 when none says more than one. Never worked out from times."""
+def settings_at_once(quest_root: Path | str) -> int | None:
+    """The most settings that ran at the same time in the run whose trials are stored, as the runner counted them: the run
+    record's ``at_once``, else the estimate's when it is the estimate of the same run (same ``key``). ``None`` when FI did
+    not count: it is then not known whether the settings ran at the same time."""
     root = Path(quest_root)
     run = read(root).get("trials_run")
     n = run.get("at_once") if isinstance(run, dict) else None
-    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+    if isinstance(n, int) and not isinstance(n, bool) and n >= 1:
         return n
     try:
         est = json.loads((root / ".fi" / "run_estimate.json").read_text(encoding="utf-8"))
-        n = est.get("at_once") if isinstance(est, dict) else None
     except (OSError, ValueError):
-        n = None
-    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
-        return n
-    try:
-        found = _AT_ONCE_LOG.findall((root / ".fi" / "run.log").read_text(encoding="utf-8", errors="replace"))
-    except OSError:
-        return 1
-    return max(1, int(found[-1])) if found else 1
+        return None
+    n = est.get("at_once") if isinstance(est, dict) else None
+    same = isinstance(run, dict) and isinstance(run.get("key"), str) and est.get("key") == run.get("key")
+    return n if same and isinstance(n, int) and not isinstance(n, bool) and n >= 1 else None
 
 
 def _seconds(value: Any) -> float | None:
@@ -206,34 +198,46 @@ def _seconds(value: Any) -> float | None:
 
 
 def reader_run(quest_root: Path | str) -> dict[str, Any] | None:
-    """What a reader's run of the delivered code takes, when FI ran the settings at the same time and so its wall time is
-    not that: ``{"least", "most", "at_once"}``, else ``None`` (FI recorded no overlap: its wall time is the run).
-    The delivered ``code/run.py`` runs the settings one after another. ``least``: the trials' own times added up (a run
-    cannot take less). ``most``: every setting's process time added up, measured WHILE the settings ran at the same time,
-    so it is an upper bound (``None`` when FI did not record it). The search FI ran counts in both. This is the one place
-    the time is worked out; the paper's facts and the run record both read it, and :func:`reader_verdict` judges it."""
+    """What a reader's run of the delivered code takes, when FI's wall time is not that: ``{"least", "most", "at_once",
+    "overlap"}``, else ``None`` (the settings ran one at a time, as counted: FI's wall time is the run).
+    The delivered ``code/run.py`` runs the settings one after another. ``least``: the trials' own times added up (plus the
+    search). ``most``: every setting's process time added up (plus the search), measured WHILE the settings ran at the
+    same time, so an upper bound (``None`` when FI did not record it). ``at_once``: the most settings that ran together, or
+    ``None`` when FI did not count; ``overlap`` is then ``True`` only when the trials' own times add up to more than the
+    wall time, which one-at-a-time trials cannot. Without a count and without that proof it is not known whether the
+    settings ran together. This is the one place the time is worked out; the paper's facts and the run record both read
+    it, and :func:`reader_verdict` judges it."""
     run = read(quest_root).get("trials_run")
     if not isinstance(run, dict):
         return None
     n = settings_at_once(quest_root)
-    if n <= 1:
+    if n == 1:
         return None
-    least, most = _seconds(run.get("trial_sum_s")), _seconds(run.get("settings_s"))
-    if least is None:
-        least = _seconds(run.get("wall_s"))  # the run cannot take less than it did with the settings at once
+    least, most, wall = _seconds(run.get("trial_sum_s")), _seconds(run.get("settings_s")), _seconds(run.get("wall_s"))
+    overlap = n is not None or (least is not None and wall is not None and least > wall)
     if least is None and most is None:
         return None
     search = search_seconds(quest_root)
     return {"least": None if least is None else least + search, "most": None if most is None else most + search,
-            "at_once": n}
+            "at_once": n, "overlap": overlap}
 
 
-def reader_verdict(reader: dict[str, Any], wall: float, limit: float) -> str:
-    """``"over"`` when the run (its wall time, or at least the time a reader's run takes) is over ``limit``; ``"within"``
-    only when the most a reader's run takes is under it; else ``"not shown to be within"``."""
-    if wall > limit or (reader["least"] is not None and reader["least"] > limit):
+def reader_verdict(reader: dict[str, Any], limit: float) -> str:
+    """``"over"`` only when the least a reader's run takes is over ``limit``; ``"within"`` only when the most it takes is
+    at or under it; else ``"not shown to be within or over"``. FI's own wall time decides neither: the settings ran at the
+    same time, or FI does not know that they did not."""
+    if reader["least"] is not None and reader["least"] > limit:
         return "over"
     return "within" if reader["most"] is not None and reader["most"] <= limit else "not shown to be within or over"
+
+
+def reader_clause(reader: dict[str, Any]) -> str:
+    """How the settings ran, in words, for the run-time sentence."""
+    if reader["at_once"] is not None:
+        return f"with {reader['at_once']} settings run at the same time"
+    if reader["overlap"]:
+        return "with an uncounted number of settings run at the same time"
+    return "FI did not record whether the settings ran at the same time"
 
 
 def reader_words(reader: dict[str, Any], plain: Any) -> str:

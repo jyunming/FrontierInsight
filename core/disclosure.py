@@ -394,9 +394,10 @@ def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> st
     # worked out): when FI ran them at the same time, the limit is judged against that, and both times are said.
     reader = _run_facts.reader_run(quest_root)
     if reader is not None:
-        verdict = _run_facts.reader_verdict(reader, float(duration_s), limit)
+        verdict = _run_facts.reader_verdict(reader, limit)
         said = verdict
-        return (f"{ran} with {reader['at_once']} settings run at the same time; one after another the settings take "
+        clause = _run_facts.reader_clause(reader)
+        return (f"{ran}{' ' if clause.startswith('with') else '; '}{clause}; one after another the settings take "
                 f"{_run_facts.reader_words(reader, _plain_seconds)}, which is {said} the topic's limit of "
                 f"{_plain_seconds(limit)}.")
     return f"{ran}; the topic sets a limit of {_plain_seconds(limit)}, and the run was {'within' if duration_s <= limit else 'over'} it."

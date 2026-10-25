@@ -66,9 +66,9 @@ _FACT_WORDS = {
     "seed": "the seed the code used to draw the trials' random numbers",
     "run_time": "the measured wall time of the experiment (the run whose trials are reported)",
     "time_limit": "the run-time limit the topic sets",
-    "time_limit_met": ("\"within\", \"over\" or \"not shown to be within or over\" (the settings ran at the same time, "
-                       "and the time a one-after-another run takes is only known to lie between two times, one of them "
-                       "under the limit and one over it): whether the run kept to the topic's limit"),
+    "time_limit_met": ("\"within\", \"over\" or \"not shown to be within or over\" (the settings ran at the same time, or FI "
+                       "does not know that they did not, and the least a one-after-another run takes is at or under the "
+                       "limit while the most it takes is over it or not known): whether the run kept to the topic's limit"),
     "trials_per_setting": "how many trials each setting ran",
     "settings": "how many settings (combinations of the plan's parameters) were run",
     "trials_failed": "how many trials failed",
@@ -965,7 +965,7 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
         reader = _run_facts.reader_run(root)
         if reader is not None:
             reader_known = reader
-            said += (f", with {reader['at_once']} settings run at the same time (run one after another, as the delivered "
+            said += (f", {_run_facts.reader_clause(reader)} (run one after another, as the delivered "
                      f"code does, the settings take {_run_facts.reader_words(reader, _plain)})")
         out["run_time"] = Fact("run_time", said, required=True)
     elif least is not None:
@@ -978,7 +978,7 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
         # The delivered code runs the settings one after another: when FI ran them at the same time, that time (a lower
         # bound) is judged, and "within" is said only when no lower bound is in question.
         if wall is not None:
-            met = (_run_facts.reader_verdict(reader_known, wall, limit) if reader_known is not None
+            met = (_run_facts.reader_verdict(reader_known, limit) if reader_known is not None
                    else "within" if wall <= limit else "over")
         else:
             met = "over" if least is not None and least > limit else ""
