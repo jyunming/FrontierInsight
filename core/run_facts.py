@@ -154,18 +154,40 @@ def run_seconds(quest_root: Path | str, fallback: Any = None) -> float | None:
     return None
 
 
-def one_after_another_seconds(quest_root: Path | str) -> float | None:
-    """The time the settings' own trials add up to, when they ran at the same time (the sum of the per-trial times in the
-    ledger is then longer than the wall time of the run); ``None`` when the settings ran one at a time or FI has no wall
-    time to compare. The code a reader runs (``code/run.py``) runs the settings one after another, so this, not the wall
-    time, is the order of what the reader's run takes."""
+def _recorded_seconds(path: Path) -> float:
+    """``time.seconds`` of one of FI's own records of the search (0 when it holds none)."""
+    try:
+        t = (json.loads(path.read_text(encoding="utf-8")) or {}).get("time")
+        v = t.get("seconds") if isinstance(t, dict) else None
+    except (OSError, ValueError, AttributeError):
+        return 0.0
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < float("inf") else 0.0
+
+
+def search_seconds(quest_root: Path | str) -> float:
+    """How long FI's search for the best design and its check at finer settings took, from the two records FI wrote when
+    each finished (``results/best_design.json``, ``needs/OPTIMUM_CHECK.json``): the wall time of the search, 0 when there
+    was none."""
+    root = Path(quest_root)
+    return _recorded_seconds(root / "results" / "best_design.json") + _recorded_seconds(root / "needs" / "OPTIMUM_CHECK.json")
+
+
+def reader_run(quest_root: Path | str) -> dict[str, Any] | None:
+    """What a reader's run of the delivered code takes, when FI ran the settings at the same time and so its wall time is
+    not that: ``{"seconds", "at_least", "at_once"}``, else ``None`` (FI recorded no overlap: its wall time is the run).
+    The delivered ``code/run.py`` runs the settings one after another. FI records the trials' own times, not what each
+    setting costs beyond them (a process per setting), so the time is a lower bound (``at_least``): a limit is judged
+    over by it, never within. The search FI ran counts. This is the one place the time is worked out; the paper's facts
+    and the run record both read it."""
     run = read(quest_root).get("trials_run")
     if not isinstance(run, dict):
         return None
-    wall, total = run.get("wall_s"), run.get("trial_sum_s")
-    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v < float("inf") for v in (wall, total)):
+    n, total = run.get("at_once"), run.get("trial_sum_s")
+    if isinstance(n, bool) or not isinstance(n, int) or n <= 1:
         return None
-    return float(total) if total > 1.1 * wall else None
+    if isinstance(total, bool) or not isinstance(total, (int, float)) or not 0 <= total < float("inf"):
+        return None
+    return {"seconds": float(total) + search_seconds(quest_root), "at_least": True, "at_once": n}
 
 
 def run_stage(quest_root: Path | str) -> tuple[str | None, dict[str, Any]]:
