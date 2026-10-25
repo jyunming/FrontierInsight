@@ -24,8 +24,6 @@ _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(\S.*?)[ \t#]*$")
 _FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
 _QUOTE_RES = (re.compile("“([^”]{25,})”"), re.compile(r'"([^"\n]{25,})"'), re.compile(r"`([^`\n]{25,})`"))
 _WORDS_RE = re.compile(r"\S+")
-_CLOSEST_COVERAGE = 0.5
-_CLOSEST_MARGIN = 0.1
 _FIGURE_LINK_RE = re.compile(r"!\[[^\n]*\]\(figures/")
 # A section the writer shortens gives up at most this share of its words (the rest of the cut comes from the next section).
 _MAX_CUT_SHARE = 0.4
@@ -90,29 +88,92 @@ def holding(markdown: str, sections: list[Section], snippet: str, end: int | Non
     return next(iter(found)) if len(found) == 1 else None
 
 
-def placing(markdown: str, sections: list[Section], snippet: str, end: int | None = None) -> set[int]:
-    """The sections a flagged passage can be in: the one that holds it (:func:`holding`), else the up to three whose best
-    sentence shares most of the content words of ``snippet`` (a claim the check put in its own words): at least
-    :data:`_CLOSEST_COVERAGE` of the words, and every section within :data:`_CLOSEST_MARGIN` of the best one when there are
-    at most three. Empty when it is not clear, so FI never points the writer at sections on a weak match."""
-    end = len(markdown) if end is None else end
-    exact = holding(markdown, sections, snippet, end)
-    if exact is not None:
-        return {exact}
-    words = set(paper_patch._tokens(snippet))
-    if len(words) < paper_patch._MIN_CONTENT_WORDS or any(
-            s.index and snippet.strip() in text_of(markdown, s) for s in sections):
-        return set()
-    best: dict[int, float] = {}
-    for start, stop, _block in paper_patch.sentence_units(markdown[:end]):
-        owner = next((s.index for s in sections if s.index and s.start <= start < s.end), None)
-        if owner is not None:
-            best[owner] = max(best.get(owner, 0.0), len(words & set(paper_patch._tokens(markdown[start:stop]))) / len(words))
-    ranked = sorted(best.items(), key=lambda kv: -kv[1])
-    if not ranked or ranked[0][1] < _CLOSEST_COVERAGE:
-        return set()
-    near = {index for index, score in ranked if ranked[0][1] - score <= _CLOSEST_MARGIN}
-    return near if len(near) <= 3 else set()
+def mark(markdown: str) -> tuple[str, dict[str, "Place"]]:
+    """``markdown`` as a checker is shown it, with FI's own id before each sentence and each heading marked with its section
+    number, and the table of ids: ``<<3.7>>`` is the 7th unit (sentence, caption, table row) of the 3rd ``##`` section.
+    A checker that names a passage cites its id; FI reads the passage from this table, never from the checker's words
+    (:func:`place`). Headings and code are not numbered."""
+    sections = split(markdown)
+    units = paper_patch.sentence_units(markdown)
+    fenced: list[tuple[int, int]] = []
+    pos, opened = 0, None
+    for line in markdown.splitlines(keepends=True):
+        if _FENCE_RE.match(line):
+            if opened is None:
+                opened = pos
+            else:
+                fenced.append((opened, pos + len(line)))
+                opened = None
+        pos += len(line)
+    if opened is not None:
+        fenced.append((opened, len(markdown)))
+    inserts: list[tuple[int, str]] = []
+    table: dict[str, Place] = {}
+    count: dict[int, int] = {}
+    for start, stop, _block in units:
+        text = markdown[start:stop]
+        if text.lstrip().startswith("#") or any(a <= start < b for a, b in fenced):
+            continue
+        owner = next((s.index for s in sections if s.start <= start < s.end), 0)
+        count[owner] = count.get(owner, 0) + 1
+        key = f"{owner}.{count[owner]}"
+        inserts.append((start, f"<<{key}>> "))
+        table[key] = Place(key, sections[owner].title, text)
+    for sec in sections:
+        if sec.index:
+            line_end = markdown.find("\n", sec.start)
+            inserts.append((len(markdown) if line_end < 0 else line_end, f" <<section {sec.index}>>"))
+    out, last = [], 0
+    for at, tag in sorted(inserts, key=lambda t: t[0]):
+        out += [markdown[last:at], tag]
+        last = at
+    out.append(markdown[last:])
+    return "".join(out), table
+
+
+@dataclass(frozen=True)
+class Place:
+    """A passage of the paper by FI's id (:func:`mark`): the id, the title of its section and its exact text."""
+
+    id: str
+    section: str
+    passage: str
+
+
+_ID_RE = re.compile(r"\d+\.\d+")
+
+
+def read_places(raw: object, table: dict[str, "Place"]) -> list[dict[str, str]]:
+    """The passages a checker cited (``raw``: an id or a list of them, ``<<3.7>>`` or ``3.7``) as the records FI keeps:
+    ``{"id", "section", "passage"}`` read from FI's own table. An id FI never issued is dropped, so a hit with no valid id
+    keeps an empty list and cannot be placed."""
+    items = raw if isinstance(raw, list) else [raw] if raw not in (None, "") else []
+    out: list[dict[str, str]] = []
+    for item in items:
+        m = _ID_RE.search(str(item))
+        place = table.get(m.group(0)) if m else None
+        if place and not any(o["id"] == place.id for o in out):
+            out.append({"id": place.id, "section": place.section, "passage": place.passage})
+    return out
+
+
+def place(markdown: str, sections: list[Section], places: object) -> set[int] | None:
+    """The sections of ``markdown`` that hold the passages of ``places`` (records from :func:`read_places`, kept with a
+    claim or a hit), or ``None`` when any of them cannot be placed: no record, or its stored text is not in exactly one
+    section of this draft (the draft was written again since). FI's stored text is looked up as it is, never matched by
+    its words."""
+    if not isinstance(places, list) or not places:
+        return None
+    found: set[int] = set()
+    for p in places:
+        text = str(p.get("passage") or "") if isinstance(p, dict) else ""
+        if not text.strip():
+            return None
+        hit = {s.index for s in sections if s.index and text in text_of(markdown, s)}
+        if len(hit) != 1:
+            return None
+        found |= hit
+    return found
 
 
 def naming(markdown: str, sections: list[Section], text: str) -> set[int]:

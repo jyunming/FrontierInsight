@@ -22368,36 +22368,53 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "that changed")
         for index in sorted(changed or ()):
             add(index, "it cites a value of FI's record that is not the value the draft shows")
-        # What the review asks for.
+        # What the review asks for. Every request is placed by an id FI issued (core/paper_scope.py) or by a passage FI itself
+        # quoted; a request with neither cannot be placed, and the paper is then written whole.
         hits = [str(h).strip() for h in review.get("must_flag_hits") or [] if str(h).strip()]
         grounding = state.get("claim_grounding") or {}
-        claims = [
-            {"claim": str(c.get("claim") or ""), "evidence": str(c.get("evidence") or "")}
-            for c in grounding.get("claims") or []
-            if isinstance(c, dict) and c.get("basis") == "unsupported"
-        ] or [{"claim": str(c), "evidence": ""} for c in _review_items(grounding.get("unsupported"))]
+        unsupported = [c for c in grounding.get("claims") or [] if isinstance(c, dict) and c.get("basis") == "unsupported"]
         captions = _review_items(review.get("figure_caption_warnings"))
         unplaced: list[str] = []
-        if any(_hit_name(h) == "figure_caption" for h in hits) and not captions:
-            # A caption flagged with no finding naming its figure: the sections that hold a figure.
-            holders = _paper_scope.holds_figures(previous, sections)
-            if not holders:
-                unplaced.append("a figure caption (no section holds a figure)")
-            for index in sorted(holders):
-                add(index, "the review flags a figure caption and names no figure; it holds a figure")
-            hits = [h for h in hits if _hit_name(h) != "figure_caption"]
-        patchable = [h for h in hits if _hit_name(h) in paper_patch.PATCHABLE_HITS]
-        if patchable:
+        names = {_hit_name(h) for h in hits}
+        if "unsupported_claim" in names:
+            if not unsupported:
+                unplaced.append("unsupported claims the check recorded without ids")
+            for c in unsupported:
+                where = _paper_scope.place(previous, sections, c.get("where"))
+                if where is None:
+                    unplaced.append(f"the claim \"{str(c.get('claim') or '')[:60]}\" (no valid id)")
+                for at in sorted(where or ()):
+                    add(at, "the check found a claim in it unsupported")
+        if "figure_caption" in names:
+            if captions:
+                for finding in captions:
+                    m = paper_patch._FIGURE_FILE_RE.search(finding)
+                    caption = paper_patch.caption_in(previous, end, m.group(1)) if m else ""
+                    at = _paper_scope.holding(previous, sections, caption) if caption else None
+                    if at is None:
+                        unplaced.append(f"the caption \"{finding[:60]}\"")
+                    else:
+                        add(at, "the review flags a figure caption in it")
+            else:
+                # A caption flagged with no finding naming its figure: the sections that hold a figure.
+                holders = _paper_scope.holds_figures(previous, sections)
+                if not holders:
+                    unplaced.append("a figure caption (no section holds a figure)")
+                for index in sorted(holders):
+                    add(index, "the review flags a figure caption and names no figure; it holds a figure")
+        quoted = [h for h in hits if _hit_name(h) in ("paper_record_mismatch", "mislabelled_statistic")]
+        if quoted:
             passages, why = paper_patch.plan_passages(
-                previous, end, hits=[(_hit_name(h), h) for h in patchable], claims=claims, captions=captions)
+                previous, end, hits=[(_hit_name(h), h) for h in quoted], claims=[], captions=[])
             if why:
                 unplaced.append(why)
-            for p in passages:
-                where = _paper_scope.placing(previous, sections, p.located or p.flagged, end)
-                if not where:
-                    unplaced.append(f"the {p.kind} \"{p.flagged[:60]}\"")
-                for at in sorted(where):
-                    add(at, f"the review flags a {p.kind}" + (" that is in it" if len(where) == 1 else " that is in it or in one of the other sections listed for it"))
+            for q in passages:
+                at = _paper_scope.holding(previous, sections, q.located) if q.how == "exact" else None
+                if at is None:
+                    unplaced.append(f"the {q.kind} \"{q.flagged[:60]}\"")
+                else:
+                    add(at, f"FI's check flags a {q.kind} in it")
+        places = review.get("hit_places") if isinstance(review.get("hit_places"), dict) else {}
         for h in hits:
             name = _hit_name(h)
             if name in paper_patch.PATCHABLE_HITS:
@@ -22413,16 +22430,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             elif name in ("figure_missing", "citations_unchecked"):
                 unplaced.append(name)
             else:
-                named = _paper_scope.naming(previous, sections, h)
-                if not named:
-                    unplaced.append(f"\"{h[:60]}\"")
-                for index in sorted(named):
-                    add(index, f"the review's point names it: {h[:140]}")
-        if not hits:
-            # A revise with no must-fix point: its weaknesses are the request.
-            for w in [*_review_items(review.get("weaknesses")), *_review_items(review.get("suggestions"))]:
-                for index in sorted(_paper_scope.naming(previous, sections, w)):
-                    add(index, f"the review's weakness names it: {w[:140]}")
+                bare = re.sub(r"^\[[^\]]*\]\s*", "", h)
+                where = _paper_scope.place(previous, sections, places.get(h) or places.get(bare))
+                if where is None:
+                    unplaced.append(f"\"{h[:60]}\" (no valid id)")
+                for at in sorted(where or ()):
+                    add(at, f"the review's point is about a passage in it: {h[:140]}")
         if refine_round:
             for h in state.get("feedback_history") or []:
                 if not isinstance(h, dict) or not str(h.get("text") or "").strip() or h.get("answered_by"):
@@ -22711,12 +22724,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 + (f" (95% CI {s['ci_lower']:.4g} to {s['ci_upper']:.4g})" if "ci_lower" in s and "ci_upper" in s else "")
                 for path, s in list(intervals.items())[:40]
             )
+        # The paper as the checker is shown it carries FI's id before each sentence (core/paper_scope.py): a claim names the
+        # passage it is about by that id, and FI reads the passage from its own table.
+        marked_paper, id_table = _paper_scope.mark(_disclosure.strip_for_checks(paper_raw))
         prompt = self._prompts["claim_check"].substitute(
             topic=state["topic"],
             evidence_block=evidence_block,
             method_block=_claim_method_block(self.quest_root, state),
             references=refs_block,
-            paper=paper_text,
+            paper=_paper_for_prompt(marked_paper, "claim_check"),
         )
         # claim_check runs AFTER the paper is already written, so a provider
         # failure here (a bridge stall, a server out of capacity once its
@@ -22795,6 +22811,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "citation_index": cite_idx,
                 "quote": quote,
                 "evidence": evidence,
+                "where": _places_as_placeholders(_paper_scope.read_places(c.get("where"), id_table)),
             })
         # The rules below add claims of their own; an empty answer from the check is judged before them.
         model_found_none = not claims
@@ -24539,6 +24556,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if pruned is not None:
             state = {**state, "claim_grounding": pruned}  # type: ignore[typeddict-item]
             self._write_claims_ledger(pruned)
+        # The paper as the reviewer is shown it carries FI's id before each sentence (core/paper_scope.py): a hit names the
+        # passage it is about by that id.
+        review_marked, review_ids = _paper_scope.mark(paper_md)
         base_prompt = self._prompts["review"].substitute(
             topic=state["topic"],
             clarify_block=_format_clarify(state),
@@ -24558,7 +24578,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # The whole paper. A 16 KB cut hid the second half of a real
             # 34,910-character paper, so the review graded a draft it had not
             # read; the cap now only guards against a runaway file.
-            paper_md=_paper_for_prompt(paper_md, "review", self._log),
+            paper_md=_paper_for_prompt(review_marked, "review", self._log),
         )
 
         panel_names = list(self.config.engine.review_panel or [])
@@ -24605,6 +24625,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             review["must_flag_hits"] = _without_reviewer_page_limit_hits(
                 [str(h).strip() for h in mfh if str(h).strip()], self._log,
             )
+            review["hit_places"] = _read_hit_places(review.get("must_flag_places"), review_ids)
             review["must_flag_hits"] += _unsupported_claim_hit(state, review["must_flag_hits"])
             # Arithmetic, not judgement: compare the paper's numbers against
             # the ones the run actually produced. Every other gate here ends
@@ -24745,6 +24766,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "design_parts": [str(x).strip() for x in (parsed.get("design_parts") or []) if str(x).strip()]
                 if isinstance(parsed.get("design_parts"), list) else [],
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
+                "hit_places": _read_hit_places(parsed.get("must_flag_places"), review_ids),
                 "status": "ok",
                 # Which model was asked for, and which provider and model actually answered (after a fallback, the
                 # fallback's): panelists answered by one model are one reviewer's view in several roles.
@@ -24813,6 +24835,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # always win; prose fields prefer the moderator's version when
         # present.
         review: dict[str, Any] = {**agg}
+        review["hit_places"] = {k: v for r in panel_results for k, v in (r.get("hit_places") or {}).items()}
         review["must_flag_hits"] = _without_reviewer_page_limit_hits(
             review.get("must_flag_hits") or [], self._log,
         )
@@ -32001,6 +32024,26 @@ def _citations_unchecked(state: QuestState) -> list[str]:
 # The name a hit starts with, after a panel's ``[persona] `` prefix:
 # ``unsupported_claim``, ``[methodologist] figure_caption: Figure 2 ...``.
 _HIT_NAME_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?[`'\"]?([A-Za-z_]+)")
+
+
+def _read_hit_places(raw: Any, table: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    """The reviewer's ``must_flag_places`` (``[{"hit": ..., "ids": [...]}]``) as ``{hit: places}``, each place read from FI's
+    own table of ids; a hit with no valid id has no entry (core/paper_scope.py)."""
+    out: dict[str, list[dict[str, str]]] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        places = _places_as_placeholders(_paper_scope.read_places(item.get("ids"), table))
+        hit = str(item.get("hit") or "").strip()
+        if hit and places:
+            out[hit] = places
+    return out
+
+
+def _places_as_placeholders(places: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Places (core/paper_scope.py) with each passage in the writer's placeholder form, the form the earlier draft is
+    read in when a section is written again."""
+    return [{**p, "passage": _paper_facts.to_placeholders(p["passage"])} for p in places]
 
 
 def _hit_name(hit: Any) -> str:

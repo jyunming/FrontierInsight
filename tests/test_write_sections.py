@@ -19,6 +19,7 @@ from core import paper_scope
 from tests.test_write_patch import CLAIM, DRAFT, _engine, _first_draft, _revise_state, _study
 
 DISCUSSION_HIT = "single_point_eval: the Discussion does not say what limits the gap between the two curves"
+DISCUSSION_PLACE = [{"id": "4.2", "section": "Discussion", "passage": "A larger population would shrink the gap [1]."}]
 NEW_DISCUSSION = "## Discussion\nThe gap closes as the population grows, because early extinction matters less [2].\n"
 
 
@@ -46,7 +47,7 @@ def _info(logged: list[tuple[int, str]]) -> list[str]:
 def test_a_hit_on_one_section_asks_for_that_section_and_shows_the_old_draft(tmp_path: Path) -> None:
     eng, client, logged = _engine(tmp_path, [DRAFT, NEW_DISCUSSION])
     out1, before = _first_draft(eng)
-    after = _revise(eng, out1, [DISCUSSION_HIT])
+    after = _revise(eng, out1, [DISCUSSION_HIT], review={"hit_places": {DISCUSSION_HIT: DISCUSSION_PLACE}})
 
     assert client.nodes == ["write", "write"], "no call for edits and no second whole paper"
     prompt = client.calls[1][1]
@@ -65,7 +66,7 @@ def test_a_reply_that_returns_a_section_not_asked_for_has_it_dropped(tmp_path: P
     reply = NEW_DISCUSSION + "\n## Results\nA different results section that nobody asked for.\n"
     eng, client, logged = _engine(tmp_path, [DRAFT, reply])
     out1, before = _first_draft(eng)
-    after = _revise(eng, out1, [DISCUSSION_HIT])
+    after = _revise(eng, out1, [DISCUSSION_HIT], review={"hit_places": {DISCUSSION_HIT: DISCUSSION_PLACE}})
 
     assert client.nodes == ["write", "write"], "dropped, not asked again"
     assert _section(after, "Results") == _section(before, "Results")
@@ -77,7 +78,7 @@ def test_a_reply_that_returns_a_section_not_asked_for_has_it_dropped(tmp_path: P
 def test_a_reply_without_the_asked_section_writes_the_whole_paper(tmp_path: Path) -> None:
     eng, client, logged = _engine(tmp_path, [DRAFT, "## Results\nOnly another section.\n", DRAFT])
     out1, _before = _first_draft(eng)
-    _revise(eng, out1, [DISCUSSION_HIT])
+    _revise(eng, out1, [DISCUSSION_HIT], review={"hit_places": {DISCUSSION_HIT: DISCUSSION_PLACE}})
     assert client.nodes == ["write", "write", "write"]
     assert any("the sections could not be put back" in m and "Discussion" in m
                for lvl, m in logged if lvl == logging.WARNING)
@@ -186,11 +187,78 @@ def test_a_caption_flagged_without_a_figure_asks_for_the_sections_holding_a_figu
     assert not any("cannot place" in m for m in _info(logged))
 
 
-def test_a_claim_the_check_paraphrased_is_placed_in_its_closest_section() -> None:
-    paper = ("# T\n\n## Introduction\nDeterministic models predict a final size for every reproduction number [1]. "
-             "Early extinction is certain below the threshold value of one.\n\n"
-             "## Results\nThe mean over 300 runs was 0.583.\n")
+
+
+def test_an_unsupported_claim_is_placed_by_the_id_the_check_gave(tmp_path: Path) -> None:
+    grounding = {"claims": [{"claim": "something paraphrased", "basis": "unsupported", "evidence": "",
+                             "where": [{"id": "1.3", "section": "Introduction", "passage": CLAIM}]}],
+                 "unsupported": ["something paraphrased"]}
+    eng, client, _ = _engine(tmp_path, [DRAFT, "garbage", "## Introduction\nRewritten introduction [1].\n"])
+    out1, before = _first_draft(eng)
+    after = _revise(eng, out1, ["unsupported_claim"], claim_grounding=grounding)
+    assert client.nodes == ["write", "write.patch", "write"]
+    assert "1. `## Introduction`" in client.calls[2][1] and "2. `" not in client.calls[2][1]
+    for title in ("Abstract", "Results", "Discussion"):
+        assert _section(after, title) == _section(before, title)
+
+
+def test_a_claim_without_a_valid_id_writes_the_whole_paper(tmp_path: Path) -> None:
+    old_record = {"claims": [{"claim": "Extinction is certain below R0 = 1.2.", "basis": "unsupported", "evidence": ""}],
+                  "unsupported": ["Extinction is certain below R0 = 1.2."]}
+    eng, client, logged = _engine(tmp_path, [DRAFT, "garbage", DRAFT])
+    out1, _before = _first_draft(eng)
+    _revise(eng, out1, ["unsupported_claim"], claim_grounding=old_record)
+    assert client.nodes == ["write", "write.patch", "write"]
+    assert "<earlier_draft>" not in client.calls[2][1]
+    assert any("writing the whole paper: FI cannot place in a section" in m and "no valid id" in m for m in _info(logged))
+
+
+def test_an_id_fi_never_issued_is_dropped() -> None:
+    from core.engine import _read_hit_places
+
+    marked, table = paper_scope.mark("# T\n\n## A\nOne sentence of the draft here.\n")
+    assert "<<1.1>> One sentence" in marked and "## A <<section 1>>" in marked
+    assert _read_hit_places([{"hit": "h", "ids": ["<<1.1>>", "9.9"]}], table) == {
+        "h": [{"id": "1.1", "section": "A", "passage": "One sentence of the draft here."}]}
+    assert _read_hit_places([{"hit": "h", "ids": ["9.9", "free words"]}], table) == {}
+
+
+def test_a_passage_that_the_draft_no_longer_holds_cannot_be_placed() -> None:
+    paper = "# T\n\n## A\nOne sentence here today.\n\n## B\nAnother one.\n"
     sections = paper_scope.split(paper)
-    claim = "Extinction early on is certain when the threshold value is below one"
-    assert paper_scope.placing(paper, sections, claim) == {1}
-    assert paper_scope.placing(paper, sections, "A wholly different statement about quantum chromodynamics lattices") == set()
+    place = [{"id": "1.1", "section": "A", "passage": "One sentence here today."}]
+    assert paper_scope.place(paper, sections, place) == {1}
+    assert paper_scope.place(paper, sections, [{**place[0], "passage": "A sentence written since."}]) is None
+    assert paper_scope.place(paper, sections, []) is None
+
+
+def test_the_claim_check_and_the_review_carry_fis_ids(tmp_path: Path) -> None:
+    import json
+
+    from tests.test_claim_check import _engine as claim_engine
+
+    eng = claim_engine(tmp_path)
+    seen: list[str] = []
+
+    async def fake_chat(prompt: str, **kw: Any) -> str:
+        seen.append(prompt)
+        return json.dumps({"claims": [
+            {"claim": "c1", "basis": "unsupported", "evidence": "x", "where": ["<<1.2>>"]},
+            {"claim": "c2", "basis": "unsupported", "evidence": "x", "where": ["7.7"]},
+            {"claim": "c3", "basis": "unsupported", "evidence": "x"}], "summary": "s"})
+
+    eng._chat = fake_chat  # type: ignore[assignment,method-assign]
+    text = ("# P\n\n## Intro\nA first sentence about the study here. A second sentence that is a claim.\n\n"
+            "## Results\nThe result is stated in this sentence of the results section.\n")
+    path = tmp_path / "paper" / "paper.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    out = asyncio.run(eng._node_claim_check({"topic": "t", "paper_md": str(path)}))  # type: ignore[arg-type]
+    assert "<<1.1>> A first sentence" in seen[0] and "<<2.1>> The result" in seen[0] and "## Intro <<section 1>>" in seen[0]
+    c1, c2, c3 = out["claim_grounding"]["claims"][:3]
+    assert c1["where"] == [{"id": "1.2", "section": "Intro", "passage": "A second sentence that is a claim."}]
+    assert c2["where"] == [] and c3["where"] == []
+    agents = Path(__file__).resolve().parent.parent / "agents"
+    review_prompt = (agents / "review.md").read_text(encoding="utf-8")
+    assert "must_flag_places" in review_prompt and "<<3.7>>" in review_prompt
+    assert '"where"' in (agents / "claim_check.md").read_text(encoding="utf-8")

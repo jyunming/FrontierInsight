@@ -34,13 +34,16 @@ Respond with a single JSON object, no prose, no markdown fence:
       "basis": "<experiment | citation | unsupported>",
       "citation_index": <the source: its References number (e.g. 3), its Further reading label as a string (e.g. "W2"), or null>,
       "quote": "<for citation: the supporting words copied exactly from that source's text; otherwise null>",
-      "evidence": "<for experiment: which number/finding; for citation: what the source supports; for unsupported: why nothing backs it>"
+      "evidence": "<for experiment: which number/finding; for citation: what the source supports; for unsupported: why nothing backs it>",
+      "where": ["<the id(s) FI printed before the sentence(s) of the paper that the claim is about, such as \"3.7\">"]
     },
     ...
   ],
   "summary": "<one short paragraph: how well-grounded is the paper overall, and what are the most serious unsupported claims if any?>"
 }
 ```
+
+The paper below carries FI's id (`<<3.7>>`: the 7th sentence of section 3) before each sentence, caption and table row, and `<<section 3>>` after each section heading. `where` gives, for every claim, the id(s) of the passage the claim is about, copied from the paper. FI places an unsupported claim by that id alone: a claim with no valid id cannot be placed, and the paper is then written again as a whole.
 
 `basis` MUST be one of the three exact lowercase strings. Every claim with `basis: "citation"` MUST give a `citation_index` that names a source in the Inputs section (a References number or a Further reading label such as `"W2"`); otherwise use `basis: "unsupported"`.
 
