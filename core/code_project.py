@@ -808,23 +808,25 @@ def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], messa
     git_dir = code_dir / ".git"
     if not git_dir.is_dir():
         return False
-    index = git_dir / "fi_refused.index"
+    import tempfile
+
+    # one index file per call: two refusals at the same time never share a tree
+    fd, index_name = tempfile.mkstemp(prefix="fi_refused_", suffix=".index", dir=git_dir)
+    os.close(fd)
+    index = Path(index_name)
     # a name git takes: no "..", no ".lock" ending, no part starting with "."
     name = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._-]+", "-", ref or "")).strip("-.")
     if name.endswith(".lock"):
         name = name[: -len(".lock")] + "-lock"
     try:
-        index.unlink(missing_ok=True)  # one left by an earlier run that stopped must not carry into this tree
+        index.unlink(missing_ok=True)  # an empty file is not an index: read-tree makes it
         extra = {"GIT_INDEX_FILE": str(index)}
         head = _git(code_dir, "rev-parse", "--verify", "-q", "HEAD")
         parent = head.stdout.strip() if head.returncode == 0 else ""
         if _git(code_dir, "read-tree", *([parent] if parent else ["--empty"]), env_extra=extra).returncode != 0:
             return False
-        if not name:
-            have = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
-            name = f"{max([int(n) for n in have if n.isdigit()] or [0]) + 1:03d}"
-        notes = {f".fi_refused/{k}": v for k, v in (extras or {}).items()}
-        for rel, text in {**files, ".fi_refused/reason.txt": message, **notes}.items():
+        notes = {f".fi_refused/{k}": v for k, v in (extras or {}).items() if k != "reason.txt"}
+        for rel, text in {**files, **notes, ".fi_refused/reason.txt": message}.items():
             blob = _git(code_dir, "hash-object", "-w", "--stdin", stdin=text)
             if blob.returncode != 0:
                 return False
@@ -838,13 +840,22 @@ def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], messa
         if made.returncode != 0:
             return False
         for n in range(1, 100):
+            if name:
+                target = f"refs/fi/refused/{name}" + ("" if n == 1 else f"-{n}")
+            else:  # the next number, asked again each time: another refusal may have taken it
+                have = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
+                target = f"refs/fi/refused/{max([int(r) for r in have if r.isdigit()] or [0]) + 1:03d}"
             # an empty old value: made only when no reference of that name is there yet
-            target = f"refs/fi/refused/{name}" + ("" if n == 1 else f"-{n}")
             if _git(code_dir, "update-ref", target, made.stdout.strip(), "").returncode == 0:
-                old = _git(code_dir, "for-each-ref", "--sort=-committerdate", "--format=%(refname)",
-                           "refs/fi/refused/").stdout.split()
-                for stale in [r for r in old[REFUSED_KEPT:] if r != target]:
-                    _git(code_dir, "update-ref", "-d", stale)
+                every = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
+                numbered = sorted((r for r in every if r.isdigit()), key=int, reverse=True)
+                for stale in numbered[REFUSED_KEPT:]:  # exactly the newest REFUSED_KEPT numbered tries stay
+                    _git(code_dir, "update-ref", "-d", f"refs/fi/refused/{stale}")
+                named = _git(code_dir, "for-each-ref", "--sort=-committerdate", "--format=%(refname:lstrip=3)",
+                             "refs/fi/refused/").stdout.split()
+                for stale in [r for r in named if not r.isdigit()][REFUSED_KEPT:]:
+                    if f"refs/fi/refused/{stale}" != target:
+                        _git(code_dir, "update-ref", "-d", f"refs/fi/refused/{stale}")
                 return True
         return False
     except (OSError, subprocess.SubprocessError) as exc:
