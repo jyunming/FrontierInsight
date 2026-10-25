@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.plan_parts_helpers import checks_reply, is_scoped_ask, parts_of, plan_shown
 
 from core import oracle_forms as of, oracle_review as orv, plan
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig
@@ -121,12 +122,12 @@ class _Model:
         if prompt.lstrip().startswith("# Second Opinion on the Checks"):
             self.reviews.append({"prompt": prompt, "model": kw.get("model")})
             return self.review if isinstance(self.review, str) else json.dumps(self.review)
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             self.revisions.append(prompt)
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             if self.revise is None:
-                return current
-            return plan.edit_design_block(current, self.revise) or current
+                return checks_reply(current, prompt)
+            return checks_reply(plan.edit_design_block(current, self.revise) or current, prompt)
         if _classify(prompt) == "Experiment Design":
             body = json.loads(_FAKE_RESPONSES["design"])
             body["protocol"] = self.protocol
@@ -311,7 +312,7 @@ async def test_a_resume_after_the_request_stopped_the_quest_asks_nothing_again(t
 
     class _Truncating(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
-            if "You are revising the plan" in messages[-1]["content"]:
+            if is_scoped_ask(messages[-1]["content"]):
                 self.revisions.append(messages[-1]["content"])
                 raise ModelAnswerTruncated("cut off at the output limit")
             return await super().chat(messages, **kw)

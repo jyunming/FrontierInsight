@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.plan_parts_helpers import checks_reply, is_scoped_ask, parts_of, plan_shown
 
 from core import oracle_check as oc, oracle_forms as of, plan, trial_runner
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig
@@ -265,14 +266,14 @@ class _Model:
 
     async def chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             self.revisions.append(prompt)
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             if self.revise is None:
-                return current
+                return checks_reply(current, prompt)
             edited = plan.edit_design_block(current, lambda block: {**block, "protocol": {
                 **block["protocol"], "oracles": [self.revise(o) for o in block["protocol"]["oracles"]]}})
-            return edited or current
+            return checks_reply(edited or current, prompt)
         if _classify(prompt) == "Experiment Design":
             body = json.loads(_FAKE_RESPONSES["design"])
             body["protocol"] = self.protocol
@@ -424,11 +425,11 @@ async def test_a_check_the_plan_removes_after_the_test_run_is_named_to_the_perso
     class _Removing(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
             prompt = messages[-1]["content"]
-            if "You are revising the plan" in prompt:
+            if is_scoped_ask(prompt):
                 self.revisions.append(prompt)
-                current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
-                return plan.edit_design_block(current, lambda b: {**b, "protocol": {
-                    **b["protocol"], "oracles": [keep]}})
+                current = plan_shown(prompt)
+                return checks_reply(plan.edit_design_block(current, lambda b: {**b, "protocol": {
+                    **b["protocol"], "oracles": [keep]}}), prompt)
             return await super().chat(messages, **kw)
 
     model = _Removing({})
@@ -449,12 +450,14 @@ async def test_a_revision_for_the_checks_can_change_only_the_checks(tmp_path: Pa
     class _Wandering(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
             prompt = messages[-1]["content"]
-            if "You are revising the plan" in prompt:
+            if is_scoped_ask(prompt):
                 self.revisions.append(prompt)
-                current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
-                return plan.edit_design_block(current, lambda b: {**b, "hypothesis": "a different claim", "protocol": {
+                current = plan_shown(prompt)
+                edited = plan.edit_design_block(current, lambda b: {**b, "protocol": {
                     **b["protocol"], "grid": {"n": [99]},
-                    "oracles": [{**o, "expected": 0} for o in b["protocol"]["oracles"]]}})
+                    "oracles": [{**o, "expected": 0} for o in b["protocol"]["oracles"]]}}) or current
+                # the reply also names the grid, which a request about the checks does not concern
+                return parts_of(edited, "oracles", "grid")
             return await super().chat(messages, **kw)
 
     model = _Wandering({})
@@ -462,8 +465,10 @@ async def test_a_revision_for_the_checks_can_change_only_the_checks(tmp_path: Pa
     await _gate(engine, {"grid": {"n": [4]}, "oracles": [{**CONSERVATION, "measure": "violation"}]}, TOY_VIOLATION)
     design = plan.load_design(engine.quest_root)[0]
     assert design["protocol"]["grid"] == {"n": [4]} and design["hypothesis"] == "power is conserved"
-    assert design["protocol"]["oracles"][0]["expected"] == 0
-    assert "only the checks were kept" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert len(model.revisions) == 2, "the reply was refused and asked once more, with FI's reason"
+    assert "protocol.grid" in model.revisions[1] and "does not concern" in model.revisions[1]
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "answer was refused" in log and "protocol.grid" in log
 
 
 @pytest.mark.asyncio
@@ -472,7 +477,7 @@ async def test_a_revision_call_that_fails_is_said_and_never_crashes_the_step(tmp
 
     class _Failing(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
-            if "You are revising the plan" in messages[-1]["content"]:
+            if is_scoped_ask(messages[-1]["content"]):
                 raise TimeoutError("the provider did not answer")
             return await super().chat(messages, **kw)
 
@@ -543,9 +548,9 @@ async def test_a_criterion_that_reads_a_changed_check_may_change_with_it_and_no_
     class _Both(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
             prompt = messages[-1]["content"]
-            if "You are revising the plan" in prompt:
+            if is_scoped_ask(prompt):
                 self.revisions.append(prompt)
-                current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+                current = plan_shown(prompt)
 
                 def change(b: dict[str, Any]) -> dict[str, Any]:
                     oracles = [{**o, "measure": "abs(ratio - 1)", "expected": 0} if o["name"] == "power_conservation" else o
@@ -553,7 +558,7 @@ async def test_a_criterion_that_reads_a_changed_check_may_change_with_it_and_no_
                     criteria = [{**c, "direction": "lower", "target": 1e-6} for c in b["protocol"]["criteria"]]
                     return {**b, "protocol": {**b["protocol"], "oracles": oracles, "criteria": criteria}}
 
-                return plan.edit_design_block(current, change)
+                return checks_reply(plan.edit_design_block(current, change) or current, prompt)
             return await super().chat(messages, **kw)
 
     model = _Both({"grid": {"n": [4, 8]}, "oracles": [{**CONSERVATION, "measure": "ratio"}, rk],

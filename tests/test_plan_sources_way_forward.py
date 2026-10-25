@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from tests.plan_parts_helpers import parts_of
 
 from core import accepted_checks, oracle_check, plan
 from core.config import (
@@ -226,7 +227,8 @@ def _chat_by_step(eng: Engine, revise: Any) -> list[tuple[str, str]]:
                                "protocol": {"grid": {"sigma": [0.3, 0.5]}, "oracles": _oracles(), "model": GOOD_MODEL},
                                "plan": {"in_short": "x"}})
         if node == "plan_revise":
-            return revise(plan.plan_path(eng.quest_root).read_text(encoding="utf-8"))
+            # the fill asks for the checks' sources alone (the parts of the checks it names), never for the file
+            return parts_of(revise(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")), "oracles")
         if node == "plan_criteria":
             return json.dumps({"criteria": []})
         return json.dumps({"objections_addressed": []})
@@ -252,7 +254,7 @@ async def test_under_research_fi_fills_the_sources_in_once_before_it_would_stop(
 
 
 @pytest.mark.asyncio
-async def test_a_fill_that_changes_a_checks_number_is_put_back_and_the_quest_goes_on_marked(tmp_path: Path) -> None:
+async def test_a_fill_that_changes_a_checks_number_is_refused_and_the_quest_goes_on_marked(tmp_path: Path) -> None:
     eng, seen = _engine(tmp_path, [])
     calls = _chat_by_step(eng, lambda text: _with(text, "derivation: sum S = 1 by definition").replace(
         "expected: 1.0", "expected: 2.0"))
@@ -260,12 +262,13 @@ async def test_a_fill_that_changes_a_checks_number_is_put_back_and_the_quest_goe
     assert seen == [], "no stop: FI goes on by itself"
     assert plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design["protocol"]["oracles"][0][
         "expected"] == 1.0, "the check's number is as the plan had it"
-    assert "put back" in plan.history(eng.quest_root)[-1]["note"]
+    assert "answer was refused" in (eng.fi_dir / "run.log").read_text(encoding="utf-8"), "FI refused it and said why"
+    assert [node for node, _text in calls].count("plan_revise") == 2, "refused, and asked once more with the reason"
     record = accepted_checks.accepted(eng.quest_root)
     assert record and {c["by"] for c in record["chosen"].values()} == {accepted_checks.AUTOMATIC}
     # Asked once: a resume asks the model no second time.
     await eng._node_plan(dict(STATE))
-    assert [node for node, _text in calls].count("plan_revise") == 1
+    assert [node for node, _text in calls].count("plan_revise") == 2
 
 
 @pytest.mark.asyncio
@@ -458,9 +461,8 @@ async def test_the_fill_request_says_plainly_that_a_source_number_does_not_exist
                                "protocol": {"grid": {"sigma": [0.3]}, "model": GOOD_MODEL,
                                             "oracles": [{**o, "reference": "[0]"} for o in _oracles()]}})
         if node == "plan_revise":
-            return _with(plan.plan_path(eng.quest_root).read_text(encoding="utf-8").replace("reference: '[0]'",
-                                                                                            "reference: ''"),
-                         "derivation: sum of S over the pupil = 1 by definition")
+            return parts_of(_with(plan.plan_path(eng.quest_root).read_text(encoding="utf-8").replace(
+                "reference: '[0]'", "reference: ''"), "derivation: sum of S over the pupil = 1 by definition"), "oracles")
         if node == "plan_criteria":
             return json.dumps({"criteria": []})
         return json.dumps({"objections_addressed": []})
@@ -473,10 +475,9 @@ async def test_the_fill_request_says_plainly_that_a_source_number_does_not_exist
 
 
 @pytest.mark.asyncio
-async def test_a_fill_whose_design_block_breaks_is_asked_for_the_block_once_and_then_kept(tmp_path: Path) -> None:
+async def test_a_fill_reply_that_is_not_json_is_asked_once_more_shorter_and_then_kept(tmp_path: Path) -> None:
     eng, seen = _engine(tmp_path, [])
     calls: list[tuple[str, str]] = []
-    filled: dict[str, str] = {}
 
     async def chat(messages: Any, **kw: Any) -> str:
         node = str(kw.get("node") or "")
@@ -486,23 +487,21 @@ async def test_a_fill_whose_design_block_breaks_is_asked_for_the_block_once_and_
             return json.dumps({"hypothesis": "an annular source prints the line best", "method": "sweep sigma",
                                "protocol": {"grid": {"sigma": [0.3, 0.5]}, "oracles": _oracles(), "model": GOOD_MODEL},
                                "plan": {"in_short": "x"}})
-        if node == "plan_revise" and "Return ONLY the corrected block" not in text:
+        if node == "plan_revise" and len([c for c in calls if c[0] == "plan_revise"]) == 1:
+            return "Here is the corrected plan, with the sources filled in: it is written below."  # no JSON at all
+        if node == "plan_revise":
             good = _with(plan.plan_path(eng.quest_root).read_text(encoding="utf-8"),
                          "derivation: sum of S over the pupil = 1 by definition")
-            filled["block"] = plan.design_block(good)[2]
-            # An unclosed quote: no repair can say where the value was meant to end.
-            return good.replace("method: sweep sigma", "method: 'sweep sigma")
-        if node == "plan_revise":
-            return "```yaml\n" + filled["block"] + "\n```"
+            return parts_of(good, "oracles")
         if node == "plan_criteria":
             return json.dumps({"criteria": []})
         return json.dumps({"objections_addressed": []})
 
     eng._client = type("Stub", (), {"chat": staticmethod(chat)})()
     await eng._node_plan(dict(STATE))
-    assert seen == [], "the corrected block filled the sources in, so the quest does not stop"
+    assert seen == [], "the second, shorter answer filled the sources in, so the quest does not stop"
     revise = [text for node, text in calls if node == "plan_revise"]
-    assert len(revise) == 2 and "Where: line" in revise[1] and "Fill in where" not in revise[1]
+    assert len(revise) == 2 and "no JSON object in it" in revise[1] and "Fill in where" in revise[1]
     assert "from: derivation: sum of S over the pupil = 1 by definition" in plan.plan_path(eng.quest_root).read_text(
         encoding="utf-8")
 

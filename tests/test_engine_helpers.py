@@ -1015,14 +1015,15 @@ async def test_a_study_too_long_to_run_asks_the_plan_once_for_one_that_fits_then
     engine = Engine(cfg)
     asked: list[tuple[str, str]] = []
 
-    async def fake_rewrite(request, path, by="person", note=""):  # noqa: ANN001
+    async def fake_rewrite(request, path, *, scope, note, by="engine", **kw):  # noqa: ANN001
         asked.append((request, by))
+        assert "simplifications" in scope.names(), "the plan is asked to say what was made smaller"
         return {"version": 2, "sha256": "x", "path": str(path)}
 
     async def no_chat(prompt, node=None):  # noqa: ANN001
         raise AssertionError("the gate decides a stop by rule")
 
-    monkeypatch.setattr(engine, "_rewrite_plan", fake_rewrite)
+    monkeypatch.setattr(engine, "_revise_plan_parts", fake_rewrite)
     monkeypatch.setattr(engine, "_chat", no_chat)
     why = "the experiment's 3802 settings would take at least 3 days, more than the 8 hours allowed"
     fit = {"seconds_per_setting": 98.0, "at_least": False, "settings": 3802, "settings_that_fit": 195,

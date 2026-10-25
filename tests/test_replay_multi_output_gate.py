@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.plan_parts_helpers import checks_reply, is_scoped_ask, parts_of, plan_shown
 
 from core import plan
 from tests.test_equation_gate import _engine
@@ -41,18 +42,18 @@ class _Model:
 
     async def chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             self.revisions.append(prompt)
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             if self.reply_example is None:
-                return current
+                return checks_reply(current, prompt)
 
             def change(block: dict[str, Any]) -> dict[str, Any]:
                 model = block["protocol"]["model"]
                 eqs = [{**e, "example": self.reply_example} if e["id"] == "E4" else e for e in model["equations"]]
                 return {**block, "protocol": {**block["protocol"], "model": {**model, "equations": eqs}}}
 
-            return plan.edit_design_block(current, change) or current
+            return checks_reply(plan.edit_design_block(current, change) or current, prompt)
         self.other.append(prompt)
         return "```python\n" + self.code + "```"
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.plan_parts_helpers import checks_reply, is_scoped_ask, parts_of, plan_shown
 
 from core import oracle_check as oc, plan, protocol_check as pc
 from core.config import (
@@ -206,14 +207,14 @@ def _fake(calls: list[str], *, implement: str, repair: str | None = None, protoc
         if kind == "ExecuteReflect" and "FI_ORACLE=1 to check its oracles" in prompt:
             calls.append("OracleRepair")
             return json.dumps({"code": repair, "deps": [], "patch_summary": "answered the oracles"}) if repair else "{}"
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             calls.append("PlanRevise")
             if not revise:
                 return "no plan file here"
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             design = plan.parse(current).design
             design["protocol"] = {**(design.get("protocol") or {}), "oracles": [ORACLE]}
-            return plan.render("smoke", {}, design)
+            return parts_of(plan.render("smoke", {}, design), "oracles")
         return _fake_response_for(prompt)
 
     return fake_chat
@@ -423,12 +424,13 @@ async def test_an_oracle_with_no_numbers_is_completed_in_the_plan_before_anythin
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
         prompts.append(prompt)
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             calls.append("PlanRevise")
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             design = plan.parse(current).design
-            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [ORACLE]}
-            return plan.render("smoke", {}, design)
+            # the numbers are completed; what the check measures is the plan's own and stays
+            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [{**ORACLE, "check": bare["check"]}]}
+            return parts_of(plan.render("smoke", {}, design), "oracles")
         return await _fake(calls, implement=_PASSING, protocol={**_PROTOCOL, "oracles": [bare]})(self, messages, **kw)
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
@@ -568,12 +570,13 @@ async def test_completing_the_plan_does_not_use_up_the_scripts_repair(
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             calls.append("PlanRevise")
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             design = plan.parse(current).design
-            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [ORACLE]}
-            return plan.render("smoke", {}, design)
+            # the numbers are completed; what the check measures is the plan's own and stays
+            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [{**ORACLE, "check": bare["check"]}]}
+            return parts_of(plan.render("smoke", {}, design), "oracles")
         return await _fake(calls, implement=_UNAWARE, repair=_PASSING, protocol={**_PROTOCOL, "oracles": [bare]})(self, messages, **kw)
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)

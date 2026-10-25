@@ -19,6 +19,7 @@ import pytest
 
 from core import frozen_protocol, plan
 from core.engine import Engine
+from tests.plan_parts_helpers import parts_of
 from tests.test_plan_optimisation import EXTRA, HEAT_SINK, _NO_OBJECTIONS, _engine as _plan_engine
 
 TOPIC = "Find the fin spacing that minimises the base temperature"
@@ -45,7 +46,9 @@ class Model:
         prompt = messages[-1]["content"]
         if "FI ran the search for the best design" in prompt:
             self.asked.append(prompt)
-            return self.revise() if callable(self.revise) else str(self.revise)
+            reply = self.revise() if callable(self.revise) else str(self.revise)
+            # FI asks for the parts of how the design is described and searched, never for the file
+            return parts_of(reply, "optimisation") if reply.startswith("# Plan") else reply
         if "A measurement, or a search for the best design?" in prompt:
             return json.dumps({**HEAT_SINK, "plan": EXTRA})
         return _NO_OBJECTIONS
