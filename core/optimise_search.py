@@ -2446,6 +2446,12 @@ def iter_grid_cells(grid):
         yield {a: v[i] for (a, v), i in zip(axes, picked)}
 
 
+def first_grid_cells(grid, n):
+    """The first ``n`` settings of :func:`grid_cells` (the plan's order), listed lazily: a grid of more settings than FI lists
+    is never built whole."""
+    return list(itertools.islice(iter_grid_cells(grid), max(1, int(n))))
+
+
 def grid_cells(grid):
     """Every setting of a grid, as the trial runner makes them: every combination of the values (axes in order), or, for a
     grid with sub-studies, the settings of each sub-study in turn without the ones an earlier sub-study already has."""

@@ -232,3 +232,47 @@ def test_the_search_does_not_start_when_the_check_s_reserve_leaves_it_no_time(tm
     runner.check_reserve_s = 5.0
     result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=1, env={}))
     assert called == [] and result.timed_out and "search was not started" in result.stderr
+
+
+BIG_SIM = '''
+import time
+
+def run_trial(cell, trial_id, seed):
+    time.sleep(0.2)
+    return {"y": float(cell["n"] + cell["m"])}
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_grid_of_more_settings_than_fi_lists_is_planned_lazily_and_run_up_to_the_limit(tmp_path: Path) -> None:
+    from core import run_manifest
+    from tests.test_run_checks import _cut, _sizing
+
+    big = {"n": list(range(800)), "m": list(range(800))}  # 640,000 settings, more than the 500,000 FI lists
+    eng, _model, _runner, _ex = await _sizing(tmp_path, timeout_s=12)
+    protocol = {"grid": big, "runs_per_setting": 1}
+    eng._protocol_block = lambda state: protocol  # type: ignore[method-assign]
+    eng._draft_protocol = lambda state: protocol  # type: ignore[method-assign]
+    code = eng.quest_root / "code"
+    (code / "simulate.py").write_text(BIG_SIM, encoding="utf-8")
+    (code / "experiment.py").write_text(CUT_ANALYSIS, encoding="utf-8")
+    # the design step no longer stops the quest for it
+    assert eng._grid_too_large_stop({"topic": "t", "iteration": 0}) is None
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=eng.quest_root,
+        protocol=lambda: protocol, deterministic=False,
+        simulate=code / "simulate.py", analysis=code / "experiment.py", log=eng._log)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    cut = _cut(eng)
+    assert cut["settings"] == 640000 and 1 <= cut["planned_settings"] < 500000 and runner.first_cells == cut["planned_settings"]
+    result = await runner.execute([sys.executable, str(code / "experiment.py")], cwd=eng.quest_root, timeout_s=12, env={})
+    assert result.returncode == 0, result.stderr
+    rows = trial_runner.read_ledger(eng.quest_root)
+    planned = {r["cell"] for r in rows}
+    assert len(planned) == cut["planned_settings"] and "n=0,m=0" in planned, "the first settings of the plan, in its order"
+    assert any(r["status"] == "ok" for r in rows)
+    said = disclosure.cut_short_text(eng.quest_root)
+    assert f"only its first {cut['planned_settings']:,} were planned" in said and "640,000 settings" in said
+    # the record of the run is not rejected for the settings that were never planned
+    manifest, row_problems = run_manifest.manifest_from_ledger(protocol, rows, {})
+    assert not row_problems

@@ -117,7 +117,7 @@ async def test_the_plan_is_asked_once_and_a_grid_that_fits_goes_on(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_a_grid_still_too_large_stops_at_design_and_is_asked_only_once(tmp_path: Path) -> None:
+async def test_a_grid_still_too_large_is_asked_only_once_and_does_not_stop_at_design(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
     model = Model(eng, [_set(grid=BIG)] * 3, _draft(BIG))
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
@@ -126,13 +126,8 @@ async def test_a_grid_still_too_large_stops_at_design_and_is_asked_only_once(tmp
     patch2 = await eng._node_design(state)  # a second pass (a resume) asks nothing more
     assert len(model.asked) == 1
     assert patch["design"]["protocol"]["grid"] == BIG == patch2["design"]["protocol"]["grid"]
-    stop = await eng._node_implement({**state, "design": patch["design"]})
-    result = stop["exec_result"]
-    assert "147,604,654,080,000" in result["too_long"] and "500,000" in result["too_long"]
-    tried = " ".join(result["too_long_tried"])
-    assert "asked the plan's model" in tried and "does not choose" in tried
-    assert "fewer settings" in result["too_long_advice"] and "timeout_s" not in result["too_long_advice"]
-    assert not (eng.quest_root / "code").exists() or not any((eng.quest_root / "code").iterdir())
+    # no stop before the code is written: the run is timed, cut at the time limit and said so (core/run_checks.py)
+    assert eng._grid_too_large_stop({**state, "design": patch["design"]}) is None
     assert _record(eng)["count"] == 1
 
 
@@ -159,9 +154,8 @@ async def test_a_note_FI_adds_to_plan_md_does_not_make_it_ask_a_second_time(tmp_
     path.write_text(path.read_text(encoding="utf-8") + "\n- a note FI added after the plan was asked about\n", encoding="utf-8")
     await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert len(model.asked) == 1
-    # ... and the stop still says the plan's model was asked (read by the model asked, not by plan.md's hash).
-    stop = eng._grid_too_large_stop({"topic": TOPIC, "design": {"protocol": {"grid": BIG}}})
-    assert stop is not None and "asked the plan's model" in " ".join(stop["exec_result"]["too_long_tried"])
+    # ... and a grid still too large is not a stop at design any more (the run is sized and cut at the time limit).
+    assert eng._grid_too_large_stop({"topic": TOPIC, "design": {"protocol": {"grid": BIG}}}) is None
 
 
 @pytest.mark.asyncio
@@ -184,8 +178,7 @@ async def test_a_redesign_drafted_at_design_is_asked_once_per_round_and_a_grid_t
     assert protocol["constants"] == {"k": 1} and protocol["runs_per_setting"] == 3
     again = await eng._ask_design_for_the_grid(state, design, iteration=1)
     assert len(sent) == 1 and again is design  # the same round asks nothing more
-    stop = eng._grid_too_large_stop({**state, "design": design})
-    assert stop is not None and "asked the plan's model" in " ".join(stop["exec_result"]["too_long_tried"])
+    assert eng._grid_too_large_stop({**state, "design": design}) is None  # no stop at design: the run is cut at the limit
     await eng._ask_design_for_the_grid(state, {"protocol": {"grid": SMALL}}, iteration=2)
     assert len(sent) == 1  # a grid that fits is never asked about
 

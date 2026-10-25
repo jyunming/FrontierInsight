@@ -666,6 +666,9 @@ def cut_short_text(quest_root: Path) -> str:
             f"{plain_duration(float(est))}, more than the {plain_duration(float(limit))} allowed, so it ran the plan's "
             "settings in the plan's order until the time limit; the results cover only what ran")
     parts: list[str] = []
+    listed, total_settings = _whole(cut.get("planned_settings")), _whole(cut.get("settings"))
+    if listed and total_settings and listed < total_settings:
+        parts.append(f"the plan has {total_settings:,} settings, more than FI lists, so only its first {listed:,} were planned")
     run_id = str(cut.get("run_id") or "")
     counts = _setting_counts(root, run_id)
     if counts is not None:

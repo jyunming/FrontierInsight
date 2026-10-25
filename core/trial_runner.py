@@ -362,10 +362,13 @@ def numerical_axes(protocol: Any) -> set[str]:
     return out
 
 
-def cells(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
+def cells(grid: dict[str, list[Any]], first: int | None = None) -> list[dict[str, Any]]:
     """Every combination of the grid's values, axes in the grid's order, values in theirs (for a grid with sub-studies, the
     settings of each in turn, none twice: :func:`core.optimise_search.grid_cells`). An empty grid is one cell with no axes
-    (a study that runs one setting)."""
+    (a study that runs one setting). ``first``: only the first settings in that order, listed lazily (a study of more
+    settings than FI lists is run up to its time limit: the settings it could reach are planned, never the whole grid)."""
+    if first is not None:
+        return _search.first_grid_cells(grid, first)
     return _search.grid_cells(grid)
 
 
@@ -491,7 +494,7 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
 def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int, base_seed: int,
           deterministic: bool, folder: Path, out_name: str, keep_spec: bool = False,
           paired: bool = False, thresholds: dict[str, Any] | None = None,
-          in_each_run: dict[str, list[Any]] | None = None) -> list[dict[str, Any]]:
+          in_each_run: dict[str, list[Any]] | None = None, first: int | None = None) -> list[dict[str, Any]]:
     """Write one spec per cell (the simulation file, the entry, the cell, its trials with their seeds, a nonce) into
     ``folder`` and return the plan: per cell its key, cell, trials, nonce, and the spec and results paths relative to
     ``quest_root``. ``in_each_run``: the values every run goes through together; the cell a run is given holds each such
@@ -502,7 +505,7 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     levels = _in_run.level_cells(inside)
     plan = []
-    for index, cell in enumerate(cells(grid)):
+    for index, cell in enumerate(cells(grid, first)):
         key = cell_key(cell)
         trials = [{"trial": t, "seed": None if deterministic else trial_seed(base_seed, "" if paired else key, t)}
                   for t in range(per_cell)]
@@ -609,6 +612,7 @@ async def run_trials(
     runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
     run_id: str = "", thresholds: dict[str, Any] | None = None, paired: bool = False, on_plan: Any = None,
     in_each_run: dict[str, list[Any]] | None = None, log: Any = None, at_once: int = 1, cost: Any = None,
+    first_cells: int | None = None,
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
     the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study. ``on_plan(plan)`` is told the
@@ -623,7 +627,7 @@ async def run_trials(
     (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                  deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
-                 thresholds=thresholds, in_each_run=in_each_run)
+                 thresholds=thresholds, in_each_run=in_each_run, first=first_cells)
     if on_plan is not None:
         on_plan(plan)
     results: dict[int, Any] = {}
@@ -1002,6 +1006,9 @@ class TrialsRunner:
         self.cost: Any = None
         #: The id of a cut study (set by the run's sizing), written into the ledger's rows.
         self.run_id = ""
+        #: How many of the plan's settings are planned, in the plan's order, when the grid is more than FI lists (set by the
+        #: run's sizing); ``None``: all of them.
+        self.first_cells: int | None = None
         self.quest_root = Path(quest_root)
         self._protocol = protocol
         self.deterministic = deterministic
@@ -1161,7 +1168,7 @@ class TrialsRunner:
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
                 paired=paired, on_plan=self._note_plan, in_each_run=inside, log=self.log, at_once=self.at_once,
-                cost=self.cost, run_id=self.run_id,
+                cost=self.cost, run_id=self.run_id, first_cells=self.first_cells,
             )
             self._plan_seen = None
             _save_run(self.quest_root, key, run)

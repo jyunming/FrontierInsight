@@ -8087,32 +8087,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return self._stop_before_run(text, "no_search", tried=tried)
 
     def _grid_too_large_stop(self, state: QuestState) -> QuestState | None:
-        """The honest stop (no paper) for a protocol whose ``grid`` holds more settings than FI lists, reached before any
-        code is written and again before it runs: the same stop, with the same count, that the run gives
-        (:meth:`_stop_too_long`), but at design, after the plan's model was asked once to make the grid smaller
-        (:meth:`_ask_plan_for_the_grid`). ``None`` when the grid fits, for a search (its scan is judged by
-        :meth:`_search_cannot_start_stop`) and for a quest that runs no experiment of its own."""
+        """A protocol whose ``grid`` holds more settings than FI lists is no longer a stop (reached before any code is written
+        and again before it runs, after the plan's model was asked once to make the grid smaller,
+        :meth:`_ask_plan_for_the_grid`): it is said in run.log and the quest goes on. The run is timed on a few real trials
+        (:meth:`_size_the_run`), the settings the time allowed can reach are planned lazily in the plan's order, run up to
+        the time limit, and the paper says how many of the plan's settings that was; the quest stops only when not even one
+        setting fits. Always ``None``: kept so the two places that asked for the stop still read the same."""
         if not self._runs_code(state):
             return None
         protocol = self._protocol_block(state)
         if not isinstance(protocol, dict) or protocol.get("optimisation"):
             return None
         said = _optimise_search.grid_too_large(_optimise_search.study_grid(protocol))
-        if not said:
-            return None
-        # Read the way the asks count themselves (by the model asked, not plan.md's hash, which FI's own notes change).
-        asked = (self._grid_asked_of(_GRID_ASKED) + self._grid_asked_of(_GRID_ASKED_AGAIN)
-                 + self._grid_asked_of(_DRAFTED_GRID_ASKED) + self._grid_asked_of(_DRAFTED_GRID_ASKED_AGAIN))
-        tried = [said,
-                 ("asked the plan's model to rewrite the settings so they are crossed only where they should be, with the "
-                  "count above; the grid was still too large") if asked else
-                 "had no plan's model to ask, or the plan was already settled, so the grid was not rewritten",
-                 "did not cut the grid: FI does not choose which settings or values to leave out"]
-        self._log.warning("[design] the plan's grid is too large to run (%s); stopping, nothing was run", _one_line(said, 400))
-        print(f"[FI] quest {self.quest_id}: {_one_line(said, 300)}; nothing was run (see needs/STUCK.json)")
-        return self._stop_before_run(said, "too_long", tried=tried, advice=(
-            "or ask in words for fewer settings to be crossed (`--revise-plan \"<what to change>\"`): more time does not "
-            "help, FI does not list that many settings."))
+        if said:
+            self._log.warning("[design] the plan's grid is more than FI lists (%s); FI will plan the settings it can reach in "
+                              "the plan's order and run them up to the time limit", _one_line(said, 400))
+        return None
 
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
         """Pause for a person only when the quest's setup stops a search for the best design: the simulation is not a
@@ -11795,6 +11785,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 return "differs", ["FI's own trial record (raw/ledger.jsonl) is missing: the trials did not run through FI"]
             thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
             manifest, row_problems = _run_manifest.manifest_from_ledger(protocol, ledger, thresholds)
+            from . import run_estimate as _estimate_record
+
+            cut = _estimate_record.read_record(self.quest_root).get("truncated")
+            if isinstance(cut, dict) and isinstance(cut.get("planned_settings"), int)                     and cut["planned_settings"] < int(cut.get("settings") or 0):
+                # More settings than FI lists: only the first of the plan's settings were planned and run (the paper says
+                # so, core/disclosure.py::cut_short_text). The ledger's rows are held to the protocol one by one above; the
+                # run cannot cover the whole grid, so it is not compared with it.
+                self._manifest_note = (f"only the first {cut['planned_settings']:,} of the plan's {int(cut['settings']):,} "
+                                       "settings were planned, so the run was not compared with the whole grid")
+                return ("differs", row_problems) if row_problems else ("ok", [])
             # FI holds every trial's value: a list the analysis reports for one of the trials' own outcomes is checked
             # value by value, not only counted.
             per_cell, altered = _trial_runner.recorded_values_by_cell(self.quest_root)
