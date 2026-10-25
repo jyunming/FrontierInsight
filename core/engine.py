@@ -142,6 +142,7 @@ from . import review_pairs as _pairs
 from . import quality_report as _quality_report
 from . import code_findings as _code_findings
 from . import grid_keys as _grid_keys
+from . import code_delta as _code_delta
 from . import finding_repair as _finding_repair
 from . import function_steps as _function_steps
 from . import second_impl as _second_impl
@@ -6408,6 +6409,79 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except OSError as e:
             self._log.warning("[%s] couldn't keep the repair's answer: %r", kind, e)
 
+    def _scripts_built_from(self, state: QuestState, outline: dict[str, Any]) -> dict[str, str]:
+        """The parts of the plan the two scripts are written from now (:mod:`core.code_delta`)."""
+        try:
+            design = json.loads(self._code_design_block(state))
+        except ValueError:
+            design = {}
+        protocol = self._protocol_block(state)
+        specs, _notes = _function_steps.model_functions(outline, protocol if isinstance(protocol, dict) else None)
+        return _code_delta.parts(design, {s.name: s.signature for s in specs})
+
+    async def _incremental_scripts(self, state: QuestState, outline: dict[str, Any]) -> dict[str, Any] | None:
+        """On a revised plan, the two scripts as they are with ONLY the functions the revision touched replaced
+        (``{"simulate", "analysis", "deps"}``), or ``None`` when that cannot be told or done and the scripts are written whole
+        as before (the reason is said in run.log). FI compares the plan parts the scripts were written from with the new
+        ones (:mod:`core.code_delta`): none changed keeps both scripts and every repair they received, without a request;
+        some changed asks the model for the functions to change and splices them in (:func:`core.code_delta.splice_functions`)."""
+        template = self._prompts.get("implement_update")
+        layout = self._code_layout(state)
+        disk = self._scripts_on_disk()
+        if (template is None or not layout or layout["shape"] != _code_layout.PACKAGE or not self._split_on(state)
+                or not disk.get(_split_run.SIMULATE_NAME, "").strip() or not disk.get("experiment.py", "").strip()):
+            return None
+        if not _function_steps.is_ready(self.quest_root, layout["package"]):
+            return None
+        delta = _code_delta.compare(self.quest_root, self._scripts_built_from(state, outline))
+        if not delta.known:
+            self._log.info("[implement] the scripts are written whole: %s", delta.reason)
+            return None
+        deps = list(state.get("deps") or [])
+        kept = {"simulate": disk[_split_run.SIMULATE_NAME], "analysis": disk["experiment.py"], "deps": deps}
+        if not delta.changed:
+            self._log.info("[implement] the revised plan changes nothing the scripts read: simulate.py and experiment.py "
+                           "are kept as they are, with every repair they received")
+            return kept
+        self._log.info("[implement] the revised plan changes %s; asking only for the functions of the scripts that must change",
+                       ", ".join(delta.changed))
+        shown = self._package_shown(state)
+        prompt = template.substitute(
+            topic_block=self._topic_block(), changes_block=_code_delta.describe(delta),
+            package_block=_package_block_text(shown[1] if shown else {}) or "(none)",
+            simulate_code=kept["simulate"], analysis_code=kept["analysis"], design_block=self._code_design_block(state),
+            clarify_block=_format_clarify(state))
+        try:
+            text = await self._chat(prompt, node="implement")
+        except Exception as exc:  # noqa: BLE001 -- the scripts are then written whole
+            self._log.warning("[implement] asking for the changed functions failed (%r); the scripts are written whole", exc)
+            return None
+        self._keep_repair_answer("implement_update", text)
+        if (text or "").strip().upper().startswith("NO CHANGE"):
+            self._log.info("[implement] the model says no function of the scripts must change for the revision; kept as they are")
+            return kept
+        if "FULL REWRITE NEEDED" in (text or "").upper():
+            self._log.info("[implement] the model says the revision needs a module-level change; the scripts are written whole")
+            return None
+        _main, marked = _finding_repair.file_blocks(text)
+        names = {"simulate.py": "simulate", "experiment.py": "analysis"}
+        done = {n: marked[n] for n in names if n in marked}
+        if not done:
+            self._log.warning("[implement] the reply held no function of simulate.py or experiment.py; the scripts are written whole")
+            return None
+        out = dict(kept)
+        for name, block in done.items():
+            old = kept[names[name]]
+            new, replaced, why = _code_delta.splice_functions(old, block)
+            broken = why or (_trial_runner.repair_breaks_contract(old, new, name) if new is not None else "")
+            if broken:
+                self._log.warning("[implement] the changed functions of %s cannot be used (%s); the scripts are written whole", name, broken)
+                return None
+            out[names[name]] = new
+            self._log.info("[implement] %s: %d function(s) replaced or added (%s); the rest is as it was", name, len(replaced), ", ".join(replaced[:8]))
+        out["deps"] = sorted({*deps, *_deps_from_tail(text.rsplit("```", 1)[-1])})
+        return out
+
     def _script_from_reply(self, node: str, old: str, code: object, parsed: Any, name: str) -> tuple[str, str]:
         """``(the script a repair's reply makes, why none)``: the reply's ``functions`` are put into ``old`` and every other
         byte of it stays (:mod:`core.script_reply`); a reply that is a whole script is taken whole. The one contract
@@ -10829,7 +10903,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                         package=self._package_shown(state))
             if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
                 prompt += _SPLIT_RERUN_NOTE
-        text = await self._chat(prompt, node="implement")
+        # A revised plan: the scripts that exist are changed only where the revision touched what they read (the model's
+        # functions, written above, were kept or written again by their own record).
+        incremental = None
+        if not extend and not rerun_for and outline and outline.get("scaffold"):
+            incremental = await self._incremental_scripts(state, outline)
+        text = "" if incremental is not None else await self._chat(prompt, node="implement")
         # Two scripts (execution.split_analysis): the simulation, and the analysis, which
         # keeps the name ``experiment.py`` because everything else reads that one. A reply
         # that does not hold both is asked for once more; if it still does not, the quest
@@ -10838,7 +10917,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         submit_code = ""
         package_files: dict[str, str] = {}
         if self._split_on(state):
-            scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
+            scripts = ({"simulate": incremental["simulate"], "analysis": incremental["analysis"]} if incremental is not None
+                       else _split_run.parse_split_response(text, _PY_FENCE_RE))
             if scripts is None:
                 self._log.warning(
                     "[implement] execution.split_analysis is on but the reply did not hold both "
@@ -10846,7 +10926,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
                 text = await self._chat(prompt + _SPLIT_REPLY_REMINDER, node="implement")
                 scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
-            if scripts is not None and self.config.execution.background_jobs and "submit" not in scripts:
+            if (scripts is not None and incremental is None and self.config.execution.background_jobs
+                    and "submit" not in scripts):
                 self._log.warning("[implement] a cluster quest's reply did not hold submit.py; asking once more")
                 text = await self._chat(prompt + _SPLIT_REPLY_REMINDER + _CLUSTER_REPLY_REMINDER, node="implement")
                 scripts = _split_run.parse_split_response(text, _PY_FENCE_RE) or scripts
@@ -10856,7 +10937,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                                                               extend=bool(extend))
                 simulate_code, code = scripts["simulate"], scripts["analysis"]
                 submit_code = scripts.get("submit", "")
-                deps = _parse_split_deps(text)
+                deps = incremental["deps"] if incremental is not None else _parse_split_deps(text)
                 broken = list(_run_manifest.split_lint({_split_run.SIMULATE_NAME: simulate_code, "experiment.py": code}))
                 model_package = next(iter(package_files), "").split("/")[0] or self._package_in_use(state)
                 if model_package and _code_layout.imports(code, model_package):
@@ -10969,6 +11050,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # With the model's package, the labels go in it: a package written again this pass runs its trials again anyway.
             if (not sim_kept or package_written) and await self._label_equations(state) == code_path:
                 code = code_path.read_text(encoding="utf-8")  # a one-script quest: the labelled script is the one that runs
+        if not extend and outline and outline.get("scaffold"):
+            _code_delta.save(self.quest_root, self._scripts_built_from(state, outline),
+                             package=(_code_layout.load(self.quest_root) or {}).get("package", ""))
         # The kind of change for code/CHANGELOG.md, from what this step knows (core/changelog.py).
         if extend:
             note, kind = "added what a refine asked for: " + "; ".join(extend)[:200], "added"
@@ -26932,6 +27016,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "scope",                # the few studies the topic could mean, for a person to pick before the plan
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
+        "implement_update",                 # a revised plan: ONLY the functions of the scripts the revision touched
         "implement_agent",                  # engine.code_writer: agent -- the coding agent's task (core/agent_build.py)
         "implement_function",               # the model's package: ONE function body for ONE equation
         "implement_function_repair",        # ONE function repaired alone (never the whole script)
@@ -33212,6 +33297,10 @@ def _deps_from_tail(tail: str) -> list[str]:
         for d in raw.split(",")
         if d.strip().strip("'\"")
     ]
+
+
+def _package_block_text(files: dict[str, str]) -> str:
+    return ("\n\n").join(f"### code/{rel}\n```python\n{text}\n```" for rel, text in files.items())
 
 
 def _parse_split_deps(text: str) -> list[str]:
