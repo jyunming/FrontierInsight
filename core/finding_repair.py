@@ -300,6 +300,38 @@ def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
     return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
+REACH_CHARS = 20000  # the most source text of reached functions a repair request shows, and so may change
+
+
+def reached_functions(source: str, name: str) -> list[str]:
+    """The top-level functions of ``source`` that ``name`` reaches through calls by plain name, nearest first and in the
+    order they are called (until their text reaches :data:`REACH_CHARS`; ``name`` itself is not listed). A repair of
+    ``name`` may need to change what it calls (the code that computes a value ``name`` only passes on), so these are in
+    the repair's scope; this one list is both what the request shows and what the reply may replace."""
+    try:
+        funcs = _top_functions(ast.parse(source))
+    except SyntaxError:
+        return []
+    if name not in funcs:
+        return []
+    seen, order, queue, used = {name}, [], [name], 0
+    while queue:
+        calls = sorted((n for n in ast.walk(funcs[queue.pop(0)]) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                        and n.func.id in funcs), key=lambda c: (c.lineno, c.col_offset))
+        for call in calls:
+            callee = call.func.id
+            if callee in seen:
+                continue
+            seen.add(callee)
+            size = len(function_source(source, callee))
+            if used + size > REACH_CHARS:
+                continue
+            used += size
+            order.append(callee)
+            queue.append(callee)
+    return order
+
+
 def params_kept(old: ast.FunctionDef | ast.AsyncFunctionDef, new: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Why a repaired function's parameters are not allowed (``""`` when they are): every parameter it had stays, by the
     same name, kind and place, so every call that worked still works; a parameter may be added only after them and only
@@ -936,7 +968,7 @@ def scope_function(issue: dict[str, Any], source: str) -> str:
         return ""
 
 
-def signatures(source: str, skip: str = "") -> str:
+def signatures(source: str, skip: str = "", also_skip: Iterable[str] = ()) -> str:
     """One line per top-level function of ``source`` (its ``def`` line): what the rest of the file offers."""
     try:
         tree = ast.parse(source)
@@ -944,7 +976,7 @@ def signatures(source: str, skip: str = "") -> str:
         return "(the file does not parse)"
     out = []
     for n in tree.body:
-        if isinstance(n, ast.FunctionDef) and n.name != skip:
+        if isinstance(n, ast.FunctionDef) and n.name != skip and n.name not in also_skip:
             out.append(f"def {n.name}({', '.join(_steps._param_names(n))})")
     return "\n".join(out) or "(none)"
 
@@ -1235,11 +1267,16 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     failure = issue.get("failure") or ""
     callers = direct_callers(env.code, rel, scope) if scope else {}
     shown = _callers_block(env, callers)
-    code_block = (f"### {rel} (the function `{scope}`)\n```python\n{function_source(old, scope)}\n```\n\nThe rest of {rel} "
-                  f"offers (do not change these unless the finding is about them):\n{signatures(old, scope)}"
+    reach = reached_functions(old, scope) if scope else []
+    reach_block = "".join(f"\n\n### {rel} (the function `{n}`, which `{scope}` reaches by calls)\n```python\n"
+                          f"{function_source(old, n)}\n```" for n in reach)
+    may = (f"You may change `{scope}`" + (" and, where the fix is there, " + ", ".join(f"`{n}`" for n in reach)
+                                          + " (each with the same parameters or more with defaults)" if reach else "") + ". ")
+    code_block = (f"### {rel} (the function `{scope}`)\n```python\n{function_source(old, scope)}\n```{reach_block}\n\n{may}"
+                  f"The rest of {rel} offers (do not change these):\n{signatures(old, scope, reach)}"
                   + (f"\n\nIt is called by:\n\n{shown}" if shown else "")
                   if scope else f"### {rel}\n```python\n{old.rstrip()}\n```")
-    how = ("Reply with ONE fenced Python block holding the corrected function(s), each whole, with the same names and "
+    how = ("Reply with ONE fenced Python block holding the corrected function(s) (only ones named above as yours to change), each whole, with the same names and "
            "parameters (you may add small helper functions and import lines). If the fix needs a value the function is not "
            "given, add it as a parameter AFTER the existing ones, with a default value, and change each function that "
            "calls it (shown above) to pass it: that function whole, in its own fenced block whose first line is "
@@ -1257,13 +1294,11 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         main, marked = file_blocks(reply)
         mine_too = callers.get(rel, set())
         skipped: list[str] = []
-        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *mine_too}, skipped)
+        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *reach, *mine_too}, skipped)
         env.tried = {rel: new} if new is not None else {}  # the model's files as they came, kept even when refused
         if skipped:
-            env.log.warning("[code_review] %s: the reply also defined %s, which the finding is not about; not used",
-                            issue.get("id"), ", ".join(f"`{n}`" for n in skipped))
-        if new is not None and scope not in names:
-            new, why = None, f"the reply does not define the function the finding is about ({scope})"
+            env.log.warning("[code_review] %s: the reply also defined %s, which `%s` does not reach; not used",
+                            issue.get("id"), ", ".join(f"`{n}`" for n in skipped), scope)
         for other, text in marked.items():
             if new is None or other == rel:
                 continue
@@ -1328,6 +1363,16 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                                    callers)
         if unpassed:
             return False, unpassed
+    if scope and rel in edits:
+        # a changed function the scope function reaches: every function that calls it, in any file, must pass on a parameter
+        # the repair added (a caller the repair may not change would leave it on its default)
+        for changed in [n for n in names if n in reach]:
+            its = direct_callers(env.code, rel, changed)
+            final = {c: (edits[c][1] if c in edits else _read(env.code / c)) for c in its}
+            unpassed = unpassed_params(function_source(old, changed), function_source(edits[rel][1], changed), changed,
+                                       final, its)
+            if unpassed:
+                return False, unpassed
     for target, (before, after_text) in edits.items():
         problem = env.keeps(before, after_text, target)
         if problem:
