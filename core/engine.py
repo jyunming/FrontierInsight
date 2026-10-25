@@ -106,6 +106,7 @@ from . import goal_coverage
 from . import citation_support as _cs
 from . import paper_patch
 from . import paper_sections as _paper_sections
+from . import paper_scope as _paper_scope
 from . import paper_trim
 from . import plan as _plan
 from . import criteria as _criteria
@@ -21529,11 +21530,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     async def _write_whole_paper(
         self, state: QuestState, persona_block: str, *, refine_round: bool = False, extra_note: str = "",
+        scope_block: str = "",
     ) -> str:
         """The paper's markdown as the writer gives it: the whole paper, written
         from the study, with the review of an earlier draft (when there is one)
-        in the prompt. A first draft always comes from here, and so does a revise
-        that :meth:`_patch_flagged_passages` cannot answer with edits."""
+        in the prompt. A first draft always comes from here, and so does a round
+        whose request FI cannot map to sections (:meth:`_write_sections`).
+
+        With ``scope_block`` (the earlier draft, read-only, and the sections to write) the reply is those sections
+        only, not a paper: the caller puts them back into the draft (core/paper_scope.py)."""
         # When the evidence gate judged the evidence thin (insufficient,
         # or "broaden" with the broaden budget exhausted), hand the writer
         # an explicit note so the paper frames its limits honestly instead
@@ -21698,11 +21703,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._writing_skills_block(state)
                 or "(no writing guidance selected for this quest)"
             ),
+            scope_block=scope_block,
         )
         markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.
         markdown = _strip_outer_fence(markdown)
-        if _is_not_a_paper(markdown):
+        if not scope_block and _is_not_a_paper(markdown):
             raise RuntimeError(
                 f"the writer returned {len(markdown.strip())} characters, which "
                 f"cannot be a paper: {markdown.strip()[:200]!r}. If that reads "
@@ -22024,6 +22030,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # A draft edited from an earlier one is under the rule its earlier draft was; a whole paper is under it when the
         # writer was given the sheet of keys (a study with no trial record has none, and an older paper is never held to it).
         keyed = bool(state.get("paper_keys")) if markdown is not None else False
+        if markdown is None and not reported:
+            # A round that answers a review or a person's notes writes only the sections it touches (_write_sections);
+            # the rest of the earlier draft is kept as it was.
+            markdown = await self._write_sections(state, persona_block, refine_round=refine_round)
+            # The sections kept are under the rule their earlier draft was; the ones written now are checked like any.
+            keyed = bool(state.get("paper_keys")) if markdown is not None else False
         if markdown is None:
             self._sheet_given = False
             markdown = await self._write_whole_paper(state, persona_block, refine_round=refine_round)
@@ -22233,7 +22245,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         )
         still = missing
         try:
-            again = _disclosure.without_block(await self._write_whole_paper(state, persona_block, extra_note=note))
+            again = await self._extension_sections(state, persona_block, markdown, note)
+            if again is None:
+                again = _disclosure.without_block(await self._write_whole_paper(state, persona_block, extra_note=note))
             still = number_provenance.unreported_results(again, result, before, asked)
             if len(still) < len(missing):
                 markdown = again
@@ -22292,6 +22306,224 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         sheet = self._values_sheet(state) if state.get("paper_keys") else ""
         return (f"{section}\n\n{sheet}".strip() or
                 "(none: this paper was not written with FI's result keys)")
+
+    def _earlier_draft(self, state: QuestState) -> tuple[str, str]:
+        """``(on disk, with FI's placeholders)``: the draft the last write left in the quest, as a reader has it and as the
+        writer works on it. ``("", "")`` when there is none."""
+        try:
+            if state.get("paper_md"):
+                disk = Path(_rerun_from.in_quest(state["paper_md"], self.quest_root)).read_text(encoding="utf-8")
+                return disk, _paper_facts.to_placeholders(disk)
+        except (OSError, UnicodeDecodeError):
+            pass
+        return "", ""
+
+    def _sections_with_changed_values(self, disk: str, state: QuestState) -> set[int] | None:
+        """The sections of ``disk`` that cite a value of FI's record that is not the value the draft shows, found by filling
+        the draft's values in again from the records as they are now and comparing the sections (core/paper_scope.py). It
+        compares FI's values, not words. ``None`` when that cannot be done."""
+        try:
+            now = _paper_facts.render(
+                disk, self.quest_root, topic=str(self.config.topic or ""),
+                fallback_s=(state.get("exec_result") or {}).get("duration_s"), records=self._paper_records(state)).text
+            return _paper_scope.changed(disk, now)
+        except Exception as e:  # noqa: BLE001 -- the sections are then chosen by the request alone, or the paper is written whole
+            self._log.warning("[write] FI could not tell which sections cite a changed value (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            return None
+
+    def _scope_of_round(
+        self, state: QuestState, previous: str, disk: str, *, refine_round: bool,
+    ) -> tuple[list[_paper_scope.Section], int, dict[int, list[str]], dict[int, int], str]:
+        """``(sections, end, why each is asked, words to cut each to, reason)`` for a round that answers a review or a
+        person's notes: the sections the round touches, or the ``reason`` it touches the whole paper (a request FI cannot
+        place in a section is not guessed at). A section is asked because a check quotes or locates a passage in it, because
+        the request names it by its heading or quotes it, because it cites a value of FI's record that changed since the
+        draft, or (a page limit) because it is long enough to give words (core/paper_scope.py)."""
+        review = state.get("review") or {}
+        start = _SOURCE_LIST_HEADING_RE.search(previous)
+        end = start.start() if start else len(previous)
+        sections = _paper_scope.split(previous, end)
+        asked: dict[int, list[str]] = {}
+        targets: dict[int, int] = {}
+        if not previous.strip():
+            return sections, end, asked, targets, "there is no earlier draft on disk"
+        if len(sections) < 2:
+            return sections, end, asked, targets, "the earlier draft has no sections to tell apart"
+        if len(previous) > _PAPER_PROMPT_CHARS:
+            return sections, end, asked, targets, (
+                f"the draft is longer than the {_PAPER_PROMPT_CHARS:,} characters a model reads")
+
+        def add(index: int, why: str) -> None:
+            asked.setdefault(index, [])
+            if why not in asked[index]:
+                asked[index].append(why)
+
+        # Values of FI's record that changed since the draft: the sections that cite them.
+        changed = self._sections_with_changed_values(disk, state) if disk else None
+        study_changed = state.get("paper_basis") != _paper_basis(state)
+        if study_changed and (changed is None or not state.get("paper_keys")):
+            return sections, end, asked, targets, (
+                "the study the draft was written from has been run again and FI cannot tell which sections cite a result "
+                "that changed")
+        for index in sorted(changed or ()):
+            add(index, "it cites a value of FI's record that is not the value the draft shows")
+        # What the review asks for.
+        hits = [str(h).strip() for h in review.get("must_flag_hits") or [] if str(h).strip()]
+        grounding = state.get("claim_grounding") or {}
+        claims = [
+            {"claim": str(c.get("claim") or ""), "evidence": str(c.get("evidence") or "")}
+            for c in grounding.get("claims") or []
+            if isinstance(c, dict) and c.get("basis") == "unsupported"
+        ] or [{"claim": str(c), "evidence": ""} for c in _review_items(grounding.get("unsupported"))]
+        captions = _review_items(review.get("figure_caption_warnings"))
+        unplaced: list[str] = []
+        if any(_hit_name(h) == "figure_caption" for h in hits) and not captions:
+            # A caption flagged with no finding naming its figure: the sections that hold a figure.
+            holders = _paper_scope.holds_figures(previous, sections)
+            if not holders:
+                unplaced.append("a figure caption (no section holds a figure)")
+            for index in sorted(holders):
+                add(index, "the review flags a figure caption and names no figure; it holds a figure")
+            hits = [h for h in hits if _hit_name(h) != "figure_caption"]
+        patchable = [h for h in hits if _hit_name(h) in paper_patch.PATCHABLE_HITS]
+        if patchable:
+            passages, why = paper_patch.plan_passages(
+                previous, end, hits=[(_hit_name(h), h) for h in patchable], claims=claims, captions=captions)
+            if why:
+                unplaced.append(why)
+            for p in passages:
+                where = _paper_scope.placing(previous, sections, p.located or p.flagged, end)
+                if not where:
+                    unplaced.append(f"the {p.kind} \"{p.flagged[:60]}\"")
+                for at in sorted(where):
+                    add(at, f"the review flags a {p.kind}" + (" that is in it" if len(where) == 1 else " that is in it or in one of the other sections listed for it"))
+        for h in hits:
+            name = _hit_name(h)
+            if name in paper_patch.PATCHABLE_HITS:
+                continue
+            if name == _PAGE_LIMIT_HIT:
+                cut = _paper_scope.words_to_cut(h)
+                shorten = _paper_scope.to_shorten(previous, sections, cut) if cut else {}
+                if not shorten:
+                    unplaced.append("the page limit (no section can give the words)")
+                for index, words in shorten.items():
+                    add(index, f"the paper is over the page limit: shorten it to about {words} words")
+                    targets[index] = words
+            elif name in ("figure_missing", "citations_unchecked"):
+                unplaced.append(name)
+            else:
+                named = _paper_scope.naming(previous, sections, h)
+                if not named:
+                    unplaced.append(f"\"{h[:60]}\"")
+                for index in sorted(named):
+                    add(index, f"the review's point names it: {h[:140]}")
+        if not hits:
+            # A revise with no must-fix point: its weaknesses are the request.
+            for w in [*_review_items(review.get("weaknesses")), *_review_items(review.get("suggestions"))]:
+                for index in sorted(_paper_scope.naming(previous, sections, w)):
+                    add(index, f"the review's weakness names it: {w[:140]}")
+        if refine_round:
+            for h in state.get("feedback_history") or []:
+                if not isinstance(h, dict) or not str(h.get("text") or "").strip() or h.get("answered_by"):
+                    continue
+                note = str(h["text"]).strip()
+                named = _paper_scope.naming(previous, sections, note)
+                if not named and not changed:
+                    unplaced.append(f"the person's note \"{note[:60]}\" (it names no section and no value that changed)")
+                for index in sorted(named):
+                    add(index, "the person's note names it")
+        if unplaced:
+            return sections, end, {}, {}, "FI cannot place in a section: " + "; ".join(dict.fromkeys(unplaced))
+        if not asked:
+            return sections, end, asked, targets, "no request names a section and no value of FI's record changed"
+        return sections, end, asked, targets, ""
+
+    async def _write_sections(
+        self, state: QuestState, persona_block: str, *, refine_round: bool = False,
+    ) -> str | None:
+        """The earlier draft with only the sections this round touches written again, or ``None`` when the round writes the
+        whole paper (a first draft, a request FI cannot place in a section, a reply that cannot be put back; the log says
+        which). The rest of the draft is kept byte for byte. Where :meth:`_patch_flagged_passages` edits sentences, this
+        writes sections, for the rounds whose request is bigger than a sentence."""
+        if not (state.get("review") or refine_round):
+            return None  # a first draft
+        disk, previous = self._earlier_draft(state)
+        sections, end, asked, targets, why = self._scope_of_round(state, previous, disk, refine_round=refine_round)
+        if why:
+            self._log.info("[write] writing the whole paper: %s", why)
+            return None
+        return await self._write_scoped(state, persona_block, previous, sections, end, asked, targets,
+                                        refine_round=refine_round)
+
+    async def _write_scoped(
+        self, state: QuestState, persona_block: str, previous: str, sections: list[_paper_scope.Section], end: int,
+        asked: dict[int, list[str]], targets: dict[int, int], *, refine_round: bool = False, extra_note: str = "",
+    ) -> str | None:
+        """Ask the writer for the sections ``asked`` of ``previous`` (shown read-only) and put them back
+        (core/paper_scope.py). A section the reply gives that was not asked for is dropped (the earlier text stands, the
+        log says which); a reply without an asked section cannot be put back, so ``None`` (the whole paper is written)."""
+        order = sorted(asked)
+        lines = []
+        for n, index in enumerate(order, 1):
+            goal = f" (about {targets[index]} words)" if index in targets else ""
+            lines.append(f"{n}. `## {sections[index].title}`{goal}. Why: " + "; ".join(asked[index]))
+        scope_block = (
+            "## This round: write only these sections\n\n"
+            "FI keeps every section you are not asked for exactly as it is in the earlier draft below, which is read-only "
+            "context. Do not write those sections, a title, a References list or anything else. Write again only the "
+            "sections listed, for the reasons given: in each, change only what the reason needs and keep the rest of its "
+            "text as it is. Keep every `{{...}}` placeholder, figure link and citation label of the text you keep. "
+            "This round's instruction overrides \"Produce a single Markdown paper\" above.\n\n"
+            "Reply with the sections listed, in this order, each starting with its heading line exactly as given "
+            "(`## Title`), its subsections inside it, and nothing else.\n\n"
+            "Sections to write:\n" + "\n".join(lines) + "\n\n<earlier_draft>\n" + previous[:end].rstrip()
+            + "\n</earlier_draft>\n"
+        )
+        self._log.info(
+            "[write] writing %d of %d section(s) again (%s); every other section of the earlier draft is kept as it was",
+            len(order), len(sections) - 1, ", ".join(sections[i].title for i in order))
+        self._sheet_given = False
+        try:
+            reply = await self._write_whole_paper(state, persona_block, refine_round=refine_round, extra_note=extra_note,
+                                                  scope_block=scope_block)
+        except Exception as e:  # noqa: BLE001 -- the whole-paper call is what a real outage stops
+            self._log.warning("[write] the call for sections failed (%s: %s); writing the whole paper again",
+                              type(e).__name__, str(e)[:200])
+            return None
+        # The lines that route a person's refine ride at the end of the reply; they are kept whatever section they follow.
+        routing = [m.group(0).strip() for rx in (_REFINE_POINT_RE, _REFINE_WHY_RE) for m in rx.finditer(reply)]
+        reply = _REFINE_WHY_RE.sub("", _REFINE_POINT_RE.sub("", reply))
+        try:
+            spliced = _paper_scope.splice(previous, sections, set(order), reply)
+        except _paper_scope.ScopeError as e:
+            self._log.warning("[write] the sections could not be put back (%s); writing the whole paper again. "
+                              "The reply began: %r", e, " ".join(str(reply).split())[:160])
+            return None
+        if spliced.ignored:
+            self._log.info("[write] the writer also gave %s, which were not asked for; the earlier text stands",
+                           ", ".join(f"\"{t}\"" for t in spliced.ignored))
+        self._log.info("[write] put back %d section(s) (%s); the other %d are as they were",
+                       len(spliced.written), ", ".join(spliced.written), len(sections) - 1 - len(spliced.written))
+        return spliced.text.rstrip("\n") + "\n" + ("\n" + "\n".join(routing) + "\n" if routing else "")
+
+    async def _extension_sections(
+        self, state: QuestState, persona_block: str, draft: str, note: str,
+    ) -> str | None:
+        """``draft`` with the sections that report results written again so that they report what the extension added, or
+        ``None`` (the whole paper is written). The sections are the ones that carry a result key or a table of FI's records
+        (read from the draft's structure, not its wording); a draft with none has no section to put the results in."""
+        start = _SOURCE_LIST_HEADING_RE.search(draft)
+        end = start.start() if start else len(draft)
+        sections = _paper_scope.split(draft, end)
+        holders = _paper_scope.holds_values(draft, sections)
+        if len(draft) > _PAPER_PROMPT_CHARS or not holders:
+            self._log.info("[write] writing the whole paper again: no section of the draft carries FI's result keys to "
+                           "put the added results in")
+            return None
+        asked = {i: ["it reports results, and the results the reader asked for are not in the paper"] for i in holders}
+        again = await self._write_scoped(state, persona_block, draft, sections, end, asked, {}, extra_note=note)
+        return None if again is None else _disclosure.without_block(again)
 
     async def _patch_flagged_passages(self, state: QuestState, persona_block: str, *,
                                       otherwise: str = "writing the whole paper again") -> str | None:

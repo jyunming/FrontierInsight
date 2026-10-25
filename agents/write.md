@@ -186,3 +186,5 @@ $skills_block
 
 ## Review of the previous draft
 $review_feedback
+
+$scope_block
