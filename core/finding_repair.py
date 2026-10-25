@@ -36,6 +36,7 @@ from typing import Any, Awaitable, Callable, Iterable
 
 from . import code_findings as _issues
 from . import function_steps as _steps
+from . import step_coverage as _sc
 from . import optimise as _optimise
 from . import trial_runner as _trials
 
@@ -296,30 +297,124 @@ def swallowed_call(text: str) -> str:
     return ""
 
 
-def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
-    return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    return {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
 REACH_CHARS = 20000  # the most source text of reached functions a repair request shows, and so may change
 
+_OUTPUT_METHODS = {"append", "extend", "update", "write", "writelines", "dump", "add", "setdefault", "insert"}
+
+
+def _scope_names(body: list[ast.AST], params: set[str]) -> set[str]:
+    """The names one scope binds itself (parameters, assignments, nested defs and classes, imports, loop and ``with`` names)."""
+    out = set(params)
+    for n in _sc._shallow(body):
+        if isinstance(n, _sc._SCOPES):
+            if not isinstance(n, ast.Lambda):
+                out.add(n.name)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            out.add(n.id)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            out.add(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            out.update((a.asname or a.name.split(".")[0]) for a in n.names)
+    return out
+
+
+def _resolved_calls(fn: ast.AST, top: set[str]) -> dict[int, str]:
+    """``{id(call): name}`` for the calls inside ``fn`` that go to a top-level function of the module: a name that a scope
+    between the call and the module binds (a parameter, a local, a nested def) is that scope's own, not the module's."""
+    out: dict[int, str] = {}
+
+    def scope(body: list[ast.AST], params: set[str], shadow: set[str]) -> None:
+        shadow = shadow | _scope_names(body, params)
+        for n in _sc._shallow(body):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in top and n.func.id not in shadow:
+                out[id(n)] = n.func.id
+            if isinstance(n, _sc._SCOPES):
+                scope([n.body] if isinstance(n, ast.Lambda) else list(n.body), _sc._params(n), shadow)
+
+    scope(list(fn.body), _sc._params(fn), set())  # type: ignore[attr-defined]
+    return out
+
+
+def _live_callees(fn: ast.FunctionDef | ast.AsyncFunctionDef, top: set[str]) -> list[str]:
+    """The top-level functions ``fn`` calls whose return value flows into what ``fn`` produces: its return and yield values,
+    the values it stores into an object or file (``out[k] = v``, ``print``, ``.write``, ``.append`` ...), followed back
+    through assignments. A call used only as a statement (a check, a plot) or whose result reaches no output is not listed.
+    In the order they are called."""
+    resolved = _resolved_calls(fn, top)
+    outputs: list[ast.AST] = []
+    edges: list[tuple[set[str], ast.AST, bool]] = []  # (names set, expression, goes to an output regardless)
+
+    def names_of(target: ast.AST) -> set[str]:
+        return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+
+    for n in _sc._shallow(list(fn.body)):
+        if isinstance(n, (ast.Return, ast.Yield, ast.YieldFrom)) and n.value is not None:
+            outputs.append(n.value)
+    for n in ast.walk(fn):
+        if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for r in _sc._shallow(list(n.body)):
+                if isinstance(r, ast.Return) and r.value is not None:
+                    edges.append(({n.name}, r.value, False))
+        elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and n.value is not None:
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            stored = any(isinstance(t, (ast.Subscript, ast.Attribute)) for t in targets)
+            edges.append((set().union(*(names_of(t) for t in targets)), n.value, stored))
+        elif isinstance(n, ast.NamedExpr):
+            edges.append((names_of(n.target), n.value, False))
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+            edges.append((names_of(n.target), n.iter, False))
+        elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+            edges.append((names_of(n.optional_vars), n.context_expr, False))
+        elif isinstance(n, ast.Expr) and isinstance(n.value, ast.Call):
+            f = n.value.func
+            if (isinstance(f, ast.Name) and f.id == "print") or (isinstance(f, ast.Attribute) and f.attr in _OUTPUT_METHODS):
+                outputs.extend([*n.value.args, *(k.value for k in n.value.keywords)])
+    need: set[str] = set()
+
+    def take(expr: ast.AST) -> None:
+        need.update(x.id for x in ast.walk(expr) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load))
+
+    live = list(outputs)
+    for o in outputs:
+        take(o)
+    taken: set[int] = set()
+    changed = True
+    while changed:
+        changed = False
+        for i, (names, expr, always) in enumerate(edges):
+            if i not in taken and (always or names & need):
+                taken.add(i)
+                live.append(expr)
+                take(expr)
+                changed = True
+    calls = {id(c): c for e in live for c in ast.walk(e) if isinstance(c, ast.Call) and id(c) in resolved}
+    out: list[str] = []
+    for c in sorted(calls.values(), key=lambda c: (c.lineno, c.col_offset)):
+        if resolved[id(c)] not in out:
+            out.append(resolved[id(c)])
+    return out
+
 
 def reached_functions(source: str, name: str) -> list[str]:
-    """The top-level functions of ``source`` that ``name`` reaches through calls by plain name, nearest first and in the
-    order they are called (until their text reaches :data:`REACH_CHARS`; ``name`` itself is not listed). A repair of
-    ``name`` may need to change what it calls (the code that computes a value ``name`` only passes on), so these are in
-    the repair's scope; this one list is both what the request shows and what the reply may replace."""
+    """The top-level functions of ``source`` whose return value flows into what ``name`` produces, through other such
+    functions as well (nearest first, in the order they are called; until their text reaches :data:`REACH_CHARS`; ``name``
+    itself is not listed). A repair of ``name`` may need to change what computes a value ``name`` only passes on; a
+    function ``name`` only calls for its effect or whose result goes nowhere (a check, a plot) is not among them. This one
+    list is both what the request shows and what the reply may replace."""
     try:
         funcs = _top_functions(ast.parse(source))
     except SyntaxError:
         return []
     if name not in funcs:
         return []
+    top = set(funcs)
     seen, order, queue, used = {name}, [], [name], 0
     while queue:
-        calls = sorted((n for n in ast.walk(funcs[queue.pop(0)]) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                        and n.func.id in funcs), key=lambda c: (c.lineno, c.col_offset))
-        for call in calls:
-            callee = call.func.id
+        for callee in _live_callees(funcs[queue.pop(0)], top):
             if callee in seen:
                 continue
             seen.add(callee)
@@ -361,9 +456,10 @@ def params_kept(old: ast.FunctionDef | ast.AsyncFunctionDef, new: ast.FunctionDe
     return ""
 
 
-def direct_callers(code: Path, rel: str, name: str) -> dict[str, set[str]]:
+def direct_callers(code: Path, rel: str, name: str, staged: dict[str, str] | None = None) -> dict[str, set[str]]:
     """``{file under code/: the top-level functions in it that call `name` directly}`` (``name(...)`` or ``module.name(...)``),
-    in every Python file of ``code/`` but its tests; ``name`` itself is not its own caller."""
+    in every Python file of ``code/`` but its tests; ``name`` itself is not its own caller. ``staged`` (``{file: text}``) is
+    read in place of the file on disk: the code as a repair would leave it."""
     out: dict[str, set[str]] = {}
     for path in sorted(code.rglob("*.py")):
         other = path.relative_to(code).as_posix()
@@ -371,7 +467,7 @@ def direct_callers(code: Path, rel: str, name: str) -> dict[str, set[str]]:
                 or path.relative_to(code).parts[0] == "skills":  # FI's copy of the skills' files (not the study's code)
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = ast.parse(staged[other] if staged and other in staged else path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, ValueError):
             continue
         for fname, fn in _top_functions(tree).items():
@@ -453,7 +549,7 @@ def caller_edit_problem(before: str, after: str, caller_names: set[str] | Iterab
     except SyntaxError:
         return ""
 
-    def masked(fn: ast.FunctionDef) -> str:
+    def masked(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
         fn = copy.deepcopy(fn)
         for call in _calls_to(fn, callee):
             call.args, call.keywords = [], []
@@ -976,7 +1072,7 @@ def signatures(source: str, skip: str = "", also_skip: Iterable[str] = ()) -> st
         return "(the file does not parse)"
     out = []
     for n in tree.body:
-        if isinstance(n, ast.FunctionDef) and n.name != skip and n.name not in also_skip:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name != skip and n.name not in also_skip:
             out.append(f"def {n.name}({', '.join(_steps._param_names(n))})")
     return "\n".join(out) or "(none)"
 
@@ -1364,11 +1460,12 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         if unpassed:
             return False, unpassed
     if scope and rel in edits:
-        # a changed function the scope function reaches: every function that calls it, in any file, must pass on a parameter
-        # the repair added (a caller the repair may not change would leave it on its default)
+        # a changed function the scope function reaches: every function that calls it, in any file, as the repair leaves the
+        # code (the reply's own new callers included), must pass on a parameter the repair added
+        staged = {t: after_text for t, (_b, after_text) in edits.items()}
         for changed in [n for n in names if n in reach]:
-            its = direct_callers(env.code, rel, changed)
-            final = {c: (edits[c][1] if c in edits else _read(env.code / c)) for c in its}
+            its = direct_callers(env.code, rel, changed, staged)
+            final = {c: (staged[c] if c in staged else _read(env.code / c)) for c in its}
             unpassed = unpassed_params(function_source(old, changed), function_source(edits[rel][1], changed), changed,
                                        final, its)
             if unpassed:

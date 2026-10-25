@@ -85,3 +85,73 @@ def test_the_request_shows_the_reached_functions_and_says_which_may_change() -> 
 
     src = inspect.getsource(fr._attempt)
     assert "reached_functions(old, scope)" in src and "You may change" in src
+
+
+# --- what a reached function must do: its return value flows into what the function produces -----------------------------
+
+CHECKED = '''def compute(x):
+    return x * 2
+
+
+def validate(result):
+    return None
+
+
+def draw(result):
+    return None
+
+
+def helper_for_label(x):
+    return str(x)
+
+
+def run(x):
+    value = compute(x)
+    result = {"value": value}
+    validate(result)
+    draw(result)
+    unused = helper_for_label(x)
+    return result
+'''
+
+
+def test_a_function_called_only_for_its_effect_or_whose_result_goes_nowhere_is_not_in_scope() -> None:
+    assert fr.reached_functions(CHECKED, "run") == ["compute"]
+    only_check = fr.splice(CHECKED, _block("def validate(result):\n    return True\n"), {"run", "compute"}, [])
+    assert only_check[0] is None, "a reply of a check alone defines neither the function nor a function it takes values from"
+
+
+def test_a_value_stored_into_a_result_or_printed_counts_as_reaching_it() -> None:
+    src = ("def a(x):\n    return x\n\n\ndef b(x):\n    return x\n\n\n"
+           "def run(x, out):\n    out['k'] = a(x)\n    print(b(x))\n")
+    assert fr.reached_functions(src, "run") == ["a", "b"]
+
+
+def test_a_name_the_function_binds_itself_is_not_the_module_function() -> None:
+    src = ("def check(v):\n    return v\n\n\ndef report(check):\n    return check(1)\n\n\n"
+           "def other(x):\n    def check(v):\n        return v\n    return check(x)\n\n\n"
+           "def real(x):\n    return check(x)\n")
+    assert fr.reached_functions(src, "report") == []
+    assert fr.reached_functions(src, "other") == []
+    assert fr.reached_functions(src, "real") == ["check"]
+
+
+def test_an_inner_function_that_is_never_called_does_not_carry_a_callee_in() -> None:
+    src = "def g(x):\n    return x\n\n\ndef run(x):\n    def unused():\n        return g(x)\n    return x\n"
+    assert fr.reached_functions(src, "run") == []
+
+
+def test_async_functions_are_functions_of_the_file() -> None:
+    src = "async def fetch(x):\n    return x\n\n\nasync def run(x):\n    return await fetch(x)\n\n\ndef sync(x):\n    return x\n"
+    assert set(fr._top_functions(ast.parse(src))) == {"fetch", "run", "sync"}
+    assert "async def" not in fr.signatures(src, "run") and "def fetch(x)" in fr.signatures(src, "run")
+    new, names, why = fr.splice(src, _block("async def run(x):\n    return await fetch(x) + 1\n"), {"run"}, [])
+    assert why == "" and names == ["run"] and "await fetch(x) + 1" in new
+
+
+def test_the_parameter_check_reads_the_code_the_repair_leaves_including_its_new_callers(tmp_path: Path) -> None:
+    (tmp_path / "mod.py").write_text("def ratio(m):\n    return m\n\n\ndef run(m):\n    return ratio(m)\n", encoding="utf-8")
+    staged = {"mod.py": "def ratio(m, tol=0.1):\n    return m + tol\n\n\ndef run(m):\n    return ratio(m)\n\n\n"
+                        "def extra(m):\n    return ratio(m)\n"}
+    assert fr.direct_callers(tmp_path, "mod.py", "ratio") == {"mod.py": {"run"}}
+    assert fr.direct_callers(tmp_path, "mod.py", "ratio", staged) == {"mod.py": {"run", "extra"}}
