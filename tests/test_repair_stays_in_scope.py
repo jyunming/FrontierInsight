@@ -97,6 +97,118 @@ def test_the_scope_is_the_failing_function_and_its_direct_callers(tmp_path: Path
     assert scope is not None and scope.files == {"experiment.py": {"heat", "main"}}
 
 
+def _agent_with(steps: list[Callable[[Path], None]], says: list[str], tmp_path: Path, monkeypatch) -> tuple[Engine, _Agent]:  # noqa: ANN001
+    agent = _Agent(steps, says=says)
+    eng = _engine(tmp_path, agent=agent)
+    _first_write(eng, agent)
+    monkeypatch.setattr("core.agent_build._frozen.load", lambda _root: None)
+    return eng, agent
+
+
+def _reflect(eng: Engine) -> dict[str, Any]:
+    return asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 1, "1", "", _failed(eng), {}))
+
+
+def _write_code(text: str) -> Callable[[Path], None]:
+    def step(code: Path) -> None:
+        code.mkdir(parents=True, exist_ok=True)
+        (code / "experiment.py").write_text(text, encoding="utf-8")
+    return step
+
+
+def test_a_frame_in_a_library_folder_that_has_a_code_part_is_not_the_quests_code(tmp_path: Path) -> None:
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "experiment.py").write_text(CODE, encoding="utf-8")
+    vendor = tmp_path / ".venv" / "Lib" / "site-packages" / "vendor" / "code" / "experiment.py"
+    assert agent_scope.scope_from_traceback(f'File "{vendor}", line 2, in heat', tmp_path) is None
+    assert agent_scope.scope_from_traceback('File "/x/y/code/experiment.py", line 2, in heat', tmp_path) is None
+
+
+def test_a_deleted_function_is_put_back_where_it_was_so_the_module_still_runs() -> None:
+    old = "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\nVALUE = b() + a()\n"
+    new = "def a():\n    return 1\n\n\nVALUE = a()\n"
+    fixed = agent_scope._put_back_units(old, new, ["b"])
+    ns: dict[str, Any] = {}
+    exec(compile(fixed, "m", "exec"), ns)  # noqa: S102 -- a NameError here is the fault
+    assert fixed.index("def a") < fixed.index("def b") < fixed.index("VALUE")
+
+
+def test_a_helper_the_failing_function_calls_may_change_with_it(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    def edit(code: Path) -> None:
+        text = (code / "experiment.py").read_text(encoding="utf-8")
+        (code / "experiment.py").write_text(text.replace("def cool(x):", "def cool(x, y=1):"), encoding="utf-8")
+    eng, agent = _agent_with([_write_code(CODE.replace("return x / 0", "return cool(x) / 0")), edit], [], tmp_path,
+                             monkeypatch)
+    _reflect(eng)
+    assert "def cool(x, y=1)" in _text(eng) and len(agent.prompts) == 2, "a callee is in the scope: kept, no second round"
+
+
+def test_an_edit_outside_the_scope_is_put_back_and_the_agent_is_sent_back_once_with_the_names(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    def edit(code: Path) -> None:
+        text = (code / "experiment.py").read_text(encoding="utf-8")
+        (code / "experiment.py").write_text(text.replace("x / 0", "x / 1").replace("x * 2", "x * 5"), encoding="utf-8")
+    eng, agent = _agent_with([_first, edit], [], tmp_path, monkeypatch)
+    _reflect(eng)
+    assert len(agent.prompts) == 3 and "cool" in agent.prompts[2] and "NEEDS:" in agent.prompts[2]
+    assert "x * 2" in _text(eng) and "x / 1" in _text(eng)
+
+
+def test_an_edit_outside_the_scope_the_agent_says_the_fix_needs_is_kept(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    def edit(code: Path) -> None:
+        text = (code / "experiment.py").read_text(encoding="utf-8")
+        (code / "experiment.py").write_text(text.replace("x / 0", "x / 1").replace("x * 2", "x * 5"), encoding="utf-8")
+    eng, agent = _agent_with([_first, edit], ["wrote it", "fixed\nNEEDS: cool - the fix scales by it"], tmp_path,
+                             monkeypatch)
+    _reflect(eng)
+    assert "x * 5" in _text(eng) and len(agent.prompts) == 2, "claimed in the same message: kept, no second round"
+
+
+def test_a_put_back_that_would_not_compile_is_undone(tmp_path: Path) -> None:
+    from core.agent_coder import TreeSnapshot
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "m.py").write_text("def f(:\n", encoding="utf-8")  # the snapshot's own text does not compile
+    snap = TreeSnapshot.take(code)
+    (code / "m.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    said, kept = agent_scope.put_back(agent_scope.Violations(files=["m.py"]), snap, code)
+    assert kept is False and said == [] and (code / "m.py").read_text(encoding="utf-8") == "def f():\n    return 1\n"
+
+
+METHODS = (
+    "class Model:\n    def run(self):\n        return 1 / 0\n\n    def other(self):\n        return 2\n\n\n"
+    "def main():\n    return Model().run()\n"
+)
+
+
+def test_a_failure_in_a_method_scopes_that_method_not_the_class(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "experiment.py").write_text(METHODS, encoding="utf-8")
+    scope = agent_scope.scope_from_traceback(f'File "{tmp_path / "code" / "experiment.py"}", line 3, in run', tmp_path)
+    assert scope is not None and scope.files == {"experiment.py": {"Model.run", "main"}}
+
+    def edit(code: Path) -> None:
+        text = (code / "experiment.py").read_text(encoding="utf-8")
+        (code / "experiment.py").write_text(text.replace("1 / 0", "1 / 1").replace("return 2", "return 9"), encoding="utf-8")
+    agent = _Agent([_write_code(METHODS), edit])
+    eng = _engine(tmp_path / "q", agent=agent)
+    _first_write(eng, agent)
+    monkeypatch.setattr("core.agent_build._frozen.load", lambda _root: None)
+    path = eng.quest_root / "code" / "experiment.py"
+    failed = {"returncode": 1, "stdout_tail": "", "stderr_tail": f'File "{path}", line 3, in run\nZeroDivisionError'}
+    asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 1, "1", "", failed, {}))
+    text = path.read_text(encoding="utf-8")
+    assert "1 / 1" in text and "return 2" in text and "return 9" not in text
+
+
+def test_a_round_that_leaves_invalid_python_is_a_failed_round_and_the_code_is_as_it_was(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    def edit(code: Path) -> None:
+        (code / "experiment.py").write_text("def heat(x:\n    return 1\n", encoding="utf-8")
+    eng, agent = _agent_with([_first, edit], [], tmp_path, monkeypatch)
+    _reflect(eng)
+    assert _text(eng) == CODE and len(agent.prompts) == 2, "the whole round is undone, no widened scope"
+
+
 # --- the module repair asks for the failing functions only ---------------------------------------------------------------
 
 
