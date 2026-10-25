@@ -100,3 +100,64 @@ def test_the_goal_check_asks_for_nothing_FI_has_no_value_for():
     assert gc.unplaced_answers(REQ, PROTOCOL, {"decay_rate"}, {"decay_rate"}) == []
     assert gc.unplaced_answers(None, PROTOCOL, {"decay_rate"}, set()) == []
     assert gc.unplaced_answers(REQ, None, {"decay_rate"}, set()) == []
+
+
+# --- replicates: no silent pick among different values ---------------------------------------------------------------
+
+
+def test_replicates_with_different_values_offer_no_single_value(tmp_path):
+    runs = [{"_seed": s, "half_life_limit": v} for s, v in ((0, 0.30), (1, 0.40), (2, 0.50))]
+    rec = _rec(tmp_path, None)
+    pv.write_answers(tmp_path, runs[0], PROTOCOL, runs)
+    rec = pv.records_of(tmp_path, PROTOCOL)
+    assert "half_life_limit" not in rec.answers and "half_life_limit" not in rec.fillable()
+    value = pv.resolve("{{v:half_life_limit}}", rec)
+    assert value.text == pv.NOT_RECORDED and "run 0: 0.3000; run 1: 0.4000; run 2: 0.5000" in value.hit.reason
+    block = pv.writer_block(rec)
+    assert "Worked out once per replicate" in block and "{{v:half_life_limit}} ->" not in block
+
+
+def test_replicates_that_all_agree_give_the_one_value(tmp_path):
+    runs = [{"_seed": s, "half_life_limit": 1.25} for s in (0, 1)]
+    _rec(tmp_path, None)
+    pv.write_answers(tmp_path, runs[0], PROTOCOL, runs)
+    rec = pv.records_of(tmp_path, PROTOCOL)
+    assert rec.answers == {"half_life_limit": 1.25} and rec.by_run == {}
+
+
+def test_a_later_run_replaces_an_earlier_record(tmp_path):
+    _rec(tmp_path, {"half_life_limit": 1.0})
+    pv.write_answers(tmp_path, {"half_life_limit": 2.0}, PROTOCOL)
+    assert pv.records_of(tmp_path, PROTOCOL).answers == {"half_life_limit": 2.0}
+
+
+# --- the review is never asked for what the paper cannot place ----------------------------------------------------------
+
+
+def test_a_left_out_quantity_is_not_held_and_gives_no_hit(tmp_path):
+    (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": _cells()}), encoding="utf-8")
+    pv.write_answers(tmp_path, {"half_life_limit": 1.5}, PROTOCOL)
+    rec = pv.load(tmp_path, PROTOCOL, left_out={"decay_rate": "wrong", "half_life_limit": "wrong"})
+    rec.answers = {"half_life_limit": 1.5}  # even a record that kept it
+    assert rec.fillable() == set()
+    assert gc.unplaced_answers(REQ, PROTOCOL, rec.fillable(), set()) == []
+
+
+def test_the_engine_check_gives_no_hit_for_a_left_out_or_per_replicate_quantity(tmp_path):
+    import logging
+    from types import SimpleNamespace
+
+    from core import engine as E
+
+    runs = [{"_seed": s, "half_life_limit": v} for s, v in ((0, 0.30), (1, 0.40))]
+    _rec(tmp_path, None)
+    pv.write_answers(tmp_path, runs[0], PROTOCOL, runs)
+    (tmp_path / ".fi").mkdir(exist_ok=True)
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps(REQ), encoding="utf-8")
+    me = SimpleNamespace(quest_root=tmp_path, fi_dir=tmp_path / ".fi", _log=logging.getLogger("t"))
+    me._protocol_block = lambda st: PROTOCOL
+    me._paper_records = lambda st: pv.records_of(tmp_path, PROTOCOL)
+    paper = "The decay rate is {{v:decay_rate @ dose=2}}."
+    filled, _ = pv.fill_values(paper, me._paper_records(None))
+    assert E.Engine._unplaced_topic_answers(me, filled, {}) == []  # the per-replicate quantity cannot be placed

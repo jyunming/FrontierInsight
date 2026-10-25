@@ -18802,7 +18802,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     figure_records[name]["single_seed"] = 0
         self._record_no_difference(getattr(runner, "no_difference", None) if result.returncode == 0 else None)
         self._keep_raw_stdout(result.stdout)
-        self._keep_analysis_answers(result_json, state)
+        self._keep_analysis_answers(
+            result_json, state,
+            result_json_replicates if (len(result_json_replicates) > 1 and not seed_ignored and not searching
+                                       and not getattr(self, "_trial_mode", False)) else None)
         patch: dict[str, Any] = {
             "exec_result": {
                 "returncode": result.returncode,
@@ -23935,11 +23938,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
         return found
 
-    def _keep_analysis_answers(self, result_json: Any, state: QuestState) -> None:
+    def _keep_analysis_answers(self, result_json: Any, state: QuestState, runs: list[Any] | None = None) -> None:
         """Keep the value the run recorded under each name the plan gives a quantity, so the paper's key for a quantity no
         trial returns can be filled (core/paper_values.py::write_answers). Best-effort."""
         try:
-            _paper_values.write_answers(self.quest_root, result_json, self._protocol_block(state))
+            _paper_values.write_answers(self.quest_root, result_json, self._protocol_block(state), runs)
         except Exception as e:  # noqa: BLE001 -- the quantity then has no key; the paper is not held to place it
             self._log.warning("[execute] the run's recorded answers could not be kept for the paper's keys (%s: %s)",
                               type(e).__name__, str(e)[:200])
@@ -23954,7 +23957,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 return []
             req = _disclosure._read_json(self.fi_dir / _topic_req.FILE)
             found = goal_coverage.unplaced_answers(
-                req, self._protocol_block(state), set(rec.metrics()) | set(rec.answers), _paper_values.placed_metrics(paper_md))
+                req, self._protocol_block(state), rec.fillable(), _paper_values.placed_metrics(paper_md))
             path = self.quest_root / "paper" / "goal_coverage.json"
             record = _disclosure._read_json(path) if path.is_file() else {}
             if not isinstance(record, dict):

@@ -315,6 +315,9 @@ class Records:
     #: The plan's quantities that no trial returned and the analysis recorded one value for (name -> value): placed without
     #: settings, ``{{v:<name>}}`` (:func:`write_answers`).
     answers: dict[str, float] = field(default_factory=dict)
+    #: The same kind of quantity when the analysis ran more than once (one run per replicate seed) and gave different values:
+    #: name -> [(run, value)]. No single value stands for the study, so no key fills it (:meth:`fillable`).
+    by_run: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
     _refs_cache: dict[str, Any] = field(default_factory=dict)
     _alias_cache: dict[str, str] | None = None
     #: The topic as the person wrote it: its numbers may be used in a ``{{calc:...}}``, as they may be typed.
@@ -329,6 +332,11 @@ class Records:
         if key not in self._derived:
             self._derived[key] = make()
         return self._derived[key]
+
+    def fillable(self) -> set[str]:
+        """The names a key can fill: the quantities the trials recorded and the analysis's single recorded values, never
+        one FI left out. The one set the sheet, the keys and the review's check of what the paper places all use."""
+        return {m for m in (*self.metrics(), *self.answers) if m not in self.left_out}
 
     def carrying(self, metric: str | None) -> list[dict[str, Any]]:
         """The cells that carry ``metric`` (every cell for ``None``), in the record's order."""
@@ -1226,8 +1234,9 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     # The plan's quantities no trial returned, which the analysis recorded one value for (never one FI left out).
     planned = {str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
                if isinstance(m, dict) and m.get("id")}
-    rec.answers = {k: v for k, v in _read_answers(root).items()
-                   if k in planned and k not in rec.metrics() and k not in rec.left_out}
+    single, by_run = _read_answers(root)
+    rec.answers = {k: v for k, v in single.items() if k in planned and k not in rec.metrics() and k not in rec.left_out}
+    rec.by_run = {k: v for k, v in by_run.items() if k in planned and k not in rec.metrics() and k not in rec.left_out}
     try:
         from . import grid_keys as _grid_keys
 
@@ -1250,44 +1259,68 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
 ANSWERS = Path(".fi") / "analysis_answers.json"
 
 
-def write_answers(quest_root: Path | str, result_json: Any, protocol: dict[str, Any] | None) -> list[str]:
-    """Keep, from the result a run recorded (after FI took out the quantities it left out), the number under each name the
-    plan gives a quantity (``protocol.metrics[].id``): the exact name and nothing matched by its words. An empty or missing
-    result leaves the earlier record as it was (a run that failed recorded nothing). Returns the names kept."""
-    if not isinstance(result_json, dict) or not result_json:
+def write_answers(quest_root: Path | str, result_json: Any, protocol: dict[str, Any] | None,
+                  runs: list[Any] | None = None) -> list[str]:
+    """Keep, from each run of the analysis (``runs``: one result per replicate seed, as :class:`core.engine.Engine` publishes
+    them; ``result_json`` alone is one run), the number under each name the plan gives a quantity
+    (``protocol.metrics[].id``): the exact name and nothing matched by its words, after FI took out the quantities it left
+    out. An empty or missing result leaves the earlier record as it was (a run that failed recorded nothing). Returns the
+    names kept."""
+    results = [r for r in (runs if runs and len(runs) > 1 else [result_json]) if isinstance(r, dict) and r]
+    if not results:
         return []
-    ids = [str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
-           if isinstance(m, dict) and m.get("id")]
-    values = {i: float(result_json[i]) for i in dict.fromkeys(ids)
-              if isinstance(result_json.get(i), (int, float)) and not isinstance(result_json.get(i), bool)
-              and math.isfinite(float(result_json[i]))}
+    ids = list(dict.fromkeys(str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
+                             if isinstance(m, dict) and m.get("id")))
+    rows = []
+    for n, result in enumerate(results):
+        values = {i: float(result[i]) for i in ids
+                  if isinstance(result.get(i), (int, float)) and not isinstance(result.get(i), bool)
+                  and math.isfinite(float(result[i]))}
+        rows.append({"run": str(result.get("_seed", n)), "values": values})
     try:
         path = Path(quest_root) / ANSWERS
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"values": values}, indent=1) + "\n", encoding="utf-8")
+        path.write_text(json.dumps({"runs": rows}, indent=1) + "\n", encoding="utf-8")
     except OSError:
         return []
-    return list(values)
+    return list(dict.fromkeys(k for row in rows for k in row["values"]))
 
 
-def _read_answers(quest_root: Path | str) -> dict[str, float]:
+def _read_answers(quest_root: Path | str) -> tuple[dict[str, float], dict[str, list[tuple[str, float]]]]:
+    """``(single, by_run)``: a name every run of the analysis gave the same value for (one run always does), and a name the
+    runs gave different values for, or not all gave, with each run's value. Nothing is picked among different values."""
     try:
         data = json.loads((Path(quest_root) / ANSWERS).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    values = data.get("values") if isinstance(data, dict) else None
-    return {str(k): float(v) for k, v in (values or {}).items()
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))}
+        return {}, {}
+    runs = [r for r in (data.get("runs") if isinstance(data, dict) else None) or [] if isinstance(r, dict)]
+    per_name: dict[str, list[tuple[str, float]]] = {}
+    for r in runs:
+        for k, v in (r.get("values") if isinstance(r.get("values"), dict) else {}).items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v)):
+                per_name.setdefault(str(k), []).append((str(r.get("run")), float(v)))
+    single: dict[str, float] = {}
+    by_run: dict[str, list[tuple[str, float]]] = {}
+    for name, found in per_name.items():
+        if len(found) == len(runs) and len({v for _, v in found}) == 1:
+            single[name] = found[0][1]
+        else:
+            by_run[name] = found
+    return single, by_run
 
 
 def _answer(shown: str, rec: Records | None) -> Value | None:
     """The value of a key that names a quantity the analysis recorded one value for (``{{v:<name>}}``); ``None`` when the
     key names no such quantity, so the settings' keys are read as always."""
-    if rec is None or not rec.answers:
+    if rec is None or not (rec.answers or rec.by_run):
         return None
     segments = [s.strip() for s in shown.split("|")]
     head = segments[0].partition("@")[0]
     metric = head.partition(":")[0].strip()
+    if metric in rec.by_run:
+        return Value(shown, NOT_RECORDED, Hit(shown, f"the analysis ran once per replicate and gave {metric} different "
+                                              f"values ({_by_run_text(rec.by_run[metric])}): FI offers no single value "
+                                              "for the study, so say it in words or leave it out"))
     if metric not in rec.answers:
         return None
     value = rec.answers[metric]
@@ -1298,6 +1331,10 @@ def _answer(shown: str, rec: Records | None) -> Value | None:
     percent = "%" in segments[1:]
     return Value(shown, fmt(Measured(value), "mean", percent), numbers=[value],
                  inputs={"value": metric, "source": "the analysis's recorded result"})
+
+
+def _by_run_text(found: list[tuple[str, float]]) -> str:
+    return "; ".join(f"run {run}: {sig(v, 4)}" for run, v in found)
 
 
 def placed_metrics(markdown: str) -> set[str]:
@@ -1435,7 +1472,7 @@ def _keys(lines: list[str]) -> int:
 def _answers_block(rec: Records) -> str:
     """The sheet's lines for the quantities the analysis worked out across the settings: one value for the whole study, a key
     with no settings, the plan's label beside it. ``""`` when there are none."""
-    if not rec.answers:
+    if not (rec.answers or rec.by_run):
         return ""
     labels = {str(m["id"]): str(m.get("label") or "") for m in (rec.protocol.get("metrics") if isinstance(rec.protocol, dict) else None) or []
               if isinstance(m, dict) and m.get("id")}
@@ -1443,8 +1480,15 @@ def _answers_block(rec: Records) -> str:
     for name in [m for m in labels if m in rec.answers] + [m for m in rec.answers if m not in labels]:
         shown = resolve(placeholder(name), rec)
         lines.append(f"- {placeholder(name)} -> {shown.text}" + (f"  ({labels[name]})" if labels.get(name) else ""))
-    return ("Worked out by the analysis across the settings (one value for the whole study; its key has no '@' and no "
-            "settings):\n" + "\n".join(lines) + "\n")
+    text = ""
+    if lines:
+        text = ("Worked out by the analysis across the settings (one value for the whole study; its key has no '@' and no "
+                "settings):\n" + "\n".join(lines) + "\n")
+    if rec.by_run:
+        text += ("Worked out once per replicate, with different values, so FI offers no key and no single value for the "
+                 "study (do not state one):\n" + "\n".join(
+                     f"- {name}: {_by_run_text(found)}" for name, found in rec.by_run.items()) + "\n")
+    return text
 
 
 def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int = SHEET_MAX_SHOWN) -> str:
