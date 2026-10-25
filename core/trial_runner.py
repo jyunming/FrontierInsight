@@ -98,7 +98,7 @@ def _fi_capture(cfg):
     seen, counts, shifted = {}, {}, {}
     # ``reads``: for each function that returned a dict, the keys its callers read (``"*"``: all of them, by iterating,
     # copying or unpacking it).
-    reads = {}
+    reads, returned = {}, {}
 
     class _Watched(dict):
         # The dict a function returned, handing out the same values and noting which keys its callers ask for.
@@ -242,6 +242,7 @@ def _fi_capture(cfg):
                 watched = _Watched(dict.items(got))
                 watched._fi_name = name
                 reads.setdefault(name, set())
+                returned.setdefault(name, set()).update(str(k) for k in dict.keys(got))
                 return watched
             return got
         return recorded
@@ -259,7 +260,7 @@ def _fi_capture(cfg):
         for name, fn in originals.items():
             if getattr(m, name, None) is fn:
                 setattr(m, name, getattr(mod, name))
-    return {"cases": seen, "counts": counts, "shifted": shifted, "reads": reads}
+    return {"cases": seen, "counts": counts, "shifted": shifted, "reads": reads, "returned": returned}
 
 def main():
     import os

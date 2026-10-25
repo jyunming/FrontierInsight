@@ -132,3 +132,4 @@ def test_fi_records_which_keys_of_a_returned_dict_the_callers_read(tmp_path: Pat
     assert reads["fit"] == ["cov", "slope"], "only the keys that were asked for, not the ones left alone"
     assert reads["summary"] == ["*"], "iterating over the values reads them all"
     assert "plain" not in reads, "a function that returned no dict has no record of reads"
+    assert si.read_captured(root)["returned"]["fit"] == ["cov", "extra", "slope", "spare"], "every key it returned"

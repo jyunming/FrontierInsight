@@ -686,3 +686,28 @@ def test_a_stale_entry_checked_again_starts_its_rounds_over(tmp_path):
     e = rec["functions"]["activation_energy"]
     assert fake.count("second_impl.adjudicate") == 1, "the rounds allowed start again for the changed code"
     assert e["rounds"] == 1 and e["status"] == "unresolved"
+
+
+def _write_request(tmp_path, record):
+    proto = protocol()
+    root = make_quest(tmp_path)
+    if record is not None:
+        (root / ".fi" / "second_impl").mkdir(parents=True)
+        (root / si.CAPTURED).write_text(json.dumps(record), encoding="utf-8")
+    s = build(root, Fake(), [spec_for(proto)], proto)
+    return si.write_prompt(spec_for(proto), template=PROMPTS["write"], protocol=proto, specs=s.specs, passages="",
+                           example=None, return_keys=s._return_keys(spec_for(proto)))
+
+
+def test_the_second_writer_is_told_which_keys_the_callers_read(tmp_path):
+    text = _write_request(tmp_path, {"cases": {}, "reads": {"activation_energy": ["Ea", "ci_Ea"]},
+                                     "returned": {"activation_energy": ["Ea", "ci_Ea", "cov"]}})
+    assert "exactly these names: Ea, ci_Ea." in text and "cov" not in text.split("exactly these names")[1][:40]
+
+
+def test_the_second_writer_is_given_every_returned_key_when_callers_iterate_or_nothing_was_recorded(tmp_path):
+    iterated = {"cases": {}, "reads": {"activation_energy": ["*"]}, "returned": {"activation_energy": ["Ea", "cov"]}}
+    assert "exactly these names: Ea, cov." in _write_request(tmp_path / "a", iterated)
+    old = {"cases": {}, "returned": {"activation_energy": ["Ea", "cov"]}}
+    assert "exactly these names: Ea, cov." in _write_request(tmp_path / "b", old)
+    assert "What it must return" not in _write_request(tmp_path / "c", None)
