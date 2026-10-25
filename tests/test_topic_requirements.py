@@ -233,11 +233,13 @@ def test_a_level_given_by_an_abbreviation_is_left_to_a_reader_and_a_level_with_n
     assert tr.match(req, other) == ([], ["F1"]), "a different method looks the same to a name match: the reader says"
     assert tr.gaps_from(req, other, {"F1": "missing"})[0][0]["kind"] == "factor"
     assert tr.gaps_from(req, other, {}) == ([], ["correction"]), "no judgement is not a pass: named as unchecked"
-    short = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni"]}, "topic_map": _CORRECTION_MAP}})
+    short = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni"]}}})
+    short["topic_map"] = _CORRECTION_MAP
     gaps, unresolved = tr.match(req, short)
     assert unresolved == [] and [g["kind"] for g in gaps] == ["level"]
     assert "Benjamini-Hochberg" in gaps[0]["sentence"] and "it has bonferroni, uncorrected" in gaps[0]["sentence"]
-    named = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "benjamini_hochberg"]}, "topic_map": _CORRECTION_MAP}})
+    named = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "benjamini_hochberg"]}}})
+    named["topic_map"] = _CORRECTION_MAP
     assert tr.match(req, named) == ([], [])
 
 
