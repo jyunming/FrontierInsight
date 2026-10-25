@@ -608,6 +608,13 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
+    # A poster problem the visual check found but could name no part of the poster for is not redone (the poster is
+    # written again part by part): it is listed here.
+    poster = _dict(_dict(_json(q.root / ".fi" / "visual_check.json")).get("poster"))
+    unplaced = list(dict.fromkeys(str(t) for a in _list(poster.get("attempts")) for t in _list(_dict(a).get("unresolved"))))
+    for text in unplaced:
+        out.append(_problem("paper", f"a poster problem in no single part of it, so not fixed: {_one(text, 160)}",
+                            "FI's visual check of the poster", "not fixed", ".fi/visual_check.json"))
     pdf = _paper_pdf(q)
     if pdf and not pdf["typeset"] and _paper_exists(q.root):
         out.append(_problem("paper", "paper.pdf is not typeset (a browser drew it): " + _one(pdf["reason"], 200),

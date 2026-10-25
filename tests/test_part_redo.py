@@ -380,3 +380,15 @@ async def test_one_broken_nested_value_is_asked_by_its_path_and_merged_at_the_le
     assert parsed == {"protocol": {"grid": {"a": [1, 2]}, "tolerance": "5 percent", "unit": "m"},
                       "study_type": "measure"}
     assert "ONLY for these keys: `protocol.tolerance`" in chat.await_args_list[1].args[0][0]["content"]
+
+
+def test_an_unplaced_poster_problem_is_listed_in_the_quality_report(tmp_path: Path) -> None:
+    from core import quality_report
+
+    (tmp_path / ".fi").mkdir()
+    entry = {"attempts": [{"attempt": 0, "score": 3, "kept": True, "unresolved": ["the third column is cut off"]}]}
+    (tmp_path / ".fi" / "visual_check.json").write_text(json.dumps({"poster": entry}), encoding="utf-8")
+    report = quality_report.build(tmp_path, running=False)
+    texts = [i["text"] for stage in report["stages"] for i in stage["problems"]["items"]]
+    assert any("the third column is cut off" in t and "poster" in t for t in texts)
+    assert "the third column is cut off" in quality_report.render(report)
