@@ -1362,7 +1362,7 @@ class RunChecksMixin:
                 runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
                 grid, probes, kinds, deterministic=runner.deterministic, budget_s=left,
                 allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol),
-                in_each_run=_in_run.of(protocol))
+                in_each_run=_in_run.of_study(protocol))
             self._pilot_spent += time.monotonic() - began
         base = {"trials": result.trials, "settings": result.settings, "metrics_read": result.checked,
                 "not_ruled_out": result.unsure, "at": time.time(), "trial_count_read": total, "code_key": code_key,

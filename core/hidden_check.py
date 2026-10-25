@@ -276,7 +276,7 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
             try:
                 checks, problems, _ = await _trial_runner.measure_oracles(
                     executor, python, quest_root, _SIMULATE.as_posix(), [hidden], timeout_s=timeout_s, env=env,
-                    thresholds=thresholds, case_env=env, in_each_run=_in_run.of(protocol),
+                    thresholds=thresholds, case_env=env, in_each_run=_in_run.of_study(protocol),
                     mean_names=_mc.mean_names(protocol), paired=_mc.paired(protocol),
                     proportion_names=_mc.proportion_names(protocol), repeated=_mc.repeats_trials(protocol))
             except Exception as e:  # noqa: BLE001 -- a run that cannot start is recorded, never raised

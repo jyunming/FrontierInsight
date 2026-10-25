@@ -11513,7 +11513,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self.executor, python, self.quest_root, f"code/{_split_run.SIMULATE_NAME}",
                 timeout_s=self.config.execution.timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                in_each_run=_in_run.of(protocol), log=self._log,
+                in_each_run=_in_run.of_study(protocol), log=self._log,
             ), label="calling a setting of simulate.py again")
         except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
             same, why = None, f"{type(e).__name__}: {e}"[:300]
@@ -14537,7 +14537,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                             self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(),
                             run_oracles, timeout_s=limit_s, env=env,
                             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                            case_env=dict(_replicate_env(exec_env, 0, stride)), in_each_run=_in_run.of(protocol),
+                            case_env=dict(_replicate_env(exec_env, 0, stride)), in_each_run=_in_run.of_study(protocol),
                             mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol),
                             proportion_names=_mc_error.proportion_names(protocol),
                             repeated=_mc_error.repeats_trials(protocol),
@@ -15573,7 +15573,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 checks, found, _timed_out = await _trial_runner.measure_oracles(
                     self.executor, py, root, simulate, oracles,
                     timeout_s=max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)),
-                    env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of(protocol),
+                    env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of_study(protocol),
                     mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol),
                     proportion_names=_mc_error.proportion_names(protocol),
                     repeated=_mc_error.repeats_trials(protocol), log=self._log,
@@ -15594,7 +15594,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     base_seed=int(env.get("FI_REPLICATE_SEED") or 0), deterministic="run_trial" not in entries,
                     timeout_s=self.config.execution.timeout_s, env=env, thresholds=thresholds,
                     paired=any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or []),
-                    in_each_run=_in_run.of(protocol), log=self._log,
+                    in_each_run=_in_run.of_study(protocol), log=self._log,
                     at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
                 )
                 series = _improve.series_of(run, trial_names)
@@ -16089,7 +16089,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 try:
                     values, _why = await _trial_runner.run_case(
                         self.executor, py, self.quest_root, rel, cell=cell, timeout_s=timeout, env=case_env,
-                        thresholds=thresholds, trial=trial_no, oracle=oracle, in_each_run=_in_run.of(protocol),
+                        thresholds=thresholds, trial=trial_no, oracle=oracle, in_each_run=_in_run.of_study(protocol),
                         paired=_mc_error.paired(protocol), log=self._log)
                 except Exception as e:  # noqa: BLE001 -- a look that could not be had never stops a quest
                     self._log.warning("[oracle] an extra run of %r's case could not be made: %r", name, e)

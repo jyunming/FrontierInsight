@@ -454,6 +454,20 @@ def of(protocol):
     return inside if isinstance(inside, dict) and inside else None
 
 
+def of_study(protocol):
+    """What each run of the study compares inside it, wherever the plan wrote it: a search for the best design
+    (``protocol.optimisation``) holds its own ``in_each_run`` in that block, any other study in the protocol. Everything that
+    calls the simulation on a case (the checks against known answers, a run again at finer settings) gives the run these
+    values, as the study's own runs get them; without them the simulation is called without a list it needs and returns a
+    number per value that FI reads as no number at all."""
+    block = protocol.get("optimisation") if isinstance(protocol, dict) else None
+    if isinstance(block, dict):
+        inside = block.get("in_each_run") if isinstance(block.get("in_each_run"), dict) else {}
+        inside = {str(k): list(v) for k, v in inside.items() if isinstance(v, list)}
+        return inside or None
+    return of(protocol)
+
+
 def parse_level_key(text):
     """``{"temperature_K": 290.2, "procedure": "bh"}`` from a level's key (:func:`level_key`): a value that reads as a
     number is that number, any other is its text."""

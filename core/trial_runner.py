@@ -1158,7 +1158,7 @@ class TrialsRunner:
             self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), run.cells,
             timeout_s=timeout_s, env=env,
             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-            in_each_run=_in_run.of(protocol), log=self.log) if self.deterministic and self.submit is None else set()
+            in_each_run=_in_run.of_study(protocol), log=self.log) if self.deterministic and self.submit is None else set()
         seen = _flat.observed_flat_sweep(run.cells, ignore=unsteady)
         flat = _flat.flat_sweep(
             run.cells, source=self.simulate.read_text(encoding="utf-8", errors="replace"),

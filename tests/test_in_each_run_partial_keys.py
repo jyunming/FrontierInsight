@@ -73,3 +73,32 @@ def test_the_small_run_accepts_a_per_setting_result_and_records_it_over_that_set
                                               base_seed=0, deterministic=True, timeout_s=60, run_id="r1", in_each_run=INSIDE))
     assert [r["status"] for c in run.cells for r in c.rows] == ["ok"]
     assert [c.key for c in run.record_cells()] == ["m=1", "m=1,width=74", "m=1,width=80", "m=1,width=90"]
+
+
+# --- a search for the best design keeps its in_each_run in its own block ---------------------------------------------------
+
+SEARCH_PROTOCOL = {"optimisation": {"in_each_run": INSIDE}}
+CASE_SOURCE = '''
+def run_cell(cell):
+    assert cell["width"] == [74, 80, 90], cell     # the run is given the whole list, as in the study
+    return {"dof": {"width=%d" % w: float(w) for w in cell["width"]}, "total": 1.0}
+'''
+
+
+def test_the_runs_of_a_search_are_given_the_values_its_block_compares_inside_each_run() -> None:
+    assert in_run.of_study(SEARCH_PROTOCOL) == INSIDE
+    assert in_run.of_study({"in_each_run": INSIDE}) == INSIDE and in_run.of_study({"optimisation": {}}) is None
+
+
+def test_a_case_run_for_a_search_gets_the_values_and_its_per_setting_result_is_read(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(CASE_SOURCE, encoding="utf-8")
+    ex = SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}")
+    case = {"m": 1}   # a known-answer case carries settings only, no list of what each run compares
+    kept = asyncio.run(trial_runner.run_case(ex, sys.executable, root, "code/simulate.py", cell=case, timeout_s=60,
+                                             in_each_run=in_run.of_study(SEARCH_PROTOCOL)))
+    assert kept[1] == "" and kept[0]["dof"] == [74.0, 80.0, 90.0] and kept[0]["total"] == 1.0
+    old = asyncio.run(trial_runner.run_case(ex, sys.executable, root, "code/simulate.py", cell=case, timeout_s=60,
+                                            in_each_run=in_run.of(SEARCH_PROTOCOL)))
+    assert old[0] is None   # what the checks passed before: no list, so the run could not be read

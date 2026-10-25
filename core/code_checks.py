@@ -279,7 +279,7 @@ async def _oracle_verdict(quest_root: Path, protocol: dict[str, Any] | None, *, 
         checks, problems, _timed_out_ = await _trials.measure_oracles(
             executor, python, quest_root, simulate.relative_to(quest_root).as_posix(), oracles, timeout_s=timeout_s,
             env={**base, "FI_ORACLE": "1", _split_run.RAW_DIR_ENV: _split_run.env_value(raw_dir, quest_root)},
-            thresholds=thresholds, in_each_run=_in_run.of(protocol), mean_names=_mc_error.mean_names(protocol),
+            thresholds=thresholds, in_each_run=_in_run.of_study(protocol), mean_names=_mc_error.mean_names(protocol),
             paired=_mc_error.paired(protocol), proportion_names=_mc_error.proportion_names(protocol),
             repeated=_mc_error.repeats_trials(protocol), log=log)
     except Exception as exc:  # noqa: BLE001 -- a run that cannot start is reported, not raised
