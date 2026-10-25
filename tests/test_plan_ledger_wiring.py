@@ -476,7 +476,7 @@ async def test_design_critique_style_replies_with_the_topic_read_first(tmp_path:
     from tests.test_design_self_critique import _AMENDED_DESIGN, _DRAFT_DESIGN, _mk_cfg
     eng = engine_mod.Engine(_mk_cfg(tmp_path))
     replies = [json.dumps(READING), json.dumps(_DRAFT_DESIGN),
-               json.dumps({"objections_addressed": [{"check": "other", "objection": "o", "fix": "f"}],
+               json.dumps({"objections_addressed": [{"check": "other", "where": "hypothesis and method", "objection": "o", "fix": "f"}],
                            "amended_design": _AMENDED_DESIGN})]
     eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=replies)})()
     patch = await eng._node_design({"topic": "OPC", "iteration": 0})

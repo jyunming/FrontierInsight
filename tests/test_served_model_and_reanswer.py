@@ -303,7 +303,7 @@ DRAFT = {
     "figures_planned": ["drift.png"],
     "dependencies": ["numpy"],
 }
-OBJECTION = {"check": "numerical_convergence", "objection": "no step halving", "fix": "halve h and compare"}
+OBJECTION = {"check": "numerical_convergence", "where": "method", "objection": "no step halving", "fix": "halve h and compare"}
 GOOD = json.dumps({"objections_addressed": [OBJECTION], "amended_design": {**DRAFT, "method": "halve h"}})
 #: The recorded shape: the amended design printed alone, then the asked-for object, in two fences.
 TWO_OBJECTS = f"```json\n{json.dumps(DRAFT, indent=2)}\n```\n\n## Objections Addressed\n\n```json\n{GOOD}\n```"
@@ -400,4 +400,4 @@ async def test_the_evidence_gate_and_the_claim_check_ask_once_more_too(tmp_path:
 
 def test_the_audit_prompt_asks_for_one_object_printed_once() -> None:
     text = (Path(__file__).resolve().parent.parent / "agents" / "design_self_critique.md").read_text(encoding="utf-8")
-    assert "Print it once: do not also print the draft or the amended design on its own" in text
+    assert "Print it once: do not also print the draft or any design on its own" in text

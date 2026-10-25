@@ -45,38 +45,30 @@ Three more, only for a search for the best design (`study_type: find_best_design
 
 One more, for every design: **16. Approximated without saying so** (use `other`) - is anything the topic names approximated, replaced or left out without an entry in `protocol.simplifications`, and does each metric's `protocol.definitions` entry match the source it quotes? Add the entry, or correct the definition.
 
-After identifying issues, produce an amended design. The amended design must match the original JSON shape exactly — same keys, same structure — but with the fields updated to reflect the fixes. If no MUST-FIX objections apply, return the original design unchanged, an empty `objections_addressed` array, and in `checked_no_problem` each checklist item you checked and found no problem with.
+After identifying issues, give the fix of each as the PARTS it changes, and only those. You never write the design again: FI keeps every part of the draft that no objection of yours names, and applies each change you list to the part it names. A change to a part that no objection names is refused. If no MUST-FIX objection applies, return an empty `objections_addressed` array and in `checked_no_problem` each checklist item you checked and found no problem with.
 
 # Output format
 
-Respond with a single JSON object, no prose, no markdown fence. Print it once: do not also print the draft or the amended design on its own, before or after it. Keep each `objection` and `fix` to one or two sentences; the amended design is the only long part, and it repeats the draft except where a fix changes it.
+Respond with a single JSON object, no prose, no markdown fence. Print it once: do not also print the draft or any design on its own, before or after it. Keep each `objection` and `fix` to one or two sentences.
 
 {
   "objections_addressed": [
     {"check": "circular_evaluation | single_point | weak_baseline | pseudo_units | stratum_collapse | precision | estimand | threshold_sensitivity | rng_independence | numerical_convergence | oracle | failed_runs | optimisation_baseline | optimisation_ranges | finer_check | other",
-     "where": "<the part of the design it concerns, such as method or protocol.grid>",
+     "where": "<the part of the design it concerns, written as a path: method, hypothesis, variables, protocol.grid, protocol.oracles ...>",
      "objection": "<one specific sentence quoting what's wrong>",
      "why": "<one sentence: why it is wrong>",
      "fix": "<one specific sentence describing the change made>",
-     "severity": "high | medium | low"},
+     "severity": "high | medium | low",
+     "changes": [{"path": "<the part changed, a path into the design: a top-level key (`method`, `variables`, `figures_planned` ...) or `protocol.<part>`, deeper for one setting (`protocol.grid.x`)>", "value": <the NEW content of that part, written in full: a string, a list or a mapping>}]},
     ...
   ],
   "checked_no_problem": [
     {"check": "<a checklist name from the list above>", "note": "<what you looked at and why it is fine, one sentence>"},
     ...
-  ],
-  "amended_design": {
-    "hypothesis": "...",
-    "study_type": "<only when the draft has it: measure | find_best_design>",
-    "variables": {"independent": [...], "dependent": [...], "controls": [...]},
-    "method": "...",
-    "expected_outcome": "...",
-    "figures_planned": [...],
-    "dependencies": [...]
-  }
+  ]
 }
 
-(If the draft design carries a `protocol` (its `grid`, `runs_per_setting`, `thresholds`, `constants`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`, `optimisation`), the amended design keeps it and amends it in place: a fix to checks 6 to 15 belongs there. Keep `study_type` as the draft has it. Never drop a key the draft has.)
+An objection that names a problem but needs no change to the design (the claim is narrowed in the paper, say) has `"changes": []`. A path is one of: `hypothesis`, `study_type`, `variables`, `method`, `expected_outcome`, `figures_planned`, `dependencies`, `protocol`, or `protocol.<part>` for a part the draft's `protocol` has or should have (`grid`, `runs_per_setting`, `thresholds`, `constants`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`, `optimisation`, ...). The value of a path is that part's whole new content, never a description of the change. Do not repeat parts you do not change.
 
 ---
 
@@ -93,4 +85,3 @@ $clarify_block
 
 ## The draft design (JSON)
 $draft_design
-

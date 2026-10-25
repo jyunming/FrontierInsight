@@ -25,7 +25,7 @@ DRAFT = {
     "dependencies": ["numpy"],
     "protocol": {"runs_per_setting": 300},
 }
-OBJECTION = {"check": "precision", "objection": "300 runs give about +-0.057", "fix": "raised the runs to 1000"}
+OBJECTION = {"check": "precision", "where": "method and protocol.runs_per_setting", "objection": "300 runs give about +-0.057", "fix": "raised the runs to 1000"}
 
 
 def _engine(tmp_path: Path, replies: list[str]) -> Engine:
@@ -111,7 +111,7 @@ def test_the_audit_asks_about_precision_the_estimand_thresholds_streams_converge
     text = (AGENTS / "design_self_critique.md").read_text(encoding="utf-8")
     for check in ("precision", "estimand", "threshold_sensitivity", "rng_independence", "numerical_convergence", "oracle", "failed_runs"):
         assert check in text, check
-    for words in ("0.98/sqrt(n)", "not a sample size", "common-random-numbers", "protocol.oracles", "Never drop a key the draft has"):
+    for words in ("0.98/sqrt(n)", "not a sample size", "common-random-numbers", "protocol.oracles", "Do not repeat parts you do not change"):
         assert words in text, words
 
 
@@ -158,7 +158,7 @@ async def test_a_repair_that_breaks_the_search_block_is_not_applied_and_is_recor
     assert plan.normalize_design(SEARCH_DRAFT)[0] is not None
     broken = _with_baseline([[0.1, 0.1], [0.0, 0.0]])  # a baseline outside what the variable takes
     assert plan.normalize_design(broken)[0] is None  # the plan step would drop the whole block over it
-    objection = {"check": "baseline", "objection": "the baseline is a single number", "fix": "made it a grid"}
+    objection = {"check": "baseline", "where": "protocol.optimisation.baseline", "objection": "the baseline is a single number", "fix": "made it a grid"}
     eng = _engine(tmp_path, [json.dumps({"objections_addressed": [objection], "amended_design": broken})])
     design, objections = await eng._audit_design({"topic": "a topic", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
     assert design["protocol"]["optimisation"]["baseline"]["values"] == {"w": 0.0}  # the block and its baseline stay

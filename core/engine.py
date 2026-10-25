@@ -78,6 +78,7 @@ from . import confirmations as _confirmations
 from . import record_anchor as _record_anchor
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
+from . import design_parts as _design_parts
 from . import todo as _todo
 from . import crash_kind as _crash_kind
 from . import oracle_card as _oracle_card
@@ -4983,9 +4984,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "literature_query_set": query_set,
         }
 
-    def _design_prompt(self, state: QuestState) -> str:
-        """The design prompt for this state: the topic, the chosen direction, the literature, the
-        clarifications, the skills and example files, and, on a later pass, what the review and the person said."""
+    def _design_feedback(self, state: QuestState) -> str:
+        """What a later design pass is told: the review, FI's precision record, the person's words, the points that need a
+        new experiment, and the frozen protocol. Empty on the first pass."""
         iteration = state.get("iteration", 0)
         review_feedback = ""
         if iteration > 0:
@@ -5045,6 +5046,65 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "and this study is described as amended after its results were known.\n"
                 f"{json.dumps(frozen_protocol, indent=2)}\n"
             ).strip()
+        return review_feedback
+
+    def _redesign_scope(self, state: QuestState) -> list[str] | None:
+        """The design parts a redesign may change, from FI's own record of why the design is asked for again, or ``None``
+        when no part is named (the whole design is then asked for, as before). A missed precision target allows the parts
+        that size the study (trials per setting, the grid); a review's or a person's notes allow the parts they name, by the
+        design's own part names (:func:`core.design_parts.allowed_for_notes`)."""
+        precision = state.get("cross_check_route") == "redesign"
+        notes: list[Any] = [h.get("text") for h in state.get("feedback_history") or []
+                            if isinstance(h, dict) and not h.get("answered_by")]
+        hf = state.get("human_feedback") or {}
+        if not notes and isinstance(hf, dict) and hf.get("action") == "refine" and hf.get("feedback"):
+            notes.append(hf["feedback"])
+        notes += [str(p) for p in state.get("refine_needs_experiment") or []]
+        flags: list[str] = []
+        review = state.get("review") or {}
+        if not precision and isinstance(review, dict):
+            notes += [review.get(k) for k in ("weaknesses", "suggestions", "blocking", "why")]
+            flags = [str(f) for f in review.get("must_flag_hits") or []]
+        parts = list(_design_parts.allowed_for_precision()) if precision else []
+        parts += [p for p in _design_parts.allowed_for_notes(notes, flags) if p not in parts]
+        return parts or None
+
+    async def _redesign_by_parts(self, state: QuestState) -> dict[str, Any] | None:
+        """A redesign (the design step run again after a review, a person's note or a missed precision target) that shows
+        the previous design and asks the model for ONLY the parts the reason concerns; every other part is carried over
+        exactly as it was, and a part the model returns that was not asked for is refused. ``None`` when this is not a
+        redesign, no part is named, or nothing asked came back: the whole design is then asked for, as before."""
+        previous = state.get("design")
+        if (state.get("iteration", 0) <= 0 or not isinstance(previous, dict) or not previous or self._client is None
+                or state.get("survey_mode_resolved")):
+            return None
+        allowed = self._redesign_scope(state)
+        if allowed is None:
+            self._log.info("[design] no note names a part of the design, so the whole design is asked for again")
+            return None
+        self._log.info("[design] the redesign may change only: %s; every other part is carried over as it was",
+                       ", ".join(f"`{a}`" for a in allowed))
+        prompt = self._prompts["design_parts"].substitute(
+            topic=state["topic"], design=json.dumps(previous, indent=2, default=str),
+            reason=self._design_feedback(state) or "(no reason was recorded)",
+            allowed="\n".join(f"- `{a}`" for a in allowed), timeout_s=str(self.config.execution.timeout_s),
+            time_note=self._time_note(state), clarify_block=_format_clarify(state))
+        text, obj = await self._chat_json(prompt, node="design", want=(), usable=lambda p: bool(p))
+        self._keep_plan_answer(text)
+        design, applied, refused = _design_parts.merge_parts(previous, obj or {}, allowed)
+        for r in refused:
+            self._log.warning("[design] the redesign's change to `%s` was not made: %s", r["key"], r["reason"])
+        if not applied:
+            self._log.warning("[design] none of the asked parts came back changed; the whole design is asked for again")
+            return None
+        self._log.info("[design] the redesign changed %s and kept every other part as it was",
+                       ", ".join(f"`{a}`" for a in applied))
+        return design
+
+    def _design_prompt(self, state: QuestState) -> str:
+        """The design prompt for this state: the topic, the chosen direction, the literature, the
+        clarifications, the skills and example files, and, on a later pass, what the review and the person said."""
+        review_feedback = self._design_feedback(state)
         prompt = self._prompts["design"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
@@ -5172,43 +5232,44 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "[design_self_critique] chat/parse failed (%r); keeping "
                 "un-audited draft design", e,
             )
-        amended = critique.get("amended_design") if isinstance(critique, dict) else None
+        whole = critique.get("amended_design") if isinstance(critique, dict) else None
         objections = critique.get("objections_addressed") if isinstance(critique, dict) else None
         not_applied: list[dict[str, str]] = []  # repairs FI did not apply: they would not pass its own checks
+        amended: dict[str, Any] | None = None
+        unnamed: list[dict[str, str]] = []  # changes no objection named: refused before the schema reading
         if not failure and not isinstance(objections, list):
             # An audit judges by naming its objections (none is an empty list). An unreadable reply, or one that names
             # none, is not an audit that found nothing.
             failure = "the audit's reply did not list its objections"
             objections = None
+        # The audit names the parts it changes (``changes`` under each objection); FI makes those and no other. A part of
+        # a whole amended design (an older reply's shape) that no objection names is refused (core/design_parts.py).
+        if isinstance(objections, list) and not failure:
+            if isinstance(whole, dict) and whole and not set(design).issubset(set(whole)):
+                failure = f"the amended design dropped the keys {sorted(set(design) - set(whole))}; the draft was kept"
+                self._log.warning("[design_self_critique] amended_design dropped keys %s; keeping draft",
+                                  sorted(set(design) - set(whole)))
+                whole = None
+            if not failure:
+                amended, unnamed, _applied = _design_parts.amended_from_audit(design, objections, whole)
+                for n in unnamed:
+                    self._log.warning("[design_self_critique] the audit's change to `%s` was not made: %s", n["key"], n["reason"])
         proposed_change = (
             isinstance(amended, dict) and bool(amended)
             and _receipts.design_core(amended) != _receipts.design_core(design)
-        )
+        ) or bool(unnamed)
         if not adopt:
             amended = None
         if isinstance(amended, dict) and amended:
-            # The amended design must keep the original design's shape —
-            # otherwise downstream consumers (implement / analyze /
-            # write) will silently mis-read missing keys. Require the
-            # SAME set of top-level keys the draft had; on schema
-            # drift, fall back to the draft rather than ship a partial
-            # design. (Stricter than the prior "hypothesis only" check,
-            # which would silently drop variables / method /
-            # figures_planned / dependencies.)
-            draft_keys = set(design.keys())
-            amended_keys = set(amended.keys())
-            if draft_keys.issubset(amended_keys):
-                draft_design = design
-                design, not_applied = self._hold_audit_repairs_to_the_schema(draft_design, amended)
-                if any(n.get("part") for n in not_applied):
-                    design, not_applied = await self._ask_the_audit_to_correct_parts(
-                        draft_design, amended, design, not_applied, review_node)
-            else:
-                failure = f"the amended design dropped the keys {sorted(draft_keys - amended_keys)}; the draft was kept"
-                self._log.warning(
-                    "[design_self_critique] amended_design dropped keys "
-                    "%s; keeping draft", sorted(draft_keys - amended_keys),
-                )
+            # Only the parts the audit named differ from the draft, so the shape is the draft's. On a part FI's own
+            # reading of the plan would refuse, the audit is asked once to correct that part.
+            draft_design = design
+            design, not_applied = self._hold_audit_repairs_to_the_schema(draft_design, amended)
+            if any(n.get("part") for n in not_applied):
+                design, not_applied = await self._ask_the_audit_to_correct_parts(
+                    draft_design, amended, design, not_applied, review_node)
+        if adopt:
+            not_applied = [*not_applied, *unnamed]
         n_addressed = len(objections) if isinstance(objections, list) else 0
         self._log.info(
             "[design_self_critique] iteration=%d objections_addressed=%d",
@@ -8920,10 +8981,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             objections = state.get("design_objections")
         if design is None:
             await self._read_topic_before_the_prompt(state)
-            # The same study-type rules as the plan's prompt: a redesign of a "find the best" topic must be able to
-            # write the search block, or it comes out as a plain sweep.
-            prompt = self._design_prompt(state) + self._study_type_part(state, seek=self._seeks_best_design(state))
-            design = await self._design_reply(prompt, node="design")
+            # A redesign changes the parts its reason concerns and carries the rest over unchanged; only when nothing
+            # names a part is the whole design asked for again (said in run.log).
+            design = await self._redesign_by_parts(state)
+            if design is None:
+                # The same study-type rules as the plan's prompt: a redesign of a "find the best" topic must be able to
+                # write the search block, or it comes out as a plain sweep.
+                prompt = self._design_prompt(state) + self._study_type_part(state, seek=self._seeks_best_design(state))
+                design = await self._design_reply(prompt, node="design")
             # Before the audit, so the receipt it leaves is for the design that runs (the hypothesis is part of it).
             design = self._keep_hypothesis_after_an_empty_run(state, design)
             design, objections = await self._audit_design(state, design)
@@ -27060,6 +27125,7 @@ def _load_prompts() -> dict[str, string.Template]:
     names = (
         "clarify", "ideate", "ideate_reflect", "ideate_tournament",
         "design", "design_self_critique",   # second-pass methodology audit
+        "design_parts",                     # a redesign: ONLY the parts the reason concerns, the rest carried over
         "plan_revise",                      # --revise-plan: rewrite plan.md as the person asked
         "plan_parts",                       # FI asks for ONLY the missing parts of the plan, as JSON (never the whole file)
         "plan_criteria",                    # the plan named no check of correctness: ask once more
