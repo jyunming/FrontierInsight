@@ -1000,6 +1000,8 @@ class TrialsRunner:
         #: (``cost(cell)`` from FI's timing, set by the sizing step; ``None`` until then): the costliest start first.
         self.at_once = max(1, int(at_once or 1))
         self.cost: Any = None
+        #: The id of a cut study (set by the run's sizing), written into the ledger's rows.
+        self.run_id = ""
         self.quest_root = Path(quest_root)
         self._protocol = protocol
         self.deterministic = deterministic
@@ -1159,7 +1161,7 @@ class TrialsRunner:
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
                 paired=paired, on_plan=self._note_plan, in_each_run=inside, log=self.log, at_once=self.at_once,
-                cost=self.cost,
+                cost=self.cost, run_id=self.run_id,
             )
             self._plan_seen = None
             _save_run(self.quest_root, key, run)

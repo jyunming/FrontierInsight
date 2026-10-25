@@ -640,7 +640,7 @@ async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, A
 async def run_search(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], *,
                      base_seed: int, timeout_s: int, env: dict[str, str] | None = None, log: Any = None,
                      frozen: bool = False, at_once: int = 1, stop_flat: bool = True,
-                     stop_stepped: bool = True, stop_unchanged: bool = True) -> SearchRun:
+                     stop_stepped: bool = True, stop_unchanged: bool = True, run_id: str = "") -> SearchRun:
     """Run the search for the best design (see the module docstring) and write its record. ``module`` is the simulation
     file relative to ``quest_root``; ``timeout_s`` bounds the whole search, the coarse scan included.
 
@@ -847,6 +847,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             executor, python, quest_root, module, grid, runs_per_setting=runs, base_seed=int(base_seed),
             deterministic=entry == "run_cell", timeout_s=max(1, math.ceil(left)), env=env,
             thresholds=thresholds, paired=True, in_each_run=_search.in_each_run(block) or None, at_once=at_once,
+            run_id=run_id,
         )
         stderr_parts.append(trial_run.stderr())
         summary = json.loads(trial_run.summary_path.read_text(encoding="utf-8"))
@@ -1049,6 +1050,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         "ledger": LEDGER_PATH.as_posix(),
         "runs_per_evaluation": runs,
         "entry": entry,
+        **({"run_id": run_id} if run_id else {}),
     }
     if outcome.get("stopped_because") == "time":
         extra["time"]["limit_seconds"] = int(timeout_s)
@@ -1377,6 +1379,9 @@ class OptimisationRunner:
         #: Seconds of the time limit kept for FI's check of the best design when the study was too long to finish (set by
         #: the run's sizing, core/run_checks.py): the coarse scan and the search stop that much sooner.
         self.check_reserve_s = 0.0
+        #: The id of a cut study (set by the run's sizing): written into the scan's ledger and the search's record, so the
+        #: disclosure reads only this run's files.
+        self.run_id = ""
         #: Whether a repair of the simulation is left (a bool, or a callable asked at each run): FI's check of the failed
         #: trials (core/trial_checks.py) sends a fault back only while one is.
         self._repairs_left = repairs_left
@@ -1483,9 +1488,17 @@ class OptimisationRunner:
                                     frozen=self._is_frozen(), at_once=self.at_once,
                                     stop_flat=bool(self._stop_flat() if callable(self._stop_flat) else self._stop_flat),
                                     stop_stepped=self._stepped_repair_left(),
-                                    stop_unchanged=self._unchanged_repair_left())
+                                    stop_unchanged=self._unchanged_repair_left(), run_id=self.run_id)
 
-        search_s = max(1, int(timeout_s - self.check_reserve_s))
+        search_s = int(timeout_s - self.check_reserve_s)
+        if search_s < 1:
+            # Nothing is left for the scan and the search once the check's time is kept: they do not start, and the check
+            # does not lose its time to a search given a second it does not have.
+            self.failed_script = None
+            return ExecutionResult(
+                returncode=1, stdout="", duration_s=time.monotonic() - started, timed_out=True,
+                stderr=f"The run's time limit (execution.timeout_s = {timeout_s} s) leaves nothing for the search once the time "
+                       "for FI's check of the best design is kept: the search was not started.")
         run = await search(search_s)
         run = await self._continue_while_improving(run, search, protocol, started, search_s)
         self.last = run

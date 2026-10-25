@@ -27,6 +27,7 @@ import json
 import math
 import re
 import time
+import uuid
 from dataclasses import replace as _replace
 from pathlib import Path
 from typing import Any
@@ -812,6 +813,7 @@ class RunChecksMixin:
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
                                record.get("says") or "the experiment is run up to the time limit")
                 runner.cost = None  # type: ignore[attr-defined]  # the plan's order
+                runner.run_id = str((record.get("truncated") or {}).get("run_id") or "")  # type: ignore[attr-defined]
                 return None
             if record.get("key") == key and record.get("stopped"):
                 return self._stop_too_long(str(record["stopped"]), fit=record.get("fit"))
@@ -1984,6 +1986,7 @@ class RunChecksMixin:
         """A search is sized again at every run: the cut an earlier sizing recorded (and the time it kept for FI's check) is
         taken away first, so a study that now fits is never described as cut."""
         runner.check_reserve_s = 0.0
+        runner.run_id = ""
         record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
         if record.pop("truncated", None) is not None:
             _estimate.write_record(self.quest_root, record)  # type: ignore[attr-defined]
@@ -2002,7 +2005,7 @@ class RunChecksMixin:
         reserve = min(max(0.0, reserve_s), limit_s / 2.0)
         cut = {"kind": kind, "estimate_s": est.seconds * _estimate.SAFETY, "at_least": bool(est.at_least),
                "limit_s": float(limit_s), "settings": int(est.cells), "one_s": one_s, "order": "plan",
-               "check_reserve_s": round(reserve, 1), **(planned or {}), "detail": detail.split("; FI does not run")[0], **({"fit": fit} if fit else {})}
+               "run_id": uuid.uuid4().hex[:12], "check_reserve_s": round(reserve, 1), **(planned or {}), "detail": detail.split("; FI does not run")[0], **({"fit": fit} if fit else {})}
         what = "the search for the best design" if kind == "search" else "the experiment"
         line = (f"FI estimates {what} would take {'at least ' if est.at_least else 'about '}"
                 f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
@@ -2010,6 +2013,7 @@ class RunChecksMixin:
                 "the time limit, and the paper will say what was and was not done")
         self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
         print(f"[FI] {line}")
+        runner.run_id = cut["run_id"]
         if kind == "grid":
             runner.cost = None
         else:

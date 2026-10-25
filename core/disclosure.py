@@ -608,9 +608,11 @@ def _untested_sentence(notes: list[str]) -> str:
     return text
 
 
-def _setting_counts(quest_root: Path) -> tuple[int, int, int, int] | None:
-    """``(settings planned, settings every trial of which ran, settings some trials of which ran, trials not run because the
-    study's time ran out)`` from FI's trial ledger, or ``None`` when it holds none. A trial that failed for another reason ran."""
+def _setting_counts(quest_root: Path, run_id: str = "") -> tuple[int, int, int, int] | None:
+    """``(settings planned, settings all of whose planned trials ran, settings some of whose trials ran, trials not run)``
+    from FI's trial ledger, or ``None`` when it holds none of this run's rows. A trial counts as run when the ledger records
+    it and the study's time limit did not cut it off (one that failed for another reason ran); a planned trial the ledger
+    does not record was not run. With ``run_id`` only the rows FI wrote for that run are read."""
     try:
         lines = (Path(quest_root) / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -618,8 +620,7 @@ def _setting_counts(quest_root: Path) -> tuple[int, int, int, int] | None:
     from .trial_runner import OUT_OF_TIME
 
     planned: dict[str, int] = {}
-    late: dict[str, int] = {}
-    seen: dict[tuple[str, int], bool] = {}
+    seen: dict[tuple[str, int], bool] = {}  # (setting, trial) -> cut off by the time limit
     for line in lines:
         try:
             row = json.loads(line)
@@ -627,18 +628,22 @@ def _setting_counts(quest_root: Path) -> tuple[int, int, int, int] | None:
             continue
         if not isinstance(row, dict) or not isinstance(row.get("cell"), str):
             continue
+        if run_id and row.get("run_id") != run_id:
+            continue
         if row.get("event") == "planned" and (n := _whole(row.get("trials"))) is not None:
             planned[row["cell"]] = n
         elif row.get("event") == "trial" and (t := _whole(row.get("trial"))) is not None:
             seen[(row["cell"], t)] = str(row.get("reason") or "").startswith(OUT_OF_TIME)
-    if not seen:
+    if not seen and not planned:
         return None
+    ran: dict[str, int] = {}
     for (cell, _t), was_late in seen.items():
-        late[cell] = late.get(cell, 0) + (1 if was_late else 0)
+        ran[cell] = ran.get(cell, 0) + (0 if was_late else 1)
     cells = set(planned) | {c for c, _t in seen}
-    none_ran = sum(1 for c in cells if late.get(c, 0) and late[c] >= planned.get(c, late[c]))
-    some_late = sum(1 for c in cells if late.get(c, 0))
-    return len(cells), len(cells) - some_late, some_late - none_ran, sum(late.values())
+    wanted = {c: planned.get(c, ran.get(c, 0)) for c in cells}
+    whole = sum(1 for c in cells if ran.get(c, 0) >= wanted[c])
+    none = sum(1 for c in cells if ran.get(c, 0) == 0 and wanted[c] > 0)
+    return len(cells), whole, len(cells) - whole - none, sum(max(0, wanted[c] - ran.get(c, 0)) for c in cells)
 
 
 def cut_short_text(quest_root: Path) -> str:
@@ -661,7 +666,8 @@ def cut_short_text(quest_root: Path) -> str:
             f"{plain_duration(float(est))}, more than the {plain_duration(float(limit))} allowed, so it ran the plan's "
             "settings in the plan's order until the time limit; the results cover only what ran")
     parts: list[str] = []
-    counts = _setting_counts(root)
+    run_id = str(cut.get("run_id") or "")
+    counts = _setting_counts(root, run_id)
     if counts is not None:
         total, whole, partly, late = counts
         none = total - whole - partly
@@ -670,6 +676,8 @@ def cut_short_text(quest_root: Path) -> str:
                      f"({late:,} trial{'' if late == 1 else 's'} {'was' if late == 1 else 'were'} not run)")
     if cut.get("kind") == "search":
         best = _read_json(root / "results" / "best_design.json")
+        if not (isinstance(best, dict) and run_id and best.get("run_id") == run_id):
+            best = None  # a record of another design or run is not this study's
         ev = best.get("evaluations") if isinstance(best, dict) else None
         if isinstance(ev, dict) and _whole(ev.get("search")) is not None and _whole(ev.get("budget")) is not None:
             parts.append(f"the search made {ev['search']:,} of the {ev['budget']:,} evaluations the plan allows"
@@ -677,11 +685,11 @@ def cut_short_text(quest_root: Path) -> str:
         compared = best.get("compared") if isinstance(best, dict) else None
         levels = [p for p in (compared.get("levels") if isinstance(compared, dict) else None) or []
                   if isinstance(p, dict) and not p.get("same_as")]
-        if len(levels) > 1 and all(_whole(p.get("evaluations")) is not None and _whole(p.get("budget")) is not None
+        if compared and levels and all(_whole(p.get("evaluations")) is not None and _whole(p.get("budget")) is not None
                                    for p in levels):
             whole = sum(1 for p in levels if p["evaluations"] >= p["budget"])
             none = sum(1 for p in levels if p["evaluations"] == 0)
-            parts.append(f"of the {len(levels):,} alternatives the plan compares, searched with their whole budget: "
+            parts.append(f"of the {len(levels):,} alternative{'' if len(levels) == 1 else 's'} the plan compares, searched with their whole budget: "
                          f"{whole:,}, searched only in part: {len(levels) - whole - none:,}, not searched: {none:,}")
     return said + ("; " + "; ".join(parts) if parts else "") + "."
 

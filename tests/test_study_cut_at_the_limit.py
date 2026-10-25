@@ -37,19 +37,20 @@ def _quest(tmp_path: Path, truncated: dict[str, Any] | None, ledger: list[dict[s
     return root
 
 
-def _ledger(cells: dict[str, list[str]]) -> list[dict[str, Any]]:
+def _ledger(cells: dict[str, list[str]], run_id: str = "r1") -> list[dict[str, Any]]:
     """``{cell: [ok | failed | late, ...]}`` as FI's trial ledger holds it (a trial the time limit cut off is ``failed``)."""
     rows: list[dict[str, Any]] = []
     for cell, statuses in cells.items():
-        rows.append({"event": "planned", "cell": cell, "trials": len(statuses)})
+        rows.append({"event": "planned", "run_id": run_id, "cell": cell, "trials": len(statuses)})
         for t, what in enumerate(statuses):
-            rows.append({"event": "trial", "cell": cell, "trial": t, "seed": 10 + t,
+            rows.append({"event": "trial", "run_id": run_id, "cell": cell, "trial": t, "seed": 10 + t,
                          "status": "ok" if what == "ok" else "failed",
                          **({"reason": REASON} if what == "late" else {"reason": "diverged"} if what == "failed" else {})})
     return rows
 
 
-GRID_CUT = {"kind": "grid", "estimate_s": 64800.0, "at_least": False, "limit_s": 28800.0, "settings": 4, "order": "plan"}
+GRID_CUT = {"kind": "grid", "estimate_s": 64800.0, "at_least": False, "limit_s": 28800.0, "settings": 4, "order": "plan",
+            "run_id": "r1"}
 
 
 def test_a_study_cut_at_the_limit_is_described_from_the_trial_ledger(tmp_path: Path) -> None:
@@ -74,7 +75,7 @@ def test_a_study_that_was_not_cut_says_nothing_of_a_cut(tmp_path: Path) -> None:
 
 def test_a_search_cut_at_the_limit_says_how_far_the_scan_and_the_search_got(tmp_path: Path) -> None:
     cut = {**GRID_CUT, "kind": "search", "estimate_s": 129600.0, "at_least": True}
-    best = {"evaluations": {"search": 40, "budget": 6000, "stopped_because": "time"},
+    best = {"run_id": "r1", "evaluations": {"search": 40, "budget": 6000, "stopped_because": "time"},
             "compared": {"levels": [{"evaluations": 40, "budget": 1200}, {"evaluations": 1200, "budget": 1200},
                                     {"evaluations": 0, "budget": 1200}, {"same_as": {"x": 1}, "evaluations": 0, "budget": 1200}]}}
     root = _quest(tmp_path, cut, _ledger({"s=1": ["ok"], "s=2": ["ok"], "s=3": ["late"]}), best)
@@ -180,3 +181,54 @@ async def test_a_run_cut_at_the_limit_is_a_result_not_a_failed_run(tmp_path: Pat
     assert await eng._node_execute_reflect(state) == {}, "no repair of the script is asked for"
     assert eng._route_after_execute_reflect(state) != "stuck"
     assert eng._no_results_verdict(state) is None
+
+
+def test_a_setting_with_fewer_trials_recorded_than_planned_ran_in_part(tmp_path: Path) -> None:
+    rows = _ledger({"a=1": ["ok", "ok", "ok"], "a=2": ["ok", "ok", "ok"]})
+    rows = [r for r in rows if not (r["cell"] == "a=2" and r.get("trial", 0) > 0)]  # the run was interrupted
+    said = disclosure.cut_short_text(_quest(tmp_path, GRID_CUT, rows))
+    assert "of 2 settings, 1 ran all their trials, 1 ran some and 0 ran none (2 trials were not run)" in said
+
+
+def test_ledger_rows_of_another_run_are_not_counted(tmp_path: Path) -> None:
+    rows = _ledger({"a=1": ["ok", "ok"]}) + _ledger({"old=1": ["late", "late"], "old=2": ["ok", "ok"]}, run_id="earlier")
+    said = disclosure.cut_short_text(_quest(tmp_path, GRID_CUT, rows))
+    assert "of 1 settings, 1 ran all their trials, 0 ran some and 0 ran none (0 trials were not run)" in said
+
+
+def test_a_search_record_of_another_design_is_not_described(tmp_path: Path) -> None:
+    cut = {**GRID_CUT, "kind": "search"}
+    other = {"run_id": "earlier", "evaluations": {"search": 40, "budget": 6000, "stopped_because": "time"}}
+    assert "the search made" not in disclosure.cut_short_text(_quest(tmp_path, cut, None, other))
+    unstamped = {"evaluations": {"search": 40, "budget": 6000, "stopped_because": "time"}}
+    shutil_root = tmp_path / "second"
+    shutil_root.mkdir()
+    assert "the search made" not in disclosure.cut_short_text(_quest(shutil_root, cut, None, unstamped))
+
+
+def test_one_alternative_cut_short_is_disclosed(tmp_path: Path) -> None:
+    cut = {**GRID_CUT, "kind": "search"}
+    best = {"run_id": "r1", "evaluations": {"search": 5, "budget": 100, "stopped_because": "time"},
+            "compared": {"levels": [{"evaluations": 5, "budget": 100}, {"same_as": {"x": 1}, "evaluations": 0, "budget": 100}]}}
+    said = disclosure.cut_short_text(_quest(tmp_path, cut, None, best))
+    assert "of the 1 alternative the plan compares, searched with their whole budget: 0, searched only in part: 1" in said
+
+
+def test_the_search_does_not_start_when_the_check_s_reserve_leaves_it_no_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {'f': 1.0}\n", encoding="utf-8")
+    (root / "code" / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    called: list[int] = []
+
+    async def fake_search(*a: Any, timeout_s: int, **k: Any) -> Any:
+        called.append(timeout_s)
+        raise RuntimeError("must not start")
+
+    monkeypatch.setattr(optimise, "run_search", fake_search)
+    runner = optimise.OptimisationRunner(
+        SharedInterpreterExecutor(python_version="3.11"), quest_root=root, protocol=lambda: {"optimisation": {"design_variables": []}},
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
+    runner.check_reserve_s = 5.0
+    result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=1, env={}))
+    assert called == [] and result.timed_out and "search was not started" in result.stderr
