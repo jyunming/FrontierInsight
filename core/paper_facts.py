@@ -444,6 +444,8 @@ def shared_seeds_text(root: Path) -> str:
     """The sentence FI puts in the Limitations when its own trial record shows the settings sharing seeds: trial ``t`` of
     every setting ran on one seed (``paired: true``, common random numbers; ``core/trial_runner.py::trial_seed`` with an
     empty key). ``""`` when the ledger shows the settings drew different seeds, or there is one setting only.
+    Only a plan that asks for common random numbers (``seed_policy``, with a metric marked paired) has the settings share
+    seeds; the interval across them is FI's own, from the different draws (``core/paper_values.py``).
 
     Why it is stated: settings that share their random draws move together, so their results are one correlated
     fluctuation, not independent repeats. A difference between two settings is sharper for it, but an interval pooled
@@ -463,9 +465,9 @@ def shared_seeds_text(root: Path) -> str:
     if not shown:
         return ""
     return ("In every setting, trial t ran on the same random seed (common random numbers), so the settings' results are "
-            "correlated, not independent: a difference between two settings is paired, but an interval pooled across "
-            "settings, or a count of settings that agree, would understate the uncertainty, because the settings are not "
-            "independent repeats")
+            "correlated, not independent: a difference between two settings is paired, so an interval over several "
+            "settings counts the different random draws, not the trials of every setting pooled, and a count of settings "
+            "that agree is not a count of independent repeats")
 
 
 _MAX_UNSUPPORTED_LISTED = 8

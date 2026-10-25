@@ -24,6 +24,7 @@ from typing import Any
 from . import experiment_deps as _experiment_deps
 from .execution import scrub_secrets
 from .proc_tree import ProcessTree as _ProcessTree
+from . import mc_error as _mc_error
 from . import optimise_search as _search
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
@@ -434,7 +435,7 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
         **({"in_each_run": inside} if inside else {}),
         "runs_per_setting": int(protocol.get("runs_per_setting") or 1),
         "base_seed": 0,
-        "paired": any(isinstance(m, dict) and m.get("paired") for m in metrics),
+        "paired": _mc_error.paired(protocol),
         "thresholds": protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {},
     }
 

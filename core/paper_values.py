@@ -333,6 +333,27 @@ class Records:
     #: never change; the axes depend on ``unread`` too). A study with values compared inside each run has a record per
     #: value: a real one had 455,292, and each key worked these out again over all of them.
     _derived: dict[Any, Any] = field(default_factory=dict)
+    #: The seed each trial ran on, from FI's ledger: ``{setting key: {trial number: seed}}``. Empty without a ledger.
+    seeds: dict[str, dict[int, int]] = field(default_factory=dict)
+
+    def seeds_of(self, cell: dict[str, Any]) -> dict[int, int]:
+        """The seeds of the trials behind ``cell``. The record of a value compared inside each run is the run's own
+        setting with that value added to its key; the trials, and so the seeds, are the setting's."""
+        key = str(cell.get("key"))
+        if key not in self.seeds and isinstance(cell.get("level"), dict) and cell["level"]:
+            key = ",".join(key.split(",")[: -len(cell["level"])])
+        return self.seeds.get(key, {})
+
+    def share_draws(self, cells: list[dict[str, Any]]) -> bool:
+        """Whether two of ``cells`` ran a trial on the same seed (FI's ledger): their trials are then not independent
+        repeats, so one interval over all their trials would be narrower than the data allow."""
+        used: set[int] = set()
+        for c in cells:
+            mine = set(self.seeds_of(c).values())
+            if used & mine:
+                return True
+            used |= mine
+        return False
 
     def _once(self, name: str, make: Any) -> Any:
         key = (name, self.unread)
@@ -664,6 +685,26 @@ def _trials(cells: list[dict[str, Any]], metric: str) -> list[float]:
     return [v for c in cells for v in _tt._values(c["metrics"][metric])]
 
 
+def _per_draw(rec: Records, cells: list[dict[str, Any]], metric: str) -> list[float]:
+    """One value per different random draw behind ``metric`` in ``cells``: the mean of the trials that ran on one seed
+    (FI's ledger), in any setting. A trial with no recorded seed, or a record that does not say which trial each value
+    is, counts as a draw of its own."""
+    groups: dict[Any, list[float]] = {}
+    for c in cells:
+        m = c["metrics"].get(metric)
+        raw = m.get("values") if isinstance(m, dict) else None
+        ids = m.get("trials") if isinstance(m, dict) else None
+        if not isinstance(raw, (list, tuple)):
+            continue
+        aligned = isinstance(ids, (list, tuple)) and len(ids) == len(raw)
+        for i, v in enumerate(raw):
+            if not (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))):
+                continue
+            seed = rec.seeds_of(c).get(ids[i]) if aligned else None
+            groups.setdefault(seed if seed is not None else ("own", str(c.get("key")), i), []).append(float(v))
+    return [sum(g) / len(g) for g in groups.values()]
+
+
 def _setting_values(cells: list[dict[str, Any]], metric: str) -> list[float] | None:
     """The one value per setting when ``metric`` is the same in every trial of every setting in ``cells`` (at least two
     trials each, so a value that was only measured once is never taken for one), else ``None``. A value like that is
@@ -834,6 +875,21 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
         return Measured(summary["mean"], "count", n=summary["n"], successes=int(summary["successes"]))
     if form == "mean":
         return Measured(summary["mean"])
+    if form in ("mean_ci", "ci", "pm", "se") and len(cells) > 1 and rec.share_draws(cells):
+        # The settings ran trials on the same seeds, so those trials are not independent repeats. What FI counts is the
+        # number of different draws: a draw's value is the mean of the trials that ran on it, whatever the setting.
+        draws = _per_draw(rec, cells, metric)
+        if len(draws) < 2:
+            raise _Unfilled("the settings share their random draws and fewer than two different draws gave a value, "
+                            "so there is no interval")
+        across = _tt.summary(draws)
+        se = across["sd"] / math.sqrt(len(draws))
+        if form == "se":
+            return Measured(se)
+        half = _stats._t95(len(draws) - 1) * se
+        return Measured(across["mean"], "interval", across["mean"] - half, across["mean"] + half,
+                        f"95% t interval over {len(draws)} different random draws, which the settings share", None,
+                        symmetric=True)
     if form in ("mean_ci", "ci", "pm"):
         lo, hi, how = _tt.interval(summary)
         if lo is None or hi is None:
@@ -1277,6 +1333,15 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
         rec.unread = tuple(unread)
     except Exception:  # noqa: BLE001 -- an axis FI cannot tell is unread counts as read: nothing is pooled by guess
         rec.unread = ()
+    try:
+        from . import disclosure as _disclosure
+
+        got = _disclosure._ledger_rows(root)
+        for (cell, trial), (_status, seed) in (got[1].items() if got else ()):
+            if seed is not None:
+                rec.seeds.setdefault(cell, {})[trial] = seed
+    except Exception:  # noqa: BLE001 -- no readable ledger: the trials are taken as independent, as before
+        rec.seeds = {}
     return rec
 
 

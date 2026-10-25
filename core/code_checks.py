@@ -171,7 +171,7 @@ async def _small_run_verdicts(quest_root: Path, protocol: dict[str, Any] | None,
         return [Verdict("small_run", None, why), Verdict("trial_checks", None, why)]
     grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
     thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
-    paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
+    paired = _mc_error.paired(protocol)
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
     got = await _small.run(executor, python, quest_root, simulate.relative_to(quest_root).as_posix(), grid,
                            deterministic="run_trial" not in entries, timeout_s=_small.budget(timeout_s), env=dict(env),

@@ -1140,8 +1140,8 @@ class TrialsRunner:
         grid = _search.study_grid(protocol)
         runs = int(protocol.get("runs_per_setting") or 1)
         key = _run_key(self.simulate, protocol, runs, base, self.deterministic)
-        # A paired metric compares the settings trial by trial: each trial number gets one seed across the settings.
-        paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
+        # Each trial number gets one seed across the settings only when the plan asks for common random numbers.
+        paired = _mc.paired(protocol)
         inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
         run = _load_run(self.quest_root, key)
         if run is not None:

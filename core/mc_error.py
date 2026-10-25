@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import math
+import re
 from typing import Any
 
 from . import metric_spec as _metric_spec
@@ -108,11 +109,25 @@ def repeats_trials(protocol: dict[str, Any] | None) -> bool | None:
     return max(runs) > 1
 
 
+#: Words of a ``seed_policy`` that ask for the same random draws in every setting. "paired" alone is not one: a metric
+#: pairs two estimates of the same trial's data, which says nothing about the draws of another setting.
+_COMMON_DRAWS_RE = re.compile(
+    r"(?<!no )(?<!not )(?<!without )common random|\bcrn\b|shared (random )?(stream|seed|draw|number)|"
+    r"same (random )?(stream|seed|draw|number)|coupled", re.IGNORECASE)
+
+
 def paired(protocol: dict[str, Any] | None) -> bool:
-    """Whether the study is paired (a metric says ``paired: true``): it runs trial ``t`` of every setting on one seed, and
-    a check's trials then get those seeds too (:func:`core.trial_runner.trial_seed` with ``key=""``)."""
-    metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
-    return any(isinstance(m, dict) and m.get("paired") for m in metrics or [])
+    """Whether trial ``t`` of every setting runs on one seed (common random numbers, :func:`core.trial_runner.trial_seed`
+    with ``key=""``, a check's trials then get those seeds too). Only when the plan asks for it: a metric says
+    ``paired: true`` (settings compared trial by trial) *and* the protocol's ``seed_policy`` says the settings share
+    their random numbers. A metric marked paired alone only pairs estimates inside a trial; the settings then each draw
+    their own stream, which is what a ``seed_policy`` of independent streams says."""
+    if not isinstance(protocol, dict):
+        return False
+    metrics = protocol.get("metrics")
+    if not any(isinstance(m, dict) and m.get("paired") for m in metrics or []):
+        return False
+    return bool(_COMMON_DRAWS_RE.search(str(protocol.get("seed_policy") or "")))
 
 
 def per_trial_flag(oracle: dict[str, Any]) -> bool | None:
