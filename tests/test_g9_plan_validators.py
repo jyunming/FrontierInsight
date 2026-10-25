@@ -138,3 +138,24 @@ async def test_a_search_answer_replaces_the_plans_top_level_scan_parts(tmp_path:
     protocol = plan.parse(kept).design["protocol"]
     assert set(protocol) >= {"optimisation"} and not {"grid", "sub_studies", "in_each_run", "numerical_settings"} & set(protocol)
     assert [s["name"] for s in protocol["optimisation"]["sub_studies"]] == ["kinds", "sizes"]
+
+
+def test_a_plan_FI_edited_itself_stays_one_its_reader_accepts() -> None:
+    """Old code wrote the plan after computing a check's expected value from its formula without asking the reader again:
+    a metric's reference that then disagreed with the check made plan.md unreadable, and the design step dropped the whole
+    plan and drafted from the topic alone. Now only that metric's reference is left out, with a sentence saying so."""
+    from tests import reference_values_plans as P
+
+    protocol = P.with_references(P.load("kin_s1", "protocol.json"), {"coverage_Ea": {"formula": "reference_coverage - 0.1"},
+                                                                      "coverage_lnA": {"formula": "reference_coverage"}})
+    text = plan.render("a topic", None, {"hypothesis": "h", "protocol": protocol})
+    assert plan.parse(text).design is None and "coverage_Ea" in plan.parse(text).error  # the plan the edit leaves
+    fixed, notes = plan.without_unreadable_references(text)
+    design = plan.parse(fixed).design
+    assert design is not None and len(notes) == 1 and "reference value of `coverage_Ea` was left out" in notes[0]
+    by_id = {m["id"]: m for m in design["protocol"]["metrics"]}
+    assert "reference" not in by_id["coverage_Ea"] and by_id["coverage_lnA"]["reference"]["formula"] == "reference_coverage"
+    # known positives: a plan that reads is not touched, and a refusal for another reason is not hidden
+    assert plan.without_unreadable_references(fixed) == (fixed, [])
+    broken = plan.render("a topic", None, {"hypothesis": "h", "protocol": {**protocol, "runs_per_setting": 0}})
+    assert plan.without_unreadable_references(broken)[1] == [] and plan.parse(broken).design is None

@@ -16982,6 +16982,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "it differed from the number the plan wrote (by more than that number's own digits), so the check uses the "
                 "formula's value (worked out before any run): "
                 + "; ".join(f"{c['name']!r} {c['was']:.10g} -> {c['now']:.10g}" for c in corrections) + "."))
+            # A metric's reference written against the old number can now disagree with the check: the plan FI wrote must
+            # still be one its own reader accepts, or the design step drops the whole plan and drafts from the topic alone.
+            new_text, dropped = _plan.without_unreadable_references(new_text)
+            for note in dropped:
+                self._log.warning("[oracle] %s", note)
+            left = [*left, *[f"{n[0].upper()}{n[1:]}." for n in dropped]]
             path.write_text(new_text, encoding="utf-8")
             _plan.record_version(self.quest_root, new_text, by="engine",
                                  note="expected values computed by FI from the plan's own formulas")
