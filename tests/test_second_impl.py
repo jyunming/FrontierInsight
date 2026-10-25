@@ -159,6 +159,44 @@ def test_judge_rows_exceptions_and_excluded():
     assert si.judge_rows([rows[1]], inputs[1:2], si.REL)["status"] == "unconfirmed"
 
 
+def test_a_different_return_shape_with_equal_shared_values_is_not_a_disagreement():
+    inputs = [{"x": 1.0}, {"x": 2.0}]
+    main = {"Ea": 49.6, "lnA": 15.3, "se_Ea": 0.69, "se_lnA": 0.26}
+    ref = {"Ea": 49.6, "lnA": 15.3, "covariance": [[0.48, 0.18], [0.18, 0.07]], "se_Ea": 0.69}
+    v = si.judge_rows([{"main": main, "ref": ref}, {"main": main, "ref": ref}], inputs, si.REL)
+    assert v["status"] == "agree" and not v["disagreements"] and v["compared"] == 2
+    assert "covariance" in v["shape_notes"][0] and "se_lnA" in v["shape_notes"][0]
+
+
+def test_a_real_difference_in_a_shared_value_still_disagrees_when_the_shapes_differ():
+    main = {"Ea": 49.6, "lnA": 15.3, "se_Ea": 0.69, "se_lnA": 0.26}
+    ref = {"Ea": 49.6 * 1.1, "lnA": 15.3, "covariance": [[1.0]], "se_Ea": 0.69}
+    v = si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL)
+    assert v["status"] == "disagree" and v["disagreements"][0]["kind"] == "value"
+
+
+def test_nothing_shared_is_not_compared_and_never_a_disagreement():
+    v = si.judge_rows([{"main": {"a": 1.0}, "ref": {"b": 2.0}}], [{"x": 1.0}], si.REL)
+    assert v["status"] == "unconfirmed" and "no value in common" in v["why"] and not v["disagreements"]
+
+
+def test_a_transformed_first_element_of_a_list_is_still_a_disagreement():
+    v = si.judge_rows([{"main": [-4.609, 0.000844], "ref": [0.00996, 0.000844]}], [{"x": 1.0}], si.REL)
+    assert v["status"] == "disagree"
+    assert si.compare_shared([1.0, 2.0], [1.0, 2.0, 3.0])[1]  # lists of another length still differ
+
+
+def test_a_step_whose_versions_return_different_shapes_with_equal_values_is_resolved_agree(tmp_path):
+    main = GOOD_MAIN.replace("return -slope * 8.314", 'return {"Ea": -slope * 8.314, "se": 0.5}')
+    ref = ("def activation_energy(slope):\n"
+           "    return {'Ea': -8.314 * slope, 'covariance': [[1.0]]}\n")
+    fake = Fake(write=[fenced(ref)])
+    root, s, rec = run_it(tmp_path, fake, main=main)
+    e = rec["functions"]["activation_energy"]
+    assert e["status"] == "agree" and rec["calls"] == 1
+    assert "both return shapes" in e["shape_note"] and "limitation" not in e
+
+
 def test_key_functions_order_and_random_skip():
     proto = protocol(example=True)
     proto["model"]["equations"] = [

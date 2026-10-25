@@ -779,6 +779,33 @@ def same(a: Any, b: Any, rel: float = REL) -> bool:
     return False
 
 
+def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "") -> tuple[int, bool, list[str]]:
+    """Compare what both versions return, matched by name (dict keys present in both) or position (lists of the same
+    length). ``(values compared, whether one of them differs, notes)``. A key only one version returns is not a value
+    disagreement: it is a note that the description allows both return shapes. Everything that is not a dict or a list
+    of the same length as the other is judged by :func:`same`, so a real difference is judged as before."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        notes: list[str] = []
+        only = sorted(str(k) for k in set(a) ^ set(b))
+        if only:
+            notes.append(f"{path or 'the result'}: only one version returns {', '.join(only)}")
+        n, differs = 0, False
+        for k in a:
+            if k in b:
+                cn, cd, cnotes = compare_shared(a[k], b[k], rel, f"{path}.{k}" if path else str(k))
+                n, differs = n + cn, differs or cd
+                notes += cnotes
+        return n, differs, notes
+    if isinstance(a, list) and isinstance(b, list) and len(a) == len(b) and any(isinstance(x, (dict, list)) for x in a + b):
+        n, differs, notes = 0, False, []
+        for i, (x, y) in enumerate(zip(a, b)):
+            cn, cd, cnotes = compare_shared(x, y, rel, f"{path}[{i}]")
+            n, differs = n + cn, differs or cd
+            notes += cnotes
+        return n, differs, notes
+    return 1, not same(a, b, rel), []
+
+
 def short(value: Any, limit: int = 120) -> str:
     """A result in few characters for a sentence or a prompt."""
     if isinstance(value, float):
@@ -795,8 +822,9 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
     """The verdict on the rows the script returned (one per input: ``main`` / ``ref`` results, or ``main_err`` /
     ``ref_err``). Both raising excludes the input; one raising is a ``domain`` disagreement; otherwise the values are
     compared. ``{"status": agree|disagree|unconfirmed, "compared", "excluded", "disagreements": [{inputs, main, other, kind}]}``."""
-    compared = excluded = 0
+    compared = excluded = unshared = 0
     bad: list[dict[str, Any]] = []
+    notes: list[str] = []
     for case, row in zip(inputs, rows):
         m_err, r_err = row.get("main_err"), row.get("ref_err")
         if m_err and r_err:
@@ -807,16 +835,26 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
             bad.append({"inputs": case, "kind": "domain",
                         "main": f"raised {m_err}" if m_err else short(decode(row.get("main"))),
                         "other": f"raised {r_err}" if r_err else short(decode(row.get("ref")))})
-        elif not same(decode(row.get("main")), decode(row.get("ref")), rel):
-            bad.append({"inputs": case, "kind": "value", "main": short(decode(row.get("main"))),
-                        "other": short(decode(row.get("ref")))})
+        else:
+            shared, differs, case_notes = compare_shared(decode(row.get("main")), decode(row.get("ref")), rel)
+            notes += [n for n in case_notes if n not in notes]
+            if differs:
+                bad.append({"inputs": case, "kind": "value", "main": short(decode(row.get("main"))),
+                            "other": short(decode(row.get("ref")))})
+            elif shared == 0:
+                unshared += 1
     if bad:
         status = DISAGREE
-    elif compared == 0:
+    elif compared == 0 or unshared == compared:
         status = UNCONFIRMED
     else:
         status = AGREE
-    return {"status": status, "compared": compared, "excluded": excluded, "disagreements": bad}
+    out: dict[str, Any] = {"status": status, "compared": compared - unshared, "excluded": excluded, "disagreements": bad}
+    if notes:
+        out["shape_notes"] = notes[:3]
+    if status == UNCONFIRMED and unshared:
+        out["why"] = "the two versions return no value in common to compare"
+    return out
 
 
 _SCRIPT = r'''
@@ -1310,7 +1348,7 @@ class SecondImpl:
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
         verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol))
         if verdict["status"] == UNCONFIRMED:
-            verdict.update(why="both versions raised on every input", retry=False)
+            verdict.update(why=verdict.get("why") or "both versions raised on every input", retry=False)
         return verdict
 
     # -- one function --
@@ -1345,8 +1383,14 @@ class SecondImpl:
             entry["disagreements"] = res["disagreements"][:3]
             entry["compared"] = res.get("compared", 0)
             entry["excluded"] = res.get("excluded", 0)
+            if res.get("shape_notes"):
+                entry["shape_note"] = ("the description allows both return shapes (" + "; ".join(res["shape_notes"])
+                                       + "); the values both return were compared")
+            else:
+                entry.pop("shape_note", None)
             if res["status"] == AGREE:
-                self._finish(spec, entry, AGREE, f"{res.get('compared', 0)} input(s) compared")
+                self._finish(spec, entry, AGREE, f"{res.get('compared', 0)} input(s) compared"
+                             + (f"; {entry['shape_note']}" if entry.get("shape_note") else ""))
                 return
             if res["status"] == UNCONFIRMED:
                 self._finish(spec, entry, UNCONFIRMED, res.get("why", ""), recheck=bool(res.get("retry")))
