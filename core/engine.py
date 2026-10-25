@@ -6477,6 +6477,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         still = {
             "in_each_run": not _in_run.of(protocol),
             "code_files": bool(_code_layout.files_note(layout)),
+            "split_overridden": self._split_overridden(state),
         }
         kept = [e for e in entries if still.get(str(e.get("kind")), False)]
         if kept != entries:
@@ -7843,9 +7844,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             goal = (f" (make {objective['quantity']} as {'low' if objective['direction'] == 'minimise' else 'high'} as "
                     f"possible by changing {', '.join(v['name'] for v in block['design_variables'])})")
         setup: list[str] = []
-        if not self._split_on(state):
-            setup.append("the search calls the simulation as a function of its own, but this quest keeps one script "
-                         "(`execution.split_analysis: false`): set it to `auto` in the quest's config and resume")
+        if self._split_overridden(state, design):
+            self._note_split_overridden()
         if self.config.execution.background_jobs:
             setup.append("the search runs here, one design after another, not as a job array on a cluster "
                          "(`execution.background_jobs` is on): turn it off in the quest's config and resume")
@@ -7870,6 +7870,30 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             alternatives=["Ask for a change in words: `--revise-plan \"<what to change>\"`."],
             payload={"quest_id": self.quest_id, "plan_file": str(path), "best_design_stage": True},
         )
+
+    def _split_overridden(self, state: QuestState, design: Any = None) -> bool:
+        """Whether ``execution.split_analysis: false`` is overridden: the quest's plan is a search for the best design,
+        which calls the simulation as a function of its own, so FI keeps the run and the analysis apart anyway. Not when
+        the trials go to a cluster (``background_jobs``): that stays an honest stop."""
+        if self.config.execution.split_analysis is not False or self.config.execution.background_jobs:
+            return False
+        if not self._runs_code(state):
+            return False
+        try:
+            return bool(self._search_problems(state, design if design is not None else state.get("design"))[0])
+        except Exception:  # noqa: BLE001 -- a design that cannot be read is not a search to override for
+            return False
+
+    def _note_split_overridden(self) -> None:
+        """Say once, in run.log and in the record the paper's limitations and QUALITY.md are built from, that
+        ``split_analysis: false`` was not followed for a search."""
+        sentence = ("the setting `execution.split_analysis: false` was not followed: the study is a search for the best "
+                    "design, which needs the run and the analysis kept apart, so FI ran it as two scripts")
+        if not getattr(self, "_split_override_logged", False):
+            self._split_override_logged = True
+            self._log.warning("[design] %s", sentence)
+        self._note_not_done([{"name": "execution.split_analysis override", "sentence": sentence,
+                              "kind": "split_overridden"}], kind="split_overridden")
 
     def _runs_code(self, state: QuestState) -> bool:
         """Whether the quest runs an experiment of its own (not the no-simulation path, a survey or ``--analyze``)."""
@@ -26130,6 +26154,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         ``independently_validated``. It is off for a study with no experiment (the no-simulation path, a survey) and a
         run that only analyses data. ``split_analysis: false`` is the way back to one script, and gives that up."""
         mode = self.config.execution.split_analysis
+        if mode is False and self._split_overridden(state):
+            return True  # a search needs the run and the analysis apart (see _note_split_overridden)
         if mode != "auto":
             return bool(mode)
         # A background job (a cluster) runs FI's trials as a job array (core/trial_runner.py): two scripts and submit.py.
