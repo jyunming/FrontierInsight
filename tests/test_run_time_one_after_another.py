@@ -156,3 +156,10 @@ def test_the_runner_keeps_the_counted_number_and_each_settings_wall_time(tmp_pat
 def test_the_writer_is_told_when_the_third_wording_applies() -> None:
     words = paper_facts._FACT_WORDS["time_limit_met"]
     assert NOT_SHOWN in words and "at or under the limit while the most it takes is over it or not known" in words
+
+
+def test_the_least_decides_over_whatever_the_count(tmp_path: Path) -> None:
+    # no count, no proof of overlap (the trials add to less than the wall time): the trials' own times, 121 s, are still
+    # the least a one-after-another run takes, and the limit is over
+    met, said, sentence = _met(_quest(tmp_path / "q", wall=130.0, total=121.0, at_once=None), 130.0)
+    assert met == "over" and "at least 121 s" in said and "is over the topic" in sentence
