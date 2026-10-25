@@ -241,7 +241,7 @@ def _research_plan(tmp_path: Path) -> tuple[Engine, Path, str]:
     eng.config = eng.config.model_copy(update={"rigor_profile": "research"})
     path = plan.plan_path(eng.quest_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    design = {"hypothesis": "an annular source prints the line best", "method": "sweep sigma",
+    design = {"hypothesis": "a wider source prints the line best", "method": "sweep sigma",
               "protocol": {"grid": {"sigma": [0.3, 0.5]}, "oracles": _oracles(), "model": GOOD_MODEL}}
     path.write_text(plan.render("source", {}, design, sources=SOURCES), encoding="utf-8")
     return eng, path, path.read_text(encoding="utf-8")
