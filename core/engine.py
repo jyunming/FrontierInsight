@@ -6375,6 +6375,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except OSError as e:
             self._log.warning("[plan] couldn't keep the plan model's answer: %r", e)
 
+    def _keep_repair_answer(self, kind: str, text: str | None) -> None:
+        """Write a repair's raw reply to ``.fi/repair_answers/<kind>_NNN.txt`` (bounded, like :meth:`_keep_plan_answer`), so a
+        refusal of the repair can be read beside what the model wrote."""
+        try:
+            folder = self.fi_dir / "repair_answers"
+            folder.mkdir(parents=True, exist_ok=True)
+            number = len(list(folder.glob(f"{kind}_*.txt"))) + 1
+            if number > self._PLAN_ANSWERS_KEPT:
+                return
+            (folder / f"{kind}_{number:03d}.txt").write_text((text or "")[: self._PLAN_ANSWER_CHARS], encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[%s] couldn't keep the repair's answer: %r", kind, e)
+
     async def _ask_for_plan_parts(self, prompt: str) -> dict[str, Any]:
         """One JSON object of the asked parts from the plan's model (node ``plan_revise``, so it is the same model, limits
         and call count as every other request of the plan step). A reply that holds no such object is asked once more,
@@ -11283,18 +11296,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         new_code = parsed.get("code")
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, _deps = _parse_implement_response(text)
-        try:
-            ast.parse(new_code)
-            # The same script, redrawn: one that lost what FI reads from it (its result line, the oracle branch, the
-            # seed, the simulation's entry points) is another script and is not used.
-            usable = bool(new_code.strip()) and all(
-                mark in new_code for mark in _figdata.KEEP_MARKS if mark in code) and (
-                not _code_review.prints_result_json(code) or _code_review.prints_result_json(new_code))
-        except (SyntaxError, ValueError):
-            usable = False
+        # The same script, redrawn: one that lost what FI reads from it (its result line, the oracle branch, the
+        # seed, the simulation's entry points) is another script and is not used.
+        self._keep_repair_answer("figures", text)
+        broken = _trial_runner.repair_breaks_contract(code, new_code, path.name)
+        usable = not broken and all(mark in new_code for mark in _figdata.KEEP_MARKS if mark in code) and (
+            not _code_review.prints_result_json(code) or _code_review.prints_result_json(new_code))
         if not usable:
-            self._log.warning("[execute] the redraw of %s is not the same script with its figures drawn from the results; "
-                              "keeping it as written", path.name)
+            self._log.warning("[execute] the redraw of %s is not the same script with its figures drawn from the results "
+                              "(%s); keeping it as written", path.name, broken or "it lost a part FI reads from the script")
             return False
         left = _figdata.typed_series(new_code, path.name)
         if len(left) >= len(found):
@@ -12120,11 +12130,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         new_code, new_deps = parsed.get("code"), _coerce_dep_list(parsed.get("deps"))
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, new_deps = _parse_implement_response(text)
-        try:
-            ast.parse(new_code)
-            usable = bool(new_code.strip())
-        except (SyntaxError, ValueError):
-            usable = False
+        self._keep_repair_answer("protocol", text)
+        broken = _trial_runner.repair_breaks_contract(code, new_code, path.name)
+        if broken:
+            self._log.warning("[protocol] the repair of %s is not usable (%s)", path.name, broken)
+        usable = not broken
         scripts = {**self._scripts_on_disk(), path.name: new_code} if usable else {}
         remaining = [m for m in _protocol.check_repairable(protocol, scripts) if not m.where or path.name in m.where] if usable else mismatches
         if not usable or len(remaining) >= len(mismatches):
@@ -17313,22 +17323,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if parsed and not parsed.get("code"):
                 return None, False, "no_code"  # an answer with nothing to change
             new_code, _deps = _parse_implement_response(text)
-        # FI calls a trial-mode simulation through run_trial / run_cell: a repair must still define each one the script
-        # defines now (a reply's JSON template parses as Python, defines none, and replaced a whole simulation).
-        needed = set(_trial_runner._ENTRY_RE.findall(code)) & {"run_trial", "run_cell"}
-        defined = set(_trial_runner._ENTRY_RE.findall(new_code or ""))
-        try:
-            ast.parse(new_code)
-            usable = bool(new_code.strip()) and (
-                ("def oracle" in new_code or all(_oracle.case_of(o) for o in oracles)) and needed <= defined
-                if getattr(self, "_trial_mode", False) else "FI_ORACLE" in new_code
-            )
-        except (SyntaxError, ValueError):
-            usable = False
-        if not usable:
-            self._log.warning("[oracle] the repair of %s is not usable (it must parse and %s); keeping it as written", path.name,
-                              f"define {', '.join(sorted(needed)) or 'oracle()'} as the script does now"
-                              if getattr(self, "_trial_mode", False) else "honour FI_ORACLE")
+        # One rule decides whether a repaired script still keeps FI's contract (what FI calls it by, its result line, the
+        # oracle marker or cases): `repair_breaks_contract`; its reason is logged.
+        self._keep_repair_answer("oracle", text)
+        broken = _trial_runner.repair_breaks_contract(code, new_code, path.name, oracles=oracles,
+                                                      trial=bool(getattr(self, "_trial_mode", False)))
+        if broken:
+            self._log.warning("[oracle] the repair of %s is not usable (%s); keeping it as written", path.name, broken)
             return None, False, "not_usable"
         if (path.name == _split_run.SIMULATE_NAME and getattr(self, "_trial_mode", False)
                 and _trial_runner.trial_aggregates(new_code)):
@@ -17463,13 +17464,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, new_deps = _parse_implement_response(text)  # fence drift
         if not why:
-            try:
-                ast.parse(new_code)
-                usable = bool(new_code.strip())
-            except (SyntaxError, ValueError):
-                usable = False
-            if not usable:
-                why = "the model returned no usable script"
+            self._keep_repair_answer("seed", text)
+            broken = _trial_runner.repair_breaks_contract(code, new_code, code_path.name)
+            if broken:
+                why = f"the model returned no usable script ({broken})"
             elif "FI_REPLICATE_SEED" not in new_code:  # the test _script_reads_replicate_seed applies
                 why = "the repaired script still does not read it"
             elif unseeded_rng_calls(new_code):

@@ -775,13 +775,18 @@ def collect_cluster(quest_root: Path, record: dict[str, Any], *, run_id: str = "
                                  "on the cluster says why)")
 
 
-def repair_breaks_contract(old: str, new: str, name: str) -> str:
+def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[str, Any]] | None = None,
+                           trial: bool = False) -> str:
     """Why a repaired script ``new`` cannot replace ``old`` (``name`` is the file), or ``""`` when it can. Read, not run.
 
     The contract comes from FI's own records of the file it replaces, not from a list of names: the new text must parse,
     must still bind (define or import) each entry point FI calls that the old one defines (:data:`_ENTRY_RE`: ``run_trial`` / ``run_cell`` of
     simulate.py), and an analysis that printed ``RESULT_JSON`` must still print it. A reply that is a stand-in for the
     script (a bare word such as a placeholder parses as Python and defines nothing) is refused here.
+
+    ``oracles`` is given by a repair made for the oracle checks and adds what those need: in a trial-mode quest
+    (``trial``) the text must define ``oracle()`` or every check must have a case FI runs; otherwise the script must
+    carry the ``FI_ORACLE`` marker. This is the one place that rule is written; every repair path asks it.
     """
     try:
         tree = ast.parse(new or "")
@@ -789,7 +794,12 @@ def repair_breaks_contract(old: str, new: str, name: str) -> str:
         return f"it is not Python that parses ({type(exc).__name__})"
     if not any(not (isinstance(n, ast.Expr) and isinstance(n.value, (ast.Name, ast.Constant))) for n in tree.body):
         return "it holds no code (only a name or a value), so it is not the whole of the script"
-    if name == "simulate.py":
+    if oracles is not None:
+        if trial and not ("def oracle" in new or all(_oracle.case_of(o) for o in oracles)):
+            return "it defines no oracle() and some check has no case FI can run"
+        if not trial and "FI_ORACLE" not in new:
+            return "it does not honour FI_ORACLE"
+    if name == "simulate.py" and (oracles is None or trial):
         lost = sorted((set(_ENTRY_RE.findall(old or "")) & {"run_trial", "run_cell"}) - _top_level_names(tree))
         if lost:
             return f"it does not define {', '.join(lost)}, which FI calls and the script has now"

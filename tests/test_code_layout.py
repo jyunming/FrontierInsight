@@ -846,6 +846,27 @@ async def test_an_oracle_repair_that_drops_the_functions_fi_calls_is_not_used(
     assert (code / "simulate.py").read_text(encoding="utf-8") == before
 
 
+@pytest.mark.asyncio
+async def test_an_oracle_repair_that_imports_its_entry_points_is_used_and_a_stand_in_says_why(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    engine._trial_mode = True
+    moved = "def oracle():\n    return {}\n\nfrom helper_mod import run_cell, run_trial\n"
+    reply = {"code": moved}
+
+    async def answer(prompt, **kw):  # noqa: ANN001
+        return json.dumps(reply)
+
+    monkeypatch.setattr(engine, "_chat", answer)
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert outcome == "applied" and new == moved
+    assert list((engine.fi_dir / "repair_answers").glob("oracle_*.txt")), "the raw reply is kept"
+    reply["code"] = "PLACEHOLDER"
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert new is None and outcome == "not_usable"
+    assert "holds no code" in (engine.fi_dir / "run.log").read_text(encoding="utf-8"), "the log says why"
+
+
 def test_the_generated_tests_call_run_cell_for_a_mean_and_run_trial_for_an_invariant() -> None:
     text = cl.oracle_tests({**PROTOCOL, "oracles": [ORACLE, {**ORACLE, "name": "inv", "kind": "invariant"},
                                                     {**ORACLE, "name": "flag", "per_trial": True}]})
