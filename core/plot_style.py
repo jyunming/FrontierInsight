@@ -99,6 +99,10 @@ PAPER_ROW_MAX_IN = 2.9
 #: of panels at their least, when that is taller): the copy is placed at its own
 #: width, which bypasses the template's own cap of a third of the text height.
 PAPER_MAX_HEIGHT_IN = 3.2
+#: Each panel of a paper copy keeps at least this share of the size it had in the figure as drawn, the whole figure
+#: taken at the copy's width (a panel half as wide or half as tall as that is squeezed). A layout that leaves less is
+#: not kept.
+PAPER_PANEL_MIN_SHARE = 0.5
 #: A single panel at least this many times as wide as it is tall (a time series)
 #: prints at the full width.
 PAPER_WIDE_ASPECT = 2.0
@@ -118,7 +122,7 @@ def paper_profile() -> dict[str, object]:
         # scaled as the ticks are and kept between these sizes.
         "other_scale": round(PAPER_TICK_PT / HOUSE_TICK_PT, 4), "other_min_pt": 7.0, "other_max_pt": 9.0,
         "row_min_in": PAPER_ROW_MIN_IN, "row_max_in": PAPER_ROW_MAX_IN, "max_height_in": PAPER_MAX_HEIGHT_IN,
-        "wide_aspect": PAPER_WIDE_ASPECT, "dpi": PAPER_DPI,
+        "wide_aspect": PAPER_WIDE_ASPECT, "dpi": PAPER_DPI, "panel_min_share": PAPER_PANEL_MIN_SHARE,
         # A collection of more points or cells than this is an image inside the vector PDF.
         "raster_over": PAPER_RASTER_OVER,
         # A copy whose first layout failed tries another only within this many seconds of starting.
@@ -342,6 +346,7 @@ try:
         import json as _fi_json
         import math as _fi_math
         import time as _fi_time
+        import warnings as _fi_warnings
         import numpy as _fi_np
         from matplotlib.collections import LineCollection as _FiLineCollection
         from matplotlib.collections import PathCollection as _FiPathCollection
@@ -1515,6 +1520,13 @@ _PAPER_SOURCE = '''\
             width, height, rule = _fi_paper_figure_size(drawn, rows, cols, p)
             info = {"file": p["dirname"] + "/" + stem + ".pdf", "png": p["dirname"] + "/" + stem + ".png",
                     "drawn_in": [round(v, 3) for v in drawn], "width": rule}
+            # The size of each panel's plotting area as the figure was drawn, in inches: what the copy is held to.
+            try:
+                first = _fi_draw(fig)
+                drawn_panels = [(ax.get_window_extent(first).width / fig.dpi, ax.get_window_extent(first).height / fig.dpi)
+                                for ax in panels]
+            except Exception:
+                drawn_panels = None
             fig.set_layout_engine(mode)
             constrained = mode == "constrained"
             fig.set_size_inches(width, height)
@@ -1607,6 +1619,19 @@ _PAPER_SOURCE = '''\
                         layout.append({"check": "legend_over_data", "panel": index,
                                        "legend": [t.get_text() for t in leg.get_texts()],
                                        "line_px": round(line_px, 1), "points": points})
+            # How much of its drawn size each panel kept in the copy (both sizes taken from the drawn panels).
+            panels_in, panel_share = [], None
+            scale = width / drawn[0] if drawn[0] > 0 else 1.0
+            for index, ax in enumerate(panels):
+                box_now = ax.get_window_extent(renderer)
+                now = (box_now.width / fig.dpi, box_now.height / fig.dpi)
+                panels_in.append([round(now[0], 3), round(now[1], 3)])
+                if drawn_panels and drawn_panels[index][0] > 0 and drawn_panels[index][1] > 0:
+                    share = min(now[0] / (drawn_panels[index][0] * scale), now[1] / (drawn_panels[index][1] * scale))
+                    panel_share = share if panel_share is None else min(panel_share, share)
+            if panel_share is not None and panel_share < p["panel_min_share"]:
+                raise ValueError("a panel is left %.0f%% of its drawn size, under the %.0f%% a copy keeps"
+                                 % (100 * panel_share, 100 * p["panel_min_share"]))
             ticks = _fi_tick_pt(fig)
             labels = [float(t.get_fontsize()) for ax in panels for t in (ax.xaxis.label, ax.yaxis.label)
                       if t.get_visible() and t.get_text().strip()]
@@ -1622,7 +1647,8 @@ _PAPER_SOURCE = '''\
                 "fit": mode + (", cropped" if tight else ""),
                 "tick_pt": ticks, "label_pt": min(labels) if labels else None,
                 "titles_dropped": dropped, "titles_kept": kept, "labels_wrapped": wrapped,
-                "legend_moved": moved, "layout": layout,
+                "legend_moved": moved, "layout": layout, "panels_in": panels_in,
+                "panel_share": None if panel_share is None else round(panel_share, 3),
             })
             if rasterized:
                 info["rasterized"] = rasterized
@@ -1647,7 +1673,14 @@ _PAPER_SOURCE = '''\
                     failed.append("no time left for another layout")
                     break
                 try:
-                    info = _fi_paper_attempt(make(), mode, stem, outputs)
+                    # matplotlib itself says when a constrained layout gave up ("axes sizes collapsed to zero") and
+                    # drew the panels as slivers: a copy drawn that way is not kept; the next layout is tried, and
+                    # with none left the figure is placed from its PNG.
+                    with _fi_warnings.catch_warnings(record=True) as caught:
+                        _fi_warnings.simplefilter("always")
+                        info = _fi_paper_attempt(make(), mode, stem, outputs)
+                    if any("collapsed" in str(w.message) for w in caught):
+                        raise ValueError("the layout collapsed the panels")
                 except Exception as exc:
                     _fi_paper_clear(outputs)
                     failed.append(mode + ": " + repr(exc)[:200])

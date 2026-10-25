@@ -45,6 +45,7 @@ from core.provider import (
 )
 from generation._cjk import has_cjk
 from generation._office_pdf import pptx_to_pdf
+from generation._paper_figures import paper_figures
 from generation._pdf_measure import (
     FigureSource,
     measure_pdf,
@@ -159,6 +160,7 @@ async def _check(
         measured = paper_report(
             doc, page_limit=resolve_page_limit(config),
             expect_latex=getattr(config.output, "paper_style", "latex") != "briefing",
+            figures=paper_figures(quest_root),
         )
     else:
         measured = _REPORTS[base](doc)

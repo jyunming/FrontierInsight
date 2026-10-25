@@ -10,10 +10,12 @@ and the slides keep the PNGs. A two-column paper keeps the PNGs too: the paper c
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
-from core.plot_style import PAPER_DIRNAME, PAPER_FULL_WIDTH_IN
+from core.plot_style import PAPER_DIRNAME, PAPER_FULL_WIDTH_IN, PAPER_PANEL_MIN_SHARE, RECORDS_DIRNAME
+from generation._pdf_measure import PaperFigure, copy_panel_share, measure_pdf
 
 # The target of a Markdown image (or link) to a figure file in figures/, with an optional {attributes} block after it.
 _FIGURE_TARGET = re.compile(r"\]\(figures/([^)\s/]+)\.(png|jpe?g|svg)\)(\{[^}]*\})?", re.IGNORECASE)
@@ -33,6 +35,48 @@ def _width_in(pdf: Path) -> float | None:
     except ValueError:
         return None
     return (x1 - x0) / 72 if x1 > x0 else None
+
+
+def paper_figure(root: Path, stem: str) -> PaperFigure | None:
+    """What FI recorded of the paper copy of ``figures/<stem>``, from the figure's record
+    (``.fi/figure_records/<stem>.json``); ``None`` when there is none or it lacks a size or a panel."""
+    try:
+        record = json.loads((Path(root) / ".fi" / RECORDS_DIRNAME / f"{stem}.json").read_text(encoding="utf-8"))
+        paper = record["paper"]
+        drawn = (float(paper["drawn_in"][0]), float(paper["drawn_in"][1]))
+        places = tuple(tuple(float(v) for v in axes["place"]) for axes in record["axes"])
+        if not places or any(len(place) != 4 for place in places):
+            return None
+        return PaperFigure(stem, float(paper["width_in"]), float(paper["height_in"]), drawn, places)  # type: ignore[arg-type]
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return None
+
+
+def paper_figures(root: Path) -> list[PaperFigure]:
+    """The recorded paper copies of every figure of the quest."""
+    found = []
+    records = Path(root) / ".fi" / RECORDS_DIRNAME
+    try:
+        stems = sorted(p.stem for p in records.glob("*.json") if ".seed" not in p.name)
+    except OSError:
+        return []
+    for stem in stems:
+        figure = paper_figure(root, stem)
+        if figure is not None:
+            found.append(figure)
+    return found
+
+
+def copy_is_squeezed(pdf: Path, figure: PaperFigure | None) -> float | None:
+    """The share of its drawn size that the smallest panel of the copy ``pdf`` keeps, measured on the file, when that
+    is under ``PAPER_PANEL_MIN_SHARE``; ``None`` when the copy is fine or cannot be measured against a record."""
+    if figure is None:
+        return None
+    doc = measure_pdf(pdf, max_pages=1)
+    if doc is None or not doc.pages:
+        return None
+    share = copy_panel_share(doc.pages[0], figure)
+    return share if share is not None and share < PAPER_PANEL_MIN_SHARE else None
 
 
 #: The most of the page's text height a paper copy is set at: a third, so a tall figure leaves room for its caption
@@ -58,6 +102,10 @@ def prefer_paper_figures(markdown: str, root: Path, *, two_column: bool = False)
         # Only the copy of a figure that is there: a figure FI took out of figures/ is not shown through a copy left
         # behind.
         if not pdf.is_file() or not (Path(root) / "figures" / f"{stem}.{suffix}").is_file():
+            return match.group(0)
+        # A copy whose panels were drawn as slivers (measured on the file against the figure's record) is not used:
+        # the figure is set from its PNG.
+        if copy_is_squeezed(pdf, paper_figure(root, stem)) is not None:
             return match.group(0)
         if not attributes:
             width = _width_in(pdf)
