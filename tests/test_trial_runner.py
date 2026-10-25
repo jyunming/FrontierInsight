@@ -767,3 +767,19 @@ def test_a_returned_text_is_still_refused(tmp_path: Path) -> None:
                      deterministic=True)
     assert run.failed_trials == 1
     assert "non-numbers" in trial_runner.read_ledger(root)[0]["reason"]
+
+
+def test_a_script_that_raises_while_it_is_loaded_names_the_line(tmp_path: Path) -> None:
+    """A known-answer case of a script whose imported package raises when the script is loaded was reported as
+    "KeyError: 'source'" with no place, for every case: the load error carried no line of the quest's own code."""
+    code = tmp_path / "code"
+    (code / "pkg").mkdir(parents=True)
+    (code / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (code / "pkg" / "model.py").write_text("def anchor():\n    g = globals()\n    return g['source']\n", encoding="utf-8")
+    (code / "simulate.py").write_text(
+        "from pkg import model\nANCHOR = model.anchor()\n\ndef run_cell(cell):\n    return {'x': 1.0}\n", encoding="utf-8")
+    executor = SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}")
+    values, why = asyncio.run(trial_runner.run_case(executor, Path(sys.executable), tmp_path, "code/simulate.py",
+                                                    cell={"a": 1}, timeout_s=60))
+    assert values is None
+    assert "KeyError: 'source'" in why and "(at code/pkg/model.py line 3)" in why

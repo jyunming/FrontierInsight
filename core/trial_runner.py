@@ -73,7 +73,7 @@ SUBMIT_NAME = "submit.py"
 # prints go to stderr, so nothing it prints can pass for a result line. It carries the text of core/in_run.py, so what a
 # run returned is read the same way here, in code/run.py and in FI.
 HARNESS_BODY = r'''
-import importlib.util, json, math, sys, time, traceback, warnings
+import importlib.util, json, math, re, sys, time, traceback, warnings
 
 def _number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -249,7 +249,16 @@ def main():
                 return got
             mod.run_trial = _counted
     except BaseException as e:
-        out.write(json.dumps({"nonce": nonce, "load_error": f"{type(e).__name__}: {e}"[:500]}) + "\n")
+        # The place in the quest's own code that raised, as a failed trial names it (last_frame): without it a script that
+        # raises while it is loaded (at import, or in the module-level code it runs) is reported with no line to open.
+        place = ""
+        for m in re.finditer(r'File "([^"]+)", line (\d+)', traceback.format_exc()):
+            path = m.group(1).replace("\\", "/")
+            if "/code/" in path:
+                rel = path[path.rfind("/code/") + 1:]
+                if "site-packages" not in rel and "/.venv/" not in "/" + rel:
+                    place = f" (at {rel} line {m.group(2)})"
+        out.write(json.dumps({"nonce": nonce, "load_error": f"{type(e).__name__}: {e}"[:max(0, 500 - len(place))] + place}) + "\n")
         out.close()
         sys.exit(3)
     # A check's trials stop when the next one would not fit in the time it is given (``budget_s``): the first always runs.
