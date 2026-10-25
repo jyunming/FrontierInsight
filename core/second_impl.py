@@ -383,7 +383,6 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
     out: dict[str, list[dict[str, Any]]] = {}
     called_at: dict[str, list[int]] = {}
     ran: list[int] = []
-    reads: dict[str, set[str]] = {}
     returned: dict[str, set[str]] = {}
     deadline = time.monotonic() + budget_s if budget_s else None
     for index, cell in enumerate(cells):
@@ -400,9 +399,6 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
         for n, count in (got.get("counts") or {}).items():
             if str(n) in names and isinstance(count, int) and count > 0:
                 called_at.setdefault(str(n), []).append(index)
-        for n, keys in (got.get("reads") or {}).items():
-            if str(n) in names and isinstance(keys, list):
-                reads.setdefault(str(n), set()).update(str(k) for k in keys)
         for n, keys in (got.get("returned") or {}).items():
             if str(n) in names and isinstance(keys, list):
                 returned.setdefault(str(n), set()).update(str(k) for k in keys)
@@ -415,7 +411,6 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
                     kept.append(c)
     out = {n: calls for n, calls in out.items() if calls}
     (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "ran": ran,
-                                             "reads": {n: sorted(k) for n, k in reads.items()},
                                              "returned": {n: sorted(k) for n, k in returned.items()},
                                              "cells": [dict(c) for c in cells]}, default=str), encoding="utf-8")
     return out
@@ -465,8 +460,8 @@ async def _run_instrumented(run: Callable[[list[str]], Awaitable[Any]], root: Pa
 
 def read_captured(quest_root: Path | str) -> dict[str, Any]:
     """The record :func:`capture_inputs` saved: ``cases`` (calls by function), ``called_at`` (the indices of the cells
-    each function was called at), ``ran`` (the indices of the cells that ran to the end), ``reads`` (for a function that
-    returned a dict, the keys its callers read; ``"*"``: all of them; ``returned``: every key it returned) and ``cells``; ``{}`` when there is none."""
+    each function was called at), ``ran`` (the indices of the cells that ran to the end), ``returned`` (for a function that
+    returned a dict, every key it returned) and ``cells``; ``{}`` when there is none."""
     try:
         data = json.loads((Path(quest_root) / CAPTURED).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -828,7 +823,7 @@ def short(value: Any, limit: int = 120) -> str:
     return str(value)[:limit]
 
 
-def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float, read: list[str] | None = None) -> dict[str, Any]:
+def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float) -> dict[str, Any]:
     """The verdict on the rows the script returned (one per input: ``main`` / ``ref`` results, or ``main_err`` /
     ``ref_err``). Both raising excludes the input; one raising is a ``domain`` disagreement; otherwise the values are
     compared. ``{"status": agree|disagree|unconfirmed, "compared", "excluded", "disagreements": [{inputs, main, other, kind}]}``."""
@@ -851,11 +846,9 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
             notes += [n for n in case_notes if n not in notes]
             m_val, r_val = decode(row.get("main")), decode(row.get("ref"))
             if isinstance(m_val, dict) and isinstance(r_val, dict):
-                # An output the callers read (FI recorded which when the simulation ran; with no record, every output of
-                # the first version) that the second version does not return was never compared: the step cannot be
-                # agree on the others alone.
-                need = list(m_val) if read is None or "*" in read else [k for k in m_val if str(k) in read]
-                missing += [str(k) for k in need if k not in r_val and str(k) not in missing]
+                # Every key the first version returned must be carried by the second: one it lacks was never compared, so
+                # the step cannot be agree on the others alone.
+                missing += [str(k) for k in m_val if k not in r_val and str(k) not in missing]
             if differs:
                 bad.append({"inputs": case, "kind": "value", "main": short(decode(row.get("main"))),
                             "other": short(decode(row.get("ref")))})
@@ -1056,8 +1049,7 @@ def write_prompt(spec: _fs.Spec, *, template: string.Template, protocol: dict[st
     given = ", ".join(f"{k} = {short(v)}" for k, v in (example or {}).items())
     example_block = f"# Inputs it will be called with\n\nFI will call the function with, among others: {given}.\n" if given else ""
     rewrite_block = (f"# A first attempt was judged wrong\n\n{rewrite}\n") if rewrite else ""
-    return_block = ("# What it must return\n\nIts result is a dict. The code that uses it reads these keys, so the dict must carry "
-                    "each of them under exactly these names: " + ", ".join(return_keys) + ".\n") if return_keys else ""
+    return_block = ("# What it must return\n\nWhen it returns a dict, the dict carries each of these keys under exactly these names: " + ", ".join(return_keys) + ".\n") if return_keys else ""
     prompt = template.substitute(topic_block=topic_block or "(the topic is not available)", step_block=_spec_block(spec, protocol),
                                  return_block=return_block,
                                  signature=spec.signature.strip(), related_block=related, literature_block=literature,
@@ -1370,26 +1362,16 @@ class SecondImpl:
         rows = out.get("rows") if isinstance(out.get("rows"), list) else []
         if len(rows) != len(inputs):
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
-        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol), self._read_keys(spec))
+        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol))
         if verdict["status"] == UNCONFIRMED:
             verdict.update(why=verdict.get("why") or "both versions raised on every input", retry=False)
         return verdict
 
     def _return_keys(self, spec: _fs.Spec) -> list[str] | None:
-        """The keys the second version's returned dict must carry: the ones the callers read, else (they iterate over it,
-        or there is no record of reads) every key the first version returned when FI ran the simulation; ``None`` when FI
-        has no record of either."""
-        record = read_captured(self.root)
-        read, every = (record.get("reads") or {}).get(spec.name), (record.get("returned") or {}).get(spec.name)
-        if isinstance(read, list) and "*" not in read:
-            return [str(k) for k in read] or None
+        """Every key the first version returned in its dict when FI ran the simulation (all settings run); ``None`` when
+        FI has no record."""
+        every = (read_captured(self.root).get("returned") or {}).get(spec.name)
         return [str(k) for k in every] if isinstance(every, list) and every else None
-
-    def _read_keys(self, spec: _fs.Spec) -> list[str] | None:
-        """The keys of the dict the function returned that its callers read when FI ran the simulation
-        (:func:`capture_inputs`); ``None`` when there is no such record (every output is then required)."""
-        got = (read_captured(self.root).get("reads") or {}).get(spec.name)
-        return [str(k) for k in got] if isinstance(got, list) else None
 
     # -- one function --
 

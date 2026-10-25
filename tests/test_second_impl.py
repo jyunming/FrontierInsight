@@ -162,29 +162,22 @@ def test_judge_rows_exceptions_and_excluded():
 def test_a_different_return_shape_with_equal_shared_values_is_not_a_disagreement():
     inputs = [{"x": 1.0}, {"x": 2.0}]
     main = {"Ea": 49.6, "lnA": 15.3, "se_Ea": 0.69, "se_lnA": 0.26}
-    ref = {"Ea": 49.6, "lnA": 15.3, "covariance": [[0.48, 0.18], [0.18, 0.07]], "se_Ea": 0.69}
-    v = si.judge_rows([{"main": main, "ref": ref}, {"main": main, "ref": ref}], inputs, si.REL, ["Ea", "lnA", "se_Ea"])
+    ref = {**main, "covariance": [[0.48, 0.18], [0.18, 0.07]]}
+    v = si.judge_rows([{"main": main, "ref": ref}, {"main": main, "ref": ref}], inputs, si.REL)
     assert v["status"] == "agree" and not v["disagreements"] and v["compared"] == 2
-    assert "covariance" in v["shape_notes"][0] and "se_lnA" in v["shape_notes"][0]
+    assert "only one version returns covariance" in v["shape_notes"][0]
     assert "those were not compared" in v["shape_notes"][0] and "description" not in v["shape_notes"][0]
 
 
-def test_an_output_the_second_version_lacks_is_not_agree_on_the_strength_of_a_trivial_shared_one():
+def test_a_returned_key_the_second_version_lacks_is_unconfirmed_never_agree():
     main, ref = {"answer": 999, "count": 1}, {"count": 1}
-    v = si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL, ["answer"])
-    assert v["status"] == "unconfirmed" and "answer" in v["why"] and not v["disagreements"]
-    # nothing says which outputs are read: every output of the first version is required
-    assert si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL)["status"] == "unconfirmed"
-    assert si.judge_rows([{"main": main, "ref": {**ref, "answer": 999}}], [{"x": 1.0}], si.REL)["status"] == "agree"
-    # an unread output the second version lacks does not block
-    assert si.judge_rows([{"main": main, "ref": {"answer": 999}}], [{"x": 1.0}], si.REL, ["answer"])["status"] == "agree"
-
-
-def test_a_real_difference_in_a_shared_value_still_disagrees_when_the_shapes_differ():
-    main = {"Ea": 49.6, "lnA": 15.3, "se_Ea": 0.69, "se_lnA": 0.26}
-    ref = {"Ea": 49.6 * 1.1, "lnA": 15.3, "covariance": [[1.0]], "se_Ea": 0.69}
     v = si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL)
-    assert v["status"] == "disagree" and v["disagreements"][0]["kind"] == "value"
+    assert v["status"] == "unconfirmed" and "answer" in v["why"] and not v["disagreements"]
+    # the s8 shape: the second version lacks one of the first version's keys
+    main = {"Ea": 49.6, "lnA": 15.3, "se_Ea": 0.69, "se_lnA": 0.26}
+    ref = {"Ea": 49.6, "lnA": 15.3, "covariance": [[1.0]], "se_Ea": 0.69}
+    assert si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL)["status"] == "unconfirmed"
+    assert si.judge_rows([{"main": main, "ref": {**main, "answer": 1}}], [{"x": 1.0}], si.REL)["status"] == "agree"
 
 
 def test_nothing_shared_is_not_compared_and_never_a_disagreement():
@@ -699,15 +692,10 @@ def _write_request(tmp_path, record):
                            example=None, return_keys=s._return_keys(spec_for(proto)))
 
 
-def test_the_second_writer_is_told_which_keys_the_callers_read(tmp_path):
-    text = _write_request(tmp_path, {"cases": {}, "reads": {"activation_energy": ["Ea", "ci_Ea"]},
-                                     "returned": {"activation_energy": ["Ea", "ci_Ea", "cov"]}})
-    assert "exactly these names: Ea, ci_Ea." in text and "cov" not in text.split("exactly these names")[1][:40]
+def test_the_second_writer_is_told_every_key_the_first_version_returned(tmp_path):
+    text = _write_request(tmp_path, {"cases": {}, "returned": {"activation_energy": ["Ea", "ci_Ea", "cov"]}})
+    assert "When it returns a dict, the dict carries each of these keys under exactly these names: Ea, ci_Ea, cov." in text
 
 
-def test_the_second_writer_is_given_every_returned_key_when_callers_iterate_or_nothing_was_recorded(tmp_path):
-    iterated = {"cases": {}, "reads": {"activation_energy": ["*"]}, "returned": {"activation_energy": ["Ea", "cov"]}}
-    assert "exactly these names: Ea, cov." in _write_request(tmp_path / "a", iterated)
-    old = {"cases": {}, "returned": {"activation_energy": ["Ea", "cov"]}}
-    assert "exactly these names: Ea, cov." in _write_request(tmp_path / "b", old)
-    assert "What it must return" not in _write_request(tmp_path / "c", None)
+def test_the_second_writer_gets_no_key_list_without_a_record(tmp_path):
+    assert "What it must return" not in _write_request(tmp_path, None)
