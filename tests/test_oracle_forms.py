@@ -148,7 +148,7 @@ def test_the_kimi_truncated_expected_value_with_a_tolerance_below_its_precision_
     kimi = {"name": "decay at t=1", "kind": "special_case", "expected": 0.367879, "tolerance": 1e-12,
             "case": {"dt": 0.1}, "measure": "y_end"}
     got = of.enforce({"oracles": [kimi]})
-    assert len(got.requests) == 1 and "6 significant digits" in got.requests[0] and "full precision" in got.requests[0]
+    assert len(got.requests) == 1 and "6 significant digits" in got.requests[0] and "enough digits for the tolerance" in got.requests[0]
     # An exact value, a tolerance the written precision allows, or a value given in full is left alone.
     for fine in ({**kimi, "expected": 0.5}, {**kimi, "tolerance": 1e-6}, {**kimi, "expected": 0.36787944117144233}):
         assert of.enforce({"oracles": [fine]}).requests == [], fine
@@ -658,3 +658,23 @@ def test_a_genuinely_wrong_value_still_fails_after_the_tolerance_is_widened_and_
     for value, passes in ((0.0174088, True), (0.017409 + 10 * widened["tolerance"], False), (0.017409 - 1e-4, False)):
         judged = oc.judged([{**check, "tolerance": widened["tolerance"]}], {"checks": [{"name": "level", "value": value}]})
         assert judged[0]["passed_by_engine"] is passes, value
+
+
+def test_the_one_time_ask_tells_the_plan_to_write_an_exact_value_with_enough_digits() -> None:
+    short = {"name": "share", "kind": "special_case", "expected": 0.3, "tolerance": 1e-6, "case": {"dt": 0.1},
+             "measure": "y_end"}
+    ask = of.request(of.enforce({"oracles": [short]}).requests)
+    assert "If the value is exact or known to more digits, write it with enough digits for the tolerance " \
+           "(for example 0.300000" in ask
+
+
+def test_the_widening_is_in_the_run_record_the_paper_s_limitations_carry(tmp_path: Path) -> None:
+    import json
+    from core import disclosure
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "oracle_review.json").write_text(
+        json.dumps({"tolerance_widened": ["The check 'level' expects 0.04978 ... FI widened the tolerance to 5e-06"]}),
+        encoding="utf-8")
+    assert "FI widened the tolerance to 5e-06." in disclosure.run_record(tmp_path)
+    (tmp_path / ".fi" / "oracle_review.json").write_text("{}", encoding="utf-8")
+    assert "widened" not in disclosure.run_record(tmp_path)

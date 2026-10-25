@@ -598,6 +598,13 @@ def _precision_sentence(missed: Any) -> str:
             f"{', '.join(said)}{more}.")
 
 
+def _widened_sentence(record: Any) -> str:
+    """The known-answer checks whose tolerance FI widened to the digits their expected value is written to, after the plan,
+    asked once, left it tighter (``Engine._widen_to_precision`` keeps the sentences in ``.fi/oracle_review.json``)."""
+    told = [t.strip() for t in record.get("tolerance_widened") or [] if isinstance(t, str) and t.strip()]         if isinstance(record, dict) else []
+    return " ".join(t if t.endswith(".") else t + "." for t in told)
+
+
 def _untested_sentence(notes: list[str]) -> str:
     """The equations FI did not test before the run, by id, in one short sentence (the paper has little room; the reasons
     are in the quality report, from the same record). A note whose id cannot be read is kept as written."""
@@ -753,6 +760,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     if untested:
         parts.append(_untested_sentence(untested))
     parts.append(_precision_sentence(_read_json(quest_root / PRECISION_RECORD)))
+    parts.append(_widened_sentence(_read_json(quest_root / ".fi" / "oracle_review.json")))
     parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts.append(unresolved_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts = [p for p in parts if p]

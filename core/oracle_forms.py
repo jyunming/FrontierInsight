@@ -555,8 +555,9 @@ def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True,
                     f"The check {name!r} expects {text or _literal(expected)}, a value written to {digits} significant digits "  # type: ignore[arg-type]
                     f"(so known only to about ±{_fmt(half)}), but its tolerance is {_fmt(limit)}"
                     f"{' (' + _fmt(tolerance) + ' of the value)' if relative else ''}: a correct simulation "
-                    "would fail it. Give the expected value to full precision (worked out to 15 digits in its "
-                    "`reference`), or a tolerance no tighter than the precision it is written to."
+                    "would fail it. If the value is exact or known to more digits, write it with enough digits for the "
+                    "tolerance (for example 0.300000, or worked out to 15 digits in its `reference`); otherwise give a "
+                    "tolerance no tighter than the precision it is written to."
                 )
     return out
 
