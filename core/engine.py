@@ -6286,18 +6286,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
     _PLAN_ANSWERS_KEPT = 40
     _PLAN_ANSWER_CHARS = 60000
 
-    def _keep_plan_answer(self, text: str | None) -> None:
-        """Write the plan's model's raw answer to a request to complete the plan to ``.fi/plan_answers/NNN.txt``, whether or not
-        the quest keeps every model call (``output.save_model_calls``, off by default). When such an answer is refused, the
-        refusal is only worth reading beside the answer itself: without it nobody can tell whether a rule was unclear or the
-        model wrote something unreadable. Small, bounded, and a failure to write never stops the quest."""
+    #: The most characters kept of a whole rewritten plan (``_rewrite_plan``): the file is long, and the place a parser
+    #: stopped at is usually far into it.
+    _PLAN_FILE_ANSWER_CHARS = 400000
+
+    def _keep_plan_answer(self, text: str | None, *, chars: int | None = None) -> None:
+        """Write the plan's model's raw answer to a request to complete or rewrite the plan to ``.fi/plan_answers/NNN.txt``,
+        whether or not the quest keeps every model call (``output.save_model_calls``, off by default). When such an answer is
+        refused, the refusal is only worth reading beside the answer itself: without it nobody can tell whether a rule was
+        unclear or the model wrote something unreadable. Small, bounded, and a failure to write never stops the quest."""
         try:
             folder = self.fi_dir / "plan_answers"
             folder.mkdir(parents=True, exist_ok=True)
             number = len(list(folder.glob("*.txt"))) + 1
             if number > self._PLAN_ANSWERS_KEPT:
                 return
-            (folder / f"{number:03d}.txt").write_text((text or "")[: self._PLAN_ANSWER_CHARS], encoding="utf-8")
+            (folder / f"{number:03d}.txt").write_text((text or "")[: chars or self._PLAN_ANSWER_CHARS], encoding="utf-8")
         except OSError as e:
             self._log.warning("[plan] couldn't keep the plan model's answer: %r", e)
 
@@ -8456,6 +8460,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         why = parsed.error or "no design"
         found = _plan.design_block(revised)
         if found is None or _plan.yaml_problem(found[2]) is None:
+            # Not a YAML fault of the block, so asking for the block alone would not help (the whole-file retry does).
+            self._log.warning("[plan] the rewritten plan's design block could not be used (%s); %s", why,
+                              "the reply has no design block" if found is None else
+                              "it is valid YAML but not a usable design, so the block alone is not asked for")
             return revised, why, False
         fixed, notes = _plan.repair_design(revised)
         if fixed is not None:
@@ -8467,11 +8475,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                            "again: %s", why, "; ".join(notes))
             return fixed, "", False
         if not ask:
+            self._log.warning("[plan] the rewritten plan's design block could not be used (%s); the block alone was "
+                              "already asked for once", why)
             return revised, why, False
         self._log.warning("[plan] the rewritten plan's design block could not be used (%s); asking the model once for "
                           "the block alone, with where it is broken", why)
         self._progress("Asking the model to correct the plan's design block")
         reply = await self._chat(_plan.block_fix_request(found[2], why), node="plan_revise")
+        self._keep_plan_answer(reply)
         block = _plan.block_from_reply(reply)
         candidate = _plan.replace_design_block(revised, block) if block is not None else None
         if candidate is None:
@@ -8500,6 +8511,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         )
         why = ""
         revised = ""
+        asked_block = False
         for _attempt in (1, 2):
             reply = await self._chat(
                 prompt + (
@@ -8508,10 +8520,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 ),
                 node="plan_revise",
             )
+            self._keep_plan_answer(reply, chars=self._PLAN_FILE_ANSWER_CHARS)
             revised = _plan.strip_outer_fence(reply)
             revised = _plan.keep_latex_in_block(revised)  # `"$\text{SNR}$"` is LaTeX, not a tab and `ext`
-            # The block alone is asked for at most once, after the first answer: at most two calls in all.
-            revised, why, asked = await self._usable_design_block(revised, ask=_attempt == 1)
+            # A block that is not valid YAML is sent back once, alone and with the parser's message, on whichever answer
+            # it is first found on (an answer with no block, or a valid one that is no design, is asked for again as a
+            # whole file): at most three calls in all.
+            revised, why, asked = await self._usable_design_block(revised, ask=not asked_block)
+            asked_block = asked_block or asked
             if not why or asked:
                 break  # used, or a block that could not be used even when asked for alone: not asked for again
         if why:
