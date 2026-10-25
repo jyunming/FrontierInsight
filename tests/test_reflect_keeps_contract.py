@@ -86,3 +86,5 @@ def test_an_entry_point_imported_from_a_helper_counts() -> None:
     assert f(OLD, "from pkg.fixed import run_cell, run_trial\n", "simulate.py") == ""
     assert f(OLD, "from pkg.fixed import run_cell\n", "simulate.py") == (
         "it does not define run_trial, which FI calls and the script has now")
+    assert f(OLD, "import pkg as run_cell\nfrom pkg.fixed import run_trial\n", "simulate.py")
+    assert f(OLD, "run_cell: object\nfrom pkg.fixed import run_trial\n", "simulate.py")

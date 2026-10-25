@@ -800,14 +800,14 @@ def repair_breaks_contract(old: str, new: str, name: str) -> str:
 
 _READS_CELL = re.compile(r"\bcell\s*\[")
 def _top_level_names(tree: ast.Module) -> set[str]:
-    """The names a module binds at its top level: a ``def``, an assignment, or an import (``from pkg import run_cell``)."""
+    """The names a module binds at its top level: a ``def``, an assignment with a value, or ``from pkg import run_cell``."""
     names: set[str] = set()
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            names.update((a.asname or a.name).split(".")[0] for a in node.names)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+        elif isinstance(node, ast.ImportFrom):  # ``import m as run_cell`` binds a module, which FI cannot call
+            names.update(a.asname or a.name for a in node.names)
+        elif isinstance(node, ast.Assign) or (isinstance(node, ast.AnnAssign) and node.value is not None):
             for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
                 names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
     return names
