@@ -78,3 +78,11 @@ def test_contract_helper() -> None:
     assert f(OLD, GOOD, "simulate.py") == ""
     assert f("print('RESULT_JSON: {}')", "print('hi')", "experiment.py")
     assert f("print('RESULT_JSON: {}')", "print('RESULT_JSON: {}')", "experiment.py") == ""
+
+
+def test_an_entry_point_imported_from_a_helper_counts() -> None:
+    """A repair that moves run_trial / run_cell into a helper module and imports them still gives FI what it calls."""
+    f = trial_runner.repair_breaks_contract
+    assert f(OLD, "from pkg.fixed import run_cell, run_trial\n", "simulate.py") == ""
+    assert f(OLD, "from pkg.fixed import run_cell\n", "simulate.py") == (
+        "it does not define run_trial, which FI calls and the script has now")

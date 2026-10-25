@@ -783,3 +783,17 @@ def test_a_script_that_raises_while_it_is_loaded_names_the_line(tmp_path: Path) 
                                                     cell={"a": 1}, timeout_s=60))
     assert values is None
     assert "KeyError: 'source'" in why and "(at code/pkg/model.py line 3)" in why
+
+
+def test_a_load_error_place_comes_from_the_traceback_not_the_message(tmp_path: Path) -> None:
+    """An error message that quotes another file and line must not be reported as the place that raised."""
+    code = tmp_path / "code"
+    code.mkdir(parents=True)
+    (code / "simulate.py").write_text(
+        "raise RuntimeError('File \"C:/q/code/elsewhere.py\", line 987')\n\ndef run_cell(cell):\n    return {}\n",
+        encoding="utf-8")
+    executor = SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}")
+    values, why = asyncio.run(trial_runner.run_case(executor, Path(sys.executable), tmp_path, "code/simulate.py",
+                                                    cell={"a": 1}, timeout_s=60))
+    assert values is None
+    assert "(at code/simulate.py line 1)" in why and "elsewhere.py line 987)" not in why

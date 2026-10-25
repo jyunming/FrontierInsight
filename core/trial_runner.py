@@ -252,12 +252,12 @@ def main():
         # The place in the quest's own code that raised, as a failed trial names it (last_frame): without it a script that
         # raises while it is loaded (at import, or in the module-level code it runs) is reported with no line to open.
         place = ""
-        for m in re.finditer(r'File "([^"]+)", line (\d+)', traceback.format_exc()):
-            path = m.group(1).replace("\\", "/")
+        for frame in traceback.extract_tb(e.__traceback__):
+            path = (frame.filename or "").replace("\\", "/")
             if "/code/" in path:
                 rel = path[path.rfind("/code/") + 1:]
                 if "site-packages" not in rel and "/.venv/" not in "/" + rel:
-                    place = f" (at {rel} line {m.group(2)})"
+                    place = f" (at {rel} line {frame.lineno})"
         out.write(json.dumps({"nonce": nonce, "load_error": f"{type(e).__name__}: {e}"[:max(0, 500 - len(place))] + place}) + "\n")
         out.close()
         sys.exit(3)
@@ -779,7 +779,7 @@ def repair_breaks_contract(old: str, new: str, name: str) -> str:
     """Why a repaired script ``new`` cannot replace ``old`` (``name`` is the file), or ``""`` when it can. Read, not run.
 
     The contract comes from FI's own records of the file it replaces, not from a list of names: the new text must parse,
-    must define each entry point FI calls that the old one defines (:data:`_ENTRY_RE`: ``run_trial`` / ``run_cell`` of
+    must still bind (define or import) each entry point FI calls that the old one defines (:data:`_ENTRY_RE`: ``run_trial`` / ``run_cell`` of
     simulate.py), and an analysis that printed ``RESULT_JSON`` must still print it. A reply that is a stand-in for the
     script (a bare word such as a placeholder parses as Python and defines nothing) is refused here.
     """
@@ -790,7 +790,7 @@ def repair_breaks_contract(old: str, new: str, name: str) -> str:
     if not any(not (isinstance(n, ast.Expr) and isinstance(n.value, (ast.Name, ast.Constant))) for n in tree.body):
         return "it holds no code (only a name or a value), so it is not the whole of the script"
     if name == "simulate.py":
-        lost = sorted((set(_ENTRY_RE.findall(old or "")) & {"run_trial", "run_cell"}) - set(_ENTRY_RE.findall(new)))
+        lost = sorted((set(_ENTRY_RE.findall(old or "")) & {"run_trial", "run_cell"}) - _top_level_names(tree))
         if lost:
             return f"it does not define {', '.join(lost)}, which FI calls and the script has now"
     elif "RESULT_JSON" in (old or "") and "RESULT_JSON" not in new:
@@ -799,6 +799,20 @@ def repair_breaks_contract(old: str, new: str, name: str) -> str:
 
 
 _READS_CELL = re.compile(r"\bcell\s*\[")
+def _top_level_names(tree: ast.Module) -> set[str]:
+    """The names a module binds at its top level: a ``def``, an assignment, or an import (``from pkg import run_cell``)."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name).split(".")[0] for a in node.names)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
+    return names
+
+
 _ENTRY_RE = re.compile(r"^def\s+(run_trial|run_cell|oracle)\s*\(", re.MULTILINE)
 
 
